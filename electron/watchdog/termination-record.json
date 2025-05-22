@@ -1,0 +1,6 @@
+{
+  "timestamp": "2025-05-16T09:59:27.076Z",
+  "reason": "Main process crashed or was force-closed",
+  "mainPid": 47016,
+  "watchdogPid": 46164
+}

@@ -1,0 +1,34 @@
+{
+  "name": "minecraft-core",
+  "private": true,
+  "version": "0.0.0",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
+    "dev:vite": "vite dev",
+    "dev:electron": "wait-on --timeout 30000 http-get://localhost:5173 && electron . || wait-on --timeout 30000 http-get://localhost:5174 && electron ."
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "concurrently": "^9.1.2",
+    "electron": "^28.1.0",
+    "svelte": "^5.0.0",
+    "vite": "^6.0.0",
+    "wait-on": "^7.2.0"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.10",
+    "archiver": "^7.0.0",
+    "axios": "^1.6.2",
+    "electron-store": "^8.1.0",
+    "fs-extra": "^11.3.0",
+    "lucide-svelte": "^0.511.0",
+    "node-fetch": "^2.7.0",
+    "pidusage": "^4.0.0",
+    "progress-stream": "^2.0.0",
+    "rimraf": "^5.0.0",
+    "svelte-sonner": "^1.0.1",
+    "uuid": "^9.0.0"
+  }
+}

@@ -1,0 +1,162 @@
+// Player state store
+import { writable } from 'svelte/store';
+
+// Create the player state store with default values
+export const playerState = writable({
+  count: 0,
+  onlinePlayers: [],
+  lists: {
+    whitelist: [],
+    ops: [],
+    'banned-players': [],
+    'banned-ips': []
+  },
+  selectedPlayer: '',
+  contextMenu: { visible: false, x: 0, y: 0, player: '' },
+  serverStatus: 'stopped', // Added to fix TypeScript error
+  lastBannedPlayer: '' // Track the last player banned by IP
+});
+
+// Debounce mechanism for player updates
+let lastPlayerListUpdate = 0;
+let pendingPlayerNames = null;
+let pendingUpdateTimer = null;
+const DEBOUNCE_DELAY = 1500; // 1.5 second debounce delay (reduced from 3 seconds)
+
+// Helper functions for player state management
+export function updateOnlinePlayers(players) {
+  if (!Array.isArray(players)) return;
+  
+  const now = Date.now();
+  const currentState = getStore();
+  
+  // If the player count decreased (someone left), update immediately
+  if (players.length < currentState.count) {
+    // Player left - update immediately
+    playerState.update(state => ({
+      ...state,
+      count: players.length,
+      onlinePlayers: players
+    }));
+    lastPlayerListUpdate = now;
+    
+    // Also clear any pending debounced updates
+    if (pendingUpdateTimer) {
+      clearTimeout(pendingUpdateTimer);
+      pendingPlayerNames = null;
+    }
+    return;
+  }
+  
+  // If this is the first update or there are many players, don't debounce
+  if (players.length > 1) {
+    // Always immediately show multiple players
+    playerState.update(state => ({
+      ...state,
+      count: players.length,
+      onlinePlayers: players
+    }));
+    lastPlayerListUpdate = now;
+    return;
+  }
+  
+  // If the new player list is empty and the last update had players,
+  // we need to debounce this to avoid flickering when players join
+  if (players.length === 0) {
+    // If currently showing players, debounce empty player list
+    if (currentState.count > 0) {
+      // We got an empty list while showing players - debounce it
+      clearTimeout(pendingUpdateTimer);
+      pendingPlayerNames = players;
+      
+      pendingUpdateTimer = setTimeout(() => {
+        // Only update to empty list if no new players came in during debounce
+        if (pendingPlayerNames && pendingPlayerNames.length === 0) {
+          playerState.update(state => ({
+            ...state,
+            count: 0,
+            onlinePlayers: []
+          }));
+        }
+        pendingPlayerNames = null;
+      }, DEBOUNCE_DELAY);
+      return;
+    }
+  }
+  
+  // If we get a player while we were debouncing empty player list,
+  // cancel that empty list update and show the player immediately
+  if (players.length > 0 && pendingPlayerNames !== null) {
+    clearTimeout(pendingUpdateTimer);
+    pendingPlayerNames = null;
+  }
+  
+  // Normal update to the player list
+  playerState.update(state => ({
+    ...state,
+    count: players.length,
+    onlinePlayers: players
+  }));
+  lastPlayerListUpdate = now;
+}
+
+// Helper function to get current store value
+function getStore() {
+  let storeValue = { count: 0, onlinePlayers: [] }; // Default value to prevent undefined
+  const unsubscribe = playerState.subscribe(value => {
+    storeValue = value;
+  });
+  unsubscribe();
+  return storeValue;
+}
+
+export function updatePlayerList(listName, players) {
+  if (!listName || !Array.isArray(players)) return;
+  
+  playerState.update(state => {
+    const lists = { ...state.lists };
+    lists[listName] = players;
+    return { ...state, lists };
+  });
+}
+
+export function selectPlayer(player) {
+  playerState.update(state => ({
+    ...state,
+    selectedPlayer: player,
+    contextMenu: { ...state.contextMenu, visible: false }
+  }));
+}
+
+export function showContextMenu(x, y, player) {
+  // Force the menu to be hidden first (to trigger re-render)
+  playerState.update(state => ({
+    ...state,
+    contextMenu: { visible: false, x: 0, y: 0, player: '' }
+  }));
+  
+  // Then show it after a short delay (helps with re-rendering)
+  setTimeout(() => {
+    // Ensure the menu stays within viewport boundaries
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const menuWidth = 200; // Approximate width of context menu
+    const menuHeight = 300; // Approximate height of context menu
+    
+    // Adjust position if menu would go outside viewport
+    const adjustedX = Math.min(x, viewportWidth - menuWidth);
+    const adjustedY = Math.min(y, viewportHeight - menuHeight);
+    
+    playerState.update(state => ({
+      ...state,
+      contextMenu: { visible: true, x: adjustedX, y: adjustedY, player }
+    }));
+  }, 50);
+}
+
+export function hideContextMenu() {
+  playerState.update(state => ({
+    ...state,
+    contextMenu: { ...state.contextMenu, visible: false }
+  }));
+}
