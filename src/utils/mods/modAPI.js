@@ -490,13 +490,52 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
     
     const result = await safeInvoke('delete-mod', serverPath, modName);
     
-    // The handler returns true directly, not an object with success property
+    // Handle new response format with enhanced feedback
     if (result === true || (result && result.success)) {
-      successMessage.set(`Successfully deleted ${modName}`);
+      let message = `Successfully deleted ${modName}`;
+      
+      // Provide additional feedback based on the deletion result
+      if (result && result.deletedFrom) {
+        if (result.deletedFrom === 'not_found') {
+          message = `${modName} was not found (may have been already deleted)`;
+        } else if (Array.isArray(result.deletedFrom)) {
+          // Multiple locations deleted
+          if (result.deletedFromCount > 1) {
+            const locations = result.deletedFrom.map(path => {
+              if (path.includes('client')) return 'client';
+              if (path.includes('disabled')) return 'disabled';
+              return 'server';
+            });
+            message = `Successfully deleted ${modName} from ${locations.join(' and ')} folders`;
+          } else {
+            // Single location
+            const path = result.deletedFrom[0];
+            if (path.includes('client')) {
+              message = `Successfully deleted ${modName} from client folder`;
+            } else if (path.includes('disabled')) {
+              message = `Successfully deleted ${modName} from disabled folder`;
+            }
+          }
+        } else if (typeof result.deletedFrom === 'string') {
+          // Legacy single path format
+          if (result.deletedFrom.includes('client')) {
+            message = `Successfully deleted ${modName} from client folder`;
+          } else if (result.deletedFrom.includes('disabled')) {
+            message = `Successfully deleted ${modName} from disabled folder`;
+          }
+        }
+      }
+      
+      successMessage.set(message);
       
       if (shouldReload) {
         await loadMods(serverPath);
       }
+      
+      // Clear success message after a delay
+      setTimeout(() => {
+        successMessage.set('');
+      }, 3000);
       
       return true;
     } else {

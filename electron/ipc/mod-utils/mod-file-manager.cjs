@@ -349,13 +349,77 @@ async function deleteMod(serverPath, modName) {
   }
   
   const fileName = modName.endsWith('.jar') ? modName : `${modName}.jar`;
-  const modPath = path.join(serverPath, 'mods', fileName);
   
-  console.log('[ModManager] Mod path to delete:', modPath);
-  await fs.unlink(modPath);
-  console.log('[ModManager] Deleted mod:', modPath);
+  // Check multiple possible locations for the mod file
+  const possiblePaths = [
+    path.join(serverPath, 'mods', fileName),
+    path.join(serverPath, 'client', 'mods', fileName),
+    path.join(serverPath, 'mods_disabled', fileName)
+  ];
   
-  return true;
+  let deletedFromPaths = [];
+  let deletionErrors = [];
+  
+  for (const modPath of possiblePaths) {
+    try {
+      console.log('[ModManager] Checking path:', modPath);
+      await fs.access(modPath);  // Check if file exists
+      await fs.unlink(modPath);  // Delete the file
+      console.log('[ModManager] Successfully deleted mod from:', modPath);
+      deletedFromPaths.push(modPath);
+      // Don't break - continue checking other locations
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        console.log('[ModManager] File not found at:', modPath);
+      } else {
+        console.error('[ModManager] Error deleting from:', modPath, error);
+        deletionErrors.push({ path: modPath, error: error.message });
+      }
+    }
+  }
+  
+  // Also try to delete associated manifest files
+  const manifestPaths = [
+    path.join(serverPath, 'minecraft-core-manifests', `${fileName}.json`),
+    path.join(serverPath, 'client', 'minecraft-core-manifests', `${fileName}.json`)
+  ];
+  
+  for (const manifestPath of manifestPaths) {
+    try {
+      await fs.access(manifestPath);
+      await fs.unlink(manifestPath);
+      console.log('[ModManager] Deleted manifest:', manifestPath);
+    } catch (error) {
+      // Silently ignore manifest deletion errors as they're not critical
+      if (error.code !== 'ENOENT') {
+        console.warn('[ModManager] Could not delete manifest:', manifestPath, error.message);
+      }
+    }
+  }
+  
+  if (deletedFromPaths.length === 0) {
+    if (deletionErrors.length > 0) {
+      const errorMsg = deletionErrors.map(e => `${e.path}: ${e.error}`).join('; ');
+      throw new Error(`Failed to delete mod from any location. Errors: ${errorMsg}`);
+    } else {
+      console.warn('[ModManager] Mod file not found in any expected location:', fileName);
+      // Return success even if file wasn't found - it's already "deleted"
+      return { success: true, message: `Mod ${fileName} was not found (may have been already deleted)`, deletedFrom: 'not_found' };
+    }
+  }
+  
+  // Create a user-friendly message about what was deleted
+  let deletionMessage = `Mod ${fileName} deleted successfully`;
+  if (deletedFromPaths.length > 1) {
+    deletionMessage += ` from ${deletedFromPaths.length} locations`;
+  }
+  
+  return { 
+    success: true, 
+    message: deletionMessage, 
+    deletedFrom: deletedFromPaths,
+    deletedFromCount: deletedFromPaths.length
+  };
 }
 
 async function saveTemporaryFile({ name, buffer }) {

@@ -124,7 +124,12 @@ function createModHandlers(win) {
           throw new Error('Only Modrinth version info is currently fully supported via modApiService.');
         }
       } catch (err) {
-        console.error('[IPC:Mods] Failed to get version info:', err);
+        // Only log as error if it's not a 404 (which can be normal for missing/removed versions)
+        if (err.message && err.message.includes('404')) {
+          console.warn(`[IPC:Mods] Version not found for mod ${modId}, version ${versionId}: ${err.message}`);
+        } else {
+          console.error('[IPC:Mods] Failed to get version info:', err);
+        }
         throw new Error(`Failed to get version info: ${err.message}`);
       }
     },
