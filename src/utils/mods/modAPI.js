@@ -52,6 +52,8 @@ const MIN_VERSION_FETCH_INTERVAL = 500; // Minimum time between version fetches 
  * @returns {Promise<boolean>} - True if successful
  */
 export async function loadMods(serverPath) {
+  console.log(`[API] loadMods called from:`, new Error().stack);
+  
   // Prevent concurrent loadMods calls
   if (get(isLoading)) {
     return false;
@@ -91,15 +93,70 @@ export async function loadMods(serverPath) {
     // Store all mods in the installedMods store
     installedMods.set(modsList);
     
-    // Update mod categories based on locations
-    const categories = new Map();
-    result.mods?.forEach(mod => {
-      categories.set(mod.fileName, {
-        category: mod.category,
-        required: true // Default to required
+    // Load existing saved categories first
+    const { loadModCategories } = await import('../../stores/modStore.js');
+    console.log(`[ModAPI] About to load mod categories from storage...`);
+    await loadModCategories();
+    
+    // Get current categories to merge with new mod data
+    let currentCategories = get(modCategories);
+    console.log(`[ModAPI] Current categories after loading:`, Array.from(currentCategories));
+    
+    // If categories are unexpectedly empty but we have mods, try loading again
+    if (currentCategories.size === 0 && result.mods && result.mods.length > 0) {
+      console.log(`[ModAPI] Categories are empty but we have mods, retrying load...`);
+      await loadModCategories();
+      currentCategories = get(modCategories);
+      console.log(`[ModAPI] Categories after retry:`, Array.from(currentCategories));
+    }
+    
+    // If we have saved categories, preserve them and only update location info
+    if (currentCategories.size > 0) {
+      console.log(`[ModAPI] Found ${currentCategories.size} saved categories, preserving them`);
+      
+      // Update mod categories based on file locations, preserving existing settings
+      const updatedCategories = new Map(currentCategories);
+      
+      result.mods?.forEach(mod => {
+        const existingCategoryInfo = currentCategories.get(mod.fileName);
+        console.log(`[ModAPI] Processing mod ${mod.fileName}, existing info:`, existingCategoryInfo);
+        
+        if (existingCategoryInfo) {
+          // Existing mod - preserve saved settings but update category if file location changed
+          console.log(`[ModAPI] Preserving saved required status for ${mod.fileName}: ${existingCategoryInfo.required}`);
+          updatedCategories.set(mod.fileName, {
+            category: mod.category, // Update to match current file location
+            required: existingCategoryInfo.required // Preserve saved requirement status
+          });
+        } else {
+          // New mod not in saved categories - set defaults
+          console.log(`[ModAPI] New mod ${mod.fileName}, setting defaults`);
+          updatedCategories.set(mod.fileName, {
+            category: mod.category,
+            required: true // Default to required for new mods
+          });
+        }
       });
-    });
-    modCategories.set(categories);
+      
+      console.log(`[ModAPI] Final updated categories:`, Array.from(updatedCategories));
+      modCategories.set(updatedCategories);
+    } else {
+      console.log(`[ModAPI] No saved categories found, setting up initial categories`);
+      
+      // No saved categories - set up initial categories
+      const initialCategories = new Map();
+      
+      result.mods?.forEach(mod => {
+        console.log(`[ModAPI] Setting up initial category for ${mod.fileName}`);
+        initialCategories.set(mod.fileName, {
+          category: mod.category,
+          required: true // Default to required for initial setup
+        });
+      });
+      
+      console.log(`[ModAPI] Initial categories:`, Array.from(initialCategories));
+      modCategories.set(initialCategories);
+    }
     
     // Get installed mod IDs and version info
     try {

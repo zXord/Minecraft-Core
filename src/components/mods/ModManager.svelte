@@ -82,7 +82,25 @@
   onMount(() => {
     const initAsync = async () => {
       if (!serverPath) {
-        serverPath = window.serverPath ? window.serverPath.get() : '';
+        try {
+          const pathResult = window.serverPath ? await window.serverPath.get() : null;
+          // The result could be either { path: '...' } or just the path string
+          if (pathResult !== null) {
+            if (pathResult !== null && typeof pathResult === 'object' && 'path' in pathResult) {
+              serverPath = pathResult.path || '';
+            } else if (typeof pathResult === 'string') {
+              serverPath = pathResult;
+            } else {
+              serverPath = '';
+            }
+          } else {
+            serverPath = '';
+          }
+          console.log('ModManager: Retrieved server path:', serverPath);
+        } catch (err) {
+          console.error('ModManager: Error getting server path:', err);
+          serverPath = '';
+        }
       }
       
       // Initialize download manager and load initial data

@@ -401,7 +401,7 @@
         type: 'client',
         path: '',
         serverIp: '',
-        serverPort: '25565'
+        serverPort: '8080'  // Management server port, not Minecraft port
       };
       instances = [...instances, newInstance];
       currentInstance = newInstance;

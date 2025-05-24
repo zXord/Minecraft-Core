@@ -25,6 +25,29 @@ function createFileHandlers(win) {  return {
       };
     },
     
+    'set-server-path': (_e, path) => {
+      if (!path) return { success: false, error: 'Invalid path' };
+      
+      try {
+        // Verify path exists
+        if (!fs.existsSync(path)) {
+          return { success: false, error: 'Path does not exist' };
+        }
+        
+        // Save to persistent store
+        appStore.set('lastServerPath', path);
+        
+        // Notify the renderer
+        if (win && win.webContents) {
+          win.webContents.send('update-server-path', path);
+        }
+        
+        return { success: true, path };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    },
+    
     'update-server-path': (_e, path) => {
       if (!path) return { success: false, error: 'Invalid path' };
       

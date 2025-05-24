@@ -12,7 +12,7 @@ const appStore = require('../utils/app-store.cjs');
  */
 function createSettingsHandlers(win) {
   return {
-    'update-settings': async (_e, { port, maxRam, serverPath }) => {
+    'update-settings': async (_e, { port, maxRam, serverPath, autoStartMinecraft, autoStartManagement }) => {
       try {
         // Validate parameters
         if (port !== undefined && (typeof port !== 'number' || port < 1 || port > 65535)) {
@@ -24,13 +24,20 @@ function createSettingsHandlers(win) {
         }
         
         // Get current settings to merge with updates
-        const currentSettings = appStore.get('serverSettings') || { port: 25565, maxRam: 4 };
+        const currentSettings = appStore.get('serverSettings') || { 
+          port: 25565, 
+          maxRam: 4, 
+          autoStartMinecraft: false, 
+          autoStartManagement: false 
+        };
         
         // Update settings with new values
         const updatedSettings = {
           ...currentSettings,
           port: port !== undefined ? port : currentSettings.port,
-          maxRam: maxRam !== undefined ? maxRam : currentSettings.maxRam
+          maxRam: maxRam !== undefined ? maxRam : currentSettings.maxRam,
+          autoStartMinecraft: autoStartMinecraft !== undefined ? autoStartMinecraft : currentSettings.autoStartMinecraft,
+          autoStartManagement: autoStartManagement !== undefined ? autoStartManagement : currentSettings.autoStartManagement
         };
         
         // Save to persistent store
@@ -86,7 +93,12 @@ function createSettingsHandlers(win) {
     
     'get-settings': async () => {
       try {
-        const settings = appStore.get('serverSettings') || { port: 25565, maxRam: 4 };
+        const settings = appStore.get('serverSettings') || { 
+          port: 25565, 
+          maxRam: 4, 
+          autoStartMinecraft: false, 
+          autoStartManagement: false 
+        };
         const serverPath = appStore.get('lastServerPath');
         
         return {
@@ -132,12 +144,24 @@ function createSettingsHandlers(win) {
             const validInstance = {
               id: instance.id || `instance-${Date.now()}`,
               name: instance.name || `Instance ${Date.now()}`,
-              type: instance.type || 'server',
-              // Only include path if it's a server instance
-              ...(instance.type === 'server' ? { 
-                path: instance.path 
-              } : {})
+              type: instance.type || 'server'
             };
+            
+            // Include type-specific fields
+            if (instance.type === 'server') {
+              if (instance.path) {
+                validInstance.path = instance.path;
+              }
+            } else if (instance.type === 'client') {
+              // Include client-specific fields
+              if (instance.path) validInstance.path = instance.path;
+              if (instance.serverIp) validInstance.serverIp = instance.serverIp;
+              if (instance.serverPort) validInstance.serverPort = instance.serverPort;
+              if (instance.clientId) validInstance.clientId = instance.clientId;
+              if (instance.clientName) validInstance.clientName = instance.clientName;
+              if (instance.lastConnected) validInstance.lastConnected = instance.lastConnected;
+            }
+            
             console.log('Mapped instance:', JSON.stringify(validInstance, null, 2));
             return validInstance;
           });
@@ -267,13 +291,27 @@ function createSettingsHandlers(win) {
             }
           })
           .map((instance, index) => {
-            const validInstance = {
+            let validInstance = {
               id: instance.id,
               name: instance.name || `Instance ${instance.id}`,
-              type: instance.type,
-              // Only include path for server instances
-              ...(instance.type === 'server' && instance.path ? { path: instance.path } : {})
+              type: instance.type
             };
+            
+            // Include type-specific fields
+            if (instance.type === 'server') {
+              if (instance.path) {
+                validInstance.path = instance.path;
+              }
+            } else if (instance.type === 'client') {
+              // Include client-specific fields
+              if (instance.path) validInstance.path = instance.path;
+              if (instance.serverIp) validInstance.serverIp = instance.serverIp;
+              if (instance.serverPort) validInstance.serverPort = instance.serverPort;
+              if (instance.clientId) validInstance.clientId = instance.clientId;
+              if (instance.clientName) validInstance.clientName = instance.clientName;
+              if (instance.lastConnected) validInstance.lastConnected = instance.lastConnected;
+            }
+            
             console.log(`Mapped instance ${index + 1}/${instances.length}:`, JSON.stringify(validInstance, null, 2));
             return validInstance;
           });
@@ -378,7 +416,7 @@ function createSettingsHandlers(win) {
     },
     
     // Save client configuration
-    'save-client-config': async (_e, { path, serverIp, serverPort }) => {
+    'save-client-config': async (_e, { path, serverIp, serverPort, clientId, clientName }) => {
       try {
         console.log(`Saving client configuration for path: ${path}, server: ${serverIp}:${serverPort}`);
         
@@ -404,12 +442,60 @@ function createSettingsHandlers(win) {
         const configFile = path_module.join(path, 'client-config.json');
         const config = {
           serverIp,
-          serverPort: serverPort || '25565',
+          serverPort: serverPort || '8080', // Default to management server port
+          clientId: clientId || `client-${Date.now()}`,
+          clientName: clientName || 'Unnamed Client',
           lastConnected: new Date().toISOString()
         };
         
         await fsPromises.writeFile(configFile, JSON.stringify(config, null, 2));
-        console.log('Client configuration saved successfully');
+        console.log('Client configuration saved to file successfully');
+        
+        // ALSO update the instance in the app store so it persists across app restarts
+        try {
+          const instances = appStore.get('instances') || [];
+          
+          // Find the client instance by path
+          const clientInstanceIndex = instances.findIndex(inst => 
+            inst.type === 'client' && inst.path === path
+          );
+          
+          if (clientInstanceIndex !== -1) {
+            // Update existing client instance
+            instances[clientInstanceIndex] = {
+              ...instances[clientInstanceIndex],
+              serverIp,
+              serverPort: serverPort || '8080',
+              clientId: config.clientId,
+              clientName: config.clientName,
+              path,
+              lastConnected: config.lastConnected
+            };
+            console.log('Updated existing client instance in app store');
+          } else {
+            // Create new client instance entry
+            const newInstance = {
+              id: config.clientId,
+              name: config.clientName,
+              type: 'client',
+              path,
+              serverIp,
+              serverPort: serverPort || '8080',
+              clientId: config.clientId,
+              clientName: config.clientName,
+              lastConnected: config.lastConnected
+            };
+            instances.push(newInstance);
+            console.log('Added new client instance to app store');
+          }
+          
+          appStore.set('instances', instances);
+          console.log('Client instance data saved to app store');
+          
+        } catch (storeError) {
+          console.error('Error updating app store:', storeError);
+          // Continue anyway since file save succeeded
+        }
         
         return { success: true };
       } catch (err) {

@@ -241,7 +241,9 @@ export async function saveModCategories() {
 // Load mod categories from persistent storage
 export async function loadModCategories() {
   try {
+    console.log(`[ModStore] loadModCategories called - stack trace:`, new Error().stack);
     const categoriesArray = await window.electron.invoke('get-mod-categories');
+    console.log(`[ModStore] Loaded categories from storage:`, categoriesArray);
     
     if (Array.isArray(categoriesArray)) {
       const categoriesMap = new Map();
@@ -255,6 +257,7 @@ export async function loadModCategories() {
         }
       });
       
+      console.log(`[ModStore] Setting modCategories to:`, Array.from(categoriesMap));
       modCategories.set(categoriesMap);
     }
     
@@ -280,11 +283,17 @@ export async function updateModCategory(modId, category) {
 
 // Update a mod's required status
 export async function updateModRequired(modId, required) {
+  console.log(`[ModStore] updateModRequired called: ${modId} -> ${required}`);
+  
   modCategories.update($categories => {
     const current = $categories.get(modId) || { category: 'server-only' };
+    console.log(`[ModStore] Current category for ${modId}:`, current);
     $categories.set(modId, { ...current, required });
+    console.log(`[ModStore] Updated category for ${modId}:`, { ...current, required });
     return $categories;
   });
   
+  console.log(`[ModStore] Calling saveModCategories...`);
   await saveModCategories();
+  console.log(`[ModStore] saveModCategories completed`);
 } 

@@ -19,33 +19,13 @@ const execOptions = {
   stdio: ['ignore', 'pipe', 'ignore']
 };
 
-// Create a function for logging
+// Create a function for logging (disabled file logging)
 function log(message) {
   const timestamp = new Date().toISOString();
-  const logMessage = `${timestamp} - ${message}\n`;
+  const logMessage = `${timestamp} - ${message}`;
   
-  try {
-    fs.appendFileSync(logFile, logMessage);
-    // Also log to console for visibility during testing
-    console.log(logMessage);
-  } catch (err) {
-    // If we can't write to the log file, write to a fallback location
-    try {
-      const fallbackLog = path.join(process.cwd(), 'app-watchdog-fallback.log');
-      fs.appendFileSync(fallbackLog, logMessage);
-      console.log(logMessage);
-    } catch (e) {
-      // Try one more location - the temp directory
-      try {
-        const tempDir = process.env.TEMP || process.env.TMP || __dirname;
-        const emergencyLog = path.join(tempDir, 'app-watchdog-emergency.log');
-        fs.appendFileSync(emergencyLog, logMessage);
-        console.log(logMessage);
-      } catch (final) {
-        // Can't do much if we can't write to any log
-      }
-    }
-  }
+  // Only log to console, no file logging
+  console.log(logMessage);
 }
 
 // Function to check if a Minecraft server is running

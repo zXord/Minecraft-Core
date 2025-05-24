@@ -96,6 +96,43 @@ contextBridge.exposeInMainWorld('electron', {
       'save-mod-categories',
       'get-mod-categories',
       'move-mod-file',
+      // Management server channels
+      'start-management-server',
+      'stop-management-server',
+      'get-management-server-status',
+      'update-management-server-path',
+      // Minecraft launcher channels
+      'minecraft-auth',
+      'minecraft-load-auth',
+      'minecraft-save-auth',
+      'minecraft-download-mods',
+      'minecraft-launch',
+      'minecraft-stop',
+      'minecraft-launcher-status',
+      'minecraft-check-mods',
+      'minecraft-check-client',
+      'minecraft-download-client',
+      'minecraft-clear-client',
+      'toggle-client-mod',
+      // Management server events
+      'management-server-status',
+      'management-server-path-updated',
+      // Minecraft launcher events
+      'launcher-auth-success',
+      'launcher-auth-error',
+      'launcher-download-start',
+      'launcher-download-progress',
+      'launcher-download-complete',
+      'launcher-launch-start',
+      'launcher-launch-progress',
+      'launcher-launch-success',
+      'launcher-launch-error',
+      'launcher-minecraft-closed',
+      'launcher-minecraft-stopped',
+      'launcher-client-download-start',
+      'launcher-client-download-progress',
+      'launcher-client-download-complete',
+      'launcher-client-download-error',
     ];
 
     // Debug: print validChannels at runtime
@@ -134,7 +171,25 @@ contextBridge.exposeInMainWorld('electron', {
       'mod-install-progress',
       'setup-progress',
       'backup-notification',
-      'minecraft-client-progress',
+      // Management server events
+      'management-server-status',
+      'management-server-path-updated',
+      // Minecraft launcher events
+      'launcher-auth-success',
+      'launcher-auth-error',
+      'launcher-download-start',
+      'launcher-download-progress',
+      'launcher-download-complete',
+      'launcher-launch-start',
+      'launcher-launch-progress',
+      'launcher-launch-success',
+      'launcher-launch-error',
+      'launcher-minecraft-closed',
+      'launcher-minecraft-stopped',
+      'launcher-client-download-start',
+      'launcher-client-download-progress',
+      'launcher-client-download-complete',
+      'launcher-client-download-error',
     ];
     if (validChannels.includes(channel)) {
       // Correctly pass the event and arguments to the listener
@@ -159,7 +214,26 @@ contextBridge.exposeInMainWorld('electron', {
       'auto-restart-status',
       'mod-install-progress',
       'setup-progress',
-      'backup-notification'
+      'backup-notification',
+      // Management server events
+      'management-server-status',
+      'management-server-path-updated',
+      // Minecraft launcher events
+      'launcher-auth-success',
+      'launcher-auth-error',
+      'launcher-download-start',
+      'launcher-download-progress',
+      'launcher-download-complete',
+      'launcher-launch-start',
+      'launcher-launch-progress',
+      'launcher-launch-success',
+      'launcher-launch-error',
+      'launcher-minecraft-closed',
+      'launcher-minecraft-stopped',
+      'launcher-client-download-start',
+      'launcher-client-download-progress',
+      'launcher-client-download-complete',
+      'launcher-client-download-error',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.removeListener(channel, listener);
@@ -183,7 +257,26 @@ contextBridge.exposeInMainWorld('electron', {
       'auto-restart-status',
       'mod-install-progress',
       'setup-progress',
-      'backup-notification'
+      'backup-notification',
+      // Management server events
+      'management-server-status',
+      'management-server-path-updated',
+      // Minecraft launcher events
+      'launcher-auth-success',
+      'launcher-auth-error',
+      'launcher-download-start',
+      'launcher-download-progress',
+      'launcher-download-complete',
+      'launcher-launch-start',
+      'launcher-launch-progress',
+      'launcher-launch-success',
+      'launcher-launch-error',
+      'launcher-minecraft-closed',
+      'launcher-minecraft-stopped',
+      'launcher-client-download-start',
+      'launcher-client-download-progress',
+      'launcher-client-download-complete',
+      'launcher-client-download-error',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.removeAllListeners(channel);

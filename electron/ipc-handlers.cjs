@@ -15,6 +15,8 @@ const { createModHandlers } = require('./ipc/mod-handlers.cjs');
 const { createConfigHandlers } = require('./ipc/config-handlers.cjs');
 const { createServerPropertiesHandlers } = require('./ipc/server-properties-handlers.cjs');
 const { createBackupHandlers, loadBackupManager } = require('./ipc/backup-handlers.cjs');
+const { createManagementServerHandlers } = require('./ipc/management-server-handlers.cjs');
+const { createMinecraftLauncherHandlers } = require('./ipc/minecraft-launcher-handlers.cjs');
 
 // Import auto-restart services for the one remaining handler
 const {
@@ -23,7 +25,7 @@ const {
 } = require('./services/auto-restart.cjs');
 
 // Disable IPC logs unless DEBUG_IPC env var is true
-const DEBUG_IPC = process.env.DEBUG_IPC === 'true';
+const DEBUG_IPC = process.env.DEBUG_IPC === 'true'; // Back to normal
 const realConsoleLog = console.log.bind(console);
 console.log = (...args) => { if (DEBUG_IPC) realConsoleLog(...args); };
 
@@ -52,6 +54,8 @@ function setupIpcHandlers(win) {
     const serverHandlers = createServerHandlers(win);
     const settingsHandlers = createSettingsHandlers(win);
     const backupHandlers = createBackupHandlers(win);
+    const managementServerHandlers = createManagementServerHandlers(win);
+    const minecraftLauncherHandlers = createMinecraftLauncherHandlers(win);
     
     // Initialize backup manager
     loadBackupManager(win);
@@ -66,7 +70,9 @@ function setupIpcHandlers(win) {
       configHandlers,
       playerHandlers,
       serverHandlers,
-      settingsHandlers
+      settingsHandlers,
+      managementServerHandlers,
+      minecraftLauncherHandlers
     ].forEach(handlers => {
       if (!handlers) return;
     

@@ -144,16 +144,8 @@ function createModHandlers(win) {
         }
         
         // Determine client path from server path
-        let clientPath = '';
-        const serverDir = path.dirname(serverPath);
-        const serverName = path.basename(serverPath);
-        
-        if (serverName.includes('server')) {
-          clientPath = path.join(serverDir, serverName.replace('server', 'client'));
-        } else {
-          // If server path doesn't contain "server", use a parallel client directory
-          clientPath = path.join(serverDir, 'client');
-        }
+        // Instead of creating a parallel client directory, create it inside the server directory
+        const clientPath = path.join(serverPath, 'client');
         
         console.log('[IPC:Mods] Server path:', serverPath);
         console.log('[IPC:Mods] Client path:', clientPath);
@@ -351,42 +343,77 @@ function createModHandlers(win) {
           throw new Error('Server path is required');
         }
         
+        // Determine client path
+        const clientPath = path.join(serverPath, 'client');
+        
         const modsDir = path.join(serverPath, 'mods');
+        const clientModsDir = path.join(clientPath, 'mods');
         await fs.mkdir(modsDir, { recursive: true });
+        await fs.mkdir(clientModsDir, { recursive: true });
         
         // Include both enabled and disabled mods for manifest lookup
         const enabledFiles = await fs.readdir(modsDir);
         const enabledMods = enabledFiles.filter(file => file.endsWith('.jar'));
+        
+        // Get client mods
+        let clientMods = [];
+        try {
+          const clientFiles = await fs.readdir(clientModsDir);
+          clientMods = clientFiles.filter(file => file.endsWith('.jar'));
+        } catch (err) {
+          console.warn('[IPC:Mods] Could not read client mods:', err);
+        }
+        
         const disabledDir = path.join(serverPath, 'mods_disabled');
         await fs.mkdir(disabledDir, { recursive: true });
         const disabledFiles = (await fs.readdir(disabledDir).catch(() => [])).filter(file => file.endsWith('.jar'));
-        const modFiles = [...enabledMods, ...disabledFiles];
         
-        // Try to get mod info from the manifest directory
-        const manifestDir = path.join(serverPath, 'minecraft-core-manifests');
+        // Combine all mod files (removing duplicates)
+        const allModFiles = [...new Set([...enabledMods, ...clientMods, ...disabledFiles])];
+        
+        // Try to get mod info from both server and client manifest directories
+        const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
+        const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
         let modInfo = [];
         
         try {
-          await fs.mkdir(manifestDir, { recursive: true });
+          await fs.mkdir(serverManifestDir, { recursive: true });
+          await fs.mkdir(clientManifestDir, { recursive: true });
           
-          // Read each manifest file
-          for (const modFile of modFiles) {
-            const manifestPath = path.join(manifestDir, `${modFile}.json`);
+          // Read manifests from both server and client directories
+          for (const modFile of allModFiles) {
+            const serverManifestPath = path.join(serverManifestDir, `${modFile}.json`);
+            const clientManifestPath = path.join(clientManifestDir, `${modFile}.json`);
             
+            let manifest = null;
+            
+            // Try client manifest first (for client-only mods)
             try {
-              const manifestContent = await fs.readFile(manifestPath, 'utf8');
-              const manifest = JSON.parse(manifestContent);
+              const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
+              manifest = JSON.parse(clientManifestContent);
+              console.log(`[IPC:Mods] Found client manifest for ${modFile}`);
+            } catch (clientManifestErr) {
+              // Try server manifest
+              try {
+                const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
+                manifest = JSON.parse(serverManifestContent);
+                console.log(`[IPC:Mods] Found server manifest for ${modFile}`);
+              } catch (serverManifestErr) {
+                // Skip this mod if manifest can't be read from either location
+                console.log(`[IPC:Mods] No manifest found for ${modFile} in either location`);
+              }
+            }
+            
+            if (manifest) {
               modInfo.push(manifest);
-            } catch (manifestErr) {
-              // Skip this mod if manifest can't be read
-              console.log(`[IPC:Mods] No manifest for ${modFile}`);
             }
           }
         } catch (manifestDirErr) {
-          console.error('[IPC:Mods] Error accessing manifest directory:', manifestDirErr);
+          console.error('[IPC:Mods] Error accessing manifest directories:', manifestDirErr);
           // Continue with empty mod info
         }
         
+        console.log(`[IPC:Mods] Found ${modInfo.length} mod manifests out of ${allModFiles.length} total mods`);
         return modInfo;
       } catch (err) {
         console.error('[IPC:Mods] Failed to get installed mod info:', err);
@@ -561,12 +588,46 @@ function createModHandlers(win) {
         return { success: false, error: 'Invalid mod details' };
       }
 
+      // Determine client path
+      const clientPath = path.join(serverPath, 'client');
       const modsDir = path.join(serverPath, 'mods');
+      const clientModsDir = path.join(clientPath, 'mods');
       await fs.mkdir(modsDir, { recursive: true }); // Ensure mods directory exists
+      await fs.mkdir(clientModsDir, { recursive: true }); // Ensure client mods directory exists
 
       // Sanitize mod name to create a valid filename
       const fileName = modDetails.name.replace(/[^a-zA-Z0-9_.-]/g, '_') + '.jar';
-      const destinationPath = path.join(modsDir, fileName);
+      
+      // Check current mod location to preserve it during updates
+      let currentModLocation = null;
+      let destinationPath = path.join(modsDir, fileName); // Default to server
+      
+      if (modDetails.forceReinstall) {
+        console.log('[IPC:Mods] Checking current mod location for version update...');
+        
+        const serverModPath = path.join(modsDir, fileName);
+        const clientModPath = path.join(clientModsDir, fileName);
+        
+        const serverExists = await fs.access(serverModPath).then(() => true).catch(() => false);
+        const clientExists = await fs.access(clientModPath).then(() => true).catch(() => false);
+        
+        console.log(`[IPC:Mods] Current mod locations - Server: ${serverExists}, Client: ${clientExists}`);
+        
+        // Determine current location and set destination accordingly
+        if (clientExists && serverExists) {
+          currentModLocation = 'both';
+          console.log('[IPC:Mods] Mod currently exists in both locations, will update both');
+        } else if (clientExists && !serverExists) {
+          currentModLocation = 'client-only';
+          destinationPath = clientModPath; // Install to client instead of server
+          console.log('[IPC:Mods] Mod is currently client-only, will update client location');
+        } else if (serverExists && !clientExists) {
+          currentModLocation = 'server-only';
+          console.log('[IPC:Mods] Mod is currently server-only, will update server location');
+        }
+      }
+      
+      const targetPath = destinationPath;
       
       // For version updates, we need to check for existing files and remove them
       if (modDetails.forceReinstall) {
@@ -659,7 +720,7 @@ function createModHandlers(win) {
           throw new Error('Failed to get download URL for mod');
         }
         
-        console.log(`[IPC:Mods] Downloading mod from ${downloadUrl} to ${destinationPath}`);
+        console.log(`[IPC:Mods] Downloading mod from ${downloadUrl} to ${targetPath}`);
         
         // Create a unique download ID
         const downloadId = `mod-${modDetails.id}-${Date.now()}`;
@@ -678,7 +739,7 @@ function createModHandlers(win) {
         
         // Use axios to download the file with progress tracking
         try {
-          const writer = createWriteStream(destinationPath);
+          const writer = createWriteStream(targetPath);
           
           const response = await axios({
             url: downloadUrl,
@@ -752,6 +813,22 @@ function createModHandlers(win) {
             response.data.pipe(writer);
           });
           
+          // If mod was in both locations, copy to the other location as well
+          if (currentModLocation === 'both') {
+            console.log('[IPC:Mods] Copying mod to other location for "both" category');
+            if (destinationPath === path.join(modsDir, fileName)) {
+              // We installed to server, copy to client
+              const clientTargetPath = path.join(clientModsDir, fileName);
+              await fs.copyFile(targetPath, clientTargetPath);
+              console.log(`[IPC:Mods] Copied mod to client: ${clientTargetPath}`);
+            } else {
+              // We installed to client, copy to server  
+              const serverTargetPath = path.join(modsDir, fileName);
+              await fs.copyFile(targetPath, serverTargetPath);
+              console.log(`[IPC:Mods] Copied mod to server: ${serverTargetPath}`);
+            }
+          }
+          
           // Send completion update
           if (win && win.webContents) {
             win.webContents.send('download-progress', {
@@ -801,8 +878,9 @@ function createModHandlers(win) {
         // Save manifest information
         if (modDetails.source === 'modrinth' && versionInfo) {
           try {
-            const manifestDir = path.join(serverPath, 'minecraft-core-manifests');
-            await fs.mkdir(manifestDir, { recursive: true });
+            // Determine which manifest directories to use based on mod location
+            const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
+            const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
             
             const manifest = {
               projectId: modDetails.id,
@@ -813,10 +891,31 @@ function createModHandlers(win) {
               source: modDetails.source
             };
             
-            const manifestPath = path.join(manifestDir, `${fileName}.json`);
-            await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
-            
-            console.log('[IPC:Mods] Saved mod manifest:', manifestPath);
+            // Save manifest to appropriate location(s) based on current mod location
+            if (currentModLocation === 'client-only') {
+              // Save only to client manifest directory
+              await fs.mkdir(clientManifestDir, { recursive: true });
+              const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
+              await fs.writeFile(clientManifestPath, JSON.stringify(manifest, null, 2));
+              console.log('[IPC:Mods] Saved client-only mod manifest:', clientManifestPath);
+            } else if (currentModLocation === 'both') {
+              // Save to both manifest directories
+              await fs.mkdir(serverManifestDir, { recursive: true });
+              await fs.mkdir(clientManifestDir, { recursive: true });
+              
+              const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
+              const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
+              
+              await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));
+              await fs.writeFile(clientManifestPath, JSON.stringify(manifest, null, 2));
+              console.log('[IPC:Mods] Saved mod manifest to both locations:', serverManifestPath, clientManifestPath);
+            } else {
+              // Default to server manifest directory (server-only or new installs)
+              await fs.mkdir(serverManifestDir, { recursive: true });
+              const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
+              await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));
+              console.log('[IPC:Mods] Saved server mod manifest:', serverManifestPath);
+            }
           } catch (manifestErr) {
             console.error('[IPC:Mods] Failed to save mod manifest:', manifestErr);
             // Continue without saving manifest
@@ -1132,24 +1231,9 @@ function createModHandlers(win) {
           
           // If clientPath is not provided, try to determine it
           if (!clientPath) {
-            // Try to find client directory by checking for common patterns
-            const serverDirName = path.basename(serverPath);
-            const parentDir = path.dirname(serverPath);
-            
-            if (serverDirName.includes('server')) {
-              // Try replacing 'server' with 'client'
-              const possibleClientDir = path.join(parentDir, serverDirName.replace('server', 'client'));
-              if (fsSync.existsSync(possibleClientDir)) {
-                clientPath = possibleClientDir;
-                console.log(`[Mod Categories] Found client path by pattern matching: ${clientPath}`);
-              }
-            }
-            
-            // If we couldn't find the client folder, use userData/client as fallback
-            if (!clientPath) {
-              clientPath = path.join(app.getPath('userData'), 'client');
-              console.log(`[Mod Categories] Using fallback client path: ${clientPath}`);
-            }
+            // Create client directory inside the server directory
+            clientPath = path.join(serverPath, 'client');
+            console.log(`[Mod Categories] Using client path inside server directory: ${clientPath}`);
           } else {
             console.log(`[Mod Categories] Using provided client path: ${clientPath}`);
           }
@@ -1159,6 +1243,13 @@ function createModHandlers(win) {
           console.log(`[Mod Categories] Server mods directory: ${serverModsDir}`);
           console.log(`[Mod Categories] Client mods directory: ${clientModsDir}`);
           
+          // Manifest directories
+          const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
+          const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
+          
+          console.log(`[Mod Categories] Server manifest directory: ${serverManifestDir}`);
+          console.log(`[Mod Categories] Client manifest directory: ${clientManifestDir}`);
+          
           // Create directories if they don't exist
           await fs.mkdir(serverModsDir, { recursive: true }).catch(err => {
             console.error(`[Mod Categories] Error creating server mods directory: ${err.message}`);
@@ -1166,6 +1257,14 @@ function createModHandlers(win) {
           
           await fs.mkdir(clientModsDir, { recursive: true }).catch(err => {
             console.error(`[Mod Categories] Error creating client mods directory: ${err.message}`);
+          });
+          
+          await fs.mkdir(serverManifestDir, { recursive: true }).catch(err => {
+            console.error(`[Mod Categories] Error creating server manifest directory: ${err.message}`);
+          });
+          
+          await fs.mkdir(clientManifestDir, { recursive: true }).catch(err => {
+            console.error(`[Mod Categories] Error creating client manifest directory: ${err.message}`);
           });
           
           // Debug: List all files in both directories before changes
@@ -1199,12 +1298,18 @@ function createModHandlers(win) {
                 const serverModPath = path.join(serverModsDir, fileName);
                 const clientModPath = path.join(clientModsDir, fileName);
                 
+                // Manifest paths
+                const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
+                const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
+                
                 console.log(`[Mod Categories] Processing mod ${fileName} with category ${category}`);
                 console.log(`[Mod Categories] Server path: ${serverModPath}`);
                 console.log(`[Mod Categories] Client path: ${clientModPath}`);
                 
                 let serverModExists = false;
                 let clientModExists = false;
+                let serverManifestExists = false;
+                let clientManifestExists = false;
                 
                 try {
                   await fs.access(serverModPath);
@@ -1220,8 +1325,24 @@ function createModHandlers(win) {
                   console.log(`[Mod Categories] Mod does not exist in client: ${fileName}`);
                 }
                 
+                try {
+                  await fs.access(serverManifestPath);
+                  serverManifestExists = true;
+                } catch (err) {
+                  console.log(`[Mod Categories] Manifest does not exist in server: ${fileName}`);
+                }
+                
+                try {
+                  await fs.access(clientManifestPath);
+                  clientManifestExists = true;
+                } catch (err) {
+                  console.log(`[Mod Categories] Manifest does not exist in client: ${fileName}`);
+                }
+                
                 console.log(`[Mod Categories] Server mod exists: ${serverModExists}`);
                 console.log(`[Mod Categories] Client mod exists: ${clientModExists}`);
+                console.log(`[Mod Categories] Server manifest exists: ${serverManifestExists}`);
+                console.log(`[Mod Categories] Client manifest exists: ${clientManifestExists}`);
                 
                 // Move files based on category
                 if (category === 'client-only') {
@@ -1232,6 +1353,13 @@ function createModHandlers(win) {
                       await fs.copyFile(serverModPath, clientModPath);
                       await fs.unlink(serverModPath);
                       console.log(`[Mod Categories] Successfully moved ${fileName} from server to client`);
+                      
+                      // Also move the manifest
+                      if (serverManifestExists) {
+                        await fs.copyFile(serverManifestPath, clientManifestPath);
+                        await fs.unlink(serverManifestPath);
+                        console.log(`[Mod Categories] Successfully moved manifest for ${fileName} from server to client`);
+                      }
                     } catch (moveError) {
                       console.error(`[Mod Categories] Error moving file: ${moveError.message}`);
                       
@@ -1252,6 +1380,13 @@ function createModHandlers(win) {
                       await fs.copyFile(clientModPath, serverModPath);
                       await fs.unlink(clientModPath);
                       console.log(`[Mod Categories] Successfully moved ${fileName} from client to server`);
+                      
+                      // Also move the manifest
+                      if (clientManifestExists) {
+                        await fs.copyFile(clientManifestPath, serverManifestPath);
+                        await fs.unlink(clientManifestPath);
+                        console.log(`[Mod Categories] Successfully moved manifest for ${fileName} from client to server`);
+                      }
                     } catch (moveError) {
                       console.error(`[Mod Categories] Error moving file: ${moveError.message}`);
                     }
@@ -1263,6 +1398,12 @@ function createModHandlers(win) {
                     try {
                       await fs.copyFile(serverModPath, clientModPath);
                       console.log(`[Mod Categories] Successfully copied ${fileName} from server to client`);
+                      
+                      // Also copy the manifest
+                      if (serverManifestExists) {
+                        await fs.copyFile(serverManifestPath, clientManifestPath);
+                        console.log(`[Mod Categories] Successfully copied manifest for ${fileName} from server to client`);
+                      }
                     } catch (copyError) {
                       console.error(`[Mod Categories] Error copying file: ${copyError.message}`);
                     }
@@ -1271,6 +1412,12 @@ function createModHandlers(win) {
                     try {
                       await fs.copyFile(clientModPath, serverModPath);
                       console.log(`[Mod Categories] Successfully copied ${fileName} from client to server`);
+                      
+                      // Also copy the manifest
+                      if (clientManifestExists) {
+                        await fs.copyFile(clientManifestPath, serverManifestPath);
+                        console.log(`[Mod Categories] Successfully copied manifest for ${fileName} from client to server`);
+                      }
                     } catch (copyError) {
                       console.error(`[Mod Categories] Error copying file: ${copyError.message}`);
                     }
@@ -1310,10 +1457,11 @@ function createModHandlers(win) {
     'get-mod-categories': async () => {
       try {
         const categories = modCategoriesStore.get();
-        return { success: true, categories };
+        console.log('[IPC] get-mod-categories returning:', categories);
+        return categories || []; // Return categories directly as array
       } catch (error) {
-        console.error('Error getting mod categories:', error);
-        return { success: false, error: error.message };
+        console.error('[IPC] Error getting mod categories:', error);
+        return []; // Return empty array on error
       }
     },
 
@@ -1335,16 +1483,8 @@ function createModHandlers(win) {
         }
         
         // Determine client path from server path
-        let clientPath = '';
-        const serverDir = path.dirname(serverPath);
-        const serverName = path.basename(serverPath);
-        
-        if (serverName.includes('server')) {
-          clientPath = path.join(serverDir, serverName.replace('server', 'client'));
-        } else {
-          // If server path doesn't contain "server", use a parallel client directory
-          clientPath = path.join(serverDir, 'client');
-        }
+        // Instead of creating a parallel client directory, create it inside the server directory
+        const clientPath = path.join(serverPath, 'client');
         
         console.log('[IPC:Mods] Server path:', serverPath);
         console.log('[IPC:Mods] Client path:', clientPath);
@@ -1353,9 +1493,15 @@ function createModHandlers(win) {
         const clientModsDir = path.join(clientPath, 'mods');
         const disabledModsDir = path.join(serverPath, 'mods_disabled');
         
+        // Manifest directories
+        const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
+        const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        
         console.log('[IPC:Mods] Server mods dir:', serverModsDir);
         console.log('[IPC:Mods] Client mods dir:', clientModsDir);
         console.log('[IPC:Mods] Disabled mods dir:', disabledModsDir);
+        console.log('[IPC:Mods] Server manifest dir:', serverManifestDir);
+        console.log('[IPC:Mods] Client manifest dir:', clientManifestDir);
         
         // Create all directories if they don't exist
         await fs.mkdir(serverModsDir, { recursive: true });
@@ -1364,11 +1510,18 @@ function createModHandlers(win) {
           throw new Error(`Could not create client mods directory: ${err.message}`);
         });
         await fs.mkdir(disabledModsDir, { recursive: true });
+        await fs.mkdir(serverManifestDir, { recursive: true });
+        await fs.mkdir(clientManifestDir, { recursive: true });
         
         // Check if file exists in various locations
         const serverModPath = path.join(serverModsDir, fileName);
         const clientModPath = path.join(clientModsDir, fileName);
         const disabledModPath = path.join(disabledModsDir, fileName);
+        
+        // Manifest file paths
+        const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
+        const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
+        const disabledManifestPath = path.join(serverManifestDir, `${fileName}.json`); // Disabled mods keep manifest in server
         
         console.log('[IPC:Mods] Server mod path:', serverModPath);
         console.log('[IPC:Mods] Client mod path:', clientModPath);
@@ -1377,8 +1530,11 @@ function createModHandlers(win) {
         const serverFileExists = await fs.access(serverModPath).then(() => true).catch(() => false);
         const clientFileExists = await fs.access(clientModPath).then(() => true).catch(() => false);
         const disabledFileExists = await fs.access(disabledModPath).then(() => true).catch(() => false);
+        const serverManifestExists = await fs.access(serverManifestPath).then(() => true).catch(() => false);
+        const clientManifestExists = await fs.access(clientManifestPath).then(() => true).catch(() => false);
         
         console.log('[IPC:Mods] File exists status - Server:', serverFileExists, 'Client:', clientFileExists, 'Disabled:', disabledFileExists);
+        console.log('[IPC:Mods] Manifest exists status - Server:', serverManifestExists, 'Client:', clientManifestExists);
         
         // Determine what files to move based on the new category
         if (newCategory === 'server-only') {
@@ -1390,8 +1546,17 @@ function createModHandlers(win) {
               await fs.copyFile(clientModPath, serverModPath);
               console.log('[IPC:Mods] Copied from client to server');
             }
+            // Copy manifest from client to server if it exists
+            if (clientManifestExists && !serverManifestExists) {
+              await fs.copyFile(clientManifestPath, serverManifestPath);
+              console.log('[IPC:Mods] Copied manifest from client to server');
+            }
             // Then remove from client
             await fs.unlink(clientModPath);
+            if (clientManifestExists) {
+              await fs.unlink(clientManifestPath);
+              console.log('[IPC:Mods] Removed manifest from client');
+            }
             console.log(`[IPC:Mods] Removed mod from client: ${clientModPath}`);
           }
           
@@ -1412,14 +1577,31 @@ function createModHandlers(win) {
               console.log(`[IPC:Mods] Copied mod to client: ${fileName}`);
             }
             
+            // Copy manifest from server to client
+            if (serverManifestExists && !clientManifestExists) {
+              await fs.copyFile(serverManifestPath, clientManifestPath);
+              console.log(`[IPC:Mods] Copied manifest to client: ${fileName}`);
+            }
+            
             // Then remove from server
             await fs.unlink(serverModPath);
+            if (serverManifestExists) {
+              await fs.unlink(serverManifestPath);
+              console.log('[IPC:Mods] Removed manifest from server');
+            }
             console.log(`[IPC:Mods] Removed mod from server: ${serverModPath}`);
           } 
           else if (disabledFileExists) {
             // Move from disabled to client
             await fs.copyFile(disabledModPath, clientModPath);
             await fs.unlink(disabledModPath);
+            
+            // Copy manifest to client if it exists in server manifests
+            if (serverManifestExists) {
+              await fs.copyFile(serverManifestPath, clientManifestPath);
+              console.log(`[IPC:Mods] Copied manifest to client from server manifests: ${fileName}`);
+            }
+            
             console.log(`[IPC:Mods] Moved mod from disabled to client: ${fileName}`);
           }
           else {
@@ -1432,17 +1614,36 @@ function createModHandlers(win) {
             // Copy from server to client
             await fs.copyFile(serverModPath, clientModPath);
             console.log(`[IPC:Mods] Copied mod to client: ${fileName}`);
+            
+            // Copy manifest to client
+            if (serverManifestExists) {
+              await fs.copyFile(serverManifestPath, clientManifestPath);
+              console.log(`[IPC:Mods] Copied manifest to client: ${fileName}`);
+            }
           } 
           else if (!serverFileExists && clientFileExists) {
             // Copy from client to server
             await fs.copyFile(clientModPath, serverModPath);
             console.log(`[IPC:Mods] Copied mod to server: ${fileName}`);
+            
+            // Copy manifest to server
+            if (clientManifestExists) {
+              await fs.copyFile(clientManifestPath, serverManifestPath);
+              console.log(`[IPC:Mods] Copied manifest to server: ${fileName}`);
+            }
           } 
           else if (disabledFileExists) {
             // Move from disabled to both
             await fs.copyFile(disabledModPath, serverModPath);
             await fs.copyFile(disabledModPath, clientModPath);
             await fs.unlink(disabledModPath);
+            
+            // Copy manifest to both locations if it exists in server manifests
+            if (serverManifestExists) {
+              await fs.copyFile(serverManifestPath, clientManifestPath);
+              console.log(`[IPC:Mods] Copied manifest to client: ${fileName}`);
+            }
+            
             console.log(`[IPC:Mods] Moved mod from disabled to both: ${fileName}`);
           }
         } 
@@ -1463,6 +1664,13 @@ function createModHandlers(win) {
               await fs.copyFile(clientModPath, disabledModPath);
             }
             await fs.unlink(clientModPath);
+            
+            // Remove client manifest but keep server manifest for disabled mods
+            if (clientManifestExists) {
+              await fs.unlink(clientManifestPath);
+              console.log('[IPC:Mods] Removed client manifest for disabled mod');
+            }
+            
             console.log(`[IPC:Mods] Disabled mod from client: ${fileName}`);
           }
         }
@@ -1471,6 +1679,17 @@ function createModHandlers(win) {
       } catch (err) {
         console.error('[IPC:Mods] Error moving mod:', err);
         throw new Error(`Failed to move mod: ${err.message}`);
+      }
+    },
+
+    // Install a mod to a client instance
+    'install-client-mod': async (_event, modData) => {
+      try {
+        const result = await installClientMod(modData);
+        return result;
+      } catch (error) {
+        console.error('[IPC:Mods] Error in install-client-mod handler:', error);
+        return { success: false, error: error.message };
       }
     },
   };
@@ -2321,6 +2540,144 @@ async function analyzeModFromUrl(url, modId) {
   } catch (error) {
     console.error('[IPC:Mods] Failed to analyze mod from URL:', error);
     return [];
+  }
+}
+
+// Install a mod to a client instance
+async function installClientMod(modData) {
+  console.log('[IPC:Mods] Installing mod to client:', modData.name, 'to path:', modData.clientPath);
+  
+  if (!modData.clientPath) {
+    throw new Error('Client path is required for client mod installation');
+  }
+  
+  if (!modData || !modData.id || !modData.name) {
+    throw new Error('Invalid mod details (id, name) are required');
+  }
+
+  // Set up client mods directory
+  const clientModsDir = path.join(modData.clientPath, 'mods');
+  await fs.mkdir(clientModsDir, { recursive: true });
+
+  // Set up client manifests directory
+  const clientManifestDir = path.join(modData.clientPath, 'minecraft-core-manifests');
+  await fs.mkdir(clientManifestDir, { recursive: true });
+
+  // Sanitize mod name to create a valid filename
+  const fileName = modData.name.replace(/[^a-zA-Z0-9_.-]/g, '_') + '.jar';
+  const targetPath = path.join(clientModsDir, fileName);
+  
+  console.log('[IPC:Mods] Client target path:', targetPath);
+
+  // Check if mod already exists
+  const fileExists = await fs.access(targetPath).then(() => true).catch(() => false);
+  if (fileExists && !modData.forceReinstall) {
+    console.log('[IPC:Mods] Mod already exists in client, skipping installation');
+    return { success: true, message: 'Mod already installed' };
+  }
+
+  try {
+    // Get mod versions to find the right download
+    const loader = modData.loader || 'fabric';
+    const mcVersion = modData.version || '1.20.1';
+    
+    console.log('[IPC:Mods] Getting mod versions for client installation:', {
+      modId: modData.id,
+      loader,
+      mcVersion,
+      selectedVersionId: modData.selectedVersionId
+    });
+
+    const versions = await getModrinthVersions(modData.id, loader, mcVersion);
+    
+    if (!versions || versions.length === 0) {
+      throw new Error('No compatible versions found for this mod');
+    }
+
+    // Find the version to install
+    let selectedVersion;
+    if (modData.selectedVersionId) {
+      selectedVersion = versions.find(v => v.id === modData.selectedVersionId);
+      if (!selectedVersion) {
+        throw new Error('Selected version not found or not compatible');
+      }
+    } else {
+      selectedVersion = versions[0]; // Latest compatible version
+    }
+
+    console.log('[IPC:Mods] Selected version for client installation:', selectedVersion.versionNumber);
+
+    // Get detailed version info
+    const versionInfo = await getModrinthVersionInfo(modData.id, selectedVersion.id);
+    
+    if (!versionInfo.files || versionInfo.files.length === 0) {
+      throw new Error('No files found for this mod version');
+    }
+
+    // Get the primary file
+    const primaryFile = versionInfo.files.find(file => file.primary) || versionInfo.files[0];
+    const downloadUrl = primaryFile.url;
+    const actualFileName = primaryFile.filename;
+
+    console.log('[IPC:Mods] Downloading mod file for client:', actualFileName);
+
+    // Update target path with actual filename
+    const actualTargetPath = path.join(clientModsDir, actualFileName);
+
+    // Download the mod file
+    const response = await axios({
+      url: downloadUrl,
+      method: 'GET',
+      responseType: 'stream',
+      timeout: 30000,
+      headers: {
+        'User-Agent': 'minecraft-core/1.0.0'
+      }
+    });
+
+    // Save to client mods directory
+    const writer = createWriteStream(actualTargetPath);
+    response.data.pipe(writer);
+
+    await new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+
+    console.log('[IPC:Mods] Successfully downloaded mod to client:', actualTargetPath);
+
+    // Create manifest file for the mod
+    const manifestData = {
+      projectId: modData.id,
+      versionId: selectedVersion.id,
+      fileName: actualFileName,
+      name: modData.name,
+      title: modData.title || modData.name,
+      versionNumber: selectedVersion.versionNumber,
+      mcVersion: mcVersion,
+      loader: loader,
+      source: 'modrinth',
+      downloadUrl: downloadUrl,
+      installedAt: new Date().toISOString(),
+      filePath: actualTargetPath,
+      fileSize: primaryFile.size
+    };
+
+    const manifestPath = path.join(clientManifestDir, `${actualFileName}.json`);
+    await fs.writeFile(manifestPath, JSON.stringify(manifestData, null, 2), 'utf8');
+
+    console.log('[IPC:Mods] Created manifest for client mod:', manifestPath);
+
+    return { 
+      success: true, 
+      fileName: actualFileName,
+      version: selectedVersion.versionNumber,
+      manifestPath
+    };
+
+  } catch (error) {
+    console.error('[IPC:Mods] Error installing mod to client:', error);
+    throw new Error(`Failed to install mod: ${error.message}`);
   }
 }
 

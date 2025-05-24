@@ -9,7 +9,7 @@
   // State variables
   let path = '';
   let serverIp = '';
-  let serverPort = '25565';
+  let serverPort = '8080'; // Default management server port
   let installing = false;
   let installProgress = 0;
   let installSpeed = '0 MB/s';
@@ -64,19 +64,53 @@
     connectionStatus = 'connecting';
     installLogs = [...installLogs, `Testing connection to ${serverIp}:${serverPort}...`];
     
-    // Simulate connection test for now
-    // In the future, implement actual server connection test
-    setTimeout(() => {
-      const success = true; // Replace with actual test result
+    try {
+      // Try to connect to the management server
+      const managementUrl = `http://${serverIp}:${serverPort}/api/test`;
+      console.log(`[ClientSetup] Testing connection to: ${managementUrl}`);
       
-      if (success) {
+      const response = await fetch(managementUrl, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        // Set a timeout
+        signal: AbortSignal.timeout(10000) // 10 second timeout
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      console.log('[ClientSetup] Connection test response:', data);
+      
+      if (data.success) {
         connectionStatus = 'connected';
         installLogs = [...installLogs, 'Connection successful!'];
+        installLogs = [...installLogs, `Server message: ${data.message}`];
+        if (data.clients !== undefined) {
+          installLogs = [...installLogs, `Connected clients: ${data.clients}`];
+        }
       } else {
-        connectionStatus = 'disconnected';
-        installLogs = [...installLogs, 'Connection failed. Please check the server address and try again.'];
+        throw new Error(data.message || 'Server returned unsuccessful response');
       }
-    }, 2000);
+    } catch (error) {
+      console.error('[ClientSetup] Connection test failed:', error);
+      connectionStatus = 'disconnected';
+      
+      let errorMessage = 'Connection failed.';
+      if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        errorMessage = 'Could not reach the server. Make sure the server is running and the address is correct.';
+      } else if (error.name === 'TimeoutError') {
+        errorMessage = 'Connection timed out. The server may be offline or the address may be incorrect.';
+      } else if (error.message) {
+        errorMessage = `Connection failed: ${error.message}`;
+      }
+      
+      installLogs = [...installLogs, errorMessage];
+      installLogs = [...installLogs, 'Please check the server address and try again.'];
+    }
   }
   
   async function saveClientConfiguration() {
@@ -91,13 +125,54 @@
       
       // Add initial log message
       installLogs = [...installLogs, 'Starting client setup...'];
+      
+      // First, register with the management server
+      installLogs = [...installLogs, 'Registering with management server...'];
+      const clientId = `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const clientName = `Client-${new Date().toLocaleTimeString()}`;
+      
+      try {
+        const registrationUrl = `http://${serverIp}:${serverPort}/api/client/register`;
+        const registrationResponse = await fetch(registrationUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            clientId: clientId,
+            name: clientName
+          }),
+          signal: AbortSignal.timeout(10000)
+        });
+        
+        if (!registrationResponse.ok) {
+          throw new Error(`Registration failed: ${registrationResponse.status}`);
+        }
+        
+        const registrationData = await registrationResponse.json();
+        if (!registrationData.success) {
+          throw new Error(registrationData.error || 'Registration failed');
+        }
+        
+        installLogs = [...installLogs, `Successfully registered as: ${clientName}`];
+        installLogs = [...installLogs, `Client ID: ${clientId}`];
+        if (registrationData.token) {
+          installLogs = [...installLogs, `Session token received`];
+        }
+      } catch (regError) {
+        console.error('Registration failed:', regError);
+        installLogs = [...installLogs, `Registration failed: ${regError.message}`];
+        installLogs = [...installLogs, 'Continuing with setup anyway...'];
+      }
     
       // Save client configuration
       installLogs = [...installLogs, 'Saving client configuration...'];
       await window.electron.invoke('save-client-config', {
         path,
         serverIp,
-        serverPort
+        serverPort,
+        clientId,
+        clientName
       });
       
       // For now, we're just setting up the connection
@@ -207,7 +282,7 @@
           id="server-port" 
           bind:value={serverPort} 
           on:input={onIpChange}
-          placeholder="25565"
+          placeholder="8080"
         />
       </div>
       

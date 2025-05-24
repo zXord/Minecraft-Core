@@ -10,7 +10,7 @@
   
   // Initialize local variables and store subscriptions
   let port = 25565;
-  let maxRam = 2;
+  let maxRam = 4;
   $: status = $serverState.status;
   $: isServerRunning = status === 'Running';
   $: playerNames = $playerState.onlinePlayers;
@@ -25,6 +25,20 @@
     }
   }
 
+  // Server status tracking
+  $: serverStatus = $serverState?.status || 'stopped';
+  $: port = $serverState?.port || 25565;
+  $: maxRam = $serverState?.maxRam || 4;
+
+  // Management server state
+  let managementServerStatus = 'stopped'; // stopped, starting, running, stopping
+  let managementPort = 8080;
+  let connectedClients = 0;
+  
+  // Auto-start settings
+  let autoStartMinecraft = false;
+  let autoStartManagement = false;
+  
   // Helper function to enable input fields
   function enableInputFields() {
     const portInput = document.getElementById('port-input');
@@ -99,6 +113,21 @@
     }
   }
 
+  // Function to check management server status and update client count
+  async function checkManagementServerStatus() {
+    if (managementServerStatus === 'running') {
+      try {
+        const result = await window.electron.invoke('get-management-server-status');
+        if (result.success && result.status) {
+          // Update client count
+          connectedClients = result.status.clientCount || 0;
+        }
+      } catch (error) {
+        console.error('Error checking management server status:', error);
+      }
+    }
+  }
+
   function startServer() { 
     // Optimistic update: mark server as running immediately
     updateServerStatus('Running');
@@ -147,6 +176,7 @@
     statusCheckInterval = setInterval(() => {
       if (isVisible) {
         checkServerStatus();
+        checkManagementServerStatus();
       }
     }, 5000); // Check every 5 seconds when visible
 
@@ -160,6 +190,8 @@
           // Update local variables with settings
           if (settings.port) port = settings.port;
           if (settings.maxRam) maxRam = settings.maxRam;
+          if (settings.autoStartMinecraft !== undefined) autoStartMinecraft = settings.autoStartMinecraft;
+          if (settings.autoStartManagement !== undefined) autoStartManagement = settings.autoStartManagement;
           // Update server state store
           serverState.update(state => ({
             ...state,
@@ -169,6 +201,21 @@
         }
         // Initial status check
         await checkServerStatus();
+        
+        // Load management server status on mount
+        try {
+          const result = await window.electron.invoke('get-management-server-status');
+          if (result.success && result.status) {
+            managementServerStatus = result.status.isRunning ? 'running' : 'stopped';
+            managementPort = result.status.port || 8080;
+            connectedClients = result.status.clientCount || 0;
+          }
+        } catch (error) {
+          console.error('Error loading management server status:', error);
+        }
+        
+        // Handle auto-start servers if enabled
+        await handleAutoStart();
       } catch (err) {
         // Failed to get settings or server status
       }
@@ -207,6 +254,23 @@
 
     window.electron.on('server-status', statusHandler);
     window.electron.on('metrics-update', metricsHandler);
+
+    // Listen for management server status updates
+    const handleManagementServerStatus = (data) => {
+      if (data.isRunning) {
+        managementServerStatus = 'running';
+        managementPort = data.port || 8080;
+      } else {
+        managementServerStatus = 'stopped';
+        connectedClients = 0;
+      }
+    };
+    
+    window.electron.on('management-server-status', handleManagementServerStatus);
+    
+    return () => {
+      window.electron.removeAllListeners('management-server-status');
+    };
   });
 
   onDestroy(() => {
@@ -234,10 +298,40 @@
     // Save settings to electron store
     window.electron.invoke('update-settings', {
       port: port,
-      maxRam: maxRam
+      maxRam: maxRam,
+      autoStartMinecraft: autoStartMinecraft,
+      autoStartManagement: autoStartManagement
     }).catch(err => {
       // Failed to save settings - silent fail
     });
+  }
+  
+  // Handle auto-start functionality
+  async function handleAutoStart() {
+    if (!validateServerPath(serverPath)) {
+      console.log('Cannot auto-start servers: invalid server path');
+      return;
+    }
+    
+    // Auto-start management server first if enabled
+    if (autoStartManagement && managementServerStatus === 'stopped') {
+      console.log('Auto-starting management server...');
+      try {
+        await startManagementServer();
+      } catch (error) {
+        console.error('Failed to auto-start management server:', error);
+      }
+    }
+    
+    // Auto-start Minecraft server if enabled
+    if (autoStartMinecraft && status === 'Stopped') {
+      console.log('Auto-starting Minecraft server...');
+      try {
+        startServer();
+      } catch (error) {
+        console.error('Failed to auto-start Minecraft server:', error);
+      }
+    }
   }
 
   // Open server folder in explorer
@@ -266,13 +360,60 @@
     event.preventDefault();
     showContextMenu(event.clientX, event.clientY, playerName);
   }
+  
+  // Management server functions
+  async function startManagementServer() {
+    if (!validateServerPath(serverPath)) return;
+    
+    managementServerStatus = 'starting';
+    try {
+      const result = await window.electron.invoke('start-management-server', {
+        port: managementPort,
+        serverPath: serverPath
+      });
+      
+      if (result.success) {
+        managementServerStatus = 'running';
+        console.log('Management server started successfully');
+      } else {
+        managementServerStatus = 'stopped';
+        console.error('Failed to start management server:', result.error);
+        alert(`Failed to start management server: ${result.error}`);
+      }
+    } catch (error) {
+      managementServerStatus = 'stopped';
+      console.error('Error starting management server:', error);
+      alert(`Error starting management server: ${error.message}`);
+    }
+  }
+  
+  async function stopManagementServer() {
+    managementServerStatus = 'stopping';
+    try {
+      const result = await window.electron.invoke('stop-management-server');
+      
+      if (result.success) {
+        managementServerStatus = 'stopped';
+        connectedClients = 0;
+        console.log('Management server stopped successfully');
+      } else {
+        managementServerStatus = 'running';
+        console.error('Failed to stop management server:', result.error);
+        alert(`Failed to stop management server: ${result.error}`);
+      }
+    } catch (error) {
+      managementServerStatus = 'running';
+      console.error('Error stopping management server:', error);
+      alert(`Error stopping management server: ${error.message}`);
+    }
+  }
 </script>  
 
 <div class="server-controls">
   <div class="status-section">
-    <h3>Server Control Panel</h3>
+    <h3>Minecraft Server Control Panel</h3>
     <div class="status-display">
-      <span class="status-label">Status:</span>
+      <span class="status-label">Minecraft Server Status:</span>
       <span class="status-value" class:status-running={status === 'Running'} class:status-stopped={status !== 'Running'}>
         {status}
       </span>
@@ -312,20 +453,32 @@
       </div>
     </div>
     
+    <div class="auto-start-section">
+      <div class="auto-start-item">
+        <input
+          type="checkbox"
+          id="auto-start-minecraft"
+          bind:checked={autoStartMinecraft}
+          on:change={updateSettings}
+        />
+        <label for="auto-start-minecraft">Auto-start Minecraft server on app launch</label>
+      </div>
+    </div>
+    
     <div class="button-group">
       <button 
         class="control-button start-button" 
         on:click={startServer}
         disabled={isServerRunning || !serverPath}
       >
-        Start Server
+        Start Minecraft Server
       </button>
       <button 
         class="control-button stop-button" 
         on:click={stopServer}
         disabled={!isServerRunning}
       >
-        Stop Server
+        Stop Minecraft Server
       </button>
       <button 
         class="control-button kill-button" 
@@ -349,7 +502,86 @@
           </li>
         {/each}
       </ul>
-  {/if}
+    {/if}
+  </div>
+  
+  <!-- Management Server Section -->
+  <div class="management-server-section">
+    <h3>Client Management Server (Port {managementPort})</h3>
+    <div class="management-status">
+      <span class="status-label">Management Server Status:</span>
+      <span class="status-value" 
+            class:status-running={managementServerStatus === 'running'} 
+            class:status-stopped={managementServerStatus === 'stopped'}
+            class:status-starting={managementServerStatus === 'starting'}
+            class:status-stopping={managementServerStatus === 'stopping'}>
+        {#if managementServerStatus === 'starting'}
+          Starting...
+        {:else if managementServerStatus === 'stopping'}
+          Stopping...
+        {:else if managementServerStatus === 'running'}
+          Running
+        {:else}
+          Stopped
+        {/if}
+      </span>
+    </div>
+    
+    {#if managementServerStatus === 'running'}
+      <div class="management-info">
+        <p class="management-detail">Port: {managementPort}</p>
+        <p class="management-detail">Connected clients: {connectedClients}</p>
+        <p class="management-url">Server URL: http://localhost:{managementPort}</p>
+      </div>
+    {/if}
+    
+    <div class="management-controls">
+      <input
+        type="number"
+        min="1025"
+        max="65535"
+        bind:value={managementPort}
+        disabled={managementServerStatus === 'running' || managementServerStatus === 'starting'}
+        placeholder="8080"
+        class="port-input"
+      />
+      
+      <div class="auto-start-section">
+        <div class="auto-start-item">
+          <input
+            type="checkbox"
+            id="auto-start-management"
+            bind:checked={autoStartManagement}
+            on:change={updateSettings}
+          />
+          <label for="auto-start-management">Auto-start management server on app launch</label>
+        </div>
+      </div>
+      
+      <div class="button-group">
+        <button 
+          class="control-button start-button" 
+          on:click={startManagementServer}
+          disabled={managementServerStatus === 'running' || managementServerStatus === 'starting' || !serverPath}
+        >
+          {managementServerStatus === 'starting' ? 'Starting...' : 'Start Management Server'}
+        </button>
+        <button 
+          class="control-button stop-button" 
+          on:click={stopManagementServer}
+          disabled={managementServerStatus === 'stopped' || managementServerStatus === 'stopping'}
+        >
+          {managementServerStatus === 'stopping' ? 'Stopping...' : 'Stop Management Server'}
+        </button>
+      </div>
+    </div>
+    
+    <div class="management-help">
+      <p class="help-text">
+        The management server allows remote clients to connect and sync mods/configurations.
+        Clients should connect to: <strong>your-server-ip:{managementPort}</strong>
+      </p>
+    </div>
   </div>
 </div>
 
@@ -450,7 +682,7 @@
   }
   
   .player-item:hover {
-    background-color: rgba(255, 255, 255, 0.05);
+    background-color: rgba(66, 153, 225, 0.2);
   }
   
   .no-players {
@@ -576,5 +808,138 @@
   
   .status-stopped {
     color: #f44336;
+  }
+
+  /* Management Server Styles */
+  .management-server-section {
+    background: rgba(32, 32, 32, 0.8);
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-top: 1rem;
+  }
+  
+  .management-server-section h3 {
+    color: #4299e1;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid #4299e1;
+    padding-bottom: 0.5rem;
+  }
+  
+  .management-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  
+  .status-starting, .status-stopping {
+    color: #f59e0b !important;
+  }
+  
+  .management-info {
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  
+  .management-detail {
+    margin: 0.25rem 0;
+    color: #e2e8f0;
+    font-size: 0.9rem;
+  }
+  
+  .management-url {
+    margin: 0.5rem 0 0 0;
+    color: #4299e1;
+    font-family: monospace;
+    font-size: 0.85rem;
+    background: rgba(66, 153, 225, 0.1);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+  }
+  
+  .management-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  
+  .port-input {
+    background-color: #2d2d2d;
+    color: white;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 0.5rem;
+    font-size: 1rem;
+    width: 100px;
+  }
+  
+  .port-input:focus {
+    outline: none;
+    border-color: #4299e1;
+    box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.2);
+  }
+  
+  .port-input:disabled {
+    background-color: #3a3a3a;
+    color: #888;
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+  
+  .management-help {
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem;
+  }
+  
+  .help-text {
+    margin: 0;
+    color: #e2e8f0;
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+  
+  .help-text strong {
+    color: #f59e0b;
+    font-family: monospace;
+  }
+  
+  /* Auto-start section styles */
+  .auto-start-section {
+    background: rgba(32, 32, 32, 0.5);
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin: 1rem 0;
+  }
+  
+  .auto-start-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  
+  .auto-start-item input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+    cursor: pointer;
+  }
+  
+  .auto-start-item label {
+    color: #e2e8f0;
+    font-size: 0.9rem;
+    margin: 0;
+    cursor: pointer;
+    user-select: none;
+  }
+  
+  .auto-start-item input[type="checkbox"]:checked + label {
+    color: #4caf50;
   }
 </style>
