@@ -189,7 +189,12 @@ export async function checkModDependencies(mod, visited = new Set()) {
         }
       }
     } catch (apiError) {
-      console.error(`[ERROR] Error fetching dependency info from API:`, apiError);
+      // Only log as error if it's not a 404 (which can be normal)
+      if (apiError.message && apiError.message.includes('404')) {
+        console.warn(`[DEBUG] Version not found for mod ${mod.id}: ${apiError.message}`);
+      } else {
+        console.error(`[ERROR] Error fetching dependency info from API:`, apiError);
+      }
     }
     
     // SECOND ATTEMPT: If we couldn't find dependencies through API, try to analyze installed file

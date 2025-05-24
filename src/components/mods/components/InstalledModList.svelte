@@ -258,6 +258,7 @@
     if (modToDelete) {
       await deleteMod(modToDelete, serverPath, true);
       modToDelete = null;
+      confirmDeleteVisible = false;
     }
   }
   

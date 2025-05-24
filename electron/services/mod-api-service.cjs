@@ -571,7 +571,12 @@ async function getModrinthVersionInfo(_projectId, versionId) { // projectId not 
     
     return await response.json();
   } catch (error) {
-    console.error('Modrinth version info error:', error);
+    // Only log as error if it's not a 404 (which can be normal for missing/removed versions)
+    if (error.message && error.message.includes('404')) {
+      console.warn('Modrinth version not found (404):', versionId);
+    } else {
+      console.error('Modrinth version info error:', error);
+    }
     throw error;
   }
 }
