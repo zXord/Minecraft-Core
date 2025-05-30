@@ -111,8 +111,10 @@ contextBridge.exposeInMainWorld('electron', {
       'minecraft-launcher-status',
       'minecraft-check-mods',
       'minecraft-check-client',
+      'minecraft-check-client-sync',
       'minecraft-download-client',
       'minecraft-clear-client',
+      'minecraft-get-status',
       'toggle-client-mod',
       // Management server events
       'management-server-status',
@@ -135,11 +137,15 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-error',
     ];
 
-    // Debug: print validChannels at runtime
-    console.log('Valid IPC channels at runtime:', validChannels);
+    // Debug: print validChannels at runtime (only once)
+    if (!window.__ipcChannelsLogged) {
+      console.log('Valid IPC channels at runtime:', validChannels);
+      window.__ipcChannelsLogged = true;
+    }
 
     if (validChannels.includes(channel)) {
-      console.log('invoke: validChannels =', validChannels, 'channel =', channel);
+      // Only log failed channels, not successful ones
+      // console.log('invoke: validChannels =', validChannels, 'channel =', channel);
       // For dropped files, we need special handling
       if (channel === 'handle-dropped-files') {
         // Just forward the files directly to the main process

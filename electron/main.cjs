@@ -7,6 +7,7 @@ const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
 const { setMainWindow } = require('./utils/safe-send.cjs');
 const appStore = require('./utils/app-store.cjs');
 const { ensureConfigFile } = require('./utils/config-manager.cjs');
+const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const fs = require('fs');
 const url = require('url');
 const { ipcMain, dialog, shell } = require('electron');
@@ -82,14 +83,21 @@ function createWindow() {
       allowRunningInsecureContent: false,
       nodeIntegration: false,
       sandbox: false
-    }
+    },
+    // Suppress security warnings in dev mode
+    show: false
+  });
+  
+  // Show window after load to reduce initial console spam
+  win.once('ready-to-show', () => {
+    win.show();
   });
 
   // Set the main window reference
   setMainWindow(win);
 
   // Open DevTools for debugging
-  // win.webContents.openDevTools();
+  win.webContents.openDevTools();
   
   // Load the app - try port 5173 first, then 5174 if that fails
   const tryLoadURL = (url) => {
@@ -117,6 +125,9 @@ function createWindow() {
 
 // Initialize app when ready
 app.whenReady().then(() => {
+  // Clean up any old runtime files from previous sessions
+  cleanupRuntimeFiles();
+  
   Menu.setApplicationMenu(null);
   createWindow();
   
@@ -252,11 +263,12 @@ app.whenReady().then(() => {
   
   // Stop the app watchdog when the server stops or crashes
   function stopAppWatchdog() {
-    const pidFile = path.join(__dirname, 'watchdog', 'app-watchdog.pid');
+    const { getRuntimePaths } = require('./utils/runtime-paths.cjs');
+    const runtimePaths = getRuntimePaths();
     let pid = null;
     try {
-      if (fs.existsSync(pidFile)) {
-        pid = parseInt(fs.readFileSync(pidFile, 'utf8'));
+      if (fs.existsSync(runtimePaths.appWatchdogPid)) {
+        pid = parseInt(fs.readFileSync(runtimePaths.appWatchdogPid, 'utf8'));
       }
     } catch (err) {
       console.error('Failed to read app-watchdog.pid:', err.message);
@@ -267,7 +279,7 @@ app.whenReady().then(() => {
         execSync(`taskkill /PID ${pid} /F`);
         console.log(`App watchdog process with PID ${pid} killed.`);
         // Remove the PID file after killing
-        fs.unlinkSync(pidFile);
+        fs.unlinkSync(runtimePaths.appWatchdogPid);
       } catch (err) {
         console.error('Failed to kill app watchdog process:', err.message);
       }

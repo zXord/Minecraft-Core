@@ -282,6 +282,40 @@ class ManagementServer {
         // Check Minecraft server status
         const minecraftServerStatus = await this.checkMinecraftServerStatus();
         
+        // Detect server loader type (Fabric/Forge/Vanilla)
+        let loaderType = 'vanilla';
+        let loaderVersion = null;
+        
+        // Check for Fabric
+        const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
+        if (fs.existsSync(fabricLaunchJar)) {
+          loaderType = 'fabric';
+          
+          // Try to get Fabric version from config or files
+          try {
+            const configPath = path.join(this.serverPath, 'config.json');
+            if (fs.existsSync(configPath)) {
+              const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+              loaderVersion = config.fabric || config.loaderVersion;
+            }
+          } catch (e) {
+            // Ignore config read errors
+          }
+        }
+        
+        // Check for Forge (forge-server.jar or forge in filename)
+        if (loaderType === 'vanilla') {
+          const serverFiles = fs.readdirSync(this.serverPath);
+          for (const file of serverFiles) {
+            if (file.includes('forge') && file.endsWith('.jar') && file !== 'fabric-server-launch.jar') {
+              loaderType = 'forge';
+              const match = file.match(/forge[.-](\d+\.\d+\.\d+)/i);
+              if (match) loaderVersion = match[1];
+              break;
+            }
+          }
+        }
+        
         res.json({
           success: true,
           serverPath: this.serverPath,
@@ -289,6 +323,8 @@ class ManagementServer {
           minecraftPort: serverProps['server-port'] || '25565',
           minecraftServerStatus: minecraftServerStatus,
           minecraftVersion: minecraftVersion,
+          loaderType: loaderType,
+          loaderVersion: loaderVersion,
           requiredMods: requiredMods,
           allClientMods: allClientMods,
           serverInfo: {

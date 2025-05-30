@@ -24,10 +24,8 @@ const {
   getAutoRestartState
 } = require('./services/auto-restart.cjs');
 
-// Disable IPC logs unless DEBUG_IPC env var is true
-const DEBUG_IPC = process.env.DEBUG_IPC === 'true'; // Back to normal
-const realConsoleLog = console.log.bind(console);
-console.log = (...args) => { if (DEBUG_IPC) realConsoleLog(...args); };
+// Removed the global console.log override that was suppressing debug messages
+// This was preventing debug messages from appearing in minecraft launcher methods
 
 /**
  * Set up all IPC handlers
@@ -35,12 +33,14 @@ console.log = (...args) => { if (DEBUG_IPC) realConsoleLog(...args); };
  * @param {Electron.BrowserWindow} win - The main application window
  */
 function setupIpcHandlers(win) {
+  console.log('💡 setupIpcHandlers CALLED');
   if (!win) {
     console.error('Cannot setup IPC handlers: No window provided');
     return;
   }
 
   try {
+    console.log('💡 Setting up all IPC handlers...');
     // Initialize track registered handler names
     registeredHandlers.clear();
     

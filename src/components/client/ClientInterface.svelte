@@ -82,6 +82,10 @@
   let isLaunching = false;
   let launchProgressText = '';
   
+  // Console spam reduction variables
+  let previousServerInfo = null;
+  let lastSyncKey = null;
+  
   // Connect to the Management Server (port 8080)
   async function connectToServer() {
     if (!instance || !instance.serverIp || !instance.serverPort) {
@@ -227,7 +231,12 @@
           minecraftServerStatus = serverInfo.minecraftServerStatus || 'unknown';
           requiredMods = serverInfo.requiredMods || [];
           
-          console.log(`[Client] Server info: Minecraft ${serverInfo.minecraftVersion}, ${requiredMods.length} required mods`);
+                  // Track server info changes for UI updates only (no console spam)
+        if (!previousServerInfo || 
+            previousServerInfo.minecraftVersion !== serverInfo.minecraftVersion || 
+            (previousServerInfo.requiredMods?.length || 0) !== requiredMods.length) {
+          previousServerInfo = { minecraftVersion: serverInfo.minecraftVersion, requiredMods };
+        }
           
           // Check mod synchronization status
           await checkModSynchronization();
@@ -294,13 +303,20 @@
       return;
     }
     
-    console.log(`[Client] Checking client synchronization for ${serverInfo.minecraftVersion} in ${instance.path}`);
+    // Only log when client sync actually changes, not every check
+    const currentSyncKey = `${serverInfo.minecraftVersion}-${instance.path}`;
+    if (lastSyncKey !== currentSyncKey) {
+      // Remove unnecessary log spam - sync checks are routine
+      lastSyncKey = currentSyncKey;
+    }
     clientSyncStatus = 'checking';
     
     try {
       const result = await window.electron.invoke('minecraft-check-client', {
         clientPath: instance.path,
-        minecraftVersion: serverInfo.minecraftVersion
+        minecraftVersion: serverInfo.minecraftVersion,
+        requiredMods: requiredMods || [],
+        serverInfo: serverInfo
       });
       
       console.log('[Client] Check client result:', result);
@@ -660,7 +676,9 @@
     try {
       const result = await window.electron.invoke('minecraft-download-client', {
         clientPath: instance.path,
-        minecraftVersion: serverInfo.minecraftVersion
+        minecraftVersion: serverInfo.minecraftVersion,
+        requiredMods: requiredMods || [],
+        serverInfo: serverInfo
       });
       
       console.log('[Client] Client download result:', result);
@@ -1030,14 +1048,14 @@
       }
     }, 30000); // Every 30 seconds
     
-    // Set up periodic server status check
+    // Set up periodic server status check (reduced frequency)
     statusCheckInterval = setInterval(() => {
       if (connectionStatus === 'connected') {
         checkServerStatus();
       }
-    }, 10000); // Every 10 seconds
+    }, 60000); // Every 60 seconds (reduced frequency)
     
-    // Set up periodic launcher status check to detect when Minecraft stops
+    // Set up periodic launcher status check to detect when Minecraft stops  
     const launcherStatusInterval = setInterval(async () => {
       if (launchStatus === 'running') {
         try {
@@ -1047,7 +1065,8 @@
             launchStatus = 'ready';
           }
         } catch (err) {
-          console.warn('[Client] Error checking launcher status:', err);
+          // Remove console spam - errors should only be logged if meaningful
+          // (This is just a periodic status check, don't spam on every failure)
         }
       }
     }, 5000); // Every 5 seconds when running
@@ -1149,7 +1168,8 @@
       const syncResult = await window.electron.invoke('minecraft-check-client-sync', {
         clientPath: instance.path,
         minecraftVersion: serverInfo.minecraftVersion,
-        requiredMods: requiredMods || []
+        requiredMods: requiredMods || [],
+        serverInfo: serverInfo
       });
       
       console.log('[Client] Sync check result:', syncResult);
@@ -1312,7 +1332,16 @@
                   </div>
                   <div class="info-item">
                     <span class="info-label">Version:</span>
-                    <span class="info-value">{serverInfo.minecraftVersion || 'Unknown'}</span>
+                    <span class="info-value">
+                      {#if serverInfo.loaderType && serverInfo.loaderType !== 'vanilla'}
+                        {serverInfo.loaderType}/{serverInfo.minecraftVersion || 'Unknown'}
+                        {#if serverInfo.loaderVersion}
+                          <span class="loader-version">({serverInfo.loaderVersion})</span>
+                        {/if}
+                      {:else}
+                        {serverInfo.minecraftVersion || 'Unknown'}
+                      {/if}
+                    </span>
                   </div>
                   <div class="info-item">
                     <span class="info-label">Required Mods:</span>

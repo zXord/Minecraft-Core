@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Runtime files (should be in app data directory, not source code)
+*.pid
+*.flag
+*-debug.json
+termination-record.json
+watchdog.log
+app-watchdog.log

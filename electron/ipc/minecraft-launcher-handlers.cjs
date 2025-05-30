@@ -1,4 +1,5 @@
 // Minecraft launcher IPC handlers
+console.log('💡 IPC HANDLERS MODULE LOADED');
 const { getMinecraftLauncher } = require('../services/minecraft-launcher.cjs');
 
 /**
@@ -8,7 +9,9 @@ const { getMinecraftLauncher } = require('../services/minecraft-launcher.cjs');
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
 function createMinecraftLauncherHandlers(win) {
+  console.log('💡 createMinecraftLauncherHandlers CALLED - about to get launcher instance');
   const launcher = getMinecraftLauncher();
+  console.log('💡 Got launcher instance:', launcher.constructor.name);
   
   // Set up launcher event forwarding to renderer
   launcher.on('auth-success', (data) => {
@@ -417,17 +420,19 @@ function createMinecraftLauncherHandlers(win) {
           serverIp,
           serverPort,
           requiredMods = [],
-          serverInfo = null
+          serverInfo = null,
+          maxMemory = null // Add maxMemory parameter
         } = options;
         
-        console.log(`[IPC] Launching Minecraft ${minecraftVersion} from: ${clientPath}`);
+        console.log(`[IPC] Launching Minecraft with ${maxMemory}MB RAM (${maxMemory ? 'user-specified' : 'auto-calculated'})`);
         const result = await launcher.launchMinecraft({
           clientPath,
           minecraftVersion,
           serverIp,
           serverPort: parseInt(serverPort), // Minecraft server port (25565)
           requiredMods,
-          serverInfo
+          serverInfo,
+          maxMemory // Pass maxMemory to launcher
         });
         return result;
       } catch (error) {
@@ -575,25 +580,42 @@ function createMinecraftLauncherHandlers(win) {
     },
     
     // Check Minecraft client synchronization
-    'minecraft-check-client': async (_e, { clientPath, minecraftVersion }) => {
+    'minecraft-check-client': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
       try {
         console.log(`[IPC] Checking Minecraft ${minecraftVersion} client files in: ${clientPath}`);
-        const result = await launcher.checkMinecraftClient(clientPath, minecraftVersion);
+        const result = await launcher.checkMinecraftClient(clientPath, minecraftVersion, { requiredMods, serverInfo });
         return { success: true, ...result };
       } catch (error) {
         console.error('[IPC] Error checking client synchronization:', error);
         return { success: false, error: error.message };
       }
     },
+
+    // Check Minecraft client sync status (alternative endpoint)
+    'minecraft-check-client-sync': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
+      try {
+        console.log(`[IPC] Checking Minecraft ${minecraftVersion} client sync status in: ${clientPath}`);
+        const result = await launcher.checkMinecraftClient(clientPath, minecraftVersion, { requiredMods, serverInfo });
+        return { success: true, ...result };
+      } catch (error) {
+        console.error('[IPC] Error checking client sync status:', error);
+        return { success: false, error: error.message };
+      }
+    },
     
     // Download Minecraft client files
-    'minecraft-download-client': async (_e, { clientPath, minecraftVersion }) => {
+    'minecraft-download-client': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
+      console.log('[IPC] minecraft-download-client handler invoked');
       try {
-        console.log(`[IPC] Downloading Minecraft ${minecraftVersion} client files to: ${clientPath}`);
-        const result = await launcher.downloadMinecraftClientSimple(clientPath, minecraftVersion);
+        console.log(`🎯 Calling downloadMinecraftClientSimple for ${minecraftVersion} → ${clientPath}`);
+        console.log(`🎯 Launcher instance type: ${launcher.constructor.name}`);
+        console.log(`🎯 Available methods: ${Object.getOwnPropertyNames(Object.getPrototypeOf(launcher)).filter(name => name.startsWith('download'))}`);
+        const result = await launcher.downloadMinecraftClientSimple(clientPath, minecraftVersion, { requiredMods, serverInfo });
+        console.log('🎯 downloadMinecraftClientSimple returned:', result);
         return result;
       } catch (error) {
-        console.error('[IPC] Error downloading client files:', error);
+        console.error('[IPC] Error in download-client handler:', error);
+        console.error('🎯 Full error stack:', error.stack);
         return { success: false, error: error.message };
       }
     },
@@ -606,6 +628,30 @@ function createMinecraftLauncherHandlers(win) {
         return result;
       } catch (error) {
         console.error('[IPC] Error clearing client files:', error);
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Clear just assets (for fixing corrupted assets)
+    'minecraft-clear-assets': async (_e, { clientPath }) => {
+      try {
+        console.log(`[IPC] Clearing corrupted assets from: ${clientPath}`);
+        const result = await launcher.clearAssets(clientPath);
+        return result;
+      } catch (error) {
+        console.error('[IPC] Error clearing assets:', error);
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Reset launcher state (for when it gets stuck)
+    'minecraft-reset-launcher': async () => {
+      try {
+        console.log(`[IPC] Resetting launcher state...`);
+        launcher.resetLauncherState();
+        return { success: true, message: 'Launcher state reset' };
+      } catch (error) {
+        console.error('[IPC] Error resetting launcher:', error);
         return { success: false, error: error.message };
       }
     },
