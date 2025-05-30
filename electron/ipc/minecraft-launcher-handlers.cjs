@@ -1,6 +1,6 @@
 // Minecraft launcher IPC handlers
 console.log('💡 IPC HANDLERS MODULE LOADED');
-const { getMinecraftLauncher } = require('../services/minecraft-launcher.cjs');
+const { getMinecraftLauncher } = require('../services/minecraft-launcher'); // Updated import path
 
 /**
  * Create Minecraft launcher IPC handlers
