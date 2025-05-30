@@ -2,15 +2,16 @@
 const { execSync, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { getRuntimePaths } = require('../utils/runtime-paths.cjs');
 
 // Process arguments - parent PID and server identifier
 const mainPid = parseInt(process.argv[2], 10);
 const serverIdentifier = process.argv[3] || 'minecraft-core';
 
-// Set up logging
-const logDir = path.join(__dirname);
-const logFile = path.join(logDir, 'app-watchdog.log');
-const serverRunningFlagPath = path.join(__dirname, 'server-running.flag');
+// Set up logging - use runtime directory instead of source code directory
+const runtimePaths = getRuntimePaths();
+const logFile = path.join(runtimePaths.runtimeDir, 'app-watchdog.log');
+const serverRunningFlagPath = runtimePaths.serverRunningFlag;
 
 // Add a common options object for all process executions to hide windows
 const execOptions = {
@@ -66,9 +67,8 @@ if (!mainPid) {
 
 // Write watchdog PID to a file for debugging
 try {
-  const watchdogPidFile = path.join(__dirname, 'app-watchdog.pid');
-  fs.writeFileSync(watchdogPidFile, process.pid.toString());
-  log(`App Watchdog PID ${process.pid} saved to ${watchdogPidFile}`);
+  fs.writeFileSync(runtimePaths.appWatchdogPid, process.pid.toString());
+  log(`App Watchdog PID ${process.pid} saved to ${runtimePaths.appWatchdogPid}`);
 } catch (err) {
   log(`Failed to write app watchdog PID file: ${err.message}`);
 }
@@ -126,14 +126,14 @@ function killJavaProcesses() {
     log(`Fabric server kill error: ${e.message}`);
   }
   
-  // Try another approach with taskkill for minecraft-related Java
+  // Try another approach - look for server jar files specifically
   try {
-    log("Attempt 3: Killing all Java processes with minecraft in the command line");
-    execSync(`wmic process where "commandline like '%minecraft%' and name='java.exe'" call terminate`, 
+    log("Attempt 3: Looking for any process with minecraft_server.jar");
+    execSync(`wmic process where "commandline like '%minecraft_server.jar%' and name='java.exe'" call terminate`, 
       { ...execOptions, stdio: 'ignore' });
-    log("Minecraft Java kill command executed");
+    log("Minecraft server jar kill command executed");
   } catch (e) {
-    log(`Minecraft Java kill error: ${e.message}`);
+    log(`Minecraft server jar kill error: ${e.message}`);
   }
   
   // Final check to make sure all relevant Java processes are gone
@@ -148,9 +148,9 @@ function killJavaProcesses() {
         log(`Found ${lines.length} remaining Java processes after cleanup`);
         
         // Don't kill all Java processes - this could affect other applications
-        // Instead, try one final targeted attempt
+        // Instead, try one final targeted attempt for server-specific processes only
         for (const line of lines) {
-          if (line.includes('minecraft') || line.includes('fabric-server-launch') || line.includes('-Dminecraft.core')) {
+          if (line.includes('fabric-server-launch') || line.includes('minecraft_server.jar') || line.includes('-Dminecraft.core')) {
             const match = line.match(/,(\d+)$/);
             if (match && match[1]) {
               const javaPid = match[1];

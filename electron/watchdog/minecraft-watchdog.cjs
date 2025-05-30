@@ -2,14 +2,15 @@
 const { execSync, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { getRuntimePaths } = require('../utils/runtime-paths.cjs');
 
 // Process arguments - parent PID and server identifier
 const mainPid = parseInt(process.argv[2], 10);
 const serverIdentifier = process.argv[3] || 'minecraft-core';
 
-// Set up logging
-const logDir = path.join(__dirname);
-const logFile = path.join(logDir, 'watchdog.log');
+// Set up logging - use runtime directory instead of source code directory
+const runtimePaths = getRuntimePaths();
+const logFile = path.join(runtimePaths.runtimeDir, 'watchdog.log');
 
 // Create a function for logging
 function log(message) {
@@ -46,18 +47,16 @@ if (!mainPid) {
 
 // Write watchdog PID to a file for debugging
 try {
-  const watchdogPidFile = path.join(__dirname, 'watchdog.pid');
-  fs.writeFileSync(watchdogPidFile, process.pid.toString());
-  log(`Watchdog PID ${process.pid} saved to ${watchdogPidFile}`);
+  fs.writeFileSync(runtimePaths.watchdogPid, process.pid.toString());
+  log(`Watchdog PID ${process.pid} saved to ${runtimePaths.watchdogPid}`);
 } catch (err) {
   log(`Failed to write watchdog PID file: ${err.message}`);
 }
 
 // Check for any server process debug information
 try {
-  const debugInfoPath = path.join(__dirname, 'server-process-debug.json');
-  if (fs.existsSync(debugInfoPath)) {
-    const debugInfo = JSON.parse(fs.readFileSync(debugInfoPath, 'utf8'));
+  if (fs.existsSync(runtimePaths.serverProcessDebug)) {
+    const debugInfo = JSON.parse(fs.readFileSync(runtimePaths.serverProcessDebug, 'utf8'));
     log(`Found server process debug info: Node PID: ${debugInfo.nodePid}, Java PID: ${debugInfo.javaPid}, Server ID: ${debugInfo.serverIdentifier}`);
     
     // If there's a specific server identifier in the debug file, prefer it
@@ -123,13 +122,14 @@ function killJavaProcesses() {
     log(`Fabric server kill error: ${e.message}`);
   }
   
-  // Try another approach with taskkill for all Java
+  // Try another approach - look for server jar files specifically
   try {
-    log("Attempt 3: Killing all Java processes with taskkill");
-    execSync('taskkill /F /IM java.exe /T', { stdio: 'ignore' });
-    log("taskkill command executed");
+    log("Attempt 3: Looking for any process with minecraft_server.jar");
+    execSync(`wmic process where "commandline like '%minecraft_server.jar%' and name='java.exe'" call terminate`, 
+      { stdio: 'ignore' });
+    log("Minecraft server jar kill command executed");
   } catch (e) {
-    log(`taskkill error: ${e.message}`);
+    log(`Minecraft server jar kill error: ${e.message}`);
   }
   
   // Try a third approach to directly search for Minecraft server processes
@@ -174,15 +174,9 @@ function killJavaProcesses() {
       const lines = remainingJava.split('\n').filter(line => line.trim() && !line.includes('ProcessId'));
       
       if (lines.length > 0) {
-        log(`Warning: Found ${lines.length} remaining Java processes after cleanup`);
-        
-        // Last resort - brute force kill
-        try {
-          log("Last resort: Using taskkill with /F /IM java.exe");
-          execSync('taskkill /F /IM java.exe', { stdio: 'ignore' });
-        } catch (e) {
-          log(`Final taskkill error: ${e.message}`);
-        }
+        log(`Warning: Found ${lines.length} remaining Java processes after targeted cleanup`);
+        log("NOT killing all Java processes - this could affect user's other applications");
+        log("If server processes remain, they will be manually cleaned up on next app start");
       } else {
         log("No remaining Java processes found - cleanup successful");
       }
