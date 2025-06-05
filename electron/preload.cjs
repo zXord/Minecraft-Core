@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('electron', {
       'add-player',
       'remove-player',
       'get-server-status',
+      'get-last-banned-player',
       // Folder and dialog operations
       'open-folder',
       'open-folder-direct',
