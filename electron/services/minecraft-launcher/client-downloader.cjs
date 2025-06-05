@@ -1464,10 +1464,13 @@ Specification-Vendor: FabricMC
               type: 'list',
               listType: 'compound',
               value: existingServers.map(server => ({
-                name: { type: 'string', value: server.name },
-                ip: { type: 'string', value: server.ip },
-                icon: { type: 'string', value: server.icon },
-                acceptTextures: { type: 'int', value: server.acceptTextures }
+                type: 'compound',
+                value: {
+                  name: { type: 'string', value: server.name },
+                  ip: { type: 'string', value: server.ip },
+                  icon: { type: 'string', value: server.icon },
+                  acceptTextures: { type: 'byte', value: server.acceptTextures }
+                }
               }))
             }
           }

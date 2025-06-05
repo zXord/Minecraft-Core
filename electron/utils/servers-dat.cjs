@@ -106,10 +106,13 @@ async function ensureServersDat(
           type: 'list',
           listType: 'compound',
           value: existingServers.map(s => ({
-            name: { type: 'string', value: s.name },
-            ip: { type: 'string', value: s.ip },
-            icon: { type: 'string', value: s.icon },
-            acceptTextures: { type: 'int', value: s.acceptTextures },
+            type: 'compound',
+            value: {
+              name: { type: 'string', value: s.name },
+              ip: { type: 'string', value: s.ip },
+              icon: { type: 'string', value: s.icon },
+              acceptTextures: { type: 'byte', value: s.acceptTextures },
+            }
           })),
         },
       },
@@ -125,4 +128,3 @@ async function ensureServersDat(
   }
 }
 module.exports = { ensureServersDat };
-
