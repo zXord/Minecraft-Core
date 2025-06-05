@@ -6,7 +6,7 @@ const fetch = require('node-fetch');
 const nbt = require('prismarine-nbt');
 const zlib = require('zlib');
 const appStore = require('../utils/app-store.cjs');
-const { createServersDat } = require('../utils/servers-dat.cjs');
+const { ensureServersDat } = require('../utils/servers-dat.cjs');
 
 async function createServersDat(clientDir, serverIp, managementPort, serverName = 'Minecraft Server') {
   try {
@@ -94,6 +94,7 @@ async function createServersDat(clientDir, serverIp, managementPort, serverName 
     return { success: false, error: err.message };
   }
 }
+
 
 /**
  * Create settings IPC handlers
@@ -424,7 +425,8 @@ function createSettingsHandlers(win) {
         console.log('Client configuration saved to file successfully');
 
         // Create servers.dat so the server appears in multiplayer list
-        const datResult = await createServersDat(clientPath, serverIp, config.serverPort, config.clientName);
+        const datResult = await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
+
         if (!datResult.success) {
           console.warn('Failed to create servers.dat:', datResult.error);
         } else {
