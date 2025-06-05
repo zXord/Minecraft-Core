@@ -177,6 +177,26 @@ function createMinecraftLauncherHandlers(win) {
         return { success: false, error: error.message };
       }
     },
+
+    // Check and refresh authentication if needed
+    'minecraft-check-refresh-auth': async (_e, { clientPath }) => {
+      try {
+        const result = await launcher.checkAndRefreshAuth();
+
+        // If token was refreshed successfully, persist updated auth data
+        if (result.success && result.refreshed && clientPath) {
+          try {
+            await launcher.saveAuthData(clientPath);
+          } catch (saveError) {
+            console.warn('[IPC] ⚠️ Failed to save refreshed auth data:', saveError.message);
+          }
+        }
+
+        return result;
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
     
     // Download required mods
     'minecraft-download-mods': async (_e, { clientPath, requiredMods, serverInfo }) => {
