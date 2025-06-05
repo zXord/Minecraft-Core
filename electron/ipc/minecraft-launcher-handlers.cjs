@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { ensureServersDat } = require('../utils/servers-dat.cjs');
 
 /**
  * Create Minecraft launcher IPC handlers
@@ -172,6 +173,26 @@ function createMinecraftLauncherHandlers(win) {
     'minecraft-save-auth': async (_e, { clientPath }) => {
       try {
         const result = await launcher.saveAuthData(clientPath);
+        return result;
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Check and refresh authentication if needed
+    'minecraft-check-refresh-auth': async (_e, { clientPath }) => {
+      try {
+        const result = await launcher.checkAndRefreshAuth();
+
+        // If token was refreshed successfully, persist updated auth data
+        if (result.success && result.refreshed && clientPath) {
+          try {
+            await launcher.saveAuthData(clientPath);
+          } catch (saveError) {
+            console.warn('[IPC] ⚠️ Failed to save refreshed auth data:', saveError.message);
+          }
+        }
+
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -346,11 +367,34 @@ function createMinecraftLauncherHandlers(win) {
           minecraftVersion,
           serverIp,
           serverPort,
+          managementPort,
+          clientName,
           requiredMods = [],
           serverInfo = null,
           maxMemory = null, // Add maxMemory parameter
           useProperLauncher = true // New option to use XMCL proper launcher
         } = options;
+
+        // Create servers.dat on demand if missing
+        try {
+          const serversDatPath = path.join(clientPath, 'servers.dat');
+          if (!fs.existsSync(serversDatPath)) {
+            const datRes = await ensureServersDat(
+              clientPath,
+              serverIp,
+              managementPort,
+              clientName || 'Minecraft Server',
+              serverPort
+            );
+            if (datRes.success) {
+              console.log('[IPC] servers.dat created automatically before launch');
+            } else {
+              console.warn(`[IPC] Failed to create servers.dat before launch: ${datRes.error}`);
+            }
+          }
+        } catch (err) {
+          console.warn('[IPC] Error while ensuring servers.dat:', err.message);
+        }
         
         // Try proper launcher first to fix LogUtils issues
         if (useProperLauncher) {
