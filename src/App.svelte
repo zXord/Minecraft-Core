@@ -551,7 +551,7 @@
 
   <!-- Instance type selector modal -->
   {#if showInstanceSelector}
-    <div class="modal-overlay" on:click={() => (showInstanceSelector = false)}>
+    <div class="modal-overlay" on:click|self={() => (showInstanceSelector = false)}>
       <div class="modal-content welcome-modal" on:click|stopPropagation>
         <h1>Welcome to Minecraft Core</h1>
         <p>Choose an instance type to get started:</p>
