@@ -1,7 +1,12 @@
-console.log('=== ROOT/PRELOAD.CJS IS LOADED ===');
+const isDev = process.env.NODE_ENV === 'development';
+if (isDev) {
+  console.log('=== ROOT/PRELOAD.CJS IS LOADED ===');
+}
 const { contextBridge, ipcRenderer } = require('electron');
 
-console.log('Loading preload.cjs with server-properties channels - v1');
+if (isDev) {
+  console.log('Loading preload.cjs with server-properties channels - v1');
+}
 
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
@@ -9,7 +14,9 @@ contextBridge.exposeInMainWorld('electron', {
   // Add file path handling for dropped files
   invoke: (channel, ...args) => {
     // Log all requested channels for debugging
-    console.log('Requested IPC channel:', channel);
+    if (isDev) {
+      console.log('Requested IPC channel:', channel);
+    }
     
     const validChannels = [
       'select-mod-files',
@@ -121,7 +128,9 @@ contextBridge.exposeInMainWorld('electron', {
 
     // Debug: print validChannels at runtime (only once)
     if (!window.__ipcChannelsLogged) {
-      console.log('Valid IPC channels at runtime:', validChannels);
+      if (isDev) {
+        console.log('Valid IPC channels at runtime:', validChannels);
+      }
       window.__ipcChannelsLogged = true;
     }
 
@@ -297,7 +306,9 @@ contextBridge.exposeInMainWorld('serverPath', {
 // Add direct folder opening function
 contextBridge.exposeInMainWorld('folderOpener', {
   open: (folderPath) => {
-    console.log('[Preload] Folder opener called for path:', folderPath);
+    if (isDev) {
+      console.log('[Preload] Folder opener called for path:', folderPath);
+    }
     return ipcRenderer.invoke('open-folder', folderPath);
   }
-}); 
+});
