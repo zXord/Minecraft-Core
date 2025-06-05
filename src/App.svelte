@@ -500,6 +500,10 @@
     ☰
   </button>
 
+  {#if isSidebarOpen}
+    <div class="sidebar-overlay" on:click={() => isSidebarOpen = false}></div>
+  {/if}
+
   <!-- Sidebar -->
   <div class="sidebar" class:open={isSidebarOpen}>
     <h2>Instances</h2>
@@ -936,6 +940,16 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .sidebar-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.3);
+    z-index: 5;
   }
 
   .instances-list {
