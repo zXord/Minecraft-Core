@@ -5,7 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
-const { createServersDat } = require('../utils/servers-dat.cjs');
+const { ensureServersDat } = require('../utils/servers-dat.cjs');
+
 
 /**
  * Create Minecraft launcher IPC handlers
@@ -379,7 +380,7 @@ function createMinecraftLauncherHandlers(win) {
         try {
           const serversDatPath = path.join(clientPath, 'servers.dat');
           if (!fs.existsSync(serversDatPath)) {
-            const datRes = await createServersDat(
+            const datRes = await ensureServersDat(
               clientPath,
               serverIp,
               managementPort,
