@@ -2,6 +2,9 @@
 const fs = require('fs');
 const path = require('path');
 const { rm } = require('fs/promises');
+const fetch = require('node-fetch');
+const nbt = require('prismarine-nbt');
+const zlib = require('zlib');
 const appStore = require('../utils/app-store.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 
@@ -335,6 +338,7 @@ function createSettingsHandlers(win) {
 
         // Create servers.dat so the server appears in multiplayer list
         const datResult = await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
+
         if (!datResult.success) {
           console.warn('Failed to create servers.dat:', datResult.error);
         } else {

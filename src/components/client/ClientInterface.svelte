@@ -469,12 +469,9 @@
           clientPath: instance.path
         });
         
-        // Force re-check server status and synchronization 
-        // but don't call checkAuthentication() since we already have the auth data
+        // Trigger a single server status refresh now that we're authenticated
+        // checkServerStatus will handle server info and sync checks
         await checkServerStatus();
-        await getServerInfo();
-        await checkModSynchronization();
-        await checkClientSynchronization();
         
         successMessage.set(`Successfully authenticated as ${result.username}`);
         setTimeout(() => successMessage.set(''), 3000);
@@ -990,12 +987,9 @@
         username = data.username;
         authData = data;
         
-        // Force re-check everything after authentication event
+        // Trigger a single server status refresh after authentication
         setTimeout(async () => {
           await checkServerStatus();
-          await getServerInfo();
-          await checkModSynchronization();
-          await checkClientSynchronization();
         }, 100);
       }
     });
@@ -1202,46 +1196,45 @@
       console.log('[Client] Skipping sync check - downloads in progress');
       return;
     }
-    
+
     if (!instance?.path || !serverInfo?.minecraftVersion) {
       console.log('[Client] Cannot check sync - missing instance or server info');
       return;
     }
-    
+
     isCheckingSync = true;
-    
+
     try {
       console.log('[Client] Checking sync status...');
-      
-      const syncResult = await window.electron.invoke('minecraft-check-client-sync', {
-        clientPath: instance.path,
-        minecraftVersion: serverInfo.minecraftVersion,
-        requiredMods: requiredMods || [],
-        serverInfo: serverInfo
-      });
-      
-      console.log('[Client] Sync check result:', syncResult);
+
+      // Refresh client and mod synchronization separately
+      await checkClientSynchronization();
+      await checkModSynchronization();
+
+      // Determine overall status
+      if (clientSyncStatus !== 'ready') {
+        downloadStatus = 'needs-client';
+      } else if (downloadStatus === 'ready') {
+        downloadStatus = 'ready';
+      } else if (downloadStatus === 'needed') {
+        downloadStatus = 'needs-mods';
+      }
+
       lastSyncCheck = Date.now();
-      
-      if (syncResult.success) {
-        clientSync = syncResult.clientSync;
-        modSync = syncResult.modSync;
-        downloadStatus = syncResult.overallStatus;
-        
-        // Update download button text
-        if (downloadStatus === 'ready') {
-          downloadButtonText = 'Launch Game';
-        } else if (downloadStatus === 'needs-client') {
-          downloadButtonText = 'Download Game Files';
-        } else if (downloadStatus === 'needs-mods') {
-          downloadButtonText = 'Download Required Mods';
-        } else {
-          downloadButtonText = 'Setup Required';
-        }
+
+      // Update download button text
+      if (downloadStatus === 'ready') {
+        downloadButtonText = 'Launch Game';
+      } else if (downloadStatus === 'needs-client') {
+        downloadButtonText = 'Download Game Files';
+      } else if (downloadStatus === 'needs-mods' || downloadStatus === 'needed') {
+        downloadButtonText = 'Download Required Mods';
+      } else if (downloadStatus === 'checking') {
+        downloadButtonText = 'Checking...';
+      } else if (downloadStatus === 'downloading') {
+        downloadButtonText = 'Downloading...';
       } else {
-        console.error('[Client] Sync check failed:', syncResult.error);
-        downloadStatus = 'error';
-        downloadButtonText = 'Check Failed - Retry';
+        downloadButtonText = 'Setup Required';
       }
     } catch (error) {
       console.error('[Client] Error checking sync status:', error);

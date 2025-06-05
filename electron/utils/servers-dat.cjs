@@ -18,6 +18,7 @@ const zlib = require('zlib');
  *   management server's /api/server/info endpoint.
  * @returns {Promise<{success: boolean, error?: string}>}
  */
+
 async function ensureServersDat(
   clientDir,
   serverIp,
@@ -126,5 +127,4 @@ async function ensureServersDat(
     return { success: false, error: err.message };
   }
 }
-
 module.exports = { ensureServersDat };
