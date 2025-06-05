@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { createServersDat } = require('../utils/servers-dat.cjs');
 
 /**
  * Create Minecraft launcher IPC handlers
@@ -366,11 +367,34 @@ function createMinecraftLauncherHandlers(win) {
           minecraftVersion,
           serverIp,
           serverPort,
+          managementPort,
+          clientName,
           requiredMods = [],
           serverInfo = null,
           maxMemory = null, // Add maxMemory parameter
           useProperLauncher = true // New option to use XMCL proper launcher
         } = options;
+
+        // Create servers.dat on demand if missing
+        try {
+          const serversDatPath = path.join(clientPath, 'servers.dat');
+          if (!fs.existsSync(serversDatPath)) {
+            const datRes = await createServersDat(
+              clientPath,
+              serverIp,
+              managementPort,
+              clientName || 'Minecraft Server',
+              serverPort
+            );
+            if (datRes.success) {
+              console.log('[IPC] servers.dat created automatically before launch');
+            } else {
+              console.warn(`[IPC] Failed to create servers.dat before launch: ${datRes.error}`);
+            }
+          }
+        } catch (err) {
+          console.warn('[IPC] Error while ensuring servers.dat:', err.message);
+        }
         
         // Try proper launcher first to fix LogUtils issues
         if (useProperLauncher) {

@@ -6,6 +6,7 @@ const fetch = require('node-fetch');
 const nbt = require('prismarine-nbt');
 const zlib = require('zlib');
 const appStore = require('../utils/app-store.cjs');
+const { createServersDat } = require('../utils/servers-dat.cjs');
 
 async function createServersDat(clientDir, serverIp, managementPort, serverName = 'Minecraft Server') {
   try {
