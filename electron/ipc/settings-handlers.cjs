@@ -338,7 +338,6 @@ function createSettingsHandlers(win) {
 
         // Create servers.dat so the server appears in multiplayer list
         const datResult = await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
-
         if (!datResult.success) {
           console.warn('Failed to create servers.dat:', datResult.error);
         } else {
