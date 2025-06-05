@@ -1161,46 +1161,45 @@
       console.log('[Client] Skipping sync check - downloads in progress');
       return;
     }
-    
+
     if (!instance?.path || !serverInfo?.minecraftVersion) {
       console.log('[Client] Cannot check sync - missing instance or server info');
       return;
     }
-    
+
     isCheckingSync = true;
-    
+
     try {
       console.log('[Client] Checking sync status...');
-      
-      const syncResult = await window.electron.invoke('minecraft-check-client-sync', {
-        clientPath: instance.path,
-        minecraftVersion: serverInfo.minecraftVersion,
-        requiredMods: requiredMods || [],
-        serverInfo: serverInfo
-      });
-      
-      console.log('[Client] Sync check result:', syncResult);
+
+      // Refresh client and mod synchronization separately
+      await checkClientSynchronization();
+      await checkModSynchronization();
+
+      // Determine overall status
+      if (clientSyncStatus !== 'ready') {
+        downloadStatus = 'needs-client';
+      } else if (downloadStatus === 'ready') {
+        downloadStatus = 'ready';
+      } else if (downloadStatus === 'needed') {
+        downloadStatus = 'needs-mods';
+      }
+
       lastSyncCheck = Date.now();
-      
-      if (syncResult.success) {
-        clientSync = syncResult.clientSync;
-        modSync = syncResult.modSync;
-        downloadStatus = syncResult.overallStatus;
-        
-        // Update download button text
-        if (downloadStatus === 'ready') {
-          downloadButtonText = 'Launch Game';
-        } else if (downloadStatus === 'needs-client') {
-          downloadButtonText = 'Download Game Files';
-        } else if (downloadStatus === 'needs-mods') {
-          downloadButtonText = 'Download Required Mods';
-        } else {
-          downloadButtonText = 'Setup Required';
-        }
+
+      // Update download button text
+      if (downloadStatus === 'ready') {
+        downloadButtonText = 'Launch Game';
+      } else if (downloadStatus === 'needs-client') {
+        downloadButtonText = 'Download Game Files';
+      } else if (downloadStatus === 'needs-mods' || downloadStatus === 'needed') {
+        downloadButtonText = 'Download Required Mods';
+      } else if (downloadStatus === 'checking') {
+        downloadButtonText = 'Checking...';
+      } else if (downloadStatus === 'downloading') {
+        downloadButtonText = 'Downloading...';
       } else {
-        console.error('[Client] Sync check failed:', syncResult.error);
-        downloadStatus = 'error';
-        downloadButtonText = 'Check Failed - Retry';
+        downloadButtonText = 'Setup Required';
       }
     } catch (error) {
       console.error('[Client] Error checking sync status:', error);
@@ -1445,13 +1444,18 @@
                       {/if}
                     </div>
                   {/if}
-                </div>
-              {:else if downloadStatus === 'ready'}
-                <div class="sync-status ready">
-                  <h3>✅ All Mods Ready</h3>
-                  <p>All required mods are installed and up to date.</p>
-                </div>
-              {/if}
+                  </div>
+                {:else if downloadStatus === 'error'}
+                  <div class="sync-status error">
+                    <h3>Mod Check Failed</h3>
+                    <p>Unable to verify mod status. Please refresh and try again.</p>
+                  </div>
+                {:else if downloadStatus === 'ready'}
+                  <div class="sync-status ready">
+                    <h3>✅ All Mods Ready</h3>
+                    <p>All required mods are installed and up to date.</p>
+                  </div>
+                {/if}
               
               <!-- Memory Settings -->
               <div class="memory-settings">
@@ -1980,10 +1984,15 @@
     background-color: rgba(59, 130, 246, 0.1);
     border: 1px solid #3b82f6;
   }
-  
+
   .sync-status.ready {
     background-color: rgba(16, 185, 129, 0.1);
     border: 1px solid #10b981;
+  }
+
+  .sync-status.error {
+    background-color: rgba(239, 68, 68, 0.1);
+    border: 1px solid #ef4444;
   }
   
   .missing-mods, .outdated-mods {
