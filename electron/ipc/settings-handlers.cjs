@@ -66,18 +66,24 @@ async function createServersDat(clientDir, serverIp, managementPort, serverName 
       acceptTextures: 1
     });
 
-    const serverTags = nbt.comp(existingServers.map(s => ({
-      name: nbt.string(s.name),
-      ip: nbt.string(s.ip),
-      icon: nbt.string(s.icon),
-      acceptTextures: nbt.int(s.acceptTextures)
-    })));
+    const nbtData = {
+      type: 'compound',
+      name: '',
+      value: {
+        servers: {
+          type: 'list',
+          listType: 'compound',
+          value: existingServers.map(s => ({
+            name: { type: 'string', value: s.name },
+            ip: { type: 'string', value: s.ip },
+            icon: { type: 'string', value: s.icon },
+            acceptTextures: { type: 'int', value: s.acceptTextures }
+          }))
+        }
+      }
+    };
 
-    const nbtData = nbt.comp({
-      servers: nbt.list(serverTags)
-    });
-
-    const raw = nbt.writeUncompressed(nbtData);
+    const raw = nbt.writeUncompressed(nbtData, '');
     const compressed = zlib.gzipSync(raw);
     fs.writeFileSync(serversDatPath, compressed);
     return { success: true };
