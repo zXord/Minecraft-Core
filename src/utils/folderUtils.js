@@ -5,8 +5,9 @@ import { safeInvoke } from './ipcUtils.js';
 
 /**
  * Opens a folder in the system file explorer
- * Tries multiple methods in sequence to ensure robustness across platforms
- * 
+ * Uses a dedicated folder opener when available; otherwise falls back to
+ * a single IPC-based method
+ *
  * @param {string} folderPath - Path to the folder to open
  * @returns {Promise<boolean>} - True if any method was successful
  */
