@@ -110,6 +110,7 @@ async function ensureServersDat(
       servers: nbt.list(nbt.comp(nbtServers))
     });
 
+
     const raw = nbt.writeUncompressed(nbtData);
     const compressed = zlib.gzipSync(raw);
     fs.writeFileSync(serversDatPath, compressed);
