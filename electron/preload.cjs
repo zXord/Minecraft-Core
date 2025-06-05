@@ -86,6 +86,7 @@ contextBridge.exposeInMainWorld('electron', {
       'minecraft-auth',
       'minecraft-load-auth',
       'minecraft-save-auth',
+      'minecraft-check-refresh-auth',
       'minecraft-download-mods',
       'minecraft-launch',
       'minecraft-stop',
