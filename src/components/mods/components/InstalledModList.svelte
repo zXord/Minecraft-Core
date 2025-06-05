@@ -879,11 +879,13 @@
         Check Compatibility
       </button>
       {#if $modsWithUpdates.size > 0}
-          <button 
-          class="action-button update-all-button" 
-            on:click={updateAllMods} 
-          disabled={updateAllInProgress}
+          <button
+          class="action-button update-all-button"
+            on:click={updateAllMods}
+          disabled={updateAllInProgress || $serverState.status === 'Running'}
+          title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}
         >
+          {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if}
           {updateAllInProgress ? 'Updating...' : `Update All (${$modsWithUpdates.size})`}
           </button>
         {/if}
