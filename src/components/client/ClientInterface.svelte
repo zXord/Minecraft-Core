@@ -1485,13 +1485,18 @@
                       {/if}
                     </div>
                   {/if}
-                </div>
-              {:else if downloadStatus === 'ready'}
-                <div class="sync-status ready">
-                  <h3>✅ All Mods Ready</h3>
-                  <p>All required mods are installed and up to date.</p>
-                </div>
-              {/if}
+                  </div>
+                {:else if downloadStatus === 'error'}
+                  <div class="sync-status error">
+                    <h3>Mod Check Failed</h3>
+                    <p>Unable to verify mod status. Please refresh and try again.</p>
+                  </div>
+                {:else if downloadStatus === 'ready'}
+                  <div class="sync-status ready">
+                    <h3>✅ All Mods Ready</h3>
+                    <p>All required mods are installed and up to date.</p>
+                  </div>
+                {/if}
               
               <!-- Memory Settings -->
               <div class="memory-settings">
@@ -2020,10 +2025,15 @@
     background-color: rgba(59, 130, 246, 0.1);
     border: 1px solid #3b82f6;
   }
-  
+
   .sync-status.ready {
     background-color: rgba(16, 185, 129, 0.1);
     border: 1px solid #10b981;
+  }
+
+  .sync-status.error {
+    background-color: rgba(239, 68, 68, 0.1);
+    border: 1px solid #ef4444;
   }
   
   .missing-mods, .outdated-mods {
