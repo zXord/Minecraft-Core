@@ -24,6 +24,7 @@
   import Backups from './components/Backups.svelte';
   import ClientInterface from './components/client/ClientInterface.svelte';
   import ClientSetupWizard from './components/client/ClientSetupWizard.svelte';
+  import StatusManager from './components/common/StatusManager.svelte';
   
   // --- Flow & Tabs ---
   let step = 'loading'; // loading → chooseFolder → chooseVersion → done
@@ -345,7 +346,8 @@
       const hasServer = instances.some(i => i.type === 'server');
       
       if (hasServer) {
-        alert('You can only have one server instance. Please delete the existing server instance first.');
+        errorMessage.set('You can only have one server instance. Please delete the existing server instance first.');
+        setTimeout(() => errorMessage.set(''), 5000);
         step = 'done';
         return;
       }
@@ -396,7 +398,8 @@
     const hasClient = instances.some(i => i.type === 'client');
     
     if (hasServer && hasClient) {
-      alert('You can only have one server instance and one client instance. Please delete an existing instance first.');
+      errorMessage.set('You can only have one server instance and one client instance. Please delete an existing instance first.');
+      setTimeout(() => errorMessage.set(''), 5000);
       return;
     }
     
@@ -684,13 +687,15 @@
                     class="folder-button" 
                     on:click={async () => {
                       if (!validateServerPath(path)) {
-                        alert('Server path is empty or invalid. Please set up the server first.');
+                        errorMessage.set('Server path is empty or invalid. Please set up the server first.');
+                        setTimeout(() => errorMessage.set(''), 5000);
                         return;
                       }
                       
                       const success = await openFolder(path);
                       if (!success) {
-                        alert(`Failed to open folder. Please access it manually at: ${path}`);
+                        errorMessage.set(`Failed to open folder. Please access it manually at: ${path}`);
+                        setTimeout(() => errorMessage.set(''), 5000);
                       }
                     }}
                     title="Open server folder"
@@ -759,6 +764,7 @@
       {/if}
     {/if}
   </div>
+  <StatusManager />
 </main>
 
 <style>
