@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('electron', {
       'get-version-info',
       'get-installed-mod-info',
       'get-project-info',
+      'extract-jar-dependencies',
+      'analyze-mod-from-url',
       'select-folder',
       'get-last-server-path',
       'read-config',
