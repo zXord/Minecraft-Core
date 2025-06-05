@@ -102,7 +102,7 @@ const hasUpdates = derived(
   modsWithUpdates,
   $modsWithUpdates => {
     for (const key of $modsWithUpdates.keys()) {
-      if (!key.startsWith('project:')) {
+      if (key.startsWith('project:')) {
         return true;
       }
     }
@@ -112,13 +112,13 @@ const hasUpdates = derived(
 
 // Derived store for the number of mods with updates
 const updateCount = derived(modsWithUpdates, $modsWithUpdates => {
-  let count = 0;
+  const projects = new Set();
   for (const key of $modsWithUpdates.keys()) {
-    if (!key.startsWith('project:')) {
-      count++;
+    if (key.startsWith('project:')) {
+      projects.add(key.slice('project:'.length));
     }
   }
-  return count;
+  return projects.size;
 });
 
 // Derived store for installed mods with categories
