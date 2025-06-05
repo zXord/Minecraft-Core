@@ -22,7 +22,7 @@ const LIST_COMMAND_THROTTLE = 10000; // Only send list command every 10 seconds 
 // Add a variable to track if we need more frequent player list checks
 let intensivePlayerCheckMode = false;
 let intensiveCheckTimer = null;
-let intensiveCheckInterval = null;
+let intensiveCheckTimeouts = [];
 let lastMetricsUpdate = 0;
 const METRICS_UPDATE_THROTTLE = 2000; // Minimum 2 seconds between updates
 
@@ -166,9 +166,9 @@ function enableIntensiveChecking() {
     intensiveCheckTimer = null;
   }
   
-  if (intensiveCheckInterval) {
-    clearInterval(intensiveCheckInterval);
-    intensiveCheckInterval = null;
+  if (intensiveCheckTimeouts.length) {
+    intensiveCheckTimeouts.forEach(clearTimeout);
+    intensiveCheckTimeouts = [];
   }
   
   // Enable intensive player list checking for a short period
@@ -181,26 +181,21 @@ function enableIntensiveChecking() {
   
   // Set up just a few quick follow-up checks after a player event
   const checkTimes = [2000, 5000]; // Check after 2s and 5s
-  
-  let checkIndex = 0;
-  intensiveCheckInterval = setInterval(() => {
-    if (serverProcess && !serverProcess.killed) {
-      sendListCommand();
-    }
-    
-    checkIndex++;
-    if (checkIndex >= checkTimes.length) {
-      // We've done all our checks
-      clearInterval(intensiveCheckInterval);
-      intensiveCheckInterval = null;
-    }
-  }, checkTimes[0]);
+
+  checkTimes.forEach(delay => {
+    const timeout = setTimeout(() => {
+      if (serverProcess && !serverProcess.killed) {
+        sendListCommand();
+      }
+    }, delay);
+    intensiveCheckTimeouts.push(timeout);
+  });
   
   // Stop intensive checking after 6 seconds total
   intensiveCheckTimer = setTimeout(() => {
-    if (intensiveCheckInterval) {
-      clearInterval(intensiveCheckInterval);
-      intensiveCheckInterval = null;
+    if (intensiveCheckTimeouts.length) {
+      intensiveCheckTimeouts.forEach(clearTimeout);
+      intensiveCheckTimeouts = [];
     }
     intensivePlayerCheckMode = false;
   }, 6000);
