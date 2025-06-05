@@ -375,22 +375,19 @@ function createMinecraftLauncherHandlers(win) {
           useProperLauncher = true // New option to use XMCL proper launcher
         } = options;
 
-        // Create servers.dat on demand if missing
+        // Ensure servers.dat has our server before launching
         try {
-          const serversDatPath = path.join(clientPath, 'servers.dat');
-          if (!fs.existsSync(serversDatPath)) {
-            const datRes = await ensureServersDat(
-              clientPath,
-              serverIp,
-              managementPort,
-              clientName || 'Minecraft Server',
-              serverPort
-            );
-            if (datRes.success) {
-              console.log('[IPC] servers.dat created automatically before launch');
-            } else {
-              console.warn(`[IPC] Failed to create servers.dat before launch: ${datRes.error}`);
-            }
+          const datRes = await ensureServersDat(
+            clientPath,
+            serverIp,
+            managementPort,
+            clientName || 'Minecraft Server',
+            serverPort
+          );
+          if (datRes.success) {
+            console.log('[IPC] servers.dat ensured before launch');
+          } else {
+            console.warn(`[IPC] Failed to ensure servers.dat before launch: ${datRes.error}`);
           }
         } catch (err) {
           console.warn('[IPC] Error while ensuring servers.dat:', err.message);
