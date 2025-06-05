@@ -104,6 +104,7 @@ async function ensureServersDat(
       acceptTextures: nbt.byte(s.acceptTextures)
     }));
 
+
     const nbtData = nbt.comp({
       servers: nbt.list(nbt.comp(nbtServers))
     });
