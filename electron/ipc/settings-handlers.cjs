@@ -2,7 +2,96 @@
 const fs = require('fs');
 const path = require('path');
 const { rm } = require('fs/promises');
+const fetch = require('node-fetch');
+const nbt = require('prismarine-nbt');
+const zlib = require('zlib');
 const appStore = require('../utils/app-store.cjs');
+
+async function createServersDat(clientDir, serverIp, managementPort, serverName = 'Minecraft Server') {
+  try {
+    let minecraftPort = 25565;
+    try {
+      const infoRes = await fetch(`http://${serverIp}:${managementPort}/api/server/info`, { timeout: 5000 });
+      if (infoRes.ok) {
+        const info = await infoRes.json();
+        if (info.minecraftPort) {
+          const portNum = parseInt(info.minecraftPort, 10);
+          if (!Number.isNaN(portNum)) minecraftPort = portNum;
+        }
+      }
+    } catch (e) {
+      console.warn('[Settings] Could not retrieve server port for servers.dat:', e.message);
+    }
+
+    if (!fs.existsSync(clientDir)) {
+      fs.mkdirSync(clientDir, { recursive: true });
+    }
+
+    const serverAddress = minecraftPort === 25565 ? serverIp : `${serverIp}:${minecraftPort}`;
+
+    const optionsFile = path.join(clientDir, 'options.txt');
+    let optionsContent = '';
+    if (fs.existsSync(optionsFile)) {
+      optionsContent = fs.readFileSync(optionsFile, 'utf8');
+    }
+    const lines = optionsContent.split('\n').filter(l => !l.startsWith('lastServer:'));
+    lines.push(`lastServer:${serverAddress}`);
+    fs.writeFileSync(optionsFile, lines.join('\n'), 'utf8');
+
+    const serversDatPath = path.join(clientDir, 'servers.dat');
+    let existingServers = [];
+    if (fs.existsSync(serversDatPath)) {
+      try {
+        const buf = fs.readFileSync(serversDatPath);
+        const uncompressed = zlib.gunzipSync(buf);
+        const parsed = await nbt.parse(uncompressed);
+        const list = parsed.parsed.value.servers?.value || [];
+        existingServers = list.map(entry => entry.value ? {
+          name: entry.value.name.value,
+          ip: entry.value.ip.value,
+          icon: entry.value.icon.value,
+          acceptTextures: entry.value.acceptTextures.value
+        } : entry);
+        existingServers = existingServers.filter(s => s.ip !== serverAddress);
+      } catch (err) {
+        console.warn('[Settings] Could not parse existing servers.dat:', err.message);
+        existingServers = [];
+      }
+    }
+
+    existingServers.push({
+      name: serverName,
+      ip: serverAddress,
+      icon: '',
+      acceptTextures: 1
+    });
+
+    const nbtData = {
+      type: 'compound',
+      name: '',
+      value: {
+        servers: {
+          type: 'list',
+          listType: 'compound',
+          value: existingServers.map(s => ({
+            name: { type: 'string', value: s.name },
+            ip: { type: 'string', value: s.ip },
+            icon: { type: 'string', value: s.icon },
+            acceptTextures: { type: 'int', value: s.acceptTextures }
+          }))
+        }
+      }
+    };
+
+    const raw = nbt.writeUncompressed(nbtData);
+    const compressed = zlib.gzipSync(raw);
+    fs.writeFileSync(serversDatPath, compressed);
+    return { success: true };
+  } catch (err) {
+    console.error('[Settings] Failed to create servers.dat:', err);
+    return { success: false, error: err.message };
+  }
+}
 
 /**
  * Create settings IPC handlers
@@ -297,11 +386,11 @@ function createSettingsHandlers(win) {
     },
     
     // Save client configuration
-    'save-client-config': async (_e, { path, serverIp, serverPort, clientId, clientName }) => {
+    'save-client-config': async (_e, { path: clientPath, serverIp, serverPort, clientId, clientName }) => {
       try {
-        console.log(`Saving client configuration for path: ${path}, server: ${serverIp}:${serverPort}`);
+        console.log(`Saving client configuration for path: ${clientPath}, server: ${serverIp}:${serverPort}`);
         
-        if (!path || typeof path !== 'string' || path.trim() === '') {
+        if (!clientPath || typeof clientPath !== 'string' || clientPath.trim() === '') {
           return { success: false, error: 'Invalid client path' };
         }
         
@@ -314,13 +403,13 @@ function createSettingsHandlers(win) {
         const path_module = require('path');
         
         // Create directory if it doesn't exist
-        if (!fs.existsSync(path)) {
-          console.log(`Creating client directory: ${path}`);
-          fs.mkdirSync(path, { recursive: true });
+        if (!fs.existsSync(clientPath)) {
+          console.log(`Creating client directory: ${clientPath}`);
+          fs.mkdirSync(clientPath, { recursive: true });
         }
         
         // Save client configuration to a JSON file
-        const configFile = path_module.join(path, 'client-config.json');
+        const configFile = path_module.join(clientPath, 'client-config.json');
         const config = {
           serverIp,
           serverPort: serverPort || '8080', // Default to management server port
@@ -331,6 +420,14 @@ function createSettingsHandlers(win) {
         
         await fsPromises.writeFile(configFile, JSON.stringify(config, null, 2));
         console.log('Client configuration saved to file successfully');
+
+        // Create servers.dat so the server appears in multiplayer list
+        const datResult = await createServersDat(clientPath, serverIp, config.serverPort, config.clientName);
+        if (!datResult.success) {
+          console.warn('Failed to create servers.dat:', datResult.error);
+        } else {
+          console.log('servers.dat created or updated successfully');
+        }
         
         // ALSO update the instance in the app store so it persists across app restarts
         try {
@@ -338,7 +435,7 @@ function createSettingsHandlers(win) {
           
           // Find the client instance by path
           const clientInstanceIndex = instances.findIndex(inst => 
-            inst.type === 'client' && inst.path === path
+            inst.type === 'client' && inst.path === clientPath
           );
           
           if (clientInstanceIndex !== -1) {
@@ -349,7 +446,7 @@ function createSettingsHandlers(win) {
               serverPort: serverPort || '8080',
               clientId: config.clientId,
               clientName: config.clientName,
-              path,
+              path: clientPath,
               lastConnected: config.lastConnected
             };
             console.log('Updated existing client instance in app store');
@@ -359,7 +456,7 @@ function createSettingsHandlers(win) {
               id: config.clientId,
               name: config.clientName,
               type: 'client',
-              path,
+              path: clientPath,
               serverIp,
               serverPort: serverPort || '8080',
               clientId: config.clientId,
