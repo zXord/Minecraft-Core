@@ -986,7 +986,6 @@
     
     window.electron.on('launcher-client-download-progress', (data) => {
       clientDownloadProgress = data;
-      console.log(`[Client] Client download progress: ${data.type} - ${data.task}`);
     });
     
     window.electron.on('launcher-client-download-complete', (data) => {
