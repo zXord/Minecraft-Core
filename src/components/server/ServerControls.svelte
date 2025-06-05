@@ -5,6 +5,7 @@
   import { playerState, updateOnlinePlayers, showContextMenu } from '../../stores/playerState.js';
   import PlayerContextMenu from '../players/PlayerContextMenu.svelte';
   import { openFolder, validateServerPath } from '../../utils/folderUtils.js';
+  import { errorMessage } from '../../stores/modStore.js';
   
   export let serverPath = '';
   
@@ -378,15 +379,17 @@
       } else {
         managementServerStatus = 'stopped';
         console.error('Failed to start management server:', result.error);
-        alert(`Failed to start management server: ${result.error}`);
+        errorMessage.set(`Failed to start management server: ${result.error}`);
+        setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
       managementServerStatus = 'stopped';
       console.error('Error starting management server:', error);
-      alert(`Error starting management server: ${error.message}`);
+      errorMessage.set(`Error starting management server: ${error.message}`);
+      setTimeout(() => errorMessage.set(''), 5000);
     }
   }
-  
+
   async function stopManagementServer() {
     managementServerStatus = 'stopping';
     try {
@@ -399,12 +402,14 @@
       } else {
         managementServerStatus = 'running';
         console.error('Failed to stop management server:', result.error);
-        alert(`Failed to stop management server: ${result.error}`);
+        errorMessage.set(`Failed to stop management server: ${result.error}`);
+        setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
       managementServerStatus = 'running';
       console.error('Error stopping management server:', error);
-      alert(`Error stopping management server: ${error.message}`);
+      errorMessage.set(`Error stopping management server: ${error.message}`);
+      setTimeout(() => errorMessage.set(''), 5000);
     }
   }
 </script>  
