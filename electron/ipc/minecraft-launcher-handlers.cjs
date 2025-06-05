@@ -7,6 +7,7 @@ const http = require('http');
 const https = require('https');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 
+
 /**
  * Create Minecraft launcher IPC handlers
  * 
