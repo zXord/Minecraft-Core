@@ -8,8 +8,6 @@ const appStore = require('../utils/app-store.cjs');
 const { ensureConfigFile } = require('../utils/config-manager.cjs');
 const { createZip } = require('../utils/backup-util.cjs');
 
-console.log('[DEBUG] file-handlers.cjs loaded');
-
 /**
  * Create file and folder management IPC handlers
  * 

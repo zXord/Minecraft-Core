@@ -21,4 +21,5 @@ interface Window {
   serverPath: ServerPath;
   folderOpener: FolderOpener;
   _folderOpenInProgress?: boolean; // Flag for debouncing folder opens
+  getInitialInstances?: () => { instances: any[], loaded: boolean };
 }

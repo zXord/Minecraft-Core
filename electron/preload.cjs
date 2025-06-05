@@ -3,25 +3,6 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 console.log('Loading preload.cjs with server-properties channels - v1');
 
-// Global shared state - accessible from all renderer processes
-let serverPath = '';
-
-// Add an IPC handler to update serverPath
-ipcRenderer.on('update-server-path', (_evt, path) => {
-  serverPath = path;
-});
-
-// Add handler for server settings updates
-ipcRenderer.on('restore-server-settings', (_evt, settings) => {
-  // Just pass it through to the renderer process
-  // No need to store it here as we use the app store for persistence
-});
-
-// Add handler for server status updates
-ipcRenderer.on('server-status', (_evt, status) => {
-  // Relays to the renderer process via the exposed API
-});
-
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electron', {

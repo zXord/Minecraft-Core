@@ -446,7 +446,9 @@
     
     try {
       console.log('[Client] About to call minecraft-auth IPC...');
-      const result = await window.electron.invoke('minecraft-auth');
+      const result = await window.electron.invoke('minecraft-auth', {
+        clientPath: instance.path
+      });
       console.log('[Client] minecraft-auth result:', result);
       
       // Clear the timeout since we got a response
@@ -678,7 +680,10 @@
         clientPath: instance.path,
         minecraftVersion: serverInfo.minecraftVersion,
         requiredMods: requiredMods || [],
-        serverInfo: serverInfo
+        serverInfo: {
+          ...serverInfo,
+          serverIp: instance.serverIp // Add the server IP for server list addition
+        }
       });
       
       console.log('[Client] Client download result:', result);
@@ -862,6 +867,8 @@
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
+
+
   
   // Set up launcher event listeners
   function setupLauncherEvents() {

@@ -12,6 +12,7 @@ const fs = require('fs');
 const url = require('url');
 const { ipcMain, dialog, shell } = require('electron');
 const { initializeAutomatedBackups } = require('./ipc/backup-handlers.cjs');
+const { registeredHandlers } = require('./utils/ipc-helpers.cjs');
 
 // Utility function to open folders directly using child_process
 function openFolderDirectly(folderPath) {
@@ -154,13 +155,14 @@ app.whenReady().then(() => {
       // Only remove handlers that are defined directly in this file
       ipcMain.removeHandler('show-confirmation-dialog');
       ipcMain.removeHandler('open-folder-direct');
-      console.log('[MAIN] Removed existing handlers to avoid duplicates');
     } catch (err) {
-      console.log('[MAIN] No existing handlers to remove:', err.message);
+      // Ignore if no existing handlers
     }
     
     // Ensure the delete-instance handler is registered
-    console.log('[MAIN] Checking if delete-instance handler is registered:', require('./utils/ipc-helpers.cjs').registeredHandlers.has('delete-instance'));
+    if (!registeredHandlers.has('delete-instance')) {
+      console.error('[MAIN] delete-instance handler is not registered');
+    }
     
     // Define our folder openers but don't register them directly
     const openFolderHandler = async (_event, folderPath) => {
@@ -214,16 +216,12 @@ app.whenReady().then(() => {
     
     // Only check if open-folder is already registered, and use our handler if not
     if (!require('./utils/ipc-helpers.cjs').registeredHandlers.has('open-folder')) {
-      console.log('[MAIN] No open-folder handler registered, adding direct handler');
       ipcMain.handle('open-folder', openFolderHandler);
-    } else {
-      console.log('[MAIN] open-folder handler already registered through IPC modules');
     }
     
     // Direct handler for confirming actions
     ipcMain.handle('show-confirmation-dialog', async (_event, options) => {
       try {
-        console.log('[MAIN] Direct handler: Showing confirmation dialog');
         return await dialog.showMessageBox(win, options);
       } catch (err) {
         console.error('[MAIN] Direct handler: Failed to show dialog:', err);
@@ -243,10 +241,8 @@ app.whenReady().then(() => {
       return;
     }
     if (appWatchdogProcess) {
-      console.log('App watchdog already running');
       return;
     }
-    console.log('Starting app watchdog process due to server start...');
     appWatchdogProcess = spawn('node', [
       appWatchdogPath,
       process.pid.toString(),
@@ -258,7 +254,6 @@ app.whenReady().then(() => {
       shell: false
     });
     appWatchdogProcess.unref();
-    console.log(`App watchdog started with PID: ${appWatchdogProcess.pid || 'unknown'}`);
   });
   
   // Stop the app watchdog when the server stops or crashes
@@ -296,40 +291,46 @@ app.whenReady().then(() => {
   startMetricsReporting(win);
   
   // Initialize with last server path if available
-  try {
-    const lastServerPath = appStore.get('lastServerPath');
-    if (lastServerPath && win && win.webContents) {
-      // Ensure config file exists with defaults
-      const serverSettings = appStore.get('serverSettings') || { port: 25565, maxRam: 4 };
-      const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
+  // IMPORTANT: Wait for the web contents to be ready before sending data
+  win.webContents.once('did-finish-load', () => {
+    try {
+      const lastServerPath = appStore.get('lastServerPath');
       
-      // Create a default config if needed
-      ensureConfigFile(lastServerPath, {
-        version: null,
-        port: serverSettings.port,
-        maxRam: serverSettings.maxRam,
-        autoRestart: {
-          enabled: autoRestart.enabled,
-          delay: autoRestart.delay, 
-          maxCrashes: autoRestart.maxCrashes
-        }
-      });
-      
-      // Send updated path to renderer
-      win.webContents.send('update-server-path', lastServerPath);
-      
-      // Restore server settings (port and RAM)
-      if (serverSettings) {
-        win.webContents.send('restore-server-settings', serverSettings);
+      if (lastServerPath && win && win.webContents) {
+        // Ensure config file exists with defaults
+        const serverSettings = appStore.get('serverSettings') || { port: 25565, maxRam: 4 };
+        const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
+        
+        // Create a default config if needed
+        ensureConfigFile(lastServerPath, {
+          version: null,
+          port: serverSettings.port,
+          maxRam: serverSettings.maxRam,
+          autoRestart: {
+            enabled: autoRestart.enabled,
+            delay: autoRestart.delay, 
+            maxCrashes: autoRestart.maxCrashes
+          }
+        });
+        
+        // Send updated path to renderer with a small delay to ensure renderer is ready
+        setTimeout(() => {
+          win.webContents.send('update-server-path', lastServerPath);
+          
+          // Restore server settings (port and RAM)
+          if (serverSettings) {
+            win.webContents.send('restore-server-settings', serverSettings);
+          }
+        }, 500); // Small delay to ensure renderer is fully ready
+        
+        // Initialize auto-restart settings from this server's config
+        const { initFromServerConfig } = require('./services/auto-restart.cjs');
+        initFromServerConfig(lastServerPath);
       }
-      
-      // Initialize auto-restart settings from this server's config
-      const { initFromServerConfig } = require('./services/auto-restart.cjs');
-      initFromServerConfig(lastServerPath);
+    } catch (err) {
+      console.error('Error restoring last server path:', err);
     }
-  } catch (err) {
-    console.error('Error restoring last server path:', err);
-  }
+  });
   
   // Setup cleanup handlers
   setupAppCleanup(app, win);

@@ -1,6 +1,10 @@
 // Minecraft launcher IPC handlers
-console.log('💡 IPC HANDLERS MODULE LOADED');
-const { getMinecraftLauncher } = require('../services/minecraft-launcher'); // Updated import path
+const { getMinecraftLauncher } = require('../services/minecraft-launcher/index.cjs');
+const utils = require('../services/minecraft-launcher/utils.cjs');
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const https = require('https');
 
 /**
  * Create Minecraft launcher IPC handlers
@@ -9,9 +13,7 @@ const { getMinecraftLauncher } = require('../services/minecraft-launcher'); // U
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
 function createMinecraftLauncherHandlers(win) {
-  console.log('💡 createMinecraftLauncherHandlers CALLED - about to get launcher instance');
   const launcher = getMinecraftLauncher();
-  console.log('💡 Got launcher instance:', launcher.constructor.name);
   
   // Set up launcher event forwarding to renderer
   launcher.on('auth-success', (data) => {
@@ -132,13 +134,26 @@ function createMinecraftLauncherHandlers(win) {
   
   return {
     // Authenticate with Microsoft
-    'minecraft-auth': async () => {
+    'minecraft-auth': async (_e, { clientPath }) => {
       try {
-        console.log('[IPC] Starting Microsoft authentication...');
         const result = await launcher.authenticateWithMicrosoft();
+        
+        // If authentication was successful and we have a client path, save the auth data immediately
+        if (result.success && clientPath) {
+          try {
+            const saveResult = await launcher.saveAuthData(clientPath);
+            if (saveResult.success) {
+              console.log('[IPC] ✅ Authentication data saved automatically after successful login');
+            } else {
+              console.warn('[IPC] ⚠️ Failed to save auth data after successful login:', saveResult.error);
+            }
+          } catch (saveError) {
+            console.warn('[IPC] ⚠️ Error auto-saving auth data:', saveError.message);
+          }
+        }
+        
         return result;
       } catch (error) {
-        console.error('[IPC] Microsoft authentication error:', error);
         return { success: false, error: error.message };
       }
     },
@@ -146,11 +161,9 @@ function createMinecraftLauncherHandlers(win) {
     // Load saved authentication data
     'minecraft-load-auth': async (_e, { clientPath }) => {
       try {
-        console.log(`[IPC] Loading authentication data from: ${clientPath}`);
         const result = await launcher.loadAuthData(clientPath);
         return result;
       } catch (error) {
-        console.error('[IPC] Error loading auth data:', error);
         return { success: false, error: error.message };
       }
     },
@@ -158,11 +171,9 @@ function createMinecraftLauncherHandlers(win) {
     // Save authentication data
     'minecraft-save-auth': async (_e, { clientPath }) => {
       try {
-        console.log(`[IPC] Saving authentication data to: ${clientPath}`);
         const result = await launcher.saveAuthData(clientPath);
         return result;
       } catch (error) {
-        console.error('[IPC] Error saving auth data:', error);
         return { success: false, error: error.message };
       }
     },
@@ -170,208 +181,129 @@ function createMinecraftLauncherHandlers(win) {
     // Download required mods
     'minecraft-download-mods': async (_e, { clientPath, requiredMods, serverInfo }) => {
       try {
-        console.log(`[IPC] minecraft-download-mods called with:`, {
-          clientPath,
-          requiredModsCount: requiredMods ? requiredMods.length : 'undefined',
-          requiredMods: requiredMods,
-          serverInfo
-        });
-        
         if (!clientPath || !requiredMods || !Array.isArray(requiredMods)) {
-          console.log(`[IPC] Invalid parameters:`, { clientPath: !!clientPath, requiredMods: !!requiredMods, isArray: Array.isArray(requiredMods) });
           return { success: false, error: 'Invalid parameters' };
         }
         
         if (requiredMods.length === 0) {
-          console.log(`[IPC] No mods required, returning success`);
           return { success: true, downloaded: 0, failures: [], message: 'No mods required' };
-        }
-        
-        console.log(`[IPC] Downloading ${requiredMods.length} mods to: ${clientPath}`);
-        console.log(`[IPC] Required mods:`, requiredMods.map(m => ({ fileName: m.fileName, downloadUrl: m.downloadUrl, checksum: m.checksum })));
-        
-        const fs = require('fs');
-        const path = require('path');
-        const https = require('https');
-        const http = require('http');
-        
-        // Create mods directory if it doesn't exist
-        const modsDir = path.join(clientPath, 'mods');
-        console.log(`[IPC] Mods directory: ${modsDir}`);
-        
-        if (!fs.existsSync(modsDir)) {
-          console.log(`[IPC] Creating mods directory...`);
-          fs.mkdirSync(modsDir, { recursive: true });
-        } else {
-          console.log(`[IPC] Mods directory already exists`);
         }
         
         const downloaded = [];
         const failures = [];
         const skipped = [];
         
-        console.log(`[IPC] Starting mod processing loop...`);
-        
         // Process each required mod
         for (let i = 0; i < requiredMods.length; i++) {
           const mod = requiredMods[i];
           const progressPercent = Math.round(((i + 1) / requiredMods.length) * 100);
           
-          console.log(`[IPC] Processing mod ${i + 1}/${requiredMods.length}: ${mod.fileName}`);
-          
-          // Send progress update
-          if (!win.isDestroyed()) {
-            console.log(`[IPC] Sending progress update: ${progressPercent}%`);
-            win.webContents.send('launcher-download-progress', {
-              type: 'Mods',
-              task: `Processing mod ${mod.fileName} (${i + 1}/${requiredMods.length})`,
-              total: requiredMods.length,
-              current: i + 1,
-              percent: progressPercent
-            });
-          } else {
-            console.log(`[IPC] Window destroyed, cannot send progress update`);
-          }
-          
           try {
-            const modPath = path.join(modsDir, mod.fileName);
-            console.log(`[IPC] Checking mod path: ${modPath}`);
+            const modPath = path.join(clientPath, 'mods', mod.fileName);
             
             // Check if mod already exists and has correct checksum
             if (fs.existsSync(modPath)) {
-              console.log(`[IPC] Mod ${mod.fileName} already exists`);
               if (mod.checksum) {
-                const existingChecksum = launcher.calculateFileChecksum(modPath);
-                console.log(`[IPC] Checksum comparison: existing=${existingChecksum}, expected=${mod.checksum}`);
+                const existingChecksum = utils.calculateFileChecksum(modPath);
                 if (existingChecksum === mod.checksum) {
-                  console.log(`[IPC] Mod ${mod.fileName} already exists with correct checksum, skipping`);
                   skipped.push(mod.fileName);
                   continue;
                 }
               } else {
-                console.log(`[IPC] Mod ${mod.fileName} already exists, skipping (no checksum to verify)`);
                 skipped.push(mod.fileName);
                 continue;
               }
-            } else {
-              console.log(`[IPC] Mod ${mod.fileName} does not exist, will download`);
             }
             
             // Download the mod file
             if (mod.downloadUrl) {
-              console.log(`[IPC] Downloading mod ${mod.fileName} from ${mod.downloadUrl}`);
-              
               await new Promise((resolve, reject) => {
                 const protocol = mod.downloadUrl.startsWith('https:') ? https : http;
                 const file = fs.createWriteStream(modPath);
                 
                 const request = protocol.get(mod.downloadUrl, (response) => {
-                  console.log(`[IPC] HTTP response status: ${response.statusCode}`);
-                  
                   if (response.statusCode === 302 || response.statusCode === 301) {
                     // Handle redirects
-                    console.log(`[IPC] Redirecting to: ${response.headers.location}`);
                     file.close();
                     fs.unlinkSync(modPath); // Remove empty file
                     
-                    const redirectProtocol = response.headers.location.startsWith('https:') ? https : http;
-                    const redirectRequest = redirectProtocol.get(response.headers.location, (redirectResponse) => {
-                      if (redirectResponse.statusCode !== 200) {
-                        reject(new Error(`HTTP ${redirectResponse.statusCode}: ${redirectResponse.statusMessage}`));
-                        return;
+                    const redirectUrl = response.headers.location;
+                    const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
+                    
+                    redirectProtocol.get(redirectUrl, (redirectResponse) => {
+                      if (redirectResponse.statusCode === 200) {
+                        const file2 = fs.createWriteStream(modPath);
+                        redirectResponse.pipe(file2);
+                        
+                        file2.on('finish', () => {
+                          file2.close();
+                          
+                          // Verify checksum if provided
+                          if (mod.checksum) {
+                            const downloadedChecksum = utils.calculateFileChecksum(modPath);
+                            if (downloadedChecksum !== mod.checksum) {
+                              fs.unlinkSync(modPath); // Remove corrupted file
+                              reject(new Error(`Checksum mismatch for ${mod.fileName}`));
+                              return;
+                            }
+                          }
+                          
+                          downloaded.push(mod.fileName);
+                          resolve();
+                        });
+                        
+                        file2.on('error', (err) => {
+                          fs.unlinkSync(modPath);
+                          reject(err);
+                        });
+                      } else {
+                        reject(new Error(`Failed to download ${mod.fileName}: HTTP ${redirectResponse.statusCode}`));
+                      }
+                    }).on('error', reject);
+                  } else if (response.statusCode === 200) {
+                    response.pipe(file);
+                    
+                    file.on('finish', () => {
+                      file.close();
+                      
+                      // Verify checksum if provided
+                      if (mod.checksum) {
+                        const downloadedChecksum = utils.calculateFileChecksum(modPath);
+                        if (downloadedChecksum !== mod.checksum) {
+                          fs.unlinkSync(modPath); // Remove corrupted file
+                          reject(new Error(`Checksum mismatch for ${mod.fileName}`));
+                          return;
+                        }
                       }
                       
-                      const redirectFile = fs.createWriteStream(modPath);
-                      redirectResponse.pipe(redirectFile);
-                      
-                      redirectFile.on('finish', () => {
-                        redirectFile.close();
-                        
-                        // Verify checksum if provided
-                        if (mod.checksum) {
-                          const downloadedChecksum = launcher.calculateFileChecksum(modPath);
-                          console.log(`[IPC] Downloaded checksum: ${downloadedChecksum}, expected: ${mod.checksum}`);
-                          if (downloadedChecksum !== mod.checksum) {
-                            fs.unlinkSync(modPath); // Remove corrupted file
-                            reject(new Error('Checksum verification failed'));
-                            return;
-                          }
-                        }
-                        
-                        console.log(`[IPC] Successfully downloaded mod ${mod.fileName}`);
-                        downloaded.push(mod.fileName);
-                        resolve();
-                      });
-                      
-                      redirectFile.on('error', (err) => {
-                        console.error(`[IPC] File write error for ${mod.fileName}:`, err);
-                        fs.unlinkSync(modPath); // Remove partial file
-                        reject(err);
-                      });
-                    }).on('error', (err) => {
-                      console.error(`[IPC] Redirect request error for ${mod.fileName}:`, err);
-                      reject(err);
+                      downloaded.push(mod.fileName);
+                      resolve();
                     });
                     
-                    return;
-                  }
-                  
-                  if (response.statusCode !== 200) {
+                    file.on('error', (err) => {
+                      fs.unlinkSync(modPath);
+                      reject(err);
+                    });
+                  } else {
                     file.close();
-                    fs.unlinkSync(modPath); // Remove empty file
-                    reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
-                    return;
+                    fs.unlinkSync(modPath);
+                    reject(new Error(`Failed to download ${mod.fileName}: HTTP ${response.statusCode}`));
                   }
-                  
-                  response.pipe(file);
-                  
-                  file.on('finish', () => {
-                    file.close();
-                    
-                    // Verify checksum if provided
-                    if (mod.checksum) {
-                      const downloadedChecksum = launcher.calculateFileChecksum(modPath);
-                      console.log(`[IPC] Downloaded checksum: ${downloadedChecksum}, expected: ${mod.checksum}`);
-                      if (downloadedChecksum !== mod.checksum) {
-                        fs.unlinkSync(modPath); // Remove corrupted file
-                        reject(new Error('Checksum verification failed'));
-                        return;
-                      }
-                    }
-                    
-                    console.log(`[IPC] Successfully downloaded mod ${mod.fileName}`);
-                    downloaded.push(mod.fileName);
-                    resolve();
-                  });
-                  
-                  file.on('error', (err) => {
-                    console.error(`[IPC] File write error for ${mod.fileName}:`, err);
-                    if (fs.existsSync(modPath)) {
-                      fs.unlinkSync(modPath); // Remove partial file
-                    }
-                    reject(err);
-                  });
                 }).on('error', (err) => {
-                  console.error(`[IPC] HTTP request error for ${mod.fileName}:`, err);
+                  file.close();
                   if (fs.existsSync(modPath)) {
-                    fs.unlinkSync(modPath); // Remove partial file
+                    fs.unlinkSync(modPath);
                   }
                   reject(err);
                 });
                 
-                // Set timeout for download
                 request.setTimeout(30000, () => {
-                  request.destroy();
-                  if (fs.existsSync(modPath)) {
-                    fs.unlinkSync(modPath); // Remove partial file
-                  }
-                  reject(new Error('Download timeout'));
+                  request.abort();
+                  reject(new Error(`Download timeout for ${mod.fileName}`));
                 });
               });
-              
             } else {
               // If no download URL, this is an error condition
-              console.error(`[IPC] No download URL for mod ${mod.fileName}`);
               failures.push({
                 fileName: mod.fileName,
                 error: 'No download URL provided'
@@ -379,7 +311,6 @@ function createMinecraftLauncherHandlers(win) {
             }
             
           } catch (error) {
-            console.error(`[IPC] Failed to download mod ${mod.fileName}:`, error);
             failures.push({
               fileName: mod.fileName,
               error: error.message
@@ -389,8 +320,6 @@ function createMinecraftLauncherHandlers(win) {
         
         const totalProcessed = downloaded.length + failures.length + skipped.length;
         const successCount = downloaded.length + skipped.length;
-        
-        console.log(`[IPC] Mod download complete: ${downloaded.length} downloaded, ${skipped.length} skipped, ${failures.length} failed`);
         
         const result = {
           success: failures.length === 0,
@@ -402,11 +331,9 @@ function createMinecraftLauncherHandlers(win) {
             : `Processed ${successCount}/${totalProcessed} mods successfully, ${failures.length} failed`
         };
         
-        console.log(`[IPC] Returning result:`, result);
         return result;
         
       } catch (error) {
-        console.error('[IPC] Error downloading mods:', error);
         return { success: false, error: error.message };
       }
     },
@@ -421,10 +348,37 @@ function createMinecraftLauncherHandlers(win) {
           serverPort,
           requiredMods = [],
           serverInfo = null,
-          maxMemory = null // Add maxMemory parameter
+          maxMemory = null, // Add maxMemory parameter
+          useProperLauncher = true // New option to use XMCL proper launcher
         } = options;
         
-        console.log(`[IPC] Launching Minecraft with ${maxMemory}MB RAM (${maxMemory ? 'user-specified' : 'auto-calculated'})`);
+        // Try proper launcher first to fix LogUtils issues
+        if (useProperLauncher) {
+          console.log(`[IPC] Attempting launch with XMCL proper launcher to fix LogUtils...`);
+          
+          const properResult = await launcher.launchMinecraftProper({
+            clientPath,
+            minecraftVersion,
+            serverIp,
+            serverPort: parseInt(serverPort),
+            requiredMods,
+            serverInfo,
+            maxMemory,
+            needsFabric: serverInfo?.loaderType === 'fabric' || requiredMods.length > 0,
+            fabricVersion: serverInfo?.loaderVersion || 'latest'
+          });
+          
+          if (properResult.success) {
+            console.log(`[IPC] ✅ XMCL proper launcher succeeded!`);
+            return properResult;
+          } else {
+            console.warn(`[IPC] ⚠️ XMCL proper launcher failed: ${properResult.error}`);
+            console.log(`[IPC] Falling back to original launcher...`);
+          }
+        }
+        
+        // Fallback to original launcher
+        console.log(`[IPC] Using original launcher implementation...`);
         const result = await launcher.launchMinecraft({
           clientPath,
           minecraftVersion,
@@ -436,7 +390,6 @@ function createMinecraftLauncherHandlers(win) {
         });
         return result;
       } catch (error) {
-        console.error('[IPC] Error launching Minecraft:', error);
         return { success: false, error: error.message };
       }
     },
@@ -444,11 +397,9 @@ function createMinecraftLauncherHandlers(win) {
     // Stop Minecraft
     'minecraft-stop': async () => {
       try {
-        console.log('[IPC] Stopping Minecraft...');
         const result = await launcher.stopMinecraft();
         return result;
       } catch (error) {
-        console.error('[IPC] Error stopping Minecraft:', error);
         return { success: false, error: error.message };
       }
     },
@@ -459,7 +410,6 @@ function createMinecraftLauncherHandlers(win) {
         const status = launcher.getStatus();
         return { success: true, status };
       } catch (error) {
-        console.error('[IPC] Error getting launcher status:', error);
         return { success: false, error: error.message };
       }
     },
@@ -470,7 +420,6 @@ function createMinecraftLauncherHandlers(win) {
         const status = launcher.getStatus();
         return status;
       } catch (error) {
-        console.error('[IPC] Error getting launcher status:', error);
         return { 
           isAuthenticated: false,
           isLaunching: false,
@@ -484,9 +433,6 @@ function createMinecraftLauncherHandlers(win) {
     // Check if mods are synchronized
     'minecraft-check-mods': async (_e, { clientPath, requiredMods, allClientMods = [] }) => {
       try {
-        const fs = require('fs');
-        const path = require('path');
-        
         if (!clientPath || !requiredMods || !Array.isArray(requiredMods)) {
           return { success: false, error: 'Invalid parameters' };
         }
@@ -528,7 +474,7 @@ function createMinecraftLauncherHandlers(win) {
           } else if (requiredMod.checksum) {
             // Check if mod is up to date using checksum
             const actualModPath = presentMods.includes(requiredMod.fileName) ? modPath : modPath + '.disabled';
-            const existingChecksum = launcher.calculateFileChecksum(actualModPath);
+            const existingChecksum = utils.calculateFileChecksum(actualModPath);
             if (existingChecksum !== requiredMod.checksum) {
               outdatedMods.push(requiredMod.fileName);
             }
@@ -548,7 +494,7 @@ function createMinecraftLauncherHandlers(win) {
             } else if (optionalMod.checksum) {
               // Check if mod is up to date using checksum
               const actualModPath = presentMods.includes(optionalMod.fileName) ? modPath : modPath + '.disabled';
-              const existingChecksum = launcher.calculateFileChecksum(actualModPath);
+              const existingChecksum = utils.calculateFileChecksum(actualModPath);
               if (existingChecksum !== optionalMod.checksum) {
                 outdatedOptionalMods.push(optionalMod.fileName);
               }
@@ -574,7 +520,6 @@ function createMinecraftLauncherHandlers(win) {
           presentDisabledMods: disabledMods
         };
       } catch (error) {
-        console.error('[IPC] Error checking mod synchronization:', error);
         return { success: false, error: error.message };
       }
     },
@@ -582,11 +527,9 @@ function createMinecraftLauncherHandlers(win) {
     // Check Minecraft client synchronization
     'minecraft-check-client': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
       try {
-        console.log(`[IPC] Checking Minecraft ${minecraftVersion} client files in: ${clientPath}`);
         const result = await launcher.checkMinecraftClient(clientPath, minecraftVersion, { requiredMods, serverInfo });
         return { success: true, ...result };
       } catch (error) {
-        console.error('[IPC] Error checking client synchronization:', error);
         return { success: false, error: error.message };
       }
     },
@@ -594,28 +537,30 @@ function createMinecraftLauncherHandlers(win) {
     // Check Minecraft client sync status (alternative endpoint)
     'minecraft-check-client-sync': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
       try {
-        console.log(`[IPC] Checking Minecraft ${minecraftVersion} client sync status in: ${clientPath}`);
         const result = await launcher.checkMinecraftClient(clientPath, minecraftVersion, { requiredMods, serverInfo });
         return { success: true, ...result };
       } catch (error) {
-        console.error('[IPC] Error checking client sync status:', error);
         return { success: false, error: error.message };
       }
     },
     
     // Download Minecraft client files
     'minecraft-download-client': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
-      console.log('[IPC] minecraft-download-client handler invoked');
       try {
-        console.log(`🎯 Calling downloadMinecraftClientSimple for ${minecraftVersion} → ${clientPath}`);
-        console.log(`🎯 Launcher instance type: ${launcher.constructor.name}`);
-        console.log(`🎯 Available methods: ${Object.getOwnPropertyNames(Object.getPrototypeOf(launcher)).filter(name => name.startsWith('download'))}`);
-        const result = await launcher.downloadMinecraftClientSimple(clientPath, minecraftVersion, { requiredMods, serverInfo });
-        console.log('🎯 downloadMinecraftClientSimple returned:', result);
+        // Extract serverIp from serverInfo if available for server list addition
+        const downloadOptions = { 
+          requiredMods, 
+          serverInfo 
+        };
+        
+        // Add serverIp to options if it's in serverInfo
+        if (serverInfo && serverInfo.serverIp) {
+          downloadOptions.serverIp = serverInfo.serverIp;
+        }
+        
+        const result = await launcher.downloadMinecraftClientSimple(clientPath, minecraftVersion, downloadOptions);
         return result;
       } catch (error) {
-        console.error('[IPC] Error in download-client handler:', error);
-        console.error('🎯 Full error stack:', error.stack);
         return { success: false, error: error.message };
       }
     },
@@ -623,11 +568,9 @@ function createMinecraftLauncherHandlers(win) {
     // Clear Minecraft client files
     'minecraft-clear-client': async (_e, { clientPath, minecraftVersion }) => {
       try {
-        console.log(`[IPC] Clearing Minecraft ${minecraftVersion} client files from: ${clientPath}`);
         const result = await launcher.clearMinecraftClient(clientPath, minecraftVersion);
         return result;
       } catch (error) {
-        console.error('[IPC] Error clearing client files:', error);
         return { success: false, error: error.message };
       }
     },
@@ -635,11 +578,9 @@ function createMinecraftLauncherHandlers(win) {
     // Clear just assets (for fixing corrupted assets)
     'minecraft-clear-assets': async (_e, { clientPath }) => {
       try {
-        console.log(`[IPC] Clearing corrupted assets from: ${clientPath}`);
         const result = await launcher.clearAssets(clientPath);
         return result;
       } catch (error) {
-        console.error('[IPC] Error clearing assets:', error);
         return { success: false, error: error.message };
       }
     },
@@ -647,11 +588,9 @@ function createMinecraftLauncherHandlers(win) {
     // Reset launcher state (for when it gets stuck)
     'minecraft-reset-launcher': async () => {
       try {
-        console.log(`[IPC] Resetting launcher state...`);
         launcher.resetLauncherState();
         return { success: true, message: 'Launcher state reset' };
       } catch (error) {
-        console.error('[IPC] Error resetting launcher:', error);
         return { success: false, error: error.message };
       }
     },
@@ -659,9 +598,6 @@ function createMinecraftLauncherHandlers(win) {
     // Toggle client mod (enable/disable)
     'toggle-client-mod': async (_e, { clientPath, modFileName, enabled }) => {
       try {
-        const fs = require('fs');
-        const path = require('path');
-        
         if (!clientPath || !modFileName) {
           return { success: false, error: 'Client path and mod file name are required' };
         }
@@ -674,11 +610,9 @@ function createMinecraftLauncherHandlers(win) {
           // Enable mod: rename from .jar.disabled to .jar
           if (fs.existsSync(disabledModPath)) {
             fs.renameSync(disabledModPath, modPath);
-            console.log(`[IPC] Enabled mod: ${modFileName}`);
             return { success: true, action: 'enabled' };
           } else if (fs.existsSync(modPath)) {
             // Already enabled
-            console.log(`[IPC] Mod already enabled: ${modFileName}`);
             return { success: true, action: 'already_enabled' };
           } else {
             return { success: false, error: 'Mod file not found' };
@@ -687,21 +621,20 @@ function createMinecraftLauncherHandlers(win) {
           // Disable mod: rename from .jar to .jar.disabled
           if (fs.existsSync(modPath)) {
             fs.renameSync(modPath, disabledModPath);
-            console.log(`[IPC] Disabled mod: ${modFileName}`);
             return { success: true, action: 'disabled' };
           } else if (fs.existsSync(disabledModPath)) {
             // Already disabled
-            console.log(`[IPC] Mod already disabled: ${modFileName}`);
             return { success: true, action: 'already_disabled' };
           } else {
             return { success: false, error: 'Mod file not found' };
           }
         }
       } catch (error) {
-        console.error('[IPC] Error toggling client mod:', error);
         return { success: false, error: error.message };
       }
     },
+
+
   };
 }
 

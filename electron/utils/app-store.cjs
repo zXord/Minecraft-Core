@@ -46,7 +46,6 @@ ensureDataDir();
 
 // Log the exact path we're using
 const storePath = path.join(appDataDir, 'minecraft-core-config.json');
-console.log('Store file path:', storePath);
 
 // Configure the store with defaults
 const storeConfig = {
@@ -77,6 +76,64 @@ const storeConfig = {
         });
         store.set('instances', validInstances);
       }
+      
+      // Migration: Check for old config file and migrate data
+      // Try multiple possible locations for the old config
+      const possibleOldPaths = [
+        path.join(process.env.HOME || process.env.USERPROFILE || '', '.minecraft-core', 'minecraft-core-config.json'),
+        path.join(os.homedir(), '.minecraft-core', 'minecraft-core-config.json'),
+        // Also check if there's an old config in the current appData location
+        path.join(appDataDir, '..', '..', '.minecraft-core', 'minecraft-core-config.json')
+      ];
+      
+      let oldConfigPath = null;
+      for (const possiblePath of possibleOldPaths) {
+        if (fs.existsSync(possiblePath)) {
+          oldConfigPath = possiblePath;
+          break;
+        }
+      }
+      
+      if (oldConfigPath) {
+        try {
+          const oldConfig = JSON.parse(fs.readFileSync(oldConfigPath, 'utf8'));
+          
+          // Migrate lastServerPath
+          if (oldConfig.lastServerPath && !store.has('lastServerPath')) {
+            store.set('lastServerPath', oldConfig.lastServerPath);
+          }
+          
+          // Migrate serverSettings
+          if (oldConfig.serverSettings && !store.has('serverSettings')) {
+            store.set('serverSettings', oldConfig.serverSettings);
+          }
+          
+          // Migrate instances
+          if (oldConfig.instances && Array.isArray(oldConfig.instances) && oldConfig.instances.length > 0) {
+            const currentInstances = store.get('instances') || [];
+            if (currentInstances.length === 0) {
+              store.set('instances', oldConfig.instances);
+            }
+          }
+          
+          // Create a server instance from lastServerPath if none exist
+          const currentInstances = store.get('instances') || [];
+          if (currentInstances.length === 0 && oldConfig.lastServerPath) {
+            const serverName = path.basename(oldConfig.lastServerPath);
+            const newInstance = {
+              id: `server-migrated-${Date.now()}`,
+              name: serverName || 'Migrated Server',
+              type: 'server',
+              path: oldConfig.lastServerPath
+            };
+            
+            store.set('instances', [newInstance]);
+          }
+          
+        } catch (error) {
+          // Silently handle migration errors
+        }
+      }
     }
   },
   defaults: {
@@ -104,7 +161,6 @@ try {
   appStore = new Store(storeConfig);
   // Quick sanity check
   appStore.get('__test__');
-  console.log('Store initialized successfully at:', storePath);
 } catch (err) {
   console.error('Failed to initialize electron-store, falling back to in-memory:', err);
   // Fallback to in-memory store
@@ -190,26 +246,5 @@ const safeStore = {
     return appStore.path || 'in-memory-store';
   }
 };
-
-// Log store info
-console.log('App Store Path:', safeStore.path);
-console.log('App Data Directory:', appDataDir);
-
-// Test store access
-try {
-  const testKey = '__store_test__';
-  const testValue = { test: Date.now() };
-  safeStore.set(testKey, testValue);
-  const readValue = safeStore.get(testKey);
-  safeStore.delete(testKey);
-  
-  if (JSON.stringify(readValue) !== JSON.stringify(testValue)) {
-    console.error('Store read/write verification failed');
-  } else {
-    console.log('Store read/write verification successful');
-  }
-} catch (err) {
-  console.error('Store test failed:', err);
-}
 
 module.exports = safeStore;
