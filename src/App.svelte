@@ -500,6 +500,10 @@
     ☰
   </button>
 
+  {#if isSidebarOpen}
+    <div class="sidebar-overlay" on:click={() => isSidebarOpen = false}></div>
+  {/if}
+
   <!-- Sidebar -->
   <div class="sidebar" class:open={isSidebarOpen}>
     <h2>Instances</h2>
@@ -551,8 +555,8 @@
 
   <!-- Instance type selector modal -->
   {#if showInstanceSelector}
-    <div class="modal-overlay">
-      <div class="modal-content welcome-modal">
+    <div class="modal-overlay" on:click={() => showInstanceSelector = false}>
+      <div class="modal-content welcome-modal" on:click|stopPropagation>
         <h1>Welcome to Minecraft Core</h1>
         <p>Choose an instance type to get started:</p>
         <div class="instance-type-container">
@@ -936,6 +940,16 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .sidebar-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.3);
+    z-index: 5;
   }
 
   .instances-list {
