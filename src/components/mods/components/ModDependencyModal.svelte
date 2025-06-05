@@ -338,11 +338,11 @@
               </li>
             {/each}
           </ul>
-          <p class="info-text">These updates are recommended but not strictly required.</p>
+          <p class="info-text">These updates are recommended but will be skipped by default.</p>
         {/if}
       </div>
       
-      <p>Would you like to install these dependencies along with the mod?</p>
+      <p>Would you like to install the required dependencies along with the mod?</p>
       
       <div class="modal-actions">
         <button 
@@ -363,7 +363,7 @@
           {:else if compatibilityDeps.length > 0}
             Update Compatibility Issues
           {:else}
-            Install All
+            Install Mod Only
           {/if}
         </button>
       </div>
