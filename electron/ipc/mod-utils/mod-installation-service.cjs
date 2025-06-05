@@ -34,7 +34,11 @@ async function installModToServer(win, serverPath, modDetails) {
   await fs.mkdir(modsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true });
 
-  const fileName = modDetails.name.replace(/[^a-zA-Z0-9_.-]/g, '_') + '.jar';
+  // Sanitize the name but avoid appending an extra .jar if it's already present
+  const sanitizedBase = modDetails.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const fileName = /\.jar$/i.test(sanitizedBase)
+    ? sanitizedBase
+    : `${sanitizedBase}.jar`;
   
   let currentModLocation = null;
   let destinationPath = path.join(modsDir, fileName); // Default to server
@@ -208,7 +212,10 @@ async function installModToClient(win, modData) {
 
   // Note: Original `install-client-mod` used `actualFileName` from Modrinth API.
   // Here we use a sanitized name first, then potentially update if API provides a different one.
-  const sanitizedFileName = modData.name.replace(/[^a-zA-Z0-9_.-]/g, '_') + '.jar';
+  const sanitizedBase = modData.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const sanitizedFileName = /\.jar$/i.test(sanitizedBase)
+    ? sanitizedBase
+    : `${sanitizedBase}.jar`;
   let targetPath = path.join(clientModsDir, sanitizedFileName); // Initial target path
 
   const fileExists = await fs.access(targetPath).then(() => true).catch(() => false);
