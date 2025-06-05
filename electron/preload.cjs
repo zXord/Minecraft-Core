@@ -179,8 +179,16 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-error',
     ];
     if (validChannels.includes(channel)) {
-      // Correctly pass the event and arguments to the listener
-      ipcRenderer.on(channel, (event, ...args) => listener(...args));
+      // Wrap the listener so we can remove it later
+      const wrapped = (_event, ...args) => listener(...args);
+      if (!window.__listenerMap) {
+        window.__listenerMap = new Map();
+      }
+      if (!window.__listenerMap.has(channel)) {
+        window.__listenerMap.set(channel, new Map());
+      }
+      window.__listenerMap.get(channel).set(listener, wrapped);
+      ipcRenderer.on(channel, wrapped);
     }
   },
   removeListener: (channel, listener) => {
@@ -223,7 +231,15 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-error',
     ];
     if (validChannels.includes(channel)) {
-      ipcRenderer.removeListener(channel, listener);
+      const map = window.__listenerMap && window.__listenerMap.get(channel);
+      const wrapped = map && map.get(listener);
+      if (wrapped) {
+        ipcRenderer.removeListener(channel, wrapped);
+        map.delete(listener);
+        if (map.size === 0) {
+          window.__listenerMap.delete(channel);
+        }
+      }
     }
   },
   removeAllListeners: (channel) => {
