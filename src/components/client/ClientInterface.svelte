@@ -469,12 +469,9 @@
           clientPath: instance.path
         });
         
-        // Force re-check server status and synchronization 
-        // but don't call checkAuthentication() since we already have the auth data
+        // Trigger a single server status refresh now that we're authenticated
+        // checkServerStatus will handle server info and sync checks
         await checkServerStatus();
-        await getServerInfo();
-        await checkModSynchronization();
-        await checkClientSynchronization();
         
         successMessage.set(`Successfully authenticated as ${result.username}`);
         setTimeout(() => successMessage.set(''), 3000);
@@ -988,12 +985,9 @@
         username = data.username;
         authData = data;
         
-        // Force re-check everything after authentication event
+        // Trigger a single server status refresh after authentication
         setTimeout(async () => {
           await checkServerStatus();
-          await getServerInfo();
-          await checkModSynchronization();
-          await checkClientSynchronization();
         }, 100);
       }
     });
