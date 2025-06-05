@@ -18,7 +18,6 @@ const zlib = require('zlib');
  *   management server's /api/server/info endpoint.
  * @returns {Promise<{success: boolean, error?: string}>}
  */
-
 async function ensureServersDat(
   clientDir,
   serverIp,
@@ -97,26 +96,19 @@ async function ensureServersDat(
       icon: '',
       acceptTextures: 1,
     });
+    const nbtServers = existingServers.map(s =>
+      nbt.comp({
+        name: nbt.string(s.name),
+        ip: nbt.string(s.ip),
+        icon: nbt.string(s.icon),
+        acceptTextures: nbt.byte(s.acceptTextures)
+      })
+    );
 
-    const nbtData = {
-      type: 'compound',
-      name: '',
-      value: {
-        servers: {
-          type: 'list',
-          listType: 'compound',
-          value: existingServers.map(s => ({
-            type: 'compound',
-            value: {
-              name: { type: 'string', value: s.name },
-              ip: { type: 'string', value: s.ip },
-              icon: { type: 'string', value: s.icon },
-              acceptTextures: { type: 'byte', value: s.acceptTextures },
-            }
-          })),
-        },
-      },
-    };
+    const nbtData = nbt.comp({
+      servers: nbt.list(nbt.comp(nbtServers))
+    });
+
 
     const raw = nbt.writeUncompressed(nbtData);
     const compressed = zlib.gzipSync(raw);
