@@ -551,6 +551,13 @@ export async function installWithDependencies(serverPath) {
   const seen = new Set();
   const dependencies = [];
   for (const dep of allDeps) {
+    // Skip optional update suggestions; these are not required for
+    // successful installation and should only be installed if the
+    // user explicitly chooses to update later.
+    if (dep.dependencyType === 'optional') {
+      continue;
+    }
+
     if (dep.projectId) {
       if (!seen.has(dep.projectId)) {
         seen.add(dep.projectId);
