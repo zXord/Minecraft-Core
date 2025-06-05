@@ -817,6 +817,8 @@
         minecraftVersion: serverInfo?.minecraftVersion || '1.20.1',
         serverIp: instance.serverIp,
         serverPort: minecraftPort, // This is the Minecraft game server port, not management port
+        managementPort: instance.serverPort,
+        clientName: instance.clientName,
         requiredMods,
         serverInfo,
         maxMemory: Math.round(maxMemory * 1024) // Convert GB to MB for launcher
