@@ -391,8 +391,7 @@ class ClientDownloader {
             message: finalMessage
           };
         } else {
-          console.log('💀💀💀 FINAL VERIFICATION FAILED - THIS DEBUG MESSAGE PROVES THE CODE IS RUNNING 💀💀💀');
-          console.log(`💀 Verification result: ${JSON.stringify(finalVerificationResult, null, 2)}`);
+          console.log('[ClientDownloader] Final verification failed:', JSON.stringify(finalVerificationResult, null, 2));
           throw new Error(`Final verification failed: ${finalVerificationResult.reason}`);
         }
       } catch (error) {
