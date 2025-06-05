@@ -2,7 +2,6 @@
 <script>
   /// <reference path="./electron.d.ts" />
   import { onMount } from 'svelte';
-  import { slide } from 'svelte/transition';
   import { serverState } from './stores/serverState.js';
   import { playerState } from './stores/playerState.js';
   import { openFolder, validateServerPath } from './utils/folderUtils.js';
