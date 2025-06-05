@@ -250,10 +250,9 @@ export async function loadServerConfig(serverPath) {
  * @returns {Promise<Object>} - Search results object
  */
 export async function searchMods(options = {}) {
-  // TEMP: Remove isSearching guard for debugging
-  // if (get(isSearching)) {
-  //   return null;
-  // }
+  if (get(isSearching)) {
+    return null;
+  }
   
   // Rate limiting protection
   const now = Date.now();
