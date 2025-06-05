@@ -426,6 +426,21 @@ async function getModrinthProjectInfo(projectId) {
 }
 
 /**
+ * Get general mod information from a supported source
+ *
+ * @param {string} modId - Mod ID or project ID
+ * @param {string} [source='modrinth'] - Mod source (currently only Modrinth)
+ * @returns {Promise<Object>} Mod information object
+ */
+async function getModInfo(modId, source = 'modrinth') {
+  if (source === 'modrinth') {
+    return getModrinthProjectInfo(modId);
+  }
+
+  throw new Error('Only Modrinth mod info is currently supported');
+}
+
+/**
  * Resolve dependency information from Modrinth
  * 
  * @param {Array} dependencies - Array of dependency objects
@@ -676,6 +691,7 @@ module.exports = {
   formatModVersions,
   getModrinthDownloadUrl,
   getModrinthProjectInfo,
+  getModInfo,
   resolveModrinthDependencies,
   getModrinthVersions,
   getModrinthVersionInfo,
