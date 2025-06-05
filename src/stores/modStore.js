@@ -100,8 +100,26 @@ function compareVersions(versionA, versionB) {
 // Derived store for whether any mods have updates
 const hasUpdates = derived(
   modsWithUpdates,
-  $modsWithUpdates => $modsWithUpdates.size > 0
+  $modsWithUpdates => {
+    for (const key of $modsWithUpdates.keys()) {
+      if (key.startsWith('project:')) {
+        return true;
+      }
+    }
+    return false;
+  }
 );
+
+// Derived store for the number of mods with updates
+const updateCount = derived(modsWithUpdates, $modsWithUpdates => {
+  const projects = new Set();
+  for (const key of $modsWithUpdates.keys()) {
+    if (key.startsWith('project:')) {
+      projects.add(key.slice('project:'.length));
+    }
+  }
+  return projects.size;
+});
 
 // Derived store for installed mods with categories
 const categorizedMods = derived(
@@ -165,9 +183,10 @@ export {
   filterMinecraftVersion,
   filterModLoader,
   modCategories,
-  
+
   // Derived stores
   hasUpdates,
+  updateCount,
   categorizedMods,
   
   // Helper functions
