@@ -33,14 +33,12 @@ const {
  * @param {Electron.BrowserWindow} win - The main application window
  */
 function setupIpcHandlers(win) {
-  console.log('💡 setupIpcHandlers CALLED');
   if (!win) {
     console.error('Cannot setup IPC handlers: No window provided');
     return;
   }
 
   try {
-    console.log('💡 Setting up all IPC handlers...');
     // Initialize track registered handler names
     registeredHandlers.clear();
     
@@ -86,28 +84,21 @@ function setupIpcHandlers(win) {
         // Check for existing handler to avoid duplicates
         if (registeredHandlers.has(channel)) {
           // Remove existing handler to prevent conflicts
-          console.log(`Removing existing handler for channel: ${channel}`);
           ipcMain.removeHandler(channel);
           registeredHandlers.delete(channel);
         }
         
-        // Register handler
-        console.log(`Registering IPC handler for channel: ${channel}`);
+        // Register handler (removed verbose logging)
         ipcMain.handle(channel, handler);
         registeredHandlers.add(channel);
       });
     });
     
     // Setup direct event listeners for progress reporting
-    // This ensures that even if the handler doesn't get registered properly,
-    // we still have a way to report progress
     win.webContents.on('did-finish-load', () => {
-      console.log('Renderer loaded, setting up progress event forwarders');
-      
       // Setup a function to safely forward progress events to the renderer
       const forwardProgressEvent = (channel, data) => {
         if (win && !win.isDestroyed()) {
-          console.log(`Forwarding progress event on channel ${channel}:`, data);
           win.webContents.send(channel, data);
         }
       };

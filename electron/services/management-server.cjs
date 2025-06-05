@@ -4,6 +4,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { createHash } = require('crypto');
+const utils = require('./minecraft-launcher/utils.cjs'); // Import utils for calculateFileChecksum
 
 class ManagementServer {
   constructor() {

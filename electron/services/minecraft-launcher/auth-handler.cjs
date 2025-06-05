@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Auth } = require('msmc'); // Specific to authentication
+const { v4: uuidv4 } = require('uuid');
 
 class AuthHandler {
   constructor(eventEmitter) {
@@ -27,14 +28,15 @@ class AuthHandler {
       if (token && token.profile) {
         this.authData = {
           access_token: token.mcToken,
-          client_token: null, // MSMC doesn't use client_token
-          uuid: token.profile.id,
+          client_token: uuidv4(),
+          uuid: token.profile.id.replace(/-/g, ''),
           name: token.profile.name,
           user_properties: {},
-          meta: token // Store the whole MSMC token object for refresh
+          meta: xboxManager, // Store the whole MSMC token object for refresh
+          savedAt: new Date().toISOString()
         };
         
-        console.log(`[AuthHandler] Authentication successful for user: ${token.profile.name}`);
+        console.log(`[AuthHandler] ✅ Authentication successful for user: ${token.profile.name}`);
         this.emitter.emit('auth-success', { username: token.profile.name, uuid: token.profile.id });
         
         return { success: true, username: token.profile.name, uuid: token.profile.id };
@@ -56,13 +58,37 @@ class AuthHandler {
     
     try {
       const authFile = path.join(clientPath, 'auth.json');
+      
+      // Try to extract serializable refresh data from MSMC meta object
+      let refreshData = null;
+      if (this.authData.meta && typeof this.authData.meta === 'object') {
+        // Try to extract refresh token or session data
+        if (this.authData.meta.cache) {
+          refreshData = {
+            cache: this.authData.meta.cache,
+            type: 'msmc_cache'
+          };
+        } else if (this.authData.meta.msa && this.authData.meta.xbl) {
+          refreshData = {
+            msa: this.authData.meta.msa,
+            xbl: this.authData.meta.xbl,
+            type: 'session_data'
+          };
+        }
+      }
+      
       const authDataToSave = {
-        ...this.authData,
-        savedAt: new Date().toISOString()
+        access_token: this.authData.access_token,
+        client_token: this.authData.client_token,
+        uuid: this.authData.uuid,
+        name: this.authData.name,
+        user_properties: this.authData.user_properties || {},
+        savedAt: new Date().toISOString(),
+        refreshData: refreshData // Save serializable refresh data
       };
       
       fs.writeFileSync(authFile, JSON.stringify(authDataToSave, null, 2));
-      console.log('[AuthHandler] Authentication data saved');
+      console.log('[AuthHandler] ✅ Authentication data saved with refresh capability');
       return { success: true };
     } catch (error) {
       console.error('[AuthHandler] Error saving auth data:', error);
@@ -82,24 +108,67 @@ class AuthHandler {
       const authDataRaw = fs.readFileSync(authFile, 'utf8');
       const savedAuthData = JSON.parse(authDataRaw);
       
-      // Check if auth data is still valid (basic check - tokens may need refresh)
+      // Check if auth data is still valid (more lenient check)
       const savedDate = new Date(savedAuthData.savedAt);
       const now = new Date();
       const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
       
-      if (hoursSinceSaved > 24) {
-        console.log('[AuthHandler] Saved auth data is old, will need re-authentication');
+      // Be more lenient with token age - up to 8 hours for cached tokens
+      if (hoursSinceSaved > 8) {
+        console.log('[AuthHandler] Saved auth data is too old, will need re-authentication');
         return { success: false, error: 'Authentication expired' };
       }
       
-      this.authData = savedAuthData; // Restore authData including MSMC meta object
-      console.log(`[AuthHandler] Loaded saved authentication for: ${savedAuthData.name}`);
+      this.authData = {
+        access_token: savedAuthData.access_token,
+        client_token: savedAuthData.client_token || uuidv4(), // Generate if missing
+        uuid: savedAuthData.uuid,
+        name: savedAuthData.name,
+        user_properties: savedAuthData.user_properties || {},
+        savedAt: savedAuthData.savedAt,
+        meta: null // Will be restored if possible
+      };
+      
+      // If we generated a new client_token, save it immediately
+      if (!savedAuthData.client_token) {
+        console.log('[AuthHandler] Generated missing client_token, saving updated auth data...');
+        try {
+          await this.saveAuthData(clientPath);
+          console.log('[AuthHandler] ✅ Updated auth data saved with new client_token');
+        } catch (saveError) {
+          console.warn('[AuthHandler] ⚠️ Could not save updated auth data:', saveError.message);
+        }
+      }
+      
+      // Try to restore refresh capability from saved data
+      if (savedAuthData.refreshData) {
+        try {
+          if (savedAuthData.refreshData.type === 'msmc_cache') {
+            // Try to restore MSMC with cache
+            const { Auth } = require('msmc');
+            const authManager = new Auth("select_account");
+            if (authManager.cache && savedAuthData.refreshData.cache) {
+              authManager.cache = savedAuthData.refreshData.cache;
+              this.authData.meta = authManager;
+              console.log('[AuthHandler] ✅ Restored MSMC auth manager with cache');
+            }
+          }
+        } catch (restoreError) {
+          console.warn('[AuthHandler] Could not restore refresh capability:', restoreError.message);
+        }
+      }
+      
+      console.log(`[AuthHandler] ✅ Loaded saved authentication for: ${savedAuthData.name}`);
+      console.log(`[AuthHandler] Token age: ${hoursSinceSaved.toFixed(1)} hours`);
+      
+      const hasRefreshCapability = this.authData.meta && typeof this.authData.meta.launch === 'function';
+      console.log(`[AuthHandler] Refresh capability: ${hasRefreshCapability ? 'Available' : 'Limited'}`);
       
       return { 
         success: true, 
         username: savedAuthData.name, 
         uuid: savedAuthData.uuid,
-        needsRefresh: hoursSinceSaved > 1 // Suggest refresh if > 1 hour old
+        needsRefresh: hoursSinceSaved > 1 && !hasRefreshCapability // Only refresh if old and no capability
       };
     } catch (error) {
       console.error('[AuthHandler] Error loading auth data:', error);
@@ -114,81 +183,120 @@ class AuthHandler {
     }
     
     try {
-      // Check if we have MSMC meta data for refreshing
-      // The 'meta' object from msmc contains the refresh() method
-      if (this.authData.meta && typeof this.authData.meta.refresh === 'function') {
+      // Check token age first
+      const savedDate = new Date(this.authData.savedAt || 0);
+      const now = new Date();
+      const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
+      
+      console.log(`[AuthHandler] Token age: ${hoursSinceSaved.toFixed(1)} hours`);
+      
+      // If token is very fresh (less than 30 minutes), just use it
+      if (hoursSinceSaved < 0.5) {
+        console.log('[AuthHandler] ✅ Token is very fresh, no refresh needed');
+        return { success: true, refreshed: false };
+      }
+      
+      // If we have MSMC meta data, try to refresh
+      if (this.authData.meta && (typeof this.authData.meta.refresh === 'function' || typeof this.authData.meta.launch === 'function')) {
         console.log('[AuthHandler] Attempting to refresh authentication token...');
         
         try {
-          // Try to refresh the token using MSMC with timeout and error handling
-          // MSMC's refresh() itself returns a new Xbox Live manager object
-          const xboxManager = this.authData.meta; // The stored meta IS the xboxManager
-          const refreshedXboxManager = await xboxManager.refresh(); // Call refresh on it
-          const refreshedToken = await refreshedXboxManager.getMinecraft(); // Get new MC token
+          let refreshedToken = null;
+          
+          // Try different refresh methods based on available MSMC API
+          if (typeof this.authData.meta.refresh === 'function') {
+            const refreshedXboxManager = await this.authData.meta.refresh();
+            if (refreshedXboxManager && typeof refreshedXboxManager.getMinecraft === 'function') {
+              refreshedToken = await refreshedXboxManager.getMinecraft();
+            }
+          } else if (typeof this.authData.meta.launch === 'function') {
+            // Alternative refresh method
+            refreshedToken = await this.authData.meta.getMinecraft();
+          }
 
           if (refreshedToken && refreshedToken.profile) {
-            // Update our stored auth data
+            // Update our stored auth data with fresh token
+            const originalClientToken = this.authData.client_token;
+            
             this.authData = {
               access_token: refreshedToken.mcToken,
-              client_token: null,
-              uuid: refreshedToken.profile.id,
+              client_token: originalClientToken, // Keep original, don't set to null
+              uuid: refreshedToken.profile.id.replace(/-/g, ''), // Ensure no dashes
               name: refreshedToken.profile.name,
-              user_properties: {},
-              meta: refreshedXboxManager, // Store the new manager object for future refreshes
+              user_properties: this.authData.user_properties || {}, // Preserve user properties
+              meta: this.authData.meta, // Keep the meta object
               savedAt: new Date().toISOString()
             };
             
-            console.log(`[AuthHandler] Authentication refreshed successfully for: ${refreshedToken.profile.name}`);
+            console.log(`[AuthHandler] ✅ Authentication refreshed successfully for: ${refreshedToken.profile.name}`);
+            console.log(`[AuthHandler] ✅ Preserved original clientToken for session continuity`);
             return { success: true, refreshed: true };
           } else {
-            // This case should ideally not happen if refresh() succeeded
-             console.warn('[AuthHandler] Token refresh seemed to succeed but no profile data found.');
-             // Fall through to check token age as a precaution
+            throw new Error('Refresh succeeded but returned invalid token data');
           }
         } catch (refreshError) {
-          console.warn('[AuthHandler] Token refresh failed (this is often normal):', refreshError.message);
+          console.warn('[AuthHandler] Token refresh failed:', refreshError.message);
           
+          // If it's a network error and token isn't too old, use cached token
           if (refreshError.message && (
             refreshError.message.includes('ENOTFOUND') ||
             refreshError.message.includes('authserver.mojang.com') ||
             refreshError.message.includes('timeout') ||
-            refreshError.message.includes('network')
+            refreshError.message.includes('network') ||
+            refreshError.message.includes('ETIMEDOUT') ||
+            refreshError.message.includes('ECONNRESET')
           )) {
-            console.log('[AuthHandler] Network error during token refresh - using existing token');
-            return { success: true, refreshed: false, networkError: true };
+            if (hoursSinceSaved < 4) {
+              console.log('[AuthHandler] ⚠️ Using cached token due to network issues');
+              return { success: true, refreshed: false, networkError: true };
+            } else {
+              console.log('[AuthHandler] Token too old and network refresh failed');
+              return { success: false, error: 'Authentication expired and cannot refresh due to network issues', needsReauth: true };
+            }
           }
-          // For other errors (like invalid_token), let it fall through to check age / re-auth
+          
+          // For other errors, check if token is still usable
+          if (hoursSinceSaved < 3) {
+            console.log('[AuthHandler] ⚠️ Refresh failed but token is still relatively fresh, proceeding');
+            return { success: true, refreshed: false, refreshFailed: true };
+          } else {
+            console.log('[AuthHandler] Token refresh failed and token is old, forcing re-authentication');
+            return { success: false, error: 'Authentication token expired', needsReauth: true };
+          }
         }
       }
       
-      // If no refresh capability or refresh failed, check token age
-      const savedDate = new Date(this.authData.savedAt || 0); // Use epoch if savedAt is missing
-      const now = new Date();
-      const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
-      
-      if (hoursSinceSaved > 24) { // More lenient token age check
-        console.log('[AuthHandler] Authentication token is old and refresh failed or not possible, needs re-authentication.');
-        return { success: false, error: 'Authentication may be expired', needsReauth: true };
+      // If no refresh capability, check token age more leniently
+      if (hoursSinceSaved > 6) { // Increased from 1 hour to 6 hours
+        console.log('[AuthHandler] Token is old and cannot be refreshed, needs re-authentication');
+        return { success: false, error: 'Authentication expired', needsReauth: true };
       }
       
-      // If token is not too old, consider it valid even if refresh failed for non-network reasons
-      console.log('[AuthHandler] Token is not expired, proceeding with current token.');
+      console.log('[AuthHandler] ✅ Token is acceptable, proceeding without refresh');
       return { success: true, refreshed: false };
       
     } catch (error) {
       console.error('[AuthHandler] Error checking/refreshing authentication:', error);
       
+      // Handle network errors gracefully
       if (error.message && (
         error.message.includes('ENOTFOUND') ||
         error.message.includes('authserver.mojang.com') ||
         error.message.includes('network') ||
-        error.message.includes('timeout')
+        error.message.includes('timeout') ||
+        error.message.includes('ETIMEDOUT') ||
+        error.message.includes('ECONNRESET')
       )) {
-        console.log('[AuthHandler] Network error during auth check - proceeding with cached token');
-        return { success: true, refreshed: false, networkError: true };
+        const savedDate = new Date(this.authData.savedAt || 0);
+        const now = new Date();
+        const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
+        
+        if (hoursSinceSaved < 8) { // Allow up to 8 hours for network issues
+          console.log('[AuthHandler] ⚠️ Using cached token due to network issues');
+          return { success: true, refreshed: false, networkError: true };
+        }
       }
       
-      // For other errors, assume re-authentication is needed
       return { success: false, error: error.message, needsReauth: true };
     }
   }

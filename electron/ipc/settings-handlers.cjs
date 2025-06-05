@@ -121,21 +121,16 @@ function createSettingsHandlers(win) {
           return { success: false, error: 'Invalid instances data: not an array' };
         }
         
-        console.log('Received instances to save:', JSON.stringify(instances, null, 2));
-        
         // Filter out invalid instances and ensure required fields
         const validInstances = instances
           .filter(instance => {
             if (!instance || typeof instance !== 'object') {
-              console.log('Instance is not an object:', instance);
               return false;
             }
             if (!instance.id || !instance.type) {
-              console.log('Instance missing required fields (id or type):', instance);
               return false;
             }
             if (instance.type === 'server' && !instance.path) {
-              console.log('Server instance missing path:', instance);
               return false;
             }
             return true;
@@ -162,7 +157,6 @@ function createSettingsHandlers(win) {
               if (instance.lastConnected) validInstance.lastConnected = instance.lastConnected;
             }
             
-            console.log('Mapped instance:', JSON.stringify(validInstance, null, 2));
             return validInstance;
           });
         
@@ -172,17 +166,13 @@ function createSettingsHandlers(win) {
           return { success: false, error };
         }
         
-        console.log('Valid instances to save:', JSON.stringify(validInstances, null, 2));
-        
         try {
           // Save instances to the store
-          console.log('Saving instances to store...');
           appStore.set('instances', validInstances);
           
           // Update lastServerPath if there's a server instance
           const serverInstance = validInstances.find(i => i.type === 'server' && i.path);
           if (serverInstance && serverInstance.path) {
-            console.log('Updating lastServerPath from instances:', serverInstance.path);
             appStore.set('lastServerPath', serverInstance.path);
           }
           
@@ -198,7 +188,6 @@ function createSettingsHandlers(win) {
             return { success: false, error };
           }
           
-          console.log('Successfully saved instances:', JSON.stringify(savedInstances, null, 2));
           return { success: true, instances: savedInstances };
           
         } catch (err) {
@@ -215,128 +204,20 @@ function createSettingsHandlers(win) {
     },
     
     'get-instances': async () => {
-      console.log('\n--- get-instances called ---');
-      
       try {
-        console.log('Getting instances from store...');
+        const instances = appStore.get('instances') || [];
+        const validInstances = instances.filter(instance => 
+          instance && 
+          typeof instance === 'object' && 
+          instance.id && 
+          instance.name && 
+          instance.type
+        );
         
-        // Get all store data for debugging
-        const allStoreData = appStore.store;
-        console.log('All store data:', JSON.stringify(allStoreData, null, 2));
-        
-        // Get instances with a fallback to empty array
-        let instances = [];
-        try {
-          const instancesData = appStore.get('instances');
-          console.log('Raw instances data from store:', JSON.stringify(instancesData, null, 2));
-          
-          // Handle case where instances is null/undefined
-          if (instancesData === null || instancesData === undefined) {
-            console.log('No instances found in store, returning empty array');
-            return { success: true, instances: [] };
-          }
-          
-          // Ensure instances is an array
-          if (!Array.isArray(instancesData)) {
-            console.error('Corrupted instances data in store (not an array):', instancesData);
-            // Try to recover by resetting to empty array
-            try {
-              console.log('Attempting to fix corrupted instances data...');
-              appStore.set('instances', []);
-              console.log('Successfully reset instances to empty array');
-            } catch (err) {
-              console.error('Failed to fix corrupted instances data:', err);
-            }
-            return { success: true, instances: [] };
-          }
-          
-          instances = instancesData;
-          console.log(`Found ${instances.length} instances in store`);
-          
-        } catch (err) {
-          console.error('Error reading instances from store:', err);
-          // On error, return empty array
-          return { success: true, instances: [] };
-        }
-        
-        // Filter out any invalid instances
-        const validInstances = instances
-          .filter((instance, index) => {
-            try {
-              // Basic validation
-              if (!instance || typeof instance !== 'object') {
-                console.log(`Instance at index ${index} is not an object:`, instance);
-                return false;
-              }
-              
-              // Must have id and type
-              if (!instance.id || !instance.type) {
-                console.log(`Instance at index ${index} missing required fields (id or type):`, instance);
-                return false;
-              }
-              
-              // Server instances must have a non-empty path
-              if (instance.type === 'server') {
-                if (!instance.path || typeof instance.path !== 'string' || instance.path.trim() === '') {
-                  console.log(`Server instance at index ${index} has invalid path:`, instance);
-                  return false;
-                }
-              }
-              
-              return true;
-              
-            } catch (err) {
-              console.error(`Error validating instance at index ${index}:`, instance, err);
-              return false;
-            }
-          })
-          .map((instance, index) => {
-            let validInstance = {
-              id: instance.id,
-              name: instance.name || `Instance ${instance.id}`,
-              type: instance.type
-            };
-            
-            // Include type-specific fields
-            if (instance.type === 'server') {
-              if (instance.path) {
-                validInstance.path = instance.path;
-              }
-            } else if (instance.type === 'client') {
-              // Include client-specific fields
-              if (instance.path) validInstance.path = instance.path;
-              if (instance.serverIp) validInstance.serverIp = instance.serverIp;
-              if (instance.serverPort) validInstance.serverPort = instance.serverPort;
-              if (instance.clientId) validInstance.clientId = instance.clientId;
-              if (instance.clientName) validInstance.clientName = instance.clientName;
-              if (instance.lastConnected) validInstance.lastConnected = instance.lastConnected;
-            }
-            
-            console.log(`Mapped instance ${index + 1}/${instances.length}:`, JSON.stringify(validInstance, null, 2));
-            return validInstance;
-          });
-        
-        // If we filtered out any instances, update the store
-        if (validInstances.length !== instances.length) {
-          const invalidCount = instances.length - validInstances.length;
-          console.log(`Filtered out ${invalidCount} invalid instances`);
-          
-          try {
-            console.log('Updating store with valid instances...');
-            appStore.set('instances', validInstances);
-            console.log('Successfully updated store with valid instances');
-          } catch (err) {
-            console.error('Error updating store with valid instances:', err);
-          }
-        } else {
-          console.log('All instances are valid');
-        }
-        
-        console.log(`Returning ${validInstances.length} valid instances`);
-        return { success: true, instances: validInstances };
-      } catch (err) {
-        console.error('Error getting instances:', err);
-        return { success: false, error: err.message, instances: [] };
+        return validInstances;
+      } catch (error) {
+        console.error('Error getting instances:', error);
+        return [];
       }
     },
     

@@ -184,18 +184,6 @@
           }, 200);
         }
       });
-    
-    // Handle server settings restoration from the main process
-    window.electron.on('restore-server-settings', (settings) => {
-      if (settings) {
-        // Update the serverState store with restored settings
-        serverState.update(state => ({
-          ...state,
-          port: settings.port || state.port,
-          maxRam: settings.maxRam || state.maxRam
-        }));
-      }
-    });
   }
   
   // Save instances to persistent storage
@@ -222,20 +210,65 @@
   onMount(() => {
     setupIpcListeners();
     
-    // Check for an existing setup
+    // 1) First, set up the restoration listeners BEFORE anything else
+    window.electron.on('update-server-path', (newPath) => {
+      console.log('Received update-server-path:', newPath);
+      if (newPath) {
+        path = newPath;
+        
+        // Find and select the instance with this path
+        const matchingInstance = instances.find(instance => 
+          instance.type === 'server' && instance.path === newPath
+        );
+        
+        if (matchingInstance) {
+          currentInstance = matchingInstance;
+          instanceType = 'server';
+          step = 'done';
+        }
+      }
+    });
+    
+    window.electron.on('restore-server-settings', (settings) => {
+      console.log('Received restore-server-settings:', settings);
+      if (settings) {
+        // Update the serverState store with restored settings
+        serverState.update(state => ({
+          ...state,
+          port: settings.port || state.port,
+          maxRam: settings.maxRam || state.maxRam
+        }));
+      }
+    });
+    
+    // 2) Check for initial instances loaded by main.js
     const checkExistingSetup = async () => {
       try {
         // Finish loading immediately to prevent "Loading" screen
         isLoading = false;
         
-        // Try to load any saved instances
-        const instancesResult = await window.electron.invoke('get-instances');
-        if (instancesResult && instancesResult.success && 
-            Array.isArray(instancesResult.instances) && 
-            instancesResult.instances.length > 0) {
-          
+        // Try to get pre-loaded instances from main.js first
+        let initialInstances = [];
+        if (window.getInitialInstances) {
+          const store = window.getInitialInstances();
+          if (store.loaded && Array.isArray(store.instances)) {
+            initialInstances = store.instances;
+            console.log('Using pre-loaded instances from main.js:', initialInstances);
+          }
+        }
+        
+        // If no pre-loaded instances, fetch them (fallback)
+        if (initialInstances.length === 0) {
+          console.log('No pre-loaded instances, fetching...');
+          const instancesResult = await window.electron.invoke('get-instances');
+          if (Array.isArray(instancesResult)) {
+            initialInstances = instancesResult;
+          }
+        }
+        
+        if (initialInstances.length > 0) {
           // Valid instances found
-          instances = instancesResult.instances;
+          instances = initialInstances;
           
           // Find the server instance to use as current (if exists)
           currentInstance = instances.find(i => i.type === 'server') || instances[0];
@@ -268,6 +301,7 @@
             
             // Set step to done to show the main UI
             step = 'done';
+            console.log('Instance restoration completed:', currentInstance);
           }
         } else {
           // No valid instances, show instance selection screen
