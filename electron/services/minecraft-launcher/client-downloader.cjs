@@ -19,10 +19,6 @@ class ClientDownloader {
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
     console.log('🎯 DOWNLOAD STARTED - Method called with params:', { clientPath, minecraftVersion, options });
     
-    // CRITICAL DEBUG: Log exactly what serverInfo structure we receive
-    console.log('[ClientDownloader] 🔧 DEBUG ENTER downloadMinecraftClientSimple – got serverInfo:', JSON.stringify(options.serverInfo, null, 2));
-    console.log('[ClientDownloader] 🔧 DEBUG ENTER – full options object:', JSON.stringify(options, null, 2));
-    
     this.emitter.emit('client-download-start', { version: minecraftVersion });
     
     // Extract options
@@ -318,9 +314,7 @@ class ClientDownloader {
         console.log(`[ClientDownloader] ▶️ ABOUT TO CHECK IF WE SHOULD ADD SERVER...`);
         
         if (hasServerInfo) {
-          console.log(`[ClientDownloader] 🔧 Adding server to Minecraft server list...`);
-          console.log(`[ClientDownloader] 🔧 DEBUG: Full serverInfo object:`, JSON.stringify(serverInfo, null, 2));
-          console.log(`[ClientDownloader] 🔧 DEBUG: clientPath for server addition:`, clientPath);
+          console.log(`[ClientDownloader] Adding server to Minecraft server list...`);
           
           this.emitter.emit('client-download-progress', {
             type: 'Server',
@@ -329,10 +323,7 @@ class ClientDownloader {
           });
           
           try {
-            console.log(`[ClientDownloader] 🔧 CALLING addServerToList() NOW...`);
-            // Extract server details from the serverInfo structure
             const serverResult = await this.addServerToList(clientPath, serverInfo);
-            console.log(`[ClientDownloader] 🔧 DEBUG: addServerToList result:`, JSON.stringify(serverResult, null, 2));
             
             if (serverResult.success) {
               console.log(`[ClientDownloader] ✅ Server setup completed: ${serverResult.message}`);
@@ -391,8 +382,7 @@ class ClientDownloader {
             message: finalMessage
           };
         } else {
-          console.log('💀💀💀 FINAL VERIFICATION FAILED - THIS DEBUG MESSAGE PROVES THE CODE IS RUNNING 💀💀💀');
-          console.log(`💀 Verification result: ${JSON.stringify(finalVerificationResult, null, 2)}`);
+          console.log('[ClientDownloader] Final verification failed:', JSON.stringify(finalVerificationResult, null, 2));
           throw new Error(`Final verification failed: ${finalVerificationResult.reason}`);
         }
       } catch (error) {
@@ -684,10 +674,10 @@ class ClientDownloader {
     });
   }
 
-  async downloadFile(url, filePath, maxRetries = 3) {
+  async downloadFile(url, filePath, maxRetries = 3, progressCallback = null) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        await this._downloadFileSingle(url, filePath);
+        await this._downloadFileSingle(url, filePath, progressCallback);
         return;
       } catch (error) {
         console.warn(`[ClientDownloader] Download attempt ${attempt}/${maxRetries} failed for ${url}: ${error.message}`);
@@ -1464,29 +1454,25 @@ Specification-Vendor: FabricMC
 
         // Use minecraft-data for prismarine-nbt initialization
         const mcData = require('minecraft-data')('1.21.1');
-        
-        // Create simple NBT structure with corrected format
-        const nbtData = {
-          type: 'compound',
-          name: '',
-          value: {
-            servers: {
-              type: 'list',
-              listType: 'compound',
-              value: existingServers.map(server => ({
-                name: { type: 'string', value: server.name },
-                ip: { type: 'string', value: server.ip },
-                icon: { type: 'string', value: server.icon },
-                acceptTextures: { type: 'int', value: server.acceptTextures }
-              }))
-            }
-          }
-        };
+
+        // Build NBT structure using prismarine-nbt helpers
+        const nbtServers = existingServers.map(server =>
+          nbt.comp({
+            name: nbt.string(server.name),
+            ip: nbt.string(server.ip),
+            icon: nbt.string(server.icon),
+            acceptTextures: nbt.byte(server.acceptTextures)
+          })
+        );
+
+        const nbtData = nbt.comp({
+          servers: nbt.list(nbt.comp(nbtServers))
+        });
         
         console.log(`[ClientDownloader] ▶️ Creating NBT with prismarine-nbt...`);
         console.log(`[ClientDownloader] ▶️ Server count: ${existingServers.length}`);
         
-        const rawBuffer = nbt.writeUncompressed(nbtData, '');
+        const rawBuffer = nbt.writeUncompressed(nbtData)
         console.log(`[ClientDownloader] ▶️ Raw NBT buffer: ${rawBuffer.length} bytes`);
         
         // Compress the NBT data since Minecraft expects gzip-compressed servers.dat
@@ -1956,11 +1942,29 @@ Specification-Vendor: FabricMC
       
       const totalAssets = Object.keys(indexJson.objects).length;
       console.log(`[ClientDownloader] 🔧 Found ${totalAssets} assets to download`);
-      
+
+      // Send initial progress event
+      this.emitter.emit('client-download-progress', {
+        type: 'Assets',
+        task: `Downloading game assets... 0/${totalAssets}`,
+        total: totalAssets,
+        current: 0
+      });
+
       // Download each asset file
       let downloaded = 0;
       let skipped = 0;
+      let processed = 0;
       const downloadPromises = [];
+
+      const updateProgress = () => {
+        this.emitter.emit('client-download-progress', {
+          type: 'Assets',
+          task: `Downloading game assets... ${processed}/${totalAssets}`,
+          total: totalAssets,
+          current: processed
+        });
+      };
       
       for (const [relPath, meta] of Object.entries(indexJson.objects)) {
         const hash = meta.hash;
@@ -1968,47 +1972,63 @@ Specification-Vendor: FabricMC
         const twoChar = hash.substring(0, 2);
         const destDir = path.join(objectsDir, twoChar);
         const destFile = path.join(destDir, hash);
-        
+
         // Skip if file already exists and has correct size
         if (fs.existsSync(destFile)) {
           const stats = fs.statSync(destFile);
           if (stats.size === size) {
             skipped++;
+            processed++;
+            if (processed % 50 === 0 || processed === totalAssets) {
+              updateProgress();
+            }
             continue;
           }
         }
-        
+
         // Ensure directory exists
         fs.mkdirSync(destDir, { recursive: true });
-        
+
         // Download URL
         const downloadUrl = `https://resources.download.minecraft.net/${twoChar}/${hash}`;
-        
+
         // Create download promise
         const downloadPromise = this.downloadFile(downloadUrl, destFile)
           .then(() => {
             downloaded++;
+            processed++;
             if (downloaded % 100 === 0) {
               console.log(`[ClientDownloader] 🔧 Downloaded ${downloaded}/${totalAssets - skipped} assets...`);
             }
+            if (processed % 50 === 0 || processed === totalAssets) {
+              updateProgress();
+            }
           })
           .catch(error => {
+            processed++;
             console.warn(`[ClientDownloader] ⚠️ Failed to download asset ${relPath} (${hash}):`, error.message);
+            if (processed % 50 === 0 || processed === totalAssets) {
+              updateProgress();
+            }
           });
-        
+
         downloadPromises.push(downloadPromise);
-        
+
         // Batch downloads to avoid overwhelming the server
         if (downloadPromises.length >= 50) {
           await Promise.all(downloadPromises);
           downloadPromises.length = 0; // Clear array
         }
       }
-      
-      // Download remaining assets
+
+      // Wait for any remaining downloads
       if (downloadPromises.length > 0) {
         await Promise.all(downloadPromises);
       }
+
+      // Final progress update
+      processed = totalAssets;
+      updateProgress();
       
       console.log(`[ClientDownloader] ✅ Asset download complete!`);
       console.log(`[ClientDownloader] ✅ Downloaded: ${downloaded} assets`);
