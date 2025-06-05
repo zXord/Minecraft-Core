@@ -1476,7 +1476,7 @@ Specification-Vendor: FabricMC
         console.log(`[ClientDownloader] ▶️ Creating NBT with prismarine-nbt...`);
         console.log(`[ClientDownloader] ▶️ Server count: ${existingServers.length}`);
         
-        const rawBuffer = nbt.writeUncompressed(nbtData, '')
+        const rawBuffer = nbt.writeUncompressed(nbtData)
         console.log(`[ClientDownloader] ▶️ Raw NBT buffer: ${rawBuffer.length} bytes`);
         
         // Compress the NBT data since Minecraft expects gzip-compressed servers.dat

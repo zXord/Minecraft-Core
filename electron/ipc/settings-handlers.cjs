@@ -83,7 +83,8 @@ async function createServersDat(clientDir, serverIp, managementPort, serverName 
       }
     };
 
-    const raw = nbt.writeUncompressed(nbtData, '');
+
+    const raw = nbt.writeUncompressed(nbtData);
     const compressed = zlib.gzipSync(raw);
     fs.writeFileSync(serversDatPath, compressed);
     return { success: true };
@@ -423,7 +424,6 @@ function createSettingsHandlers(win) {
 
         // Create servers.dat so the server appears in multiplayer list
         const datResult = await createServersDat(clientPath, serverIp, config.serverPort, config.clientName);
-
         if (!datResult.success) {
           console.warn('Failed to create servers.dat:', datResult.error);
         } else {
