@@ -98,16 +98,22 @@ async function ensureServersDat(
     });
 
     const nbtServers = existingServers.map(s => ({
-      name: nbt.string(s.name),
-      ip: nbt.string(s.ip),
-      icon: nbt.string(s.icon),
-      acceptTextures: nbt.byte(s.acceptTextures)
+      name: { type: 'string', value: s.name },
+      ip: { type: 'string', value: s.ip },
+      icon: { type: 'string', value: s.icon },
+      acceptTextures: { type: 'byte', value: s.acceptTextures }
     }));
 
-
-    const nbtData = nbt.comp({
-      servers: nbt.list(nbt.comp(nbtServers))
-    });
+    const nbtData = {
+      type: 'compound',
+      name: '',
+      value: {
+        servers: {
+          type: 'list',
+          value: { type: 'compound', value: nbtServers }
+        }
+      }
+    };
 
     const raw = nbt.writeUncompressed(nbtData);
     const compressed = zlib.gzipSync(raw);
