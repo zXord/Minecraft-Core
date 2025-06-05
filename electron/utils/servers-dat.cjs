@@ -96,19 +96,18 @@ async function ensureServersDat(
       icon: '',
       acceptTextures: 1,
     });
-    const nbtServers = existingServers.map(s =>
-      nbt.comp({
-        name: nbt.string(s.name),
-        ip: nbt.string(s.ip),
-        icon: nbt.string(s.icon),
-        acceptTextures: nbt.byte(s.acceptTextures)
-      })
-    );
+
+    const nbtServers = existingServers.map(s => ({
+      name: nbt.string(s.name),
+      ip: nbt.string(s.ip),
+      icon: nbt.string(s.icon),
+      acceptTextures: nbt.byte(s.acceptTextures)
+    }));
+
 
     const nbtData = nbt.comp({
       servers: nbt.list(nbt.comp(nbtServers))
     });
-
 
     const raw = nbt.writeUncompressed(nbtData);
     const compressed = zlib.gzipSync(raw);
@@ -119,4 +118,5 @@ async function ensureServersDat(
     return { success: false, error: err.message };
   }
 }
+
 module.exports = { ensureServersDat };
