@@ -1,4 +1,4 @@
-<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';
+<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    updateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';
   import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
   import { slide } from 'svelte/transition';
   import { checkDependencyCompatibility } from '../../../utils/mods/modCompatibility.js';
@@ -878,13 +878,13 @@
       <button class="action-button" on:click={checkAllModsCompatibility}>
         Check Compatibility
       </button>
-      {#if $modsWithUpdates.size > 0}
-          <button 
-          class="action-button update-all-button" 
-            on:click={updateAllMods} 
+      {#if $updateCount > 0}
+          <button
+          class="action-button update-all-button"
+            on:click={updateAllMods}
           disabled={updateAllInProgress}
         >
-          {updateAllInProgress ? 'Updating...' : `Update All (${$modsWithUpdates.size})`}
+          {updateAllInProgress ? 'Updating...' : `Update All (${$updateCount})`}
           </button>
         {/if}
       {#if selectedMods.size > 0}
