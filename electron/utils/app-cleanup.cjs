@@ -1,5 +1,7 @@
 // Application cleanup utilities
 const { dialog } = require('electron');
+const path = require('path');
+const fs = require('fs');
 const { safeSend } = require('./safe-send.cjs');
 
 /**
@@ -19,6 +21,9 @@ function setupAppCleanup(app, win) {
         // Import server manager here to avoid circular dependencies
         const { getServerProcess, killMinecraftServer } = require('../services/server-manager.cjs');
         const serverProcess = getServerProcess();
+
+        const iconCandidate = path.join(__dirname, '..', 'resources', 'icon.png');
+        const iconPath = fs.existsSync(iconCandidate) ? iconCandidate : undefined;
         
         if (serverProcess) {
           const dialogOpts = {
@@ -28,7 +33,7 @@ function setupAppCleanup(app, win) {
             title: 'Minecraft Server Running',
             message: 'The Minecraft server is still running.',
             detail: 'Would you like to stop the server and quit the application?',
-            icon: '../resources/icon.png',
+            icon: iconPath,
             noLink: true,
             customStylesheet: `
               body {
