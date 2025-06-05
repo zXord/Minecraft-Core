@@ -97,21 +97,22 @@ async function ensureServersDat(
       acceptTextures: 1,
     });
 
-    const nbtServers = existingServers.map(s => ({
+    const nbtServers = existingServers.map((s) => ({
       name: nbt.string(s.name),
       ip: nbt.string(s.ip),
       icon: nbt.string(s.icon),
       acceptTextures: nbt.byte(s.acceptTextures)
     }));
 
-
     const nbtData = nbt.comp({
       servers: nbt.list(nbt.comp(nbtServers))
     });
 
     const raw = nbt.writeUncompressed(nbtData);
-    const compressed = zlib.gzipSync(raw);
-    fs.writeFileSync(serversDatPath, compressed);
+
+    // Minecraft's servers.dat is stored uncompressed, so simply write
+    // the raw NBT buffer without applying gzip compression.
+    fs.writeFileSync(serversDatPath, raw);
     return { success: true };
   } catch (err) {
     console.error('[serversDat] Failed to create servers.dat:', err);
