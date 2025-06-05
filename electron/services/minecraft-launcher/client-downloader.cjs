@@ -1445,21 +1445,38 @@ Specification-Vendor: FabricMC
         console.log(`[ClientDownloader] ▶️ Added new server entry. Total entries: ${existingServers.length}`);
         console.log(`[ClientDownloader] ▶️ New server: "${flat.name}" at ${flat.ip}:${flat.port}`);
 
-        const serverTags = nbt.comp(existingServers.map(server => ({
-          name: nbt.string(server.name),
-          ip: nbt.string(server.ip),
-          icon: nbt.string(server.icon),
-          acceptTextures: nbt.int(server.acceptTextures)
-        })));
+        // Create simple JavaScript object - prismarine-nbt will convert it
+        const simpleObject = {
+          servers: existingServers
+        };
 
-        const nbtData = nbt.comp({
-          servers: nbt.list(serverTags)
-        });
+        console.log(`[ClientDownloader] ▶️ Created simple object with ${existingServers.length} server entries`);
+
+        // Use minecraft-data for prismarine-nbt initialization
+        const mcData = require('minecraft-data')('1.21.1');
+
+        // Create simple NBT structure with corrected format
+        const nbtData = {
+          type: 'compound',
+          name: '',
+          value: {
+            servers: {
+              type: 'list',
+              listType: 'compound',
+              value: existingServers.map(server => ({
+                name: { type: 'string', value: server.name },
+                ip: { type: 'string', value: server.ip },
+                icon: { type: 'string', value: server.icon },
+                acceptTextures: { type: 'int', value: server.acceptTextures }
+              }))
+            }
+          }
+        };
         
         console.log(`[ClientDownloader] ▶️ Creating NBT with prismarine-nbt...`);
         console.log(`[ClientDownloader] ▶️ Server count: ${existingServers.length}`);
         
-        const rawBuffer = nbt.writeUncompressed(nbtData);
+        const rawBuffer = nbt.writeUncompressed(nbtData, '')
         console.log(`[ClientDownloader] ▶️ Raw NBT buffer: ${rawBuffer.length} bytes`);
         
         // Compress the NBT data since Minecraft expects gzip-compressed servers.dat
