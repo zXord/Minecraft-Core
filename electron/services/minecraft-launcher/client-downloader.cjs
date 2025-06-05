@@ -1454,7 +1454,6 @@ Specification-Vendor: FabricMC
 
         // Use minecraft-data for prismarine-nbt initialization
         const mcData = require('minecraft-data')('1.21.1');
-
         // Build NBT structure using prismarine-nbt helpers
         const nbtServers = existingServers.map(server =>
           nbt.comp({
