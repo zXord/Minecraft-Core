@@ -380,11 +380,11 @@ function createSettingsHandlers(win) {
     },
     
     // Save client configuration
-    'save-client-config': async (_e, { path, serverIp, serverPort, clientId, clientName }) => {
+    'save-client-config': async (_e, { path: clientPath, serverIp, serverPort, clientId, clientName }) => {
       try {
-        console.log(`Saving client configuration for path: ${path}, server: ${serverIp}:${serverPort}`);
+        console.log(`Saving client configuration for path: ${clientPath}, server: ${serverIp}:${serverPort}`);
         
-        if (!path || typeof path !== 'string' || path.trim() === '') {
+        if (!clientPath || typeof clientPath !== 'string' || clientPath.trim() === '') {
           return { success: false, error: 'Invalid client path' };
         }
         
@@ -397,13 +397,13 @@ function createSettingsHandlers(win) {
         const path_module = require('path');
         
         // Create directory if it doesn't exist
-        if (!fs.existsSync(path)) {
-          console.log(`Creating client directory: ${path}`);
-          fs.mkdirSync(path, { recursive: true });
+        if (!fs.existsSync(clientPath)) {
+          console.log(`Creating client directory: ${clientPath}`);
+          fs.mkdirSync(clientPath, { recursive: true });
         }
         
         // Save client configuration to a JSON file
-        const configFile = path_module.join(path, 'client-config.json');
+        const configFile = path_module.join(clientPath, 'client-config.json');
         const config = {
           serverIp,
           serverPort: serverPort || '8080', // Default to management server port
@@ -416,7 +416,7 @@ function createSettingsHandlers(win) {
         console.log('Client configuration saved to file successfully');
 
         // Create servers.dat so the server appears in multiplayer list
-        const datResult = await createServersDat(path, serverIp, config.serverPort, config.clientName);
+        const datResult = await createServersDat(clientPath, serverIp, config.serverPort, config.clientName);
         if (!datResult.success) {
           console.warn('Failed to create servers.dat:', datResult.error);
         } else {
@@ -429,7 +429,7 @@ function createSettingsHandlers(win) {
           
           // Find the client instance by path
           const clientInstanceIndex = instances.findIndex(inst => 
-            inst.type === 'client' && inst.path === path
+            inst.type === 'client' && inst.path === clientPath
           );
           
           if (clientInstanceIndex !== -1) {
@@ -440,7 +440,7 @@ function createSettingsHandlers(win) {
               serverPort: serverPort || '8080',
               clientId: config.clientId,
               clientName: config.clientName,
-              path,
+              path: clientPath,
               lastConnected: config.lastConnected
             };
             console.log('Updated existing client instance in app store');
@@ -450,7 +450,7 @@ function createSettingsHandlers(win) {
               id: config.clientId,
               name: config.clientName,
               type: 'client',
-              path,
+              path: clientPath,
               serverIp,
               serverPort: serverPort || '8080',
               clientId: config.clientId,
