@@ -54,6 +54,7 @@
   // Connection check interval
   let connectionCheckInterval;
   let statusCheckInterval;
+  let authRefreshInterval;
   
   // Active tab tracking
   let activeTab = 'play';
@@ -380,9 +381,10 @@
         authStatus = 'authenticated';
         username = result.username;
         authData = { username: result.username, uuid: result.uuid };
-        
+
         if (result.needsRefresh) {
           console.log('[Client] Authentication may need refresh');
+          await refreshAuthToken();
         }
         
         console.log(`[Client] Authentication loaded: ${result.username}`);
@@ -483,7 +485,7 @@
         errorMessage.set('Authentication failed: ' + result.error);
         setTimeout(() => errorMessage.set(''), 5000);
       }
-    } catch (err) {
+  } catch (err) {
       // Clear the timeout since we got an error
       clearTimeout(authTimeout);
       
@@ -501,6 +503,32 @@
         errorMessage.set('Authentication error: ' + err.message);
         setTimeout(() => errorMessage.set(''), 5000);
       }
+    }
+  }
+
+  // Refresh authentication token if possible
+  async function refreshAuthToken() {
+    if (authStatus !== 'authenticated' || !instance.path) {
+      return;
+    }
+
+    try {
+      const result = await window.electron.invoke('minecraft-check-refresh-auth', {
+        clientPath: instance.path
+      });
+
+      if (result.success && result.refreshed) {
+        console.log('[Client] Authentication token refreshed');
+        successMessage.set('Authentication refreshed');
+        setTimeout(() => successMessage.set(''), 3000);
+      } else if (!result.success && result.needsReauth) {
+        console.log('[Client] Authentication expired, re-authentication required');
+        authStatus = 'needs-auth';
+        username = '';
+        authData = null;
+      }
+    } catch (err) {
+      console.error('[Client] Error refreshing authentication:', err);
     }
   }
   
@@ -1047,6 +1075,11 @@
   function setupChecks() {
     // Check connection immediately
     connectToServer();
+
+    // Attempt an initial auth refresh after loading
+    setTimeout(() => {
+      refreshAuthToken();
+    }, 5000);
     
     // Set up periodic connection check
     connectionCheckInterval = setInterval(() => {
@@ -1061,6 +1094,11 @@
         checkServerStatus();
       }
     }, 60000); // Every 60 seconds (reduced frequency)
+
+    // Set up periodic authentication refresh
+    authRefreshInterval = setInterval(() => {
+      refreshAuthToken();
+    }, 30 * 60 * 1000); // Every 30 minutes
     
     // Set up periodic launcher status check to detect when Minecraft stops  
     const launcherStatusInterval = setInterval(async () => {
@@ -1085,6 +1123,7 @@
     // Add launcher status interval to cleanup
     onDestroy(() => {
       clearInterval(launcherStatusInterval);
+      clearInterval(authRefreshInterval);
     });
   }
   
@@ -1092,6 +1131,7 @@
   onDestroy(() => {
     clearInterval(connectionCheckInterval);
     clearInterval(statusCheckInterval);
+    clearInterval(authRefreshInterval);
     cleanupLauncherEvents();
   });
   
