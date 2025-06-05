@@ -19,10 +19,6 @@ class ClientDownloader {
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
     console.log('🎯 DOWNLOAD STARTED - Method called with params:', { clientPath, minecraftVersion, options });
     
-    // CRITICAL DEBUG: Log exactly what serverInfo structure we receive
-    console.log('[ClientDownloader] 🔧 DEBUG ENTER downloadMinecraftClientSimple – got serverInfo:', JSON.stringify(options.serverInfo, null, 2));
-    console.log('[ClientDownloader] 🔧 DEBUG ENTER – full options object:', JSON.stringify(options, null, 2));
-    
     this.emitter.emit('client-download-start', { version: minecraftVersion });
     
     // Extract options
@@ -318,9 +314,7 @@ class ClientDownloader {
         console.log(`[ClientDownloader] ▶️ ABOUT TO CHECK IF WE SHOULD ADD SERVER...`);
         
         if (hasServerInfo) {
-          console.log(`[ClientDownloader] 🔧 Adding server to Minecraft server list...`);
-          console.log(`[ClientDownloader] 🔧 DEBUG: Full serverInfo object:`, JSON.stringify(serverInfo, null, 2));
-          console.log(`[ClientDownloader] 🔧 DEBUG: clientPath for server addition:`, clientPath);
+          console.log(`[ClientDownloader] Adding server to Minecraft server list...`);
           
           this.emitter.emit('client-download-progress', {
             type: 'Server',
@@ -329,10 +323,7 @@ class ClientDownloader {
           });
           
           try {
-            console.log(`[ClientDownloader] 🔧 CALLING addServerToList() NOW...`);
-            // Extract server details from the serverInfo structure
             const serverResult = await this.addServerToList(clientPath, serverInfo);
-            console.log(`[ClientDownloader] 🔧 DEBUG: addServerToList result:`, JSON.stringify(serverResult, null, 2));
             
             if (serverResult.success) {
               console.log(`[ClientDownloader] ✅ Server setup completed: ${serverResult.message}`);
@@ -1463,7 +1454,7 @@ Specification-Vendor: FabricMC
 
         // Use minecraft-data for prismarine-nbt initialization
         const mcData = require('minecraft-data')('1.21.1');
-        
+
         // Create simple NBT structure with corrected format
         const nbtData = {
           type: 'compound',
@@ -1485,7 +1476,7 @@ Specification-Vendor: FabricMC
         console.log(`[ClientDownloader] ▶️ Creating NBT with prismarine-nbt...`);
         console.log(`[ClientDownloader] ▶️ Server count: ${existingServers.length}`);
         
-        const rawBuffer = nbt.writeUncompressed(nbtData, '');
+        const rawBuffer = nbt.writeUncompressed(nbtData, '')
         console.log(`[ClientDownloader] ▶️ Raw NBT buffer: ${rawBuffer.length} bytes`);
         
         // Compress the NBT data since Minecraft expects gzip-compressed servers.dat
