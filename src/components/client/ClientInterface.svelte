@@ -54,6 +54,7 @@
   // Connection check interval
   let connectionCheckInterval;
   let statusCheckInterval;
+  let authRefreshInterval;
   
   // Active tab tracking
   let activeTab = 'play';
@@ -380,9 +381,10 @@
         authStatus = 'authenticated';
         username = result.username;
         authData = { username: result.username, uuid: result.uuid };
-        
+
         if (result.needsRefresh) {
           console.log('[Client] Authentication may need refresh');
+          await refreshAuthToken();
         }
         
         console.log(`[Client] Authentication loaded: ${result.username}`);
@@ -483,7 +485,7 @@
         errorMessage.set('Authentication failed: ' + result.error);
         setTimeout(() => errorMessage.set(''), 5000);
       }
-    } catch (err) {
+  } catch (err) {
       // Clear the timeout since we got an error
       clearTimeout(authTimeout);
       
@@ -501,6 +503,32 @@
         errorMessage.set('Authentication error: ' + err.message);
         setTimeout(() => errorMessage.set(''), 5000);
       }
+    }
+  }
+
+  // Refresh authentication token if possible
+  async function refreshAuthToken() {
+    if (authStatus !== 'authenticated' || !instance.path) {
+      return;
+    }
+
+    try {
+      const result = await window.electron.invoke('minecraft-check-refresh-auth', {
+        clientPath: instance.path
+      });
+
+      if (result.success && result.refreshed) {
+        console.log('[Client] Authentication token refreshed');
+        successMessage.set('Authentication refreshed');
+        setTimeout(() => successMessage.set(''), 3000);
+      } else if (!result.success && result.needsReauth) {
+        console.log('[Client] Authentication expired, re-authentication required');
+        authStatus = 'needs-auth';
+        username = '';
+        authData = null;
+      }
+    } catch (err) {
+      console.error('[Client] Error refreshing authentication:', err);
     }
   }
   
@@ -986,7 +1014,6 @@
     
     window.electron.on('launcher-client-download-progress', (data) => {
       clientDownloadProgress = data;
-      console.log(`[Client] Client download progress: ${data.type} - ${data.task}`);
     });
     
     window.electron.on('launcher-client-download-complete', (data) => {
@@ -1047,6 +1074,11 @@
   function setupChecks() {
     // Check connection immediately
     connectToServer();
+
+    // Attempt an initial auth refresh after loading
+    setTimeout(() => {
+      refreshAuthToken();
+    }, 5000);
     
     // Set up periodic connection check
     connectionCheckInterval = setInterval(() => {
@@ -1061,6 +1093,11 @@
         checkServerStatus();
       }
     }, 60000); // Every 60 seconds (reduced frequency)
+
+    // Set up periodic authentication refresh
+    authRefreshInterval = setInterval(() => {
+      refreshAuthToken();
+    }, 30 * 60 * 1000); // Every 30 minutes
     
     // Set up periodic launcher status check to detect when Minecraft stops  
     const launcherStatusInterval = setInterval(async () => {
@@ -1085,6 +1122,7 @@
     // Add launcher status interval to cleanup
     onDestroy(() => {
       clearInterval(launcherStatusInterval);
+      clearInterval(authRefreshInterval);
     });
   }
   
@@ -1092,6 +1130,7 @@
   onDestroy(() => {
     clearInterval(connectionCheckInterval);
     clearInterval(statusCheckInterval);
+    clearInterval(authRefreshInterval);
     cleanupLauncherEvents();
   });
   
@@ -1445,13 +1484,18 @@
                       {/if}
                     </div>
                   {/if}
-                </div>
-              {:else if downloadStatus === 'ready'}
-                <div class="sync-status ready">
-                  <h3>✅ All Mods Ready</h3>
-                  <p>All required mods are installed and up to date.</p>
-                </div>
-              {/if}
+                  </div>
+                {:else if downloadStatus === 'error'}
+                  <div class="sync-status error">
+                    <h3>Mod Check Failed</h3>
+                    <p>Unable to verify mod status. Please refresh and try again.</p>
+                  </div>
+                {:else if downloadStatus === 'ready'}
+                  <div class="sync-status ready">
+                    <h3>✅ All Mods Ready</h3>
+                    <p>All required mods are installed and up to date.</p>
+                  </div>
+                {/if}
               
               <!-- Memory Settings -->
               <div class="memory-settings">
@@ -1980,10 +2024,15 @@
     background-color: rgba(59, 130, 246, 0.1);
     border: 1px solid #3b82f6;
   }
-  
+
   .sync-status.ready {
     background-color: rgba(16, 185, 129, 0.1);
     border: 1px solid #10b981;
+  }
+
+  .sync-status.error {
+    background-color: rgba(239, 68, 68, 0.1);
+    border: 1px solid #ef4444;
   }
   
   .missing-mods, .outdated-mods {
