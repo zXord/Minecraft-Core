@@ -259,6 +259,20 @@ function createModHandlers(win) {
       }
     },
 
+    'get-mod-info': async (_event, { modId, source }) => {
+      console.log(`[IPC:Mods] Getting mod info for ${modId} (source: ${source})`);
+      try {
+        if (source === 'modrinth') {
+          return await modApiService.getModInfo(modId, source);
+        } else {
+          throw new Error('Only Modrinth mod info is currently fully supported via modApiService.');
+        }
+      } catch (err) {
+        console.error('[IPC:Mods] Failed to get mod info:', err);
+        throw new Error(`Failed to get mod info: ${err.message}`);
+      }
+    },
+
     'get-project-info': async (_event, { projectId, source }) => {
       console.log(`[IPC:Mods] Getting project info for ${projectId} (source: ${source})`);
       try {
