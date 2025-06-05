@@ -83,6 +83,7 @@ async function createServersDat(clientDir, serverIp, managementPort, serverName 
       }
     };
 
+
     const raw = nbt.writeUncompressed(nbtData);
     const compressed = zlib.gzipSync(raw);
     fs.writeFileSync(serversDatPath, compressed);
