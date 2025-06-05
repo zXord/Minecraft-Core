@@ -104,9 +104,11 @@ async function ensureServersDat(
       acceptTextures: nbt.byte(s.acceptTextures)
     }));
 
+
     const nbtData = nbt.comp({
       servers: nbt.list(nbt.comp(nbtServers))
     });
+
 
     const raw = nbt.writeUncompressed(nbtData);
     const compressed = zlib.gzipSync(raw);
