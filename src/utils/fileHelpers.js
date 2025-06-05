@@ -4,7 +4,7 @@
 
 /**
  * Converts a File object to a path using a FileReader
- * This creates a temporary copy of the file that can be used by Electron
+ * This creates a temporary copy of the file that can be used by Electron.
  * 
  * @param {File} file - Browser File object
  * @returns {Promise<string>} Path to the temporary file
