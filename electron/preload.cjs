@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('electron', {
       'delete-mod',
       'search-mods',
       'install-mod',
+      'install-client-mod',
       'get-mod-versions',
       'get-mod-info',
       'get-version-info',
