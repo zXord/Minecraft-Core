@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('electron', {
       'delete-mod',
       'search-mods',
       'install-mod',
+      'install-client-mod',
       'get-mod-versions',
       'get-mod-info',
       'get-version-info',
@@ -112,6 +113,7 @@ contextBridge.exposeInMainWorld('electron', {
       'minecraft-clear-client',
       'minecraft-get-status',
       'toggle-client-mod',
+      'delete-client-mod',
       // Management server events
       'management-server-status',
       'management-server-path-updated',

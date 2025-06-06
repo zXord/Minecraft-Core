@@ -22,9 +22,13 @@
     filterModLoader
   } from '../../stores/modStore.js';
   import { searchMods, fetchModVersions } from '../../utils/mods/modAPI.js';
+  import { installedModIds, installedModInfo } from '../../stores/modStore.js';
+  import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
+  import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   import ClientModList from './ClientModList.svelte';
   import ClientModStatus from './ClientModStatus.svelte';
   import ModCard from '../mods/components/ModCard.svelte';
+  import ModSearch from '../mods/components/ModSearch.svelte';
 
   // Types
   interface Instance {
@@ -77,13 +81,18 @@
   let lastModCheck: Date | null = null;
   
   // Client mod finding state
-  let activeTab: string = 'server-mods'; // 'server-mods' or 'find-mods'
+  let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
   let versionsCache = {};
   let versionsLoading = {};
   let versionsError = {};
+  let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
+  let manualMods: Mod[] = [];
+  let filterType = 'client';
+  let downloadManagerCleanup;
 
   // Connect to server and get mod information
   onMount(() => {
+    downloadManagerCleanup = initDownloadManager();
     // Initialize filter stores for client mod search
     if (!get(filterMinecraftVersion)) {
       filterMinecraftVersion.set(get(minecraftVersion) || '1.20.1');
@@ -100,9 +109,45 @@
       
       return () => {
         clearInterval(interval);
+        if (downloadManagerCleanup) downloadManagerCleanup();
       };
     }
   });
+
+  onDestroy(() => {
+    if (downloadManagerCleanup) downloadManagerCleanup();
+  });
+
+  // Keep filters in sync with the selected Minecraft version
+  $: {
+    if ($minecraftVersion) {
+      filterMinecraftVersion.set($minecraftVersion);
+      if (!minecraftVersionOptions.includes($minecraftVersion)) {
+        minecraftVersionOptions = [$minecraftVersion, ...minecraftVersionOptions.filter(v => v !== $minecraftVersion)];
+      }
+    }
+  }
+
+  // Derive list of manually installed mods from sync status
+  $: {
+    if (modSyncStatus) {
+      const managed = new Set([
+        ...requiredMods.map(m => m.fileName),
+        ...optionalMods.map(m => m.fileName)
+      ]);
+      const enabled = modSyncStatus.presentEnabledMods || [];
+      const disabled = modSyncStatus.presentDisabledMods || [];
+      const manualEnabled = enabled
+        .filter(f => !managed.has(f))
+        .map(fileName => ({ fileName, location: 'client' }));
+      const manualDisabled = disabled
+        .filter(f => !managed.has(f))
+        .map(fileName => ({ fileName, location: 'disabled' }));
+      manualMods = [...manualEnabled, ...manualDisabled];
+    } else {
+      manualMods = [];
+    }
+  }
 
   // Load mods from the management server
   async function loadModsFromServer() {
@@ -137,6 +182,9 @@
       if (serverInfoResponse.ok) {
         const serverInfo = await serverInfoResponse.json();
         if (serverInfo.success) {
+          if (serverInfo.minecraftVersion) {
+            minecraftVersion.set(serverInfo.minecraftVersion);
+          }
           requiredMods = serverInfo.requiredMods || [];
           allClientMods = serverInfo.allClientMods || [];
           
@@ -321,6 +369,42 @@
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
+
+  // Delete a mod from the client
+  async function handleModDelete(modFileName) {
+    if (!instance.path) return;
+
+    try {
+      const result = await window.electron.invoke('delete-client-mod', {
+        clientPath: instance.path,
+        modFileName
+      });
+
+      if (result.success) {
+        successMessage.set(`Deleted mod: ${modFileName}`);
+        setTimeout(() => successMessage.set(''), 3000);
+        installedModInfo.update(info => {
+          const updated = info.filter(m => m.fileName !== modFileName);
+          const removed = info.find(m => m.fileName === modFileName);
+          if (removed && removed.projectId) {
+            installedModIds.update(ids => {
+              ids.delete(removed.projectId);
+              return new Set(ids);
+            });
+          }
+          return updated;
+        });
+        await checkModSynchronization();
+      } else {
+        errorMessage.set(`Failed to delete mod: ${result.error}`);
+        setTimeout(() => errorMessage.set(''), 5000);
+      }
+    } catch (err) {
+      console.error('[ClientModManager] Error deleting mod:', err);
+      errorMessage.set('Error deleting mod: ' + err.message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  }
   
   // Client mod search functionality
   async function searchClientMods() {
@@ -366,8 +450,24 @@
       if (result && result.success) {
         successMessage.set(`Successfully installed ${mod.name} to client`);
         setTimeout(() => successMessage.set(''), 5000);
-        
-        // Refresh mod status if we have server connection
+
+        installedModIds.update(ids => {
+          ids.add(mod.id);
+          return new Set(ids);
+        });
+        installedModInfo.update(info => {
+          return [
+            ...info,
+            {
+              fileName: result.fileName,
+              projectId: mod.id,
+              versionId: result.versionId,
+              versionNumber: result.version,
+              source: 'modrinth'
+            }
+          ];
+        });
+
         if (connectionStatus === 'connected') {
           await checkModSynchronization();
         }
@@ -386,20 +486,6 @@
     }
   }
 
-  // Handle search input
-  function handleSearchInput(event) {
-    searchKeyword.set(event.target.value);
-    // Reset pagination when search changes
-    currentPage.set(1);
-  }
-
-  // Handle search submission
-  function handleSearchSubmit(event) {
-    event.preventDefault();
-    searchClientMods();
-  }
-
-  // Switch between tabs
   function switchTab(tab) {
     activeTab = tab;
     if (tab === 'find-mods' && get(searchResults).length === 0 && get(searchKeyword)) {
@@ -462,6 +548,7 @@
 </script>
 
 <div class="client-mod-manager">
+  <DownloadProgress />
   <div class="mod-manager-header">
     <h2>Client Mods</h2>
     <div class="connection-status">
@@ -488,11 +575,11 @@
 
   <!-- Tab Navigation -->
   <div class="tab-navigation">
-    <button 
-      class="tab {activeTab === 'server-mods' ? 'active' : ''}"
-      on:click={() => switchTab('server-mods')}
+    <button
+      class="tab {activeTab === 'installed-mods' ? 'active' : ''}"
+      on:click={() => switchTab('installed-mods')}
     >
-      Server Mods
+      Installed Mods
     </button>
     <button 
       class="tab {activeTab === 'find-mods' ? 'active' : ''}"
@@ -503,7 +590,7 @@
   </div>
 
   <div class="mod-content">
-    {#if activeTab === 'server-mods'}
+    {#if activeTab === 'installed-mods'}
       <!-- Original server mod synchronization content -->
       {#if connectionStatus === 'disconnected'}
         <div class="connection-error">
@@ -552,12 +639,30 @@
               <p class="section-description">
                 These mods are available but not required. You can enable or disable them before playing.
               </p>
-              <ClientModList 
-                mods={optionalMods}
+          <ClientModList
+            mods={optionalMods}
+            type="optional"
+            {modSyncStatus}
+            on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
+            on:download={downloadRequiredMods}
+            on:delete={(e) => handleModDelete(e.detail.fileName)}
+          />
+        </div>
+      {/if}
+
+          <!-- Manually Installed Mods Section -->
+          {#if manualMods.length > 0}
+            <div class="mod-section">
+              <h3>Manual Mods</h3>
+              <p class="section-description">
+                Mods installed directly in your client folder.
+              </p>
+              <ClientModList
+                mods={manualMods}
                 type="optional"
                 {modSyncStatus}
                 on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
-                on:download={downloadRequiredMods}
+                on:delete={(e) => handleModDelete(e.detail.fileName)}
               />
             </div>
           {/if}
@@ -566,12 +671,12 @@
     {:else if activeTab === 'find-mods'}
       <!-- Client mod finding and installation -->
       <div class="mod-search-section">
-        <h3>Find and Install Mods</h3>
-        <p class="section-description">
-          Search for and install mods directly to your client. These mods are independent of any server.
-        </p>
-
-                <!-- Search Interface -->        <form class="search-form" on:submit={handleSearchSubmit}>          <div class="search-input-container">            <input              type="text"              class="search-input"              placeholder="Search for mods..."              value={$searchKeyword}              on:input={handleSearchInput}            />            <button               type="submit"               class="search-button"              disabled={$isSearching}            >              {$isSearching ? '⏳' : '🔍'}            </button>          </div>        </form>        {#if $searchError}          <div class="error-message">            ❌ {$searchError}          </div>        {/if}        <!-- Search Results -->        {#if $isSearching}          <div class="loading">            <h4>🔄 Searching...</h4>            <p>Finding mods...</p>          </div>        {:else if $searchResults.length > 0}          <div class="search-results">            <h4>Search Results</h4>            <div class="mods-grid">              {#each $searchResults as mod (mod.id)}                <ModCard                  {mod}                  expanded={$expandedModId === mod.id}                  versions={versionsCache[mod.id] || []}                  loading={versionsLoading[mod.id] || false}                  error={versionsError[mod.id] || null}                  filterMinecraftVersion={$filterMinecraftVersion}                  loadOnMount={false}                  installedVersionId=""                  on:loadVersions={loadVersions}                  on:versionSelect={handleVersionSelect}                  on:install={handleInstallMod}                />              {/each}            </div>            <!-- Pagination -->            {#if $totalPages > 1}              <div class="pagination">                <button                   class="page-button"                  disabled={$currentPage <= 1}                  on:click={prevPage}                >                  ← Previous                </button>                <span class="page-info">Page {$currentPage} of {$totalPages}</span>                <button                   class="page-button"                  disabled={$currentPage >= $totalPages}                  on:click={nextPage}                >                  Next →                </button>              </div>            {/if}          </div>        {:else if $searchKeyword.trim()}          <div class="no-results">            <h4>No mods found</h4>            <p>Try different search terms or check your spelling.</p>          </div>        {/if}
+        <ModSearch
+          on:install={handleInstallMod}
+          bind:filterType
+          {minecraftVersionOptions}
+          serverPath={instance?.path || ""}
+        />
       </div>
     {/if}
   </div>

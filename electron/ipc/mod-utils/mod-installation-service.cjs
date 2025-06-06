@@ -228,21 +228,47 @@ async function installModToClient(win, modData) {
     const loader = modData.loader || 'fabric'; // Default or passed
     const mcVersion = modData.version || '1.20.1'; // Default or passed
     
-    console.log('[ModInstallService] Getting mod versions for client installation:', { modId: modData.id, loader, mcVersion, selectedVersionId: modData.selectedVersionId });
+    console.log('[ModInstallService] Getting mod versions for client installation:', {
+      modId: modData.id,
+      loader,
+      mcVersion,
+      selectedVersionId: modData.selectedVersionId
+    });
 
-    // Assuming getModrinthVersions is available and works as expected
-    const versions = await getModrinthVersions(modData.id, loader, mcVersion, true); // true for loadLatestOnly if no specific versionId
-    
-    if (!versions || versions.length === 0) throw new Error('No compatible versions found for this mod');
+    let versionInfo;
+    let versionToInstall;
 
-    let versionToInstall = modData.selectedVersionId 
-      ? versions.find(v => v.id === modData.selectedVersionId) 
-      : versions[0]; // Fallback to latest if specific not found or not provided
+    if (modData.selectedVersionId) {
+      // Try to fetch the requested version info
+      try {
+        versionInfo = await getModrinthVersionInfo(modData.id, modData.selectedVersionId);
+        if (
+          versionInfo &&
+          (!loader || versionInfo.loaders.includes(loader)) &&
+          (!mcVersion || versionInfo.game_versions.includes(mcVersion))
+        ) {
+          versionToInstall = { id: versionInfo.id, versionNumber: versionInfo.version_number };
+        } else {
+          console.warn('[ModInstallService] Requested version incompatible, falling back to best match');
+          versionInfo = null;
+        }
+      } catch (err) {
+        console.warn('[ModInstallService] Failed to fetch requested version, falling back:', err.message);
+        versionInfo = null;
+      }
+    }
 
-    if (!versionToInstall) throw new Error('Selected version not found or not compatible');
-    
+    // If no suitable version info found, pick the best compatible version automatically
+    if (!versionInfo) {
+      const versions = await getModrinthVersions(modData.id, loader, mcVersion, true);
+      if (!versions || versions.length === 0) {
+        throw new Error('No compatible versions found for this mod');
+      }
+      versionToInstall = versions[0];
+      versionInfo = await getModrinthVersionInfo(modData.id, versionToInstall.id);
+    }
+
     console.log('[ModInstallService] Selected version for client installation:', versionToInstall.versionNumber);
-    const versionInfo = await getModrinthVersionInfo(modData.id, versionToInstall.id);
     if (!versionInfo.files || versionInfo.files.length === 0) throw new Error('No files found for this mod version');
 
     const primaryFile = versionInfo.files.find(file => file.primary) || versionInfo.files[0];
@@ -251,10 +277,31 @@ async function installModToClient(win, modData) {
     targetPath = path.join(clientModsDir, actualFileName); // Update targetPath with actual filename
 
     console.log(`[ModInstallService] Downloading client mod from ${downloadUrl} to ${targetPath}`);
-    // Simplified download for client, progress reporting can be added similarly if needed
-    const response = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream', timeout: 30000 });
+    const downloadId = `client-mod-${modData.id}-${Date.now()}`;
+    if (win && win.webContents) {
+      win.webContents.send('download-progress', { id: downloadId, name: modData.name, progress: 0, speed: 0, completed: false, error: null });
+    }
+
     const writer = createWriteStream(targetPath);
+    const response = await axios({
+      url: downloadUrl,
+      method: 'GET',
+      responseType: 'stream',
+      timeout: 30000,
+      onDownloadProgress: progressEvent => {
+        const progress = progressEvent.loaded / progressEvent.total;
+        const speed = progressEvent.rate || 0;
+        if (win && win.webContents) {
+          win.webContents.send('download-progress', { id: downloadId, name: modData.name, progress: progress * 100, size: progressEvent.total, downloaded: progressEvent.loaded, speed, completed: false, error: null });
+        }
+      }
+    });
+
     await pipelineAsync(response.data, writer);
+
+    if (win && win.webContents) {
+      win.webContents.send('download-progress', { id: downloadId, name: modData.name, progress: 100, speed: 0, completed: true, completedTime: Date.now(), error: null });
+    }
 
     console.log('[ModInstallService] Successfully downloaded mod to client:', targetPath);
 
@@ -268,7 +315,7 @@ async function installModToClient(win, modData) {
     await fs.writeFile(manifestPath, JSON.stringify(manifestData, null, 2), 'utf8');
     console.log('[ModInstallService] Created manifest for client mod:', manifestPath);
 
-    return { success: true, fileName: actualFileName, version: versionToInstall.versionNumber, manifestPath };
+    return { success: true, fileName: actualFileName, version: versionToInstall.versionNumber, versionId: versionToInstall.id, manifestPath };
   } catch (error) {
     console.error('[ModInstallService] Error installing mod to client:', error);
     // Clean up partially downloaded file

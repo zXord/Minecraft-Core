@@ -66,11 +66,16 @@
   // Handle mod toggle for optional mods
   function handleToggle(mod: Mod, enabled: boolean): void {
     if (type === 'required') return; // Required mods cannot be toggled
-    
+
     dispatch('toggle', {
       fileName: mod.fileName,
       enabled: enabled
     });
+  }
+
+  // Handle mod deletion
+  function handleDelete(mod: Mod): void {
+    dispatch('delete', { fileName: mod.fileName });
   }
 
   // Handle download for missing mods
@@ -130,8 +135,8 @@
               <!-- Optional mods can be enabled/disabled -->
               <div class="toggle-control">
                 <label class="toggle-label">
-                  <input 
-                    type="checkbox" 
+                  <input
+                    type="checkbox"
                     checked={getModStatus(mod) === 'installed'}
                     on:change={(e) => handleToggle(mod, (e.target as HTMLInputElement).checked)}
                     class="toggle-input"
@@ -149,6 +154,9 @@
                   </span>
                 </label>
               </div>
+              <button class="delete-button" on:click={() => handleDelete(mod)}>
+                🗑️ Delete
+              </button>
             {/if}
           </div>
         </div>
@@ -348,6 +356,21 @@
     color: #e5e7eb;
     font-size: 0.9rem;
     font-weight: 500;
+  }
+
+  .delete-button {
+    background-color: rgba(244, 67, 54, 0.2);
+    color: #ff6b6b;
+    border: none;
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .delete-button:hover {
+    background-color: rgba(244, 67, 54, 0.3);
   }
 
   .summary {
