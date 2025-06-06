@@ -276,12 +276,12 @@ async function getClientInstalledModInfo(clientPath) {
           }
         });
 
+      let meta = {};
       if (jarPath) {
-        const meta = await readModMetadataFromJar(jarPath);
-        if (meta && (meta.name || meta.versionNumber)) {
-          modInfo.push({ fileName: file, ...meta });
-        }
+        meta = await readModMetadataFromJar(jarPath);
       }
+
+      modInfo.push({ fileName: file, ...meta });
     }
   }
 
