@@ -69,18 +69,18 @@ async function listMods(serverPath) {
   await fs.mkdir(disabledModsDir, { recursive: true });
   
   const serverFiles = await fs.readdir(serverModsDir);
-  const serverModFiles = serverFiles.filter(file => file.endsWith('.jar'));
+  const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   
   let clientModFiles = [];
   try {
     const clientFiles = await fs.readdir(clientModsDir);
-    clientModFiles = clientFiles.filter(file => file.endsWith('.jar'));
+    clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   } catch (err) {
     console.warn('[ModManager] Could not read client mods directory:', err);
   }
   
   const disabledFiles = await fs.readdir(disabledModsDir);
-  const disabledModFiles = disabledFiles.filter(file => file.endsWith('.jar'));
+  const disabledModFiles = disabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   
   const modsInBoth = serverModFiles.filter(mod => clientModFiles.includes(mod));
   const serverOnlyMods = serverModFiles.filter(mod => !clientModFiles.includes(mod));
@@ -120,19 +120,20 @@ async function getInstalledModInfo(serverPath) {
   await fs.mkdir(clientModsDir, { recursive: true });
   
   const enabledFiles = await fs.readdir(modsDir);
-  const enabledMods = enabledFiles.filter(file => file.endsWith('.jar'));
+  const enabledMods = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   
   let clientMods = [];
   try {
     const clientFiles = await fs.readdir(clientModsDir);
-    clientMods = clientFiles.filter(file => file.endsWith('.jar'));
+    clientMods = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   } catch (err) {
     console.warn('[ModManager] Could not read client mods:', err);
   }
   
   const disabledDir = path.join(serverPath, 'mods_disabled');
   await fs.mkdir(disabledDir, { recursive: true });
-  const disabledFiles = (await fs.readdir(disabledDir).catch(() => [])).filter(file => file.endsWith('.jar'));
+  const disabledFiles = (await fs.readdir(disabledDir).catch(() => []))
+    .filter(file => file.toLowerCase().endsWith('.jar'));
   
   const allModFiles = [...new Set([...enabledMods, ...clientMods, ...disabledFiles])];
   
@@ -190,7 +191,9 @@ async function getClientInstalledModInfo(clientPath) {
 
   const files = await fs.readdir(modsDir).catch(() => []);
   const modFiles = files
-    .filter(f => f.endsWith('.jar') || f.endsWith('.jar.disabled'))
+    .filter(f =>
+      f.toLowerCase().endsWith('.jar') || f.toLowerCase().endsWith('.jar.disabled')
+    )
     .map(f => f.replace('.disabled', ''));
 
   const uniqueModFiles = Array.from(new Set(modFiles));
@@ -241,7 +244,7 @@ async function saveDisabledMods(serverPath, disabledMods) {
   console.log(`[ModManager] Desired disabled mods list contains:`, disabledMods);
   
   for (const modFile of enabledFiles) {
-    if (modFile.endsWith('.jar') && disabledMods.includes(modFile)) {
+    if (modFile.toLowerCase().endsWith('.jar') && disabledMods.includes(modFile)) {
       const sourcePath = path.join(modsDir, modFile);
       const destPath = path.join(disabledModsDir, modFile);
       console.log(`[ModManager] Disabling mod by moving: ${sourcePath} -> ${destPath}`);
@@ -257,7 +260,7 @@ async function saveDisabledMods(serverPath, disabledMods) {
   }
   
   for (const modFile of currentDisabledFiles) {
-    if (modFile.endsWith('.jar') && !disabledMods.includes(modFile)) {
+    if (modFile.toLowerCase().endsWith('.jar') && !disabledMods.includes(modFile)) {
       const sourcePath = path.join(disabledModsDir, modFile);
       const destPath = path.join(modsDir, modFile);
       console.log(`[ModManager] Enabling mod by moving: ${sourcePath} -> ${destPath}`);
@@ -312,7 +315,7 @@ async function getDisabledMods(serverPath) {
   
   try {
     const currentDisabledFiles = await fs.readdir(disabledModsDir);
-    const disabledModFileNames = currentDisabledFiles.filter(file => file.endsWith('.jar'));
+    const disabledModFileNames = currentDisabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
     for (const modFile of disabledModFileNames) {
       if (!disabledMods.includes(modFile)) {
         disabledMods.push(modFile);

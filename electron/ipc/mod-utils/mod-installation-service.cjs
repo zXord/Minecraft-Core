@@ -210,8 +210,8 @@ async function installModToClient(win, modData) {
   const clientManifestDir = path.join(modData.clientPath, 'minecraft-core-manifests');
   await fs.mkdir(clientManifestDir, { recursive: true });
 
-  // Note: Original `install-client-mod` used `actualFileName` from Modrinth API.
-  // Here we use a sanitized name first, then potentially update if API provides a different one.
+  // Use a sanitized file name instead of the API provided one to
+  // match the server install behaviour and avoid version suffixes.
   const sanitizedBase = modData.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
   const sanitizedFileName = /\.jar$/i.test(sanitizedBase)
     ? sanitizedBase
@@ -304,8 +304,10 @@ async function installModToClient(win, modData) {
 
     const primaryFile = versionInfo.files.find(file => file.primary) || versionInfo.files[0];
     const downloadUrl = primaryFile.url;
-    const actualFileName = primaryFile.filename; // Use filename from API
-    targetPath = path.join(clientModsDir, actualFileName); // Update targetPath with actual filename
+
+    // Use sanitized file name for storage to match server behaviour
+    const fileName = sanitizedFileName;
+    targetPath = path.join(clientModsDir, fileName);
 
     console.log(`[ModInstallService] Downloading client mod from ${downloadUrl} to ${targetPath}`);
     const downloadId = `client-mod-${modData.id}-${Date.now()}`;
@@ -337,16 +339,16 @@ async function installModToClient(win, modData) {
     console.log('[ModInstallService] Successfully downloaded mod to client:', targetPath);
 
     const manifestData = {
-      projectId: modData.id, versionId: versionToInstall.id, fileName: actualFileName,
+      projectId: modData.id, versionId: versionToInstall.id, fileName: fileName,
       name: modData.name, title: modData.title || modData.name, versionNumber: versionToInstall.versionNumber,
       mcVersion: mcVersion, loader: loader, source: 'modrinth', downloadUrl: downloadUrl,
       installedAt: new Date().toISOString(), filePath: targetPath, fileSize: primaryFile.size
     };
-    const manifestPath = path.join(clientManifestDir, `${actualFileName}.json`);
+    const manifestPath = path.join(clientManifestDir, `${fileName}.json`);
     await fs.writeFile(manifestPath, JSON.stringify(manifestData, null, 2), 'utf8');
     console.log('[ModInstallService] Created manifest for client mod:', manifestPath);
 
-    return { success: true, fileName: actualFileName, version: versionToInstall.versionNumber, versionId: versionToInstall.id, manifestPath };
+    return { success: true, fileName: fileName, version: versionToInstall.versionNumber, versionId: versionToInstall.id, manifestPath };
   } catch (error) {
     console.error('[ModInstallService] Error installing mod to client:', error);
     // Clean up partially downloaded file
