@@ -153,14 +153,14 @@
   function updateManualMods() {
     if (modSyncStatus) {
       const managed = new Set([
-        ...requiredMods.map(m => m.fileName),
-        ...optionalMods.map(m => m.fileName)
+        ...requiredMods.map(m => m.fileName.toLowerCase()),
+        ...optionalMods.map(m => m.fileName.toLowerCase())
       ]);
       const enabled = modSyncStatus.presentEnabledMods || [];
       const disabled = modSyncStatus.presentDisabledMods || [];
       const info = get(installedModInfo);
       const manualEnabled = enabled
-        .filter(f => !managed.has(f))
+        .filter(f => !managed.has(f.toLowerCase()))
         .map(fileName => {
           const details = info.find(m => m.fileName === fileName) || {};
           return {
@@ -172,7 +172,7 @@
           };
         });
       const manualDisabled = disabled
-        .filter(f => !managed.has(f))
+        .filter(f => !managed.has(f.toLowerCase()))
         .map(fileName => {
           const details = info.find(m => m.fileName === fileName) || {};
           return {
