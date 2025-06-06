@@ -26,6 +26,7 @@
   import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
   import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   import ClientModList from './ClientModList.svelte';
+  import ClientManualModList from './ClientManualModList.svelte';
   import ClientModStatus from './ClientModStatus.svelte';
   import ModCard from '../mods/components/ModCard.svelte';
   import ModSearch from '../mods/components/ModSearch.svelte';
@@ -93,6 +94,9 @@
   // Connect to server and get mod information
   onMount(() => {
     downloadManagerCleanup = initDownloadManager();
+    if (instance?.path) {
+      loadInstalledInfo();
+    }
     // Initialize filter stores for client mod search
     if (!get(filterMinecraftVersion)) {
       filterMinecraftVersion.set(get(minecraftVersion) || '1.20.1');
@@ -139,13 +143,43 @@
       const disabled = modSyncStatus.presentDisabledMods || [];
       const manualEnabled = enabled
         .filter(f => !managed.has(f))
-        .map(fileName => ({ fileName, location: 'client' }));
+        .map(fileName => {
+          const info = get(installedModInfo).find(m => m.fileName === fileName) || {};
+          return {
+            fileName,
+            location: 'client',
+            projectId: info.projectId,
+            versionId: info.versionId,
+            versionNumber: info.versionNumber
+          };
+        });
       const manualDisabled = disabled
         .filter(f => !managed.has(f))
-        .map(fileName => ({ fileName, location: 'disabled' }));
+        .map(fileName => {
+          const info = get(installedModInfo).find(m => m.fileName === fileName) || {};
+          return {
+            fileName,
+            location: 'disabled',
+            projectId: info.projectId,
+            versionId: info.versionId,
+            versionNumber: info.versionNumber
+          };
+        });
       manualMods = [...manualEnabled, ...manualDisabled];
     } else {
       manualMods = [];
+    }
+  }
+
+  async function loadInstalledInfo() {
+    try {
+      const info = await window.electron.invoke('get-client-installed-mod-info', instance.path);
+      if (Array.isArray(info)) {
+        installedModIds.set(new Set(info.map(i => i.projectId).filter(Boolean)));
+        installedModInfo.set(info);
+      }
+    } catch (err) {
+      console.error('[ClientModManager] Failed to load installed mod info:', err);
     }
   }
 
@@ -394,6 +428,7 @@
           }
           return updated;
         });
+        await loadInstalledInfo();
         await checkModSynchronization();
       } else {
         errorMessage.set(`Failed to delete mod: ${result.error}`);
@@ -434,6 +469,7 @@
     });
 
     try {
+      const isUpdate = $installedModIds.has(mod.id);
       const modData = {
         id: mod.id,
         name: mod.name,
@@ -442,7 +478,8 @@
         source: 'modrinth',
         loader: get(loaderType) || 'fabric',
         version: get(minecraftVersion) || '1.20.1',
-        clientPath: instance.path
+        clientPath: instance.path,
+        forceReinstall: isUpdate
       };
 
       const result = await window.electron.invoke('install-client-mod', modData);
@@ -456,8 +493,9 @@
           return new Set(ids);
         });
         installedModInfo.update(info => {
+          const filtered = info.filter(m => m.projectId !== mod.id);
           return [
-            ...info,
+            ...filtered,
             {
               fileName: result.fileName,
               projectId: mod.id,
@@ -467,6 +505,8 @@
             }
           ];
         });
+
+        await loadInstalledInfo();
 
         if (connectionStatus === 'connected') {
           await checkModSynchronization();
@@ -522,8 +562,9 @@
 
   // Handle mod installation
   async function handleInstallMod(event) {
-    const { mod } = event.detail;
-    await installClientMod(mod, mod.selectedVersionId);
+    const { mod, versionId } = event.detail;
+    const ver = versionId || mod.selectedVersionId;
+    await installClientMod(mod, ver);
   }
 
   // Handle pagination
@@ -657,12 +698,11 @@
               <p class="section-description">
                 Mods installed directly in your client folder.
               </p>
-              <ClientModList
-                mods={manualMods}
-                type="optional"
-                {modSyncStatus}
+              <ClientManualModList
+                {manualMods}
                 on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
                 on:delete={(e) => handleModDelete(e.detail.fileName)}
+                on:install={handleInstallMod}
               />
             </div>
           {/if}

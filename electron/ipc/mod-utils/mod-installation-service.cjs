@@ -224,6 +224,37 @@ async function installModToClient(win, modData) {
     return { success: true, message: 'Mod already installed', fileName: sanitizedFileName };
   }
 
+  if (modData.forceReinstall) {
+    try {
+      const manifestFiles = await fs.readdir(clientManifestDir).catch(() => []);
+      for (const manifestFile of manifestFiles) {
+        if (!manifestFile.endsWith('.json')) continue;
+        const manifestPath = path.join(clientManifestDir, manifestFile);
+        try {
+          const manifestContent = await fs.readFile(manifestPath, 'utf8');
+          const manifest = JSON.parse(manifestContent);
+          if (manifest.projectId === modData.id) {
+            const oldFilePath = path.join(clientModsDir, manifest.fileName);
+            await fs.unlink(oldFilePath).catch(() => {});
+            await fs.unlink(manifestPath).catch(() => {});
+            break;
+          }
+        } catch {}
+      }
+
+      if (modData.name) {
+        const modFiles = await fs.readdir(clientModsDir);
+        const baseName = modData.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        const possibleMatches = modFiles.filter(f => f.startsWith(baseName) && f.endsWith('.jar'));
+        for (const match of possibleMatches) {
+          await fs.unlink(path.join(clientModsDir, match)).catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.error('[ModInstallService] Error cleaning existing client mod:', err);
+    }
+  }
+
   try {
     const loader = modData.loader || 'fabric'; // Default or passed
     const mcVersion = modData.version || '1.20.1'; // Default or passed
