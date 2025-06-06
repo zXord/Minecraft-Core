@@ -289,7 +289,7 @@
 
       if (result.success) {
         modSyncStatus = result;
-        
+
         // Emit event to parent about sync status
         dispatch('mod-sync-status', {
           synchronized: result.synchronized,
@@ -297,9 +297,16 @@
           totalRequired: result.totalRequired,
           totalPresent: result.totalPresent
         });
+      } else {
+        errorMessage.set(
+          `${result.error || 'Failed to check mod synchronization.'}`
+        );
+        setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
       console.error('[ClientModManager] Error checking mod synchronization:', err);
+      errorMessage.set('Failed to check mod synchronization.');
+      setTimeout(() => errorMessage.set(''), 5000);
     }
   }
 
@@ -746,14 +753,19 @@
           <!-- Manually Installed Mods Section -->
           <div class="mod-section">
             <h3>Manual Mods</h3>
-            <p class="section-description">
-              Mods installed directly in your client folder.
+          <p class="section-description">
+            Mods installed directly in your client folder.
+          </p>
+          {#if $errorMessage}
+            <p class="error-message">
+              {$errorMessage} Ensure your client path contains a <code>mods</code> directory.
             </p>
-            <ClientManualModList
-              {manualMods}
-              on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
-              on:delete={(e) => handleModDelete(e.detail.fileName)}
-              on:install={handleInstallMod}
+          {/if}
+          <ClientManualModList
+            {manualMods}
+            on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
+            on:delete={(e) => handleModDelete(e.detail.fileName)}
+            on:install={handleInstallMod}
             />
           </div>
         </div>
