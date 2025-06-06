@@ -4,6 +4,7 @@ const fsSync = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { app } = require('electron'); // Required for app.getPath('userData')
+const AdmZip = require('adm-zip');
 
 // Simple store implementation to persist mod categories
 const configDir = path.join(app.getPath('userData'), 'config');
@@ -39,6 +40,56 @@ const modCategoriesStore = {
   }
 };
 
+function parseForgeToml(content) {
+  const nameMatch = content.match(/displayName\s*=\s*"([^"]+)"/);
+  const versionMatch = content.match(/version\s*=\s*"([^"]+)"/);
+  return {
+    name: nameMatch ? nameMatch[1] : undefined,
+    versionNumber: versionMatch ? versionMatch[1] : undefined
+  };
+}
+
+async function readModMetadataFromJar(jarPath) {
+  try {
+    const zip = new AdmZip(jarPath);
+    const entries = zip.getEntries();
+    const fabric = entries.find(e =>
+      e.entryName === 'fabric.mod.json' || e.entryName.endsWith('/fabric.mod.json')
+    );
+    if (fabric) {
+      try {
+        const data = JSON.parse(fabric.getData().toString('utf8'));
+        return {
+          name: data.name || data.id,
+          versionNumber: data.version || data.version_number
+        };
+      } catch {}
+    }
+    const quilt = entries.find(e =>
+      e.entryName === 'quilt.mod.json' || e.entryName.endsWith('/quilt.mod.json')
+    );
+    if (quilt) {
+      try {
+        const data = JSON.parse(quilt.getData().toString('utf8'));
+        return {
+          name: data.name || data.quilt_loader?.id,
+          versionNumber: data.version
+        };
+      } catch {}
+    }
+    const forge = entries.find(e =>
+      e.entryName === 'META-INF/mods.toml' || e.entryName.endsWith('/META-INF/mods.toml')
+    );
+    if (forge) {
+      const text = forge.getData().toString('utf8');
+      return parseForgeToml(text);
+    }
+  } catch (err) {
+    console.warn('[ModManager] Failed to read metadata from', jarPath, err.message);
+  }
+  return {};
+}
+
 async function listMods(serverPath) {
   console.log('[ModManager] Listing mods from:', serverPath);
   
@@ -69,18 +120,18 @@ async function listMods(serverPath) {
   await fs.mkdir(disabledModsDir, { recursive: true });
   
   const serverFiles = await fs.readdir(serverModsDir);
-  const serverModFiles = serverFiles.filter(file => file.endsWith('.jar'));
+  const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   
   let clientModFiles = [];
   try {
     const clientFiles = await fs.readdir(clientModsDir);
-    clientModFiles = clientFiles.filter(file => file.endsWith('.jar'));
+    clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   } catch (err) {
     console.warn('[ModManager] Could not read client mods directory:', err);
   }
   
   const disabledFiles = await fs.readdir(disabledModsDir);
-  const disabledModFiles = disabledFiles.filter(file => file.endsWith('.jar'));
+  const disabledModFiles = disabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   
   const modsInBoth = serverModFiles.filter(mod => clientModFiles.includes(mod));
   const serverOnlyMods = serverModFiles.filter(mod => !clientModFiles.includes(mod));
@@ -120,19 +171,20 @@ async function getInstalledModInfo(serverPath) {
   await fs.mkdir(clientModsDir, { recursive: true });
   
   const enabledFiles = await fs.readdir(modsDir);
-  const enabledMods = enabledFiles.filter(file => file.endsWith('.jar'));
+  const enabledMods = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   
   let clientMods = [];
   try {
     const clientFiles = await fs.readdir(clientModsDir);
-    clientMods = clientFiles.filter(file => file.endsWith('.jar'));
+    clientMods = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   } catch (err) {
     console.warn('[ModManager] Could not read client mods:', err);
   }
   
   const disabledDir = path.join(serverPath, 'mods_disabled');
   await fs.mkdir(disabledDir, { recursive: true });
-  const disabledFiles = (await fs.readdir(disabledDir).catch(() => [])).filter(file => file.endsWith('.jar'));
+  const disabledFiles = (await fs.readdir(disabledDir).catch(() => []))
+    .filter(file => file.toLowerCase().endsWith('.jar'));
   
   const allModFiles = [...new Set([...enabledMods, ...clientMods, ...disabledFiles])];
   
@@ -190,7 +242,9 @@ async function getClientInstalledModInfo(clientPath) {
 
   const files = await fs.readdir(modsDir).catch(() => []);
   const modFiles = files
-    .filter(f => f.endsWith('.jar') || f.endsWith('.jar.disabled'))
+    .filter(f =>
+      f.toLowerCase().endsWith('.jar') || f.toLowerCase().endsWith('.jar.disabled')
+    )
     .map(f => f.replace('.disabled', ''));
 
   const uniqueModFiles = Array.from(new Set(modFiles));
@@ -198,12 +252,36 @@ async function getClientInstalledModInfo(clientPath) {
   const modInfo = [];
   for (const file of uniqueModFiles) {
     const manifestPath = path.join(manifestDir, `${file}.json`);
+    let manifest = null;
     try {
       const content = await fs.readFile(manifestPath, 'utf8');
-      const manifest = JSON.parse(content);
+      manifest = JSON.parse(content);
       modInfo.push(manifest);
     } catch (err) {
       console.log(`[ModManager] No manifest found for ${file}`);
+    }
+
+    if (!manifest) {
+      const jarBase = path.join(modsDir, file);
+      const jarPath = await fs
+        .access(jarBase)
+        .then(() => jarBase)
+        .catch(async () => {
+          const disabledPath = jarBase + '.disabled';
+          try {
+            await fs.access(disabledPath);
+            return disabledPath;
+          } catch {
+            return null;
+          }
+        });
+
+      if (jarPath) {
+        const meta = await readModMetadataFromJar(jarPath);
+        if (meta && (meta.name || meta.versionNumber)) {
+          modInfo.push({ fileName: file, ...meta });
+        }
+      }
     }
   }
 
@@ -241,7 +319,7 @@ async function saveDisabledMods(serverPath, disabledMods) {
   console.log(`[ModManager] Desired disabled mods list contains:`, disabledMods);
   
   for (const modFile of enabledFiles) {
-    if (modFile.endsWith('.jar') && disabledMods.includes(modFile)) {
+    if (modFile.toLowerCase().endsWith('.jar') && disabledMods.includes(modFile)) {
       const sourcePath = path.join(modsDir, modFile);
       const destPath = path.join(disabledModsDir, modFile);
       console.log(`[ModManager] Disabling mod by moving: ${sourcePath} -> ${destPath}`);
@@ -257,7 +335,7 @@ async function saveDisabledMods(serverPath, disabledMods) {
   }
   
   for (const modFile of currentDisabledFiles) {
-    if (modFile.endsWith('.jar') && !disabledMods.includes(modFile)) {
+    if (modFile.toLowerCase().endsWith('.jar') && !disabledMods.includes(modFile)) {
       const sourcePath = path.join(disabledModsDir, modFile);
       const destPath = path.join(modsDir, modFile);
       console.log(`[ModManager] Enabling mod by moving: ${sourcePath} -> ${destPath}`);
@@ -312,7 +390,7 @@ async function getDisabledMods(serverPath) {
   
   try {
     const currentDisabledFiles = await fs.readdir(disabledModsDir);
-    const disabledModFileNames = currentDisabledFiles.filter(file => file.endsWith('.jar'));
+    const disabledModFileNames = currentDisabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
     for (const modFile of disabledModFileNames) {
       if (!disabledMods.includes(modFile)) {
         disabledMods.push(modFile);
