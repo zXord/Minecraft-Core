@@ -19,7 +19,12 @@ function createFileHandlers(win) {  return {
       // Return both the path and server settings
       return {
         path: appStore.get('lastServerPath') || null,
-        serverSettings: appStore.get('serverSettings') || { port: 25565, maxRam: 4 }
+        serverSettings: appStore.get('serverSettings') || {
+          port: 25565,
+          maxRam: 4,
+          autoStartMinecraft: false,
+          autoStartManagement: false
+        }
       };
     },
     
@@ -86,7 +91,12 @@ function createFileHandlers(win) {  return {
         }
         
         // Ensure config file exists with defaults
-        const serverSettings = appStore.get('serverSettings') || { port: 25565, maxRam: 4 };
+        const serverSettings = appStore.get('serverSettings') || {
+          port: 25565,
+          maxRam: 4,
+          autoStartMinecraft: false,
+          autoStartManagement: false
+        };
         const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
         
         ensureConfigFile(folder, {
