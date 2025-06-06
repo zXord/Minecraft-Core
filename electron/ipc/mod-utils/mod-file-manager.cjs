@@ -175,6 +175,42 @@ async function getInstalledModInfo(serverPath) {
   return modInfo;
 }
 
+// Get installed mod info for a standalone client path
+async function getClientInstalledModInfo(clientPath) {
+  console.log('[ModManager] Getting client installed mod info from:', clientPath);
+
+  if (!clientPath) {
+    throw new Error('Client path is required');
+  }
+
+  const modsDir = path.join(clientPath, 'mods');
+  const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+  await fs.mkdir(modsDir, { recursive: true });
+  await fs.mkdir(manifestDir, { recursive: true });
+
+  const files = await fs.readdir(modsDir).catch(() => []);
+  const modFiles = files
+    .filter(f => f.endsWith('.jar') || f.endsWith('.jar.disabled'))
+    .map(f => f.replace('.disabled', ''));
+
+  const uniqueModFiles = Array.from(new Set(modFiles));
+
+  const modInfo = [];
+  for (const file of uniqueModFiles) {
+    const manifestPath = path.join(manifestDir, `${file}.json`);
+    try {
+      const content = await fs.readFile(manifestPath, 'utf8');
+      const manifest = JSON.parse(content);
+      modInfo.push(manifest);
+    } catch (err) {
+      console.log(`[ModManager] No manifest found for ${file}`);
+    }
+  }
+
+  console.log(`[ModManager] Found ${modInfo.length} client mod manifests out of ${uniqueModFiles.length} total mods`);
+  return modInfo;
+}
+
 async function saveDisabledMods(serverPath, disabledMods) {
   console.log('[ModManager] Saving disabled mods:', disabledMods);
   
@@ -581,6 +617,7 @@ module.exports = {
   modCategoriesStore,
   listMods,
   getInstalledModInfo,
+  getClientInstalledModInfo,
   saveDisabledMods,
   getDisabledMods,
   addMod,
