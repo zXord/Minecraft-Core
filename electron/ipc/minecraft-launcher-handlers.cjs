@@ -675,6 +675,36 @@ function createMinecraftLauncherHandlers(win) {
       }
     },
 
+    // Delete a client mod
+    'delete-client-mod': async (_e, { clientPath, modFileName }) => {
+      try {
+        if (!clientPath || !modFileName) {
+          return { success: false, error: 'Client path and mod file name are required' };
+        }
+
+        const modsDir = path.join(clientPath, 'mods');
+        const modPath = path.join(modsDir, modFileName);
+        const disabledModPath = path.join(modsDir, modFileName + '.disabled');
+
+        let deleted = false;
+        if (fs.existsSync(modPath)) {
+          fs.unlinkSync(modPath);
+          deleted = true;
+        }
+        if (fs.existsSync(disabledModPath)) {
+          fs.unlinkSync(disabledModPath);
+          deleted = true;
+        }
+
+        if (deleted) {
+          return { success: true, action: 'deleted' };
+        }
+        return { success: false, error: 'Mod file not found' };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
 
   };
 }
