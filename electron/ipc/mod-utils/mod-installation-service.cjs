@@ -237,21 +237,33 @@ async function installModToClient(win, modData) {
 
     let versionInfo;
     let versionToInstall;
+
     if (modData.selectedVersionId) {
-      // Fetch exact version info when a specific version is requested
-      versionInfo = await getModrinthVersionInfo(modData.id, modData.selectedVersionId);
-      if (
-        !versionInfo ||
-        (loader && !versionInfo.loaders.includes(loader)) ||
-        (mcVersion && !versionInfo.game_versions.includes(mcVersion))
-      ) {
-        throw new Error('Selected version not found or not compatible');
+      // Try to fetch the requested version info
+      try {
+        versionInfo = await getModrinthVersionInfo(modData.id, modData.selectedVersionId);
+        if (
+          versionInfo &&
+          (!loader || versionInfo.loaders.includes(loader)) &&
+          (!mcVersion || versionInfo.game_versions.includes(mcVersion))
+        ) {
+          versionToInstall = { id: versionInfo.id, versionNumber: versionInfo.version_number };
+        } else {
+          console.warn('[ModInstallService] Requested version incompatible, falling back to best match');
+          versionInfo = null;
+        }
+      } catch (err) {
+        console.warn('[ModInstallService] Failed to fetch requested version, falling back:', err.message);
+        versionInfo = null;
       }
-      versionToInstall = { id: versionInfo.id, versionNumber: versionInfo.version_number };
-    } else {
-      // Get the best compatible version automatically
+    }
+
+    // If no suitable version info found, pick the best compatible version automatically
+    if (!versionInfo) {
       const versions = await getModrinthVersions(modData.id, loader, mcVersion, true);
-      if (!versions || versions.length === 0) throw new Error('No compatible versions found for this mod');
+      if (!versions || versions.length === 0) {
+        throw new Error('No compatible versions found for this mod');
+      }
       versionToInstall = versions[0];
       versionInfo = await getModrinthVersionInfo(modData.id, versionToInstall.id);
     }
