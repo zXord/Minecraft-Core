@@ -508,6 +508,7 @@
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
+
   
   // Client mod search functionality
   async function searchClientMods() {
@@ -1161,4 +1162,5 @@
   .no-results p {
     color: #9ca3af;
   }
-</style> 
+
+</style>
