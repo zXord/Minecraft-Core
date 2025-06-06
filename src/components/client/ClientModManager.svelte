@@ -78,11 +78,12 @@
   let lastModCheck: Date | null = null;
   
   // Client mod finding state
-  let activeTab: string = 'server-mods'; // 'server-mods' or 'find-mods'
+  let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
   let versionsCache = {};
   let versionsLoading = {};
   let versionsError = {};
-  let minecraftVersionOptions = [get(minecraftVersion)];
+  let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
+  let manualMods: Mod[] = [];
   let filterType = 'client';
 
   // Connect to server and get mod information
@@ -114,6 +115,27 @@
       if (!minecraftVersionOptions.includes($minecraftVersion)) {
         minecraftVersionOptions = [$minecraftVersion, ...minecraftVersionOptions.filter(v => v !== $minecraftVersion)];
       }
+    }
+  }
+
+  // Derive list of manually installed mods from sync status
+  $: {
+    if (modSyncStatus) {
+      const managed = new Set([
+        ...requiredMods.map(m => m.fileName),
+        ...optionalMods.map(m => m.fileName)
+      ]);
+      const enabled = modSyncStatus.presentEnabledMods || [];
+      const disabled = modSyncStatus.presentDisabledMods || [];
+      const manualEnabled = enabled
+        .filter(f => !managed.has(f))
+        .map(fileName => ({ fileName, location: 'client' }));
+      const manualDisabled = disabled
+        .filter(f => !managed.has(f))
+        .map(fileName => ({ fileName, location: 'disabled' }));
+      manualMods = [...manualEnabled, ...manualDisabled];
+    } else {
+      manualMods = [];
     }
   }
 
@@ -487,11 +509,11 @@
 
   <!-- Tab Navigation -->
   <div class="tab-navigation">
-    <button 
-      class="tab {activeTab === 'server-mods' ? 'active' : ''}"
-      on:click={() => switchTab('server-mods')}
+    <button
+      class="tab {activeTab === 'installed-mods' ? 'active' : ''}"
+      on:click={() => switchTab('installed-mods')}
     >
-      Server Mods
+      Installed Mods
     </button>
     <button 
       class="tab {activeTab === 'find-mods' ? 'active' : ''}"
@@ -502,7 +524,7 @@
   </div>
 
   <div class="mod-content">
-    {#if activeTab === 'server-mods'}
+    {#if activeTab === 'installed-mods'}
       <!-- Original server mod synchronization content -->
       {#if connectionStatus === 'disconnected'}
         <div class="connection-error">
@@ -551,12 +573,28 @@
               <p class="section-description">
                 These mods are available but not required. You can enable or disable them before playing.
               </p>
-              <ClientModList 
-                mods={optionalMods}
+          <ClientModList
+            mods={optionalMods}
+            type="optional"
+            {modSyncStatus}
+            on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
+            on:download={downloadRequiredMods}
+          />
+        </div>
+      {/if}
+
+          <!-- Manually Installed Mods Section -->
+          {#if manualMods.length > 0}
+            <div class="mod-section">
+              <h3>Manual Mods</h3>
+              <p class="section-description">
+                Mods installed directly in your client folder.
+              </p>
+              <ClientModList
+                mods={manualMods}
                 type="optional"
                 {modSyncStatus}
                 on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
-                on:download={downloadRequiredMods}
               />
             </div>
           {/if}
