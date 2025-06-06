@@ -1,8 +1,8 @@
 <script>
   export let serverPath = '';
-  import ModManager from '../components/mods/ModManager.svelte';
+  import ServerModManager from '../components/server/ServerModManager.svelte';
 </script>
 
 <div class="content-panel">
-  <ModManager {serverPath} />
+  <ServerModManager {serverPath} />
 </div>
