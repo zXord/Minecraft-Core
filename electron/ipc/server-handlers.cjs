@@ -40,9 +40,17 @@ function createServerHandlers(win) {
         // Save server path to persistent store
         appStore.set("lastServerPath", targetPath);
 
-        // Save port and maxRam settings
+        // Save port and maxRam settings while preserving existing auto-start
         try {
+          const currentSettings = appStore.get("serverSettings") || {
+            port: 25565,
+            maxRam: 4,
+            autoStartMinecraft: false,
+            autoStartManagement: false,
+          };
+
           appStore.set("serverSettings", {
+            ...currentSettings,
             port: port || 25565,
             maxRam: maxRam || 4,
           });
@@ -109,6 +117,8 @@ function createServerHandlers(win) {
         const serverSettings = appStore.get("serverSettings") || {
           port: 25565,
           maxRam: 4,
+          autoStartMinecraft: false,
+          autoStartManagement: false,
         };
 
         return {
