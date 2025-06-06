@@ -21,6 +21,7 @@
   export let filterMinecraftVersion = '';
   export let loadOnMount = false; // New flag to control whether to load versions on mount
   export let installedVersionId = ''; // ID of the currently installed version
+  export let serverManaged = false; // True if this mod is managed by the server
   
   // Local state
   let selectedVersionId = mod.selectedVersionId || installedVersionId;
@@ -191,6 +192,9 @@
    * Toggle version selector visibility
    */
   function toggleVersionSelector() {
+    if (serverManaged) {
+      return;
+    }
     if (expanded) {
       expandedModId.set(null);
     } else {
@@ -253,6 +257,9 @@
    * @param {boolean} isVersionChange - Whether this is changing version of an installed mod
    */
   function handleInstall(isVersionChange = false) {
+    if (serverManaged) {
+      return;
+    }
     // Mark mod as installing
     installingModIds.update(ids => {
       ids.add(mod.id);
@@ -428,7 +435,7 @@
         class:update-available={isInstalled && hasUpdate && !expanded}
         class:change-version={isChangingVersion && expanded && !isInstalling}
         class:installing={isInstalling}
-        disabled={isInstalling || (!isInstalled && versions.length > 0 && !selectedVersionId)}
+        disabled={serverManaged || isInstalling || (!isInstalled && versions.length > 0 && !selectedVersionId)}
         on:click={(e) => {
           e.stopPropagation();
           if (isInstalled) {
@@ -464,7 +471,9 @@
           }
         }}
       >
-        {#if isInstalling}
+        {#if serverManaged}
+          Server Mod
+        {:else if isInstalling}
           Installing...
         {:else if isInstalled}
           {#if expanded && isChangingVersion}
@@ -481,7 +490,7 @@
     </div>
   </div>
   
-  {#if expanded}
+  {#if expanded && !serverManaged}
     <div id="version-selector-{mod.id}" class="version-selector">
       {#if loading}
         <div class="loading-versions">Loading versions...</div>
