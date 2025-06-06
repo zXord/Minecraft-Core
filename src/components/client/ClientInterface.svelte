@@ -523,10 +523,9 @@
         successMessage.set('Authentication refreshed');
         setTimeout(() => successMessage.set(''), 3000);
       } else if (!result.success && result.needsReauth) {
-        console.log('[Client] Authentication expired, re-authentication required');
-        authStatus = 'needs-auth';
-        username = '';
-        authData = null;
+        console.log('[Client] Authentication expired, user should re-authenticate manually');
+        errorMessage.set('Authentication expired. Use the "Re-authenticate" button in Settings.');
+        setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
       console.error('[Client] Error refreshing authentication:', err);
@@ -842,10 +841,6 @@
         
         if (errorMsg.includes('Authentication expired') || errorMsg.includes('authserver.mojang.com')) {
           errorMsg = 'Your Microsoft authentication has expired. Please click "🔄 Re-authenticate" in Settings and try again.';
-          // Also update auth status
-          authStatus = 'needs-auth';
-          username = '';
-          authData = null;
         } else if (errorMsg.includes('EMFILE') || errorMsg.includes('too many files')) {
           errorMsg = 'Too many files are open. Please close other applications and try again.';
         } else if (errorMsg.includes('ENOENT') || errorMsg.includes('not found')) {
@@ -869,9 +864,6 @@
         errorMsg = 'Network connection error. Please check your internet connection and try again.';
       } else if (errorMsg.includes('Authentication')) {
         errorMsg = 'Authentication error. Please re-authenticate with Microsoft in Settings.';
-        authStatus = 'needs-auth';
-        username = '';
-        authData = null;
       }
       
       errorMessage.set('Launch error: ' + errorMsg);
