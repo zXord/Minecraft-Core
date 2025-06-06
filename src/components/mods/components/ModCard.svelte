@@ -504,13 +504,11 @@
         {#if filteredVersions.some(v => v.gameVersions.includes(filterMinecraftVersion))}
           <div class="version-list">
             {#each filteredVersions as version}
-              <button 
+              <div
                 class="version-item"
                 class:selected={version.id === selectedVersionId}
                 class:installed-version={version.id === installedVersionId}
                 class:compatible={version.gameVersions.includes(filterMinecraftVersion)}
-                on:click={() => selectVersion(version)}
-                type="button"
                 aria-selected={version.id === selectedVersionId}
               >
                 <div class="version-info">
@@ -532,7 +530,10 @@
                     </span>
                   {/if}
                 </div>
-              </button>
+                <button class="select-version" on:click={() => selectVersion(version)} type="button">
+                  Select
+                </button>
+              </div>
             {/each}
           </div>
         {:else}
@@ -541,12 +542,10 @@
           </div>
           <div class="version-list">
             {#each filteredVersions as version}
-              <button 
+              <div
                 class="version-item"
                 class:selected={version.id === selectedVersionId}
                 class:installed-version={version.id === installedVersionId}
-                on:click={() => selectVersion(version)}
-                type="button"
                 aria-selected={version.id === selectedVersionId}
               >
                 <div class="version-info">
@@ -568,7 +567,10 @@
                     </span>
                   {/if}
                 </div>
-              </button>
+                <button class="select-version" on:click={() => selectVersion(version)} type="button">
+                  Select
+                </button>
+              </div>
             {/each}
           </div>
         {/if}
@@ -785,11 +787,9 @@
     padding: 8px 10px;
     border-radius: 4px;
     background: rgba(255, 255, 255, 0.05);
-    cursor: pointer;
     transition: background-color 0.15s;
     text-align: left;
     width: 100%;
-    border: none;
     font-family: inherit;
     font-size: inherit;
     color: inherit;
@@ -813,6 +813,19 @@
     border-left-color: #4caf50;
     border-left-width: 3px;
     background: rgba(76, 175, 80, 0.1);
+  }
+
+  .select-version {
+    background: #646cff;
+    color: white;
+    border: none;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .select-version:hover {
+    background: #7a81ff;
   }
   
   .version-name {
