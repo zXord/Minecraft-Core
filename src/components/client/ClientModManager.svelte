@@ -96,6 +96,8 @@
     downloadManagerCleanup = initDownloadManager();
     if (instance?.path) {
       loadInstalledInfo();
+      // Populate local mod status even if not connected to a server
+      checkModSynchronization();
     }
     // Initialize filter stores for client mod search
     if (!get(filterMinecraftVersion)) {
@@ -144,7 +146,7 @@
       const manualEnabled = enabled
         .filter(f => !managed.has(f))
         .map(fileName => {
-          const info = get(installedModInfo).find(m => m.fileName === fileName) || {};
+          const info = $installedModInfo.find(m => m.fileName === fileName) || {};
           return {
             fileName,
             location: 'client',
@@ -156,7 +158,7 @@
       const manualDisabled = disabled
         .filter(f => !managed.has(f))
         .map(fileName => {
-          const info = get(installedModInfo).find(m => m.fileName === fileName) || {};
+          const info = $installedModInfo.find(m => m.fileName === fileName) || {};
           return {
             fileName,
             location: 'disabled',
@@ -267,7 +269,7 @@
 
   // Check mod synchronization status
   async function checkModSynchronization() {
-    if (!instance.path || !requiredMods.length) {
+    if (!instance?.path) {
       return;
     }
 
