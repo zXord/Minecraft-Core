@@ -800,6 +800,7 @@
           bind:filterType
           {minecraftVersionOptions}
           serverPath={instance?.path || ""}
+          serverManagedSet={$serverManagedFiles}
         />
       </div>
     {/if}
