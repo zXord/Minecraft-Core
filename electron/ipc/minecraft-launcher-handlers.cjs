@@ -213,6 +213,11 @@ function createMinecraftLauncherHandlers(win) {
         const downloaded = [];
         const failures = [];
         const skipped = [];
+
+        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        if (!fs.existsSync(manifestDir)) {
+          fs.mkdirSync(manifestDir, { recursive: true });
+        }
         
         // Process each required mod
         for (let i = 0; i < requiredMods.length; i++) {
@@ -270,6 +275,10 @@ function createMinecraftLauncherHandlers(win) {
                           }
                           
                           downloaded.push(mod.fileName);
+                          try {
+                            const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                            fs.writeFileSync(manifestPath, JSON.stringify({ fileName: mod.fileName, source: 'server' }, null, 2));
+                          } catch {}
                           resolve();
                         });
                         
@@ -298,6 +307,10 @@ function createMinecraftLauncherHandlers(win) {
                       }
                       
                       downloaded.push(mod.fileName);
+                      try {
+                        const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                        fs.writeFileSync(manifestPath, JSON.stringify({ fileName: mod.fileName, source: 'server' }, null, 2));
+                      } catch {}
                       resolve();
                     });
                     

@@ -13,6 +13,8 @@ const downloads = writable({});
 const installingModIds = writable(new Set());
 const modWarnings = writable(new Map());
 const disabledMods = writable(new Set()); // Store for disabled mods
+// Names of mods that are managed by the server (required or optional)
+const serverManagedFiles = writable(new Set());
 
 // Loading states
 const isLoading = writable(false);
@@ -158,6 +160,7 @@ export {
   installingModIds,
   modWarnings,
   disabledMods,
+  serverManagedFiles,
   isLoading,
   isSearching,
   isCheckingUpdates,

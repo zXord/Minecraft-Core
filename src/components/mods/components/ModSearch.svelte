@@ -22,7 +22,8 @@
     installedModInfo,
     modsWithUpdates,
     isCheckingUpdates,
-    successMessage
+    successMessage,
+    serverManagedFiles
   } from '../../../stores/modStore.js';
   import { searchMods, fetchModVersions, checkForUpdates } from '../../../utils/mods/modAPI.js';
   import ModCard from './ModCard.svelte';
@@ -435,6 +436,7 @@
       <div class="mods-grid">
         {#each visibleMods as mod (mod.id)}
           {@const installedInfo = $installedModInfo.find(info => info.projectId === mod.id)}
+          {@const serverManaged = installedInfo && $serverManagedFiles.has(installedInfo.fileName)}
           <ModCard
             {mod}
             expanded={$expandedModId === mod.id}
@@ -444,6 +446,7 @@
             filterMinecraftVersion={$filterMinecraftVersion}
             loadOnMount={true}
             installedVersionId={installedInfo?.versionId || ''}
+            serverManaged={serverManaged}
             on:loadVersions={(e) => loadVersions(e)}
             on:versionSelect={handleVersionSelect}
             on:install={handleInstall}
