@@ -4,6 +4,7 @@ const fsSync = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { app } = require('electron'); // Required for app.getPath('userData')
+const AdmZip = require('adm-zip');
 
 // Simple store implementation to persist mod categories
 const configDir = path.join(app.getPath('userData'), 'config');
@@ -38,6 +39,56 @@ const modCategoriesStore = {
     }
   }
 };
+
+function parseForgeToml(content) {
+  const nameMatch = content.match(/displayName\s*=\s*"([^"]+)"/);
+  const versionMatch = content.match(/version\s*=\s*"([^"]+)"/);
+  return {
+    name: nameMatch ? nameMatch[1] : undefined,
+    versionNumber: versionMatch ? versionMatch[1] : undefined
+  };
+}
+
+async function readModMetadataFromJar(jarPath) {
+  try {
+    const zip = new AdmZip(jarPath);
+    const entries = zip.getEntries();
+    const fabric = entries.find(e =>
+      e.entryName === 'fabric.mod.json' || e.entryName.endsWith('/fabric.mod.json')
+    );
+    if (fabric) {
+      try {
+        const data = JSON.parse(fabric.getData().toString('utf8'));
+        return {
+          name: data.name || data.id,
+          versionNumber: data.version || data.version_number
+        };
+      } catch {}
+    }
+    const quilt = entries.find(e =>
+      e.entryName === 'quilt.mod.json' || e.entryName.endsWith('/quilt.mod.json')
+    );
+    if (quilt) {
+      try {
+        const data = JSON.parse(quilt.getData().toString('utf8'));
+        return {
+          name: data.name || data.quilt_loader?.id,
+          versionNumber: data.version
+        };
+      } catch {}
+    }
+    const forge = entries.find(e =>
+      e.entryName === 'META-INF/mods.toml' || e.entryName.endsWith('/META-INF/mods.toml')
+    );
+    if (forge) {
+      const text = forge.getData().toString('utf8');
+      return parseForgeToml(text);
+    }
+  } catch (err) {
+    console.warn('[ModManager] Failed to read metadata from', jarPath, err.message);
+  }
+  return {};
+}
 
 async function listMods(serverPath) {
   console.log('[ModManager] Listing mods from:', serverPath);
@@ -201,12 +252,36 @@ async function getClientInstalledModInfo(clientPath) {
   const modInfo = [];
   for (const file of uniqueModFiles) {
     const manifestPath = path.join(manifestDir, `${file}.json`);
+    let manifest = null;
     try {
       const content = await fs.readFile(manifestPath, 'utf8');
-      const manifest = JSON.parse(content);
+      manifest = JSON.parse(content);
       modInfo.push(manifest);
     } catch (err) {
       console.log(`[ModManager] No manifest found for ${file}`);
+    }
+
+    if (!manifest) {
+      const jarBase = path.join(modsDir, file);
+      const jarPath = await fs
+        .access(jarBase)
+        .then(() => jarBase)
+        .catch(async () => {
+          const disabledPath = jarBase + '.disabled';
+          try {
+            await fs.access(disabledPath);
+            return disabledPath;
+          } catch {
+            return null;
+          }
+        });
+
+      if (jarPath) {
+        const meta = await readModMetadataFromJar(jarPath);
+        if (meta && (meta.name || meta.versionNumber)) {
+          modInfo.push({ fileName: file, ...meta });
+        }
+      }
     }
   }
 

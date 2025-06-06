@@ -51,6 +51,8 @@
     required?: boolean;
     checksum?: string;
     downloadUrl?: string;
+    name?: string;
+    versionNumber?: string;
   }
 
   interface ModSyncStatus {
@@ -168,7 +170,8 @@
             location: 'client',
             projectId: details.projectId,
             versionId: details.versionId,
-            versionNumber: details.versionNumber
+            versionNumber: details.versionNumber,
+            name: details.name
           };
         });
       const manualDisabled = disabled
@@ -180,7 +183,8 @@
             location: 'disabled',
             projectId: details.projectId,
             versionId: details.versionId,
-            versionNumber: details.versionNumber
+            versionNumber: details.versionNumber,
+            name: details.name
           };
         });
       manualMods = [...manualEnabled, ...manualDisabled];
