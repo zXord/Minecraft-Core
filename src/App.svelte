@@ -19,6 +19,8 @@
   import ClientInterface from './components/client/ClientInterface.svelte';
   import ClientSetupWizard from './components/client/ClientSetupWizard.svelte';
   import StatusManager from './components/common/StatusManager.svelte';
+  import ConfirmationDialog from './components/common/ConfirmationDialog.svelte';
+  import { showExitConfirmation } from './stores/exitStore.js';
   
   // --- Flow & Tabs ---
   let step = 'loading'; // loading → chooseFolder → chooseVersion → done
@@ -136,6 +138,11 @@
           maxRam: settings.maxRam || state.maxRam
         }));
       }
+    });
+
+    // Show exit confirmation when main process requests it
+    window.electron.on('app-close-request', () => {
+      showExitConfirmation.set(true);
     });
     
     // 2) Check for initial instances loaded by main.js
@@ -583,6 +590,23 @@
       {/if}
     {/if}
   </div>
+  <ConfirmationDialog
+    bind:visible={$showExitConfirmation}
+    title="Minecraft Server Running"
+    message="The Minecraft server is still running. Stop the server and quit?"
+    confirmText="Quit"
+    cancelText="Cancel"
+    confirmType="danger"
+    backdropClosable={false}
+    on:confirm={() => {
+      window.electron.invoke('app-close-response', true);
+      showExitConfirmation.set(false);
+    }}
+    on:cancel={() => {
+      window.electron.invoke('app-close-response', false);
+      showExitConfirmation.set(false);
+    }}
+  />
   <StatusManager />
 </main>
 
