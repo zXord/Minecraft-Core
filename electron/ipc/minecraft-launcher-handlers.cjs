@@ -729,6 +729,52 @@ function createMinecraftLauncherHandlers(win) {
       }
     },
 
+    // Remove mods that are not managed by the server
+    'minecraft-remove-unmanaged-mods': async (_e, { clientPath, requiredMods = [], allClientMods = [] }) => {
+      try {
+        if (!clientPath) {
+          return { success: false, error: 'Client path is required' };
+        }
+
+        const modsDir = path.join(clientPath, 'mods');
+        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+
+        if (!fs.existsSync(modsDir)) {
+          return { success: true, removed: [] };
+        }
+
+        const allowed = new Set([
+          ...requiredMods.map(m => m.fileName),
+          ...allClientMods.map(m => m.fileName)
+        ]);
+
+        const files = fs.readdirSync(modsDir).filter(f => f.endsWith('.jar') || f.endsWith('.jar.disabled'));
+        const removed = [];
+
+        for (const file of files) {
+          const base = file.replace('.disabled', '');
+          if (!allowed.has(base)) {
+            const filePath = path.join(modsDir, file);
+            try {
+              fs.unlinkSync(filePath);
+            } catch {}
+
+            // remove corresponding manifest if exists
+            try {
+              const manifestPath = path.join(manifestDir, `${base}.json`);
+              if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
+            } catch {}
+
+            removed.push(base);
+          }
+        }
+
+        return { success: true, removed };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
 
   };
 }
