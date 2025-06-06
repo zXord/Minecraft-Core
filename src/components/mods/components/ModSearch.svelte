@@ -22,8 +22,7 @@
     installedModInfo,
     modsWithUpdates,
     isCheckingUpdates,
-    successMessage,
-    serverManagedFiles
+    successMessage
   } from '../../../stores/modStore.js';
   import { searchMods, fetchModVersions, checkForUpdates } from '../../../utils/mods/modAPI.js';
   import ModCard from './ModCard.svelte';
@@ -33,6 +32,7 @@
   export const serverPath = '';
   export let minecraftVersionOptions = [];
   export let filterType = 'all';
+  export let serverManagedSet = undefined;
   
   // Local state
   let versionsCache = {};
@@ -436,7 +436,7 @@
       <div class="mods-grid">
         {#each visibleMods as mod (mod.id)}
           {@const installedInfo = $installedModInfo.find(info => info.projectId === mod.id)}
-          {@const serverManaged = installedInfo && $serverManagedFiles.has(installedInfo.fileName)}
+          {@const serverManaged = serverManagedSet?.has(installedInfo?.fileName)}
           <ModCard
             {mod}
             expanded={$expandedModId === mod.id}

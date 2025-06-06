@@ -148,8 +148,9 @@
     }
   }
 
-  // Derive list of manually installed mods from sync status
-  $: {
+
+  // Update manual mods based on current synchronization status
+  function updateManualMods() {
     if (modSyncStatus) {
       const managed = new Set([
         ...requiredMods.map(m => m.fileName),
@@ -157,28 +158,29 @@
       ]);
       const enabled = modSyncStatus.presentEnabledMods || [];
       const disabled = modSyncStatus.presentDisabledMods || [];
+      const info = get(installedModInfo);
       const manualEnabled = enabled
         .filter(f => !managed.has(f))
         .map(fileName => {
-          const info = $installedModInfo.find(m => m.fileName === fileName) || {};
+          const details = info.find(m => m.fileName === fileName) || {};
           return {
             fileName,
             location: 'client',
-            projectId: info.projectId,
-            versionId: info.versionId,
-            versionNumber: info.versionNumber
+            projectId: details.projectId,
+            versionId: details.versionId,
+            versionNumber: details.versionNumber
           };
         });
       const manualDisabled = disabled
         .filter(f => !managed.has(f))
         .map(fileName => {
-          const info = $installedModInfo.find(m => m.fileName === fileName) || {};
+          const details = info.find(m => m.fileName === fileName) || {};
           return {
             fileName,
             location: 'disabled',
-            projectId: info.projectId,
-            versionId: info.versionId,
-            versionNumber: info.versionNumber
+            projectId: details.projectId,
+            versionId: details.versionId,
+            versionNumber: details.versionNumber
           };
         });
       manualMods = [...manualEnabled, ...manualDisabled];
@@ -288,6 +290,7 @@
       setTimeout(() => errorMessage.set(''), 5000);
     } finally {
       isLoadingMods = false;
+      updateManualMods();
     }
   }
 
@@ -325,6 +328,7 @@
       errorMessage.set('Failed to check mod synchronization.');
       setTimeout(() => errorMessage.set(''), 5000);
     }
+    updateManualMods();
   }
 
   // Reload installed mod info and update synchronization status
@@ -332,6 +336,7 @@
     if (!instance?.path) return;
     await loadInstalledInfo();
     await checkModSynchronization();
+    updateManualMods();
   }
 
   // Download required mods
@@ -800,6 +805,7 @@
           bind:filterType
           {minecraftVersionOptions}
           serverPath={instance?.path || ""}
+          serverManagedSet={$serverManagedFiles}
         />
       </div>
     {/if}
