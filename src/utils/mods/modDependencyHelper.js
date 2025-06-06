@@ -20,6 +20,34 @@ import { installMod } from './modAPI.js';
 import { checkVersionCompatibility } from './modCompatibility.js';
 
 /**
+ * Determine if the given project ID refers to Minecraft itself
+ * This normalizes the ID by removing non-letter characters so values
+ * like "minecraft", "com.mojang:minecraft" and "net.minecraft" match.
+ * @param {string} id - Project ID to test
+ * @returns {boolean} - True if the ID represents Minecraft
+ */
+function isMinecraftProjectId(id) {
+  if (!id) return false;
+  const canonical = String(id).toLowerCase().replace(/[^a-z]/g, '');
+  return canonical === 'minecraft';
+}
+
+/**
+ * Determine if the project ID refers to a Fabric API submodule or the loader
+ * These modules are bundled with Fabric API or the loader and are not
+ * standalone projects on Modrinth.
+ * @param {string} id - Project ID
+ * @returns {boolean}
+ */
+function isBundledFabricModule(id) {
+  if (!id) return false;
+  const canonical = String(id).toLowerCase();
+  if (canonical === 'fabricloader') return true;
+  if (canonical === 'fabric-api') return false;
+  return /^fabric-.*-v\d+$/.test(canonical);
+}
+
+/**
  * Check for a mod's dependencies
  * @param {Object} mod - The mod object
  * @returns {Promise<Array>} - Array of dependency objects
@@ -353,7 +381,18 @@ export async function checkModDependencies(mod, visited = new Set()) {
     // Remove self-dependency entries
     const filteredDeps = uniqueDeps.filter(dep => {
       const depId = dep.project_id || dep.projectId;
-      return depId !== mod.id;
+      if (depId === mod.id) {
+        return false; // remove self dependencies
+      }
+      if (isMinecraftProjectId(depId)) {
+        console.log(`[DEBUG] Skipping Minecraft dependency entry (${depId})`);
+        return false;
+      }
+      if (isBundledFabricModule(depId)) {
+        console.log(`[DEBUG] Skipping bundled Fabric module (${depId})`);
+        return false;
+      }
+      return true;
     });
     console.log(`[DEBUG] Removed self-dependency entries, ${filteredDeps.length}/${uniqueDeps.length} remain`);
 
@@ -408,12 +447,25 @@ async function filterAndResolveDependencies(dependencies) {
   console.log('[DEBUG] Actually installed mod IDs based on physical files:', [...actualInstalledIds]);
   
   // Convert dependencies to standard format to handle different API response formats
-  const normalizedDeps = dependencies.map(dep => ({
-    project_id: dep.project_id || dep.projectId,
-    dependency_type: dep.dependency_type || dep.dependencyType || 'required',
-    name: dep.name || null,
-    version_requirement: dep.version_requirement || dep.versionRequirement || null
-  }));
+  const normalizedDeps = dependencies
+    .map(dep => ({
+      project_id: dep.project_id || dep.projectId,
+      dependency_type: dep.dependency_type || dep.dependencyType || 'required',
+      name: dep.name || null,
+      version_requirement: dep.version_requirement || dep.versionRequirement || null
+    }))
+    // Skip entries that refer to Minecraft or bundled Fabric modules
+    .filter(dep => {
+      if (isMinecraftProjectId(dep.project_id)) {
+        console.log(`[DEBUG] Skipping Minecraft dependency entry (${dep.project_id})`);
+        return false;
+      }
+      if (isBundledFabricModule(dep.project_id)) {
+        console.log(`[DEBUG] Skipping bundled Fabric module (${dep.project_id})`);
+        return false;
+      }
+      return true;
+    });
   
   console.log('[DEBUG] Normalized dependencies:', normalizedDeps);
   
@@ -506,6 +558,9 @@ async function filterAndResolveDependencies(dependencies) {
     } catch (error) {
       console.error(`Failed to fetch info for dependency ${dep.project_id}:`, error);
       // Fall back to basic info if available
+      if (!name && dep.project_id) {
+        name = dep.project_id;
+      }
       if (dep.version_requirement) {
         versionInfo = `Requirement: ${dep.version_requirement}`;
       }
