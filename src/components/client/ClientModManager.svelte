@@ -19,7 +19,8 @@
     loaderType,
     installingModIds,
     filterMinecraftVersion,
-    filterModLoader
+    filterModLoader,
+    serverManagedFiles
   } from '../../stores/modStore.js';
   import { searchMods, fetchModVersions } from '../../utils/mods/modAPI.js';
   import { installedModIds, installedModInfo } from '../../stores/modStore.js';
@@ -201,6 +202,7 @@
   // Load mods from the management server
   async function loadModsFromServer() {
     if (!instance || !instance.serverIp || !instance.serverPort) {
+      serverManagedFiles.set(new Set());
       return;
     }
 
@@ -216,6 +218,7 @@
 
       if (!testResponse.ok) {
         connectionStatus = 'disconnected';
+        serverManagedFiles.set(new Set());
         return;
       }
 
@@ -236,6 +239,13 @@
           }
           requiredMods = serverInfo.requiredMods || [];
           allClientMods = serverInfo.allClientMods || [];
+
+          // Update global store with server-managed mod file names
+          const managed = new Set([
+            ...requiredMods.map(m => m.fileName),
+            ...(allClientMods || []).map(m => m.fileName)
+          ]);
+          serverManagedFiles.set(managed);
           
           // Get full mod list from server
           const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
@@ -273,6 +283,7 @@
     } catch (err) {
       console.error('[ClientModManager] Error loading mods from server:', err);
       connectionStatus = 'disconnected';
+      serverManagedFiles.set(new Set());
       errorMessage.set('Failed to connect to server: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
     } finally {

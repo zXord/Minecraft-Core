@@ -166,23 +166,6 @@
           </div>
 
           <div class="mod-actions">
-            {#if $modsWithUpdates.has(mod.fileName)}
-              {@const updateInfo = $modsWithUpdates.get(mod.fileName)}
-              <button
-                class="update-button"
-                on:click={() => selectVersion(mod, updateInfo.id)}
-              >
-                Update
-              </button>
-            {/if}
-
-            <button
-              class="version-toggle-button"
-              on:click={() => toggleVersions(mod)}
-              aria-expanded={$expandedInstalledMod === mod.fileName}
-            >
-              <span class="version-toggle-icon">{$expandedInstalledMod === mod.fileName ? '▲' : '▼'}</span>
-            </button>
 
             {#if type === 'required'}
               <span class="required-label">Required</span>
