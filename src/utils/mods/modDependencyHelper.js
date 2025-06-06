@@ -33,6 +33,21 @@ function isMinecraftProjectId(id) {
 }
 
 /**
+ * Determine if the project ID refers to a Fabric API submodule or the loader
+ * These modules are bundled with Fabric API or the loader and are not
+ * standalone projects on Modrinth.
+ * @param {string} id - Project ID
+ * @returns {boolean}
+ */
+function isBundledFabricModule(id) {
+  if (!id) return false;
+  const canonical = String(id).toLowerCase();
+  if (canonical === 'fabricloader') return true;
+  if (canonical === 'fabric-api') return false;
+  return /^fabric-.*-v\d+$/.test(canonical);
+}
+
+/**
  * Check for a mod's dependencies
  * @param {Object} mod - The mod object
  * @returns {Promise<Array>} - Array of dependency objects
@@ -373,6 +388,10 @@ export async function checkModDependencies(mod, visited = new Set()) {
         console.log(`[DEBUG] Skipping Minecraft dependency entry (${depId})`);
         return false;
       }
+      if (isBundledFabricModule(depId)) {
+        console.log(`[DEBUG] Skipping bundled Fabric module (${depId})`);
+        return false;
+      }
       return true;
     });
     console.log(`[DEBUG] Removed self-dependency entries, ${filteredDeps.length}/${uniqueDeps.length} remain`);
@@ -435,10 +454,14 @@ async function filterAndResolveDependencies(dependencies) {
       name: dep.name || null,
       version_requirement: dep.version_requirement || dep.versionRequirement || null
     }))
-    // Skip Minecraft itself or similar entries so we don't waste API calls
+    // Skip entries that refer to Minecraft or bundled Fabric modules
     .filter(dep => {
       if (isMinecraftProjectId(dep.project_id)) {
         console.log(`[DEBUG] Skipping Minecraft dependency entry (${dep.project_id})`);
+        return false;
+      }
+      if (isBundledFabricModule(dep.project_id)) {
+        console.log(`[DEBUG] Skipping bundled Fabric module (${dep.project_id})`);
         return false;
       }
       return true;
