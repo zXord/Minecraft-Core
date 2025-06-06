@@ -1,5 +1,13 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { get } from 'svelte/store';
+  import {
+    installedModInfo,
+    modsWithUpdates,
+    expandedInstalledMod,
+    minecraftVersion
+  } from '../../stores/modStore.js';
+  import { fetchModVersions } from '../../utils/mods/modAPI.js';
 
   // Types
   interface Mod {
@@ -28,6 +36,9 @@
 
   // Create event dispatcher
   const dispatch = createEventDispatcher();
+
+  let versionsCache: Record<string, any[]> = {};
+  let versionsLoading: Record<string, boolean> = {};
 
   // Get mod status from sync status
   function getModStatus(mod: Mod): string {
@@ -82,6 +93,38 @@
   function handleDownload(): void {
     dispatch('download');
   }
+
+  async function toggleVersions(mod: Mod) {
+    const isExpanded = $expandedInstalledMod === mod.fileName;
+    if (isExpanded) {
+      expandedInstalledMod.set(null);
+      return;
+    }
+
+    expandedInstalledMod.set(mod.fileName);
+
+    const info = get(installedModInfo).find(m => m.fileName === mod.fileName);
+    if (info && info.projectId && !versionsCache[info.projectId]) {
+      versionsLoading[info.projectId] = true;
+      try {
+        const versions = await fetchModVersions(info.projectId);
+        versionsCache = { ...versionsCache, [info.projectId]: versions };
+      } catch (err) {
+        console.error('Failed to load versions', err);
+        versionsCache = { ...versionsCache, [info.projectId]: [] };
+      } finally {
+        versionsLoading[info.projectId] = false;
+      }
+    }
+  }
+
+  function selectVersion(mod: Mod, versionId: string) {
+    const info = get(installedModInfo).find(m => m.fileName === mod.fileName);
+    if (info && info.projectId) {
+      dispatch('updateMod', { modName: mod.fileName, projectId: info.projectId, versionId });
+    }
+    expandedInstalledMod.set(null);
+  }
 </script>
 
 <div class="client-mod-list">
@@ -123,8 +166,25 @@
           </div>
 
           <div class="mod-actions">
+            {#if $modsWithUpdates.has(mod.fileName)}
+              {@const updateInfo = $modsWithUpdates.get(mod.fileName)}
+              <button
+                class="update-button"
+                on:click={() => selectVersion(mod, updateInfo.id)}
+              >
+                Update
+              </button>
+            {/if}
+
+            <button
+              class="version-toggle-button"
+              on:click={() => toggleVersions(mod)}
+              aria-expanded={$expandedInstalledMod === mod.fileName}
+            >
+              <span class="version-toggle-icon">{$expandedInstalledMod === mod.fileName ? '▲' : '▼'}</span>
+            </button>
+
             {#if type === 'required'}
-              <!-- Required mods cannot be disabled -->
               <span class="required-label">Required</span>
               {#if getModStatus(mod) === 'missing'}
                 <button class="download-button" on:click={handleDownload}>
@@ -132,7 +192,6 @@
                 </button>
               {/if}
             {:else if type === 'optional'}
-              <!-- Optional mods can be enabled/disabled -->
               <div class="toggle-control">
                 <label class="toggle-label">
                   <input
@@ -159,6 +218,26 @@
               </button>
             {/if}
           </div>
+
+          {#if $expandedInstalledMod === mod.fileName}
+            {@const info = get(installedModInfo).find(m => m.fileName === mod.fileName)}
+            {#if info && info.projectId}
+              <div class="version-list">
+                {#if versionsLoading[info.projectId]}
+                  <div class="loading-versions">Loading versions...</div>
+                {:else}
+                  {#each versionsCache[info.projectId] || [] as v}
+                    <div class="version-item">
+                      <span class="version-number">{v.versionNumber || v.name}</span>
+                      <button class="select-version" on:click={() => selectVersion(mod, v.id)}>
+                        Select
+                      </button>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
+          {/if}
         </div>
       {/each}
     </div>
@@ -390,5 +469,71 @@
   .summary-text {
     color: #f59e0b;
     font-weight: 500;
+  }
+
+  .update-button {
+    background: #1bd96a;
+    color: #000;
+    font-weight: 600;
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .update-button:hover {
+    background: #0ec258;
+  }
+
+  .version-toggle-button {
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 4px;
+    width: 2rem;
+    height: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .version-toggle-button:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .version-toggle-icon {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .version-list {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .version-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+  }
+
+  .select-version {
+    background: #646cff;
+    color: white;
+    border: none;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .select-version:hover {
+    background: #7a81ff;
   }
 </style> 
