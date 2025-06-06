@@ -113,6 +113,7 @@ contextBridge.exposeInMainWorld('electron', {
       'minecraft-clear-client',
       'minecraft-get-status',
       'toggle-client-mod',
+      'delete-client-mod',
       // Management server events
       'management-server-status',
       'management-server-path-updated',

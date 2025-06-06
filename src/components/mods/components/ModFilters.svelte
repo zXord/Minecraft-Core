@@ -87,7 +87,6 @@
       <select
         id="filter-mc-version"
         bind:value={filterMinecraftVersion}
-        disabled
         class="disabled-select"
       >
         {#each minecraftVersionOptions as ver}

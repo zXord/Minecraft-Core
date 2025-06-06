@@ -356,6 +356,31 @@
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
+
+  // Delete a mod from the client
+  async function handleModDelete(modFileName) {
+    if (!instance.path) return;
+
+    try {
+      const result = await window.electron.invoke('delete-client-mod', {
+        clientPath: instance.path,
+        modFileName
+      });
+
+      if (result.success) {
+        successMessage.set(`Deleted mod: ${modFileName}`);
+        setTimeout(() => successMessage.set(''), 3000);
+        await checkModSynchronization();
+      } else {
+        errorMessage.set(`Failed to delete mod: ${result.error}`);
+        setTimeout(() => errorMessage.set(''), 5000);
+      }
+    } catch (err) {
+      console.error('[ClientModManager] Error deleting mod:', err);
+      errorMessage.set('Error deleting mod: ' + err.message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  }
   
   // Client mod search functionality
   async function searchClientMods() {
@@ -579,6 +604,7 @@
             {modSyncStatus}
             on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
             on:download={downloadRequiredMods}
+            on:delete={(e) => handleModDelete(e.detail.fileName)}
           />
         </div>
       {/if}
@@ -595,6 +621,7 @@
                 type="optional"
                 {modSyncStatus}
                 on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
+                on:delete={(e) => handleModDelete(e.detail.fileName)}
               />
             </div>
           {/if}
