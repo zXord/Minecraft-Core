@@ -109,6 +109,8 @@ function createServerHandlers(win) {
         const serverSettings = appStore.get("serverSettings") || {
           port: 25565,
           maxRam: 4,
+          autoStartMinecraft: false,
+          autoStartManagement: false,
         };
 
         return {

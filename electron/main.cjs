@@ -298,7 +298,12 @@ app.whenReady().then(() => {
       
       if (lastServerPath && win && win.webContents) {
         // Ensure config file exists with defaults
-        const serverSettings = appStore.get('serverSettings') || { port: 25565, maxRam: 4 };
+        const serverSettings = appStore.get('serverSettings') || {
+          port: 25565,
+          maxRam: 4,
+          autoStartMinecraft: false,
+          autoStartManagement: false
+        };
         const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
         
         // Create a default config if needed
