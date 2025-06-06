@@ -115,6 +115,7 @@ contextBridge.exposeInMainWorld('electron', {
       'minecraft-get-status',
       'toggle-client-mod',
       'delete-client-mod',
+      'minecraft-remove-unmanaged-mods',
       // Application lifecycle
       'app-close-response',
       // Management server events
