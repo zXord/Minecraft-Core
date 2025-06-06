@@ -115,6 +115,8 @@ contextBridge.exposeInMainWorld('electron', {
       'minecraft-get-status',
       'toggle-client-mod',
       'delete-client-mod',
+      // Application lifecycle
+      'app-close-response',
       // Management server events
       'management-server-status',
       'management-server-path-updated',
@@ -134,6 +136,8 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-progress',
       'launcher-client-download-complete',
       'launcher-client-download-error',
+      // Application lifecycle events
+      'app-close-request',
     ];
 
     // Debug: print validChannels at runtime (only once)
@@ -197,6 +201,7 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-progress',
       'launcher-client-download-complete',
       'launcher-client-download-error',
+      'app-close-request',
     ];
     if (validChannels.includes(channel)) {
       // Wrap the listener so we can remove it later
@@ -249,6 +254,7 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-progress',
       'launcher-client-download-complete',
       'launcher-client-download-error',
+      'app-close-request',
     ];
     if (validChannels.includes(channel)) {
       const map = window.__listenerMap && window.__listenerMap.get(channel);
@@ -300,6 +306,7 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-progress',
       'launcher-client-download-complete',
       'launcher-client-download-error',
+      'app-close-request',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.removeAllListeners(channel);
