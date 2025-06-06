@@ -598,28 +598,41 @@ function createMinecraftLauncherHandlers(win) {
               }
             }
           }
-        }
-        
-          // Detect extra mods that were previously managed by the server
-          const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
-          const extraMods = [];
-          try {
-            if (fs.existsSync(manifestDir)) {
-              const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
-              const allowed = new Set([
-                ...requiredMods.map(m => m.fileName),
-                ...allClientMods.map(m => m.fileName)
-              ]);
-              for (const file of manifests) {
-                try {
-                  const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
-                  if (data.fileName && !allowed.has(data.fileName)) {
+        }        // Detect extra mods that were previously managed by the server
+        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        const extraMods = [];
+        try {
+          if (fs.existsSync(manifestDir)) {
+            const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
+            const allowed = new Set([
+              ...requiredMods.map(m => m.fileName),
+              ...allClientMods.map(m => m.fileName)
+            ]);
+            
+            // Get server-managed files from the store to differentiate server-managed from client-installed mods
+            let serverManagedFiles = new Set();
+            try {
+              const appStore = require('../utils/app-store.cjs');
+              const serverManagedFilesArray = appStore.get('serverManagedFiles') || [];
+              serverManagedFiles = new Set(serverManagedFilesArray);
+            } catch (storeErr) {
+              console.warn('[minecraft-check-mods] Could not access server managed files from store:', storeErr.message);
+            }
+            
+            for (const file of manifests) {
+              try {
+                const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
+                if (data.fileName && !allowed.has(data.fileName)) {
+                  // Only flag as "extra" if this mod was previously managed by the server
+                  // Client-installed mods should not be flagged for removal
+                  if (serverManagedFiles.has(data.fileName)) {
                     extraMods.push(data.fileName);
                   }
-                } catch {}
-              }
+                }
+              } catch {}
             }
-          } catch {}
+          }
+        } catch {}
 
           // Synchronized means all required mods are present, up to date, and no extras remain
           const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && extraMods.length === 0;

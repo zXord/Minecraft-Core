@@ -41,13 +41,11 @@
     path?: string;
     clientId?: string;
     clientName?: string;
-  }
-
-  interface Mod {
+  }  interface ClientMod {
     fileName: string;
     size?: number;
     lastModified?: string;
-    location?: string;
+    location: string;
     required?: boolean;
     checksum?: string;
     downloadUrl?: string;
@@ -74,14 +72,13 @@
 
   // Create event dispatcher
   const dispatch = createEventDispatcher();
-
   // State
   let connectionStatus: string = 'disconnected';
-  let serverMods: Mod[] = [];
-  let clientMods: Mod[] = [];
-  let requiredMods: Mod[] = [];
-  let optionalMods: Mod[] = [];
-  let allClientMods: Mod[] = []; // All client mods (required + optional)
+  let serverMods: ClientMod[] = [];
+  let clientMods: ClientMod[] = [];
+  let requiredMods: ClientMod[] = [];
+  let optionalMods: ClientMod[] = [];
+  let allClientMods: ClientMod[] = []; // All client mods (required + optional)
   let modSyncStatus: ModSyncStatus | null = null;
   let isLoadingMods: boolean = false;
   let lastModCheck: Date | null = null;
@@ -92,7 +89,7 @@
   let versionsLoading = {};
   let versionsError = {};
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
-  let manualMods: Mod[] = [];
+  let manualMods: ClientMod[] = [];
   let filterType = 'client';
   let downloadManagerCleanup;
   let unsubscribeInstalledInfo;
@@ -132,9 +129,7 @@
   onDestroy(() => {
     if (downloadManagerCleanup) downloadManagerCleanup();
     if (unsubscribeInstalledInfo) unsubscribeInstalledInfo();
-  });
-
-  // Refresh installed mods when the instance path changes
+  });  // Refresh installed mods when the instance path changes
   $: if (instance?.path && instance.path !== previousPath) {
     previousPath = instance.path;
     refreshInstalledMods();
@@ -149,17 +144,14 @@
       }
     }
   }
-
-
   // Update manual mods based on current synchronization status
   function updateManualMods() {
     const info = get(installedModInfo);
+    
     if (!info || info.length === 0) {
       manualMods = [];
       return;
-    }
-
-    const managed = new Set([
+    }const managed = new Set([
       ...requiredMods.map(m => m.fileName.toLowerCase()),
       ...optionalMods.map(m => m.fileName.toLowerCase())
     ]);
@@ -168,9 +160,9 @@
       (modSyncStatus?.presentDisabledMods || []).map(f => f.toLowerCase())
     );
 
-    manualMods = info
-      .filter(mod => !managed.has(mod.fileName.toLowerCase()))
-      .map(mod => ({
+    const filteredMods = info.filter(mod => !managed.has(mod.fileName.toLowerCase()));
+
+    manualMods = filteredMods.map(mod => ({
         fileName: mod.fileName,
         location: disabledSet.has(mod.fileName.toLowerCase()) ? 'disabled' : 'client',
         projectId: mod.projectId,
@@ -178,21 +170,24 @@
         versionNumber: mod.versionNumber,
         name: mod.name
       }));
-  }
-
-  async function loadInstalledInfo() {
+  }  async function loadInstalledInfo() {
     try {
       const info = await window.electron.invoke('get-client-installed-mod-info', instance.path);
       if (Array.isArray(info)) {
         installedModIds.set(new Set(info.map(i => i.projectId).filter(Boolean)));
         installedModInfo.set(info);
+        
+        // Force update manual mods after setting the store
+        setTimeout(() => {
+          updateManualMods();
+        }, 100);
+      } else {
+        console.warn('Received non-array mod info:', info);
       }
     } catch (err) {
-      console.error('[ClientModManager] Failed to load installed mod info:', err);
+      console.error('Failed to load installed mod info:', err);
     }
-  }
-
-  // Load mods from the management server
+  }  // Load mods from the management server
   async function loadModsFromServer() {
     if (!instance || !instance.serverIp || !instance.serverPort) {
       serverManagedFiles.set(new Set());
@@ -210,12 +205,14 @@
       });
 
       if (!testResponse.ok) {
+        console.log('[ClientModManager] Server connection failed');
         connectionStatus = 'disconnected';
         serverManagedFiles.set(new Set());
         return;
       }
 
       connectionStatus = 'connected';
+      console.log('[ClientModManager] Connected to server successfully');
 
       // Get server info which includes required mods
       const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
@@ -226,12 +223,15 @@
 
       if (serverInfoResponse.ok) {
         const serverInfo = await serverInfoResponse.json();
+        console.log('[ClientModManager] Received server info:', serverInfo);
         if (serverInfo.success) {
           if (serverInfo.minecraftVersion) {
             minecraftVersion.set(serverInfo.minecraftVersion);
           }
           requiredMods = serverInfo.requiredMods || [];
           allClientMods = serverInfo.allClientMods || [];
+          console.log('[ClientModManager] Set requiredMods:', requiredMods);
+          console.log('[ClientModManager] Set allClientMods:', allClientMods);
 
           // Update global store with server-managed mod file names
           const managed = new Set([
@@ -239,6 +239,7 @@
             ...(allClientMods || []).map(m => m.fileName)
           ]);
           serverManagedFiles.set(managed);
+          console.log('[ClientModManager] Set server managed files:', Array.from(managed));
           
           // Get full mod list from server
           const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
@@ -249,6 +250,7 @@
 
           if (modsResponse.ok) {
             const modsData = await modsResponse.json();
+            console.log('[ClientModManager] Received mods data:', modsData);
             if (modsData.success) {
               serverMods = modsData.mods.server || [];
               const bothMods = modsData.mods.both || [];
@@ -635,12 +637,25 @@
     // Store the selected version for later installation
     mod.selectedVersionId = versionId;
   }
-
   // Handle mod installation
   async function handleInstallMod(event) {
     const { mod, versionId } = event.detail;
     const ver = versionId || mod.selectedVersionId;
-    await installClientMod(mod, ver);
+    
+    // Handle manual mod version changes
+    if (mod.fileName && mod.projectId && !mod.id) {
+      // This is a manual mod version change - create proper mod object
+      const modForInstall = {
+        id: mod.projectId,
+        name: mod.name || mod.fileName.replace(/\.jar$/i, ''),
+        title: mod.name || mod.fileName.replace(/\.jar$/i, ''),
+        forceReinstall: true
+      };
+      await installClientMod(modForInstall, ver);
+    } else {
+      // Regular mod installation from search
+      await installClientMod(mod, ver);
+    }
   }
 
   // Handle pagination
@@ -781,18 +796,12 @@
             <p class="error-message">
               {$errorMessage} Ensure your client path contains a <code>mods</code> directory.
             </p>
-          {/if}
-          <ClientManualModList
-            {manualMods}
+          {/if}          <ClientManualModList
+            mods={manualMods}
             on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
             on:install={handleInstallMod}
             />
-          {#if manualMods.length > 0}
-            <button class="cleanup-button" on:click={removeExtraMods}>
-              🗑️ Remove Extra Mods ({manualMods.length})
-            </button>
-          {/if}
           </div>
         </div>
       {/if}
@@ -973,7 +982,6 @@
     background-color: #3b82f6;
     color: white;
   }
-
   .mod-search-section {
     padding: 1.5rem;
     background-color: #1f2937;
@@ -981,184 +989,9 @@
     border: 1px solid #374151;
   }
 
-  .search-input-container {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-  }
-
-  .search-input {
-    flex: 1;
-    padding: 0.5rem;
-    border: none;
-    border-radius: 6px;
-    background-color: #374151;
-    color: white;
-  }
-
-  .search-button {
-    padding: 0.5rem 1rem;
-    border: none;
-    border-radius: 6px;
-    background-color: #3b82f6;
-    color: white;
-    cursor: pointer;
-    transition: background-color 0.2s;
-  }
-
-  .search-button:hover {
-    background-color: #2563eb;
-  }
-
-  .search-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   .error-message {
     color: #ef4444;
     margin-bottom: 1rem;
-  }
-
-  .search-results {
-    margin-bottom: 1rem;
-  }
-
-  .mods-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1rem;
-  }
-
-  .mod-card {
-    flex: 1;
-    background-color: #1f2937;
-    border-radius: 8px;
-    border: 1px solid #374151;
-    padding: 1rem;
-  }
-
-  .mod-header {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 1rem;
-  }
-
-  .mod-info {
-    flex: 1;
-  }
-
-  .mod-title {
-    color: white;
-    margin: 0 0 0.5rem 0;
-    font-size: 1.25rem;
-  }
-
-  .mod-author {
-    color: #9ca3af;
-    font-size: 0.9rem;
-  }
-
-  .mod-description {
-    color: #9ca3af;
-    font-size: 0.9rem;
-  }
-
-  .mod-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
-  }
-
-  .mod-stats {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1rem;
-  }
-
-  .download-count {
-    color: #9ca3af;
-    font-size: 0.9rem;
-  }
-
-  .followers-count {
-    color: #9ca3af;
-    font-size: 0.9rem;
-  }
-
-  .mod-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-  }
-
-  .install-button {
-    padding: 0.5rem 1rem;
-    border: none;
-    border-radius: 6px;
-    background-color: #3b82f6;
-    color: white;
-    cursor: pointer;
-    transition: background-color 0.2s;
-  }
-
-  .install-button:hover {
-    background-color: #2563eb;
-  }
-
-  .install-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .pagination {
-    display: flex;
-    justify-content: center;
-    margin-top: 1rem;
-  }
-
-  .page-button {
-    padding: 0.5rem 1rem;
-    border: none;
-    border-radius: 6px;
-    background-color: #374151;
-    color: white;
-    cursor: pointer;
-    transition: background-color 0.2s;
-  }
-
-  .page-button:hover {
-    background-color: #4b5563;
-  }
-
-  .page-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .page-info {
-    color: #9ca3af;
-    font-size: 0.9rem;
-    margin: 0 1rem;
-  }
-
-  .no-results {
-    text-align: center;
-    padding: 3rem 1rem;
-    background-color: #1f2937;
-    border-radius: 8px;
-    border: 1px solid #374151;
-  }
-
-  .no-results h4 {
-    color: white;
-    margin-bottom: 1rem;
-  }
-
-  .no-results p {
-    color: #9ca3af;
   }
 
 </style>

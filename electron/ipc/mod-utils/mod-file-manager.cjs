@@ -237,55 +237,73 @@ async function getClientInstalledModInfo(clientPath) {
 
   const modsDir = path.join(clientPath, 'mods');
   const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+  console.log('[ModManager] Checking mods directory:', modsDir);
+  console.log('[ModManager] Checking manifest directory:', manifestDir);
+  
   await fs.mkdir(modsDir, { recursive: true });
   await fs.mkdir(manifestDir, { recursive: true });
 
   const files = await fs.readdir(modsDir).catch(() => []);
+  console.log('[ModManager] Files in mods directory:', files);
+  
   const modFiles = files
     .filter(f =>
       f.toLowerCase().endsWith('.jar') || f.toLowerCase().endsWith('.jar.disabled')
     )
     .map(f => f.replace('.disabled', ''));
 
+  console.log('[ModManager] Mod files found:', modFiles);
   const uniqueModFiles = Array.from(new Set(modFiles));
+  console.log('[ModManager] Unique mod files:', uniqueModFiles);
 
   const modInfo = [];
   for (const file of uniqueModFiles) {
+    console.log('[ModManager] Processing mod file:', file);
     const manifestPath = path.join(manifestDir, `${file}.json`);
-    let manifest = null;
-    try {
+    let manifest = null;    try {
       const content = await fs.readFile(manifestPath, 'utf8');
       manifest = JSON.parse(content);
+      console.log('[ModManager] Found manifest for', file, ':', manifest);
       modInfo.push(manifest);
     } catch (err) {
-      console.log(`[ModManager] No manifest found for ${file}`);
+      console.log(`[ModManager] No manifest found for ${file}, trying to read JAR metadata`);
     }
 
     if (!manifest) {
       const jarBase = path.join(modsDir, file);
       const jarPath = await fs
         .access(jarBase)
-        .then(() => jarBase)
+        .then(() => {
+          console.log('[ModManager] Found JAR file:', jarBase);
+          return jarBase;
+        })
         .catch(async () => {
           const disabledPath = jarBase + '.disabled';
           try {
             await fs.access(disabledPath);
+            console.log('[ModManager] Found disabled JAR file:', disabledPath);
             return disabledPath;
           } catch {
+            console.log('[ModManager] No JAR file found for:', file);
             return null;
           }
         });
 
       let meta = {};
       if (jarPath) {
+        console.log('[ModManager] Reading metadata from JAR:', jarPath);
         meta = await readModMetadataFromJar(jarPath);
+        console.log('[ModManager] Extracted metadata:', meta);
       }
 
-      modInfo.push({ fileName: file, ...meta });
+      const modData = { fileName: file, ...meta };
+      console.log('[ModManager] Adding mod info:', modData);
+      modInfo.push(modData);
     }
   }
 
   console.log(`[ModManager] Found ${modInfo.length} client mod manifests out of ${uniqueModFiles.length} total mods`);
+  console.log('[ModManager] Final mod info:', modInfo);
   return modInfo;
 }
 
