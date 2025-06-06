@@ -1,7 +1,8 @@
 <script>
   import { createEventDispatcher } from 'svelte';
   import { slide } from 'svelte/transition';
-  import { installedModInfo, modsWithUpdates, expandedInstalledMod, minecraftVersion, categorizedMods, serverState } from '../../../stores/modStore.js';
+  import { installedModInfo, modsWithUpdates, expandedInstalledMod, minecraftVersion, categorizedMods } from '../../../stores/modStore.js';
+  import { serverState } from '../../../stores/serverState.js';
   import { toggleInstalledVersionSelector, updateInstalledMod, updateModToLatest } from '../../../utils/mods/installedModActions.js';
 
   export let mod;
