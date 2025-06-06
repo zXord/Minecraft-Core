@@ -93,14 +93,14 @@
   let filterType = 'client';
   let downloadManagerCleanup;
   let unsubscribeInstalledInfo;
+  let previousPath: string | null = null;
 
   // Connect to server and get mod information
   onMount(() => {
     downloadManagerCleanup = initDownloadManager();
     if (instance?.path) {
-      loadInstalledInfo();
       // Populate local mod status even if not connected to a server
-      checkModSynchronization();
+      refreshInstalledMods();
     }
     unsubscribeInstalledInfo = installedModInfo.subscribe(() => {
       checkModSynchronization();
@@ -130,6 +130,12 @@
     if (downloadManagerCleanup) downloadManagerCleanup();
     if (unsubscribeInstalledInfo) unsubscribeInstalledInfo();
   });
+
+  // Refresh installed mods when the instance path changes
+  $: if (instance?.path && instance.path !== previousPath) {
+    previousPath = instance.path;
+    refreshInstalledMods();
+  }
 
   // Keep filters in sync with the selected Minecraft version
   $: {
@@ -310,6 +316,13 @@
     }
   }
 
+  // Reload installed mod info and update synchronization status
+  async function refreshInstalledMods() {
+    if (!instance?.path) return;
+    await loadInstalledInfo();
+    await checkModSynchronization();
+  }
+
   // Download required mods
   async function downloadRequiredMods() {
     if (!instance.path || !requiredMods.length) {
@@ -386,6 +399,7 @@
   // Refresh mods from server
   async function refreshMods() {
     await loadModsFromServer();
+    await refreshInstalledMods();
     successMessage.set('Mod list refreshed');
     setTimeout(() => successMessage.set(''), 3000);
   }
@@ -403,8 +417,7 @@
         if (result.success) {
           successMessage.set(`Successfully added ${result.count} mods`);
 
-          await loadInstalledInfo();
-          await checkModSynchronization();
+          await refreshInstalledMods();
         } else {
           errorMessage.set(`Failed to add mods: ${result.failed.join(', ')}`);
         }
@@ -468,8 +481,7 @@
           }
           return updated;
         });
-        await loadInstalledInfo();
-        await checkModSynchronization();
+        await refreshInstalledMods();
       } else {
         errorMessage.set(`Failed to delete mod: ${result.error}`);
         setTimeout(() => errorMessage.set(''), 5000);
@@ -546,11 +558,7 @@
           ];
         });
 
-        await loadInstalledInfo();
-
-        if (connectionStatus === 'connected') {
-          await checkModSynchronization();
-        }
+        await refreshInstalledMods();
       } else {
         throw new Error(result?.error || 'Installation failed');
       }
@@ -583,6 +591,9 @@
 
   function switchTab(tab) {
     activeTab = tab;
+    if (tab === 'installed-mods') {
+      refreshInstalledMods();
+    }
     if (tab === 'find-mods' && get(searchResults).length === 0 && get(searchKeyword)) {
       searchClientMods();
     }
