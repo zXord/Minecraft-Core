@@ -51,6 +51,8 @@
     required?: boolean;
     checksum?: string;
     downloadUrl?: string;
+    name?: string;
+    versionNumber?: string;
   }
 
   interface ModSyncStatus {
@@ -151,42 +153,31 @@
 
   // Update manual mods based on current synchronization status
   function updateManualMods() {
-    if (modSyncStatus) {
-      const managed = new Set([
-        ...requiredMods.map(m => m.fileName),
-        ...optionalMods.map(m => m.fileName)
-      ]);
-      const enabled = modSyncStatus.presentEnabledMods || [];
-      const disabled = modSyncStatus.presentDisabledMods || [];
-      const info = get(installedModInfo);
-      const manualEnabled = enabled
-        .filter(f => !managed.has(f))
-        .map(fileName => {
-          const details = info.find(m => m.fileName === fileName) || {};
-          return {
-            fileName,
-            location: 'client',
-            projectId: details.projectId,
-            versionId: details.versionId,
-            versionNumber: details.versionNumber
-          };
-        });
-      const manualDisabled = disabled
-        .filter(f => !managed.has(f))
-        .map(fileName => {
-          const details = info.find(m => m.fileName === fileName) || {};
-          return {
-            fileName,
-            location: 'disabled',
-            projectId: details.projectId,
-            versionId: details.versionId,
-            versionNumber: details.versionNumber
-          };
-        });
-      manualMods = [...manualEnabled, ...manualDisabled];
-    } else {
+    const info = get(installedModInfo);
+    if (!info || info.length === 0) {
       manualMods = [];
+      return;
     }
+
+    const managed = new Set([
+      ...requiredMods.map(m => m.fileName.toLowerCase()),
+      ...optionalMods.map(m => m.fileName.toLowerCase())
+    ]);
+
+    const disabledSet = new Set(
+      (modSyncStatus?.presentDisabledMods || []).map(f => f.toLowerCase())
+    );
+
+    manualMods = info
+      .filter(mod => !managed.has(mod.fileName.toLowerCase()))
+      .map(mod => ({
+        fileName: mod.fileName,
+        location: disabledSet.has(mod.fileName.toLowerCase()) ? 'disabled' : 'client',
+        projectId: mod.projectId,
+        versionId: mod.versionId,
+        versionNumber: mod.versionNumber,
+        name: mod.name
+      }));
   }
 
   async function loadInstalledInfo() {

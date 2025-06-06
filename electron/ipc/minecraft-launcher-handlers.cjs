@@ -507,10 +507,13 @@ function createMinecraftLauncherHandlers(win) {
         }
         
         // Get all .jar files (enabled mods) in the client mods directory
-        const presentMods = fs.readdirSync(modsDir).filter(file => file.endsWith('.jar'));
+        const presentMods = fs
+          .readdirSync(modsDir)
+          .filter(file => file.toLowerCase().endsWith('.jar'));
         // Also check for .disabled files (disabled mods)
-        const disabledMods = fs.readdirSync(modsDir)
-          .filter(file => file.endsWith('.jar.disabled'))
+        const disabledMods = fs
+          .readdirSync(modsDir)
+          .filter(file => file.toLowerCase().endsWith('.jar.disabled'))
           .map(file => file.replace('.disabled', '')); // Remove .disabled extension
         
         const missingMods = [];
@@ -521,13 +524,17 @@ function createMinecraftLauncherHandlers(win) {
         // Check required mods
         for (const requiredMod of requiredMods) {
           const modPath = path.join(modsDir, requiredMod.fileName);
-          const isPresent = presentMods.includes(requiredMod.fileName) || disabledMods.includes(requiredMod.fileName);
+          const isPresent =
+            presentMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase()) ||
+            disabledMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase());
           
           if (!isPresent) {
             missingMods.push(requiredMod.fileName);
           } else if (requiredMod.checksum) {
             // Check if mod is up to date using checksum
-            const actualModPath = presentMods.includes(requiredMod.fileName) ? modPath : modPath + '.disabled';
+            const actualModPath = presentMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase())
+              ? modPath
+              : modPath + '.disabled';
             const existingChecksum = utils.calculateFileChecksum(actualModPath);
             if (existingChecksum !== requiredMod.checksum) {
               outdatedMods.push(requiredMod.fileName);
@@ -541,13 +548,17 @@ function createMinecraftLauncherHandlers(win) {
           
           for (const optionalMod of optionalMods) {
             const modPath = path.join(modsDir, optionalMod.fileName);
-            const isPresent = presentMods.includes(optionalMod.fileName) || disabledMods.includes(optionalMod.fileName);
+            const isPresent =
+              presentMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase()) ||
+              disabledMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase());
             
             if (!isPresent) {
               missingOptionalMods.push(optionalMod.fileName);
             } else if (optionalMod.checksum) {
               // Check if mod is up to date using checksum
-              const actualModPath = presentMods.includes(optionalMod.fileName) ? modPath : modPath + '.disabled';
+              const actualModPath = presentMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase())
+                ? modPath
+                : modPath + '.disabled';
               const existingChecksum = utils.calculateFileChecksum(actualModPath);
               if (existingChecksum !== optionalMod.checksum) {
                 outdatedOptionalMods.push(optionalMod.fileName);
