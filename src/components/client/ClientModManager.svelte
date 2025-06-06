@@ -509,36 +509,6 @@
     }
   }
 
-  // Remove all mods that are not managed by the server
-  async function removeExtraMods() {
-    if (!instance.path) return;
-
-    try {
-      const result = await window.electron.invoke('minecraft-remove-unmanaged-mods', {
-        clientPath: instance.path,
-        requiredMods,
-        allClientMods
-      });
-
-      if (result.success) {
-        if (result.removed.length > 0) {
-          successMessage.set(`Removed ${result.removed.length} extra mods`);
-        } else {
-          successMessage.set('No extra mods found');
-        }
-        setTimeout(() => successMessage.set(''), 3000);
-
-        await refreshInstalledMods();
-      } else {
-        errorMessage.set(`Failed to remove mods: ${result.error}`);
-        setTimeout(() => errorMessage.set(''), 5000);
-      }
-    } catch (err) {
-      console.error('[ClientModManager] Error removing mods:', err);
-      errorMessage.set('Error removing mods: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
-  }
   
   // Client mod search functionality
   async function searchClientMods() {
@@ -1198,17 +1168,4 @@
     color: #9ca3af;
   }
 
-  .cleanup-button {
-    margin-top: 1rem;
-    padding: 0.5rem 1rem;
-    border: none;
-    border-radius: 6px;
-    background-color: #ef4444;
-    color: white;
-    cursor: pointer;
-  }
-
-  .cleanup-button:hover {
-    background-color: #dc2626;
-  }
 </style>
