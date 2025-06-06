@@ -113,11 +113,10 @@ class AuthHandler {
       const now = new Date();
       const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
       
-      // Be more lenient with token age - up to 8 hours for cached tokens
-      if (hoursSinceSaved > 8) {
-        console.log('[AuthHandler] Saved auth data is too old, will need re-authentication');
-        return { success: false, error: 'Authentication expired' };
-      }
+      // Previously we enforced a maximum token age which resulted in
+      // users being forced to re-authenticate after a few hours.
+      // To allow long-lived sessions we simply load the saved token
+      // regardless of its age and rely on refresh logic to keep it valid.
       
       this.authData = {
         access_token: savedAuthData.access_token,
@@ -250,8 +249,8 @@ class AuthHandler {
               console.log('[AuthHandler] ⚠️ Using cached token due to network issues');
               return { success: true, refreshed: false, networkError: true };
             } else {
-              console.log('[AuthHandler] Token too old and network refresh failed');
-              return { success: false, error: 'Authentication expired and cannot refresh due to network issues', needsReauth: true };
+              console.log('[AuthHandler] Token too old and network refresh failed, continuing with cached token');
+              return { success: true, refreshed: false, networkError: true, refreshFailed: true };
             }
           }
           
@@ -260,16 +259,15 @@ class AuthHandler {
             console.log('[AuthHandler] ⚠️ Refresh failed but token is still relatively fresh, proceeding');
             return { success: true, refreshed: false, refreshFailed: true };
           } else {
-            console.log('[AuthHandler] Token refresh failed and token is old, forcing re-authentication');
-            return { success: false, error: 'Authentication token expired', needsReauth: true };
+            console.log('[AuthHandler] Token refresh failed and token is old, continuing with cached token');
+            return { success: true, refreshed: false, refreshFailed: true };
           }
-        }
       }
-      
-      // If no refresh capability, check token age more leniently
-      if (hoursSinceSaved > 6) { // Increased from 1 hour to 6 hours
-        console.log('[AuthHandler] Token is old and cannot be refreshed, needs re-authentication');
-        return { success: false, error: 'Authentication expired', needsReauth: true };
+    }
+
+      // If no refresh capability just log token age; we no longer force re-authentication
+      if (hoursSinceSaved > 6) {
+        console.log('[AuthHandler] Token is old and cannot be refreshed, continuing with cached token');
       }
       
       console.log('[AuthHandler] ✅ Token is acceptable, proceeding without refresh');
@@ -297,7 +295,8 @@ class AuthHandler {
         }
       }
       
-      return { success: false, error: error.message, needsReauth: true };
+      // On unexpected errors fallback to cached token instead of forcing re-authentication
+      return { success: true, refreshed: false, refreshFailed: true, error: error.message };
     }
   }
 }
