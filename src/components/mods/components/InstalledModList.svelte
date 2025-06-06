@@ -1,4 +1,13 @@
-<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    updateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';
+<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    updateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';
+import ModRow from './ModRow.svelte';
+import CompatibilityWarningDialog from './CompatibilityWarningDialog.svelte';
+import {
+  toggleInstalledVersionSelector,
+  clearModStatus,
+  updateInstalledMod,
+  updateModToLatest,
+  proceedWithUpdate
+} from '../../../utils/mods/installedModActions.js';
   import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
   import { slide } from 'svelte/transition';
   import { checkDependencyCompatibility } from '../../../utils/mods/modCompatibility.js';
@@ -45,202 +54,6 @@
     return parts.map(part => part.replace(/^\/|\/$/g, '')).filter(Boolean).join('/');
   }
   
-  /**
-   * Toggle version selector for an installed mod
-   * @param {string} modName - Mod filename
-   */
-  async function toggleInstalledVersionSelector(modName) {
-    const isExpanded = $expandedInstalledMod === modName;
-    
-    if (isExpanded) {
-      $expandedInstalledMod = null;
-      return;
-    }
-    
-    $expandedInstalledMod = modName;
-    
-    // Clear all status indicators for this mod when opening dropdown
-    // This prevents stale indicators from previous operations
-    clearModStatus(modName);
-    
-    // Find this mod in installedModInfo
-    const modInfo = $installedModInfo.find(m => m.fileName === modName);
-    
-    // If this mod has a project ID but we don't have its versions cached, fetch them
-    if (modInfo && modInfo.projectId) {
-      try {
-        // Always refresh versions when a dropdown is opened to ensure we have the latest info
-        const versions = await fetchModVersions(modInfo.projectId);
-        installedModVersionsCache = { 
-          ...installedModVersionsCache, 
-          [modInfo.projectId]: versions 
-        };
-        
-        // Also check for updates to make sure the update button shows immediately
-        if (!get(isCheckingUpdates)) {
-          checkForUpdates(serverPath);
-        }
-      } catch (error) {
-        console.error(`Failed to fetch versions for ${modName}:`, error);
-      }
-    }
-  }
-  
-  /**
-   * Clear all status indicators for a mod
-   * @param {string} modName - Mod filename to clear statuses for
-   */
-  function clearModStatus(modName) {
-    let hasChanges = false;
-    for (const key of [...modStatus.keys()]) {
-      if (key.startsWith(`${modName}:`)) {
-        modStatus.delete(key);
-        hasChanges = true;
-      }
-    }
-    
-    if (hasChanges) {
-      modStatus = new Map(modStatus); // Force reactivity update
-    }
-  }
-  
-  /**
-   * Update a mod to a specific version
-   * @param {string} modName - Mod filename
-   * @param {string} projectId - Mod project ID
-   * @param {string} versionId - Version ID to update to
-   */
-  async function updateInstalledMod(modName, projectId, versionId) {
-    if (!projectId || !versionId) return;
-    
-    // Find version details
-    const versions = installedModVersionsCache[projectId];
-    if (!versions) return;
-    
-    const version = versions.find(v => v.id === versionId);
-    if (!version) return;
-    
-    // Skip if already the current version
-    const modInfo = $installedModInfo.find(m => m.fileName === modName);
-    if (modInfo && modInfo.versionNumber === version.versionNumber) {
-      // Already on this version
-      return;
-    }
-    
-    // Check for dependencies and compatibility issues
-    if (version.dependencies && version.dependencies.length > 0) {
-      const issues = await checkDependencyCompatibility(version.dependencies);
-      if (issues.length > 0) {
-        // Dispatch to show dependency modal via ModManager
-        dispatch('compatibility-warning', {
-          issues,
-          modToUpdate: {
-            id: projectId,
-            name: modName,
-            selectedVersionId: versionId,
-            source: 'modrinth'
-          }
-        });
-        return;
-      }
-    }
-    
-    try {
-      // Track status - use a composite key for the specific version
-      const statusKey = `${modName}:${versionId}`;
-      modStatus.set(statusKey, "updating");
-      modStatus = new Map(modStatus); // Force reactivity update
-      
-      // Update mod
-      await dispatch('updateMod', { 
-        modName, 
-        projectId, 
-        versionId, 
-        version 
-      });
-      
-      // Success indicator will be set by the event listener for download completion
-      // This is just the initial dispatch
-    } catch (error) {
-      // Set error status for this specific version
-      const statusKey = `${modName}:${versionId}`;
-      modStatus.set(statusKey, "error");
-      modStatus = new Map(modStatus); // Force reactivity update
-      
-      // Clear error status after a delay
-      setTimeout(() => {
-        modStatus.delete(statusKey);
-        modStatus = new Map(modStatus); // Force reactivity update
-      }, 3000);
-    }
-  }
-  
-  /**
-   * Update a mod to the latest version
-   * @param {string} modName - Mod filename
-   */
-  function updateModToLatest(modName) {
-    const updateInfo = $modsWithUpdates.get(modName);
-    const modInfo = $installedModInfo.find(m => m.fileName === modName);
-    
-    if (!updateInfo || !modInfo || !modInfo.projectId) return;
-    
-    try {
-      // Check dependencies before updating
-      if (updateInfo.dependencies && updateInfo.dependencies.length > 0) {
-        checkDependencyCompatibility(updateInfo.dependencies).then(issues => {
-          if (issues.length > 0) {
-            // Show compatibility warning
-            compatibilityWarnings = issues;
-            showCompatibilityWarning = true;
-            // Store the mod info for later if the user confirms
-            modsToUpdate = [{
-              modName,
-              projectId: modInfo.projectId,
-              versionId: updateInfo.id,
-              version: updateInfo
-            }];
-            return;
-          } else {
-            // No issues, proceed with update
-            proceedWithUpdate(modName, modInfo.projectId, updateInfo.id, updateInfo);
-          }
-        });
-      } else {
-        // No dependencies, proceed directly
-        proceedWithUpdate(modName, modInfo.projectId, updateInfo.id, updateInfo);
-      }
-    } catch (error) {
-      console.error(`Failed to update ${modName}:`, error);
-    }
-  }
-  
-  /**
-   * Proceed with update after dependency checks
-   */
-  function proceedWithUpdate(modName, projectId, versionId, version) {
-    // Clear any existing status indicators
-    clearModStatus(modName);
-    
-    // Track status - use a composite key for the update
-    const statusKey = `${modName}:${versionId}`;
-    modStatus.set(statusKey, "updating");
-    modStatus = new Map(modStatus); // Force reactivity update
-    
-    // Dispatch update request
-    dispatch('updateMod', {
-      modName,
-      projectId,
-      versionId,
-      version
-    });
-    
-    // Clear from modsWithUpdates immediately so button disappears
-    modsWithUpdates.update(updates => {
-      updates.delete(modName);
-      return updates;
-    });
-  }
   
   /**
    * Show delete confirmation for a mod
@@ -500,6 +313,12 @@
     }
   }
   
+  function handleCompatibilityWarning({ issues, modToUpdate }) {
+    compatibilityWarnings = issues;
+    modsToUpdate = modToUpdate ? [{ modName: modToUpdate.name, projectId: modToUpdate.id, versionId: modToUpdate.selectedVersionId, version: modToUpdate }] : [];
+    showCompatibilityWarning = true;
+  }
+
   /**
    * Proceed with updates after confirming compatibility warnings
    */
@@ -516,6 +335,29 @@
     compatibilityWarnings = [];
   }
   
+  function handleEnableDependencies() {
+    groupDependencyWarnings(compatibilityWarnings).forEach(g => { if (g.type === "disabled") enableDependency(g.dependency); });
+    showCompatibilityWarning = false;
+    compatibilityWarnings = [];
+    modsToUpdate = [];
+  }
+
+  function handleInstallDependencies() {
+    const deps = groupDependencyWarnings(compatibilityWarnings).filter(g => g.type === "missing").map(g => ({ projectId: g.dependency?.projectId, name: g.dependency?.name || "Required Dependency", dependencyType: "required", requiredVersion: g.dependency?.versionRequirement }));
+    if (deps.length > 0) {
+      const modToUpdate = { id: deps[0].projectId, name: deps[0].name, selectedVersionId: null };
+      dispatch("install-dependencies", { mod: modToUpdate, dependencies: deps });
+    }
+    showCompatibilityWarning = false;
+    compatibilityWarnings = [];
+    modsToUpdate = [];
+  }
+
+  function handleFixAll() {
+    handleEnableDependencies();
+    handleInstallDependencies();
+  }
+
   /** Toggle selection of a mod for bulk actions */
   function toggleSelectMod(modName) {
     if (selectedMods.has(modName)) {
@@ -916,215 +758,15 @@
         <div class="header-cell">Current Version</div>
         <div class="header-cell">Available Update</div>
         <div class="header-cell">Actions</div>
-      </div>
+  
       <div class="mods-grid">
         {#each $installedMods.filter(mod => !$disabledMods.has(mod)) as mod}
-          {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-          {@const modCategoryInfo = $categorizedMods.find(m => m.fileName === mod)}
-          <div class="mod-card {$expandedInstalledMod === mod ? 'expanded' : ''} {modCategoryInfo?.category || ''}">
-            <div class="mod-item-header-container">
-              <div class="select-cell">
-                <input type="checkbox"
-                  checked={selectedMods.has(mod)}
-                  on:change={() => toggleSelectMod(mod)}
-                />
-              </div>
-              <div class="mod-info">
-                <span class="mod-name">{modCategoryInfo?.name || mod}</span>
-                
-                {#if modInfo && modInfo.mcVersion}
-                    <span class="mc-version-tag">MC {modInfo.mcVersion}</span>
-                {/if}
-                
-                <div class="mod-category-container">
-                  <select 
-                    class="mod-category-select"
-                    value={modCategoryInfo?.category || 'server-only'}
-                    on:change={(e) => handleCategoryChange(mod, e)}
-                    disabled={$serverState.status === 'Running'}
-                  >
-                    <option value="server-only">Server Only</option>
-                    <option value="client-only">Client Only</option>
-                    <option value="both">Client & Server</option>
-                  </select>
-                  
-                  {#if modCategoryInfo?.category === 'client-only' || modCategoryInfo?.category === 'both'}
-                    <div class="mod-required-checkbox">
-                      <label title="Whether this mod is required for clients to connect">
-                        <input 
-                          type="checkbox"
-                          checked={modCategoryInfo?.required}
-                          on:change={(e) => handleRequirementChange(mod, e)}
-                          disabled={$serverState.status === 'Running'}
-                        />
-                        <span>Client Requirement</span>
-                      </label>
-                    </div>
-                  {/if}
-                </div>
-              </div>
-
-              <div class="mod-location-column">
-                {#if modCategoryInfo}
-                  {#if modCategoryInfo.category === 'server-only'}
-                    <span class="location-tag server-tag">Server</span>
-                  {:else if modCategoryInfo.category === 'client-only'}
-                    <span class="location-tag client-tag">Client</span>
-                  {:else if modCategoryInfo.category === 'both'}
-                    <span class="location-tag both-tag">Both</span>
-                  {/if}
-                {/if}
-              </div>
-              
-              <div class="mod-version-column">
-                {#if modInfo && modInfo.versionNumber}
-                    <span class="version-tag current-version">{modInfo.versionNumber}</span>
-                {/if}
-              </div>
-              
-              <div class="mod-update-column">
-                {#if $modsWithUpdates.has(mod)}
-                  {@const updateInfo = $modsWithUpdates.get(mod)}
-                  <div class="update-container">
-                    <span class="version-tag new-version">{updateInfo.versionNumber}</span>
-                  </div>
-                {:else}
-                  <span class="up-to-date">Up to date</span>
-                {/if}
-              </div>
-              
-              <div class="mod-actions">
-                {#if $modsWithUpdates.has(mod)}
-                  {@const updateInfo = $modsWithUpdates.get(mod)}
-                  <button class="update-button" on:click={() => updateModToLatest(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                    {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Update
-                  </button>
-                  
-                  <div class="button-row">
-                    <button 
-                      class="version-toggle-button" 
-                      on:click={() => toggleInstalledVersionSelector(mod)}
-                      type="button"
-                      aria-expanded={$expandedInstalledMod === mod}
-                      aria-label="Toggle version selection"
-                      disabled={$serverState.status === 'Running'}
-                      title={$serverState.status === 'Running' ? 'Disabled while server is running' : 'Toggle version selection'}
-                    >
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if}
-                      <span class="version-toggle-icon">{$expandedInstalledMod === mod ? '▲' : '▼'}</span>
-                    </button>
-                    
-                    <button class="delete-button" on:click={() => showDeleteConfirmation(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete
-                    </button>
-                    
-                    <!-- Add disable button -->
-                    <button class="disable-button" on:click={() => showDisableConfirmation(mod, false)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Disable
-                    </button>
-                  </div>
-                {:else}
-                  <div class="button-row">
-                    <button 
-                      class="version-toggle-button" 
-                      on:click={() => toggleInstalledVersionSelector(mod)}
-                      type="button"
-                      aria-expanded={$expandedInstalledMod === mod}
-                      aria-label="Toggle version selection"
-                      disabled={$serverState.status === 'Running'}
-                      title={$serverState.status === 'Running' ? 'Disabled while server is running' : 'Toggle version selection'}
-                    >
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if}
-                      <span class="version-toggle-icon">{$expandedInstalledMod === mod ? '▲' : '▼'}</span>
-                    </button>
-                    
-                    <button class="delete-button" on:click={() => showDeleteConfirmation(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete
-                    </button>
-                    
-                    <!-- Add disable button -->
-                    <button class="disable-button" on:click={() => showDisableConfirmation(mod, false)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Disable
-                    </button>
-                  </div>
-                {/if}
-              </div>
-            </div>
-            
-            {#if $expandedInstalledMod === mod}
-              {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-              {#if modInfo && modInfo.projectId}
-                <div 
-                  class="installed-mod-versions" 
-                  id={`versions-for-${mod.replace(/\W/g, '')}`}
-                  transition:slide|local={{ duration: 200 }}
-                >
-                  {#if !installedModVersionsCache[modInfo.projectId]}
-                    <div class="loading-versions">Loading versions...</div>
-                  {:else if installedModVersionsCache[modInfo.projectId].length === 0}
-                    <div class="no-versions">No versions available</div>
-                  {:else}
-                    <div class="mod-versions" transition:slide|local={{ duration: 200 }}>
-                      {#each installedModVersionsCache[modInfo.projectId] as version}
-                        {@const isCurrentVersion = modInfo && modInfo.versionId === version.id}
-                        {@const statusKey = `${modInfo.fileName}:${version.id}`}
-                        {@const status = modStatus.get(statusKey) || ""}
-                        
-                        <div class="mod-version-item {isCurrentVersion ? 'current' : ''}">
-                          <div class="version-info">
-                            <span class="version-number">{version.versionNumber || version.name}</span>
-                            
-                            {#if version.gameVersions && version.gameVersions.includes($minecraftVersion)}
-                              <span class="compatibility-badge compatible">
-                                ✓ {$minecraftVersion}
-                              </span>
-                            {/if}
-                          </div>
-                          
-                          {#if isCurrentVersion}
-                            <span class="version-status current">Installed</span>
-                          {:else}
-                            <div class="version-controls">
-                              {#if status === "updating"}
-                                <span class="mod-status updating"></span>
-                              {:else if status === "success"}
-                                <span class="mod-status success"></span>
-                              {:else if status === "error"}
-                                <span class="mod-status error"></span>
-                              {:else}
-                                <button 
-                                  class="select-version" 
-                                  on:click={() => updateInstalledMod(modInfo.fileName, modInfo.projectId, version.id)}
-                                >
-                                  Select
-                                </button>
-                              {/if}
-                            </div>
-                          {/if}
-                        </div>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-              {:else}
-                <div class="no-version-info">
-                  <p>
-                    This mod doesn't have project information for updates.
-                    {#if !modInfo}
-                      Unable to read mod metadata.
-                    {:else if !modInfo.projectId}
-                      No project ID found in mod metadata.
-                    {/if}
-                  </p>
-                </div>
-              {/if}
-            {/if}
-          </div>
+          <ModRow {mod} {installedModVersionsCache} {modStatus} selected={selectedMods.has(mod)} on:toggleSelect={toggleSelectMod} on:delete={showDeleteConfirmation} on:toggleDisable={(e) => showDisableConfirmation(e.detail.mod, e.detail.disabled)} on:updateMod={(e) => dispatch("updateMod", e.detail)} on:compatibility-warning={(e) => handleCompatibilityWarning(e.detail)} />
         {/each}
       </div>
-    {/if}
+      {/if}
   </div>
-  
+
   <!-- Disabled Mods Section - Only shown if there are disabled mods -->
   {#if $disabledMods && $disabledMods.size > 0}
     <div class="disabled-mods-section">
@@ -1159,58 +801,7 @@
         </div>
         <div class="mods-grid">
           {#each Array.from($disabledMods).filter(mod => $installedMods.includes(mod)) as mod}
-            <div class="mod-card disabled">
-              <div class="mod-item-header-container">
-                <div class="select-cell">
-                  <input type="checkbox"
-                    checked={selectedDisabledMods.has(mod)}
-                    on:change={() => toggleSelectDisabledMod(mod)}
-                  />
-                </div>
-                <div class="mod-info">
-                  <span class="mod-name">{mod}</span>
-                  
-                  {#if $installedModInfo.find(m => m.fileName === mod)}
-                    {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-                    {#if modInfo.mcVersion}
-                      <span class="mc-version-tag">MC {modInfo.mcVersion}</span>
-                    {/if}
-                  {/if}
-                </div>
-                
-                <div class="mod-version-column">
-                  {#if $installedModInfo.find(m => m.fileName === mod)}
-                    {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-                    {#if modInfo.versionNumber}
-                      <span class="version-tag current-version">{modInfo.versionNumber}</span>
-                    {/if}
-                  {/if}
-                </div>
-                
-                <div class="mod-update-column">
-                  {#if $modsWithUpdates.has(mod)}
-                    {@const updateInfo = $modsWithUpdates.get(mod)}
-                    <div class="update-container">
-                      <span class="version-tag new-version">{updateInfo.versionNumber}</span>
-                    </div>
-                  {:else}
-                    <span class="up-to-date">Up to date</span>
-                  {/if}
-                </div>
-                
-                <div class="mod-actions">
-                  <div class="button-row">
-                    <button class="delete-button" on:click={() => showDeleteConfirmation(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete
-                    </button>
-                    
-                    <button class="enable-button" on:click={() => showDisableConfirmation(mod, true)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Enable
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <ModRow {mod} {installedModVersionsCache} {modStatus} selected={selectedDisabledMods.has(mod)} disabled={true} on:toggleSelect={toggleSelectDisabledMod} on:delete={showDeleteConfirmation} on:toggleDisable={(e) => showDisableConfirmation(e.detail.mod, true)} on:updateMod={(e) => dispatch("updateMod", e.detail)} on:compatibility-warning={(e) => handleCompatibilityWarning(e.detail)} />
           {/each}
         </div>
       </div>
@@ -1246,139 +837,16 @@
     on:cancel={() => { confirmDisableVisible = false; }}
   />
   
-  <!-- Compatibility Warning Dialog -->
-  {#if showCompatibilityWarning}
-    <div class="compatibility-warning-overlay" on:click={() => { showCompatibilityWarning = false; modsToUpdate = []; compatibilityWarnings = []; }}>
-      <div class="compatibility-warning-dialog" on:click|stopPropagation>
-        <h3>Compatibility Issues</h3>
-        <div class="warnings-container">
-          {#each groupDependencyWarnings(compatibilityWarnings) as group (group.dependency?.projectId)}
-            {#if group.type === 'missing' || group.type === 'disabled'}
-              <div class="warning-item {group.type}">
-                <h4>{group.type === 'missing' ? 'Missing Dependency' : 'Disabled Dependency'}</h4>
-                <span class="dependency-name">{group.dependency?.name || 'Required Dependency'}</span>
-                <div class="required-by">Required by: {group.mods.join(', ')}</div>
-                <span class="warning-badge">{group.type}</span>
-                {#if group.type === 'disabled'}
-                  <button class="enable-dependency-button" on:click={() => {
-                    enableDependency(group.dependency);
-                    // Remove this group from the warnings UI immediately
-                    compatibilityWarnings = compatibilityWarnings.filter(w => w.dependency?.projectId !== group.dependency?.projectId || w.type !== 'disabled');
-                  }}>
-                    Enable Dependency
-                  </button>
-                {/if}
-              </div>
-            {/if}
-            {#if group.type === 'version_mismatch'}
-              <div class="warning-item version-mismatch">
-                <h4>Version Compatibility Issue</h4>
-                <span class="dependency-name">{group.dependency?.name || 'Required Dependency'}</span>
-                <div class="required-by">Required by: {group.mods.join(', ')}</div>
-                <span class="warning-badge">compatibility</span>
-              </div>
-            {/if}
-            {#if group.type === 'update_available'}
-              <div class="warning-item update">
-                <h4>Update Available</h4>
-                <span class="dependency-name">{group.dependency?.name || 'Required Dependency'}</span>
-                <div class="required-by">Required by: {group.mods.join(', ')}</div>
-                <span class="warning-badge">optional</span>
-              </div>
-            {/if}
-          {/each}
-        </div>
-        <div class="warning-message">
-          {#if modsToUpdate.length > 0}
-            <p>These dependency issues may cause compatibility problems. How would you like to proceed?</p>
-          {:else}
-            <p>The compatibility check found these issues. Installing missing dependencies or enabling disabled ones may help fix these problems.</p>
-          {/if}
-        </div>
-        <div class="warning-actions">
-          <button class="warning-cancel" on:click={() => {
-            showCompatibilityWarning = false;
-            modsToUpdate = [];
-            compatibilityWarnings = [];
-          }}>
-            Cancel
-          </button>
-          {#if modsToUpdate.length > 0}
-            <button class="warning-proceed" on:click={proceedWithUpdatesAnyway}>
-              Proceed Without Dependencies
-            </button>
-          {/if}
-          {#if groupDependencyWarnings(compatibilityWarnings).every(g => g.type === 'disabled')}
-            <button class="warning-install" on:click={() => {
-              // Enable all disabled dependencies
-              groupDependencyWarnings(compatibilityWarnings).forEach(group => {
-                if (group.type === 'disabled') enableDependency(group.dependency);
-              });
-              showCompatibilityWarning = false;
-            }}>
-              Enable Dependencies
-            </button>
-          {:else if groupDependencyWarnings(compatibilityWarnings).every(g => g.type === 'missing')}
-            <button class="warning-install" on:click={() => {
-              showCompatibilityWarning = false;
-              // Install all missing dependencies
-              const dependencies = groupDependencyWarnings(compatibilityWarnings)
-                .filter(g => g.type === 'missing')
-                .map(g => ({
-                  projectId: g.dependency?.projectId,
-                  name: g.dependency?.name || 'Required Dependency',
-                  dependencyType: 'required',
-                  requiredVersion: g.dependency?.versionRequirement
-                }));
-              if (dependencies.length > 0) {
-                const modToUpdate = {
-                  id: dependencies[0].projectId,
-                  name: dependencies[0].name,
-                  selectedVersionId: null
-                };
-                dispatch('install-dependencies', {
-                  mod: modToUpdate,
-                  dependencies
-                });
-              }
-            }}>
-              Install Missing Dependencies
-            </button>
-          {:else if groupDependencyWarnings(compatibilityWarnings).some(g => g.type === 'missing' || g.type === 'disabled')}
-            <button class="warning-install" on:click={() => {
-              // Enable all disabled dependencies
-              groupDependencyWarnings(compatibilityWarnings).forEach(group => {
-                if (group.type === 'disabled') enableDependency(group.dependency);
-              });
-              // Install all missing dependencies
-              const dependencies = groupDependencyWarnings(compatibilityWarnings)
-                .filter(g => g.type === 'missing')
-                .map(g => ({
-                  projectId: g.dependency?.projectId,
-                  name: g.dependency?.name || 'Required Dependency',
-                  dependencyType: 'required',
-                  requiredVersion: g.dependency?.versionRequirement
-                }));
-              if (dependencies.length > 0) {
-                const modToUpdate = {
-                  id: dependencies[0].projectId,
-                  name: dependencies[0].name,
-                  selectedVersionId: null
-                };
-                dispatch('install-dependencies', {
-                  mod: modToUpdate,
-                  dependencies
-                });
-              }
-              showCompatibilityWarning = false;
-            }}>
-              Fix All Dependencies
-            </button>
-          {/if}
-        </div>
-      </div>
-    </div>
-  {/if}
+  <CompatibilityWarningDialog
+    bind:visible={showCompatibilityWarning}
+    warnings={compatibilityWarnings}
+    {modsToUpdate}
+    on:close={() => { showCompatibilityWarning = false; modsToUpdate = []; compatibilityWarnings = []; }}
+    on:proceed={proceedWithUpdatesAnyway}
+    on:enable={handleEnableDependencies}
+    on:install={handleInstallDependencies}
+    on:fixAll={handleFixAll}
+  />
   
   <!-- Bulk Delete Installed Mods Confirmation -->
   <ConfirmationDialog
