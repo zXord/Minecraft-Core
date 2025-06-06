@@ -228,21 +228,47 @@ async function installModToClient(win, modData) {
     const loader = modData.loader || 'fabric'; // Default or passed
     const mcVersion = modData.version || '1.20.1'; // Default or passed
     
-    console.log('[ModInstallService] Getting mod versions for client installation:', { modId: modData.id, loader, mcVersion, selectedVersionId: modData.selectedVersionId });
+    console.log('[ModInstallService] Getting mod versions for client installation:', {
+      modId: modData.id,
+      loader,
+      mcVersion,
+      selectedVersionId: modData.selectedVersionId
+    });
 
-    // Assuming getModrinthVersions is available and works as expected
-    const versions = await getModrinthVersions(modData.id, loader, mcVersion, true); // true for loadLatestOnly if no specific versionId
-    
-    if (!versions || versions.length === 0) throw new Error('No compatible versions found for this mod');
+    let versionInfo;
+    let versionToInstall;
 
-    let versionToInstall = modData.selectedVersionId 
-      ? versions.find(v => v.id === modData.selectedVersionId) 
-      : versions[0]; // Fallback to latest if specific not found or not provided
+    if (modData.selectedVersionId) {
+      // Try to fetch the requested version info
+      try {
+        versionInfo = await getModrinthVersionInfo(modData.id, modData.selectedVersionId);
+        if (
+          versionInfo &&
+          (!loader || versionInfo.loaders.includes(loader)) &&
+          (!mcVersion || versionInfo.game_versions.includes(mcVersion))
+        ) {
+          versionToInstall = { id: versionInfo.id, versionNumber: versionInfo.version_number };
+        } else {
+          console.warn('[ModInstallService] Requested version incompatible, falling back to best match');
+          versionInfo = null;
+        }
+      } catch (err) {
+        console.warn('[ModInstallService] Failed to fetch requested version, falling back:', err.message);
+        versionInfo = null;
+      }
+    }
 
-    if (!versionToInstall) throw new Error('Selected version not found or not compatible');
-    
+    // If no suitable version info found, pick the best compatible version automatically
+    if (!versionInfo) {
+      const versions = await getModrinthVersions(modData.id, loader, mcVersion, true);
+      if (!versions || versions.length === 0) {
+        throw new Error('No compatible versions found for this mod');
+      }
+      versionToInstall = versions[0];
+      versionInfo = await getModrinthVersionInfo(modData.id, versionToInstall.id);
+    }
+
     console.log('[ModInstallService] Selected version for client installation:', versionToInstall.versionNumber);
-    const versionInfo = await getModrinthVersionInfo(modData.id, versionToInstall.id);
     if (!versionInfo.files || versionInfo.files.length === 0) throw new Error('No files found for this mod version');
 
     const primaryFile = versionInfo.files.find(file => file.primary) || versionInfo.files[0];
