@@ -626,16 +626,24 @@
         downloadStatus = 'ready';
         downloadProgress = 100;
         
-        let message = `Successfully processed ${result.downloaded + result.skipped} mods`;
+        let processed = result.downloaded + result.skipped;
+        let message = `Successfully processed ${processed} mods`;
         if (result.downloaded > 0) {
           message += ` (${result.downloaded} downloaded`;
           if (result.skipped > 0) {
-            message += `, ${result.skipped} already present)`;
-          } else {
-            message += ')';
+            message += `, ${result.skipped} already present`;
           }
-        } else if (result.skipped > 0) {
-          message += ` (all already present)`;
+          if (result.removed > 0) {
+            message += `, ${result.removed} removed`;
+          }
+          message += ')';
+        } else if (result.skipped > 0 || result.removed > 0) {
+          message += ' (';
+          const parts = [];
+          if (result.skipped > 0) parts.push('all already present');
+          if (result.removed > 0) parts.push(`${result.removed} removed`);
+          message += parts.join(', ');
+          message += ')';
         }
         
         successMessage.set(message);
