@@ -277,10 +277,31 @@ async function installModToClient(win, modData) {
     targetPath = path.join(clientModsDir, actualFileName); // Update targetPath with actual filename
 
     console.log(`[ModInstallService] Downloading client mod from ${downloadUrl} to ${targetPath}`);
-    // Simplified download for client, progress reporting can be added similarly if needed
-    const response = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream', timeout: 30000 });
+    const downloadId = `client-mod-${modData.id}-${Date.now()}`;
+    if (win && win.webContents) {
+      win.webContents.send('download-progress', { id: downloadId, name: modData.name, progress: 0, speed: 0, completed: false, error: null });
+    }
+
     const writer = createWriteStream(targetPath);
+    const response = await axios({
+      url: downloadUrl,
+      method: 'GET',
+      responseType: 'stream',
+      timeout: 30000,
+      onDownloadProgress: progressEvent => {
+        const progress = progressEvent.loaded / progressEvent.total;
+        const speed = progressEvent.rate || 0;
+        if (win && win.webContents) {
+          win.webContents.send('download-progress', { id: downloadId, name: modData.name, progress: progress * 100, size: progressEvent.total, downloaded: progressEvent.loaded, speed, completed: false, error: null });
+        }
+      }
+    });
+
     await pipelineAsync(response.data, writer);
+
+    if (win && win.webContents) {
+      win.webContents.send('download-progress', { id: downloadId, name: modData.name, progress: 100, speed: 0, completed: true, completedTime: Date.now(), error: null });
+    }
 
     console.log('[ModInstallService] Successfully downloaded mod to client:', targetPath);
 
@@ -294,7 +315,7 @@ async function installModToClient(win, modData) {
     await fs.writeFile(manifestPath, JSON.stringify(manifestData, null, 2), 'utf8');
     console.log('[ModInstallService] Created manifest for client mod:', manifestPath);
 
-    return { success: true, fileName: actualFileName, version: versionToInstall.versionNumber, manifestPath };
+    return { success: true, fileName: actualFileName, version: versionToInstall.versionNumber, versionId: versionToInstall.id, manifestPath };
   } catch (error) {
     console.error('[ModInstallService] Error installing mod to client:', error);
     // Clean up partially downloaded file

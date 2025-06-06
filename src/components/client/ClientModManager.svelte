@@ -22,6 +22,9 @@
     filterModLoader
   } from '../../stores/modStore.js';
   import { searchMods, fetchModVersions } from '../../utils/mods/modAPI.js';
+  import { installedModIds, installedModInfo } from '../../stores/modStore.js';
+  import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
+  import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   import ClientModList from './ClientModList.svelte';
   import ClientModStatus from './ClientModStatus.svelte';
   import ModCard from '../mods/components/ModCard.svelte';
@@ -85,9 +88,11 @@
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
   let manualMods: Mod[] = [];
   let filterType = 'client';
+  let downloadManagerCleanup;
 
   // Connect to server and get mod information
   onMount(() => {
+    downloadManagerCleanup = initDownloadManager();
     // Initialize filter stores for client mod search
     if (!get(filterMinecraftVersion)) {
       filterMinecraftVersion.set(get(minecraftVersion) || '1.20.1');
@@ -104,8 +109,13 @@
       
       return () => {
         clearInterval(interval);
+        if (downloadManagerCleanup) downloadManagerCleanup();
       };
     }
+  });
+
+  onDestroy(() => {
+    if (downloadManagerCleanup) downloadManagerCleanup();
   });
 
   // Keep filters in sync with the selected Minecraft version
@@ -172,6 +182,9 @@
       if (serverInfoResponse.ok) {
         const serverInfo = await serverInfoResponse.json();
         if (serverInfo.success) {
+          if (serverInfo.minecraftVersion) {
+            minecraftVersion.set(serverInfo.minecraftVersion);
+          }
           requiredMods = serverInfo.requiredMods || [];
           allClientMods = serverInfo.allClientMods || [];
           
@@ -370,6 +383,17 @@
       if (result.success) {
         successMessage.set(`Deleted mod: ${modFileName}`);
         setTimeout(() => successMessage.set(''), 3000);
+        installedModInfo.update(info => {
+          const updated = info.filter(m => m.fileName !== modFileName);
+          const removed = info.find(m => m.fileName === modFileName);
+          if (removed && removed.projectId) {
+            installedModIds.update(ids => {
+              ids.delete(removed.projectId);
+              return new Set(ids);
+            });
+          }
+          return updated;
+        });
         await checkModSynchronization();
       } else {
         errorMessage.set(`Failed to delete mod: ${result.error}`);
@@ -426,8 +450,24 @@
       if (result && result.success) {
         successMessage.set(`Successfully installed ${mod.name} to client`);
         setTimeout(() => successMessage.set(''), 5000);
-        
-        // Refresh mod status if we have server connection
+
+        installedModIds.update(ids => {
+          ids.add(mod.id);
+          return new Set(ids);
+        });
+        installedModInfo.update(info => {
+          return [
+            ...info,
+            {
+              fileName: result.fileName,
+              projectId: mod.id,
+              versionId: result.versionId,
+              versionNumber: result.version,
+              source: 'modrinth'
+            }
+          ];
+        });
+
         if (connectionStatus === 'connected') {
           await checkModSynchronization();
         }
@@ -508,6 +548,7 @@
 </script>
 
 <div class="client-mod-manager">
+  <DownloadProgress />
   <div class="mod-manager-header">
     <h2>Client Mods</h2>
     <div class="connection-status">
