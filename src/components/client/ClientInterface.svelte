@@ -2,8 +2,16 @@
   import { onMount, onDestroy } from 'svelte';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import ClientModManager from './ClientModManager.svelte';
+  import ClientHeader from './ClientHeader.svelte';
   import { errorMessage, successMessage } from '../../stores/modStore.js';
   import { createEventDispatcher } from 'svelte';
+  import {
+    clientState,
+    setActiveTab,
+    setConnectionStatus,
+    setManagementServerStatus,
+    setMinecraftServerStatus
+  } from '../../stores/clientStore.js';
   
   // Props
   export let instance = {
@@ -18,10 +26,7 @@
   // Create event dispatcher
   const dispatch = createEventDispatcher();
   
-  // Client state management
-  let connectionStatus = 'disconnected';     // disconnected, connecting, connected (to management server)
-  let managementServerStatus = 'unknown';    // unknown, running, stopped (management server status)
-  let minecraftServerStatus = 'unknown';     // unknown, running, stopped (minecraft server status)
+  // Client state management handled by store
   let downloadStatus = 'ready';               // ready, downloading, completed, failed
   let clientSyncStatus = 'ready';            // ready, checking, needed, downloading, failed (for client files)
   let authStatus = 'unknown';                // unknown, checking, authenticated, needs-auth
@@ -57,7 +62,6 @@
   let authRefreshInterval;
   
   // Active tab tracking
-  let activeTab = 'play';
   const tabs = ['play', 'mods', 'settings'];
   
   // Settings
@@ -91,11 +95,11 @@
   async function connectToServer() {
     if (!instance || !instance.serverIp || !instance.serverPort) {
       console.error('Server address not configured');
-      connectionStatus = 'disconnected';
+      setConnectionStatus('disconnected');
       return;
     }
-    
-    connectionStatus = 'connecting';
+
+    setConnectionStatus('connecting');
     
     try {
       const managementUrl = `http://${instance.serverIp}:${instance.serverPort}/api/test`;
@@ -112,10 +116,10 @@
       if (!response.ok) {
         throw new Error(`Management server responded with ${response.status}`);
       }
-      
+
       const data = await response.json();
       if (data.success) {
-        connectionStatus = 'connected';
+        setConnectionStatus('connected');
         console.log('[Client] Successfully connected to management server');
         
         // Register with the server
@@ -131,9 +135,9 @@
       }
     } catch (err) {
       console.error('[Client] Failed to connect to management server:', err);
-      connectionStatus = 'disconnected';
-      managementServerStatus = 'unknown';
-      minecraftServerStatus = 'unknown';
+      setConnectionStatus('disconnected');
+      setManagementServerStatus('unknown');
+      setMinecraftServerStatus('unknown');
     }
   }
   
@@ -181,9 +185,9 @@
   
   // Check both management server and minecraft server status
   async function checkServerStatus() {
-    if (connectionStatus !== 'connected') {
-      managementServerStatus = 'unknown';
-      minecraftServerStatus = 'unknown';
+    if ($clientState.connectionStatus !== 'connected') {
+      setManagementServerStatus('unknown');
+      setMinecraftServerStatus('unknown');
       return;
     }
     
@@ -198,7 +202,7 @@
       });
       
       if (managementResponse.ok) {
-        managementServerStatus = 'running';
+        setManagementServerStatus('running');
         
         // Get server info to check minecraft server status
         await getServerInfo();
@@ -209,9 +213,9 @@
       lastCheck = new Date();
     } catch (err) {
       console.error('[Client] Failed to check server status:', err);
-      connectionStatus = 'disconnected';
-      managementServerStatus = 'unknown';
-      minecraftServerStatus = 'unknown';
+      setConnectionStatus('disconnected');
+      setManagementServerStatus('unknown');
+      setMinecraftServerStatus('unknown');
     }
     
     isChecking = false;
@@ -229,7 +233,7 @@
       if (response.ok) {
         serverInfo = await response.json();
         if (serverInfo.success) {
-          minecraftServerStatus = serverInfo.minecraftServerStatus || 'unknown';
+          setMinecraftServerStatus(serverInfo.minecraftServerStatus || 'unknown');
           requiredMods = serverInfo.requiredMods || [];
           
                   // Track server info changes for UI updates only (no console spam)
@@ -248,7 +252,7 @@
       }
     } catch (err) {
       console.warn('[Client] Could not get server info:', err);
-      minecraftServerStatus = 'unknown';
+      setMinecraftServerStatus('unknown');
     }
   }
   
@@ -786,7 +790,7 @@
       return;
     }
     
-    if (minecraftServerStatus !== 'running') {
+    if ($clientState.minecraftServerStatus !== 'running') {
       errorMessage.set('The Minecraft server is not running. Please wait for the server to start.');
       setTimeout(() => errorMessage.set(''), 5000);
       return;
@@ -1078,14 +1082,14 @@
     
     // Set up periodic connection check
     connectionCheckInterval = setInterval(() => {
-      if (connectionStatus === 'disconnected') {
+      if ($clientState.connectionStatus === 'disconnected') {
         connectToServer();
       }
     }, 30000); // Every 30 seconds
     
     // Set up periodic server status check (reduced frequency)
     statusCheckInterval = setInterval(() => {
-      if (connectionStatus === 'connected') {
+      if ($clientState.connectionStatus === 'connected') {
         checkServerStatus();
       }
     }, 60000); // Every 60 seconds (reduced frequency)
@@ -1136,7 +1140,7 @@
     
     // Reset states to force re-check
     authStatus = 'checking';
-    connectionStatus = 'connecting';
+    setConnectionStatus('connecting');
     downloadStatus = 'checking';
     clientSyncStatus = 'checking';
     
@@ -1247,87 +1251,13 @@
 </script>
 
 <div class="client-container">
-  <header class="client-header">
-    <h1>Minecraft Client</h1>
-    <div class="connection-status">
-      <!-- Management Server Status -->
-      <div class="status-section">
-        <span class="status-section-label">Management Server:</span>
-        {#if connectionStatus === 'connected'}
-          <div class="status-indicator connected" title="Connected to management server">
-            <span class="status-dot"></span>
-            <span class="status-text">Connected</span>
-          </div>
-        {:else if connectionStatus === 'connecting'}
-          <div class="status-indicator connecting" title="Connecting to management server">
-            <span class="status-dot"></span>
-            <span class="status-text">Connecting...</span>
-          </div>
-        {:else}
-          <div class="status-indicator disconnected" title="Not connected to management server">
-            <span class="status-dot"></span>
-            <span class="status-text">Disconnected</span>
-          </div>
-        {/if}
-      </div>
-      
-      {#if connectionStatus === 'connected'}
-        <div class="server-details">
-          <span class="server-address">
-            <span class="address-label">Management Server:</span>
-            {instance?.serverIp || 'Unknown'}:{instance?.serverPort || '8080'}
-          </span>
-          
-          <!-- Minecraft Server Status -->
-          <div class="status-section">
-            <span class="status-section-label">Minecraft Server:</span>
-            {#if minecraftServerStatus === 'running'}
-              <div class="status-indicator server-running" title="Minecraft server is running">
-                <span class="status-dot"></span>
-                <span class="status-text">Running</span>
-              </div>
-            {:else if minecraftServerStatus === 'stopped'}
-              <div class="status-indicator server-stopped" title="Minecraft server is stopped">
-                <span class="status-dot"></span>
-                <span class="status-text">Stopped</span>
-              </div>
-            {:else}
-              <div class="status-indicator server-unknown" title="Minecraft server status unknown">
-                <span class="status-dot"></span>
-                <span class="status-text">Status Unknown</span>
-              </div>
-            {/if}
-          </div>
-        </div>
-      {/if}
-    </div>
-    
-    <!-- Add tabs for navigation -->
-    <div class="client-tabs">
-      {#each tabs as tab}
-        <button 
-          class="tab-button {activeTab === tab ? 'active' : ''}" 
-          on:click={() => activeTab = tab}
-        >
-          {#if tab === 'play'}
-            🎮 Play
-          {:else if tab === 'mods'}
-            🧩 Mods
-          {:else if tab === 'settings'}
-            ⚙️ Settings
-          {:else}
-            {tab[0].toUpperCase() + tab.slice(1)}
-          {/if}
-        </button>
-      {/each}
-    </div>
-  </header>
+  <ClientHeader {instance} {tabs} minecraftServerStatus={$clientState.minecraftServerStatus} />
   
   <div class="client-content">
-    {#if activeTab === 'play'}
+    {#if $clientState.activeTab === 'play'}
       <div class="client-main">
         <div class="client-status">
-          {#if connectionStatus !== 'connected'}
+          {#if $clientState.connectionStatus !== 'connected'}
             <div class="connection-status-display">
               <h2>Connecting to Server</h2>
               <p>Attempting to connect to the management server...</p>
@@ -1528,13 +1458,13 @@
               <!-- Launch controls -->
               <div class="launch-controls">
                 {#if launchStatus === 'ready'}
-                  {#if minecraftServerStatus === 'running' && clientSyncStatus === 'ready' && downloadStatus === 'ready'}
+                  {#if $clientState.minecraftServerStatus === 'running' && clientSyncStatus === 'ready' && downloadStatus === 'ready'}
                     <button class="play-button" on:click={launchMinecraft}>
                       🎮 PLAY MINECRAFT
                     </button>
                   {:else}
                     <button class="play-button disabled" disabled>
-                      {#if minecraftServerStatus !== 'running'}
+                      {#if $clientState.minecraftServerStatus !== 'running'}
                         ⏸️ WAITING FOR SERVER
                       {:else if clientSyncStatus !== 'ready'}
                         📥 DOWNLOAD CLIENT FIRST
@@ -1544,7 +1474,7 @@
                         🎮 PLAY MINECRAFT
                       {/if}
                     </button>
-                    {#if minecraftServerStatus !== 'running'}
+                    {#if $clientState.minecraftServerStatus !== 'running'}
                       <p class="server-status-message">
                         The Minecraft server is not running. Please wait for it to start.
                       </p>
@@ -1596,7 +1526,7 @@
             <!-- Catch-all for debugging -->
             <div class="auth-section">
               <h2>Status Check</h2>
-              <p>Connection: {connectionStatus}</p>
+              <p>Connection: {$clientState.connectionStatus}</p>
               <p>Auth Status: {authStatus}</p>
               <p>Username: {username || 'None'}</p>
               <p>Auth Data: {authData ? 'Present' : 'Missing'}</p>
@@ -1627,7 +1557,7 @@
           {/if}
         </div>
       </div>
-    {:else if activeTab === 'mods'}
+    {:else if $clientState.activeTab === 'mods'}
       <div class="mods-container">
         <ClientModManager {instance} on:mod-sync-status={(e) => {
           // Update mod sync status when the mod manager reports changes
@@ -1639,7 +1569,7 @@
           }
         }} />
       </div>
-    {:else if activeTab === 'settings'}
+    {:else if $clientState.activeTab === 'settings'}
       <div class="settings-container">
         <div class="settings-section">
           <h2>Client Settings</h2>
@@ -1764,151 +1694,7 @@
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-  }
-  
-  .client-header {
-    background-color: #1f2937;
-    padding: 1rem 2rem;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    border-bottom: 1px solid #374151;
-  }
-  
-  .client-content {
-    flex: 1;
-    padding: 2rem;
-    max-width: 1200px;
-    margin: 0 auto;
-    width: 100%;
-  }
-  
-  h1, h2, h3 {
-    color: white;
-    margin-bottom: 1rem;
-    text-align: center;
-  }
-  
-  p {
-    color: #e2e8f0;
-    text-align: center;
-    margin-bottom: 1.5rem;
-  }
-  
-  .connection-status {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    margin-top: 1rem;
-    gap: 0.5rem;
-  }
-  
-  .status-section {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    margin-top: 0.5rem;
-    gap: 0.5rem;
-  }
-  
-  .status-section-label {
-    color: #9ca3af;
-    font-size: 0.9rem;
-  }
-  
-  .address-label {
-    color: #9ca3af;
-    font-size: 0.9rem;
-    margin-right: 0.5rem;
-  }
-  
-  .status-indicator {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 1rem;
-    border-radius: 2rem;
-    font-size: 0.875rem;
-    font-weight: 500;
-  }
-  
-  .status-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-  }
-  
-  .connected {
-    background-color: rgba(16, 185, 129, 0.2);
-    color: #10b981;
-  }
-  
-  .connected .status-dot {
-    background-color: #10b981;
-  }
-  
-  .connecting {
-    background-color: rgba(245, 158, 11, 0.2);
-    color: #f59e0b;
-  }
-  
-  .connecting .status-dot {
-    background-color: #f59e0b;
-    animation: pulse 1.5s infinite;
-  }
-  
-  .disconnected {
-    background-color: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-  }
-  
-  .disconnected .status-dot {
-    background-color: #ef4444;
-  }
-  
-  .server-running {
-    background-color: rgba(16, 185, 129, 0.2);
-    color: #10b981;
-  }
-  
-  .server-running .status-dot {
-    background-color: #10b981;
-  }
-  
-  .server-stopped {
-    background-color: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-  }
-  
-  .server-stopped .status-dot {
-    background-color: #ef4444;
-  }
-  
-  .server-unknown {
-    background-color: rgba(107, 114, 128, 0.2);
-    color: #9ca3af;
-  }
-  
-  .server-unknown .status-dot {
-    background-color: #9ca3af;
-  }
-  
-  .server-details {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    margin-top: 0.5rem;
-    gap: 0.5rem;
-  }
-  
-  .server-address {
-    color: #e2e8f0;
-    font-family: monospace;
-    background-color: #374151;
-    padding: 0.25rem 0.5rem;
-    border-radius: 0.25rem;
-  }
-  
+  }  
   .client-main {
     display: flex;
     flex-direction: column;
@@ -2247,34 +2033,7 @@
   
   .refresh-button:hover {
     background-color: #6b7280;
-  }
-  
-  .client-tabs {
-    display: flex;
-    margin-top: 1rem;
-    gap: 1rem;
-  }
-  
-  .tab-button {
-    background: none;
-    border: none;
-    color: #9ca3af;
-    padding: 0.5rem 1rem;
-    font-size: 1rem;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    transition: all 0.2s;
-  }
-  
-  .tab-button:hover {
-    color: white;
-  }
-  
-  .tab-button.active {
-    color: white;
-    border-bottom: 2px solid #646cff;
-  }
-  
+  }  
   .settings-container {
     width: 100%;
     max-width: 600px;
