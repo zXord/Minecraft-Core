@@ -30,6 +30,8 @@
   import ClientModStatus from './ClientModStatus.svelte';
   import ModCard from '../mods/components/ModCard.svelte';
   import ModSearch from '../mods/components/ModSearch.svelte';
+  import ModDropZone from '../mods/components/ModDropZone.svelte';
+  import { uploadDroppedMods } from '../../utils/directFileUpload.js';
 
   // Types
   interface Instance {
@@ -376,6 +378,30 @@
     setTimeout(() => successMessage.set(''), 3000);
   }
 
+  // Handle file drop for adding mods directly
+  async function handleDroppedFiles(event) {
+    const { files } = event.detail;
+
+    if (files && files.length > 0) {
+      try {
+        successMessage.set(`Processing ${files.length} files...`);
+
+        const result = await uploadDroppedMods(files, instance?.path);
+
+        if (result.success) {
+          successMessage.set(`Successfully added ${result.count} mods`);
+
+          await loadInstalledInfo();
+          await checkModSynchronization();
+        } else {
+          errorMessage.set(`Failed to add mods: ${result.failed.join(', ')}`);
+        }
+      } catch (error) {
+        errorMessage.set(`Failed to process files: ${error.message || 'Unknown error'}`);
+      }
+    }
+  }
+
   // Handle mod enable/disable for optional mods
   async function handleModToggle(modFileName, enabled) {
     if (!instance.path) return;
@@ -650,7 +676,7 @@
         </div>
       {:else}
         <!-- Mod Status Overview -->
-        <ClientModStatus 
+        <ClientModStatus
           {modSyncStatus}
           requiredModsCount={requiredMods.length}
           optionalModsCount={optionalMods.length}
@@ -658,6 +684,8 @@
           on:download-optional={downloadOptionalMods}
           on:refresh={refreshMods}
         />
+
+        <ModDropZone on:filesDropped={handleDroppedFiles} />
 
         <!-- Mod Lists -->
         <div class="mod-sections">
