@@ -535,6 +535,9 @@ async function filterAndResolveDependencies(dependencies) {
     } catch (error) {
       console.error(`Failed to fetch info for dependency ${dep.project_id}:`, error);
       // Fall back to basic info if available
+      if (!name && dep.project_id) {
+        name = dep.project_id;
+      }
       if (dep.version_requirement) {
         versionInfo = `Requirement: ${dep.version_requirement}`;
       }
