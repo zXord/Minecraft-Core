@@ -502,7 +502,7 @@
     });
 
     try {
-      const isUpdate = $installedModIds.has(mod.id);
+      const isUpdate = mod.forceReinstall || $installedModIds.has(mod.id);
       const modData = {
         id: mod.id,
         name: mod.name,
@@ -557,6 +557,21 @@
         return ids;
       });
     }
+  }
+
+  // Update an already installed mod to a specific version
+  async function updateInstalledMod(modName, projectId, versionId) {
+    if (!projectId || !versionId) return;
+
+    const baseName = modName.replace(/\.jar$/i, '');
+    const mod = {
+      id: projectId,
+      name: baseName,
+      title: baseName,
+      forceReinstall: true
+    };
+
+    await installClientMod(mod, versionId);
   }
 
   function switchTab(tab) {
@@ -700,12 +715,13 @@
             <p class="section-description">
               These mods are required by the server and cannot be disabled.
             </p>
-            <ClientModList 
-              mods={requiredMods}
-              type="required"
-              {modSyncStatus}
-              on:download={downloadRequiredMods}
-            />
+          <ClientModList
+            mods={requiredMods}
+            type="required"
+            {modSyncStatus}
+            on:download={downloadRequiredMods}
+            on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
+          />
           </div>
 
           <!-- Optional Mods Section -->
@@ -722,6 +738,7 @@
             on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
             on:download={downloadRequiredMods}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
+            on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
           />
         </div>
       {/if}
