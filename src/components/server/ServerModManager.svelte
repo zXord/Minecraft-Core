@@ -30,13 +30,13 @@
   } from '../../stores/modStore.js';
   
   // Import components
-  import ModSearch from './components/ModSearch.svelte';
-  import InstalledModList from './components/InstalledModList.svelte';
-  import ModDropZone from './components/ModDropZone.svelte';
-  import Pagination from './components/Pagination.svelte';
-  import StatusManager from '../common/StatusManager.svelte';
-  import ModDependencyModal from './components/ModDependencyModal.svelte';
-  import DownloadProgress from './components/DownloadProgress.svelte';
+import ModSearch from '../mods/components/ModSearch.svelte';
+import InstalledModList from '../mods/components/InstalledModList.svelte';
+import ModDropZone from '../mods/components/ModDropZone.svelte';
+import Pagination from '../mods/components/Pagination.svelte';
+import StatusManager from '../common/StatusManager.svelte';
+import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';
+import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   
   // Import API utilities
   import { 
