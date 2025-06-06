@@ -199,8 +199,8 @@ function createMinecraftLauncherHandlers(win) {
       }
     },
     
-    // Download required mods
-    'minecraft-download-mods': async (_e, { clientPath, requiredMods, serverInfo }) => {
+      // Download required mods and clean up removed ones
+      'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo }) => {
       try {
         if (!clientPath || !requiredMods || !Array.isArray(requiredMods)) {
           return { success: false, error: 'Invalid parameters' };
@@ -355,16 +355,49 @@ function createMinecraftLauncherHandlers(win) {
         const totalProcessed = downloaded.length + failures.length + skipped.length;
         const successCount = downloaded.length + skipped.length;
         
+        const removed = [];
+
+        try {
+          const modsDir = path.join(clientPath, 'mods');
+          const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+
+          const allowedList = Array.isArray(allClientMods) && allClientMods.length > 0
+            ? allClientMods
+            : requiredMods;
+          const allowed = new Set(allowedList.map(m => (typeof m === 'string' ? m : m.fileName)));
+          if (fs.existsSync(manifestDir)) {
+            const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
+            for (const file of manifests) {
+              try {
+                const manifestPath = path.join(manifestDir, file);
+                const data = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+                const fileName = data.fileName;
+                if (!allowed.has(fileName)) {
+                  const jar = path.join(modsDir, fileName);
+                  const disabled = jar + '.disabled';
+                  if (fs.existsSync(jar)) fs.unlinkSync(jar);
+                  if (fs.existsSync(disabled)) fs.unlinkSync(disabled);
+                  fs.unlinkSync(manifestPath);
+                  removed.push(fileName);
+                }
+              } catch {}
+            }
+          }
+        } catch (cleanupErr) {
+          console.warn('[IPC] Failed to clean up unmanaged mods:', cleanupErr);
+        }
+
         const result = {
           success: failures.length === 0,
           downloaded: downloaded.length,
           skipped: skipped.length,
+          removed: removed.length,
           failures: failures,
-          message: failures.length === 0 
-            ? `Successfully processed ${totalProcessed} mods (${downloaded.length} downloaded, ${skipped.length} already present)`
+          message: failures.length === 0
+            ? `Successfully processed ${totalProcessed} mods (${downloaded.length} downloaded, ${skipped.length} already present, ${removed.length} removed)`
             : `Processed ${successCount}/${totalProcessed} mods successfully, ${failures.length} failed`
         };
-        
+
         return result;
         
       } catch (error) {
@@ -567,20 +600,43 @@ function createMinecraftLauncherHandlers(win) {
           }
         }
         
-        // Synchronized means all required mods are present and up to date
-        const synchronized = missingMods.length === 0 && outdatedMods.length === 0;
+          // Detect extra mods that were previously managed by the server
+          const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+          const extraMods = [];
+          try {
+            if (fs.existsSync(manifestDir)) {
+              const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
+              const allowed = new Set([
+                ...requiredMods.map(m => m.fileName),
+                ...allClientMods.map(m => m.fileName)
+              ]);
+              for (const file of manifests) {
+                try {
+                  const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
+                  if (data.fileName && !allowed.has(data.fileName)) {
+                    extraMods.push(data.fileName);
+                  }
+                } catch {}
+              }
+            }
+          } catch {}
+
+          // Synchronized means all required mods are present, up to date, and no extras remain
+          const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && extraMods.length === 0;
         
         return {
           success: true,
           synchronized,
           missingMods: missingMods.concat(outdatedMods),
           missingOptionalMods: missingOptionalMods.concat(outdatedOptionalMods),
+          extraMods,
           totalRequired: requiredMods.length,
           totalOptional: allClientMods.filter(m => !m.required).length,
           totalPresent: requiredMods.length - missingMods.length - outdatedMods.length,
           totalOptionalPresent: (allClientMods.filter(m => !m.required).length) - missingOptionalMods.length - outdatedOptionalMods.length,
           needsDownload: missingMods.length + outdatedMods.length,
           needsOptionalDownload: missingOptionalMods.length + outdatedOptionalMods.length,
+          needsRemoval: extraMods.length,
           presentEnabledMods: presentMods,
           presentDisabledMods: disabledMods
         };
@@ -728,6 +784,54 @@ function createMinecraftLauncherHandlers(win) {
         return { success: false, error: error.message };
       }
     },
+
+    // Remove mods that are not managed by the server
+    'minecraft-remove-unmanaged-mods': async (_e, { clientPath, requiredMods = [], allClientMods = [] }) => {
+      try {
+        if (!clientPath) {
+          return { success: false, error: 'Client path is required' };
+        }
+
+        const modsDir = path.join(clientPath, 'mods');
+        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+
+        if (!fs.existsSync(modsDir)) {
+          return { success: true, removed: [] };
+        }
+
+        const allowed = new Set([
+          ...requiredMods.map(m => m.fileName),
+          ...allClientMods.map(m => m.fileName)
+        ]);
+
+        const files = fs.readdirSync(modsDir).filter(f => f.endsWith('.jar') || f.endsWith('.jar.disabled'));
+        const removed = [];
+
+        for (const file of files) {
+          const base = file.replace('.disabled', '');
+          if (!allowed.has(base)) {
+            const filePath = path.join(modsDir, file);
+            try {
+              fs.unlinkSync(filePath);
+            } catch {}
+
+            // remove corresponding manifest if exists
+            try {
+              const manifestPath = path.join(manifestDir, `${base}.json`);
+              if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
+            } catch {}
+
+            removed.push(base);
+          }
+        }
+
+        return { success: true, removed };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+
 
 
   };
