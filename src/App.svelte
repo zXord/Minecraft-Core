@@ -4,22 +4,17 @@
   import { onMount } from 'svelte';
   import { serverState } from './stores/serverState.js';
   import { playerState } from './stores/playerState.js';
-  import { openFolder, validateServerPath } from './utils/folderUtils.js';
-  import { isRestarting } from './stores/restartState.js';
   import { errorMessage, successMessage } from './stores/modStore.js';
+  import { route, navigate } from './router.js';
+  import ServerDashboard from './routes/ServerDashboard.svelte';
+  import ModsPage from './routes/ModsPage.svelte';
+  import SettingsPage from './routes/SettingsPage.svelte';
+  import { setupIpcListeners } from './modules/serverListeners.js';
+  import { saveInstances } from './modules/instanceUtils.js';
   
   // Components
   import SetupWizard from './components/setup/SetupWizard.svelte';
-  import ServerControls from './components/server/ServerControls.svelte';
-  import ServerConsole from './components/server/ServerConsole.svelte';
-  import ServerMetrics from './components/server/ServerMetrics.svelte';
   import PlayerList from './components/players/PlayerList.svelte';
-  import ModManager from './components/mods/ModManager.svelte';
-  import AutoRestartSettings from './components/settings/AutoRestartSettings.svelte';
-  import ServerRepair from './components/settings/ServerRepair.svelte';
-  import WorldSettings from './components/settings/WorldSettings.svelte';
-  import ServerPropertiesEditor from './components/settings/ServerPropertiesEditor.svelte';
-  import InstanceSettings from './components/settings/InstanceSettings.svelte';
   import Backups from './components/Backups.svelte';
   import ClientInterface from './components/client/ClientInterface.svelte';
   import ClientSetupWizard from './components/client/ClientSetupWizard.svelte';
@@ -28,26 +23,14 @@
   // --- Flow & Tabs ---
   let step = 'loading'; // loading → chooseFolder → chooseVersion → done
   const tabs = ['dashboard', 'players', 'mods', 'backups', 'settings'];
-  let activeTab = 'dashboard';
   let path = '';
   let isLoading = true; // Add loading state
   
   // Save instances whenever they change
   $: if (step === 'done' && instances) {
     console.log('Instances changed, saving...');
-    window.electron.invoke('save-instances', instances)
-      .then(result => {
-        if (!result?.success) {
-          console.error('Failed to save instances:', result?.error);
-        } else {
-          console.log('Instances saved successfully');
-        }
-      })
-      .catch(error => {
-        console.error('Error saving instances:', error);
-      });
+    saveInstances(instances);
   }
-  let restarting = false;
   
   // Sidebar and instance management
   let isSidebarOpen = false;
@@ -87,7 +70,7 @@
         }
         
         // Explicitly save instances to ensure persistence
-        await saveInstances();
+        await saveInstances(instances);
       } else {
         console.error('Failed to rename instance:', result.error);
       }
@@ -117,95 +100,9 @@
     }
   }
   
-  // Subscribe to restarting store
-  isRestarting.subscribe(value => {
-    restarting = value;
-  });
   
-  // Setup the IPC listeners that should be global
-  function setupIpcListeners() {
-    // Remove any existing listeners first to prevent duplicates
-    window.electron.removeAllListeners('server-status');
-    window.electron.removeAllListeners('metrics-update');      
-    
-    window.electron.on('server-status', status => {
-        // When restarting, ignore 'stopped' but clear flag on 'running'
-        if (restarting) {
-          if (status === 'running') {
-            isRestarting.set(false);
-          }
-          if (status === 'stopped') {
-            return;
-          }
-        }
-        // Normalize status to either 'Running' or 'Stopped'
-        const normalizedStatus = status === 'running' ? 'Running' : 'Stopped';
-        
-        serverState.update(state => ({
-          ...state,
-          status: normalizedStatus
-        }));
-        
-        // If server has stopped, reset metrics to ensure consistent UI
-        if (normalizedStatus === 'Stopped') {
-          serverState.update(state => ({
-            ...state,
-            cpuLoad: 0,
-            memUsedMB: 0,
-            uptime: '0h 0m 0s'
-          }));
-          
-          // Also reset players
-          playerState.update(state => ({
-            ...state,
-            count: 0,
-            onlinePlayers: []
-          }));
-          
-          // Direct DOM manipulation to ensure inputs are enabled
-          setTimeout(() => {
-            const portInput = document.getElementById('port-input');
-            const ramInput = document.getElementById('ram-input');
-            const portLabel = document.getElementById('port-label');
-            const ramLabel = document.getElementById('ram-label');
-            
-            if (portInput && portInput instanceof HTMLInputElement) {
-              portInput.disabled = false;
-              portInput.classList.remove('disabled-input');
-            }
-            
-            if (ramInput && ramInput instanceof HTMLInputElement) {
-              ramInput.disabled = false;
-              ramInput.classList.remove('disabled-input');
-            }
-            
-            if (portLabel) portLabel.classList.remove('disabled');
-            if (ramLabel) ramLabel.classList.remove('disabled');
-          }, 200);
-        }
-      });
-  }
   
   // Save instances to persistent storage
-  async function saveInstances() {
-    try {
-      // Make sure instances have valid data
-      const validInstances = instances.filter(instance => {
-        // For server instances, path must be provided
-        if (instance.type === 'server' && (!instance.path || instance.path.trim() === '')) {
-          return false;
-        }
-        return true;
-      });
-      
-      const result = await window.electron.invoke('save-instances', validInstances);
-      if (!result || !result.success) {
-        console.error('Failed to save instances:', result?.error || 'Unknown error');
-      }
-    } catch (err) {
-      console.error('Failed to save instances:', err);
-    }
-  }
   
   onMount(() => {
     setupIpcListeners();
@@ -624,8 +521,8 @@
             {#each tabs as t}
               <button
                 class="tab-button"
-                class:active={activeTab === t}
-                on:click={() => activeTab = t}
+                class:active={$route === '/' + t}
+                on:click={() => navigate('/' + t)}
               >
                 {#if t === 'dashboard'}
                   <span class="tab-icon">📊</span>
@@ -646,101 +543,20 @@
         
         <!-- Tab content container -->
         <div class="tab-content">
-          {#if activeTab === 'dashboard'}
-            <div class="dashboard-panel">
-              <!-- Server controls -->
-              <ServerControls serverPath={path} />
-              
-              <!-- Server metrics -->
-              <ServerMetrics />
-              
-              <!-- Server console -->
-              <ServerConsole />
-
-              <hr/>
-
-              <!-- Health check and repair -->
-              <ServerRepair serverPath={path} />
-            </div>
-          {:else if activeTab === 'players'}
-            <!-- Player management -->
+          {#if $route === '/dashboard'}
+            <ServerDashboard serverPath={path} />
+          {:else if $route === '/players'}
             <div class="content-panel">
               <PlayerList serverPath={path} />
             </div>
-          {:else if activeTab === 'mods'}
-            <!-- Mod management -->
-            <div class="content-panel">
-              <ModManager serverPath={path} />
-            </div>
-          {:else if activeTab === 'backups'}
+          {:else if $route === '/mods'}
+            <ModsPage serverPath={path} />
+          {:else if $route === '/backups'}
             <div class="content-panel">
               <Backups serverPath={path} />
             </div>
-          {:else if activeTab === 'settings'}
-            <!-- Server settings -->
-            <div class="content-panel">
-              <h2>Server Settings</h2>
-              
-              <!-- Server Path with folder icon -->
-              <div class="server-path-section">
-                <h3>Server Location</h3>
-                <div class="path-container">
-                  <div class="path-text">{path}</div>
-                  <button 
-                    class="folder-button" 
-                    on:click={async () => {
-                      if (!validateServerPath(path)) {
-                        errorMessage.set('Server path is empty or invalid. Please set up the server first.');
-                        setTimeout(() => errorMessage.set(''), 5000);
-                        return;
-                      }
-                      
-                      const success = await openFolder(path);
-                      if (!success) {
-                        errorMessage.set(`Failed to open folder. Please access it manually at: ${path}`);
-                        setTimeout(() => errorMessage.set(''), 5000);
-                      }
-                    }}
-                    title="Open server folder"
-                  >
-                    📁
-                  </button>
-                </div>
-              </div>
-              
-              <!-- Server Properties Editor -->
-              <ServerPropertiesEditor serverPath={path} />
-              
-              <!-- World Settings -->
-              <WorldSettings serverPath={path} />
-              
-              <!-- Auto Restart Settings -->
-              <AutoRestartSettings />
-              
-              <!-- Instance Settings -->
-              {#if currentInstance}
-                <InstanceSettings 
-                  instance={currentInstance} 
-                  on:deleted={(e) => {
-                    // Remove the instance from the list
-                    instances = instances.filter(i => i.id !== e.detail.id);
-                    
-                    // Switch to a different instance if available, otherwise show selection screen
-                    if (instances.length > 0) {
-                      currentInstance = instances[0];
-                      if (currentInstance.type === 'server') {
-                        path = currentInstance.path;
-                        instanceType = 'server';
-                      } else {
-                        instanceType = 'client';
-                      }
-                    } else {
-                      showInstanceSelector = true;
-                    }
-                  }}
-                />
-              {/if}
-            </div>
+          {:else if $route === '/settings'}
+            <SettingsPage serverPath={path} currentInstance={currentInstance} />
           {/if}
         </div>
       {:else if instanceType === 'client'}

@@ -11,6 +11,9 @@
     installedModInfo
   } from '../../../stores/modStore.js';
   import { onMount } from 'svelte';
+  import ModCardHeader from './ModCardHeader.svelte';
+  import ModCardActions from './ModCardActions.svelte';
+  import ModCardBody from './ModCardBody.svelte';
   
   // Props
   export let mod = {};
@@ -260,11 +263,41 @@
     });
     
     // Notify parent component to install the mod
-    dispatch('install', { 
-      mod, 
+    dispatch('install', {
+      mod,
       versionId: selectedVersionId,
       isVersionChange
     });
+  }
+
+  /**
+   * Click handler for the install/update button
+   * @param {MouseEvent} e
+   */
+  function handleInstallClick(e) {
+    e.stopPropagation();
+    if (isInstalled) {
+      if (expanded && isChangingVersion) {
+        handleInstall(true);
+      } else if (hasUpdate && !expanded) {
+        if (updateInfo && updateInfo.id) {
+          selectVersion(updateInfo);
+          handleInstall(true);
+        } else {
+          toggleVersionSelector();
+          dispatch('loadVersions', { modId: mod.id, loadAll: true });
+        }
+      } else {
+        toggleVersionSelector();
+      }
+    } else {
+      if (versions && versions.length > 0 && selectedVersionId) {
+        handleInstall();
+      } else {
+        toggleVersionSelector();
+        dispatch('loadVersions', { modId: mod.id, loadLatestOnly: true });
+      }
+    }
   }
   
   /**
@@ -321,254 +354,48 @@
 
 <div class="mod-card" class:has-warnings={mod.warnings && mod.warnings.length > 0} class:has-update={hasUpdate}>
   <div class="mod-header-container">
-    <button 
-      class="mod-header" 
-      on:click={toggleVersionSelector}
-      type="button"
-      aria-expanded={expanded}
-      aria-controls={`version-selector-${mod.id}`}
-    >
-      <div class="mod-icon-container">
-        {#if mod.iconUrl}
-          <img 
-            src={mod.iconUrl} 
-            alt={mod.name} 
-            class="mod-icon"
-            on:error={() => mod.iconUrl = null} 
-            class:disabled={isInstalled && !hasUpdate}
-          />
-        {:else}
-          <div class="mod-icon-placeholder" class:disabled={isInstalled && !hasUpdate}>
-            {getFirstChar(mod.name || mod.title)}
-          </div>
-        {/if}
-      </div>
-      
-      <div class="mod-details">
-        <h3 class="mod-title" class:disabled={isInstalled && !hasUpdate}>
-          {mod.name || mod.title}
-          
-          {#if mod.clientSide && mod.serverSide}
-            <span class="environment-badge both" title="Works on both client and server">C/S</span>
-          {:else if mod.clientSide}
-            <span class="environment-badge client" title="Client-side mod">Client</span>
-          {:else if mod.serverSide}
-            <span class="environment-badge server" title="Server-side mod">Server</span>
-          {/if}
-          
-          {#if hasUpdate}
-            <span class="update-badge" title="Update available">
-              New Update
-            </span>
-          {/if}
-          
-          {#if mod.warnings && mod.warnings.length > 0}
-            <span 
-              class="warning-badge" 
-              title={mod.warnings.join('\n')}
-            >
-              ⚠️
-            </span>
-          {/if}
-        </h3>
-        
-        <p class="mod-description" class:disabled={isInstalled && !hasUpdate}>
-          {mod.description || 'No description available'}
-        </p>
-        
-        <div class="mod-stats">
-          {#if mod.downloads !== undefined}
-            <span class="mod-stat" title="Downloads">
-              <i class="stat-icon download-icon">⬇️</i> {mod.downloads.toLocaleString()}
-            </span>
-          {/if}
-          
-          {#if mod.followers !== undefined}
-            <span class="mod-stat" title="Followers">
-              <i class="stat-icon follow-icon">⭐</i> {mod.followers.toLocaleString()}
-            </span>
-          {/if}
-          
-          {#if mod.lastUpdated}
-            <span class="mod-stat" title="Last Updated">
-              <i class="stat-icon updated-icon">🔄</i> {formatDate(mod.lastUpdated)}
-            </span>
-          {/if}
-        </div>
-        
-        <div class="mod-meta">
-          {#if mod.author}
-            <span class="mod-author">by {mod.author}</span>
-          {/if}
-          
-          {#if isInstalled}
-            <!-- Show installed version info -->
-            <span class="version-tag-inline" class:has-update={hasUpdate}>
-              {installedVersionNumber || 'Installed'}
-              {#if hasUpdate && updateVersionNumber}
-                <span class="update-available-tag" title={`Update to ${updateVersionNumber} available`}>
-                  ({updateVersionNumber} available)
-                </span>
-              {/if}
-            </span>
-          {:else if selectedVersionId && versions.length > 0}
-            {@const selectedVersion = versions.find(v => v.id === selectedVersionId)}
-            <span class="version-tag-inline">
-              {selectedVersion ? selectedVersion.versionNumber : 'Select version'}
-            </span>
-          {/if}
-        </div>
-      </div>
-    </button>
-    
-    <div class="mod-actions">
-      <button
-        class="install-button"
-        class:installed={isInstalled && (!isChangingVersion || !expanded) && !hasUpdate}
-        class:update-available={isInstalled && hasUpdate && !expanded}
-        class:change-version={isChangingVersion && expanded && !isInstalling}
-        class:installing={isInstalling}
-        disabled={isInstalling || (!isInstalled && versions.length > 0 && !selectedVersionId)}
-        on:click={(e) => {
-          e.stopPropagation();
-          if (isInstalled) {
-            if (expanded && isChangingVersion) {
-              // If expanded and a different version is selected, trigger install with version change
-              handleInstall(true);
-            } else if (hasUpdate && !expanded) {
-              // If there's an update available and not expanded, directly install the update
-              // First, select the update version
-              if (updateInfo && updateInfo.id) {
-                selectVersion(updateInfo);
-                // Then immediately install it
-                handleInstall(true);
-              } else {
-                // If we don't have update info yet, load versions first
-                toggleVersionSelector();
-                dispatch('loadVersions', { modId: mod.id, loadAll: true });
-              }
-            } else {
-              // Otherwise just expand to show version options
-              toggleVersionSelector();
-            }
-          } else {
-            // If not installed and we have versions, directly install the selected version
-            if (versions && versions.length > 0 && selectedVersionId) {
-              handleInstall();
-            } else {
-              // If versions aren't loaded yet, load them first
-              toggleVersionSelector();
-              // Try to fetch versions and auto-select the best one
-              dispatch('loadVersions', { modId: mod.id, loadLatestOnly: true });
-            }
-          }
-        }}
-      >
-        {#if isInstalling}
-          Installing...
-        {:else if isInstalled}
-          {#if expanded && isChangingVersion}
-            Change Version
-          {:else if hasUpdate}
-            Update
-          {:else}
-            Installed
-          {/if}
-        {:else}
-          Install
-        {/if}
-      </button>
-    </div>
+    <ModCardHeader
+      {mod}
+      {expanded}
+      {isInstalled}
+      {hasUpdate}
+      {updateVersionNumber}
+      {installedVersionNumber}
+      {selectedVersionId}
+      {installedVersionId}
+      {versions}
+      toggleVersionSelector={toggleVersionSelector}
+      getFirstChar={getFirstChar}
+      formatDate={formatDate}
+    />
+    <ModCardActions
+      {isInstalled}
+      {isChangingVersion}
+      {isInstalling}
+      {hasUpdate}
+      {expanded}
+      {versions}
+      {selectedVersionId}
+      handleInstallClick={handleInstallClick}
+    />
   </div>
-  
-  {#if expanded}
-    <div id="version-selector-{mod.id}" class="version-selector">
-      {#if loading}
-        <div class="loading-versions">Loading versions...</div>
-      {:else if error}
-        <div class="version-error">Error loading versions: {error}</div>
-      {:else if filteredVersions.length === 0}
-        <div class="no-versions">
-          No compatible versions for Minecraft {filterMinecraftVersion}
-        </div>
-      {:else}
-        {#if filteredVersions.some(v => v.gameVersions.includes(filterMinecraftVersion))}
-          <div class="version-list">
-            {#each filteredVersions as version}
-              <button 
-                class="version-item"
-                class:selected={version.id === selectedVersionId}
-                class:installed-version={version.id === installedVersionId}
-                class:compatible={version.gameVersions.includes(filterMinecraftVersion)}
-                on:click={() => selectVersion(version)}
-                type="button"
-                aria-selected={version.id === selectedVersionId}
-              >
-                <div class="version-info">
-                  <span class="version-name">{version.name || version.versionNumber}</span>
-                  <span class="version-mc">{version.gameVersions.join(', ')}</span>
-                  {#if version.id === installedVersionId}
-                    <span class="installed-badge">Installed</span>
-                  {/if}
-                </div>
-                <div class="version-meta">
-                  {#if version.downloads !== undefined}
-                    <span class="download-count" title="Download count">
-                      {version.downloads.toLocaleString()} DL
-                    </span>
-                  {/if}
-                  {#if version.fileSize !== undefined}
-                    <span class="file-size" title="File size">
-                      {formatFileSize(version.fileSize)}
-                    </span>
-                  {/if}
-                </div>
-              </button>
-            {/each}
-          </div>
-        {:else}
-          <div class="version-note">
-            No versions are officially tagged for Minecraft {filterMinecraftVersion}, but these versions may be compatible:
-          </div>
-          <div class="version-list">
-            {#each filteredVersions as version}
-              <button 
-                class="version-item"
-                class:selected={version.id === selectedVersionId}
-                class:installed-version={version.id === installedVersionId}
-                on:click={() => selectVersion(version)}
-                type="button"
-                aria-selected={version.id === selectedVersionId}
-              >
-                <div class="version-info">
-                  <span class="version-name">{version.name || version.versionNumber}</span>
-                  <span class="version-mc">{version.gameVersions.join(', ')}</span>
-                  {#if version.id === installedVersionId}
-                    <span class="installed-badge">Installed</span>
-                  {/if}
-                </div>
-                <div class="version-meta">
-                  {#if version.downloads !== undefined}
-                    <span class="download-count" title="Download count">
-                      {version.downloads.toLocaleString()} DL
-                    </span>
-                  {/if}
-                  {#if version.fileSize !== undefined}
-                    <span class="file-size" title="File size">
-                      {formatFileSize(version.fileSize)}
-                    </span>
-                  {/if}
-                </div>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      {/if}
-    </div>
-  {/if}
+
+  <ModCardBody
+    {expanded}
+    modId={mod.id}
+    {loading}
+    {error}
+    {filteredVersions}
+    {filterMinecraftVersion}
+    {selectedVersionId}
+    {installedVersionId}
+    {versions}
+    selectVersion={selectVersion}
+    formatFileSize={formatFileSize}
+  />
 </div>
 
-<style>
+<style global>
   .mod-card {
     background: rgba(255, 255, 255, 0.07);
     border-radius: 8px;
