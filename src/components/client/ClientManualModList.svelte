@@ -10,6 +10,7 @@
     projectId?: string;
     versionId?: string;
     versionNumber?: string;
+    name?: string;
   }
 
   export let mods: Mod[] = [];
@@ -65,7 +66,7 @@
     {#each mods as mod}
       <div class="mod-item">
         <div class="info">
-          <span class="name">{mod.fileName}</span>
+          <span class="name">{mod.name || mod.fileName}</span>
           {#if mod.versionNumber}
             <span class="version">v{mod.versionNumber}</span>
           {/if}
