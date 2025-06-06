@@ -340,6 +340,7 @@
       const result = await window.electron.invoke('minecraft-download-mods', {
         clientPath: instance.path,
         requiredMods,
+        allClientMods,
         serverInfo: {
           serverIp: instance.serverIp,
           serverPort: instance.serverPort
@@ -380,6 +381,7 @@
       const result = await window.electron.invoke('minecraft-download-mods', {
         clientPath: instance.path,
         requiredMods: optionalMods, // Use the same parameter name for consistency
+        allClientMods,
         serverInfo: {
           serverIp: instance.serverIp,
           serverPort: instance.serverPort
@@ -499,6 +501,7 @@
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
+
   
   // Client mod search functionality
   async function searchClientMods() {
@@ -785,6 +788,11 @@
             on:delete={(e) => handleModDelete(e.detail.fileName)}
             on:install={handleInstallMod}
             />
+          {#if manualMods.length > 0}
+            <button class="cleanup-button" on:click={removeExtraMods}>
+              🗑️ Remove Extra Mods ({manualMods.length})
+            </button>
+          {/if}
           </div>
         </div>
       {/if}
@@ -1152,4 +1160,5 @@
   .no-results p {
     color: #9ca3af;
   }
-</style> 
+
+</style>
