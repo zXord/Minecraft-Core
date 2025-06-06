@@ -759,7 +759,6 @@ import {
         <div class="header-cell">Available Update</div>
         <div class="header-cell">Actions</div>
   
-        </div>
       <div class="mods-grid">
         {#each $installedMods.filter(mod => !$disabledMods.has(mod)) as mod}
           <ModRow {mod} {installedModVersionsCache} {modStatus} selected={selectedMods.has(mod)} on:toggleSelect={toggleSelectMod} on:delete={showDeleteConfirmation} on:toggleDisable={(e) => showDisableConfirmation(e.detail.mod, e.detail.disabled)} on:updateMod={(e) => dispatch("updateMod", e.detail)} on:compatibility-warning={(e) => handleCompatibilityWarning(e.detail)} />
