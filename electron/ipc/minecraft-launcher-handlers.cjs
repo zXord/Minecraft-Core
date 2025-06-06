@@ -200,7 +200,7 @@ function createMinecraftLauncherHandlers(win) {
     },
     
       // Download required mods and clean up removed ones
-      'minecraft-download-mods': async (_e, { clientPath, requiredMods, serverInfo }) => {
+      'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo }) => {
       try {
         if (!clientPath || !requiredMods || !Array.isArray(requiredMods)) {
           return { success: false, error: 'Invalid parameters' };
@@ -361,7 +361,10 @@ function createMinecraftLauncherHandlers(win) {
           const modsDir = path.join(clientPath, 'mods');
           const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
 
-          const allowed = new Set(requiredMods.map(m => m.fileName));
+          const allowedList = Array.isArray(allClientMods) && allClientMods.length > 0
+            ? allClientMods
+            : requiredMods;
+          const allowed = new Set(allowedList.map(m => (typeof m === 'string' ? m : m.fileName)));
           if (fs.existsSync(manifestDir)) {
             const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
             for (const file of manifests) {
@@ -827,6 +830,7 @@ function createMinecraftLauncherHandlers(win) {
         return { success: false, error: error.message };
       }
     },
+
 
 
 

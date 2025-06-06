@@ -614,6 +614,7 @@
       const result = await window.electron.invoke('minecraft-download-mods', {
         clientPath: instance.path,
         requiredMods,
+        allClientMods: serverInfo?.allClientMods || [],
         serverInfo: {
           serverIp: instance.serverIp,
           serverPort: instance.serverPort
