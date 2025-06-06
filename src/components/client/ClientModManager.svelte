@@ -90,6 +90,7 @@
   let manualMods: Mod[] = [];
   let filterType = 'client';
   let downloadManagerCleanup;
+  let unsubscribeInstalledInfo;
 
   // Connect to server and get mod information
   onMount(() => {
@@ -99,6 +100,9 @@
       // Populate local mod status even if not connected to a server
       checkModSynchronization();
     }
+    unsubscribeInstalledInfo = installedModInfo.subscribe(() => {
+      checkModSynchronization();
+    });
     // Initialize filter stores for client mod search
     if (!get(filterMinecraftVersion)) {
       filterMinecraftVersion.set(get(minecraftVersion) || '1.20.1');
@@ -122,6 +126,7 @@
 
   onDestroy(() => {
     if (downloadManagerCleanup) downloadManagerCleanup();
+    if (unsubscribeInstalledInfo) unsubscribeInstalledInfo();
   });
 
   // Keep filters in sync with the selected Minecraft version
@@ -694,20 +699,18 @@
       {/if}
 
           <!-- Manually Installed Mods Section -->
-          {#if manualMods.length > 0}
-            <div class="mod-section">
-              <h3>Manual Mods</h3>
-              <p class="section-description">
-                Mods installed directly in your client folder.
-              </p>
-              <ClientManualModList
-                {manualMods}
-                on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
-                on:delete={(e) => handleModDelete(e.detail.fileName)}
-                on:install={handleInstallMod}
-              />
-            </div>
-          {/if}
+          <div class="mod-section">
+            <h3>Manual Mods</h3>
+            <p class="section-description">
+              Mods installed directly in your client folder.
+            </p>
+            <ClientManualModList
+              {manualMods}
+              on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
+              on:delete={(e) => handleModDelete(e.detail.fileName)}
+              on:install={handleInstallMod}
+            />
+          </div>
         </div>
       {/if}
     {:else if activeTab === 'find-mods'}
