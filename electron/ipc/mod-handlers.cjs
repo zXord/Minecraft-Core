@@ -144,6 +144,16 @@ function createModHandlers(win) {
       }
     },
 
+    'get-client-installed-mod-info': async (_event, clientPath) => {
+      try {
+        console.log('[IPC:Mods] Getting client installed mod info for path:', clientPath);
+        return await modFileManager.getClientInstalledModInfo(clientPath);
+      } catch (err) {
+        console.error('[IPC:Mods] Failed to get client installed mod info:', err);
+        throw new Error(`Failed to get client installed mod info: ${err.message}`);
+      }
+    },
+
     'save-disabled-mods': async (_event, serverPath, disabledMods) => {
       try {
         console.log('[IPC:Mods] Saving disabled mods, calling modFileManager.saveDisabledMods for serverPath:', serverPath);
