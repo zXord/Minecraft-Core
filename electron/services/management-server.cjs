@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { createHash } = require('crypto');
 const utils = require('./minecraft-launcher/utils.cjs'); // Import utils for calculateFileChecksum
+const eventBus = require('../utils/event-bus.cjs');
 
 class ManagementServer {
   constructor() {
@@ -15,7 +16,10 @@ class ManagementServer {
     this.serverPath = null;
     this.clients = new Map(); // Track connected clients
     this.clientCleanupInterval = null; // Interval for cleaning up stale clients
-    
+    this.versionInfo = { minecraftVersion: null, loaderType: null, loaderVersion: null };
+    this.versionWatcher = null;
+    this.sseClients = [];
+
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -40,12 +44,31 @@ class ManagementServer {
   setupRoutes() {
     // Health check endpoint
     this.app.get('/health', (req, res) => {
-      res.json({ 
-        status: 'ok', 
+      res.json({
+        status: 'ok',
         server: 'minecraft-core-management',
         version: '1.0.0',
         serverPath: this.serverPath
       });
+    });
+
+    // Server-Sent Events endpoint for clients to receive updates
+    this.app.get('/api/events', (req, res) => {
+      res.set({
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive'
+      });
+      res.flushHeaders();
+      this.sseClients.push(res);
+      req.on('close', () => {
+        this.sseClients = this.sseClients.filter(c => c !== res);
+      });
+    });
+
+    // Endpoint to query current server version
+    this.app.get('/api/server/version', (req, res) => {
+      res.json({ success: true, version: this.versionInfo });
     });
     
     // Client registration
@@ -511,10 +534,12 @@ class ManagementServer {
         this.isRunning = true;
         console.log(`[ManagementServer] Management server started on port ${port}`);
         console.log(`[ManagementServer] Server path: ${serverPath || 'Not set'}`);
-        
+
         // Start client cleanup interval (check every 30 seconds)
         this.startClientCleanup();
-        
+        this.startVersionWatcher();
+        this.checkVersionChange();
+
         resolve({ success: true, port });
       });
       
@@ -544,7 +569,8 @@ class ManagementServer {
         
         // Stop client cleanup interval
         this.stopClientCleanup();
-        
+        this.stopVersionWatcher();
+
         console.log('[ManagementServer] Management server stopped');
         resolve({ success: true });
       });
@@ -554,6 +580,9 @@ class ManagementServer {
   updateServerPath(newPath) {
     this.serverPath = newPath;
     console.log(`[ManagementServer] Server path updated: ${newPath}`);
+    this.stopVersionWatcher();
+    this.startVersionWatcher();
+    this.checkVersionChange();
   }
   
   // Check if Minecraft server is running
@@ -872,13 +901,86 @@ class ManagementServer {
       });
     }
   }
+
+  broadcastEvent(event, data) {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    this.sseClients.forEach(res => {
+      try {
+        res.write(payload);
+      } catch {}
+    });
+    eventBus.emit(event, data);
+  }
+
+  startVersionWatcher() {
+    if (!this.serverPath) return;
+    this.versionWatcher = fs.watch(this.serverPath, (eventType, filename) => {
+      if (!filename) return;
+      if (filename.endsWith('.jar') || filename === 'version.json') {
+        this.checkVersionChange();
+      }
+    });
+  }
+
+  stopVersionWatcher() {
+    if (this.versionWatcher) {
+      this.versionWatcher.close();
+      this.versionWatcher = null;
+    }
+  }
+
+  async detectServerVersions() {
+    if (!this.serverPath) return { minecraftVersion: null, loaderType: null, loaderVersion: null };
+    let minecraftVersion = 'unknown';
+    let loaderType = 'vanilla';
+    let loaderVersion = null;
+    try {
+      const files = fs.readdirSync(this.serverPath);
+      const serverJars = files.filter(f => f.endsWith('.jar'));
+      if (serverJars.length > 0) {
+        const match = serverJars[0].match(/(\d+\.\d+(?:\.\d+)?)/);
+        if (match) minecraftVersion = match[1];
+      }
+      const versionPath = path.join(this.serverPath, 'version.json');
+      if (minecraftVersion === 'unknown' && fs.existsSync(versionPath)) {
+        const data = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
+        minecraftVersion = data.name || data.id || minecraftVersion;
+      }
+      const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
+      if (fs.existsSync(fabricLaunchJar)) {
+        loaderType = 'fabric';
+        try {
+          const configPath = path.join(this.serverPath, 'config.json');
+          if (fs.existsSync(configPath)) {
+            const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            loaderVersion = cfg.fabric || cfg.loaderVersion || null;
+          }
+        } catch {}
+      }
+    } catch {}
+    return { minecraftVersion, loaderType, loaderVersion };
+  }
+
+  async checkVersionChange() {
+    const info = await this.detectServerVersions();
+    if (!this.versionInfo ||
+        info.minecraftVersion !== this.versionInfo.minecraftVersion ||
+        info.loaderType !== this.versionInfo.loaderType ||
+        info.loaderVersion !== this.versionInfo.loaderVersion) {
+      const requiredMods = await this.getRequiredMods();
+      const allClientMods = await this.getAllClientMods();
+      this.versionInfo = info;
+      this.broadcastEvent('server-version-changed', { ...info, port: this.port, serverPath: this.serverPath, requiredMods, allClientMods });
+    }
+  }
   
   getStatus() {
     return {
       isRunning: this.isRunning,
       port: this.port,
       serverPath: this.serverPath,
-      clientCount: this.clients.size
+      clientCount: this.clients.size,
+      version: this.versionInfo
     };
   }
 }
