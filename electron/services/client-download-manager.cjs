@@ -189,6 +189,51 @@ class ClientDownloadManager {
     }
   }
 
+  async updateForServerVersion(options) {
+    const { clientPath, mcVersion, fabricVersion, requiredMods = [], allClientMods = [], serverPath = null } = options;
+    const configPath = path.join(clientPath, 'client-config.json');
+    let current = {};
+    if (fs.existsSync(configPath)) {
+      try { current = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+    }
+
+    if (mcVersion && mcVersion !== current.minecraftVersion) {
+      await this.downloadMinecraftClient({ clientPath, mcVersion });
+      current.minecraftVersion = mcVersion;
+    }
+
+    if (fabricVersion && fabricVersion !== current.fabricVersion) {
+      await this.downloadFabricLoader({ clientPath, mcVersion, fabricVersion });
+      current.fabricVersion = fabricVersion;
+    }
+
+    if (requiredMods.length > 0 && serverPath) {
+      await this.downloadRequiredMods({ clientPath, serverPath, requiredMods });
+    }
+
+    // Clean up obsolete mods
+    if (allClientMods.length > 0) {
+      const modsDir = path.join(clientPath, 'mods');
+      if (fs.existsSync(modsDir)) {
+        const allowed = new Set(allClientMods.map(m => typeof m === 'string' ? m : m.fileName));
+        const files = fs.readdirSync(modsDir).filter(f => f.endsWith('.jar'));
+        for (const file of files) {
+          if (!allowed.has(file)) {
+            try { fs.unlinkSync(path.join(modsDir, file)); } catch {}
+          }
+        }
+      }
+    }
+
+    fs.writeFileSync(configPath, JSON.stringify({
+      minecraftVersion: current.minecraftVersion,
+      fabricVersion: current.fabricVersion,
+      lastUpdated: new Date().toISOString()
+    }, null, 2));
+
+    return true;
+  }
+
   /**
    * Ensure a directory exists
    * @param {string} dir - Directory path
