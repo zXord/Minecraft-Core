@@ -17,6 +17,10 @@
   let compatChecked = false;
   let incompatibleMods = [];
 
+  // Track current server status
+  $: serverStatus = $serverState.status;
+  $: serverRunning = serverStatus === 'Running';
+
   $: resolvedPath = serverPath || get(settingsStore).path;
 
   onMount(() => {
@@ -137,11 +141,15 @@
     {/if}
   {/if}
 
-  <button class="update-btn" on:click={updateServerVersion}
-    disabled={!compatChecked || $serverState.status === 'Running' || updating}>
+  <button
+    class="update-btn"
+    on:click={updateServerVersion}
+    disabled={!compatChecked || serverRunning || updating}
+    title={serverRunning ? 'Stop the server before updating.' : ''}
+  >
     {updating ? 'Updating...' : 'Update Server Version'}
   </button>
-  {#if $serverState.status === 'Running'}
+  {#if serverRunning}
     <p class="server-running-warning">Stop the server before updating.</p>
   {/if}
 </div>
