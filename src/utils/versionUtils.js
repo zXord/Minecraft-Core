@@ -1,0 +1,42 @@
+/**
+ * Utility functions to fetch the latest Minecraft and Fabric versions
+ */
+
+/**
+ * Fetch the latest stable Minecraft version from Fabric's meta API
+ * @returns {Promise<string|null>} latest version or null on failure
+ */
+export async function fetchLatestMinecraftVersion() {
+  try {
+    const res = await fetch('https://meta.fabricmc.net/v2/versions/game');
+    if (!res.ok) {
+      throw new Error(`Status ${res.status}`);
+    }
+    const data = await res.json();
+    const stable = data.find(v => v.stable);
+    return stable ? stable.version : (data[0]?.version ?? null);
+  } catch (err) {
+    console.error('Error fetching latest Minecraft version:', err);
+    return null;
+  }
+}
+
+/**
+ * Fetch the latest Fabric loader version for a given Minecraft version
+ * @param {string} mcVersion - Minecraft version to check
+ * @returns {Promise<string|null>} latest loader version or null on failure
+ */
+export async function fetchLatestFabricVersion(mcVersion) {
+  if (!mcVersion) return null;
+  try {
+    const res = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${mcVersion}`);
+    if (!res.ok) {
+      throw new Error(`Status ${res.status}`);
+    }
+    const data = await res.json();
+    return data.length > 0 ? data[0].loader.version : null;
+  } catch (err) {
+    console.error('Error fetching latest Fabric version:', err);
+    return null;
+  }
+}

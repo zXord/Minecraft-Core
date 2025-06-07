@@ -1,11 +1,14 @@
 <!-- @ts-ignore -->
 <script lang="ts">  /// <reference path="../../electron.d.ts" />
   import { onMount, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import { serverState, updateServerMetrics, updateServerStatus } from '../../stores/serverState.js';
   import { playerState, updateOnlinePlayers, showContextMenu } from '../../stores/playerState.js';
   import PlayerContextMenu from '../players/PlayerContextMenu.svelte';
   import { openFolder, validateServerPath } from '../../utils/folderUtils.js';
   import { errorMessage } from '../../stores/modStore.js';
+  import { settingsStore } from '../../stores/settingsStore.js';
+  import { latestVersions, refreshLatestVersions } from '../../stores/versionUpdates.js';
   
   export let serverPath = '';
   
@@ -39,6 +42,22 @@
   // Auto-start settings
   let autoStartMinecraft = false;
   let autoStartManagement = false;
+
+  // Version update tracking
+  $: currentMcVersion = $settingsStore.mcVersion;
+  $: currentFabricVersion = $settingsStore.fabricVersion;
+  $: latestMcVersion = $latestVersions.mc;
+  $: latestFabricVersion = $latestVersions.fabric;
+  $: mcUpdateAvailable = currentMcVersion && latestMcVersion && currentMcVersion !== latestMcVersion;
+  $: fabricUpdateAvailable = currentFabricVersion && latestFabricVersion && currentFabricVersion !== latestFabricVersion;
+
+  let updateChecked = false;
+  $: upToDate = updateChecked && !mcUpdateAvailable && !fabricUpdateAvailable && latestMcVersion && latestFabricVersion;
+
+  async function checkVersionUpdates() {
+    await refreshLatestVersions(currentMcVersion);
+    updateChecked = true;
+  }
   
   // Helper function to enable input fields
   function enableInputFields() {
@@ -202,6 +221,10 @@
         }
         // Initial status check
         await checkServerStatus();
+
+        // Fetch latest version info for update notification
+        await refreshLatestVersions(get(settingsStore).mcVersion);
+        updateChecked = true;
         
         // Load management server status on mount
         try {
@@ -417,6 +440,21 @@
 <div class="server-controls">
   <div class="status-section">
     <h3>Minecraft Server Control Panel</h3>
+    <div class="update-section">
+      <button class="check-updates-button" on:click={checkVersionUpdates}>Check Updates</button>
+      {#if mcUpdateAvailable || fabricUpdateAvailable}
+        <div class="update-notice">
+          {#if mcUpdateAvailable}
+            <span>Minecraft {currentMcVersion} → {latestMcVersion}</span>
+          {/if}
+          {#if fabricUpdateAvailable}
+            <span>Fabric {currentFabricVersion} → {latestFabricVersion}</span>
+          {/if}
+        </div>
+      {:else if upToDate}
+        <div class="update-notice up-to-date">All versions are up to date.</div>
+      {/if}
+    </div>
     <div class="status-display">
       <span class="status-label">Minecraft Server Status:</span>
       <span class="status-value" class:status-running={status === 'Running'} class:status-stopped={status !== 'Running'}>
@@ -946,5 +984,36 @@
   
   .auto-start-item input[type="checkbox"]:checked + label {
     color: #4caf50;
+  }
+
+  .update-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .check-updates-button {
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .check-updates-button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .update-notice {
+    color: #fbbf24;
+    font-size: 0.9rem;
+    text-align: center;
+  }
+
+  .update-notice.up-to-date {
+    color: #a0e881;
   }
 </style>
