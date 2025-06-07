@@ -1,5 +1,6 @@
 // Mod management IPC handlers
 const path = require('path'); // Keep for clientPath determination if needed by handlers directly
+const fs = require('fs');
 const { dialog, app } = require('electron'); // For dialogs & app paths
 
 // Services and Utilities for Mod Management
@@ -171,6 +172,56 @@ function createModHandlers(win) {
       } catch (err) {
         console.error('[IPC:Mods] Failed to get disabled mods:', err);
         throw new Error(`Failed to get disabled mods: ${err.message}`);
+      }
+    },
+
+    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
+      try {
+        if (!serverPath || !fs.existsSync(serverPath)) {
+          throw new Error('Invalid server path');
+        }
+        if (!mcVersion || !fabricVersion) {
+          throw new Error('Version information missing');
+        }
+
+        const installed = await modFileManager.getInstalledModInfo(serverPath);
+        const results = [];
+
+        for (const mod of installed) {
+          const projectId = mod.projectId;
+          const fileName = mod.fileName;
+          const name = mod.name || mod.title || fileName;
+
+          if (!projectId) {
+            results.push({ projectId: null, fileName, name, compatible: true, dependencies: [] });
+            continue;
+          }
+
+          try {
+            const versions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
+            const best = versions && versions[0];
+
+            if (!best) {
+              results.push({ projectId, fileName, name, compatible: false });
+            } else {
+              results.push({
+                projectId,
+                fileName,
+                name,
+                compatible: true,
+                dependencies: best.dependencies || []
+              });
+            }
+          } catch (err) {
+            console.error('[IPC:Mods] Compatibility check error for', projectId, err);
+            results.push({ projectId, fileName, name, compatible: false, error: err.message });
+          }
+        }
+
+        return results;
+      } catch (err) {
+        console.error('[IPC:Mods] check-mod-compatibility error:', err);
+        throw err;
       }
     },
 
