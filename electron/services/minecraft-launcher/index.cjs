@@ -9,6 +9,7 @@ const { AuthHandler } = require('./auth-handler.cjs');
 const { ClientDownloader } = require('./client-downloader.cjs');
 const utils = require('./utils.cjs'); // Added import for utils
 const { ProperMinecraftLauncher } = require('./proper-launcher.cjs'); // Import proper launcher
+const eventBus = require('../utils/event-bus.cjs');
 
 // CRITICAL DEBUG: Intercept session join requests to debug authentication
 try {
@@ -93,6 +94,14 @@ class MinecraftLauncher extends EventEmitter {
     utils.logSystemInfo(); // Use util function
     // Update alias to use the downloader's method
     this.downloadMinecraftClient = this.clientDownloader.downloadMinecraftClientSimple.bind(this.clientDownloader);
+
+    eventBus.on('server-version-changed', async (info) => {
+      try {
+        await this.handleServerVersionChanged(info);
+      } catch (err) {
+        console.error('[MinecraftLauncher] Error handling server version change:', err.message);
+      }
+    });
   }
   
   // Log system information to help with debugging - MOVED to utils.cjs
@@ -1412,6 +1421,22 @@ class MinecraftLauncher extends EventEmitter {
         message: `Failed to launch with proper launcher: ${error.message}`
       };
     }
+  }
+
+  async handleServerVersionChanged(info) {
+    if (!this.clientPath) {
+      return;
+    }
+    const { minecraftVersion, loaderType, loaderVersion } = info;
+    console.log(`[MinecraftLauncher] Detected server version change:`, info);
+    await this.clientDownloader.updateForServerVersion({
+      clientPath: this.clientPath,
+      mcVersion: minecraftVersion,
+      fabricVersion: loaderType === 'fabric' ? loaderVersion : null,
+      serverPath: info.serverPath,
+      requiredMods: info.requiredMods || [],
+      allClientMods: info.allClientMods || []
+    });
   }
 }
 
