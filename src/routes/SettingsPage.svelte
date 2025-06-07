@@ -40,7 +40,7 @@
   <AutoRestartSettings />
   {#if currentInstance}
     <InstanceSettings
-      {currentInstance}
+      instance={currentInstance}
       on:deleted={(e) => {
         /* This event bubbles up to App to handle instance removal */
       }}
