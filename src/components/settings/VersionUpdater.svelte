@@ -5,6 +5,7 @@
   import { settingsStore, updateVersions } from '../../stores/settingsStore.js';
   import { safeInvoke, showConfirmationDialog } from '../../utils/ipcUtils.js';
   import { checkDependencyCompatibility } from '../../utils/mods/modCompatibility.js';
+  import { fetchAllFabricVersions } from '../../utils/versionUtils.js';
 
   export let serverPath = '';
 
@@ -39,9 +40,7 @@
     fabricVersions = [];
     if (!selectedMC) return;
     try {
-      const res = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${selectedMC}`);
-      const data = await res.json();
-      fabricVersions = data.map(v => v.loader.version);
+      fabricVersions = await fetchAllFabricVersions(selectedMC);
     } catch (err) {
       console.error('Failed to fetch Fabric versions', err);
       fabricVersions = [];
