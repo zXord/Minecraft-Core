@@ -3,6 +3,7 @@
   export let currentInstance;
   import { openFolder, validateServerPath } from '../utils/folderUtils.js';
   import AutoRestartSettings from '../components/settings/AutoRestartSettings.svelte';
+  import VersionUpdater from '../components/settings/VersionUpdater.svelte';
   import WorldSettings from '../components/settings/WorldSettings.svelte';
   import ServerPropertiesEditor from '../components/settings/ServerPropertiesEditor.svelte';
   import InstanceSettings from '../components/settings/InstanceSettings.svelte';
@@ -38,6 +39,7 @@
   <ServerPropertiesEditor serverPath={serverPath} />
   <WorldSettings serverPath={serverPath} />
   <AutoRestartSettings />
+  <VersionUpdater serverPath={serverPath} />
   {#if currentInstance}
     <InstanceSettings
       instance={currentInstance}

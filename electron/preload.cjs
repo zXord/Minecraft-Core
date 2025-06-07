@@ -93,6 +93,7 @@ contextBridge.exposeInMainWorld('electron', {
       // Disabled mods management
       'save-disabled-mods',
       'get-disabled-mods',
+      'check-mod-compatibility',
       // Management server channels
       'start-management-server',
       'stop-management-server',
