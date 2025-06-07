@@ -51,8 +51,12 @@
   $: mcUpdateAvailable = currentMcVersion && latestMcVersion && currentMcVersion !== latestMcVersion;
   $: fabricUpdateAvailable = currentFabricVersion && latestFabricVersion && currentFabricVersion !== latestFabricVersion;
 
+  let updateChecked = false;
+  $: upToDate = updateChecked && !mcUpdateAvailable && !fabricUpdateAvailable && latestMcVersion && latestFabricVersion;
+
   async function checkVersionUpdates() {
     await refreshLatestVersions(currentMcVersion);
+    updateChecked = true;
   }
   
   // Helper function to enable input fields
@@ -220,6 +224,7 @@
 
         // Fetch latest version info for update notification
         await refreshLatestVersions(get(settingsStore).mcVersion);
+        updateChecked = true;
         
         // Load management server status on mount
         try {
@@ -446,6 +451,8 @@
             <span>Fabric {currentFabricVersion} → {latestFabricVersion}</span>
           {/if}
         </div>
+      {:else if upToDate}
+        <div class="update-notice up-to-date">All versions are up to date.</div>
       {/if}
     </div>
     <div class="status-display">
@@ -1004,5 +1011,9 @@
     color: #fbbf24;
     font-size: 0.9rem;
     text-align: center;
+  }
+
+  .update-notice.up-to-date {
+    color: #a0e881;
   }
 </style>
