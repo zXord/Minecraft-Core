@@ -40,3 +40,23 @@ export async function fetchLatestFabricVersion(mcVersion) {
     return null;
   }
 }
+
+/**
+ * Fetch all Fabric loader versions for a given Minecraft version
+ * @param {string} mcVersion - Minecraft version to check
+ * @returns {Promise<string[]>} array of loader versions (may include unstable releases)
+ */
+export async function fetchAllFabricVersions(mcVersion) {
+  if (!mcVersion) return [];
+  try {
+    const res = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${mcVersion}?limit=1000`);
+    if (!res.ok) {
+      throw new Error(`Status ${res.status}`);
+    }
+    const data = await res.json();
+    return data.map(v => v.loader.version);
+  } catch (err) {
+    console.error('Error fetching fabric loader versions:', err);
+    return [];
+  }
+}
