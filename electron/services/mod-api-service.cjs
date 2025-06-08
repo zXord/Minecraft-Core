@@ -148,6 +148,7 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
     
     const mods = data.hits.map(mod => ({
       id: mod.project_id,
+      slug: mod.slug,
       name: mod.title,
       description: mod.description,
       author: mod.author,
@@ -266,6 +267,7 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
     // Process results
     const mods = data.hits.map(project => ({
       id: project.project_id,
+      slug: project.slug,
       name: project.title,
       description: project.description,
       thumbnail: project.icon_url,
