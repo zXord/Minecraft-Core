@@ -151,9 +151,12 @@
     if (!info || info.length === 0) {
       manualMods = [];
       return;
-    }const managed = new Set([
+    }
+    // Also include server-only mods in the 'managed' set so they don't appear as manual client mods
+    const managed = new Set([
       ...requiredMods.map(m => m.fileName.toLowerCase()),
-      ...optionalMods.map(m => m.fileName.toLowerCase())
+      ...optionalMods.map(m => m.fileName.toLowerCase()),
+      ...serverMods.map(m => m.fileName.toLowerCase()) // Include server-only mods
     ]);
 
     const disabledSet = new Set(
@@ -746,8 +749,7 @@
           on:download-required={downloadRequiredMods}
           on:download-optional={downloadOptionalMods}
           on:refresh={refreshMods}
-        />
-
+        />        <!-- ModDropZone -->
         <ModDropZone on:filesDropped={handleDroppedFiles} />
 
         <!-- Mod Lists -->
@@ -784,24 +786,21 @@
             on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
           />
         </div>
-      {/if}
-
-          <!-- Manually Installed Mods Section -->
+      {/if}          <!-- Client-Side Mods Section -->
           <div class="mod-section">
-            <h3>Manual Mods</h3>
+            <h3>Client-Side Mods</h3>
           <p class="section-description">
-            Mods installed directly in your client folder.
+            Mods installed by you (not synced from server).
           </p>
-          {#if $errorMessage}
-            <p class="error-message">
+          {#if $errorMessage}            <p class="error-message">
               {$errorMessage} Ensure your client path contains a <code>mods</code> directory.
             </p>
           {/if}          <ClientManualModList
+            clientPath={instance?.path || ''}
             mods={manualMods}
             on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
-            on:install={handleInstallMod}
-            />
+            on:install={handleInstallMod}            />
           </div>
         </div>
       {/if}

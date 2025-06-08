@@ -6,126 +6,186 @@ const AdmZip = require('adm-zip');
 
 async function extractDependenciesFromJar(jarPath) {
   try {
-    console.log(`[ModAnalysis] Analyzing mod file for dependencies: ${jarPath}`);
-    
+    // console.log(`[ModAnalysis] Analyzing mod file for metadata: ${jarPath}`); // Keep console logs for debugging if necessary
+
     try {
       await fs.access(jarPath);
     } catch (err) {
+      // console.error(`[ModAnalysis] Mod file does not exist: ${jarPath}`);
       throw new Error(`Mod file does not exist: ${jarPath}`);
     }
-    
+
     try {
       const zip = new AdmZip(jarPath);
       const zipEntries = zip.getEntries();
-      
-      const fabricEntry = zipEntries.find(entry => 
-        entry.entryName === 'fabric.mod.json' || 
+
+      // Try fabric.mod.json
+      const fabricEntry = zipEntries.find(entry =>
+        entry.entryName === 'fabric.mod.json' ||
         entry.entryName.endsWith('/fabric.mod.json')
       );
-      
+
       if (fabricEntry) {
-        console.log('[ModAnalysis] Found fabric.mod.json');
+        // console.log('[ModAnalysis] Found fabric.mod.json');
         const content = fabricEntry.getData().toString('utf8');
         try {
           const metadata = JSON.parse(content);
-          const dependencies = [];
-          if (metadata.depends && typeof metadata.depends === 'object') {
-            Object.keys(metadata.depends).forEach(depId => {
-              dependencies.push({
-                id: depId,
-                dependency_type: 'required',
-                version_requirement: metadata.depends[depId]
-              });
-            });
-          }
-          if (metadata.recommends && typeof metadata.recommends === 'object') {
-            Object.keys(metadata.recommends).forEach(depId => {
-              dependencies.push({
-                id: depId,
-                dependency_type: 'optional',
-                version_requirement: metadata.recommends[depId]
-              });
-            });
-          }
-          console.log(`[ModAnalysis] Extracted ${dependencies.length} dependencies from fabric.mod.json`);
-          return dependencies;
+          metadata.loaderType = metadata.loaderType || 'fabric';
+          metadata.projectId = metadata.projectId || metadata.id; // Often 'id' is used for project identifier
+          metadata.authors = metadata.authors || (metadata.author ? [metadata.author] : (metadata.contributors ? Object.keys(metadata.contributors) : []));
+          metadata.name = metadata.name || metadata.id;
+          // console.log('[ModAnalysis] Extracted metadata from fabric.mod.json:', metadata);
+          return metadata; // Return full metadata
         } catch (parseErr) {
           console.error('[ModAnalysis] Error parsing fabric.mod.json:', parseErr);
+          return null;
         }
       }
-      
-      const forgeEntry = zipEntries.find(entry => 
-        entry.entryName === 'META-INF/mods.toml' || 
+
+      // Try META-INF/mods.toml (Forge)
+      const forgeEntry = zipEntries.find(entry =>
+        entry.entryName === 'META-INF/mods.toml' ||
         entry.entryName.endsWith('/META-INF/mods.toml')
       );
-      
+
       if (forgeEntry) {
-        console.log('[ModAnalysis] Found Forge mods.toml');
+        // console.log('[ModAnalysis] Found Forge mods.toml');
         const content = forgeEntry.getData().toString('utf8');
-        const dependencies = [];
-        const dependencyLines = content.match(/\[\[dependencies\.[^\]]+\]\]([\s\S]*?)(?=\[|\Z)/g);
-        
-        if (dependencyLines) {
-          dependencyLines.forEach(section => {
-            const modIdMatch = section.match(/modId\s*=\s*["']([^"']+)["']/);
-            if (modIdMatch) {
-              const modId = modIdMatch[1];
-              const mandatoryMatch = section.match(/mandatory\s*=\s*(true|false)/);
-              const isMandatory = mandatoryMatch ? mandatoryMatch[1] === 'true' : false;
-              const versionRangeMatch = section.match(/versionRange\s*=\s*["']([^"']+)["']/);
-              const versionRange = versionRangeMatch ? versionRangeMatch[1] : '*';
-              dependencies.push({
-                id: modId,
-                dependency_type: isMandatory ? 'required' : 'optional',
-                version_requirement: versionRange
-              });
+        try {
+          const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
+          const lines = content.split(/\r?\n/);
+          let currentModTable = null; // To hold data for the current [[mods]] entry
+          let inModsArray = false;
+          let inDescription = false;
+          let currentDescription = [];
+
+          lines.forEach(line => {
+            const trimmedLine = line.trim();
+
+            if (inDescription) {
+              if (trimmedLine.endsWith("'''")) {
+                currentDescription.push(trimmedLine.slice(0, -3));
+                if (currentModTable) currentModTable.description = currentDescription.join('\n').trim();
+                inDescription = false;
+                currentDescription = [];
+              } else {
+                currentDescription.push(trimmedLine);
+              }
+              return; // Continue to next line if processing multi-line description
+            }
+
+            if (trimmedLine.startsWith('modLoader')) metadata.modLoader = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
+            if (trimmedLine.startsWith('loaderVersion')) metadata.loaderVersion = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
+            if (trimmedLine.startsWith('license')) metadata.license = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
+            if (trimmedLine.startsWith('issueTrackerURL')) metadata.issueTrackerURL = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
+
+
+            if (trimmedLine === '[[mods]]') {
+              inModsArray = true;
+              // If we already have a currentModTable, it means a new mod entry is starting.
+              // For simplicity, we'll prioritize the first [[mods]] entry or one that matches the JAR name if possible.
+              // Here, we'll just take the first one encountered.
+              if (!currentModTable) {
+                currentModTable = {};
+              }
+            }
+
+            if (inModsArray && currentModTable) {
+              if (trimmedLine.startsWith('modId')) currentModTable.id = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
+              if (trimmedLine.startsWith('version')) currentModTable.version = trimmedLine.split('=')[1]?.trim().replace(/"/g, '') || '${file.jarVersion}'; // Default from Forge if version is dynamic
+              if (trimmedLine.startsWith('displayName')) currentModTable.name = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
+              if (trimmedLine.startsWith('authors')) currentModTable.authors = (trimmedLine.split('=')[1]?.trim().replace(/"/g, '') || '').split(',').map(a => a.trim()).filter(a => a);
+              if (trimmedLine.startsWith('description')) {
+                // Handle multi-line descriptions
+                let desc = trimmedLine.substring(trimmedLine.indexOf('=') + 1).trim();
+                if (desc.startsWith("'''")) {
+                  if (desc.endsWith("'''") && desc.length > 5) { // Single line triple-quote
+                     currentModTable.description = desc.slice(3, -3).trim();
+                  } else {
+                    inDescription = true;
+                    currentDescription.push(desc.slice(3));
+                  }
+                } else if (desc.startsWith('"') && desc.endsWith('"')) {
+                  currentModTable.description = desc.slice(1, -1).trim();
+                } else {
+                    currentModTable.description = desc; // Plain string if not quoted
+                }
+              }
+            }
+             // If we encounter another top-level key or a new section, assume the current [[mods]] block has ended.
+            if (inModsArray && (trimmedLine.startsWith('[') && !trimmedLine.startsWith('[[dependencies')) && trimmedLine !== '[[mods]]') {
+                inModsArray = false; // Exited mods array
             }
           });
+          
+          // Populate main metadata from the first found mod table
+          if (currentModTable) {
+            metadata.id = metadata.id || currentModTable.id;
+            metadata.version = metadata.version || currentModTable.version;
+            metadata.name = metadata.name || currentModTable.name || metadata.id; // Fallback to id if name is missing
+            if (currentModTable.authors && currentModTable.authors.length > 0) {
+                 metadata.authors = currentModTable.authors;
+            }
+            metadata.description = metadata.description || currentModTable.description;
+          }
+          metadata.projectId = metadata.projectId || metadata.id;
+
+
+          // console.log('[ModAnalysis] Extracted metadata from mods.toml:', metadata);
+          return metadata;
+        } catch (parseErr) {
+          console.error('[ModAnalysis] Error parsing mods.toml:', parseErr);
+          return null;
         }
-        console.log(`[ModAnalysis] Extracted ${dependencies.length} dependencies from mods.toml`);
-        return dependencies;
       }
-      
-      const quiltEntry = zipEntries.find(entry => 
-        entry.entryName === 'quilt.mod.json' || 
+
+      // Try quilt.mod.json
+      const quiltEntry = zipEntries.find(entry =>
+        entry.entryName === 'quilt.mod.json' ||
         entry.entryName.endsWith('/quilt.mod.json')
       );
-      
+
       if (quiltEntry) {
-        console.log('[ModAnalysis] Found quilt.mod.json');
+        // console.log('[ModAnalysis] Found quilt.mod.json');
         const content = quiltEntry.getData().toString('utf8');
         try {
-          const metadata = JSON.parse(content);
-          const dependencies = [];
-          if (metadata.depends && Array.isArray(metadata.depends)) {
-            metadata.depends.forEach(dep => {
-              if (typeof dep === 'string') {
-                dependencies.push({ id: dep, dependency_type: 'required' });
-              } else if (dep && dep.id) {
-                dependencies.push({
-                  id: dep.id,
-                  dependency_type: 'required',
-                  version_requirement: dep.versions || dep.version
-                });
-              }
-            });
+          const quiltJson = JSON.parse(content);
+          const qmd = quiltJson.quilt_loader || quiltJson; // quilt_loader is primary, fallback to root
+          
+          const metadata = {
+            loaderType: 'quilt',
+            id: qmd.id,
+            version: qmd.version,
+            name: (qmd.metadata && qmd.metadata.name) || qmd.id,
+            description: (qmd.metadata && qmd.metadata.description) || '',
+            authors: [],
+            projectId: qmd.id // Quilt uses 'id' as the project identifier
+          };
+
+          if (qmd.metadata && qmd.metadata.contributors) {
+            metadata.authors = Object.keys(qmd.metadata.contributors);
+          } else if (quiltJson.contributors) { // Fallback for older formats
+             metadata.authors = Object.keys(quiltJson.contributors);
           }
-          console.log(`[ModAnalysis] Extracted ${dependencies.length} dependencies from quilt.mod.json`);
-          return dependencies;
+
+
+          // console.log('[ModAnalysis] Extracted metadata from quilt.mod.json:', metadata);
+          return metadata;
         } catch (parseErr) {
           console.error('[ModAnalysis] Error parsing quilt.mod.json:', parseErr);
+          return null;
         }
       }
       
-      console.log('[ModAnalysis] No recognized mod metadata found in JAR');
-      return [];
+      // console.log('[ModAnalysis] No recognized mod metadata file found in JAR');
+      return null; // Return null if no metadata file is found or parsable
     } catch (zipErr) {
       console.error('[ModAnalysis] Error processing JAR file:', zipErr);
-      return [];
+      return null;
     }
   } catch (error) {
-    console.error('[ModAnalysis] Failed to extract dependencies from JAR:', error);
-    return [];
+    console.error('[ModAnalysis] Failed to extract metadata from JAR:', error);
+    return null;
   }
 }
 
