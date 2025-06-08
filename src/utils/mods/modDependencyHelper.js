@@ -618,7 +618,7 @@ export function showDependencyModal(mod, dependencies) {
  * @param {string} serverPath - Server path
  * @returns {Promise<boolean>} - True if successful
  */
-export async function installWithDependencies(serverPath) {
+export async function installWithDependencies(serverPath, installFn = installMod) {
   const mod = get(modToInstall);
   // Get and dedupe dependencies by projectId to avoid duplicate downloads
   const allDeps = get(currentDependencies);
@@ -843,7 +843,7 @@ export async function installWithDependencies(serverPath) {
         });
         
         // Install the dependency
-        await installMod(depMod, serverPath);
+        await installFn(depMod, serverPath);
         installedCount++;
       } catch (depErr) {
         console.error(`Error installing dependency ${dependency.name}:`, depErr);
@@ -852,7 +852,7 @@ export async function installWithDependencies(serverPath) {
     }
     
     // Now install the main mod
-    await installMod(mod, serverPath);
+    await installFn(mod, serverPath);
     
     // Update success message
     successMessage.set(`Installed ${mod.name} with ${installedCount} dependencies`);
