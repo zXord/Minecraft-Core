@@ -41,7 +41,6 @@ async function downloadWithProgress(url, destPath, channel) {
         '0.00 MB/s';
       
       // Send progress update to the renderer process
-      console.log(`Download progress: ${percent}% at ${mbps} (channel: ${channel})`);
       safeSend(channel, {
         percent,
         speed: mbps
