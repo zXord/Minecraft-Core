@@ -148,6 +148,7 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
     
     const mods = data.hits.map(mod => ({
       id: mod.project_id,
+      slug: mod.slug,
       name: mod.title,
       description: mod.description,
       author: mod.author,
@@ -266,6 +267,7 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
     // Process results
     const mods = data.hits.map(project => ({
       id: project.project_id,
+      slug: project.slug,
       name: project.title,
       description: project.description,
       thumbnail: project.icon_url,
@@ -607,15 +609,20 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
  * @param {string} versionId - Version ID
  * @returns {Promise<Object>} Version info object
  */
-async function getModrinthVersionInfo(_projectId, versionId) { // projectId not strictly needed for /version/{id}
+async function getModrinthVersionInfo(projectId, versionId) { // projectId not strictly needed for /version/{id}
   try {
+    // If no version ID provided, fall back to latest version info
+    if (!versionId) {
+      return await getLatestModrinthVersionInfo(projectId);
+    }
+
     await rateLimit(); // Ensure rate limiting
     const response = await fetch(`${MODRINTH_API}/version/${versionId}`);
-    
+
     if (!response.ok) {
       throw new Error(`Modrinth API error: ${response.status}`);
     }
-    
+
     return await response.json();
   } catch (error) {
     // Only log as error if it's not a 404 (which can be normal for missing/removed versions)
