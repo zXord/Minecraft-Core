@@ -41,7 +41,8 @@
     path?: string;
     clientId?: string;
     clientName?: string;
-  }  interface ClientMod {
+  }
+  interface ClientMod {
     fileName: string;
     size?: number;
     lastModified?: string;
