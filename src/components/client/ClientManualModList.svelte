@@ -2,7 +2,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import { slide } from 'svelte/transition';
   import { get } from 'svelte/store'; // Import get
-  import { serverManagedFiles } from '../../stores/modStore'; // Import serverManagedFiles
+  import { serverManagedFiles, minecraftVersion } from '../../stores/modStore';
 
   interface DetailedMod {
     fileName: string;
@@ -80,7 +80,7 @@
     
     checkingUpdates = true;
     try {
-      const currentMinecraftVersion = '1.21.4'; // TODO: Replace with dynamic version from store
+      const currentMinecraftVersion = get(minecraftVersion);
       const managedFiles = get(serverManagedFiles); // Get the server managed files from the store
 
       if (!currentMinecraftVersion) {
