@@ -114,9 +114,14 @@ contextBridge.exposeInMainWorld('electron', {
       'minecraft-download-client',
       'minecraft-clear-client',
       'minecraft-get-status',
-      'toggle-client-mod',
-      'delete-client-mod',
-      'minecraft-remove-unmanaged-mods',
+      'toggle-client-mod',      'delete-client-mod',
+      'minecraft-remove-unmanaged-mods',      // Manual mod management channels
+      'check-manual-mods',
+      'remove-manual-mods',
+      'get-manual-mods-detailed',
+      'check-manual-mod-updates',
+      'toggle-manual-mod',
+      'update-manual-mod',
       // Application lifecycle
       'app-close-response',
       // Management server events

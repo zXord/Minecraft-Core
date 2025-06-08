@@ -93,11 +93,11 @@
     editId = null;
     editName = '';
   }
-
-  // Access globally shared serverPath
+  // Access globally shared serverPath - only for server instances
   $: {
-    // When path updates from components, sync to global store
-    if (path) {
+    // When path updates from server components, sync to global store
+    // Client instances should not affect the global serverPath
+    if (path && instanceType === 'server') {
       window.serverPath.set(path);
     }
   }

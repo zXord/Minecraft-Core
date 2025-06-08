@@ -26,15 +26,11 @@
       if (!result) {
         console.log('No folder selected, returning');
         return;
-      }
-      path = result;
+      }      path = result;
       console.log(`Selected client path: ${path}`);
       
-      // Update global client path
-      if (window.serverPath) {
-        window.serverPath.set(path);
-        console.log('Updated global client path');
-      }
+      // Note: Client paths should not update the global serverPath
+      // The client instance will store its own path separately
 
       // Move to server IP configuration
       step = 'configureConnection';

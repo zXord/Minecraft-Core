@@ -3,6 +3,7 @@
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import ClientModManager from './ClientModManager.svelte';
   import ClientHeader from './ClientHeader.svelte';
+  import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
   import { errorMessage, successMessage } from '../../stores/modStore.js';
   import { createEventDispatcher } from 'svelte';
   import {
@@ -86,10 +87,15 @@
   // Launch progress tracking
   let isLaunching = false;
   let launchProgressText = '';
-  
-  // Console spam reduction variables
+    // Console spam reduction variables
   let previousServerInfo = null;
   let lastSyncKey = null;
+  
+  // Client mod compatibility dialog state
+  let showCompatibilityDialog = false;
+  let compatibilityReport = null;
+  let newMcVersion = ''; // Defined here
+  let oldMcVersion = ''; // Defined here
   
   // Connect to the Management Server (port 8080)
   async function connectToServer() {
@@ -1038,12 +1044,22 @@
       
       console.log(`[Client] Client download complete for ${data.version}`);
     });
-    
-    window.electron.on('launcher-client-download-error', (data) => {
+      window.electron.on('launcher-client-download-error', (data) => {
       clientSyncStatus = 'needed';
       errorMessage.set('Client download failed: ' + data.error);
       setTimeout(() => errorMessage.set(''), 5000);
       console.error(`[Client] Client download error: ${data.error}`);
+    });
+    
+    // Client mod compatibility events
+    window.electron.on('client-mod-compatibility-report', (report) => {
+      console.log('[Client] Received compatibility report:', report);
+      compatibilityReport = report;
+      
+      // Show dialog if there are compatibility issues
+      if (report.hasIncompatible || report.hasUpdatable) {
+        showCompatibilityDialog = true;
+      }
     });
   }
   
@@ -1063,7 +1079,8 @@
       'launcher-client-download-start',
       'launcher-client-download-progress',
       'launcher-client-download-complete',
-      'launcher-client-download-error'
+      'launcher-client-download-error',
+      'client-mod-compatibility-report'
     ];
     
     events.forEach(event => {
@@ -1163,6 +1180,18 @@
     // Initialize client functionality
     setupLauncherEvents();
     setupChecks();
+    
+    window.electron.on('client-mod-compatibility-report', (data) => {
+      console.log('[Client] Received client-mod-compatibility-report:', data);
+      if (data && data.report && data.newMinecraftVersion && data.oldMinecraftVersion) {
+        compatibilityReport = data.report;
+        newMcVersion = data.newMinecraftVersion; 
+        oldMcVersion = data.oldMinecraftVersion; 
+        showCompatibilityDialog = true; 
+      } else {
+        console.error('[Client] Invalid data received for client-mod-compatibility-report:', data);
+      }
+    });
   });
   
   // Settings functions
@@ -1240,8 +1269,7 @@
         downloadButtonText = 'Downloading...';
       } else {
         downloadButtonText = 'Setup Required';
-      }
-    } catch (error) {
+      }    } catch (error) {
       console.error('[Client] Error checking sync status:', error);
       downloadStatus = 'error';
       downloadButtonText = 'Check Failed - Retry';
@@ -1249,6 +1277,139 @@
       isCheckingSync = false;
     }
   }
+  
+  // Handle compatibility dialog events
+  function handleCompatibilityDialogContinue() {
+    showCompatibilityDialog = false;
+    compatibilityReport = null;
+    console.log('[Client] User chose to continue with version change despite compatibility issues');
+  }
+  
+  async function handleCompatibilityDialogUpdateMods() {
+    if (!compatibilityReport || !compatibilityReport.needsUpdate || compatibilityReport.needsUpdate.length === 0) {
+      errorMessage.set('No mods available for update');
+      setTimeout(() => errorMessage.set(''), 3000);
+      return;
+    }
+    
+    showCompatibilityDialog = false;
+    
+    try {
+      console.log('[Client] Updating client mods from compatibility dialog...');
+      
+      // Update each mod that has an available update
+      const updatePromises = compatibilityReport.needsUpdate.map(async (mod) => {
+        if (mod.availableUpdate && mod.availableUpdate.projectId && mod.availableUpdate.version) {
+          try {
+            const result = await window.electron.invoke('update-client-mod', {
+              clientPath: instance.path,
+              fileName: mod.fileName,
+              projectId: mod.availableUpdate.projectId,
+              targetVersion: mod.availableUpdate.version
+            });
+            
+            if (result.success) {
+              console.log(`[Client] Successfully updated ${mod.fileName} to ${mod.availableUpdate.version}`);
+              return { success: true, mod: mod.fileName };
+            } else {
+              console.error(`[Client] Failed to update ${mod.fileName}:`, result.error);
+              return { success: false, mod: mod.fileName, error: result.error };
+            }
+          } catch (error) {
+            console.error(`[Client] Error updating ${mod.fileName}:`, error);
+            return { success: false, mod: mod.fileName, error: error.message };
+          }
+        }
+        return { success: false, mod: mod.fileName, error: 'No update information available' };
+      });
+      
+      const results = await Promise.all(updatePromises);
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
+      
+      if (successful.length > 0) {
+        successMessage.set(`Successfully updated ${successful.length} mod${successful.length > 1 ? 's' : ''}`);
+        setTimeout(() => successMessage.set(''), 5000);
+      }
+      
+      if (failed.length > 0) {
+        console.error('[Client] Some mod updates failed:', failed);
+        errorMessage.set(`Failed to update ${failed.length} mod${failed.length > 1 ? 's' : ''}: ${failed.map(f => f.mod).join(', ')}`);
+        setTimeout(() => errorMessage.set(''), 8000);
+      }
+      
+    } catch (error) {
+      console.error('[Client] Error during mod updates:', error);
+      errorMessage.set('Error updating mods: ' + error.message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+    
+    compatibilityReport = null;
+  }
+
+  async function handleCompatibilityDialogDisableIncompatible() {
+    if (!compatibilityReport || !compatibilityReport.incompatible || compatibilityReport.incompatible.length === 0) {
+      errorMessage.set('No incompatible mods to disable');
+      setTimeout(() => errorMessage.set(''), 3000);
+      return;
+    }
+    
+    showCompatibilityDialog = false;
+    
+    try {
+      console.log('[Client] Disabling incompatible client mods...');
+      
+      const disablePromises = compatibilityReport.incompatible.map(async (mod) => {
+        try {
+          const result = await window.electron.invoke('disable-client-mod', {
+            clientPath: instance.path,
+            fileName: mod.fileName
+          });
+          
+          if (result.success) {
+            console.log(`[Client] Successfully disabled ${mod.fileName}`);
+            return { success: true, mod: mod.fileName };
+          } else {
+            console.error(`[Client] Failed to disable ${mod.fileName}:`, result.error);
+            return { success: false, mod: mod.fileName, error: result.error };
+          }
+        } catch (error) {
+          console.error(`[Client] Error disabling ${mod.fileName}:`, error);
+          return { success: false, mod: mod.fileName, error: error.message };
+        }
+      });
+      
+      const results = await Promise.all(disablePromises);
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
+      
+      if (successful.length > 0) {
+        successMessage.set(`Successfully disabled ${successful.length} incompatible mod${successful.length > 1 ? 's' : ''}`);
+        setTimeout(() => successMessage.set(''), 5000);
+      }
+      
+      if (failed.length > 0) {
+        console.error('[Client] Some mod disables failed:', failed);
+        errorMessage.set(`Failed to disable ${failed.length} mod${failed.length > 1 ? 's' : ''}: ${failed.map(f => f.mod).join(', ')}`);
+        setTimeout(() => errorMessage.set(''), 8000);
+      }
+      
+    } catch (error) {
+      console.error('[Client] Error during mod disabling:', error);
+      errorMessage.set('Error disabling mods: ' + error.message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+    
+    compatibilityReport = null;
+  }
+
+  function handleCloseCompatibilityDialog() {
+    showCompatibilityDialog = false; 
+    compatibilityReport = null;
+    newMcVersion = '';
+    oldMcVersion = '';
+  }
+
 </script>
 
 <div class="client-container">
@@ -1372,15 +1533,53 @@
                 <div class="sync-status checking">
                   <h3>Checking Mods...</h3>
                   <p>Verifying installed mods...</p>
-                </div>
-              {:else if downloadStatus === 'needed'}
+                </div>              {:else if downloadStatus === 'needed'}
                 <div class="sync-status needed">
                   <h3>Mods Need Update</h3>
                   {#if modSyncStatus}
                     <p>{modSyncStatus.needsDownload} out of {modSyncStatus.totalRequired} mods need to be downloaded.</p>
+                    
+                    <!-- New Downloads (Server-managed mods) -->
                     {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
-                      <p class="missing-mods">Missing: {modSyncStatus.missingMods.join(', ')}</p>
+                      <div class="mod-changes-section">
+                        <h4>📥 New Downloads:</h4>
+                        <ul class="mod-list">
+                          {#each modSyncStatus.missingMods as modName}
+                            <li class="mod-item new-download">{modName}</li>
+                          {/each}
+                        </ul>
+                      </div>
                     {/if}
+
+                    <!-- Client Mod Updates -->
+                    {#if modSyncStatus.clientModChanges?.updates && modSyncStatus.clientModChanges.updates.length > 0}
+                      <div class="mod-changes-section">
+                        <h4>🔄 Mod Updates:</h4>
+                        <ul class="mod-list">
+                          {#each modSyncStatus.clientModChanges.updates as update}
+                            <li class="mod-item mod-update">
+                              {update.name} v{update.currentVersion} → {update.serverVersion}
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+
+                    <!-- Client Mod Removals -->
+                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}
+                      <div class="mod-changes-section">
+                        <h4>❌ Mods to be Disabled:</h4>
+                        <ul class="mod-list">
+                          {#each modSyncStatus.clientModChanges.removals as removal}
+                            <li class="mod-item mod-removal">
+                              {removal.name} → disabled
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+
+                    <!-- Legacy display for backwards compatibility -->
                     {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
                       <p class="outdated-mods">Outdated: {modSyncStatus.outdatedMods.join(', ')}</p>
                     {/if}
@@ -1689,6 +1888,15 @@
   on:cancel={() => showDeleteConfirmation = false}
 />
 
+<!-- Client Mod Compatibility Dialog -->
+<ClientModCompatibilityDialog
+  bind:show={showCompatibilityDialog}
+  {compatibilityReport}
+  on:continue={handleCompatibilityDialogContinue}
+  on:update-mods={handleCompatibilityDialogUpdateMods}
+  on:disable-incompatible={handleCompatibilityDialogDisableIncompatible}
+/>
+
 <style>
   .client-container {
     width: 100%;
@@ -1816,11 +2024,60 @@
     background-color: rgba(239, 68, 68, 0.1);
     border: 1px solid #ef4444;
   }
-  
-  .missing-mods, .outdated-mods {
+    .missing-mods, .outdated-mods {
     font-size: 0.8rem;
     color: #fbbf24;
     font-family: monospace;
+  }
+
+  /* Mod changes section styles */
+  .mod-changes-section {
+    margin: 1rem 0;
+    padding: 0.75rem;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 0.5rem;
+    border-left: 3px solid #3b82f6;
+  }
+
+  .mod-changes-section h4 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #e2e8f0;
+  }
+
+  .mod-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .mod-item {
+    padding: 0.5rem 0.75rem;
+    margin: 0.25rem 0;
+    border-radius: 0.25rem;
+    font-size: 0.8rem;
+    font-family: monospace;
+    display: flex;
+    align-items: center;
+  }
+
+  .mod-item.new-download {
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: #60a5fa;
+  }
+
+  .mod-item.mod-update {
+    background-color: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #fbbf24;
+  }
+
+  .mod-item.mod-removal {
+    background-color: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #f87171;
   }
   
   .download-button {
@@ -1914,7 +2171,7 @@
     font-size: 0.7rem;
     color: #3b82f6;
     margin: 0.25rem 0;
-  }
+   }
   
   /* Launch controls */
   .launch-controls {
@@ -2352,4 +2609,4 @@
     max-width: 1200px;
     margin: 0 auto;
   }
-</style> 
+</style>

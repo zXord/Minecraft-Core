@@ -8,6 +8,9 @@ const modApiService = require('../services/mod-api-service.cjs');
 const modFileManager = require('./mod-utils/mod-file-manager.cjs');
 const modInstallService = require('./mod-utils/mod-installation-service.cjs');
 const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
+const { downloadWithProgress } = require('../services/download-manager.cjs'); // Corrected import
+const { disableMod, enableMod } = require('./mod-utils/mod-file-utils.cjs');
+const { mainWindow } = require('../main.cjs'); // Import mainWindow
 
 // fs/promises, axios, createWriteStream, pipeline, promisify, pipelineAsync are now mainly used within the services.
 // If any handler directly needs them (e.g. a simple file op not covered by services), they can be re-added or operations moved.
@@ -483,9 +486,7 @@ function createModHandlers(win) {
         console.error('[IPC:Mods] Error moving mod file:', err);
         throw new Error(`Failed to move mod file: ${err.message}`);
       }
-    },
-
-    'install-client-mod': async (_event, modData) => {
+    },    'install-client-mod': async (_event, modData) => {
       try {
         console.log('[IPC:Mods] Installing client mod, calling modInstallService.installModToClient');
         // Pass 'win' object for progress reporting, if the service function is adapted for it
@@ -496,8 +497,978 @@ function createModHandlers(win) {
         console.error('[IPC:Mods] Error installing client mod:', error);
         throw error; // Re-throw the error
       }
+    },
+
+    // Check client-side mod compatibility with new Minecraft version
+    'check-client-mod-compatibility': async (_event, options) => {
+      try {
+        const { newMinecraftVersion, clientPath } = options;
+        console.log(`[IPC:Mods] Checking client mod compatibility for Minecraft ${newMinecraftVersion}`);
+        
+        if (!clientPath || !fs.existsSync(clientPath)) {
+          throw new Error('Invalid client path provided');
+        }
+        
+        // Get list of client-side mods (manual mods)
+        const clientMods = await getClientSideMods(clientPath);
+        
+        // Check compatibility for each mod
+        const compatibilityResults = [];
+        
+        for (const mod of clientMods) {
+          try {
+            let compatibilityStatus = 'unknown';
+            let reason = '';
+            let availableUpdate = null;
+            
+            // Try to get mod metadata for better compatibility checking
+            const modPath = path.join(clientPath, 'mods', mod.fileName);
+            const metadata = await readModMetadata(modPath);
+            
+            if (metadata && metadata.gameVersions) {
+              // Check if mod supports the new Minecraft version
+              const isCompatible = metadata.gameVersions.includes(newMinecraftVersion);
+              
+              if (isCompatible) {
+                compatibilityStatus = 'compatible';
+              } else {
+                compatibilityStatus = 'incompatible';
+                reason = `Does not support Minecraft ${newMinecraftVersion}. Supported versions: ${metadata.gameVersions.join(', ')}`;
+                
+                // Try to find available updates
+                if (metadata.projectId) {
+                  try {
+                    const updateInfo = await modApiService.checkModUpdate(metadata.projectId, {
+                      currentVersion: metadata.version,
+                      gameVersion: newMinecraftVersion,
+                      source: metadata.source || 'modrinth'
+                    });
+                    
+                    if (updateInfo && updateInfo.hasUpdate) {
+                      compatibilityStatus = 'needs_update';
+                      availableUpdate = updateInfo;
+                      reason = `Update available for Minecraft ${newMinecraftVersion}`;
+                    }
+                  } catch (updateError) {
+                    console.warn(`[IPC:Mods] Failed to check updates for ${mod.fileName}:`, updateError);
+                  }
+                }
+              }
+            } else {
+              // Fallback to filename-based checking
+              const filenameCheck = checkModCompatibilityFromFilename(mod.fileName, newMinecraftVersion);
+              if (filenameCheck.isCompatible) {
+                compatibilityStatus = 'compatible';
+                reason = 'Compatibility determined from filename';
+              } else {
+                compatibilityStatus = 'unknown';
+                reason = 'Unable to determine compatibility - manual verification recommended';
+              }
+            }
+            
+            compatibilityResults.push({
+              fileName: mod.fileName,
+              name: metadata?.name || mod.fileName,
+              compatibilityStatus,
+              reason,
+              availableUpdate,
+              metadata
+            });
+            
+          } catch (modError) {
+            console.error(`[IPC:Mods] Error checking compatibility for ${mod.fileName}:`, modError);
+            compatibilityResults.push({
+              fileName: mod.fileName,
+              name: mod.fileName,
+              compatibilityStatus: 'error',
+              reason: `Error checking compatibility: ${modError.message}`
+            });
+          }
+        }
+        
+        // Categorize results
+        const report = {
+          compatible: compatibilityResults.filter(r => r.compatibilityStatus === 'compatible'),
+          incompatible: compatibilityResults.filter(r => r.compatibilityStatus === 'incompatible'),
+          needsUpdate: compatibilityResults.filter(r => r.compatibilityStatus === 'needs_update'),
+          unknown: compatibilityResults.filter(r => r.compatibilityStatus === 'unknown'),
+          errors: compatibilityResults.filter(r => r.compatibilityStatus === 'error'),
+          hasIncompatible: false,
+          hasUpdatable: false
+        };
+        
+        report.hasIncompatible = report.incompatible.length > 0;
+        report.hasUpdatable = report.needsUpdate.length > 0;
+        
+        console.log(`[IPC:Mods] Compatibility check complete:`, {
+          total: compatibilityResults.length,
+          compatible: report.compatible.length,
+          incompatible: report.incompatible.length,
+          needsUpdate: report.needsUpdate.length,
+          unknown: report.unknown.length,
+          errors: report.errors.length
+        });
+          return report;
+        
+      } catch (error) {
+        console.error('[IPC:Mods] Error checking client mod compatibility:', error);
+        throw new Error(`Failed to check client mod compatibility: ${error.message}`);
+      }
+    },    // Update a client-side mod to a newer version
+    'update-client-mod': async (_event, { modInfo, clientPath }) => {
+      try {
+        console.log('[IPC:Mods] Updating client mod:', modInfo.name);
+        
+        if (!modInfo.downloadUrl) {
+          throw new Error('No download URL available for mod update');
+        }
+        
+        const fs = require('fs').promises;
+        const path = require('path');
+        const axios = require('axios');
+        const { createWriteStream } = require('fs');
+        const { pipeline } = require('stream');
+        const { promisify } = require('util');
+        const pipelineAsync = promisify(pipeline);
+        
+        const modsDir = path.join(clientPath, 'mods');
+        await fs.mkdir(modsDir, { recursive: true });
+        
+        // Generate a safe filename
+        const sanitizedName = modInfo.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        const fileName = sanitizedName.endsWith('.jar') ? sanitizedName : `${sanitizedName}.jar`;
+        const targetPath = path.join(modsDir, fileName);
+        
+        // Download the updated mod
+        console.log('[IPC:Mods] Downloading mod update from:', modInfo.downloadUrl);
+        const writer = createWriteStream(targetPath);
+        const response = await axios({
+          url: modInfo.downloadUrl,
+          method: 'GET',
+          responseType: 'stream',
+          timeout: 60000
+        });
+        
+        await pipelineAsync(response.data, writer);
+        
+        // If the old mod file exists and has a different name, remove it
+        if (modInfo.currentFilePath && require('fs').existsSync(modInfo.currentFilePath)) {
+          const oldFileName = path.basename(modInfo.currentFilePath);
+          const newFileName = path.basename(targetPath);
+          
+          if (oldFileName !== newFileName) {
+            await fs.unlink(modInfo.currentFilePath);
+            console.log('[IPC:Mods] Removed old mod file:', oldFileName);
+          }
+        }
+        
+        console.log('[IPC:Mods] Successfully updated mod:', modInfo.name);
+        return { success: true, filePath: targetPath };
+        
+      } catch (error) {
+        console.error('[IPC:Mods] Error updating client mod:', error);
+        throw new Error(`Failed to update mod "${modInfo.name}": ${error.message}`);
+      }
+    },    // Disable a client-side mod by moving it to disabled folder
+    'disable-client-mod': async (_event, { modFilePath, clientPath }) => {
+      try {
+        console.log('[IPC:Mods] Disabling client mod:', modFilePath);
+        
+        if (!fs.existsSync(modFilePath)) {
+          throw new Error('Mod file not found');
+        }
+        
+        const modsDir = path.join(clientPath, 'mods');
+        const disabledDir = path.join(modsDir, 'disabled');
+        
+        // Create disabled directory if it doesn't exist
+        if (!fs.existsSync(disabledDir)) {
+          fs.mkdirSync(disabledDir, { recursive: true });
+        }
+        
+        const fileName = path.basename(modFilePath);
+        const disabledPath = path.join(disabledDir, fileName);
+        
+        // Move the mod file to the disabled directory
+        fs.renameSync(modFilePath, disabledPath);
+        
+        console.log('[IPC:Mods] Successfully disabled mod:', fileName);
+        return { success: true, disabledPath };
+        
+      } catch (error) {
+        console.error('[IPC:Mods] Error disabling client mod:', error);
+        throw new Error(`Failed to disable mod: ${error.message}`);
+      }
+    },
+
+    // Get detailed information about manual mods
+    'get-manual-mods-detailed': async (_event, { clientPath, serverManagedFiles }) => {
+      try {
+        console.log('[IPC:Mods] Getting detailed manual mods info for:', clientPath);
+        console.log('[IPC:Mods] Server managed files to exclude:', serverManagedFiles);
+
+        if (!clientPath || !fs.existsSync(clientPath)) {
+          throw new Error('Invalid client path provided');
+        }
+
+        const modsDir = path.join(clientPath, 'mods');
+        const disabledDir = path.join(modsDir, 'disabled');
+
+        if (!fs.existsSync(modsDir)) {
+          return { success: true, mods: [] };
+        }
+
+        const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
+
+        const enabledFiles = fs.existsSync(modsDir) ? fs.readdirSync(modsDir).filter(f => f.endsWith('.jar')) : [];
+        const disabledFiles = fs.existsSync(disabledDir) ? fs.readdirSync(disabledDir).filter(f => f.endsWith('.jar')) : [];
+
+        const mods = [];
+
+        // Process enabled mods
+        for (const fileName of enabledFiles) {
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) {
+            console.log(`[IPC:Mods] Skipping server managed file (enabled): ${fileName}`);
+            continue;
+          }
+          const filePath = path.join(modsDir, fileName);
+          const stats = fs.statSync(filePath);
+
+          try {
+            const metadata = await readModMetadata(filePath);
+            mods.push({
+              fileName,
+              name: metadata?.name || fileName.replace(/\.jar$/i, ''),
+              version: metadata?.version || 'Unknown', // Use metadata version
+              authors: metadata?.authors || [],
+              description: metadata?.description || '',
+              projectId: metadata?.projectId || null,
+              loaderType: metadata?.loaderType || 'Unknown',
+              gameVersions: metadata?.gameVersions || [],
+              size: stats.size,
+              lastModified: stats.mtime,
+              enabled: true
+            });
+          } catch (metadataError) {
+            console.warn(`[IPC:Mods] Failed to read metadata for ${fileName}:`, metadataError);
+            mods.push({
+              fileName,
+              name: fileName.replace(/\.jar$/i, ''),
+              version: 'Unknown', // Fallback version
+              authors: [],
+              description: '',
+              projectId: null,
+              loaderType: 'Unknown',
+              gameVersions: [],
+              size: stats.size,
+              lastModified: stats.mtime,
+              enabled: true
+            });
+          }
+        }
+
+        // Process disabled mods
+        for (const fileName of disabledFiles) {
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) {
+            console.log(`[IPC:Mods] Skipping server managed file (disabled): ${fileName}`);
+            continue;
+          }
+          const filePath = path.join(disabledDir, fileName);
+          const stats = fs.statSync(filePath);
+
+          try {
+            const metadata = await readModMetadata(filePath);
+            mods.push({
+              fileName,
+              name: metadata?.name || fileName.replace(/\.jar$/i, ''),
+              version: metadata?.version || 'Unknown', // Use metadata version
+              authors: metadata?.authors || [],
+              description: metadata?.description || '',
+              projectId: metadata?.projectId || null,
+              loaderType: metadata?.loaderType || 'Unknown',
+              gameVersions: metadata?.gameVersions || [],
+              size: stats.size,
+              lastModified: stats.mtime,
+              enabled: false
+            });
+          } catch (metadataError) {
+            console.warn(`[IPC:Mods] Failed to read metadata for disabled ${fileName}:`, metadataError);
+            mods.push({
+              fileName,
+              name: fileName.replace(/\.jar$/i, ''),
+              version: 'Unknown', // Fallback version
+              authors: [],
+              description: '',
+              projectId: null,
+              loaderType: 'Unknown',
+              gameVersions: [],
+              size: stats.size,
+              lastModified: stats.mtime,
+              enabled: false
+            });
+          }
+        }
+        
+        console.log(`[IPC:Mods] Found ${mods.length} manual mods after filtering`);
+        return { success: true, mods };
+
+      } catch (error) {
+        console.error('[IPC:Mods] Error getting manual mods detailed:', error);
+        return { success: false, error: error.message, mods: [] };
+      }
+    },    // Check manual mods for basic compatibility
+    'check-manual-mods': async (_event, { clientPath, minecraftVersion }) => {
+      try {
+        console.log('[IPC:Mods] Checking manual mods compatibility for Minecraft:', minecraftVersion);
+        
+        if (!clientPath || !fs.existsSync(clientPath)) {
+          throw new Error('Invalid client path provided');
+        }
+        
+        // Get detailed mods directly using the same logic
+        const modsDir = path.join(clientPath, 'mods');
+        const disabledDir = path.join(modsDir, 'disabled');
+        
+        if (!fs.existsSync(modsDir)) {
+          return { success: true, results: [] };
+        }
+        
+        const enabledFiles = fs.existsSync(modsDir) ? fs.readdirSync(modsDir).filter(f => f.endsWith('.jar')) : [];
+        const disabledFiles = fs.existsSync(disabledDir) ? fs.readdirSync(disabledDir).filter(f => f.endsWith('.jar')) : [];
+        
+        const compatibilityResults = [];
+        
+        // Process enabled mods
+        for (const fileName of enabledFiles) {
+          const filePath = path.join(modsDir, fileName);
+          
+          try {
+            const metadata = await readModMetadata(filePath);
+            let status = 'unknown';
+            let reason = '';
+            
+            if (metadata && metadata.gameVersions && metadata.gameVersions.length > 0) {
+              const isCompatible = metadata.gameVersions.includes(minecraftVersion);
+              status = isCompatible ? 'compatible' : 'incompatible';
+              reason = isCompatible ? 
+                `Supports Minecraft ${minecraftVersion}` : 
+                `Does not support Minecraft ${minecraftVersion}. Supported: ${metadata.gameVersions.join(', ')}`;
+            } else {
+              // Fallback to filename-based checking
+              const filenameCheck = checkModCompatibilityFromFilename(fileName, minecraftVersion);
+              status = filenameCheck.isCompatible ? 'compatible' : 'unknown';
+              reason = filenameCheck.isCompatible ? 
+                'Compatibility determined from filename' : 
+                'Unable to determine compatibility';
+            }
+            
+            compatibilityResults.push({
+              fileName,
+              name: metadata?.name || fileName.replace(/\.jar$/i, ''),
+              status,
+              reason,
+              enabled: true
+            });
+          } catch (metadataError) {
+            console.warn(`[IPC:Mods] Failed to read metadata for ${fileName}:`, metadataError);
+            compatibilityResults.push({
+              fileName,
+              name: fileName.replace(/\.jar$/i, ''),
+              status: 'unknown',
+              reason: 'Unable to read mod metadata',
+              enabled: true
+            });
+          }
+        }
+        
+        // Process disabled mods
+        for (const fileName of disabledFiles) {
+          const filePath = path.join(disabledDir, fileName);
+          
+          try {
+            const metadata = await readModMetadata(filePath);
+            let status = 'unknown';
+            let reason = '';
+            
+            if (metadata && metadata.gameVersions && metadata.gameVersions.length > 0) {
+              const isCompatible = metadata.gameVersions.includes(minecraftVersion);
+              status = isCompatible ? 'compatible' : 'incompatible';
+              reason = isCompatible ? 
+                `Supports Minecraft ${minecraftVersion}` : 
+                `Does not support Minecraft ${minecraftVersion}. Supported: ${metadata.gameVersions.join(', ')}`;
+            } else {
+              // Fallback to filename-based checking
+              const filenameCheck = checkModCompatibilityFromFilename(fileName, minecraftVersion);
+              status = filenameCheck.isCompatible ? 'compatible' : 'unknown';
+              reason = filenameCheck.isCompatible ? 
+                'Compatibility determined from filename' : 
+                'Unable to determine compatibility';
+            }
+            
+            compatibilityResults.push({
+              fileName,
+              name: metadata?.name || fileName.replace(/\.jar$/i, ''),
+              status,
+              reason,
+              enabled: false
+            });
+          } catch (metadataError) {
+            console.warn(`[IPC:Mods] Failed to read metadata for disabled ${fileName}:`, metadataError);
+            compatibilityResults.push({
+              fileName,
+              name: fileName.replace(/\.jar$/i, ''),
+              status: 'unknown',
+              reason: 'Unable to read mod metadata',
+              enabled: false
+            });
+          }
+        }
+        
+        return { success: true, results: compatibilityResults };
+        
+      } catch (error) {
+        console.error('[IPC:Mods] Error checking manual mods:', error);
+        return { success: false, error: error.message, results: [] };
+      }
+    },
+
+    // Remove manual mods
+    'remove-manual-mods': async (_event, { clientPath, fileNames }) => {
+      try {
+        console.log('[IPC:Mods] Removing manual mods:', fileNames);
+        
+        if (!clientPath || !fs.existsSync(clientPath)) {
+          throw new Error('Invalid client path provided');
+        }
+        
+        if (!Array.isArray(fileNames) || fileNames.length === 0) {
+          throw new Error('No file names provided');
+        }
+        
+        const modsDir = path.join(clientPath, 'mods');
+        const disabledDir = path.join(modsDir, 'disabled');
+        const removedFiles = [];
+        const errors = [];
+        
+        for (const fileName of fileNames) {
+          try {
+            let filePath = path.join(modsDir, fileName);
+            let found = false;
+            
+            // Check in enabled mods directory
+            if (fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+              removedFiles.push({ fileName, location: 'enabled' });
+              found = true;
+            } else {
+              // Check in disabled mods directory
+              filePath = path.join(disabledDir, fileName);
+              if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+                removedFiles.push({ fileName, location: 'disabled' });
+                found = true;
+              }
+            }
+            
+            if (!found) {
+              errors.push({ fileName, error: 'File not found' });
+            }
+          } catch (fileError) {
+            console.error(`[IPC:Mods] Error removing ${fileName}:`, fileError);
+            errors.push({ fileName, error: fileError.message });
+          }
+        }
+        
+        console.log(`[IPC:Mods] Removed ${removedFiles.length} mods, ${errors.length} errors`);
+        return { 
+          success: errors.length === 0, 
+          removedFiles, 
+          errors,
+          message: errors.length === 0 ? 'All mods removed successfully' : `${removedFiles.length} mods removed, ${errors.length} failed`
+        };
+        
+      } catch (error) {
+        console.error('[IPC:Mods] Error removing manual mods:', error);
+        return { success: false, error: error.message, removedFiles: [], errors: [] };
+      }
+    },
+
+    // Toggle manual mod enabled/disabled state
+    'toggle-manual-mod': async (_event, { clientPath, fileName, enable }) => {
+      try {
+        console.log('[IPC:Mods] Toggling manual mod:', fileName, 'enable:', enable);
+        
+        if (!clientPath || !fs.existsSync(clientPath)) {
+          throw new Error('Invalid client path provided');
+        }
+        
+        const modsDir = path.join(clientPath, 'mods');
+        const disabledDir = path.join(modsDir, 'disabled');
+        
+        // Ensure disabled directory exists
+        if (!fs.existsSync(disabledDir)) {
+          fs.mkdirSync(disabledDir, { recursive: true });
+        }
+        
+        let sourceFile, targetFile;
+        
+        if (enable) {
+          // Moving from disabled to enabled
+          sourceFile = path.join(disabledDir, fileName);
+          targetFile = path.join(modsDir, fileName);
+          
+          if (!fs.existsSync(sourceFile)) {
+            throw new Error(`Disabled mod file not found: ${fileName}`);
+          }
+        } else {
+          // Moving from enabled to disabled
+          sourceFile = path.join(modsDir, fileName);
+          targetFile = path.join(disabledDir, fileName);
+          
+          if (!fs.existsSync(sourceFile)) {
+            throw new Error(`Enabled mod file not found: ${fileName}`);
+          }
+        }
+        
+        // Check if target already exists
+        if (fs.existsSync(targetFile)) {
+          throw new Error(`Target file already exists: ${path.basename(targetFile)}`);
+        }
+        
+        // Move the file
+        fs.renameSync(sourceFile, targetFile);
+        
+        console.log(`[IPC:Mods] Successfully ${enable ? 'enabled' : 'disabled'} mod:`, fileName);
+        return { 
+          success: true, 
+          message: `Mod ${enable ? 'enabled' : 'disabled'} successfully`,
+          newPath: targetFile
+        };
+        
+      } catch (error) {
+        console.error('[IPC:Mods] Error toggling manual mod:', error);
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Update a manual mod to a newer version
+    'update-manual-mod': async (_event, { clientPath, fileName, newVersion, downloadUrl }) => {
+      try {
+        console.log('[IPC:Mods] Updating manual mod:', fileName, 'to version:', newVersion);
+        
+        if (!clientPath || !fs.existsSync(clientPath)) {
+          throw new Error('Invalid client path provided');
+        }
+        
+        if (!downloadUrl) {
+          throw new Error('Download URL is required for mod update');
+        }
+        
+        const axios = require('axios');
+        const { createWriteStream } = require('fs');
+        const { pipeline } = require('stream');
+        const { promisify } = require('util');
+        const pipelineAsync = promisify(pipeline);
+        
+        const modsDir = path.join(clientPath, 'mods');
+        const disabledDir = path.join(modsDir, 'disabled');
+        
+        // Find the current mod file
+        let currentFilePath = path.join(modsDir, fileName);
+        let isDisabled = false;
+        
+        if (!fs.existsSync(currentFilePath)) {
+          currentFilePath = path.join(disabledDir, fileName);
+          isDisabled = true;
+          
+          if (!fs.existsSync(currentFilePath)) {
+            throw new Error(`Mod file not found: ${fileName}`);
+          }
+        }
+        
+        // Generate new filename with version if provided
+        const baseName = fileName.replace(/\.jar$/i, '');
+        const newFileName = newVersion ? `${baseName}-${newVersion}.jar` : fileName;
+        const targetDir = isDisabled ? disabledDir : modsDir;
+        const targetPath = path.join(targetDir, newFileName);
+        
+        // Download the new version
+        console.log('[IPC:Mods] Downloading mod update from:', downloadUrl);
+        const writer = createWriteStream(targetPath);
+        const response = await axios({
+          url: downloadUrl,
+          method: 'GET',
+          responseType: 'stream',
+          timeout: 60000,
+          headers: {
+            'User-Agent': 'MinecraftModManager/1.0'
+          }
+        });
+        
+        await pipelineAsync(response.data, writer);
+        
+        // Remove old file if name changed
+        if (currentFilePath !== targetPath && fs.existsSync(currentFilePath)) {
+          fs.unlinkSync(currentFilePath);
+          console.log('[IPC:Mods] Removed old mod file:', fileName);
+        }
+        
+        console.log('[IPC:Mods] Successfully updated mod:', fileName);
+        return { 
+          success: true, 
+          message: `Mod updated to version ${newVersion}`,
+          newFileName: newFileName,
+          newPath: targetPath
+        };
+        
+      } catch (error) {
+        console.error('[IPC:Mods] Error updating manual mod:', error);
+        return { success: false, error: error.message };
+      }
+    },    // Check for updates for manual mods
+    'check-manual-mod-updates': async (_event, { clientPath, minecraftVersion, serverManagedFiles }) => {
+      try {
+        console.log(`[IPC:Mods] Checking for manual mod updates for: ${clientPath}, Minecraft version: ${minecraftVersion}`);
+        console.log('[IPC:Mods] Server managed files to exclude for update check:', serverManagedFiles);
+
+        if (!clientPath || !fs.existsSync(clientPath)) {
+          throw new Error('Invalid client path provided');
+        }
+        if (!minecraftVersion) {
+          console.warn('[IPC:Mods] Minecraft version not provided for update check. This might lead to inaccurate results.');
+        }
+        
+        const modsDir = path.join(clientPath, 'mods');
+        const disabledDir = path.join(modsDir, 'disabled');
+        
+        if (!fs.existsSync(modsDir)) {
+          return { success: true, updates: [], summary: { total: 0, updatesAvailable: 0 } };
+        }
+        
+        const enabledFiles = fs.existsSync(modsDir) ? fs.readdirSync(modsDir).filter(f => f.endsWith('.jar')) : [];
+        const disabledFiles = fs.existsSync(disabledDir) ? fs.readdirSync(disabledDir).filter(f => f.endsWith('.jar')) : [];
+        
+        const updates = [];
+        // Use the passed serverManagedFiles array
+        const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
+
+        // Process enabled mods
+        for (const fileName of enabledFiles) {
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) continue; // Skip server managed
+
+          const filePath = path.join(modsDir, fileName);
+          
+          try {
+            const metadata = await readModMetadata(filePath);
+            
+            if (metadata && metadata.projectId) {
+              console.log(`[IPC:Mods] Checking updates for mod ${metadata.name} (${metadata.projectId})`);
+              
+              const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
+              const latestInfo = await modApiService.getLatestModrinthVersionInfo(metadata.projectId, minecraftVersion, loader);
+              
+              if (latestInfo && latestInfo.version_number !== metadata.version) {
+                updates.push({
+                  fileName,
+                  hasUpdate: true,
+                  currentVersion: metadata.version,
+                  latestVersion: latestInfo.version_number,
+                  updateUrl: latestInfo.files?.[0]?.url || null,
+                  changelogUrl: latestInfo.changelog_url || null
+                });
+              } else {
+                updates.push({
+                  fileName,
+                  hasUpdate: false,
+                  currentVersion: metadata.version,
+                  latestVersion: metadata.version
+                });
+              }
+            } else {
+              // No project ID, can't check for updates
+              updates.push({
+                fileName,
+                hasUpdate: false,
+                currentVersion: metadata?.version || 'Unknown',
+                reason: 'No project ID available'
+              });
+            }
+          } catch (modError) {
+            console.warn(`[IPC:Mods] Failed to check updates for ${fileName}:`, modError);
+            updates.push({
+              fileName,
+              hasUpdate: false,
+              currentVersion: 'Unknown',
+              error: modError.message
+            });
+          }
+        }
+        
+        // Process disabled mods
+        for (const fileName of disabledFiles) {
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) continue; // Skip server managed
+
+          const filePath = path.join(disabledDir, fileName);
+          
+          try {
+            const metadata = await readModMetadata(filePath);
+            
+            if (metadata && metadata.projectId) {
+              console.log(`[IPC:Mods] Checking updates for disabled mod ${metadata.name} (${metadata.projectId})`);
+              
+              const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
+              const latestInfo = await modApiService.getLatestModrinthVersionInfo(metadata.projectId, minecraftVersion, loader);
+              
+              if (latestInfo && latestInfo.version_number !== metadata.version) {
+                updates.push({
+                  fileName,
+                  hasUpdate: true,
+                  currentVersion: metadata.version,
+                  latestVersion: latestInfo.version_number,
+                  updateUrl: latestInfo.files?.[0]?.url || null,
+                  changelogUrl: latestInfo.changelog_url || null
+                });
+              } else {
+                updates.push({
+                  fileName,
+                  hasUpdate: false,
+                  currentVersion: metadata.version,
+                  latestVersion: metadata.version
+                });
+              }
+            } else {
+              // No project ID, can't check for updates
+              updates.push({
+                fileName,
+                hasUpdate: false,
+                currentVersion: metadata?.version || 'Unknown',
+                reason: 'No project ID available'
+              });
+            }
+          } catch (modError) {
+            console.warn(`[IPC:Mods] Failed to check updates for disabled ${fileName}:`, modError);
+            updates.push({
+              fileName,
+              hasUpdate: false,
+              currentVersion: 'Unknown',
+              error: modError.message
+            });
+          }
+        }
+        
+        const updatesAvailable = updates.filter(u => u.hasUpdate).length;
+        console.log(`[IPC:Mods] Found ${updatesAvailable} mods with updates available`);
+        
+        return { 
+          success: true, 
+          updates,
+          summary: {
+            total: updates.length,
+            updatesAvailable
+          }
+        };
+        
+      } catch (error) {
+        console.error('[IPC:Mods] Error checking manual mod updates:', error);
+        return { success: false, error: error.message, updates: [] };
+      }
+    },
+
+    // Update multiple client-side mods to new versions
+    'update-client-mods': async (_event, { mods, clientPath, minecraftVersion, loaderType }) => {
+      try {
+        console.log('[IPC:Mods] Updating client mods:', mods);
+        
+        if (!mods || !Array.isArray(mods) || mods.length === 0) {
+          return { success: false, error: 'No mods specified for update.', updatedCount: 0 };
+        }
+        if (!clientPath) {
+          return { success: false, error: 'Client path not provided.', updatedCount: 0 };
+        }
+        if (!minecraftVersion) {
+          return { success: false, error: 'Minecraft version not provided.', updatedCount: 0 };
+        }
+
+        const modsDir = path.join(clientPath, 'mods');
+        if (!fs.existsSync(modsDir)) {
+          fs.mkdirSync(modsDir, { recursive: true });
+        }
+
+        let updatedCount = 0;
+        const errors = [];
+
+        for (const modToUpdate of mods) {
+          try {
+            if (!modToUpdate.newVersionDetails || !modToUpdate.newVersionDetails.files || modToUpdate.newVersionDetails.files.length === 0) {
+              throw new Error(`No suitable file found for ${modToUpdate.name || modToUpdate.fileName} for MC ${minecraftVersion}`);
+            }
+
+            // Find the primary file (usually a .jar)
+            const primaryFile = modToUpdate.newVersionDetails.files.find(f => f.primary && f.url);
+            const fileToDownload = primaryFile || modToUpdate.newVersionDetails.files.find(f => f.url && f.filename.endsWith('.jar')) || modToUpdate.newVersionDetails.files[0];
+
+            if (!fileToDownload || !fileToDownload.url) {
+              throw new Error(`Could not determine download URL for ${modToUpdate.name || modToUpdate.fileName}`);
+            }
+
+            const oldFileName = modToUpdate.fileName;
+            const newFileName = fileToDownload.filename;
+
+            // Disable old mod file (rename to .disabled)
+            if (oldFileName && fs.existsSync(path.join(modsDir, oldFileName))) {
+              await disableMod(modsDir, oldFileName);
+              console.log(`Disabled old mod file: ${oldFileName}`);
+            }
+
+            // Download new mod file
+            console.log(`Downloading update for ${modToUpdate.name || oldFileName}: ${newFileName} from ${fileToDownload.url}`);
+            await downloadWithProgress(fileToDownload.url, modsDir, newFileName, fileToDownload.hashes?.sha512 || fileToDownload.hashes?.sha1);
+            console.log(`Successfully downloaded ${newFileName}`);
+            updatedCount++;
+
+          } catch (error) {
+            console.error(`Error updating mod ${modToUpdate.name || modToUpdate.fileName}:`, error);
+            errors.push(`${modToUpdate.name || modToUpdate.fileName}: ${error.message}`);
+          }
+        }
+
+        if (errors.length > 0) {
+          return { success: updatedCount > 0, updatedCount, error: `Some mods failed to update. Errors: ${errors.join('; ')}` };
+        }
+        return { success: true, updatedCount };
+      } catch (error) {
+        console.error('[IPC:Mods] Error updating client mods:', error);
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Disable multiple client-side mods
+    'disable-client-mods': async (_event, { mods, clientPath }) => {
+      try {
+        console.log('[IPC:Mods] Disabling client mods:', mods);
+        
+        if (!mods || !Array.isArray(mods) || mods.length === 0) {
+          return { success: false, error: 'No mods specified for disabling.', disabledCount: 0 };
+        }
+        if (!clientPath) {
+          return { success: false, error: 'Client path not provided.', disabledCount: 0 };
+        }
+
+        const modsDir = path.join(clientPath, 'mods');
+        if (!fs.existsSync(modsDir)) {
+          // If mods directory doesn't exist, there's nothing to disable.
+          return { success: true, disabledCount: 0, message: 'Mods directory does not exist.' };
+        }
+
+        let disabledCount = 0;
+        const errors = [];
+
+        for (const modToDisable of mods) {
+          try {
+            if (!modToDisable.fileName) {
+              throw new Error('Mod filename not provided for disabling.');
+            }
+            const modPath = path.join(modsDir, modToDisable.fileName);
+            if (fs.existsSync(modPath)) {
+              await disableMod(modsDir, modToDisable.fileName);
+              console.log(`Disabled mod: ${modToDisable.fileName}`);
+              disabledCount++;
+            } else {
+              console.warn(`Mod file not found for disabling: ${modToDisable.fileName}`);
+              // Optionally, count this as a non-error if the goal is to ensure it's disabled
+            }
+          } catch (error) {
+            console.error(`Error disabling mod ${modToDisable.fileName}:`, error);
+            errors.push(`${modToDisable.fileName}: ${error.message}`);
+          }
+        }
+
+        if (errors.length > 0) {
+          return { success: disabledCount > 0, disabledCount, error: `Some mods failed to disable. Errors: ${errors.join('; ')}` };
+        }
+        return { success: true, disabledCount };
+      } catch (error) {
+        console.error('[IPC:Mods] Error disabling client mods:', error);
+        return { success: false, error: error.message };
+      }
     }
   };
+}
+
+/**
+ * Read mod metadata from a JAR file
+ * @param {string} filePath - Path to the mod JAR file
+ * @returns {Promise<Object|null>} - Mod metadata or null if not readable
+ */
+async function readModMetadata(filePath) {
+  try {
+    const result = await modAnalysisUtils.extractDependenciesFromJar(filePath);
+    return result;
+  } catch (error) {
+    console.warn(`[IPC:Mods] Failed to read metadata for ${filePath}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Get list of client-side mods (manual mods)
+ * @param {string} clientPath - Path to the client directory
+ * @returns {Promise<Array>} - Array of client-side mods
+ */
+async function getClientSideMods(clientPath) {
+  const modsDir = path.join(clientPath, 'mods');
+  
+  if (!fs.existsSync(modsDir)) {
+    return [];
+  }
+  
+  const files = fs.readdirSync(modsDir);
+  const jarFiles = files.filter(file => file.endsWith('.jar'));
+  
+  // Filter to get only manual/client-side mods
+  // We can identify these by checking if they're in the manual mods list or not in server mods
+  const clientMods = [];
+  
+  for (const fileName of jarFiles) {
+    // For now, treat all mods as potential client-side mods
+    // In a more sophisticated implementation, we could check against server mod lists
+    clientMods.push({
+      fileName,
+      filePath: path.join(modsDir, fileName),
+      lastModified: fs.statSync(path.join(modsDir, fileName)).mtime
+    });
+  }
+  
+  return clientMods;
+}
+
+/**
+ * Check mod compatibility based on filename
+ * @param {string} filename - The mod filename
+ * @param {string} minecraftVersion - Target Minecraft version
+ * @returns {Object} - Compatibility result
+ */
+function checkModCompatibilityFromFilename(filename, minecraftVersion) {
+  if (!filename || !minecraftVersion) {
+    return { isCompatible: false, confidence: 'low' };
+  }
+  
+  const lowerFilename = filename.toLowerCase();
+  const versionPattern = /(\d+\.\d+(?:\.\d+)?)/g;
+  const matches = lowerFilename.match(versionPattern);
+  
+  if (!matches) {
+    return { isCompatible: false, confidence: 'low' };
+  }
+  
+  // Check if the target Minecraft version appears in the filename
+  for (const match of matches) {
+    if (match === minecraftVersion || minecraftVersion.startsWith(match)) {
+      return { isCompatible: true, confidence: 'medium' };
+    }
+  }
+  
+  return { isCompatible: false, confidence: 'medium' };
 }
 
 module.exports = { createModHandlers };

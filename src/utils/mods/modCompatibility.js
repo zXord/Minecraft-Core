@@ -412,4 +412,152 @@ function compareVersions(versionA, versionB) {
   }
   
   return 0;
-} 
+}
+
+/**
+ * Check client-side mod compatibility with a new Minecraft version
+ * @param {string} newMinecraftVersion - The new Minecraft version to check against
+ * @param {Array} clientMods - Array of client-side mods to check
+ * @returns {Promise<Object>} - Compatibility report with incompatible mods and suggestions
+ */
+export async function checkClientModCompatibility(newMinecraftVersion, clientMods = []) {
+  console.log(`[ModCompatibility] Checking client mod compatibility for Minecraft ${newMinecraftVersion}`);
+  
+  const compatibilityReport = {
+    compatible: [],
+    incompatible: [],
+    needsUpdate: [],
+    unknown: [],
+    hasIncompatible: false,
+    hasUpdatable: false
+  };
+  
+  if (!clientMods || clientMods.length === 0) {
+    console.log('[ModCompatibility] No client mods to check');
+    return compatibilityReport;
+  }
+  
+  for (const mod of clientMods) {
+    try {
+      // Skip if mod is disabled
+      if (mod.disabled) {
+        console.log(`[ModCompatibility] Skipping disabled mod: ${mod.name || mod.fileName}`);
+        continue;
+      }
+      
+      const modName = mod.name || mod.fileName || 'Unknown Mod';
+      console.log(`[ModCompatibility] Checking compatibility for: ${modName}`);
+      
+      // Check if mod has version requirements
+      if (mod.gameVersions && mod.gameVersions.length > 0) {
+        const isCompatible = mod.gameVersions.includes(newMinecraftVersion);
+        
+        if (isCompatible) {
+          compatibilityReport.compatible.push({
+            ...mod,
+            compatibilityStatus: 'compatible'
+          });
+        } else {
+          // Check if there's an update available for the new version
+          let hasUpdate = false;
+          
+          if (mod.projectId) {
+            try {
+              // Check for updates that support the new Minecraft version
+              const updateCheck = await safeInvoke('check-mod-updates', {
+                projectId: mod.projectId,
+                currentVersion: mod.version,
+                gameVersion: newMinecraftVersion,
+                source: mod.source || 'modrinth'
+              });
+              
+              if (updateCheck && updateCheck.hasUpdate && updateCheck.latestVersion) {
+                hasUpdate = true;
+                compatibilityReport.needsUpdate.push({
+                  ...mod,
+                  compatibilityStatus: 'needs_update',
+                  availableUpdate: updateCheck.latestVersion,
+                  updateUrl: updateCheck.downloadUrl
+                });
+                compatibilityReport.hasUpdatable = true;
+              }
+            } catch (error) {
+              console.warn(`[ModCompatibility] Failed to check updates for ${modName}:`, error);
+            }
+          }
+          
+          if (!hasUpdate) {
+            compatibilityReport.incompatible.push({
+              ...mod,
+              compatibilityStatus: 'incompatible',
+              reason: `Does not support Minecraft ${newMinecraftVersion}. Supported versions: ${mod.gameVersions.join(', ')}`
+            });
+            compatibilityReport.hasIncompatible = true;
+          }
+        }
+      } else {
+        // No version information available - try filename-based checking
+        const filenameCompatibility = checkModCompatibilityFromFilename(mod.fileName || '', newMinecraftVersion);
+        
+        if (filenameCompatibility.isCompatible) {
+          compatibilityReport.compatible.push({
+            ...mod,
+            compatibilityStatus: 'compatible',
+            note: 'Compatibility determined from filename'
+          });
+        } else {
+          compatibilityReport.unknown.push({
+            ...mod,
+            compatibilityStatus: 'unknown',
+            reason: 'Unable to determine compatibility - manual verification recommended'
+          });
+        }
+      }
+    } catch (error) {
+      console.error(`[ModCompatibility] Error checking compatibility for mod:`, mod, error);
+      compatibilityReport.unknown.push({
+        ...mod,
+        compatibilityStatus: 'unknown',
+        reason: `Error checking compatibility: ${error.message}`
+      });
+    }
+  }
+  
+  console.log(`[ModCompatibility] Compatibility check complete:`, {
+    compatible: compatibilityReport.compatible.length,
+    incompatible: compatibilityReport.incompatible.length,
+    needsUpdate: compatibilityReport.needsUpdate.length,
+    unknown: compatibilityReport.unknown.length
+  });
+  
+  return compatibilityReport;
+}
+
+/**
+ * Check mod compatibility based on filename
+ * @param {string} filename - The mod filename
+ * @param {string} minecraftVersion - Target Minecraft version
+ * @returns {Object} - Compatibility result
+ */
+function checkModCompatibilityFromFilename(filename, minecraftVersion) {
+  if (!filename || !minecraftVersion) {
+    return { isCompatible: false, confidence: 'low' };
+  }
+  
+  const lowerFilename = filename.toLowerCase();
+  const versionPattern = /(\d+\.\d+(?:\.\d+)?)/g;
+  const matches = lowerFilename.match(versionPattern);
+  
+  if (!matches) {
+    return { isCompatible: false, confidence: 'low' };
+  }
+  
+  // Check if the target Minecraft version appears in the filename
+  for (const match of matches) {
+    if (match === minecraftVersion || minecraftVersion.startsWith(match)) {
+      return { isCompatible: true, confidence: 'medium' };
+    }
+  }
+  
+  return { isCompatible: false, confidence: 'medium' };
+}
