@@ -150,13 +150,13 @@ function createBackupHandlers(win) {
         return { success: false, error: formatErrorMessage(err) };
       }
     },
-    'backups:run-immediate-auto': async (_e, { serverPath }) => {
+    'backups:run-immediate-auto': async (_e, { serverPath, type }) => {
       try {
         const settings = appStore.get('backupSettings') || {};
-        const type = settings.type || 'world';
-        const result = await backupService.safeCreateBackup({ 
-          serverPath, 
-          type, 
+        const backupType = type || settings.type || 'world';
+        const result = await backupService.safeCreateBackup({
+          serverPath,
+          type: backupType,
           trigger: 'manual-auto'  // Mark as manually triggered auto backup
         });
         
@@ -172,7 +172,7 @@ function createBackupHandlers(win) {
         // Send notification
         safeSend('backup-notification', {
           success: true,
-          message: `✅ Manual ${type === 'full' ? 'Full' : 'World-only'} auto-backup created at ${new Date().toLocaleTimeString()}`
+          message: `✅ Manual ${backupType === 'full' ? 'Full' : 'World-only'} auto-backup created at ${new Date().toLocaleTimeString()}`
         });
         
         return result;
