@@ -305,7 +305,9 @@ export async function searchMods(options = {}) {
       const installedModIdsSet = get(installedModIds);
       const mods = result.mods.map(mod => ({
         ...mod,
-        isInstalled: installedModIdsSet.has(mod.id)
+        isInstalled:
+          installedModIdsSet.has(mod.id) ||
+          (mod.slug && installedModIdsSet.has(mod.slug))
       }));
       searchResults.set(mods);
       if (result.pagination) {
