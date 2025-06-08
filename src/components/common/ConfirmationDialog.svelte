@@ -98,6 +98,7 @@
       </div>
       <div class="modal-body">
         <p id="dialog-message">{message}</p>
+        <slot />
       </div>
       <div class="modal-footer">
         {#if showCancel && cancelText}
