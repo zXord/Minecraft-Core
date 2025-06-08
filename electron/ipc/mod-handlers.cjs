@@ -173,9 +173,7 @@ function createModHandlers(win) {
         console.error('[IPC:Mods] Failed to get disabled mods:', err);
         throw new Error(`Failed to get disabled mods: ${err.message}`);
       }
-    },
-
-    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
+    },    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
       try {
         if (!serverPath || !fs.existsSync(serverPath)) {
           throw new Error('Invalid server path');
@@ -191,9 +189,17 @@ function createModHandlers(win) {
           const projectId = mod.projectId;
           const fileName = mod.fileName;
           const name = mod.name || mod.title || fileName;
+          const currentVersion = mod.versionNumber || mod.version || null;
 
           if (!projectId) {
-            results.push({ projectId: null, fileName, name, compatible: true, dependencies: [] });
+            results.push({ 
+              projectId: null, 
+              fileName, 
+              name, 
+              currentVersion, 
+              compatible: true, 
+              dependencies: [] 
+            });
             continue;
           }
 
@@ -202,19 +208,34 @@ function createModHandlers(win) {
             const best = versions && versions[0];
 
             if (!best) {
-              results.push({ projectId, fileName, name, compatible: false });
+              results.push({ 
+                projectId, 
+                fileName, 
+                name, 
+                currentVersion, 
+                compatible: false 
+              });
             } else {
               results.push({
                 projectId,
                 fileName,
                 name,
+                currentVersion,
+                latestVersion: best.version_number,
                 compatible: true,
                 dependencies: best.dependencies || []
               });
             }
           } catch (err) {
             console.error('[IPC:Mods] Compatibility check error for', projectId, err);
-            results.push({ projectId, fileName, name, compatible: false, error: err.message });
+            results.push({ 
+              projectId, 
+              fileName, 
+              name, 
+              currentVersion, 
+              compatible: false, 
+              error: err.message 
+            });
           }
         }
 
@@ -246,14 +267,57 @@ function createModHandlers(win) {
         throw new Error(`Failed to add mod: ${err.message}`);
       }
     },
-    
-    'delete-mod': async (_event, serverPath, modName) => {
+      'delete-mod': async (_event, serverPath, modName) => {
       try {
         console.log('[IPC:Mods] Deleting mod, calling modFileManager.deleteMod for serverPath:', serverPath);
         return await modFileManager.deleteMod(serverPath, modName);
       } catch (err) {
         console.error('[IPC:Mods] Failed to delete mod:', err);
         throw new Error(`Failed to delete mod: ${err.message}`);
+      }    },
+
+    // Update a mod to a new version
+    'update-mod': async (_event, { serverPath, projectId, targetVersion, fileName }) => {
+      try {
+        console.log('[IPC:Mods] Updating mod:', { serverPath, projectId, targetVersion, fileName });
+          // Step 1: Get the new version details
+        const versions = await modApiService.getModrinthVersions(projectId, 'fabric', null, false);
+        const targetVersionInfo = versions.find(v => v.versionNumber === targetVersion);
+          if (!targetVersionInfo) {
+          throw new Error(`Target version ${targetVersion} not found for mod ${projectId}`);
+        }
+
+        console.log('[IPC:Mods] Target version info structure:', JSON.stringify(targetVersionInfo, null, 2));        // Step 1.5: Get complete version details including files
+        const completeVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionInfo.id);
+        console.log('[IPC:Mods] Complete version info:', JSON.stringify(completeVersionInfo, null, 2));
+
+        // Step 2: Install the new version (installation service will handle cleanup)
+        const modDetails = {
+          id: projectId,
+          selectedVersionId: targetVersionInfo.id, // Use selectedVersionId instead of versionId
+          name: completeVersionInfo.name || targetVersionInfo.name || projectId,
+          fileName: completeVersionInfo.files[0]?.filename,
+          downloadUrl: completeVersionInfo.files[0]?.url,
+          version: targetVersion,
+          source: 'modrinth',
+          forceReinstall: true, // This flag triggers location detection and preservation
+          oldFileName: fileName // Pass the old filename for proper location detection
+        };        console.log('[IPC:Mods] Installing new version:', modDetails);
+        const result = await modInstallService.installModToServer(win, serverPath, modDetails);
+        
+        console.log('[IPC:Mods] Mod update completed successfully');
+        return { 
+          success: true, 
+          modName: modDetails.name,
+          oldFileName: fileName,
+          newFileName: modDetails.fileName,
+          version: targetVersion,
+          result 
+        };
+        
+      } catch (err) {
+        console.error('[IPC:Mods] Failed to update mod:', err);
+        throw new Error(`Failed to update mod: ${err.message}`);
       }
     },
     

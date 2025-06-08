@@ -33,6 +33,19 @@ function isMinecraftProjectId(id) {
 }
 
 /**
+ * Determine if the project ID refers to a system dependency (like Java)
+ * These are not mods but system requirements and should not be looked up on Modrinth.
+ * @param {string} id - Project ID to test
+ * @returns {boolean} - True if the ID represents a system dependency
+ */
+function isSystemDependency(id) {
+  if (!id) return false;
+  const canonical = String(id).toLowerCase().replace(/[^a-z]/g, '');
+  const systemDependencies = ['java', 'javafml', 'forge', 'fabricloader', 'quiltloader'];
+  return systemDependencies.includes(canonical);
+}
+
+/**
  * Determine if the project ID refers to a Fabric API submodule or the loader
  * These modules are bundled with Fabric API or the loader and are not
  * standalone projects on Modrinth.
@@ -377,8 +390,7 @@ export async function checkModDependencies(mod, visited = new Set()) {
     if (uniqueDeps.length === 0) {
       return [];
     }
-    
-    // Remove self-dependency entries
+      // Remove self-dependency entries
     const filteredDeps = uniqueDeps.filter(dep => {
       const depId = dep.project_id || dep.projectId;
       if (depId === mod.id) {
@@ -386,6 +398,10 @@ export async function checkModDependencies(mod, visited = new Set()) {
       }
       if (isMinecraftProjectId(depId)) {
         console.log(`[DEBUG] Skipping Minecraft dependency entry (${depId})`);
+        return false;
+      }
+      if (isSystemDependency(depId)) {
+        console.log(`[DEBUG] Skipping system dependency entry (${depId})`);
         return false;
       }
       if (isBundledFabricModule(depId)) {
@@ -453,11 +469,14 @@ async function filterAndResolveDependencies(dependencies) {
       dependency_type: dep.dependency_type || dep.dependencyType || 'required',
       name: dep.name || null,
       version_requirement: dep.version_requirement || dep.versionRequirement || null
-    }))
-    // Skip entries that refer to Minecraft or bundled Fabric modules
+    }))    // Skip entries that refer to Minecraft, system dependencies, or bundled Fabric modules
     .filter(dep => {
       if (isMinecraftProjectId(dep.project_id)) {
         console.log(`[DEBUG] Skipping Minecraft dependency entry (${dep.project_id})`);
+        return false;
+      }
+      if (isSystemDependency(dep.project_id)) {
+        console.log(`[DEBUG] Skipping system dependency entry (${dep.project_id})`);
         return false;
       }
       if (isBundledFabricModule(dep.project_id)) {

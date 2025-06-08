@@ -549,16 +549,48 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     
     // Cache the results
     versionCache.set(cacheKey, mappedVersions);
-    
-    // If we only need the latest version, just return the first one
+      // If we only need the latest version, select the best one for the target game version
     if (loadLatestOnly && mappedVersions.length > 0) {
-      // Try to get the latest stable version first
-      const latestStable = mappedVersions.find(v => v.isStable);
-      if (latestStable) {
-        return [latestStable];
+      // When a specific game version is requested, prioritize versions with narrower compatibility
+      if (gameVersion) {
+        // Sort versions by compatibility specificity and date
+        const sortedBySpecificity = [...mappedVersions].sort((a, b) => {
+          // First priority: prefer stable versions
+          const aStable = a.isStable;
+          const bStable = b.isStable;
+          if (aStable !== bStable) {
+            return bStable - aStable; // true (1) - false (0) = 1, so stable comes first
+          }
+          
+          // Second priority: prefer versions with fewer supported game versions (more specific)
+          const aVersionCount = a.gameVersions.length;
+          const bVersionCount = b.gameVersions.length;
+          if (aVersionCount !== bVersionCount) {
+            return aVersionCount - bVersionCount; // fewer versions = more specific
+          }
+          
+          // Third priority: prefer versions that list the target version first (primary target)
+          const aTargetIndex = a.gameVersions.indexOf(gameVersion);
+          const bTargetIndex = b.gameVersions.indexOf(gameVersion);
+          if (aTargetIndex !== bTargetIndex) {
+            return aTargetIndex - bTargetIndex; // lower index = earlier in list = primary target
+          }
+          
+          // Final priority: newer versions
+          const dateA = new Date(a.datePublished).getTime();
+          const dateB = new Date(b.datePublished).getTime();
+          return dateB - dateA;
+        });
+        
+        return [sortedBySpecificity[0]];
+      } else {
+        // No specific game version, use original logic
+        const latestStable = mappedVersions.find(v => v.isStable);
+        if (latestStable) {
+          return [latestStable];
+        }
+        return [mappedVersions[0]];
       }
-      // If no stable version, return the latest version regardless of stability
-      return [mappedVersions[0]];
     }
     
     return mappedVersions;
