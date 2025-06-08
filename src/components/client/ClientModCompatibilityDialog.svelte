@@ -3,6 +3,7 @@
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   
   export let show = false;
+  /** @type {any} */
   export let compatibilityReport = null;
   export let newMinecraftVersion = '';
   export let oldMinecraftVersion = '';
@@ -10,11 +11,6 @@
   const dispatch = createEventDispatcher();
   
   let showDetails = false;
-  
-  function handleClose() {
-    show = false;
-    dispatch('close');
-  }
   
   function handleContinue() {
     show = false;
@@ -128,7 +124,9 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="modDetailsTitle"
+      tabindex="0"
       on:click|stopPropagation
+      on:keydown|stopPropagation
     >
       <div class="modal-header">
         <h3 id="modDetailsTitle">Mod Compatibility Details</h3>
