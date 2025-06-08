@@ -723,7 +723,9 @@
           const versionInfo = await safeInvoke('get-version-info', {
             modId: modForInstall.id,
             versionId: ver,
-            source: modForInstall.source
+            source: modForInstall.source,
+            loader: get(loaderType),
+            gameVersion: get(minecraftVersion)
           });
           if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
             compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, modForInstall.id);

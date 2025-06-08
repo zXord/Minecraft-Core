@@ -119,11 +119,11 @@ function createModHandlers(win) {
       }
     },
     
-    'get-version-info': async (_event, { modId, versionId, source }) => {
+    'get-version-info': async (_event, { modId, versionId, source, gameVersion, loader }) => {
       console.log(`[IPC:Mods] Getting version info for mod ${modId}, version ${versionId} (source: ${source})`);
       try {
         if (source === 'modrinth') {
-          return await modApiService.getModrinthVersionInfo(modId, versionId);
+          return await modApiService.getModrinthVersionInfo(modId, versionId, gameVersion, loader);
         } else {
           throw new Error('Only Modrinth version info is currently fully supported via modApiService.');
         }

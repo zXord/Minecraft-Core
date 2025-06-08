@@ -390,7 +390,7 @@ async function getModrinthDownloadUrl(projectId, version, loader) {
     const latest = versions[0];
     
     // Get the full version info
-    const versionInfo = await getModrinthVersionInfo(projectId, latest.id);
+    const versionInfo = await getModrinthVersionInfo(projectId, latest.id, gameVersion, loader);
     
     // Get primary file
     if (!versionInfo.files || versionInfo.files.length === 0) {
@@ -609,11 +609,11 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
  * @param {string} versionId - Version ID
  * @returns {Promise<Object>} Version info object
  */
-async function getModrinthVersionInfo(projectId, versionId) { // projectId not strictly needed for /version/{id}
+async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader) { // projectId not strictly needed for /version/{id}
   try {
     // If no version ID provided, fall back to latest version info
     if (!versionId) {
-      return await getLatestModrinthVersionInfo(projectId);
+      return await getLatestModrinthVersionInfo(projectId, gameVersion, loader);
     }
 
     await rateLimit(); // Ensure rate limiting
@@ -653,7 +653,7 @@ async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
     
     // The getModrinthVersions with loadLatestOnly should already return the single best version.
     // Now fetch its full details.
-    return await getModrinthVersionInfo(projectId, versions[0].id);
+    return await getModrinthVersionInfo(projectId, versions[0].id, gameVersion, loader);
   } catch (error) {
     console.error('Modrinth latest version info error:', error);
     throw error;

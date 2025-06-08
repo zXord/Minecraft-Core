@@ -96,7 +96,9 @@ export async function checkModDependencies(mod, visited = new Set()) {
         console.log(`[DEBUG] No specific version ID, getting latest version info for ${mod.id}`);
         versionInfo = await safeInvoke('get-version-info', {
           modId: mod.id,
-          source: mod.source || 'modrinth'
+          source: mod.source || 'modrinth',
+          loader: get(loaderType),
+          gameVersion: get(minecraftVersion)
         });
         console.log(`[DEBUG] Received version info for ${mod.id}:`, versionInfo?.id || 'none');
       } else {
@@ -105,7 +107,9 @@ export async function checkModDependencies(mod, visited = new Set()) {
         versionInfo = await safeInvoke('get-version-info', {
           modId: mod.id,
           versionId,
-          source: mod.source || 'modrinth'
+          source: mod.source || 'modrinth',
+          loader: get(loaderType),
+          gameVersion: get(minecraftVersion)
         });
         console.log(`[DEBUG] Received version info for ${mod.id}:`, versionInfo?.id || 'none');
       }
