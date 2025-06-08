@@ -609,15 +609,20 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
  * @param {string} versionId - Version ID
  * @returns {Promise<Object>} Version info object
  */
-async function getModrinthVersionInfo(_projectId, versionId) { // projectId not strictly needed for /version/{id}
+async function getModrinthVersionInfo(projectId, versionId) { // projectId not strictly needed for /version/{id}
   try {
+    // If no version ID provided, fall back to latest version info
+    if (!versionId) {
+      return await getLatestModrinthVersionInfo(projectId);
+    }
+
     await rateLimit(); // Ensure rate limiting
     const response = await fetch(`${MODRINTH_API}/version/${versionId}`);
-    
+
     if (!response.ok) {
       throw new Error(`Modrinth API error: ${response.status}`);
     }
-    
+
     return await response.json();
   } catch (error) {
     // Only log as error if it's not a 404 (which can be normal for missing/removed versions)
