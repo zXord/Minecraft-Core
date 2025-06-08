@@ -20,12 +20,16 @@
     installingModIds,
     filterMinecraftVersion,
     filterModLoader,
-    serverManagedFiles
+    serverManagedFiles,
+    modToInstall,
+    currentDependencies,
+    dependencyModalOpen
   } from '../../stores/modStore.js';
   import { searchMods, fetchModVersions } from '../../utils/mods/modAPI.js';
   import { installedModIds, installedModInfo } from '../../stores/modStore.js';
   import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
   import DownloadProgress from '../mods/components/DownloadProgress.svelte';
+  import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';
   import ClientModList from './ClientModList.svelte';
   import ClientManualModList from './ClientManualModList.svelte';
   import ClientModStatus from './ClientModStatus.svelte';
@@ -33,6 +37,9 @@
   import ModSearch from '../mods/components/ModSearch.svelte';
   import ModDropZone from '../mods/components/ModDropZone.svelte';
   import { uploadDroppedMods } from '../../utils/directFileUpload.js';
+  import { checkModDependencies, showDependencyModal, installWithDependencies } from '../../utils/mods/modDependencyHelper.js';
+  import { checkDependencyCompatibility } from '../../utils/mods/modCompatibility.js';
+  import { safeInvoke } from '../../utils/ipcUtils.js';
 
   // Types
   interface Instance {
@@ -524,8 +531,9 @@
   }
 
   // Install a mod to the client instance
-  async function installClientMod(mod, versionId = null) {
-    if (!instance.path) {
+  async function installClientMod(mod, versionId = null, customPath = null) {
+    const pathToUse = customPath || instance.path;
+    if (!pathToUse) {
       errorMessage.set('No client path configured');
       setTimeout(() => errorMessage.set(''), 5000);
       return;
@@ -546,7 +554,7 @@
         source: 'modrinth',
         loader: get(loaderType) || 'fabric',
         version: get(minecraftVersion) || '1.20.1',
-        clientPath: instance.path,
+        clientPath: pathToUse,
         forceReinstall: isUpdate
       };
 
@@ -605,6 +613,11 @@
     await installClientMod(mod, versionId);
   }
 
+  // Wrapper used by installWithDependencies for client installs
+  function clientInstallFn(mod, path) {
+    return installClientMod(mod, mod.selectedVersionId, path);
+  }
+
   function switchTab(tab) {
     activeTab = tab;
     if (tab === 'installed-mods') {
@@ -641,24 +654,117 @@
     // Store the selected version for later installation
     mod.selectedVersionId = versionId;
   }
-  // Handle mod installation
+
+  // Install selected mod and its dependencies using helper
+  async function handleInstallWithDependencies() {
+    try {
+      const result = await installWithDependencies(instance?.path, clientInstallFn);
+
+      if (!result) {
+        const mod = get(modToInstall);
+        if (mod && mod.id) {
+          installingModIds.update(ids => {
+            ids.delete(mod.id);
+            return ids;
+          });
+        }
+
+        const dependencies = get(currentDependencies);
+        if (dependencies && dependencies.length > 0) {
+          for (const dep of dependencies) {
+            if (dep.projectId) {
+              installingModIds.update(ids => {
+                ids.delete(dep.projectId);
+                return ids;
+              });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error installing dependencies:', error);
+      errorMessage.set(`Failed to install dependencies: ${error.message || 'Unknown error'}`);
+      installingModIds.set(new Set());
+    }
+  }
+  // Handle mod installation with dependency checks
   async function handleInstallMod(event) {
     const { mod, versionId } = event.detail;
     const ver = versionId || mod.selectedVersionId;
-    
-    // Handle manual mod version changes
+
+    let modForInstall;
     if (mod.fileName && mod.projectId && !mod.id) {
-      // This is a manual mod version change - create proper mod object
-      const modForInstall = {
+      modForInstall = {
         id: mod.projectId,
         name: mod.name || mod.fileName.replace(/\.jar$/i, ''),
         title: mod.name || mod.fileName.replace(/\.jar$/i, ''),
-        forceReinstall: true
+        forceReinstall: true,
+        source: 'modrinth'
       };
-      await installClientMod(modForInstall, ver);
     } else {
-      // Regular mod installation from search
-      await installClientMod(mod, ver);
+      modForInstall = { ...mod, source: mod.source || 'modrinth' };
+    }
+
+    if (ver) {
+      modForInstall.selectedVersionId = ver;
+    }
+
+    installingModIds.update(ids => {
+      ids.add(modForInstall.id);
+      return ids;
+    });
+
+    try {
+      const dependencies = await checkModDependencies(modForInstall);
+      let compatibilityIssues = [];
+
+      try {
+        if (ver) {
+          const versionInfo = await safeInvoke('get-version-info', {
+            modId: modForInstall.id,
+            versionId: ver,
+            source: modForInstall.source
+          });
+          if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
+            compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, modForInstall.id);
+          }
+        }
+      } catch (compatErr) {
+        console.error('Error checking compatibility:', compatErr);
+      }
+
+      if ((dependencies && dependencies.length > 0) || compatibilityIssues.length > 0) {
+        if (compatibilityIssues.length > 0) {
+          dependencies.push(
+            ...compatibilityIssues.map(issue => ({
+              projectId: issue.dependency.projectId,
+              name: `${issue.dependency.name} (${issue.message})`,
+              dependencyType: 'compatibility',
+              versionRequirement: issue.dependency.versionRequirement,
+              currentVersionId: issue.dependency.currentVersionId,
+              requiredVersion: issue.requiredVersion
+            }))
+          );
+        }
+
+        showDependencyModal(modForInstall, dependencies);
+
+        installingModIds.update(ids => {
+          ids.delete(modForInstall.id);
+          return ids;
+        });
+        return;
+      }
+
+      await installClientMod(modForInstall, ver);
+    } catch (err) {
+      console.error('[ClientModManager] Error installing mod:', err);
+      errorMessage.set(`Failed to install ${modForInstall.name}: ${err.message}`);
+      setTimeout(() => errorMessage.set(''), 5000);
+      installingModIds.update(ids => {
+        ids.delete(modForInstall.id);
+        return ids;
+      });
     }
   }
 
@@ -685,6 +791,7 @@
 
 <div class="client-mod-manager">
   <DownloadProgress />
+  <ModDependencyModal on:install={handleInstallWithDependencies} />
   <div class="mod-manager-header">
     <h2>Client Mods</h2>
     <div class="connection-status">
