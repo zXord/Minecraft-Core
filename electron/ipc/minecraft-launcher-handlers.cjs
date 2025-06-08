@@ -34,6 +34,30 @@ function checkModCompatibility(modFileName, targetVersion) {
   }
 }
 
+function getBaseModName(fileName) {
+  if (!fileName) return '';
+  const clean = fileName.toLowerCase().replace(/\.jar$/i, '');
+  const segments = clean.split(/[-_+]/);
+  const base = [];
+  for (const seg of segments) {
+    if (/^(?:v?\d|mc\d)/i.test(seg)) break;
+    base.push(seg);
+  }
+  return base.join('-');
+}
+
+function extractVersionFromFilename(fileName) {
+  if (!fileName) return null;
+  const clean = fileName.toLowerCase().replace(/\.jar$/i, '');
+  const segments = clean.split(/[-_+]/).reverse();
+  for (const seg of segments) {
+    if (/^mc\d+(?:\.\d+)*$/i.test(seg)) continue;
+    const match = seg.match(/^v?(\d+\.\d+(?:\.\d+)?)/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
 /**
  * Create Minecraft launcher IPC handlers
  * 
@@ -789,10 +813,10 @@ function createMinecraftLauncherHandlers(win) {
                 const serverFileName = rm.fileName.toLowerCase();
                 const clientFileName = modFileNameLower;
                 
-                // Check for common mod name patterns
-                if (clientFileName.includes('sodium') && serverFileName.includes('sodium')) return true;
-                if (clientFileName.includes('fabric_api') && serverFileName.includes('fabric_api')) return true;
-                if (clientModMetadata.name && rm.fileName.toLowerCase().includes(clientModMetadata.name.toLowerCase().replace(/\s+/g, '_'))) return true;
+                const clientBase = getBaseModName(clientFileName);
+                const serverBase = getBaseModName(serverFileName);
+                if (clientBase && serverBase && clientBase === serverBase) return true;
+                if (clientModMetadata.name && serverBase === getBaseModName(clientModMetadata.name.toLowerCase().replace(/\s+/g, '_'))) return true;
                 
                 return false;
               }) : null;
@@ -824,20 +848,7 @@ function createMinecraftLauncherHandlers(win) {
                 if (exactServerMatch || similarServerMatch) {
                 // This client mod has a server equivalent - it's an update
                 const matchedServerMod = exactServerMatch || similarServerMatch;
-                const serverVersion = (() => {
-                  // Try to extract version from server mod filename
-                  const versionMatch = matchedServerMod.fileName.match(/(\d+\.\d+\.\d+)/);
-                  if (versionMatch) return versionMatch[1];
-                  
-                  // Try to extract version from server mod filename (alternative patterns)
-                  const fabricMatch = matchedServerMod.fileName.match(/fabric[_-]api[_-]([0-9.]+)/i);
-                  if (fabricMatch) return fabricMatch[1];
-                  
-                  const sodiumMatch = matchedServerMod.fileName.match(/sodium[_-]([0-9.]+)/i);
-                  if (sodiumMatch) return sodiumMatch[1];
-                  
-                  return 'Server Version';
-                })();
+                const serverVersion = extractVersionFromFilename(matchedServerMod.fileName) || 'Server Version';
                 
                 console.log(`[minecraft-check-mods] ${modFileName} is an update (${exactServerMatch ? 'exact' : 'similar'} match with server)`);
                 clientModChanges.updates.push({
@@ -889,10 +900,9 @@ function createMinecraftLauncherHandlers(win) {
             if (serverMod.fileName === update.fileName) return true;
             
             // Check for similar name patterns (same mod, different version)
-            if ((clientModNameLower.includes('sodium') && serverModNameLower.includes('sodium')) ||
-                (clientModNameLower.includes('fabric_api') && serverModNameLower.includes('fabric_api'))) {
-              return true;
-            }
+            const clientBase = getBaseModName(clientModNameLower);
+            const serverBase = getBaseModName(serverModNameLower);
+            if (clientBase && serverBase && clientBase === serverBase) return true;
             
             return false;
           });
