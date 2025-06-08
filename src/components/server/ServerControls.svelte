@@ -4,11 +4,54 @@
   import { get } from 'svelte/store';
   import { serverState, updateServerMetrics, updateServerStatus } from '../../stores/serverState.js';
   import { playerState, updateOnlinePlayers, showContextMenu } from '../../stores/playerState.js';
-  import PlayerContextMenu from '../players/PlayerContextMenu.svelte';
-  import { openFolder, validateServerPath } from '../../utils/folderUtils.js';
+  import PlayerContextMenu from '../players/PlayerContextMenu.svelte';  import { openFolder, validateServerPath } from '../../utils/folderUtils.js';
   import { errorMessage } from '../../stores/modStore.js';
-  import { settingsStore } from '../../stores/settingsStore.js';
+  import { settingsStore, loadSettings } from '../../stores/settingsStore.js';
   import { latestVersions, refreshLatestVersions } from '../../stores/versionUpdates.js';
+  
+  // Import compareVersions function for semantic version comparison
+  function compareVersions(versionA, versionB) {
+    if (!versionA || !versionB) return 0;
+    if (versionA === versionB) return 0;
+    
+    // Convert to arrays of version components
+    const partsA = versionA.split(/[.-]/).map(part => {
+      const num = parseInt(part, 10);
+      return isNaN(num) ? part : num;
+    });
+    
+    const partsB = versionB.split(/[.-]/).map(part => {
+      const num = parseInt(part, 10);
+      return isNaN(num) ? part : num;
+    });
+    
+    // Compare each part
+    const minLength = Math.min(partsA.length, partsB.length);
+    
+    for (let i = 0; i < minLength; i++) {
+      const a = partsA[i];
+      const b = partsB[i];
+      
+      // If both are numbers, compare numerically
+      if (typeof a === 'number' && typeof b === 'number') {
+        if (a !== b) return a - b;
+      } 
+      // If both are strings, compare alphabetically
+      else if (typeof a === 'string' && typeof b === 'string') {
+        if (a !== b) return a.localeCompare(b);
+      }
+      // Numbers are considered greater than strings for this purpose
+      else if (typeof a === 'number') {
+        return 1;
+      } else {
+        return -1;
+      }
+    }
+    
+    // If we get here, one version might be a prefix of the other
+    // The longer one is considered newer (e.g., 1.0.1 > 1.0)
+    return partsA.length - partsB.length;
+  }
   
   export let serverPath = '';
   
@@ -21,11 +64,35 @@
 
   let statusCheckInterval: NodeJS.Timeout;
   let isVisible = true;
-
   // Access global serverPath when local prop is empty
   $: {
     if (!serverPath && window.serverPath) {
       serverPath = window.serverPath.get();
+    }
+  }
+
+  // Reactive config loading when server path changes
+  $: {
+    if (serverPath) {
+      loadServerConfig(serverPath);
+    }
+  }
+  async function loadServerConfig(path) {
+    try {
+      console.log('[ServerControls] Loading config for server path:', path);
+      const configResult = await window.electron.invoke('read-config', path);
+      console.log('[ServerControls] Config result:', configResult);
+      
+      if (configResult && (configResult.version || configResult.fabric)) {
+        console.log('[ServerControls] Loading server config:', configResult);
+        loadSettings(configResult);
+        console.log('[ServerControls] Current versions loaded - MC:', configResult.version, 'Fabric:', configResult.fabric);
+        console.log('[ServerControls] Settings store after loading:', get(settingsStore));
+      } else {
+        console.warn('[ServerControls] Config result does not contain version information:', configResult);
+      }
+    } catch (error) {
+      console.error('[ServerControls] Error loading server config:', error);
     }
   }
 
@@ -41,21 +108,46 @@
   
   // Auto-start settings
   let autoStartMinecraft = false;
-  let autoStartManagement = false;
-
-  // Version update tracking
+  let autoStartManagement = false;  // Version update tracking
   $: currentMcVersion = $settingsStore.mcVersion;
   $: currentFabricVersion = $settingsStore.fabricVersion;
   $: latestMcVersion = $latestVersions.mc;
   $: latestFabricVersion = $latestVersions.fabric;
-  $: mcUpdateAvailable = currentMcVersion && latestMcVersion && currentMcVersion !== latestMcVersion;
-  $: fabricUpdateAvailable = currentFabricVersion && latestFabricVersion && currentFabricVersion !== latestFabricVersion;
+  $: mcUpdateAvailable = currentMcVersion && latestMcVersion && compareVersions(latestMcVersion, currentMcVersion) > 0;
+  $: fabricUpdateAvailable = currentFabricVersion && latestFabricVersion && compareVersions(latestFabricVersion, currentFabricVersion) > 0;
+
+  // Debug logging for version changes
+  $: if (currentMcVersion !== undefined) {
+    console.log('[ServerControls] Current MC version changed to:', currentMcVersion);
+  }
+  $: if (currentFabricVersion !== undefined) {
+    console.log('[ServerControls] Current Fabric version changed to:', currentFabricVersion);
+  }
 
   let updateChecked = false;
   $: upToDate = updateChecked && !mcUpdateAvailable && !fabricUpdateAvailable && latestMcVersion && latestFabricVersion;
-
   async function checkVersionUpdates() {
+    console.log('[VersionCheck] Starting version check...');
+    console.log('[VersionCheck] Current MC:', currentMcVersion);
+    console.log('[VersionCheck] Current Fabric:', currentFabricVersion);
+    
     await refreshLatestVersions(currentMcVersion);
+    
+    console.log('[VersionCheck] Latest MC:', latestMcVersion);
+    console.log('[VersionCheck] Latest Fabric:', latestFabricVersion);
+    console.log('[VersionCheck] MC update available:', mcUpdateAvailable);
+    console.log('[VersionCheck] Fabric update available:', fabricUpdateAvailable);
+    
+    if (currentMcVersion && latestMcVersion) {
+      const mcComparison = compareVersions(latestMcVersion, currentMcVersion);
+      console.log('[VersionCheck] MC version comparison result:', mcComparison);
+    }
+    
+    if (currentFabricVersion && latestFabricVersion) {
+      const fabricComparison = compareVersions(latestFabricVersion, currentFabricVersion);
+      console.log('[VersionCheck] Fabric version comparison result:', fabricComparison);
+    }
+    
     updateChecked = true;
   }
   
@@ -216,9 +308,7 @@
           serverState.update(state => ({
             ...state,
             port,
-            maxRam
-          }));
-        }
+            maxRam          }));        }
         // Initial status check
         await checkServerStatus();
 
@@ -777,24 +867,8 @@
     background-color: #ff9800;
     color: white;
   }
-  
-  .kill-button:hover:not(:disabled) {
+    .kill-button:hover:not(:disabled) {
     background-color: #ef6c00;
-  }
-  
-  .server-running {
-    padding-left: 0.5rem;
-    display: flex;
-    align-items: center;
-    color: inherit !important; /* Ensure color doesn't change */
-  }
-  
-  /* Override any inherited colors */
-  .server-running label,
-  .server-running input,
-  .setting-item.server-running,
-  .setting-item.server-running label {
-    color: #dddddd !important;
   }
 
   label {

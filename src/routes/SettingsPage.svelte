@@ -1,4 +1,6 @@
 <script>
+  import { createEventDispatcher } from 'svelte';
+  
   export let serverPath = '';
   export let currentInstance;
   import { openFolder, validateServerPath } from '../utils/folderUtils.js';
@@ -8,6 +10,8 @@
   import ServerPropertiesEditor from '../components/settings/ServerPropertiesEditor.svelte';
   import InstanceSettings from '../components/settings/InstanceSettings.svelte';
   import { errorMessage } from '../stores/modStore.js';
+  
+  const dispatch = createEventDispatcher();
 </script>
 
 <div class="content-panel">
@@ -39,12 +43,12 @@
   <ServerPropertiesEditor serverPath={serverPath} />
   <WorldSettings serverPath={serverPath} />
   <AutoRestartSettings />
-  <VersionUpdater serverPath={serverPath} />
-  {#if currentInstance}
+  <VersionUpdater serverPath={serverPath} />  {#if currentInstance}
     <InstanceSettings
       instance={currentInstance}
       on:deleted={(e) => {
-        /* This event bubbles up to App to handle instance removal */
+        // Forward the deletion event to the parent component (App.svelte)
+        dispatch('deleted', e.detail);
       }}
     />
   {/if}

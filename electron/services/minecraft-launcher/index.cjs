@@ -9,7 +9,7 @@ const { AuthHandler } = require('./auth-handler.cjs');
 const { ClientDownloader } = require('./client-downloader.cjs');
 const utils = require('./utils.cjs'); // Added import for utils
 const { ProperMinecraftLauncher } = require('./proper-launcher.cjs'); // Import proper launcher
-const eventBus = require('../utils/event-bus.cjs');
+const eventBus = require('../../utils/event-bus.cjs');
 
 // CRITICAL DEBUG: Intercept session join requests to debug authentication
 try {

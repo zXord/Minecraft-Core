@@ -403,39 +403,36 @@
   <button class="sidebar-toggle" on:click={toggleSidebar}>
     ☰
   </button>
-
   {#if isSidebarOpen}
-    <div class="sidebar-overlay" on:click={() => isSidebarOpen = false}></div>
+    <div class="sidebar-overlay" role="button" tabindex="0" on:click={() => isSidebarOpen = false} on:keydown={(e) => e.key === 'Escape' && (isSidebarOpen = false)}></div>
   {/if}
 
   <!-- Sidebar -->
   <div class="sidebar" class:open={isSidebarOpen}>
     <h2>Instances</h2>
-    <div class="instances-list">
-      {#each instances as instance}
+    <div class="instances-list">      {#each instances as instance}
         <div 
           class="instance-item" 
           class:active={currentInstance && currentInstance.id === instance.id}
+          role="button"
+          tabindex="0"
           on:click={() => switchInstance(instance)}
+          on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && switchInstance(instance)}
         >
-          <span class="instance-icon">{instance.type === 'server' ? '🖥️' : '👤'}</span>
-          
-          {#if editId === instance.id}
-            <!-- Edit mode -->
-            <div class="rename-controls" on:click|stopPropagation>
-              <input 
+          <span class="instance-icon">{instance.type === 'server' ? '🖥️' : '👤'}</span>          {#if editId === instance.id}            <!-- Edit mode -->
+            <div class="rename-controls" role="group">              <input 
                 type="text" 
                 bind:value={editName} 
                 class="rename-input"
+                on:click|stopPropagation
                 on:keydown={e => {
+                  e.stopPropagation();
                   if (e.key === 'Enter') confirmRename(e);
                   if (e.key === 'Escape') cancelRename(e);
                 }}
-                autofocus
-              />
-              <div class="rename-actions">
-                <button class="rename-btn confirm" on:click={confirmRename} title="Save">✓</button>
-                <button class="rename-btn cancel" on:click={cancelRename} title="Cancel">✕</button>
+              />              <div class="rename-actions">
+                <button class="rename-btn confirm" on:click={(e) => {e.stopPropagation(); confirmRename(e);}} title="Save">✓</button>
+                <button class="rename-btn cancel" on:click={(e) => {e.stopPropagation(); cancelRename(e);}} title="Cancel">✕</button>
               </div>
             </div>
           {:else}
@@ -457,10 +454,8 @@
     </button>
   </div>
 
-  <!-- Instance type selector modal -->
-  {#if showInstanceSelector}
-    <div class="modal-overlay" on:click={() => showInstanceSelector = false}>
-      <div class="modal-content welcome-modal" on:click|stopPropagation>
+  <!-- Instance type selector modal -->  {#if showInstanceSelector}    <div class="modal-overlay" role="dialog" aria-modal="true" tabindex="0" on:click={() => showInstanceSelector = false} on:keydown={(e) => e.key === 'Escape' && (showInstanceSelector = false)}>
+      <div class="modal-content welcome-modal" role="document">
         <h1>Welcome to Minecraft Core</h1>
         <p>Choose an instance type to get started:</p>
         <div class="instance-type-container">
@@ -470,13 +465,16 @@
               <h3>Server Manager</h3>
               <p>Create and manage Minecraft servers</p>
               <div class="disabled-notice">You already have a server instance</div>
-            </div>
-          {:else}
-            <div class="instance-type-card" on:click={() => {
+            </div>          {:else}
+            <div class="instance-type-card" role="button" tabindex="0" on:click={() => {
               instanceType = 'server';
               showInstanceSelector = false;
               step = 'chooseFolder';
-            }}>
+            }} on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && (() => {
+              instanceType = 'server';
+              showInstanceSelector = false;
+              step = 'chooseFolder';
+            })()}>
               <div class="instance-type-icon">🖥️</div>
               <h3>Server Manager</h3>
               <p>Create and manage Minecraft servers</p>
@@ -489,9 +487,8 @@
               <h3>Client Interface</h3>
               <p>Connect to Minecraft servers as a player</p>
               <div class="disabled-notice">You already have a client instance</div>
-            </div>
-          {:else}
-            <div class="instance-type-card" on:click={() => selectInstanceType('client')}>
+            </div>          {:else}
+            <div class="instance-type-card" role="button" tabindex="0" on:click={() => selectInstanceType('client')} on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && selectInstanceType('client')}>
               <div class="instance-type-icon">👤</div>
               <h3>Client Interface</h3>
               <p>Connect to Minecraft servers as a player</p>
@@ -561,9 +558,28 @@
           {:else if $route === '/backups'}
             <div class="content-panel">
               <Backups serverPath={path} />
-            </div>
-          {:else if $route === '/settings'}
-            <SettingsPage serverPath={path} currentInstance={currentInstance} />
+            </div>          {:else if $route === '/settings'}
+            <SettingsPage 
+              serverPath={path} 
+              currentInstance={currentInstance} 
+              on:deleted={(e) => {
+                // Remove the instance from the list
+                instances = instances.filter(i => i.id !== e.detail.id);
+                
+                // Switch to a different instance if available, otherwise show selection screen
+                if (instances.length > 0) {
+                  currentInstance = instances[0];
+                  if (currentInstance.type === 'server') {
+                    path = currentInstance.path;
+                    instanceType = 'server';
+                  } else {
+                    instanceType = 'client';
+                  }
+                } else {
+                  showInstanceSelector = true;
+                }
+              }}
+            />
           {/if}
         </div>
       {:else if instanceType === 'client'}
@@ -728,7 +744,6 @@
     font-size: 1.25rem;
     margin-bottom: 0.25rem;
   }
-
   .tab-text {
     font-weight: 500;
   }
@@ -738,7 +753,7 @@
     padding: 2rem;
   }
 
-  .dashboard-panel, .content-panel {
+  .content-panel {
     max-width: 1200px;
     margin: 0 auto;
   }
@@ -990,24 +1005,9 @@
     font-size: 0.9rem;
     font-weight: bold;
   }
-
   .instance-type-icon {
     font-size: 3rem;
     margin-bottom: 1rem;
-  }
-
-  .close-modal-btn {
-    background-color: #ef4444;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 0.75rem 1.5rem;
-    cursor: pointer;
-    font-weight: bold;
-  }
-  
-  .debug-button, .debug-info {
-    display: none;
   }
 
   /* Loading screen */
@@ -1017,51 +1017,6 @@
     align-items: center;
     justify-content: center;
     height: 100vh;
-  }
-
-  /* Content styles */
-  .server-path-section {
-    margin-bottom: 20px;
-  }
-
-  .path-container {
-    display: flex;
-    align-items: center;
-    border: 1px solid #4b5563;
-    border-radius: 4px;
-    padding: 8px 12px;
-    background-color: #2d3748;
-  }
-
-  .path-text {
-    flex: 1;
-    overflow-x: auto;
-    white-space: nowrap;
-    font-family: monospace;
-  }
-
-  .folder-button {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 1.2rem;
-    margin-left: 10px;
-    padding: 4px 8px;
-    color: white;
-  }
-
-  .folder-button:hover {
-    background: #4b5563;
-    border-radius: 4px;
-  }
-
-  h2, h3 {
-    color: white;
-  }
-
-  hr {
-    border-color: #4b5563;
-    margin: 2rem 0;
   }
 
   /* Ensure client components use consistent styling */

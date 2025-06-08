@@ -42,24 +42,32 @@ async function installModToServer(win, serverPath, modDetails) {
   
   let currentModLocation = null;
   let destinationPath = path.join(modsDir, fileName); // Default to server
-  
-  if (modDetails.forceReinstall) {
+    if (modDetails.forceReinstall) {
     console.log('[ModInstallService] Checking current mod location for version update...');
-    const serverModPath = path.join(modsDir, fileName);
-    const clientModPath = path.join(clientModsDir, fileName);
+    
+    // Use old filename for location detection if provided (for updates)
+    const checkFileName = modDetails.oldFileName || fileName;
+    const serverModPath = path.join(modsDir, checkFileName);
+    const clientModPath = path.join(clientModsDir, checkFileName);
     const serverExists = await fs.access(serverModPath).then(() => true).catch(() => false);
     const clientExists = await fs.access(clientModPath).then(() => true).catch(() => false);
     
-    console.log(`[ModInstallService] Current mod locations - Server: ${serverExists}, Client: ${clientExists}`);
-    if (clientExists && serverExists) currentModLocation = 'both';
-    else if (clientExists && !serverExists) {
+    console.log(`[ModInstallService] Current mod locations (${checkFileName}) - Server: ${serverExists}, Client: ${clientExists}`);
+    if (clientExists && serverExists) {
+      currentModLocation = 'both';
+      destinationPath = path.join(modsDir, fileName); // Install new version to server
+    } else if (clientExists && !serverExists) {
       currentModLocation = 'client-only';
-      destinationPath = clientModPath;
-    } else if (serverExists && !clientExists) currentModLocation = 'server-only';
+      destinationPath = path.join(clientModsDir, fileName); // Install new version to client
+    } else if (serverExists && !clientExists) {
+      currentModLocation = 'server-only';
+      destinationPath = path.join(modsDir, fileName); // Install new version to server
+    }
+    
+    console.log(`[ModInstallService] Detected current location: ${currentModLocation}, new file will go to: ${destinationPath}`);
   }
   
   const targetPath = destinationPath;
-
   if (modDetails.forceReinstall) {
     try {
       console.log('[ModInstallService] Checking for existing mod files to replace...');
@@ -76,14 +84,28 @@ async function installModToServer(win, serverPath, modDetails) {
           if (manifest.projectId === modDetails.id) {
             const existingFileName = manifest.fileName;
             console.log(`[ModInstallService] Found existing version of mod: ${existingFileName}`);
-            const oldFilePath = path.join(modsDir, existingFileName);
-            await fs.unlink(oldFilePath).catch(() => console.log(`[ModInstallService] Could not delete ${oldFilePath}, may not exist`));
+            
+            // Clean up from both locations during update
+            const serverFilePath = path.join(modsDir, existingFileName);
+            const clientFilePath = path.join(clientModsDir, existingFileName);
+            
+            await fs.unlink(serverFilePath).catch(() => console.log(`[ModInstallService] Could not delete server file ${serverFilePath}, may not exist`));
+            await fs.unlink(clientFilePath).catch(() => console.log(`[ModInstallService] Could not delete client file ${clientFilePath}, may not exist`));
             await fs.unlink(manifestPath).catch(() => console.log(`[ModInstallService] Could not delete manifest ${manifestPath}`));
             break;
           }
         } catch (err) {
-          console.error(`[ModInstallService] Error parsing manifest ${manifestFile}:`, err);
-        }
+          console.error(`[ModInstallService] Error parsing manifest ${manifestFile}:`, err);        }
+      }
+      
+      // Also clean up using oldFileName if provided (for direct updates)
+      if (modDetails.oldFileName && modDetails.oldFileName !== fileName) {
+        console.log(`[ModInstallService] Cleaning up old file: ${modDetails.oldFileName}`);
+        const oldServerPath = path.join(modsDir, modDetails.oldFileName);
+        const oldClientPath = path.join(clientModsDir, modDetails.oldFileName);
+        
+        await fs.unlink(oldServerPath).catch(() => console.log(`[ModInstallService] Could not delete old server file ${oldServerPath}, may not exist`));
+        await fs.unlink(oldClientPath).catch(() => console.log(`[ModInstallService] Could not delete old client file ${oldClientPath}, may not exist`));
       }
       
       if (modDetails.name) {
@@ -99,10 +121,17 @@ async function installModToServer(win, serverPath, modDetails) {
       console.error('[ModInstallService] Error checking for existing mod files:', err);
     }
   }
-
   try {
     let downloadUrl, versionInfoToSave;
-    if (modDetails.source === 'modrinth') {
+    
+    // Check if downloadUrl is already provided
+    if (modDetails.downloadUrl) {
+      downloadUrl = modDetails.downloadUrl;
+      // If we have selectedVersionId, use it to get version info for manifest
+      if (modDetails.selectedVersionId && modDetails.source === 'modrinth') {
+        versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId);
+      }
+    } else if (modDetails.source === 'modrinth') {
       if (modDetails.selectedVersionId) {
         versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId);
         if (!versionInfoToSave || !versionInfoToSave.files || versionInfoToSave.files.length === 0) {

@@ -129,61 +129,7 @@ function setupIpcHandlers(win) {
       'get-auto-restart': () => getAutoRestartState(),
       'set-auto-restart': (_e, options) => setAutoRestartOptions(options)
     });
-    
-    // Ensure the delete-instance handler is directly registered
-    if (!registeredHandlers.has('delete-instance')) {
-      console.log('Manually registering delete-instance handler');
-      const { rm } = require('fs/promises');
-      
-      ipcMain.handle('delete-instance', async (_e, { id, deleteFiles }) => {
-        try {
-          console.log(`Deleting instance ${id} (deleteFiles: ${deleteFiles})`);
-          
-          if (!id) {
-            return { success: false, error: 'Invalid instance ID' };
-          }
-          
-          const instances = appStore.get('instances') || [];
-          const inst = instances.find(i => i.id === id);
-          
-          if (!inst) {
-            return { success: false, error: 'Instance not found' };
-          }
-          
-          const remaining = instances.filter(i => i.id !== id);
-          appStore.set('instances', remaining);
-          
-          // also clear lastServerPath if it was the deleted one
-          if (inst.path && appStore.get('lastServerPath') === inst.path) {
-            console.log('Clearing lastServerPath as it matched deleted instance');
-            appStore.set('lastServerPath', null);
-          }
-          
-          // optionally delete directory
-          if (deleteFiles && inst.path) {
-            try {
-              console.log(`Deleting server directory: ${inst.path}`);
-              await rm(inst.path, { recursive: true, force: true });
-              console.log('Server directory deleted successfully');
-            } catch (err) {
-              console.error('Failed to delete folder:', err);
-              return { 
-                success: true, 
-                instances: remaining,
-                warning: `Instance removed but could not delete server files: ${err.message}`
-              };
-            }
-          }
-          
-          return { success: true, instances: remaining };
-        } catch (err) {
-          console.error('Error deleting instance:', err);
-          return { success: false, error: err.message };
-        }
-      });
-      
-      registeredHandlers.add('delete-instance');
-    }
+      // delete-instance handler is registered in settings-handlers.cjs
     
     // Initialize player-IP map with the last server path
     const lastServerPath = appStore.get('lastServerPath');

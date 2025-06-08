@@ -165,23 +165,36 @@ class ManagementServer {
             }
           }
         }
-        
-        // Get Minecraft version from server jar name or version.json
+          // Get Minecraft version from .minecraft-core.json, server jar name or version.json
         let minecraftVersion = 'unknown';
         try {
-          // First, try to find version from server jar files
-          const files = fs.readdirSync(this.serverPath);
-          const serverJars = files.filter(file => 
-            file.endsWith('.jar') && (
-              file.includes('server') || 
-              file.includes('minecraft') || 
-              file.includes('paper') || 
-              file.includes('forge') || 
-              file.includes('fabric') ||
-              file === 'fabric-server-launch.jar'
-            )
-          );
+          // First priority: check .minecraft-core.json config file
+          const minecraftCoreConfigPath = path.join(this.serverPath, '.minecraft-core.json');
+          if (fs.existsSync(minecraftCoreConfigPath)) {
+            try {
+              const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
+              if (coreConfig.version) {
+                minecraftVersion = coreConfig.version;
+                console.log(`[ManagementServer] Found version in .minecraft-core.json: ${minecraftVersion}`);
+              }
+            } catch (err) {
+              console.warn('[ManagementServer] Error reading .minecraft-core.json:', err.message);
+            }
+          }
           
+          // Second priority: try to find version from server jar files
+          if (minecraftVersion === 'unknown') {
+            const files = fs.readdirSync(this.serverPath);
+            const serverJars = files.filter(file => 
+              file.endsWith('.jar') && (
+                file.includes('server') || 
+                file.includes('minecraft') || 
+                file.includes('paper') || 
+                file.includes('forge') || 
+                file.includes('fabric') ||
+                file === 'fabric-server-launch.jar'
+              )
+            );          
           if (serverJars.length > 0) {
             const jarName = serverJars[0];
             console.log(`[ManagementServer] Found server jar: ${jarName}`);
@@ -192,6 +205,7 @@ class ManagementServer {
               minecraftVersion = versionMatch[1];
               console.log(`[ManagementServer] Extracted version from jar name: ${minecraftVersion}`);
             }
+          }
           }
           
           // If no version found from jar name, try reading from version.json if it exists
@@ -305,25 +319,41 @@ class ManagementServer {
         
         // Check Minecraft server status
         const minecraftServerStatus = await this.checkMinecraftServerStatus();
-        
-        // Detect server loader type (Fabric/Forge/Vanilla)
+          // Detect server loader type (Fabric/Forge/Vanilla)
         let loaderType = 'vanilla';
         let loaderVersion = null;
         
-        // Check for Fabric
-        const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
-        if (fs.existsSync(fabricLaunchJar)) {
-          loaderType = 'fabric';
-          
-          // Try to get Fabric version from config or files
+        // First priority: check .minecraft-core.json config file for loader info
+        const minecraftCoreConfigPath = path.join(this.serverPath, '.minecraft-core.json');
+        if (fs.existsSync(minecraftCoreConfigPath)) {
           try {
-            const configPath = path.join(this.serverPath, 'config.json');
-            if (fs.existsSync(configPath)) {
-              const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-              loaderVersion = config.fabric || config.loaderVersion;
+            const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
+            if (coreConfig.fabric) {
+              loaderType = 'fabric';
+              loaderVersion = coreConfig.fabric;
+              console.log(`[ManagementServer] Found Fabric version in .minecraft-core.json: ${loaderVersion}`);
             }
-          } catch (e) {
-            // Ignore config read errors
+          } catch (err) {
+            console.warn('[ManagementServer] Error reading .minecraft-core.json for loader info:', err.message);
+          }
+        }
+        
+        // Fallback: Check for Fabric launcher jar
+        if (loaderType === 'vanilla') {
+          const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
+          if (fs.existsSync(fabricLaunchJar)) {
+            loaderType = 'fabric';
+            
+            // Try to get Fabric version from config or files
+            try {
+              const configPath = path.join(this.serverPath, 'config.json');
+              if (fs.existsSync(configPath)) {
+                const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+                loaderVersion = config.fabric || config.loaderVersion;
+              }
+            } catch (e) {
+              // Ignore config read errors
+            }
           }
         }
         
@@ -928,34 +958,60 @@ class ManagementServer {
       this.versionWatcher = null;
     }
   }
-
   async detectServerVersions() {
     if (!this.serverPath) return { minecraftVersion: null, loaderType: null, loaderVersion: null };
     let minecraftVersion = 'unknown';
     let loaderType = 'vanilla';
     let loaderVersion = null;
     try {
-      const files = fs.readdirSync(this.serverPath);
-      const serverJars = files.filter(f => f.endsWith('.jar'));
-      if (serverJars.length > 0) {
-        const match = serverJars[0].match(/(\d+\.\d+(?:\.\d+)?)/);
-        if (match) minecraftVersion = match[1];
-      }
-      const versionPath = path.join(this.serverPath, 'version.json');
-      if (minecraftVersion === 'unknown' && fs.existsSync(versionPath)) {
-        const data = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
-        minecraftVersion = data.name || data.id || minecraftVersion;
-      }
-      const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
-      if (fs.existsSync(fabricLaunchJar)) {
-        loaderType = 'fabric';
+      // First priority: check .minecraft-core.json config file
+      const minecraftCoreConfigPath = path.join(this.serverPath, '.minecraft-core.json');
+      if (fs.existsSync(minecraftCoreConfigPath)) {
         try {
-          const configPath = path.join(this.serverPath, 'config.json');
-          if (fs.existsSync(configPath)) {
-            const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-            loaderVersion = cfg.fabric || cfg.loaderVersion || null;
+          const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
+          if (coreConfig.version) {
+            minecraftVersion = coreConfig.version;
           }
-        } catch {}
+          if (coreConfig.fabric) {
+            loaderType = 'fabric';
+            loaderVersion = coreConfig.fabric;
+          }
+        } catch (err) {
+          console.warn('[ManagementServer] Error reading .minecraft-core.json in detectServerVersions:', err.message);
+        }
+      }
+      
+      // Fallback: check JAR files and other sources
+      if (minecraftVersion === 'unknown') {
+        const files = fs.readdirSync(this.serverPath);
+        const serverJars = files.filter(f => f.endsWith('.jar'));
+        if (serverJars.length > 0) {
+          const match = serverJars[0].match(/(\d+\.\d+(?:\.\d+)?)/);
+          if (match) minecraftVersion = match[1];
+        }
+      }
+      
+      if (minecraftVersion === 'unknown') {
+        const versionPath = path.join(this.serverPath, 'version.json');
+        if (fs.existsSync(versionPath)) {
+          const data = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
+          minecraftVersion = data.name || data.id || minecraftVersion;
+        }
+      }
+      
+      // Check for Fabric if not already detected from .minecraft-core.json
+      if (loaderType === 'vanilla') {
+        const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
+        if (fs.existsSync(fabricLaunchJar)) {
+          loaderType = 'fabric';
+          try {
+            const configPath = path.join(this.serverPath, 'config.json');
+            if (fs.existsSync(configPath)) {
+              const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+              loaderVersion = cfg.fabric || cfg.loaderVersion || null;
+            }
+          } catch {}
+        }
       }
     } catch {}
     return { minecraftVersion, loaderType, loaderVersion };
