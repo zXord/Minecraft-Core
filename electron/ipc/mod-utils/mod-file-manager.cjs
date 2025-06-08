@@ -43,9 +43,11 @@ const modCategoriesStore = {
 function parseForgeToml(content) {
   const nameMatch = content.match(/displayName\s*=\s*"([^"]+)"/);
   const versionMatch = content.match(/version\s*=\s*"([^"]+)"/);
+  const idMatch = content.match(/modId\s*=\s*"([^"]+)"/i);
   return {
     name: nameMatch ? nameMatch[1] : undefined,
-    versionNumber: versionMatch ? versionMatch[1] : undefined
+    versionNumber: versionMatch ? versionMatch[1] : undefined,
+    projectId: idMatch ? idMatch[1] : undefined
   };
 }
 
@@ -61,7 +63,8 @@ async function readModMetadataFromJar(jarPath) {
         const data = JSON.parse(fabric.getData().toString('utf8'));
         return {
           name: data.name || data.id,
-          versionNumber: data.version || data.version_number
+          versionNumber: data.version || data.version_number,
+          projectId: data.id
         };
       } catch {}
     }
@@ -73,7 +76,8 @@ async function readModMetadataFromJar(jarPath) {
         const data = JSON.parse(quilt.getData().toString('utf8'));
         return {
           name: data.name || data.quilt_loader?.id,
-          versionNumber: data.version
+          versionNumber: data.version,
+          projectId: data.quilt_loader?.id
         };
       } catch {}
     }
