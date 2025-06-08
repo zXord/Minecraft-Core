@@ -6,6 +6,7 @@
   import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
   import { errorMessage, successMessage } from '../../stores/modStore.js';
   import { createEventDispatcher } from 'svelte';
+  import { openFolder } from '../../utils/folderUtils.js';
   import {
     clientState,
     setActiveTab,
@@ -1223,6 +1224,24 @@
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
+
+  async function openClientFolder() {
+    if (!instance?.path) return;
+
+    if (window._folderOpenInProgress) {
+      return;
+    }
+
+    window._folderOpenInProgress = true;
+
+    try {
+      await openFolder(instance.path);
+    } finally {
+      setTimeout(() => {
+        window._folderOpenInProgress = false;
+      }, 1000);
+    }
+  }
   
   // Prevent sync check when downloads are in progress
   async function checkSyncStatus() {
@@ -1786,6 +1805,9 @@
             <div class="info-item">
               <span class="info-label">Client Path:</span>
               <span class="info-value">{instance.path || 'Not configured'}</span>
+              {#if instance.path}
+                <button class="folder-button" on:click={openClientFolder} title="Open client folder">📁</button>
+              {/if}
             </div>
             {#if authData}
               <div class="info-item">
@@ -2337,6 +2359,15 @@
   .settings-info .info-value {
     color: white;
     font-weight: 500;
+  }
+
+  .folder-button {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: #3b82f6;
+    font-size: 1rem;
+    margin-left: 0.5rem;
   }
   
   .auth-management {
