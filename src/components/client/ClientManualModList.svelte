@@ -2,6 +2,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import { slide } from 'svelte/transition';
   import { get } from 'svelte/store'; // Import get
+  import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { serverManagedFiles, minecraftVersion } from '../../stores/modStore';
 
   interface DetailedMod {
@@ -30,6 +31,8 @@
   let expanded: string = '';
   let checkingUpdates = false;
   let updatingMods: Set<string> = new Set();
+  let showRemoveDialog = false;
+  let modToRemove: DetailedMod | null = null;
   onMount(async () => {
     console.log('ClientManualModList: onMount - clientPath:', clientPath);
     await loadManualMods();
@@ -159,16 +162,24 @@
     }
   }
 
-  async function removeMod(mod: DetailedMod) {
-    if (!confirm(`Are you sure you want to remove ${mod.name || mod.fileName}?`)) {
-      return;    }
-    
+  function promptRemove(mod: DetailedMod) {
+    modToRemove = mod;
+    showRemoveDialog = true;
+  }
+
+  async function confirmRemove() {
+    if (!modToRemove) return;
+
+    const mod = modToRemove;
+    showRemoveDialog = false;
+    modToRemove = null;
+
     try {
       const result = await window.electron.invoke('remove-manual-mods', {
         clientPath,
         fileNames: [mod.fileName]
       });
-      
+
       if (result.success) {
         await loadManualMods(); // Refresh the list
       } else {
@@ -285,9 +296,9 @@
               >
                 {mod.enabled ? 'Disable' : 'Enable'}
               </button>
-              <button 
-                class="action-btn delete-btn" 
-                on:click={() => removeMod(mod)}
+              <button
+                class="action-btn delete-btn"
+                on:click={() => promptRemove(mod)}
                 title="Remove mod"
               >
                 Remove
@@ -337,6 +348,14 @@
     </div>
   </div>
 {/if}
+
+<ConfirmationDialog
+  bind:visible={showRemoveDialog}
+  title="Remove Mod"
+  message={`Are you sure you want to remove ${modToRemove?.name || modToRemove?.fileName}?`}
+  on:confirm={confirmRemove}
+  on:cancel={() => { showRemoveDialog = false; modToRemove = null; }}
+/>
 
 <style>
   .loading-container, .error-container, .no-mods {
