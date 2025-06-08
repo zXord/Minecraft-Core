@@ -34,6 +34,7 @@
   let backupHour = 3; // Default to 3 AM
   let backupMinute = 0; // Default to 00 minutes
   let backupDay = 0; // Default to Sunday (0-based, 0=Sunday, 6=Saturday)
+  let manualBackupType = 'world';
   
   // Define frequency options (in milliseconds)
   const frequencyOptions = [
@@ -101,6 +102,7 @@
         autoBackupEnabled = settings.enabled || false;
         backupFrequency = settings.frequency || 86400000;
         backupType = settings.type || 'world';
+        manualBackupType = backupType;
         retentionCount = settings.retentionCount || 7;
         runOnLaunch = settings.runOnLaunch || false;
         backupHour = settings.hour || 3;
@@ -141,14 +143,14 @@
   // Run backup now
   async function runAutoBackupNow() {
     loading = true;
-    status = 'Running automated backup now...';
+    status = 'Running backup now...';
     error = '';
     try {
-      await window.electron.invoke('backups:run-immediate-auto', { serverPath });
+      await window.electron.invoke('backups:run-immediate-auto', { serverPath, type: manualBackupType });
       await fetchBackups(); // Refresh the list
-      status = 'Automated backup completed!';
+      status = 'Backup completed!';
     } catch (e) {
-      error = cleanErrorMessage(e.message) || 'Automated backup failed';
+      error = cleanErrorMessage(e.message) || 'Backup failed';
     }
     loading = false;
     setTimeout(() => status = '', 2000);
@@ -355,14 +357,20 @@
   <div class="automation-section">
     <div class="section-header">
       <h3>Backup Automation</h3>
-      <button 
-        class="run-now-button" 
-        on:click={runAutoBackupNow} 
-        disabled={loading}
-        title="Run a backup now with the current settings"
-      >
-        Run Backup Now
-      </button>
+      <div class="run-now-controls">
+        <select bind:value={manualBackupType} class="manual-type-select" title="Backup content">
+          <option value="full">Full</option>
+          <option value="world">World-only</option>
+        </select>
+        <button
+          class="run-now-button"
+          on:click={runAutoBackupNow}
+          disabled={loading}
+          title="Run a backup now with the selected content"
+        >
+          Run Backup Now
+        </button>
+      </div>
     </div>
     
     <div class="automation-controls">
@@ -652,6 +660,20 @@
     margin: 0;
     color: #d9eef7;
     font-size: 1.2rem;
+  }
+
+  .run-now-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .manual-type-select {
+    padding: 0.3rem;
+    border-radius: 4px;
+    background: #2a2e36;
+    color: #d9eef7;
+    border: 1px solid #555;
   }
   
   .automation-controls {
