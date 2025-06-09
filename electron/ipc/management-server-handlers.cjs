@@ -4,7 +4,7 @@ const { getManagementServer } = require('../services/management-server.cjs');
 /**
  * Create management server IPC handlers
  * 
- * @param {BrowserWindow} win - The main application window
+ * @param {object} win - The main application window
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
 function createManagementServerHandlers(win) {
@@ -85,4 +85,4 @@ function createManagementServerHandlers(win) {
   };
 }
 
-module.exports = { createManagementServerHandlers }; 
+module.exports = { createManagementServerHandlers };

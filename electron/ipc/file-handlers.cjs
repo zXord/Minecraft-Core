@@ -1,4 +1,6 @@
 // File and folder IPC handlers
+const fs = require('fs');
+const path = require('path');
 const fsPromises = require('fs/promises');
 const { dialog, shell } = require('electron');
 const appStore = require('../utils/app-store.cjs');
@@ -8,7 +10,7 @@ const { createZip } = require('../utils/backup-util.cjs');
 /**
  * Create file and folder management IPC handlers
  * 
- * @param {BrowserWindow} win - The main application window
+ * @param {object} win - The main application window
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
 function createFileHandlers(win) {  return {
@@ -72,53 +74,49 @@ function createFileHandlers(win) {  return {
     },
     
     'select-folder': async () => {
+      const { canceled, filePaths } = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+      if (canceled) return null;
+      const folder = filePaths[0];
+      
+      // Create needed directories
       try {
-        const { canceled, filePaths } = await dialog.showOpenDialog({ properties: ['openDirectory'] });
-        if (canceled) return null;
-        const folder = filePaths[0];
-        
-        // Create needed directories
-        try {
-          ['mods', 'logs', 'config'].forEach(dir => {
-            fs.mkdirSync(path.join(folder, dir), { recursive: true });
-          });
-        } catch (err) {
-          throw new Error(`Failed to create directories: ${err.message}`);
-        }
-        
-        // Ensure config file exists with defaults
-        const serverSettings = appStore.get('serverSettings') || {
-          port: 25565,
-          maxRam: 4,
-          autoStartMinecraft: false,
-          autoStartManagement: false
-        };
-        const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
-        
-        ensureConfigFile(folder, {
-          version: null,
-          fabric: null,
-          port: serverSettings.port,
-          maxRam: serverSettings.maxRam,
-          autoRestart: {
-            enabled: autoRestart.enabled,
-            delay: autoRestart.delay, 
-            maxCrashes: autoRestart.maxCrashes
-          }
+        ['mods', 'logs', 'config'].forEach(dir => {
+          fs.mkdirSync(path.join(folder, dir), { recursive: true });
         });
-        
-        // Save path to persistent store
-        appStore.set('lastServerPath', folder);
-        
-        // Share selected path with renderer through preload script
-        if (win && win.webContents) {
-          win.webContents.send('update-server-path', folder);
-        }
-  
-        return folder;
       } catch (err) {
-        throw err;
+        throw new Error(`Failed to create directories: ${err.message}`);
       }
+      
+      // Ensure config file exists with defaults
+      const serverSettings = appStore.get('serverSettings') || {
+        port: 25565,
+        maxRam: 4,
+        autoStartMinecraft: false,
+        autoStartManagement: false
+      };
+      const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
+      
+      ensureConfigFile(folder, {
+        version: null,
+        fabric: null,
+        port: serverSettings.port,
+        maxRam: serverSettings.maxRam,
+        autoRestart: {
+          enabled: autoRestart.enabled,
+          delay: autoRestart.delay, 
+          maxCrashes: autoRestart.maxCrashes
+        }
+      });
+      
+      // Save path to persistent store
+      appStore.set('lastServerPath', folder);
+      
+      // Share selected path with renderer through preload script
+      if (win && win.webContents) {
+        win.webContents.send('update-server-path', folder);
+      }
+
+      return folder;
     },
     
     'open-folder': async (_e, folderPath) => {
@@ -142,50 +140,41 @@ function createFileHandlers(win) {  return {
         if (!fs.existsSync(configPath)) {
           return null;
         }
-        return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      } catch (err) {
+        return JSON.parse(fs.readFileSync(configPath, 'utf-8'));      } catch {
         return null;
       }
     },
     
     'save-version-selection': (_e, { path: targetPath, mcVersion, fabricVersion }) => {
-      try {
-        if (!targetPath) {
-          throw new Error('Target path is required');
-        }
-        
-        const configFile = path.join(targetPath, '.minecraft-core.json');
-        let config = {};
-        
-        if (fs.existsSync(configFile)) {
-          try {
-            config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
-          } catch (parseErr) {
-            // Continue with empty config
-          }
-        }
-        
-        // Preserve any existing settings and update version info
-        config.version = mcVersion;
-        config.fabric = fabricVersion;
-        
-        fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
-        return true;
-      } catch (err) {
-        throw err;
+      if (!targetPath) {
+        throw new Error('Target path is required');
       }
+      
+      const configFile = path.join(targetPath, '.minecraft-core.json');
+      let config = {};
+      
+      if (fs.existsSync(configFile)) {
+        try {
+          config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+        } catch {
+          // Continue with empty config
+        }
+      }
+      
+      // Preserve any existing settings and update version info
+      config.version = mcVersion;
+      config.fabric = fabricVersion;
+      
+      fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+      return true;
     },
     
     'write-eula': (_e, { path: targetPath, content }) => {
-      try {
-        if (!targetPath || typeof content !== 'string') {
-          throw new Error('Invalid parameters for writing EULA');
-        }
-        fs.writeFileSync(path.join(targetPath, 'eula.txt'), content);
-        return true;
-      } catch (err) {
-        throw err;
+      if (!targetPath || typeof content !== 'string') {
+        throw new Error('Invalid parameters for writing EULA');
       }
+      fs.writeFileSync(path.join(targetPath, 'eula.txt'), content);
+      return true;
     },
     
     'delete-world': async (_event, serverPath) => {
@@ -259,11 +248,9 @@ async function deleteWorld(serverPath) {
     let backupCreated = false;
     if (foldersToBackup.length > 0) {
       try {
-        await createZip(foldersToBackup, backupFilePath);
-        // Check if the backup is a zip file and not a folder
+        await createZip(foldersToBackup, backupFilePath);        // Check if the backup is a zip file and not a folder
         const stat = fs.existsSync(backupFilePath) ? fs.statSync(backupFilePath) : null;
         const isZip = stat && stat.isFile() && backupFilePath.endsWith('.zip');
-        const backupDirContents = fs.readdirSync(backupPath);
         if (!isZip) {
           return { success: false, error: 'Backup was not created as a zip file. World was NOT deleted.' };
         }
@@ -276,8 +263,7 @@ async function deleteWorld(serverPath) {
           trigger: 'delete-world'
         };
         fs.writeFileSync(backupFilePath.replace('.zip', '.json'), JSON.stringify(metadata, null, 2));
-        backupCreated = true;
-      } catch (err) {
+        backupCreated = true;      } catch {
         return { success: false, error: 'Failed to create world backup zip. World was NOT deleted.' };
       }
     }

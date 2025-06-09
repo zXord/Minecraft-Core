@@ -1,5 +1,6 @@
 // Mod management IPC handlers
 const fs = require('fs');
+const path = require('path'); // Added path import
 const { dialog, app } = require('electron'); // For dialogs & app paths
 
 // Services and Utilities for Mod Management
@@ -8,7 +9,7 @@ const modFileManager = require('./mod-utils/mod-file-manager.cjs');
 const modInstallService = require('./mod-utils/mod-installation-service.cjs');
 const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { downloadWithProgress } = require('../services/download-manager.cjs'); // Corrected import
-const { disableMod, enableMod } = require('./mod-utils/mod-file-utils.cjs');
+const { disableMod } = require('./mod-utils/mod-file-utils.cjs'); // Removed unused enableMod
 
 // fs/promises, axios, createWriteStream, pipeline, promisify, pipelineAsync are now mainly used within the services.
 // If any handler directly needs them (e.g. a simple file op not covered by services), they can be re-added or operations moved.
@@ -16,7 +17,7 @@ const { disableMod, enableMod } = require('./mod-utils/mod-file-utils.cjs');
 /**
  * Create mod management IPC handlers
  * 
- * @param {BrowserWindow} win - The main application window
+ * @param {object} win - The main application window (Changed from BrowserWindow to object)
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
 function createModHandlers(win) {
@@ -69,19 +70,23 @@ function createModHandlers(win) {
       }
     },
 
-    'search-mods': async (_event, { keyword, loader, version, source, page = 1, limit = 20, sortBy = 'popular', environmentType = 'all' }) => {
+    'search-mods': async (_event, { keyword, loader, version, source, page = 1, limit = 20, sortBy = 'popular' /* environmentType removed */ }) => {
       try {
         if (source === 'modrinth') {
           if (!keyword || keyword.trim() === '') {
-            return await modApiService.getModrinthPopular({ loader, version, page, limit, sortBy, environmentType });
+            // Removed environmentType from getModrinthPopular call
+            return await modApiService.getModrinthPopular({ loader, version, page, limit, sortBy });
           } else {
-            return await modApiService.searchModrinthMods({ query: keyword, loader, version, page, limit, sortBy, environmentType });
+            // Removed environmentType from searchModrinthMods call
+            return await modApiService.searchModrinthMods({ query: keyword, loader, version, page, limit, sortBy });
           }
         } else if (source === 'curseforge') {
            if (!keyword || keyword.trim() === '') {
-            return await modApiService.getCurseForgePopular({ loader, version, page, limit, environmentType });
+            // Removed environmentType from getCurseForgePopular call
+            return await modApiService.getCurseForgePopular({ loader, version, page, limit });
           } else {
-            return await modApiService.searchCurseForgeMods({ query: keyword, loader, version, page, limit, environmentType });
+            // Removed environmentType from searchCurseForgeMods call
+            return await modApiService.searchCurseForgeMods({ query: keyword, loader, version, page, limit });
           }
         } else {
           throw new Error(`Invalid source: ${source}`);
@@ -114,7 +119,9 @@ function createModHandlers(win) {
       } catch (err) {
         // Only log as error if it's not a 404 (which can be normal for missing/removed versions)
         if (err.message && err.message.includes('404')) {
+          // Not an error, version likely not found
         } else {
+          // Log other errors if needed
         }
         throw new Error(`Failed to get version info: ${err.message}`);
       }
@@ -380,11 +387,13 @@ function createModHandlers(win) {
       }
     },
 
-    'save-mod-categories': async (_event, categories, serverPath, clientPath) => {
+    // Removed clientPath parameter as it's unused
+    'save-mod-categories': async (_event, categories, serverPath) => {
       try {
         // First, save the categories to the store
         const storeSuccess = modFileManager.modCategoriesStore.set(categories);
         if (!storeSuccess) {
+          // Optionally log or handle the case where saving to store fails
         }
 
         // If serverPath is provided, proceed with physical file movements
@@ -470,6 +479,8 @@ function createModHandlers(win) {
                 reason = `Does not support Minecraft ${newMinecraftVersion}. Supported versions: ${metadata.gameVersions.join(', ')}`;
                 
                 // Try to find available updates
+                // Commenting out checkModUpdate call and related logic as the function is not found in mod-api-service
+                /*
                 if (metadata.projectId) {
                   try {
                     const updateInfo = await modApiService.checkModUpdate(metadata.projectId, {
@@ -484,8 +495,10 @@ function createModHandlers(win) {
                       reason = `Update available for Minecraft ${newMinecraftVersion}`;
                     }
                   } catch (updateError) {
+                    // Log or handle update check error if necessary
                   }
                 }
+                */
               }
             } else {
               // Fallback to filename-based checking
@@ -660,7 +673,7 @@ function createModHandlers(win) {
               lastModified: stats.mtime,
               enabled: true
             });
-          } catch (metadataError) {
+          } catch { // Changed from catch (metadataError)
             mods.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -700,7 +713,7 @@ function createModHandlers(win) {
               lastModified: stats.mtime,
               enabled: false
             });
-          } catch (metadataError) {
+          } catch { // Changed from catch (metadataError)
             mods.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -774,7 +787,7 @@ function createModHandlers(win) {
               reason,
               enabled: true
             });
-          } catch (metadataError) {
+          } catch { // Changed from catch (metadataError)
             compatibilityResults.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -816,7 +829,7 @@ function createModHandlers(win) {
               reason,
               enabled: false
             });
-          } catch (metadataError) {
+          } catch { // Changed from catch (metadataError)
             compatibilityResults.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -1023,6 +1036,7 @@ function createModHandlers(win) {
           throw new Error('Invalid client path provided');
         }
         if (!minecraftVersion) {
+          // Minecraft version is optional, proceed if not provided
         }
         
         const modsDir = path.join(clientPath, 'mods');
@@ -1156,7 +1170,8 @@ function createModHandlers(win) {
     },
 
     // Update multiple client-side mods to new versions
-    'update-client-mods': async (_event, { mods, clientPath, minecraftVersion, loaderType }) => {
+    // Removed loaderType from parameters as it's unused
+    'update-client-mods': async (_event, { mods, clientPath, minecraftVersion }) => {
       try {
         
         if (!mods || !Array.isArray(mods) || mods.length === 0) {
@@ -1200,7 +1215,8 @@ function createModHandlers(win) {
             }
 
             // Download new mod file
-            await downloadWithProgress(fileToDownload.url, modsDir, newFileName, fileToDownload.hashes?.sha512 || fileToDownload.hashes?.sha1);
+            // Removed 4th argument (hash) from downloadWithProgress call
+            await downloadWithProgress(fileToDownload.url, modsDir, newFileName);
             updatedCount++;
 
           } catch (error) {
@@ -1274,7 +1290,7 @@ async function readModMetadata(filePath) {
   try {
     const result = await modAnalysisUtils.extractDependenciesFromJar(filePath);
     return result;
-  } catch (error) {
+  } catch { // Changed from catch (error)
     return null;
   }
 }

@@ -41,16 +41,15 @@ function setupIpcHandlers(win) {
     const modHandlers = createModHandlers(win);
     const serverPropertiesHandlers = createServerPropertiesHandlers(win);
     const installHandlers = createInstallHandlers(win);
-    const configHandlers = createConfigHandlers(win);
-    const playerHandlers = createPlayerHandlers(win);
+    const configHandlers = createConfigHandlers();
+    const playerHandlers = createPlayerHandlers();
     const serverHandlers = createServerHandlers(win);
-    const settingsHandlers = createSettingsHandlers(win);
-    const backupHandlers = createBackupHandlers(win);
+    const settingsHandlers = createSettingsHandlers(win);    const backupHandlers = createBackupHandlers();
     const managementServerHandlers = createManagementServerHandlers(win);
     const minecraftLauncherHandlers = createMinecraftLauncherHandlers(win);
     
     // Initialize backup manager
-    loadBackupManager(win);
+    loadBackupManager();
       // Loop through each handler object and register the handlers
     [
       backupHandlers,
@@ -63,7 +62,7 @@ function setupIpcHandlers(win) {
       serverHandlers,
       settingsHandlers,
       managementServerHandlers,
-      minecraftLauncherHandlers    ].forEach((handlers, index) => {
+      minecraftLauncherHandlers    ].forEach((handlers) => {
       if (!handlers) {
         return;
       }
@@ -81,8 +80,9 @@ function setupIpcHandlers(win) {
           registeredHandlers.delete(channel);
         }
         
-        // Register handler
-        ipcMain.handle(channel, handler);
+        // Ensure handler has the correct signature for ipcMain.handle
+        const wrappedHandler = (event, ...args) => handler(event, ...args);
+        ipcMain.handle(channel, wrappedHandler);
         registeredHandlers.add(channel);
       });    });
     
