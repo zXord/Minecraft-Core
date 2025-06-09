@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { readModMetadataFromJar } = require('./mod-utils/mod-file-manager.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 
 /**
@@ -358,7 +359,7 @@ function createMinecraftLauncherHandlers(win) {
                         const file2 = fs.createWriteStream(modPath);
                         redirectResponse.pipe(file2);
                         
-                        file2.on('finish', () => {
+                        file2.on('finish', async () => {
                           file2.close();
                           
                           // Verify checksum if provided
@@ -374,7 +375,23 @@ function createMinecraftLauncherHandlers(win) {
                           downloaded.push(mod.fileName);
                           try {
                             const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
-                            fs.writeFileSync(manifestPath, JSON.stringify({ fileName: mod.fileName, source: 'server' }, null, 2));
+                            const manifestData = {
+                              fileName: mod.fileName,
+                              source: 'server',
+                              projectId: mod.projectId || null,
+                              versionId: mod.versionId || null,
+                              versionNumber: mod.versionNumber || null,
+                              name: mod.name || null
+                            };
+                            try {
+                              const meta = await readModMetadataFromJar(modPath);
+                              if (meta) {
+                                if (!manifestData.projectId) manifestData.projectId = meta.projectId;
+                                if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
+                                if (!manifestData.name) manifestData.name = meta.name;
+                              }
+                            } catch {}
+                            fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
                           } catch {}
                           resolve();
                         });
@@ -390,7 +407,7 @@ function createMinecraftLauncherHandlers(win) {
                   } else if (response.statusCode === 200) {
                     response.pipe(file);
                     
-                    file.on('finish', () => {
+                    file.on('finish', async () => {
                       file.close();
                       
                       // Verify checksum if provided
@@ -406,7 +423,23 @@ function createMinecraftLauncherHandlers(win) {
                       downloaded.push(mod.fileName);
                       try {
                         const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
-                        fs.writeFileSync(manifestPath, JSON.stringify({ fileName: mod.fileName, source: 'server' }, null, 2));
+                        const manifestData = {
+                          fileName: mod.fileName,
+                          source: 'server',
+                          projectId: mod.projectId || null,
+                          versionId: mod.versionId || null,
+                          versionNumber: mod.versionNumber || null,
+                          name: mod.name || null
+                        };
+                        try {
+                          const meta = await readModMetadataFromJar(modPath);
+                          if (meta) {
+                            if (!manifestData.projectId) manifestData.projectId = meta.projectId;
+                            if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
+                            if (!manifestData.name) manifestData.name = meta.name;
+                          }
+                        } catch {}
+                        fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
                       } catch {}
                       resolve();
                     });
