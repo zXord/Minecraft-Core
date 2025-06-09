@@ -48,8 +48,7 @@
     path?: string;
     clientId?: string;
     clientName?: string;
-  }
-  interface ClientMod {
+  }  interface ClientMod {
     fileName: string;
     size?: number;
     lastModified?: string;
@@ -59,6 +58,7 @@
     downloadUrl?: string;
     name?: string;
     versionNumber?: string;
+    projectId?: string;
   }
 
   interface ModSyncStatus {
@@ -184,9 +184,36 @@
   }  async function loadInstalledInfo() {
     try {
       const info = await window.electron.invoke('get-client-installed-mod-info', instance.path);
+      
       if (Array.isArray(info)) {
-        installedModIds.set(new Set(info.map(i => i.projectId).filter(Boolean)));
-        installedModInfo.set(info);
+        // Enrich installed mod info with project IDs from server-provided mod lists
+        const enrichedInfo = info.map(mod => {
+          // If mod already has projectId, return as-is
+          if (mod.projectId) {
+            return mod;
+          }
+          
+          // Try to find matching project ID from server mod lists
+          const serverMod = [...requiredMods, ...(allClientMods || [])].find(serverMod => {
+            // Match by filename (most reliable for server-downloaded mods)
+            return serverMod.fileName === mod.fileName;
+          });
+          
+          if (serverMod && serverMod.projectId) {
+            console.log(`[ClientModManager] Enriching ${mod.fileName} with projectId: ${serverMod.projectId}`);
+            return {
+              ...mod,
+              projectId: serverMod.projectId
+            };
+          }
+          
+          return mod;
+        });
+        
+        const projectIds = new Set(enrichedInfo.map(i => i.projectId).filter(Boolean));
+        console.log('[ClientModManager] Setting installedModIds to:', Array.from(projectIds));
+        installedModIds.set(projectIds);
+        installedModInfo.set(enrichedInfo);
         
         // Force update manual mods after setting the store
         setTimeout(() => {
@@ -198,7 +225,7 @@
     } catch (err) {
       console.error('Failed to load installed mod info:', err);
     }
-  }  // Load mods from the management server
+  }// Load mods from the management server
   async function loadModsFromServer() {
     if (!instance || !instance.serverIp || !instance.serverPort) {
       serverManagedFiles.set(new Set());
@@ -241,16 +268,49 @@
           }
           requiredMods = serverInfo.requiredMods || [];
           allClientMods = serverInfo.allClientMods || [];
-          console.log('[ClientModManager] Set requiredMods:', requiredMods);
-          console.log('[ClientModManager] Set allClientMods:', allClientMods);
-
+          console.log('[ClientModManager] Set requiredMods:', requiredMods);          console.log('[ClientModManager] Set allClientMods:', allClientMods);
+          
           // Update global store with server-managed mod file names
-          const managed = new Set([
+          // IMPORTANT: Merge with existing store to preserve previously downloaded server mods
+          // that may have been removed from the server (needed for removal detection)
+          const currentServerMods = new Set([
             ...requiredMods.map(m => m.fileName),
             ...(allClientMods || []).map(m => m.fileName)
           ]);
-          serverManagedFiles.set(managed);
-          console.log('[ClientModManager] Set server managed files:', Array.from(managed));
+          
+          // Get existing server-managed files from store
+          const existingManagedFiles = get(serverManagedFiles) || new Set();
+          
+          // Merge current server mods with existing ones to preserve removal tracking
+          const mergedManaged = new Set([
+            ...existingManagedFiles,
+            ...currentServerMods
+          ]);
+          
+          serverManagedFiles.set(mergedManaged);
+          console.log('[ClientModManager] Current server mods:', Array.from(currentServerMods));
+          console.log('[ClientModManager] Previously managed files:', Array.from(existingManagedFiles));
+          console.log('[ClientModManager] Merged server managed files:', Array.from(mergedManaged));          
+          // Refresh installed mod info to enrich with server project IDs
+          await loadInstalledInfo();
+          
+          // Clean up the server managed files store by removing files that are no longer
+          // installed on the client (they may have been manually deleted)
+          const installedInfo = get(installedModInfo) || [];
+          const installedFileNames = new Set(installedInfo.map(mod => mod.fileName));
+          
+          // Only keep server-managed files that are either currently on server OR still installed on client
+          const cleanedManaged = new Set();
+          for (const fileName of mergedManaged) {
+            if (currentServerMods.has(fileName) || installedFileNames.has(fileName)) {
+              cleanedManaged.add(fileName);
+            } else {
+              console.log(`[ClientModManager] Removing ${fileName} from server managed files - no longer installed or on server`);
+            }
+          }
+          
+          serverManagedFiles.set(cleanedManaged);
+          console.log('[ClientModManager] Final cleaned server managed files:', Array.from(cleanedManaged));
           
           // Get full mod list from server
           const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
@@ -302,13 +362,13 @@
   async function checkModSynchronization() {
     if (!instance?.path) {
       return;
-    }
-
-    try {
+    }    try {
+      const managedFiles = get(serverManagedFiles);
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods,
-        allClientMods
+        allClientMods,
+        serverManagedFiles: Array.from(managedFiles)
       });
 
       if (result.success) {
@@ -613,20 +673,29 @@
     };
 
     await installClientMod(mod, versionId);
-  }
+    }
 
   // Wrapper used by installWithDependencies for client installs
-  function clientInstallFn(mod, path) {
-    return installClientMod(mod, mod.selectedVersionId, path);
+  async function clientInstallFn(mod, path) {
+    try {
+      await installClientMod(mod, mod.selectedVersionId, path);
+      return true;
+    } catch (error) {
+      console.error('[ClientModManager] Error installing client mod:', error);
+      return false;
+    }
   }
-
   function switchTab(tab) {
     activeTab = tab;
     if (tab === 'installed-mods') {
       refreshInstalledMods();
     }
-    if (tab === 'find-mods' && get(searchResults).length === 0 && get(searchKeyword)) {
-      searchClientMods();
+    if (tab === 'find-mods') {
+      // Refresh installed mod info when switching to find-mods tab
+      loadInstalledInfo();
+      if (get(searchResults).length === 0 && get(searchKeyword)) {
+        searchClientMods();
+      }
     }
   }
 
@@ -912,10 +981,10 @@
             </p>
           {/if}          <ClientManualModList
             clientPath={instance?.path || ''}
-            mods={manualMods}
             on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
-            on:install={handleInstallMod}            />
+            on:install={handleInstallMod}
+          />
           </div>
         </div>
       {/if}

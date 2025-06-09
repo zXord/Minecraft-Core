@@ -207,19 +207,17 @@ async function getInstalledModInfo(serverPath) {
       
       try {
         const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
-        manifest = JSON.parse(clientManifestContent);
-        console.log(`[ModManager] Found client manifest for ${modFile}`);
+        manifest = JSON.parse(clientManifestContent);        // console.log(`[ModManager] Found client manifest for ${modFile}`);
       } catch (clientManifestErr) {
         try {
           const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
           manifest = JSON.parse(serverManifestContent);
-          console.log(`[ModManager] Found server manifest for ${modFile}`);
+          // console.log(`[ModManager] Found server manifest for ${modFile}`);
         } catch (serverManifestErr) {
           console.log(`[ModManager] No manifest found for ${modFile} in either location`);
         }
       }
-      
-      if (manifest) {
+        if (manifest) {
         if (!manifest.projectId || !manifest.versionNumber) {
           try {
             const jarBase = path.join(modsDir, modFile);
@@ -233,11 +231,25 @@ async function getInstalledModInfo(serverPath) {
                   return disabledPath;
                 } catch {
                   return null;
-                }
-              });
+                }              });
             if (jarPath) {
               const meta = await readModMetadataFromJar(jarPath);
-              manifest = { ...meta, ...manifest, projectId: manifest.projectId || meta.projectId, versionNumber: manifest.versionNumber || meta.versionNumber, name: manifest.name || meta.name };
+              // Preserve manifest projectId if it exists and looks like a Modrinth ID
+              const shouldPreserveManifestProjectId = manifest.projectId && 
+                (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
+                /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
+              
+              // Store the original manifest projectId before merging
+              const originalProjectId = manifest.projectId;
+              
+              manifest = { 
+                ...meta, 
+                ...manifest, 
+                // Always preserve proper Modrinth project ID if it exists in manifest
+                projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
+                versionNumber: manifest.versionNumber || meta.versionNumber, 
+                name: manifest.name || meta.name 
+              };
             }
           } catch (metaErr) {
             console.warn('[ModManager] Failed to enhance manifest with metadata:', metaErr.message);
@@ -284,13 +296,12 @@ async function getClientInstalledModInfo(clientPath) {
   console.log('[ModManager] Unique mod files:', uniqueModFiles);
 
   const modInfo = [];
-  for (const file of uniqueModFiles) {
-    console.log('[ModManager] Processing mod file:', file);
+  for (const file of uniqueModFiles) {    // console.log('[ModManager] Processing mod file:', file);
     const manifestPath = path.join(manifestDir, `${file}.json`);
     let manifest = null;    try {
       const content = await fs.readFile(manifestPath, 'utf8');
       manifest = JSON.parse(content);
-      console.log('[ModManager] Found manifest for', file, ':', manifest);
+      // console.log('[ModManager] Found manifest for', file, ':', manifest);
       if (!manifest.projectId || !manifest.versionNumber) {
         try {
           const jarBase = path.join(modsDir, file);
@@ -305,10 +316,24 @@ async function getClientInstalledModInfo(clientPath) {
               } catch {
                 return null;
               }
-            });
-          if (jarPath) {
+            });          if (jarPath) {
             const meta = await readModMetadataFromJar(jarPath);
-            manifest = { ...meta, ...manifest, projectId: manifest.projectId || meta.projectId, versionNumber: manifest.versionNumber || meta.versionNumber, name: manifest.name || meta.name };
+            // Preserve manifest projectId if it exists and looks like a Modrinth ID
+            const shouldPreserveManifestProjectId = manifest.projectId && 
+              (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
+              /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
+            
+            // Store the original manifest projectId before merging
+            const originalProjectId = manifest.projectId;
+            
+            manifest = { 
+              ...meta, 
+              ...manifest, 
+              // Always preserve proper Modrinth project ID if it exists in manifest
+              projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
+              versionNumber: manifest.versionNumber || meta.versionNumber, 
+              name: manifest.name || meta.name 
+            };
           }
         } catch (metaErr) {
           console.warn('[ModManager] Failed to enhance manifest with metadata:', metaErr.message);
@@ -337,17 +362,15 @@ async function getClientInstalledModInfo(clientPath) {
             console.log('[ModManager] No JAR file found for:', file);
             return null;
           }
-        });
-
-      let meta = {};
+        });      let meta = {};
       if (jarPath) {
-        console.log('[ModManager] Reading metadata from JAR:', jarPath);
+        // console.log('[ModManager] Reading metadata from JAR:', jarPath);
         meta = await readModMetadataFromJar(jarPath);
-        console.log('[ModManager] Extracted metadata:', meta);
+        // console.log('[ModManager] Extracted metadata:', meta);
       }
 
       const modData = { fileName: file, ...meta };
-      console.log('[ModManager] Adding mod info:', modData);
+      // console.log('[ModManager] Adding mod info:', modData);
       modInfo.push(modData);
     }
   }
