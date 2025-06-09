@@ -36,9 +36,7 @@ function setupIpcHandlers(win) {
   }
 
   // Initialize track registered handler names
-  registeredHandlers.clear();
-    
-    // Get all handler modules
+  registeredHandlers.clear();    // Get all handler modules
     const fileHandlers = createFileHandlers(win);
     const modHandlers = createModHandlers(win);
     const serverPropertiesHandlers = createServerPropertiesHandlers(win);
@@ -53,8 +51,7 @@ function setupIpcHandlers(win) {
     
     // Initialize backup manager
     loadBackupManager(win);
-    
-    // Loop through each handler object and register the handlers
+      // Loop through each handler object and register the handlers
     [
       backupHandlers,
       fileHandlers,
@@ -66,9 +63,10 @@ function setupIpcHandlers(win) {
       serverHandlers,
       settingsHandlers,
       managementServerHandlers,
-      minecraftLauncherHandlers
-    ].forEach(handlers => {
-      if (!handlers) return;
+      minecraftLauncherHandlers    ].forEach((handlers, index) => {
+      if (!handlers) {
+        return;
+      }
     
       Object.entries(handlers).forEach(([channel, handler]) => {
         // Skip if handler is not a function
@@ -83,11 +81,10 @@ function setupIpcHandlers(win) {
           registeredHandlers.delete(channel);
         }
         
-        // Register handler (removed verbose logging)
+        // Register handler
         ipcMain.handle(channel, handler);
         registeredHandlers.add(channel);
-      });
-    });
+      });    });
     
     // Setup direct event listeners for progress reporting
     win.webContents.on('did-finish-load', () => {

@@ -67,8 +67,7 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
         
         if (modInfo && modInfo.title) {
           name = modInfo.title;
-        } else {
-          // Fallback to project info
+        } else {          // Fallback to project info
           const projectInfo = await safeInvoke('get-project-info', {
             projectId: projectId,
             source: 'modrinth'
@@ -78,7 +77,7 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
             name = projectInfo.title;
           }
         }
-      } catch (error) {
+      } catch {
       }
     }
     
@@ -168,14 +167,13 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
               } else {
                 missingIssue.versionInfo = `Requirement: ${requirement}`;
               }
-            } else {
-              // No specific requirement, will install latest
+            } else {              // No specific requirement, will install latest
               missingIssue.requiredVersion = latestVersion;
               missingIssue.latestVersion = latestVersion;
               missingIssue.versionInfo = `v${latestVersion}`;
             }
           }
-        } catch (error) {
+        } catch {
         }
         
         issues.push(missingIssue);
@@ -219,10 +217,9 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 if (projectInfo && projectInfo.title) {
                   displayName = projectInfo.title;
                 } else {
-                  // If we still don't have a name, use a more descriptive fallback
-                  displayName = `Installed Mod (needs update)`;
+                  // If we still don't have a name, use a more descriptive fallback                displayName = `Installed Mod (needs update)`;
                 }
-              } catch (error) {
+              } catch {
                 displayName = `Installed Mod (needs update)`;
               }
             }
@@ -245,14 +242,13 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 });
                 
                 // Find most recent compatible version
-                for (const version of sortedVersions) {
-                  if (checkVersionCompatibility(version.versionNumber, versionRequirement)) {
+                for (const version of sortedVersions) {                if (checkVersionCompatibility(version.versionNumber, versionRequirement)) {
                     compatibleVersion = version.versionNumber;
                     break;
                   }
                 }
               }
-            } catch (error) {
+            } catch {
             }
             
             // Version mismatch - the installed version doesn't meet requirements
@@ -471,8 +467,7 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
                   updateUrl: updateCheck.downloadUrl
                 });
                 compatibilityReport.hasUpdatable = true;
-              }
-            } catch (error) {
+              }          } catch {
             }
           }
           

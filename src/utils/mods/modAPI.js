@@ -178,9 +178,8 @@ export async function loadMods(serverPath) {
       setTimeout(() => {
         checkForUpdates(serverPath)
       }, 500);
-      
-      return true;
-    } catch (error) {
+        return true;
+    } catch {
       // Continue without installed mod IDs, still consider this a success
       return true;
     }
@@ -370,10 +369,9 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
     modVersionsCache.update(cache => {
       cache[cacheKey] = versions;
       return cache;
-    });
-    
+    });    
     return versions;
-  } catch (error) {
+  } catch {
     
     // Return empty array on error
     return [];
@@ -580,9 +578,8 @@ export async function checkForUpdates(serverPath) {
             
             // Store the project ID separately for reference in the Find Mods tab
             // We'll use a special prefix to distinguish it from actual mod filenames
-            updatesMap.set(`project:${modInfo.projectId}`, updateVersion);
-          }
-        } catch (error) {
+            updatesMap.set(`project:${modInfo.projectId}`, updateVersion);          }
+        } catch {
           // Silently skip this mod
         }
       }

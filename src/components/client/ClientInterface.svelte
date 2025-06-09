@@ -1,15 +1,14 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import ClientModManager from './ClientModManager.svelte';
   import ClientHeader from './ClientHeader.svelte';
   import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';  import { errorMessage, successMessage, serverManagedFiles } from '../../stores/modStore.js';
   import { createEventDispatcher } from 'svelte';
-  import { get } from 'svelte/store';
   import { openFolder } from '../../utils/folderUtils.js';
   import {
     clientState,
-    setActiveTab,
     setConnectionStatus,
     setManagementServerStatus,
     setMinecraftServerStatus
@@ -37,10 +36,7 @@
   // Progress tracking
   let downloadProgress = 0;
   let downloadSpeed = '0 MB/s';
-  let currentDownloadFile = '';
-  let fileProgress = 0;
-  let downloadedBytes = 0;
-  let totalBytes = 0;
+  let currentDownloadFile = '';  let fileProgress = 0;
   let clientDownloadProgress = { type: '', task: '', total: 0 };
   let clientSyncInfo = null;
   let isChecking = false;

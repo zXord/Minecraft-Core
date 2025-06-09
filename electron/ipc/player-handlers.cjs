@@ -225,8 +225,7 @@ function createPlayerHandlers() {
           
           // Store this association in our map for future lookups
           playerIpMap.set(entry, playerName);
-          
-          // Also store it in a persistent file
+            // Also store it in a persistent file
           const playerMapFile = path.join(serverPath, 'player-ip-map.json');
           try {
             let mapData = {};
@@ -235,9 +234,10 @@ function createPlayerHandlers() {
             }
             mapData[entry] = playerName;
             fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
+          } catch (mapErr) {
+            // Ignore errors writing to player map file
           }
-        
-        // Format objects based on the list type
+        }// Format objects based on the list type
         let newEntry = entry;
         if (listName === 'ops' || listName === 'whitelist') {
           newEntry = { name: entry, uuid: `player-${Date.now()}`, level: 4 };
@@ -438,8 +438,7 @@ function createPlayerHandlers() {
             }
           }
         }
-        
-        // If we still don't have a player name, check whitelist.json
+          // If we still don't have a player name, check whitelist.json
         const whitelistFile = path.join(serverPath, 'whitelist.json');
         if (fs.existsSync(whitelistFile)) {
           try {
@@ -453,6 +452,8 @@ function createPlayerHandlers() {
                 }
               }
             }
+          } catch (err) {
+            // Ignore errors reading whitelist file
           }
         }
 

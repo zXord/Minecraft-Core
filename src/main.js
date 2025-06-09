@@ -23,7 +23,7 @@ window.electron.invoke('get-instances')
     initialInstanceStore.loaded = true;
   })
   .catch(error => {
-    
+    console.error('Error fetching initial instances:', error);
     // Mark as loaded anyway
     initialInstanceStore.loaded = true;
   });

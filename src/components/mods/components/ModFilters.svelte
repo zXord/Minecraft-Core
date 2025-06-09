@@ -1,9 +1,7 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
-  import { 
+  import { createEventDispatcher } from 'svelte';  import { 
     minecraftVersion,
-    loaderType,
-    searchKeyword
+    loaderType
   } from '../../../stores/modStore.js';
 
   // Create event dispatcher

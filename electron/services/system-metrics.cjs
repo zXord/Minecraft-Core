@@ -127,9 +127,9 @@ async function getServerMemoryUsage(serverProcess) {
         
         if (minecraftServerMemory > 0) {
           currentLookupMem = parseFloat((minecraftServerMemory / 1024 / 1024).toFixed(1));
-        }
-      } catch (wmicErr) {
+        }      } catch (wmicErr) {
         if (process.env.DEBUG) {
+          console.error('WMIC memory lookup failed:', wmicErr.message);
         }
       }
         // If the first method failed, try direct PowerShell as backup
@@ -151,10 +151,10 @@ async function getServerMemoryUsage(serverProcess) {
               currentLookupMem = memoryValue;
             }
           } else {
-          }
-        } catch (psErr) {
+          }        } catch (psErr) {
           // Silently handle the error and don't output to console as this is expected sometimes
           if (process.env.DEBUG) {
+            console.error('PowerShell memory lookup failed:', psErr.message);
           }
         }
       }

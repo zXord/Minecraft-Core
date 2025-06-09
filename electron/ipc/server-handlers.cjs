@@ -1,6 +1,4 @@
 // Server management IPC handlers
-const path = require("path");
-const fs = require("fs");
 const {
   startMinecraftServer,
   stopMinecraftServer,

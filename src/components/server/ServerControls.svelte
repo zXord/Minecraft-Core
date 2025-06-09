@@ -1,8 +1,7 @@
 <!-- @ts-ignore -->
 <script lang="ts">  /// <reference path="../../electron.d.ts" />
   import { onMount, onDestroy } from 'svelte';
-  import { get } from 'svelte/store';
-  import { serverState, updateServerMetrics, updateServerStatus } from '../../stores/serverState.js';
+  import { get } from 'svelte/store';  import { serverState, updateServerMetrics } from '../../stores/serverState.js';
   import { playerState, updateOnlinePlayers, showContextMenu } from '../../stores/playerState.js';
   import PlayerContextMenu from '../players/PlayerContextMenu.svelte';  import { openFolder, validateServerPath } from '../../utils/folderUtils.js';
   import { errorMessage } from '../../stores/modStore.js';
@@ -209,10 +208,9 @@
       }
     }
   }
-
   function startServer() { 
     // Optimistic update: mark server as running immediately
-    updateServerStatus('Running');
+    serverState.update(state => ({ ...state, status: 'Running' }));
     window.electron.invoke('start-server', { 
       targetPath: serverPath, 
       port: port, 

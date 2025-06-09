@@ -85,8 +85,7 @@ async function readModMetadataFromJar(jarPath) {
     if (forge) {
       const text = forge.getData().toString('utf8');
       return parseForgeToml(text);
-    }
-  } catch (err) {
+    }  } catch {
   }
   return {};
 }
@@ -119,11 +118,10 @@ async function listMods(serverPath) {
   const serverFiles = await fs.readdir(serverModsDir);
   const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   
-  let clientModFiles = [];
-  try {
+  let clientModFiles = [];  try {
     const clientFiles = await fs.readdir(clientModsDir);
     clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
-  } catch (err) {
+  } catch {
   }
   
   const disabledFiles = await fs.readdir(disabledModsDir);
@@ -165,12 +163,11 @@ async function getInstalledModInfo(serverPath) {
   
   const enabledFiles = await fs.readdir(modsDir);
   const enabledMods = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
-  
-  let clientMods = [];
+    let clientMods = [];
   try {
     const clientFiles = await fs.readdir(clientModsDir);
     clientMods = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
-  } catch (err) {
+  } catch {
   }
   
   const disabledDir = path.join(serverPath, 'mods_disabled');
@@ -192,14 +189,12 @@ async function getInstalledModInfo(serverPath) {
       const serverManifestPath = path.join(serverManifestDir, `${modFile}.json`);
       const clientManifestPath = path.join(clientManifestDir, `${modFile}.json`);
       let manifest = null;
-      
-      try {
-        const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
-      } catch (clientManifestErr) {
         try {
-          const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
+        const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
+      } catch {
+        try {          const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
           manifest = JSON.parse(serverManifestContent);
-        } catch (serverManifestErr) {
+        } catch {
         }
       }
         if (manifest) {
@@ -241,8 +236,7 @@ async function getInstalledModInfo(serverPath) {
         }
         modInfo.push(manifest);
       }
-    }
-  } catch (manifestDirErr) {
+    }  } catch {
   }
   
   return modInfo;
@@ -309,12 +303,11 @@ async function getClientInstalledModInfo(clientPath) {
               versionNumber: manifest.versionNumber || meta.versionNumber, 
               name: manifest.name || meta.name 
             };
-          }
-        } catch (metaErr) {
+          }        } catch {
         }
       }
       modInfo.push(manifest);
-    } catch (err) {
+    } catch {
     }
 
     if (!manifest) {
@@ -391,13 +384,9 @@ async function saveDisabledMods(serverPath, disabledMods) {
         await fs.copyFile(sourcePath, destPath);
         await fs.unlink(sourcePath);
       } catch (moveErr) {
-        throw new Error(`Failed to enable mod ${modFile}: ${moveErr.message}`);
-      }
+        throw new Error(`Failed to enable mod ${modFile}: ${moveErr.message}`);      }
     }
   }
-  
-  const newEnabledFiles = await fs.readdir(modsDir);
-  const newDisabledFiles = await fs.readdir(disabledModsDir);
   
   return true;
 }
@@ -423,9 +412,8 @@ async function getDisabledMods(serverPath) {
     const disabledModsContent = await fs.readFile(disabledModsPath, 'utf8');
     disabledMods = JSON.parse(disabledModsContent);
     if (!Array.isArray(disabledMods)) {
-      throw new Error('Invalid disabled mods format');
-    }
-  } catch (fileErr) {
+      throw new Error('Invalid disabled mods format');    }
+  } catch {
     disabledMods = [];
   }
   
@@ -437,8 +425,7 @@ async function getDisabledMods(serverPath) {
         disabledMods.push(modFile);
       }
     }
-    await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
-  } catch (disabledFolderErr) {
+    await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));  } catch {
   }
   
   return disabledMods;

@@ -194,17 +194,15 @@ async function analyzeModFromUrl(url, modId) {
       
       // Now call the local extractDependenciesFromJar
       const dependencies = await extractDependenciesFromJar(tempFile);
-      
-      try {
+        try {
         await fs.unlink(tempFile);
-      } catch (cleanupErr) {
+      } catch {
       }
       
       return dependencies;
-    } catch (err) {
-      try {
+    } catch (err) {      try {
         await fs.unlink(tempFile); // Attempt cleanup on error too
-      } catch (cleanupErr) {
+      } catch {
         // Ignore cleanup errors if main operation already failed
       }
       throw err; // Re-throw the error to be caught by the outer try-catch

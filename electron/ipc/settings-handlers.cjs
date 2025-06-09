@@ -1,7 +1,4 @@
 // Settings IPC handlers
-const fs = require('fs');
-const path = require('path');
-const { rm } = require('fs/promises');
 const appStore = require('../utils/app-store.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 
