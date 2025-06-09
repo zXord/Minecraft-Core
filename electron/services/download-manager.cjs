@@ -16,18 +16,15 @@ const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fet
  * @returns {Promise<void>} - Promise that resolves when download is complete
  */
 async function downloadWithProgress(url, destPath, channel) {
-  console.log(`Starting download: ${url} to ${destPath}`);
   
   try {
     const res = await fetch(url);
     
     if (!res.ok) {
-      console.error(`Download failed with status: ${res.status} ${res.statusText}`);
       throw new Error(`Failed to download: ${res.status} ${res.statusText}`);
     }
     
     const total = parseInt(res.headers.get('content-length'), 10) || 0;
-    console.log(`Download size: ${total} bytes`);
     
     const prog = progress({ length: total, time: 100 });
   
@@ -93,14 +90,12 @@ async function downloadWithProgress(url, destPath, channel) {
       
       // Ensure destination directory exists
       if (!fs.existsSync(destDir)) {
-        console.log(`Creating directory: ${destDir}`);
         fs.mkdirSync(destDir, { recursive: true });
       }
       
       const fileStream = fs.createWriteStream(destPath);
       
       fileStream.on('error', err => {
-        console.error(`File write error: ${err.message}`);
         reject(new Error(`File write error: ${err.message}`));
       });
       
@@ -108,7 +103,6 @@ async function downloadWithProgress(url, destPath, channel) {
         .pipe(prog)
         .pipe(fileStream)
         .on('finish', () => {
-          console.log(`Download completed: ${destPath}`);
           
           // Send 100% progress on completion
           safeSend(channel, { percent: 100, speed: '0.00 MB/s' });
@@ -125,12 +119,10 @@ async function downloadWithProgress(url, destPath, channel) {
           resolve();
         })
         .on('error', err => {
-          console.error(`Download stream error: ${err.message}`);
           reject(new Error(`Download stream error: ${err.message}`));
         });
     });
   } catch (err) {
-    console.error(`Download failed: ${err.message}`, err);
     throw new Error(`Download failed: ${err.message}`);
   }
 }
@@ -152,13 +144,11 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
 
   // Check if Java is installed
   try {
-    console.log('Checking Java installation...');
     safeSend(logChannel, '🔍 Checking Java installation...');
     
     await new Promise((resolve, reject) => {
       exec('java -version', (error, stdout, stderr) => {
         if (error) {
-          console.error('Java check error:', error);
           safeSend(logChannel, '❌ Java not found. Please install Java to use Fabric.');
           reject(new Error('Java is not installed or not in PATH. Please install Java to use Fabric.'));
           return;
@@ -166,7 +156,6 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
         
         // Java outputs version to stderr by default
         const output = stderr || stdout;
-        console.log('Java version output:', output);
         safeSend(logChannel, '✓ Java found: ' + output.split('\n')[0]);
         resolve();
       });
@@ -180,7 +169,6 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
   safeSend(logChannel, '✔ Fabric installer downloaded');
 
   await new Promise((resolve, reject) => {
-    console.log('Spawning Java process to install Fabric...');
     safeSend(logChannel, '🔧 Installing Fabric...');
     
     // Send progress update for starting installation
@@ -196,18 +184,15 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
 
     proc.stdout.on('data', data => {
       const message = data.toString();
-      console.log('Fabric installer stdout:', message);
       safeSend(logChannel, message);
     });
     
     proc.stderr.on('data', data => {
       const message = data.toString();
-      console.error('Fabric installer stderr:', message);
       safeSend(logChannel, `[ERROR] ${message}`);
     });
     
     proc.on('close', code => {
-      console.log(`Fabric installer exited with code ${code}`);
       if (code === 0) {
         safeSend(logChannel, '✔ Fabric install completed');
         
@@ -282,7 +267,6 @@ async function downloadMinecraftServer(mcVersion, targetPath, progressChannel = 
     safeSend('install-log', 'Minecraft server.jar downloaded successfully');
     return true;
   } catch (err) {
-    console.error('Error downloading Minecraft server:', err);
     safeSend('install-log', `Error downloading server: ${err.message}`);
     return false;
   }

@@ -14,7 +14,6 @@ function setupAppCleanup(app, win) {
     win.on('close', async (e) => {
       if (!app.isQuitting) {
         e.preventDefault();
-        console.log('Window close requested, checking if server is running...');
         
         // Import server manager here to avoid circular dependencies
         const { getServerProcess, killMinecraftServer } = require('../services/server-manager.cjs');
@@ -32,19 +31,16 @@ function setupAppCleanup(app, win) {
           });
 
           if (userConfirmed) {
-            console.log('Stopping server before exit...');
             try {
               killMinecraftServer();
               await new Promise(resolve => setTimeout(resolve, 500));
               app.isQuitting = true;
               win.close();
             } catch (err) {
-              console.error('Error stopping server:', err);
               app.isQuitting = true;
               win.close();
             }
           } else {
-            console.log('User canceled application exit');
           }
         } else {
           app.isQuitting = true;
@@ -56,7 +52,6 @@ function setupAppCleanup(app, win) {
   
   // Ensure all processes are cleaned up on quit
   app.on('quit', () => {
-    console.log('Application quit event detected, ensuring all processes are cleaned up...');
     
     try {
       // Import server manager here to avoid circular dependencies
@@ -64,11 +59,9 @@ function setupAppCleanup(app, win) {
       const serverProcess = getServerProcess();
       
       if (serverProcess) {
-        console.log('Server still running on quit, forcefully terminating...');
         killMinecraftServer();
       }
     } catch (err) {
-      console.error('Error cleaning up processes on quit:', err);
     }
   });
   
@@ -76,23 +69,19 @@ function setupAppCleanup(app, win) {
   const signals = ['SIGINT', 'SIGTERM'];
   signals.forEach(signal => {
     process.on(signal, () => {
-      console.log(`${signal} signal received, cleaning up...`);
       try {
         const { getServerProcess, killMinecraftServer } = require('../services/server-manager.cjs');
         const serverProcess = getServerProcess();
         
         if (serverProcess) {
-          console.log('Server still running, forcefully terminating...');
           killMinecraftServer();
         }
         
         // Allow a small delay for cleanup before exiting
         setTimeout(() => {
-          console.log('Cleanup complete, exiting...');
           process.exit(0);
         }, 500);
       } catch (err) {
-        console.error(`Error cleaning up on ${signal}:`, err);
         process.exit(1);
       }
     });

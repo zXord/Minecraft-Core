@@ -16,7 +16,6 @@ export async function fetchLatestMinecraftVersion() {
     const stable = data.find(v => v.stable);
     return stable ? stable.version : (data[0]?.version ?? null);
   } catch (err) {
-    console.error('Error fetching latest Minecraft version:', err);
     return null;
   }
 }
@@ -36,7 +35,6 @@ export async function fetchLatestFabricVersion(mcVersion) {
     const data = await res.json();
     return data.length > 0 ? data[0].loader.version : null;
   } catch (err) {
-    console.error('Error fetching latest Fabric version:', err);
     return null;
   }
 }
@@ -56,7 +54,6 @@ export async function fetchAllFabricVersions(mcVersion) {
     const data = await res.json();
     return data.map(v => v.loader.version);
   } catch (err) {
-    console.error('Error fetching fabric loader versions:', err);
     return [];
   }
 }

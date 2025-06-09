@@ -21,13 +21,10 @@
   // Functions
   async function selectFolder() {
     try {
-      console.log('Selecting folder for client...');
       const result = await window.electron.invoke('select-folder');
       if (!result) {
-        console.log('No folder selected, returning');
         return;
       }      path = result;
-      console.log(`Selected client path: ${path}`);
       
       // Note: Client paths should not update the global serverPath
       // The client instance will store its own path separately
@@ -35,7 +32,6 @@
       // Move to server IP configuration
       step = 'configureConnection';
     } catch (err) {
-      console.error('Error selecting folder:', err);
     }
   }
   
@@ -63,7 +59,6 @@
     try {
       // Try to connect to the management server
       const managementUrl = `http://${serverIp}:${serverPort}/api/test`;
-      console.log(`[ClientSetup] Testing connection to: ${managementUrl}`);
       
       const response = await fetch(managementUrl, {
         method: 'GET',
@@ -79,7 +74,6 @@
       }
       
       const data = await response.json();
-      console.log('[ClientSetup] Connection test response:', data);
       
       if (data.success) {
         connectionStatus = 'connected';
@@ -92,7 +86,6 @@
         throw new Error(data.message || 'Server returned unsuccessful response');
       }
     } catch (error) {
-      console.error('[ClientSetup] Connection test failed:', error);
       connectionStatus = 'disconnected';
       
       let errorMessage = 'Connection failed.';
@@ -156,7 +149,6 @@
           installLogs = [...installLogs, `Session token received`];
         }
       } catch (regError) {
-        console.error('Registration failed:', regError);
         installLogs = [...installLogs, `Registration failed: ${regError.message}`];
         installLogs = [...installLogs, 'Continuing with setup anyway...'];
       }
@@ -182,7 +174,6 @@
       installing = false;
       dispatchSetupComplete();
     } catch (err) {
-      console.error('Error during client setup:', err);
       installing = false;
       installLogs = [...installLogs, `Error: ${err.message || 'Unknown error during setup'}`];
     }
@@ -196,7 +187,6 @@
     
     // Add new listeners
     window.electron.on('minecraft-client-progress', (data) => {
-      console.log('Minecraft client progress:', data);
       if (data && typeof data === 'object') {
         installProgress = data.percent || 0;
         installSpeed = data.speed || '0 MB/s';
@@ -204,7 +194,6 @@
     });
     
     window.electron.on('fabric-install-progress', (data) => {
-      console.log('Fabric install progress:', data);
       if (data && typeof data === 'object') {
         installProgress = data.percent || 0;
         installSpeed = data.speed || '0 MB/s';
@@ -212,7 +201,6 @@
     });
     
     window.electron.on('install-log', (line) => {
-      console.log('Install log:', line);
       if (line && typeof line === 'string') {
         installLogs = [...installLogs, line];
       }
@@ -222,7 +210,6 @@
   function dispatchSetupComplete() {
     // Make sure path is not empty
     if (!path || path.trim() === '') {
-      console.error('Attempted to dispatch setup-complete with empty path');
       return;
     }
     

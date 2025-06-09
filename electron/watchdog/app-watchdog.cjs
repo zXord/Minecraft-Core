@@ -26,7 +26,6 @@ function log(message) {
   const logMessage = `${timestamp} - ${message}`;
   
   // Only log to console, no file logging
-  console.log(logMessage);
 }
 
 // Function to check if a Minecraft server is running
@@ -200,7 +199,6 @@ function checkProcess() {
   if (!serverRunning) {
     // Only log occasionally to reduce noise
     if (quietCheckCounter % 6 === 0) { // Log once every 30 seconds (5s × 6)
-      console.log(`[${new Date().toISOString()}] No Minecraft server running, watchdog in standby mode`);
     }
     quietCheckCounter++;
     

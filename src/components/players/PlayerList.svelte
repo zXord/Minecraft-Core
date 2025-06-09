@@ -202,12 +202,10 @@
       // For banned-ips, extract just the IP portion if the entry has a player name in parentheses
       let entryToRemove = entry;
       if (name === 'banned-ips') {
-        console.log('Removing banned IP entry:', entry);
         const matches = entry.match(/^(.+)\s+\((.+)\)$/);
         if (matches) {
           // Extract just the IP address part
           entryToRemove = matches[1];
-          console.log('Extracted IP to remove:', entryToRemove);
         }
       }
       
@@ -277,7 +275,6 @@
             }));
           }
         } catch (err) {
-          console.error('Error fetching last banned player:', err);
         }
         
         // Now load all player lists

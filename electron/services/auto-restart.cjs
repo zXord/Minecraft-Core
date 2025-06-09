@@ -105,7 +105,6 @@ function scheduleAutoRestart(restartInfo) {
         safeSend('server-log', `[ERROR] Cannot auto-restart: invalid server path ${targetPathToRestart}`);
       }
     } catch (restartErr) {
-      console.error('Error during auto-restart:', restartErr);
       safeSend('server-log', `[ERROR] Auto-restart failed: ${restartErr.message}`);
     }
   }, seconds * 1000);
@@ -138,7 +137,6 @@ function resetCrashCount() {
 function setAutoRestartOptions(options) {
   if (typeof options.enabled === 'boolean') {
     autoRestartEnabled = options.enabled;
-    console.log(`Auto-restart enabled set to: ${autoRestartEnabled}`);
   }
   
   if (typeof options.delay === 'number' && options.delay >= 5 && options.delay <= 300) {
@@ -156,7 +154,6 @@ function setAutoRestartOptions(options) {
       maxCrashes: maxCrashesBeforeDisable
     });
   } catch (err) {
-    console.error('Error saving auto-restart settings to app store:', err);
   }
     // Also save these settings to the server's config file
   // First try targetPath if provided, otherwise use lastServerPath 
@@ -176,7 +173,6 @@ function setAutoRestartOptions(options) {
       
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
     } catch (err) {
-      console.error('Error saving auto-restart settings:', err);
     }
   }
   
@@ -213,7 +209,6 @@ function getAutoRestartState() {
  * @param {object} restartInfo - Information about the server that crashed
  */
 function handleServerCrash(restartInfo) {
-  console.log('Server crash detected, auto-restart enabled:', autoRestartEnabled);
   
   if (autoRestartEnabled) {
     // Handle auto-restart logic
@@ -256,7 +251,6 @@ function initFromServerConfig(serverPath) {
       try {
         config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       } catch (parseErr) {
-        console.error('Error parsing server config:', parseErr);
         return;
       }
       
@@ -280,12 +274,10 @@ function initFromServerConfig(serverPath) {
             maxCrashes: maxCrashesBeforeDisable
           });
         } catch (storeErr) {
-          console.error('Error saving to app store:', storeErr);
         }
       }
     }
   } catch (err) {
-    console.error('Error loading auto-restart settings from server config:', err);
   }
 }
 

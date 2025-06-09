@@ -196,12 +196,9 @@ function createMinecraftLauncherHandlers(win) {
           try {
             const saveResult = await launcher.saveAuthData(clientPath);
             if (saveResult.success) {
-              console.log('[IPC] ✅ Authentication data saved automatically after successful login');
             } else {
-              console.warn('[IPC] ⚠️ Failed to save auth data after successful login:', saveResult.error);
             }
           } catch (saveError) {
-            console.warn('[IPC] ⚠️ Error auto-saving auth data:', saveError.message);
           }
         }
         
@@ -241,7 +238,6 @@ function createMinecraftLauncherHandlers(win) {
           try {
             await launcher.saveAuthData(clientPath);
           } catch (saveError) {
-            console.warn('[IPC] ⚠️ Failed to save refreshed auth data:', saveError.message);
           }
         }
 
@@ -511,7 +507,6 @@ function createMinecraftLauncherHandlers(win) {
                   if (fs.existsSync(disabled)) fs.unlinkSync(disabled);
                   fs.unlinkSync(manifestPath);
                   removed.push(fileName);
-                  console.log(`[minecraft-download-mods] Removed server-managed mod: ${fileName}`);
                 }
               } catch {}
             }
@@ -524,7 +519,6 @@ function createMinecraftLauncherHandlers(win) {
               // If mod has no manifest, it's likely manual - preserve it
               const manifestPath = path.join(manifestDir, `${modFile}.json`);
               if (!fs.existsSync(manifestPath) && !allowed.has(modFile)) {
-                console.log(`[minecraft-download-mods] Preserving manual mod: ${modFile}`);
                 // Create a simple marker file to track this as a preserved manual mod
                 try {
                   if (!fs.existsSync(manifestDir)) {
@@ -537,13 +531,11 @@ function createMinecraftLauncherHandlers(win) {
                     timestamp: new Date().toISOString()
                   }, null, 2));
                 } catch (manifestError) {
-                  console.warn(`[minecraft-download-mods] Could not create manual mod manifest for ${modFile}:`, manifestError.message);
                 }
               }
             }
           }
         } catch (cleanupErr) {
-          console.warn('[IPC] Failed to clean up unmanaged mods:', cleanupErr);
         }        const result = {
           success: failures.length === 0,
           downloaded: downloaded.length,
@@ -589,17 +581,13 @@ function createMinecraftLauncherHandlers(win) {
             serverPort
           );
           if (datRes.success) {
-            console.log('[IPC] servers.dat ensured before launch');
           } else {
-            console.warn(`[IPC] Failed to ensure servers.dat before launch: ${datRes.error}`);
           }
         } catch (err) {
-          console.warn('[IPC] Error while ensuring servers.dat:', err.message);
         }
         
         // Try proper launcher first to fix LogUtils issues
         if (useProperLauncher) {
-          console.log(`[IPC] Attempting launch with XMCL proper launcher to fix LogUtils...`);
           
           const properResult = await launcher.launchMinecraftProper({
             clientPath,
@@ -614,16 +602,12 @@ function createMinecraftLauncherHandlers(win) {
           });
           
           if (properResult.success) {
-            console.log(`[IPC] ✅ XMCL proper launcher succeeded!`);
             return properResult;
           } else {
-            console.warn(`[IPC] ⚠️ XMCL proper launcher failed: ${properResult.error}`);
-            console.log(`[IPC] Falling back to original launcher...`);
           }
         }
         
         // Fallback to original launcher
-        console.log(`[IPC] Using original launcher implementation...`);
         const result = await launcher.launchMinecraft({
           clientPath,
           minecraftVersion,
@@ -805,9 +789,6 @@ function createMinecraftLauncherHandlers(win) {
             ...(allClientMods || []).map(m => m.fileName.toLowerCase())
           ]);
           
-          console.log('[minecraft-check-mods] Server managed files:', Array.from(allServerManagedFiles));
-          console.log('[minecraft-check-mods] All allowed mods:', Array.from(allAllowedMods));
-          console.log('[minecraft-check-mods] Present mods to analyze:', allPresentMods);            for (const modFileName of allPresentMods) {
             const modFileNameLower = modFileName.toLowerCase();
             
             // Skip server-managed mods (mods that are/will be managed by the server)
@@ -869,7 +850,6 @@ function createMinecraftLauncherHandlers(win) {
                 const matchedServerMod = exactServerMatch || similarServerMatch;
                 const serverVersion = extractVersionFromFilename(matchedServerMod.fileName) || 'Server Version';
                 
-                console.log(`[minecraft-check-mods] ${modFileName} is an update (${exactServerMatch ? 'exact' : 'similar'} match with server)`);
                 clientModChanges.updates.push({
                   fileName: modFileName,
                   name: clientModMetadata.name || modFileName,
@@ -896,10 +876,8 @@ function createMinecraftLauncherHandlers(win) {
                 // If it's explicitly allowed, we don't need to do anything - it stays as-is
               }
             } catch (metadataError) {
-              console.warn(`[minecraft-check-mods] Could not analyze client mod ${modFileName}:`, metadataError.message);
             }
           }        } catch (analysisError) {
-          console.warn('[minecraft-check-mods] Error analyzing client mod changes:', analysisError.message);
         }        // Populate newDownloads with mods that are truly new (not updates of existing client mods)
         // Get the server mod files that have corresponding client mod updates
         const serverModsWithClientUpdates = new Set();
@@ -932,9 +910,6 @@ function createMinecraftLauncherHandlers(win) {
           const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && extraMods.length === 0;
         
         // Debug: Show final removal results
-        console.log('[minecraft-check-mods] Final removal results:');
-        console.log('[minecraft-check-mods] - Extra mods (to be removed):', extraMods);
-        console.log('[minecraft-check-mods] - Client mod removals:', clientModChanges.removals);
         
         return {
           success: true,

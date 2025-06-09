@@ -55,7 +55,6 @@ function createServerHandlers(win) {
             maxRam: maxRam || 4,
           });
         } catch (err) {
-          console.error("Error saving server settings:", err);
         }
 
         // Share server path with renderer through preload script
@@ -71,7 +70,6 @@ function createServerHandlers(win) {
 
         return startMinecraftServer(targetPath, port, maxRam);
       } catch (err) {
-        console.error("Error starting server:", err);
         throw err;
       }
     },
@@ -82,7 +80,6 @@ function createServerHandlers(win) {
         cancelAutoRestart();
         return stopMinecraftServer();
       } catch (err) {
-        console.error("Error stopping server:", err);
         throw err;
       }
     },
@@ -93,7 +90,6 @@ function createServerHandlers(win) {
         cancelAutoRestart();
         return killMinecraftServer();
       } catch (err) {
-        console.error("Error killing server:", err);
         throw err;
       }
     },
@@ -106,7 +102,6 @@ function createServerHandlers(win) {
 
         return sendServerCommand(command);
       } catch (err) {
-        console.error("Error sending command:", err);
         throw err;
       }
     },
@@ -129,7 +124,6 @@ function createServerHandlers(win) {
           playersInfo: state.playersInfo || { online: 0, max: 0, list: [] },
         };
       } catch (err) {
-        console.error("Error getting server status:", err);
         throw err;
       }
     },

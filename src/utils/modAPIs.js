@@ -260,7 +260,6 @@ export async function getCurseForgePopular({ loader, version }) {
       downloadUrl: mod.id, // We'll need the mod ID to get the correct download URL later
     }));
   } catch (error) {
-    console.error('CurseForge API error:', error);
     
     // Return an empty array rather than throwing, since CurseForge might be behind a paywall
     return [];
@@ -312,7 +311,6 @@ export async function searchCurseForgeMods({ query, loader, version }) {
       downloadUrl: mod.id, // We'll need the mod ID to get the correct download URL later
     }));
   } catch (error) {
-    console.error('CurseForge API error:', error);
     
     // Return an empty array rather than throwing, since CurseForge might be behind a paywall
     return [];
@@ -360,7 +358,6 @@ export async function getCurseForgeDownloadUrl(modId, version, loader) {
     const latest = matchingFiles[0];
     return latest.downloadUrl;
   } catch (error) {
-    console.error('CurseForge download URL error:', error);
     throw error;
   }
 } 

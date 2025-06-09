@@ -43,7 +43,6 @@ async function ensureServersDat(
           }
         }
       } catch (e) {
-        console.warn('[serversDat] Could not retrieve server port:', e.message);
       }
     }
 
@@ -85,7 +84,6 @@ async function ensureServersDat(
         );
         existingServers = existingServers.filter(s => s.ip !== serverAddress);
       } catch (err) {
-        console.warn('[serversDat] Could not parse existing servers.dat:', err.message);
         existingServers = [];
       }
     }
@@ -116,7 +114,6 @@ async function ensureServersDat(
     fs.writeFileSync(serversDatPath, raw);
     return { success: true };
   } catch (err) {
-    console.error('[serversDat] Failed to create servers.dat:', err);
     return { success: false, error: err.message };
   }
 }

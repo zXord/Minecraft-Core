@@ -22,27 +22,20 @@
   // Functions
   async function selectFolder() {
     try {
-      console.log('Selecting folder...');
       const result = await window.electron.invoke('select-folder');
-      console.log('Folder selection result:', result);
       if (!result) {
-        console.log('No folder selected, returning');
         return;
       }
       path = result;
-      console.log(`Selected path: ${path}`);
       
       // Update global server path
       if (window.serverPath) {
         window.serverPath.set(path);
-        console.log('Updated global server path');
       }
 
       const config = await window.electron.invoke('read-config', path);
-      console.log('Read config result:', config);
       if (config?.version && config?.fabric) {
         // Existing configuration found
-        console.log('Found existing configuration, skipping version selection');
         selectedMC = config.version;
         selectedFabric = config.fabric;
         
@@ -50,12 +43,10 @@
         dispatchSetupComplete();
       } else {
         // Need to configure
-        console.log('No existing configuration found, moving to version selection');
         step = 'chooseVersion';
         await fetchMinecraftVersions();
       }
     } catch (err) {
-      console.error('Error selecting folder:', err);
     }
   }
   
@@ -68,7 +59,6 @@
       const data = await res.json();
       mcVersions = data.filter(v => v.stable).map(v => v.version);
     } catch (err) {
-      console.error('Error fetching Minecraft versions:', err);
       mcVersions = [];
     }
   }
@@ -83,7 +73,6 @@
       const data = await res.json();
       fabricVersions = data.map(v => v.loader.version);
     } catch (err) {
-      console.error('Error fetching Fabric versions:', err);
       fabricVersions = [];
     }
   }
@@ -135,7 +124,6 @@
       installing = false;
       dispatchSetupComplete();
     } catch (err) {
-      console.error('Error during installation:', err);
       installing = false;
       installLogs = [...installLogs, `Error: ${err.message || 'Unknown error during installation'}`];
     }
@@ -149,7 +137,6 @@
     
     // Add new listeners
     window.electron.on('minecraft-server-progress', (data) => {
-      console.log('Minecraft server progress:', data);
       if (data && typeof data === 'object') {
         installProgress = data.percent || 0;
         installSpeed = data.speed || '0 MB/s';
@@ -157,7 +144,6 @@
     });
     
     window.electron.on('fabric-install-progress', (data) => {
-      console.log('Fabric install progress:', data);
       if (data && typeof data === 'object') {
         installProgress = data.percent || 0;
         installSpeed = data.speed || '0 MB/s';
@@ -165,7 +151,6 @@
     });
     
     window.electron.on('install-log', (line) => {
-      console.log('Install log:', line);
       if (line && typeof line === 'string') {
         installLogs = [...installLogs, line];
       }
@@ -175,7 +160,6 @@
   function dispatchSetupComplete() {
     // Make sure path is not empty
     if (!path || path.trim() === '') {
-      console.error('Attempted to dispatch setup-complete with empty path');
       return;
     }
     

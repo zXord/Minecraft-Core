@@ -214,12 +214,10 @@ export async function saveModCategories() {
         
         if (serverInstance && serverInstance.path) {
           serverPath = serverInstance.path;
-          console.log(`[ModStore] Found server path from instances list: ${serverPath}`);
         }
         
         if (clientInstance && clientInstance.path) {
           clientPath = clientInstance.path;
-          console.log(`[ModStore] Found client path from instances list: ${clientPath}`);
         }
       }
       
@@ -230,16 +228,13 @@ export async function saveModCategories() {
           const instance = JSON.parse(storedInstance);
           if (instance && instance.path) {
             serverPath = instance.path;
-            console.log(`[ModStore] Found server path from current instance: ${serverPath}`);
           }
         }
       }
     } catch (storageError) {
-      console.error('[ModStore] Error reading paths from local storage:', storageError);
     }
     
     if (!serverPath) {
-      console.warn('[ModStore] No server path found in local storage. Mod files will not be moved.');
     }
 
     // Convert Map to array of objects for storage
@@ -248,14 +243,10 @@ export async function saveModCategories() {
       ...info
     }));
     
-    console.log(`[ModStore] Saving mod categories to paths - Server: ${serverPath || 'None'}, Client: ${clientPath || 'Auto-detect'}`);
-    console.log(`[ModStore] Categories to save:`, categoriesArray);
     
     const result = await safeInvoke('save-mod-categories', categoriesArray, serverPath, clientPath);
-    console.log(`[ModStore] Save result:`, result);
     return true;
   } catch (error) {
-    console.error('[ModStore] Failed to save mod categories:', error);
     return false;
   }
 }
@@ -263,9 +254,7 @@ export async function saveModCategories() {
 // Load mod categories from persistent storage
 export async function loadModCategories() {
   try {
-    console.log(`[ModStore] loadModCategories called - stack trace:`, new Error().stack);
     const categoriesArray = await window.electron.invoke('get-mod-categories');
-    console.log(`[ModStore] Loaded categories from storage:`, categoriesArray);
     
     if (Array.isArray(categoriesArray)) {
       const categoriesMap = new Map();
@@ -279,20 +268,17 @@ export async function loadModCategories() {
         }
       });
       
-      console.log(`[ModStore] Setting modCategories to:`, Array.from(categoriesMap));
       modCategories.set(categoriesMap);
     }
     
     return true;
   } catch (error) {
-    console.error('Failed to load mod categories:', error);
     return false;
   }
 }
 
 // Update a mod's category
 export async function updateModCategory(modId, category) {
-  console.log(`[ModStore] Updating mod category: ${modId} -> ${category}`);
   
   modCategories.update($categories => {
     const current = $categories.get(modId) || { required: true };
@@ -305,17 +291,12 @@ export async function updateModCategory(modId, category) {
 
 // Update a mod's required status
 export async function updateModRequired(modId, required) {
-  console.log(`[ModStore] updateModRequired called: ${modId} -> ${required}`);
   
   modCategories.update($categories => {
     const current = $categories.get(modId) || { category: 'server-only' };
-    console.log(`[ModStore] Current category for ${modId}:`, current);
     $categories.set(modId, { ...current, required });
-    console.log(`[ModStore] Updated category for ${modId}:`, { ...current, required });
     return $categories;
   });
   
-  console.log(`[ModStore] Calling saveModCategories...`);
   await saveModCategories();
-  console.log(`[ModStore] saveModCategories completed`);
 } 
