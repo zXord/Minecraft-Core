@@ -2,8 +2,7 @@
 <script>
   import { createEventDispatcher } from 'svelte';
   import { onMount } from 'svelte';
-  import { get } from 'svelte/store';
-  import {
+  import { get } from 'svelte/store';  import {
     searchKeyword,
     modSource,
     searchResults,
@@ -16,7 +15,6 @@
     expandedModId,
     minecraftVersion,
     loaderType,
-    serverConfig,
     filterMinecraftVersion,
     filterModLoader,
     installedModInfo,
@@ -27,11 +25,11 @@
   import { searchMods, fetchModVersions, checkForUpdates } from '../../../utils/mods/modAPI.js';
   import ModCard from './ModCard.svelte';
   import ModFilters from './ModFilters.svelte';
-  
-  // Props
+    // Props
   export const serverPath = '';
   export let minecraftVersionOptions = [];
   export let filterType = 'all';
+  /** @type {Set<string> | undefined} */
   export let serverManagedSet = undefined;
   
   // Local state
@@ -425,10 +423,9 @@
   
   <div class="search-results">
     {#if $searchResults.length > 0}
-      <div class="mods-grid">
-        {#each visibleMods as mod (mod.id)}
+      <div class="mods-grid">        {#each visibleMods as mod (mod.id)}
           {@const installedInfo = $installedModInfo.find(info => info.projectId === mod.id)}
-          {@const serverManaged = serverManagedSet?.has(installedInfo?.fileName)}
+          {@const serverManaged = Boolean(serverManagedSet && installedInfo?.fileName && serverManagedSet.has(installedInfo.fileName))}
           <ModCard
             {mod}
             expanded={$expandedModId === mod.id}
@@ -759,15 +756,8 @@
     transition: all 0.2s;
   }
   
-  .retry-button:hover,
-  .switch-source-button:hover {
+  .retry-button:hover,  .switch-source-button:hover {
     background: #7a81ff;
-  }
-  
-  @media (max-width: 768px) {
-    .filter-group {
-      min-width: 100%;
-    }
   }
   
   .top-pagination {

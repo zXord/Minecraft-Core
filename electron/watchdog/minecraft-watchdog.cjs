@@ -15,21 +15,20 @@ const logFile = path.join(runtimePaths.runtimeDir, 'watchdog.log');
 // Create a function for logging
 function log(message) {
   const timestamp = new Date().toISOString();
-  const logMessage = `${timestamp} - ${message}\n`;
   
   try {
-    fs.appendFileSync(logFile, logMessage);
+    fs.appendFileSync(logFile, `${timestamp} - ${message}\n`);
   } catch (err) {
     // If we can't write to the log file, write to a fallback location
     try {
       const fallbackLog = path.join(process.cwd(), 'watchdog-fallback.log');
-      fs.appendFileSync(fallbackLog, logMessage);
+      fs.appendFileSync(fallbackLog, `${timestamp} - ${message}\n`);
     } catch (e) {
       // Try one more location - the temp directory
       try {
         const tempDir = process.env.TEMP || process.env.TMP || __dirname;
         const emergencyLog = path.join(tempDir, 'minecraft-watchdog-emergency.log');
-        fs.appendFileSync(emergencyLog, logMessage);
+        fs.appendFileSync(emergencyLog, `${timestamp} - ${message}\n`);
       } catch (final) {
         // Can't do much if we can't write to any log
       }

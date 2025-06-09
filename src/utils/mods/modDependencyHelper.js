@@ -215,12 +215,8 @@ export async function checkModDependencies(mod, visited = new Set()) {
         if (versionInfo.files && versionInfo.files.length > 0) {
           mod.downloadUrl = versionInfo.files[0].url;
         }
-      }
-    } catch (apiError) {
-      // Only log as error if it's not a 404 (which can be normal)
-      if (apiError.message && apiError.message.includes('404')) {
-      } else {
-      }
+      }    } catch {
+      // Error getting version info - this is acceptable
     }
     
     // SECOND ATTEMPT: If we couldn't find dependencies through API, try to analyze installed file
@@ -260,8 +256,7 @@ export async function checkModDependencies(mod, visited = new Set()) {
           if (installedMod.fileName.toLowerCase().includes('fabric')) {
             isFabricMod = true;
           }
-        }
-        // If mod isn't installed but we have a URL, ask backend to analyze it
+        }        // If mod isn't installed but we have a URL, ask backend to analyze it
         else if (mod.downloadUrl) {
           
           // Ask the backend to download and analyze the JAR
@@ -279,7 +274,7 @@ export async function checkModDependencies(mod, visited = new Set()) {
                 const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
                 if (projectInfo?.id) pid = projectInfo.id;
                 if (projectInfo?.title) depName = projectInfo.title;
-              } catch (err) {
+              } catch {
               }
               allDependencies.push({
                 project_id: pid,
@@ -289,8 +284,7 @@ export async function checkModDependencies(mod, visited = new Set()) {
               });
             }
           }
-        }
-      } catch (jarError) {
+        }      } catch {
       }
     }
     
@@ -312,8 +306,7 @@ export async function checkModDependencies(mod, visited = new Set()) {
               name: fapiName
             });
           }
-        }
-      } catch (err) {
+        }      } catch {
       }
     }
     

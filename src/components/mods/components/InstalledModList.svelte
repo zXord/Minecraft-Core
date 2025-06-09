@@ -75,12 +75,11 @@
           ...installedModVersionsCache, 
           [modInfo.projectId]: versions 
         };
-        
-        // Also check for updates to make sure the update button shows immediately
+          // Also check for updates to make sure the update button shows immediately
         if (!get(isCheckingUpdates)) {
           checkForUpdates(serverPath);
         }
-      } catch (error) {
+      } catch {
       }
     }
   }
@@ -708,13 +707,12 @@
     }
     
     // Load disabled mods
-    try {
-      safeInvoke('get-disabled-mods', serverPath).then(disabledModsList => {
+    try {      safeInvoke('get-disabled-mods', serverPath).then(disabledModsList => {
         if (Array.isArray(disabledModsList)) {
           disabledMods.set(new Set(disabledModsList));
         }
       });
-    } catch (error) {
+    } catch {
     }
     
     // Clean up the interval when the component is destroyed
@@ -1232,12 +1230,25 @@
     on:confirm={confirmToggleModStatus}
     on:cancel={() => { confirmDisableVisible = false; }}
   />
-  
-  <!-- Compatibility Warning Dialog -->
+    <!-- Compatibility Warning Dialog -->
   {#if showCompatibilityWarning}
-    <div class="compatibility-warning-overlay" on:click={() => { showCompatibilityWarning = false; modsToUpdate = []; compatibilityWarnings = []; }}>
-      <div class="compatibility-warning-dialog" on:click|stopPropagation>
-        <h3>Compatibility Issues</h3>
+    <div 
+      class="compatibility-warning-overlay" 
+      on:click={() => { showCompatibilityWarning = false; modsToUpdate = []; compatibilityWarnings = []; }}
+      on:keydown={(e) => { if (e.key === 'Escape') { showCompatibilityWarning = false; modsToUpdate = []; compatibilityWarnings = []; } }}
+      role="button"
+      tabindex="0"
+      aria-label="Close compatibility warning dialog"
+    >      <div 
+        class="compatibility-warning-dialog" 
+        on:click|stopPropagation
+        on:keydown|stopPropagation
+        role="dialog"
+        aria-labelledby="compatibility-dialog-title"
+        aria-modal="true"
+        tabindex="-1"
+      >
+        <h3 id="compatibility-dialog-title">Compatibility Issues</h3>
         <div class="warnings-container">
           {#each groupDependencyWarnings(compatibilityWarnings) as group (group.dependency?.projectId)}
             {#if group.type === 'missing' || group.type === 'disabled'}

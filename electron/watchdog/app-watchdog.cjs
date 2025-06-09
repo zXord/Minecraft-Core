@@ -23,7 +23,6 @@ const execOptions = {
 // Create a function for logging (disabled file logging)
 function log(message) {
   const timestamp = new Date().toISOString();
-  const logMessage = `${timestamp} - ${message}`;
   
   // Only log to console, no file logging
 }

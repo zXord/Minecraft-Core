@@ -82,12 +82,11 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   onMount(() => {
     const initAsync = async () => {
       if (!serverPath) {
-        try {
-          const pathResult = window.serverPath ? await window.serverPath.get() : null;
+        try {          const pathResult = window.serverPath ? await window.serverPath.get() : null;
           // The result could be either { path: '...' } or just the path string
-          if (pathResult !== null) {
-            if (pathResult !== null && typeof pathResult === 'object' && 'path' in pathResult) {
-              serverPath = pathResult.path || '';
+          if (pathResult !== null && pathResult !== undefined) {
+            if (typeof pathResult === 'object' && pathResult && 'path' in pathResult) {
+              serverPath = pathResult['path'] || '';
             } else if (typeof pathResult === 'string') {
               serverPath = pathResult;
             } else {

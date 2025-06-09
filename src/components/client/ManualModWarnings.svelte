@@ -30,9 +30,8 @@
               ? 'Some manual mods may need checking for compatibility.' 
               : 'No compatibility issues found.'
           };
-          showWarning = manualModInfo && manualModInfo.manualMods.length > 0;
-        }
-      } catch (error) {
+          showWarning = manualModInfo && manualModInfo.manualMods.length > 0;        }
+      } catch {
         // Fallback: Try to read the file directly if IPC handler isn't available yet
         try {
           const configContent = await safeInvoke('read-file', `${clientPath}/manual-mods.json`);
@@ -40,21 +39,20 @@
             manualModInfo = JSON.parse(configContent);
             showWarning = manualModInfo && manualModInfo.manualMods && manualModInfo.manualMods.length > 0;
           }
-        } catch (fallbackError) {
+        } catch {
         }
       }
-    } catch (error) {
+    } catch {
     }
   }
 
   function dismissWarning() {
     showWarning = false;
-  }
-  async function removeIncompatibleMods() {
+  }  async function removeIncompatibleMods() {
     try {
       await safeInvoke('remove-manual-mods', clientPath);
       await loadManualModInfo();
-    } catch (error) {
+    } catch {
     }
   }
 </script>

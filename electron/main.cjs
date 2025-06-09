@@ -9,8 +9,7 @@ const appStore = require('./utils/app-store.cjs');
 const { ensureConfigFile } = require('./utils/config-manager.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const fs = require('fs');
-const url = require('url');
-const { ipcMain, dialog, shell } = require('electron');
+const { ipcMain, dialog } = require('electron');
 const { initializeAutomatedBackups } = require('./ipc/backup-handlers.cjs');
 const { registeredHandlers } = require('./utils/ipc-helpers.cjs');
 
@@ -88,9 +87,50 @@ function createWindow() {
   win.once('ready-to-show', () => {
     win.show();
   });
-
   // Set the main window reference
   setMainWindow(win);
+  // Setup IPC handlers BEFORE loading the URL - only once
+  if (!handlersInitialized) {
+    setupIpcHandlers(win);
+    handlersInitialized = true;
+    
+    // Initialize automated backups system
+    const { loadBackupManager } = require('./ipc/backup-handlers.cjs');
+    loadBackupManager(win);
+    
+    // Add direct handlers for critical functions to ensure they work
+    const fsPromises = require('fs/promises');
+    
+    // Remove any existing handlers first to avoid duplicates
+    try {
+      ipcMain.removeHandler('open-folder-direct');
+    } catch (e) {
+      // Handler doesn't exist, which is fine
+    }
+    
+    // Register the direct folder opening handler
+    ipcMain.handle('open-folder-direct', async (_event, folderPath) => {
+      try {
+        if (!folderPath || typeof folderPath !== 'string') {
+          return { success: false, error: 'Invalid folder path' };
+        }
+        
+        const normalizedPath = path.normalize(folderPath);
+        
+        // Check if path exists
+        try {
+          await fsPromises.access(normalizedPath);
+        } catch (accessError) {
+          return { success: false, error: 'Folder does not exist or is inaccessible' };
+        }
+        
+        const result = await openFolderDirectly(normalizedPath);
+        return { success: result };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    });
+  }
 
   // Open DevTools for debugging
   win.webContents.openDevTools();
@@ -126,96 +166,6 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   createWindow();
   
-  // Set the main window reference for IPC communications
-  // Must be done before setupIpcHandlers
-  setMainWindow(win);
-  
-  // Setup IPC handlers with reference to the window - only once
-  if (!handlersInitialized) {
-    setupIpcHandlers(win);
-    handlersInitialized = true;
-    
-    // Initialize automated backups system
-    const { loadBackupManager } = require('./ipc/backup-handlers.cjs');
-    loadBackupManager(win);
-    
-    // Add direct handlers for critical functions to ensure they work
-    const { ipcMain, shell, dialog } = require('electron');
-    const fsPromises = require('fs/promises');
-    
-    // Remove any existing handlers first to avoid duplicates
-    try {
-      // Don't remove open-folder here as it's registered through createFileHandlers
-      // Only remove handlers that are defined directly in this file
-      ipcMain.removeHandler('show-confirmation-dialog');
-      ipcMain.removeHandler('open-folder-direct');
-    } catch (err) {
-      // Ignore if no existing handlers
-    }
-    
-    // Ensure the delete-instance handler is registered
-    if (!registeredHandlers.has('delete-instance')) {
-    }
-    
-    // Define our folder openers but don't register them directly
-    const openFolderHandler = async (_event, folderPath) => {
-      try {
-        
-        // Check if path exists
-        if (!folderPath) {
-          return { success: false, error: 'No folder path provided' };
-        }
-        
-        // Try the direct folder opening first (most reliable)
-        try {
-          await openFolderDirectly(folderPath);
-          return { success: true, method: 'direct' };
-        } catch (directError) {
-          
-          // Fall back to shell.openPath
-          try {
-            await shell.openPath(path.normalize(folderPath));
-            return { success: true, method: 'shell' };
-          } catch (shellError) {
-            
-            // Final attempt with spawn
-            if (process.platform === 'win32') {
-              try {
-                require('child_process').spawn('explorer', [folderPath], { detached: true });
-                return { success: true, method: 'spawn' };
-              } catch (spawnError) {
-                return { 
-                  success: false, 
-                  error: 'All methods failed: ' + directError.message 
-                };
-              }
-            } else {
-              return { 
-                success: false, 
-                error: 'All methods failed: ' + directError.message 
-              };
-            }
-          }
-        }
-      } catch (err) {
-        return { success: false, error: err.message };
-      }
-    };
-    
-    // Only check if open-folder is already registered, and use our handler if not
-    if (!require('./utils/ipc-helpers.cjs').registeredHandlers.has('open-folder')) {
-      ipcMain.handle('open-folder', openFolderHandler);
-    }
-    
-    // Direct handler for confirming actions
-    ipcMain.handle('show-confirmation-dialog', async (_event, options) => {
-      try {
-        return await dialog.showMessageBox(win, options);
-      } catch (err) {
-        throw new Error(`Failed to show dialog: ${err.message}`);
-      }
-    });
-  }    
   // Start app watchdog only when a Minecraft server starts
   const eventBus = require('./utils/event-bus.cjs');
   const { spawn } = require('child_process');

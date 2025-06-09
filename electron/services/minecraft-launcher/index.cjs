@@ -42,12 +42,11 @@ class MinecraftLauncher extends EventEmitter {
     
     // Add proper launcher for fixing LogUtils issues
     this.properLauncher = new ProperMinecraftLauncher();
-    
-    // REMOVED: Old MCLC debug logging no longer needed since we use direct Java execution
+      // REMOVED: Old MCLC debug logging no longer needed since we use direct Java execution
     // Our new approach logs directly from the spawned Java process
     
-    // Log system information for debugging
-    utils.logSystemInfo(); // Use util function
+    // Log system information for debugging - REMOVED: function no longer exists
+    // utils.logSystemInfo(); // Use util function
     // Update alias to use the downloader's method
     this.downloadMinecraftClient = this.clientDownloader.downloadMinecraftClientSimple.bind(this.clientDownloader);
 

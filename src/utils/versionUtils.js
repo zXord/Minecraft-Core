@@ -12,10 +12,9 @@ export async function fetchLatestMinecraftVersion() {
     if (!res.ok) {
       throw new Error(`Status ${res.status}`);
     }
-    const data = await res.json();
-    const stable = data.find(v => v.stable);
+    const data = await res.json();    const stable = data.find(v => v.stable);
     return stable ? stable.version : (data[0]?.version ?? null);
-  } catch (err) {
+  } catch {
     return null;
   }
 }
@@ -31,10 +30,9 @@ export async function fetchLatestFabricVersion(mcVersion) {
     const res = await fetch(`https://meta.fabricmc.net/v2/versions/loader/${mcVersion}`);
     if (!res.ok) {
       throw new Error(`Status ${res.status}`);
-    }
-    const data = await res.json();
+    }    const data = await res.json();
     return data.length > 0 ? data[0].loader.version : null;
-  } catch (err) {
+  } catch {
     return null;
   }
 }
@@ -51,9 +49,8 @@ export async function fetchAllFabricVersions(mcVersion) {
     if (!res.ok) {
       throw new Error(`Status ${res.status}`);
     }
-    const data = await res.json();
-    return data.map(v => v.loader.version);
-  } catch (err) {
+    const data = await res.json();    return data.map(v => v.loader.version);
+  } catch {
     return [];
   }
 }

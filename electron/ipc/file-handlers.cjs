@@ -1,6 +1,4 @@
 // File and folder IPC handlers
-const path = require('path');
-const fs = require('fs');
 const fsPromises = require('fs/promises');
 const { dialog, shell } = require('electron');
 const appStore = require('../utils/app-store.cjs');

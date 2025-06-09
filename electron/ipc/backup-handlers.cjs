@@ -1,7 +1,6 @@
 const backupService = require('../services/backup-service.cjs');
 const appStore = require('../utils/app-store.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
-const path = require('path');
 
 // Interval ID for automated backup scheduler
 let autoBackupIntervalId = null;
@@ -352,11 +351,11 @@ function initializeAutomatedBackups(win) {
           }
         }, 5000);
       }
-      
-      // Always start the scheduler regardless
+        // Always start the scheduler regardless
       startAutomatedBackups(win, settings, serverPath);
     }
   }
+}
 
 /**
  * Initializes the backup manager and starts automated backups if configured

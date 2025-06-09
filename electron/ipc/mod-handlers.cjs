@@ -1,5 +1,4 @@
 // Mod management IPC handlers
-const path = require('path'); // Keep for clientPath determination if needed by handlers directly
 const fs = require('fs');
 const { dialog, app } = require('electron'); // For dialogs & app paths
 
