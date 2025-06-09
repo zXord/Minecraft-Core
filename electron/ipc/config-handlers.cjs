@@ -5,10 +5,9 @@ const path = require('path');
 /**
  * Create config IPC handlers
  * 
- * @param {BrowserWindow} win - The main application window
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
-function createConfigHandlers(win) {
+function createConfigHandlers() {
   return {
     'read-config': async (_e, serverPath) => {
       try {
@@ -62,13 +61,12 @@ function createConfigHandlers(win) {
         
         const configPath = path.join(serverPath, '.minecraft-core.json');
         let config = {};
-        
-        // Read existing config if it exists
+          // Read existing config if it exists
         if (fs.existsSync(configPath)) {
           try {
             const content = fs.readFileSync(configPath, 'utf-8');
             config = JSON.parse(content);
-          } catch (parseErr) {
+          } catch {
             // Continue with empty config
           }
         }

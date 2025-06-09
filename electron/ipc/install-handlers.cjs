@@ -9,7 +9,7 @@ const {
 /**
  * Create installation and download IPC handlers
  * 
- * @param {BrowserWindow} win - The main application window
+ * @param {object} win - The main application window
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
 function createInstallHandlers(win) {
