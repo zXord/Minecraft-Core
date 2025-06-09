@@ -355,10 +355,6 @@ function startMinecraftServer(targetPath, port, maxRam) {
           signal: signal
         };
         
-          targetPath: restartInfo.serverInfo.targetPath,
-          port: restartInfo.serverInfo.port,
-          maxRam: restartInfo.serverInfo.maxRam
-        });
         
         eventBus.emit('server-crashed', restartInfo);
       } else {

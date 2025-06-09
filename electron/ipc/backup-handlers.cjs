@@ -308,11 +308,6 @@ function startAutomatedBackups(win, settings, serverPath, isNewActivation = fals
 function initializeAutomatedBackups(win) {
   // Load the settings and start the scheduler if enabled
   const settings = appStore.get('backupSettings');
-    settings ? JSON.stringify({
-      enabled: settings.enabled,
-      runOnLaunch: settings.runOnLaunch,
-      type: settings.type
-    }) : 'null');
     
   if (settings && settings.enabled) {
     // Need to retrieve the server path from app settings

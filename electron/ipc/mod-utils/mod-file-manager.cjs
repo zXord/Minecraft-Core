@@ -272,6 +272,7 @@ async function getClientInstalledModInfo(clientPath) {
   const uniqueModFiles = Array.from(new Set(modFiles));
 
   const modInfo = [];
+  for (const file of uniqueModFiles) {
     const manifestPath = path.join(manifestDir, `${file}.json`);
     let manifest = null;    try {
       const content = await fs.readFile(manifestPath, 'utf8');

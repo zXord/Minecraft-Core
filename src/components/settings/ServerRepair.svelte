@@ -72,10 +72,6 @@
         }
       }
       
-        targetPath: serverPath,
-        mcVersion: selectedMC,
-        fabricVersion: selectedFabric
-      });
       
       repairLogs = [...repairLogs, `Repairing server with Minecraft ${selectedMC} and Fabric ${selectedFabric}`];
 

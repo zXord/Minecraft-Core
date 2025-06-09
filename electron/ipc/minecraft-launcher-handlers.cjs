@@ -788,7 +788,8 @@ function createMinecraftLauncherHandlers(win) {
             ...requiredMods.map(rm => rm.fileName.toLowerCase()),
             ...(allClientMods || []).map(m => m.fileName.toLowerCase())
           ]);
-          
+
+          for (const modFileName of allPresentMods) {
             const modFileNameLower = modFileName.toLowerCase();
             
             // Skip server-managed mods (mods that are/will be managed by the server)
@@ -877,8 +878,11 @@ function createMinecraftLauncherHandlers(win) {
               }
             } catch (metadataError) {
             }
-          }        } catch (analysisError) {
-        }        // Populate newDownloads with mods that are truly new (not updates of existing client mods)
+          }
+        } catch (analysisError) {
+        }
+
+        // Populate newDownloads with mods that are truly new (not updates of existing client mods)
         // Get the server mod files that have corresponding client mod updates
         const serverModsWithClientUpdates = new Set();
         for (const update of clientModChanges.updates) {
