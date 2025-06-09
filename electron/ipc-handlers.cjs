@@ -35,9 +35,8 @@ function setupIpcHandlers(win) {
     return;
   }
 
-  try {
-    // Initialize track registered handler names
-    registeredHandlers.clear();
+  // Initialize track registered handler names
+  registeredHandlers.clear();
     
     // Get all handler modules
     const fileHandlers = createFileHandlers(win);
@@ -133,8 +132,7 @@ function setupIpcHandlers(win) {
       initializePlayerIpMap(lastServerPath);
     }
     
-  } catch (error) {
-  }
+  
 }
 
 module.exports = { setupIpcHandlers };

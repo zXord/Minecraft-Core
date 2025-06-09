@@ -3,7 +3,6 @@ const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const { dialog, shell } = require('electron');
-const rimraf = require('rimraf');
 const appStore = require('../utils/app-store.cjs');
 const { ensureConfigFile } = require('../utils/config-manager.cjs');
 const { createZip } = require('../utils/backup-util.cjs');
