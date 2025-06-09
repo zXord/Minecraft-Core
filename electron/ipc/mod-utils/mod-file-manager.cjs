@@ -770,5 +770,6 @@ module.exports = {
   deleteMod,
   saveTemporaryFile,
   directAddMod,
-  moveModFile
+  moveModFile,
+  readModMetadataFromJar
 };
