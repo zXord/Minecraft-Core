@@ -34,7 +34,6 @@
         }
       } catch (error) {
         // Fallback: Try to read the file directly if IPC handler isn't available yet
-        console.warn('IPC handler not available, using fallback method:', error.message);
         try {
           const configContent = await safeInvoke('read-file', `${clientPath}/manual-mods.json`);
           if (configContent) {
@@ -42,11 +41,9 @@
             showWarning = manualModInfo && manualModInfo.manualMods && manualModInfo.manualMods.length > 0;
           }
         } catch (fallbackError) {
-          console.log('No manual mods config found');
         }
       }
     } catch (error) {
-      console.error('Error loading manual mod info:', error);
     }
   }
 
@@ -58,7 +55,6 @@
       await safeInvoke('remove-manual-mods', clientPath);
       await loadManualModInfo();
     } catch (error) {
-      console.error('Error removing manual mods:', error);
     }
   }
 </script>

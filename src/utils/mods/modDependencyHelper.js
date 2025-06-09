@@ -68,18 +68,15 @@ function isBundledFabricModule(id) {
 export async function checkModDependencies(mod, visited = new Set()) {
   try {
     if (!mod || !mod.id) {
-      console.log('No valid mod provided for dependency check');
       return [];
     }
     
     // Avoid infinite recursion by checking visited mods
     if (visited.has(mod.id)) {
-      console.log(`[DEBUG] Already checked dependencies for mod: ${mod.name || mod.id}, skipping nested check`);
       return [];
     }
     visited.add(mod.id);
     
-    console.log(`[DEBUG] Checking dependencies for mod: ${mod.name} (${mod.id})`);
     
     // Initialize an array to collect all dependencies from various sources
     const allDependencies = [];
@@ -93,17 +90,14 @@ export async function checkModDependencies(mod, visited = new Set()) {
       // If we don't have a selected version ID, get the latest version info
       if (!versionId) {
         // Get the detailed version info for the latest version
-        console.log(`[DEBUG] No specific version ID, getting latest version info for ${mod.id}`);
         versionInfo = await safeInvoke('get-version-info', {
           modId: mod.id,
           source: mod.source || 'modrinth',
           loader: get(loaderType),
           gameVersion: get(minecraftVersion)
         });
-        console.log(`[DEBUG] Received version info for ${mod.id}:`, versionInfo?.id || 'none');
       } else {
         // Get specific version info
-        console.log(`[DEBUG] Getting info for specific version: ${versionId}`);
         versionInfo = await safeInvoke('get-version-info', {
           modId: mod.id,
           versionId,
@@ -111,28 +105,23 @@ export async function checkModDependencies(mod, visited = new Set()) {
           loader: get(loaderType),
           gameVersion: get(minecraftVersion)
         });
-        console.log(`[DEBUG] Received version info for ${mod.id}:`, versionInfo?.id || 'none');
       }
       
       // Check if we got valid version info
       if (versionInfo) {
-        console.log(`[DEBUG] Examining version info for dependencies`);
         
         // Check if this is a Fabric mod
         if (versionInfo.loaders && Array.isArray(versionInfo.loaders)) {
           isFabricMod = versionInfo.loaders.includes('fabric');
-          console.log(`[DEBUG] Is Fabric mod: ${isFabricMod}`);
         }
         
         // METHOD 1: Standard dependencies array
         if (versionInfo.dependencies && Array.isArray(versionInfo.dependencies)) {
-          console.log(`[DEBUG] Found standard dependencies array with ${versionInfo.dependencies.length} items`);
           allDependencies.push(...versionInfo.dependencies);
         }
         
         // METHOD 2: Check 'depends' property (older Modrinth API format)
         if (versionInfo.depends && Array.isArray(versionInfo.depends)) {
-          console.log(`[DEBUG] Found 'depends' array with ${versionInfo.depends.length} dependencies`);
           allDependencies.push(...versionInfo.depends.map(dep => ({
             ...dep,
             dependency_type: 'required' // Mark as required
@@ -141,7 +130,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
         
         // METHOD 3: Check 'required_dependencies' or 'required_mods' property
         if (versionInfo.required_dependencies && Array.isArray(versionInfo.required_dependencies)) {
-          console.log(`[DEBUG] Found 'required_dependencies' array with ${versionInfo.required_dependencies.length} items`);
           allDependencies.push(...versionInfo.required_dependencies.map(dep => {
             // Convert to standard format if it's just a string or ID
             if (typeof dep === 'string') {
@@ -158,7 +146,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
         }
         
         if (versionInfo.required_mods && Array.isArray(versionInfo.required_mods)) {
-          console.log(`[DEBUG] Found 'required_mods' array with ${versionInfo.required_mods.length} items`);
           allDependencies.push(...versionInfo.required_mods.map(dep => {
             // Convert to standard format if it's just a string or ID
             if (typeof dep === 'string') {
@@ -178,7 +165,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
         if (versionInfo.game_versions && Array.isArray(versionInfo.game_versions)) {
           for (const gameVersion of versionInfo.game_versions) {
             if (gameVersion.requires && Array.isArray(gameVersion.requires)) {
-              console.log(`[DEBUG] Found 'requires' array in game_versions with ${gameVersion.requires.length} items`);
               allDependencies.push(...gameVersion.requires.map(dep => ({
                 ...dep,
                 dependency_type: 'required'
@@ -191,14 +177,12 @@ export async function checkModDependencies(mod, visited = new Set()) {
         if (versionInfo.relationships && typeof versionInfo.relationships === 'object') {
           const relationships = versionInfo.relationships;
           if (relationships.dependencies && Array.isArray(relationships.dependencies)) {
-            console.log(`[DEBUG] Found 'relationships.dependencies' array with ${relationships.dependencies.length} items`);
             allDependencies.push(...relationships.dependencies.map(dep => ({
               project_id: dep.id || dep.project_id || dep.slug,
               dependency_type: 'required'
             })));
           }
           if (relationships.required && Array.isArray(relationships.required)) {
-            console.log(`[DEBUG] Found 'relationships.required' array with ${relationships.required.length} items`);
             allDependencies.push(...relationships.required.map(dep => ({
               project_id: dep.id || dep.project_id || dep.slug,
               dependency_type: 'required'
@@ -211,7 +195,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
           const metadata = versionInfo.metadata;
           
           if (metadata.dependencies && Array.isArray(metadata.dependencies)) {
-            console.log(`[DEBUG] Found 'metadata.dependencies' with ${metadata.dependencies.length} items`);
             allDependencies.push(...metadata.dependencies.map(dep => {
               // Handle both object format and string format
               if (typeof dep === 'string') {
@@ -236,15 +219,12 @@ export async function checkModDependencies(mod, visited = new Set()) {
     } catch (apiError) {
       // Only log as error if it's not a 404 (which can be normal)
       if (apiError.message && apiError.message.includes('404')) {
-        console.warn(`[DEBUG] Version not found for mod ${mod.id}: ${apiError.message}`);
       } else {
-        console.error(`[ERROR] Error fetching dependency info from API:`, apiError);
       }
     }
     
     // SECOND ATTEMPT: If we couldn't find dependencies through API, try to analyze installed file
     if (allDependencies.length === 0) {
-      console.log(`[DEBUG] No dependencies found from API, checking if this mod is already installed`);
       
       try {
         // Check if this mod is already installed, and ask backend to analyze its JAR file
@@ -252,13 +232,11 @@ export async function checkModDependencies(mod, visited = new Set()) {
         const installedMod = installedModsInfo.find(info => info.projectId === mod.id);
         
         if (installedMod && installedMod.fileName) {
-          console.log(`[DEBUG] Found installed mod file: ${installedMod.fileName}`);
           
           // Ask the backend to analyze the installed JAR file
           const jarDeps = await safeInvoke('extract-jar-dependencies', installedMod.filePath);
           
           if (jarDeps && jarDeps.length > 0) {
-            console.log(`[DEBUG] Found ${jarDeps.length} dependencies from JAR analysis`);
             // Resolve any slug-based IDs to actual project IDs and names
             for (const dep of jarDeps) {
               let pid = dep.id;
@@ -268,7 +246,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
                 if (projectInfo?.id) pid = projectInfo.id;
                 if (projectInfo?.title) depName = projectInfo.title;
               } catch (err) {
-                console.error(`Failed to resolve dependency slug ${dep.id}:`, err);
               }
               allDependencies.push({
                 project_id: pid,
@@ -282,12 +259,10 @@ export async function checkModDependencies(mod, visited = new Set()) {
           // Check if this is a Fabric mod based on the filename
           if (installedMod.fileName.toLowerCase().includes('fabric')) {
             isFabricMod = true;
-            console.log(`[DEBUG] Determined this is a Fabric mod from filename`);
           }
         }
         // If mod isn't installed but we have a URL, ask backend to analyze it
         else if (mod.downloadUrl) {
-          console.log(`[DEBUG] Mod not installed locally, requesting backend analysis: ${mod.downloadUrl}`);
           
           // Ask the backend to download and analyze the JAR
           const jarDeps = await safeInvoke('analyze-mod-from-url', {
@@ -296,7 +271,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
           });
           
           if (jarDeps && jarDeps.length > 0) {
-            console.log(`[DEBUG] Found ${jarDeps.length} dependencies from backend analysis`);
             // Resolve any slug-based IDs to actual project IDs and names
             for (const dep of jarDeps) {
               let pid = dep.id;
@@ -306,7 +280,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
                 if (projectInfo?.id) pid = projectInfo.id;
                 if (projectInfo?.title) depName = projectInfo.title;
               } catch (err) {
-                console.error(`Failed to resolve dependency slug ${dep.id}:`, err);
               }
               allDependencies.push({
                 project_id: pid,
@@ -318,15 +291,12 @@ export async function checkModDependencies(mod, visited = new Set()) {
           }
         }
       } catch (jarError) {
-        console.error(`[ERROR] Error analyzing mod file:`, jarError);
       }
     }
     
-    console.log(`[DEBUG] Compiled a total of ${allDependencies.length} dependencies from all sources`);
     
     // SPECIAL CASE: If this is a Fabric mod, ensure Fabric API is included (unless installing Fabric API itself)
     if (isFabricMod) {
-      console.log(`[DEBUG] This is a Fabric mod, ensuring Fabric API appears as a dependency`);
       try {
         // Fetch real Fabric API project info by slug
         const fapiInfo = await safeInvoke('get-project-info', { projectId: 'fabric-api', source: 'modrinth' });
@@ -336,7 +306,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
         if (mod.id !== fapiId) {
           const hasFapi = allDependencies.some(dep => dep.project_id === fapiId);
           if (!hasFapi) {
-            console.log(`[DEBUG] Injecting Fabric API dependency (UUID ${fapiId})`);
             allDependencies.push({
               project_id: fapiId,
               dependency_type: 'required',
@@ -345,7 +314,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
           }
         }
       } catch (err) {
-        console.warn(`[WARN] Unable to resolve Fabric API project info:`, err);
       }
     }
     
@@ -353,23 +321,19 @@ export async function checkModDependencies(mod, visited = new Set()) {
     const processedDependencies = allDependencies.map(dep => {
       // If dependency_type is missing, try to infer it from other properties
       if (!dep.dependency_type && !dep.dependencyType) {
-        console.log(`[DEBUG] Dependency missing type information:`, dep);
         
         // If there's a 'required' property that's true, mark as required
         if (dep.required === true) {
-          console.log(`[DEBUG] Marking dependency as required based on 'required' property`);
           dep.dependency_type = 'required';
         }
         
         // If there's a 'type' property with value 'required', mark as required
         else if (dep.type === 'required' || dep.type === 'depends') {
-          console.log(`[DEBUG] Marking dependency as required based on 'type' property`);
           dep.dependency_type = 'required';
         }
         
         // Default to 'required' for safety if we can't determine
         else {
-          console.log(`[DEBUG] Dependency type missing, defaulting to required`);
           dep.dependency_type = 'required';
         }
       }
@@ -389,7 +353,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
       }
     }
     
-    console.log(`[DEBUG] Found ${uniqueDeps.length} unique dependencies after deduplication`);
     
     if (uniqueDeps.length === 0) {
       return [];
@@ -401,33 +364,22 @@ export async function checkModDependencies(mod, visited = new Set()) {
         return false; // remove self dependencies
       }
       if (isMinecraftProjectId(depId)) {
-        console.log(`[DEBUG] Skipping Minecraft dependency entry (${depId})`);
         return false;
       }
       if (isSystemDependency(depId)) {
-        console.log(`[DEBUG] Skipping system dependency entry (${depId})`);
         return false;
       }
       if (isBundledFabricModule(depId)) {
-        console.log(`[DEBUG] Skipping bundled Fabric module (${depId})`);
         return false;
       }
       return true;
     });
-    console.log(`[DEBUG] Removed self-dependency entries, ${filteredDeps.length}/${uniqueDeps.length} remain`);
 
     if (filteredDeps.length === 0) {
       return [];
     }
     
-    // Update dependency logging to use filteredDeps
-    filteredDeps.forEach((dep, index) => {
-      console.log(`[DEBUG] Dependency ${index + 1}:`, {
-        projectId: dep.project_id || dep.projectId,
-        type: dep.dependency_type || dep.dependencyType,
-        version: dep.version_requirement || dep.versionRequirement
-      });
-    });
+
     
     // Resolve direct dependencies
     const directDeps = await filterAndResolveDependencies(filteredDeps);
@@ -443,7 +395,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
     }
     return allDeps;
   } catch (error) {
-    console.error(`[ERROR] Error checking dependencies for ${mod.name || 'unknown mod'}:`, error);
     return [];
   }
 }
@@ -457,14 +408,11 @@ async function filterAndResolveDependencies(dependencies) {
   const installedIds = get(installedModIds);
   const disabled = get(disabledMods); // Get the set of disabled mods
   
-  console.log(`[DEBUG] filterAndResolveDependencies called with ${dependencies.length} dependencies`);
-  console.log('[DEBUG] Currently installed mod IDs:', [...installedIds]);
   
   // Get the actual installed mod info to double-check physical installation
   const actualInstalledInfo = get(installedModInfo);
   const actualInstalledIds = new Set(actualInstalledInfo.map(info => info.projectId));
   
-  console.log('[DEBUG] Actually installed mod IDs based on physical files:', [...actualInstalledIds]);
   
   // Convert dependencies to standard format to handle different API response formats
   const normalizedDeps = dependencies
@@ -476,21 +424,17 @@ async function filterAndResolveDependencies(dependencies) {
     }))    // Skip entries that refer to Minecraft, system dependencies, or bundled Fabric modules
     .filter(dep => {
       if (isMinecraftProjectId(dep.project_id)) {
-        console.log(`[DEBUG] Skipping Minecraft dependency entry (${dep.project_id})`);
         return false;
       }
       if (isSystemDependency(dep.project_id)) {
-        console.log(`[DEBUG] Skipping system dependency entry (${dep.project_id})`);
         return false;
       }
       if (isBundledFabricModule(dep.project_id)) {
-        console.log(`[DEBUG] Skipping bundled Fabric module (${dep.project_id})`);
         return false;
       }
       return true;
     });
   
-  console.log('[DEBUG] Normalized dependencies:', normalizedDeps);
   
   // Filter for required dependencies that are not already installed and enabled
   const requiredDeps = normalizedDeps.filter(dep => {
@@ -500,23 +444,18 @@ async function filterAndResolveDependencies(dependencies) {
     const isDisabled = installedMod && disabled.has(installedMod.fileName);
     const isInstalledAndEnabled = isPhysicallyInstalled && !isDisabled;
     
-    console.log(`[DEBUG] Dependency ${dep.project_id}: required=${isRequired}, physically installed=${isPhysicallyInstalled}, disabled=${isDisabled}`);
     return isRequired && !isInstalledAndEnabled;
   });
   
-  console.log(`[DEBUG] Found ${requiredDeps.length} required dependencies that are not installed`);
   
   if (requiredDeps.length === 0) {
     return [];
   }
   
   // Debug logging
-  console.log('[DEBUG] Required dependencies for installation:', requiredDeps);
-  console.log('[DEBUG] Currently installed mods:', [...installedIds]);
   
   // Resolve dependency names and versions
   const resolvedDeps = await Promise.all(requiredDeps.map(async (dep) => {
-    console.log(`[DEBUG] Resolving dependency: ${dep.project_id}`);
     let name = dep.name;
     let versionInfo = '';
     let versionToInstall = '';
@@ -579,7 +518,6 @@ async function filterAndResolveDependencies(dependencies) {
         }
       }
     } catch (error) {
-      console.error(`Failed to fetch info for dependency ${dep.project_id}:`, error);
       // Fall back to basic info if available
       if (!name && dep.project_id) {
         name = dep.project_id;
@@ -651,7 +589,6 @@ export async function installWithDependencies(serverPath, installFn = installMod
   const actualInstalledInfo = get(installedModInfo);
   const actualInstalledIds = new Set(actualInstalledInfo.map(info => info.projectId));
   
-  console.log('[DEBUG] Actually installed mod IDs during installation:', [...actualInstalledIds]);
   
   if (!mod) {
     return false;
@@ -685,10 +622,8 @@ export async function installWithDependencies(serverPath, installFn = installMod
           const installedInfoEntry = actualInstalledInfo.find(info => info.projectId === dependency.projectId);
           // Skip if no version requirement or installed version is compatible
           if (!dependency.versionRequirement || (installedInfoEntry && checkVersionCompatibility(installedInfoEntry.versionNumber, dependency.versionRequirement))) {
-            console.log(`Dependency ${dependency.name} (${dependency.projectId}) already installed and meets requirement, skipping...`);
             skipDependency = true;
           } else {
-            console.log(`Dependency ${dependency.name} (${dependency.projectId}) installed but does not meet requirement ${dependency.versionRequirement}, upgrading...`);
           }
         }
         if (skipDependency) {
@@ -701,7 +636,6 @@ export async function installWithDependencies(serverPath, installFn = installMod
             dependency.projectId === mod.id || 
             modsToInstall.has(dependency.projectId)
           )) {
-          console.log(`Dependency ${dependency.name} (${dependency.projectId}) is the same as main mod or already queued, skipping...`);
           continue;
         }
         
@@ -712,7 +646,6 @@ export async function installWithDependencies(serverPath, installFn = installMod
         
         // Skip dependencies with generic names that might be incorrect
         if (dependency.name === 'Required Dependency' || dependency.name === 'Required_Dependency') {
-          console.log(`Skipping dependency with generic name: ${dependency.name}`);
           continue;
         }
         
@@ -766,11 +699,9 @@ export async function installWithDependencies(serverPath, installFn = installMod
               depName = `mod-${dependency.projectId.substring(0, 8)}`;
             } else {
               // Skip dependencies without a proper name or ID
-              console.log(`Skipping dependency without proper identification`);
               continue;
             }
           } catch (error) {
-            console.error(`Failed to fetch project info for dependency ${dependency.projectId}:`, error);
             // Skip if we can't get proper identification
             continue;
           }
@@ -785,7 +716,6 @@ export async function installWithDependencies(serverPath, installFn = installMod
         
         // If there's a specific version requirement, handle it
         if (dependency.versionRequirement) {
-          console.log(`Installing dependency ${depName} with version requirement: ${dependency.versionRequirement}`);
           
           // Get all versions of this mod
           const loader = get(loaderType);
@@ -830,11 +760,9 @@ export async function installWithDependencies(serverPath, installFn = installMod
             
             // If we found a compatible version, use its ID
             if (selectedVersion) {
-              console.log(`Found compatible version for ${depName}: ${selectedVersion.versionNumber} (${selectedVersion.id})`);
               depMod.selectedVersionId = selectedVersion.id;
             } else {
               // If no compatible version found, skip this dependency
-              console.log(`No compatible version found for ${depName}, skipping`);
               continue;
             }
           }
@@ -850,7 +778,6 @@ export async function installWithDependencies(serverPath, installFn = installMod
         await installFn(depMod, serverPath);
         installedCount++;
       } catch (depErr) {
-        console.error(`Error installing dependency ${dependency.name}:`, depErr);
         // Continue with other dependencies
       }
     }

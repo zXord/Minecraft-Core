@@ -31,7 +31,6 @@ function createBackupHandlers(win) {
       try {
         return await backupService.createBackup({ serverPath, type, trigger });
       } catch (err) {
-        console.error('Backup creation error:', err);
         return { error: formatErrorMessage(err) };
       }
     },
@@ -39,7 +38,6 @@ function createBackupHandlers(win) {
       try {
         return await backupService.listBackupsWithMetadata(serverPath);
       } catch (err) {
-        console.error('Backup listing error:', err);
         return { error: formatErrorMessage(err) };
       }
     },
@@ -83,7 +81,6 @@ function createBackupHandlers(win) {
         
         return result;
       } catch (err) {
-        console.error('Safe backup creation error:', err);
         
         // Show an error notification with user-friendly message
         safeSend('backup-notification', {
@@ -127,7 +124,6 @@ function createBackupHandlers(win) {
         
         return { success: true };
       } catch (err) {
-        console.error('Configure automation error:', err);
         return { success: false, error: formatErrorMessage(err) };
       }
     },
@@ -146,7 +142,6 @@ function createBackupHandlers(win) {
         };
         return { success: true, settings };
       } catch (err) {
-        console.error('Get automation settings error:', err);
         return { success: false, error: formatErrorMessage(err) };
       }
     },
@@ -177,7 +172,6 @@ function createBackupHandlers(win) {
         
         return result;
       } catch (err) {
-        console.error('Run immediate auto backup error:', err);
         safeSend('backup-notification', {
           success: false,
           message: `⚠️ Failed to create manual auto-backup: ${formatErrorMessage(err)}`
@@ -190,11 +184,9 @@ function createBackupHandlers(win) {
 
 function startAutomatedBackups(win, settings, serverPath, isNewActivation = false) {
   if (!settings.enabled || !settings.frequency) {
-    console.log('[Backup] Automated backups disabled or no frequency set');
     return;
   }
   
-  console.log(`[Backup] Starting automated backup scheduler with frequency: ${settings.frequency}ms`);
   
   // Convert frequency to milliseconds if it's a string option
   let intervalMs = settings.frequency;
@@ -204,11 +196,9 @@ function startAutomatedBackups(win, settings, serverPath, isNewActivation = fals
   
   // Set up the interval for regular backups
   if (autoBackupIntervalId) {
-    console.log('[Backup] Clearing existing backup interval');
     clearInterval(autoBackupIntervalId);
   }
   
-  console.log('[Backup] Setting up new backup interval check (every minute)');
   autoBackupIntervalId = setInterval(async () => {
     try {
       // Check if it's been at least frequency ms since last backup
@@ -286,7 +276,6 @@ function startAutomatedBackups(win, settings, serverPath, isNewActivation = fals
         return; // Not time for a backup yet
       }
       
-      console.log('[Backup] Conditions met for scheduled backup, executing now');
       await backupService.safeCreateBackup({
         serverPath,
         type: settings.type || 'world',
@@ -308,7 +297,6 @@ function startAutomatedBackups(win, settings, serverPath, isNewActivation = fals
         message: `✅ ${settings.type === 'full' ? 'Full' : 'World-only'} auto-backup created at ${now.toLocaleTimeString()}`
       });
     } catch (err) {
-      console.error('Scheduled auto-backup failed:', err);
       safeSend('backup-notification', {
         success: false, 
         message: `⚠️ Failed to create scheduled backup: ${formatErrorMessage(err)}`
@@ -320,12 +308,6 @@ function startAutomatedBackups(win, settings, serverPath, isNewActivation = fals
 function initializeAutomatedBackups(win) {
   // Load the settings and start the scheduler if enabled
   const settings = appStore.get('backupSettings');
-  console.log('[Backup] Initializing automated backups with settings:', 
-    settings ? JSON.stringify({
-      enabled: settings.enabled,
-      runOnLaunch: settings.runOnLaunch,
-      type: settings.type
-    }) : 'null');
     
   if (settings && settings.enabled) {
     // Need to retrieve the server path from app settings
@@ -333,25 +315,20 @@ function initializeAutomatedBackups(win) {
     const lastServerPath = appStore.get('lastServerPath');
     const serverPath = serverSettings.path || lastServerPath;
     
-    console.log('[Backup] Server path for automated backups:', serverPath);
     
     if (serverPath) {
-      console.log('[Backup] Initializing automated backups on app startup');
       
       // If runOnLaunch is enabled, force a backup now
       if (settings.runOnLaunch) {
-        console.log('[Backup] Run-on-launch is enabled, scheduling immediate backup');
         // Run a backup immediately (after a short delay to let app initialize)
         setTimeout(async () => {
           try {
-            console.log('[Backup] Executing app-launch backup now');
             const result = await backupService.safeCreateBackup({
               serverPath,
               type: settings.type || 'world',
               trigger: 'app-launch'
             });
             
-            console.log('[Backup] App launch backup completed:', result);
             
             // Update last run time
             settings.lastRun = new Date().toISOString();
@@ -368,7 +345,6 @@ function initializeAutomatedBackups(win) {
               message: `✅ ${settings.type === 'full' ? 'Full' : 'World-only'} app-launch backup created at ${new Date().toLocaleTimeString()}`
             });
           } catch (err) {
-            console.error('[Backup] Auto-backup on launch failed:', err);
             safeSend('backup-notification', {
               success: false, 
               message: `⚠️ Failed to create app-launch backup: ${formatErrorMessage(err)}`
@@ -380,10 +356,8 @@ function initializeAutomatedBackups(win) {
       // Always start the scheduler regardless
       startAutomatedBackups(win, settings, serverPath);
     } else {
-      console.log('[Backup] No server path available, skipping automated backup initialization');
     }
   } else {
-    console.log('[Backup] Automated backups not enabled, skipping initialization');
   }
 }
 
@@ -394,7 +368,6 @@ function initializeAutomatedBackups(win) {
  */
 function loadBackupManager(win) {
   try {
-    console.log('[Backup] Initializing backup manager');
     
     // Load backup settings
     const settings = appStore.get('backupSettings') || {
@@ -414,13 +387,11 @@ function loadBackupManager(win) {
     
     // Start automated backups if enabled
     if (settings.enabled && serverPath) {
-      console.log('[Backup] Starting automated backup scheduler');
       startAutomatedBackups(win, settings, serverPath);
     }
     
     // Check if we should run a backup on launch
     if (settings.runOnLaunch && serverPath) {
-      console.log('[Backup] Checking for world directories before running launch backup');
       
       // Get the getWorldDirs function to check valid worlds
       const getWorldDirs = require('../services/backup-service.cjs').getWorldDirs;
@@ -428,7 +399,6 @@ function loadBackupManager(win) {
       // Check if we have valid world directories
       const worldDirs = getWorldDirs(serverPath);
       if (worldDirs && worldDirs.length > 0) {
-        console.log(`[Backup] Found ${worldDirs.length} valid world directories, proceeding with backup`);
         
         // Run the backup with a slight delay to ensure app is fully loaded
         setTimeout(async () => {
@@ -454,7 +424,6 @@ function loadBackupManager(win) {
               message: `✅ Auto-backup on application launch completed at ${new Date().toLocaleTimeString()}`
             });
           } catch (err) {
-            console.error('[Backup] Auto-backup on launch failed:', err);
             
             // Send notification
             safeSend('backup-notification', {
@@ -464,7 +433,6 @@ function loadBackupManager(win) {
           }
         }, 3000);
       } else {
-        console.log('[Backup] No valid world directories found, skipping launch backup');
         safeSend('backup-notification', {
           success: false,
           message: `⚠️ Auto-backup on launch skipped: No valid world directories found`
@@ -472,7 +440,6 @@ function loadBackupManager(win) {
       }
     }
   } catch (err) {
-    console.error('[Backup] Error initializing backup manager:', err);
   }
 }
 

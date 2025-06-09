@@ -27,7 +27,6 @@ class ClientDownloadManager {
   async downloadMinecraftClient(options) {
     try {
       const { clientPath, mcVersion } = options;
-      console.log(`[ClientDownloadManager] Downloading Minecraft client ${mcVersion}...`);
 
       // Use the existing client downloader from minecraft-launcher
       const ClientDownloader = require('./minecraft-launcher/client-downloader.cjs');
@@ -41,13 +40,11 @@ class ClientDownloadManager {
       const result = await clientDownloader.downloadMinecraftClientSimple(clientPath, mcVersion);
       
       if (result.success) {
-        console.log(`[ClientDownloadManager] Successfully downloaded Minecraft ${mcVersion}`);
         return true;
       } else {
         throw new Error(result.error || 'Failed to download Minecraft client');
       }
     } catch (error) {
-      console.error(`[ClientDownloadManager] Error downloading Minecraft client:`, error);
       return false;
     }
   }
@@ -63,7 +60,6 @@ class ClientDownloadManager {
   async downloadFabricLoader(options) {
     try {
       const { clientPath, mcVersion, fabricVersion } = options;
-      console.log(`[ClientDownloadManager] Installing Fabric loader ${fabricVersion} for Minecraft ${mcVersion}...`);
 
       // Use the existing client downloader from minecraft-launcher
       const ClientDownloader = require('./minecraft-launcher/client-downloader.cjs');
@@ -77,13 +73,11 @@ class ClientDownloadManager {
       const result = await clientDownloader.installFabricLoader(clientPath, mcVersion, fabricVersion);
       
       if (result.success) {
-        console.log(`[ClientDownloadManager] Successfully installed Fabric ${fabricVersion}`);
         return true;
       } else {
         throw new Error(result.error || 'Failed to install Fabric loader');
       }
     } catch (error) {
-      console.error(`[ClientDownloadManager] Error installing Fabric loader:`, error);
       return false;
     }
   }
@@ -99,7 +93,6 @@ class ClientDownloadManager {
   async downloadRequiredMods(options) {
     try {
       const { clientPath, serverPath, requiredMods } = options;
-      console.log(`[ClientDownloadManager] Downloading ${requiredMods.length} required mods...`);
 
       const modsDir = path.join(clientPath, 'mods');
       await this.ensureDirectoryExists(modsDir);
@@ -115,19 +108,14 @@ class ClientDownloadManager {
             // Copy mod from server to client
             const modData = fs.readFileSync(serverModPath);
             fs.writeFileSync(clientModPath, modData);
-            console.log(`[ClientDownloadManager] Copied mod: ${modFileName}`);
           } else {
-            console.warn(`[ClientDownloadManager] Server mod not found: ${modFileName}`);
           }
         } catch (modError) {
-          console.error(`[ClientDownloadManager] Error copying mod ${mod}:`, modError);
         }
       }
 
-      console.log(`[ClientDownloadManager] Successfully downloaded required mods`);
       return true;
     } catch (error) {
-      console.error(`[ClientDownloadManager] Error downloading required mods:`, error);
       return false;
     }
   }
@@ -155,13 +143,11 @@ class ClientDownloadManager {
     // Clean up old versions before installing new ones
     if (mcVersion && mcVersion !== actualOldMinecraftVersion) {
       if (actualOldMinecraftVersion) {
-        console.log(`[ClientDownloadManager] Cleaning up old Minecraft version: ${actualOldMinecraftVersion}`);
         await this.cleanupOldVersion(clientPath, actualOldMinecraftVersion, current.fabricVersion);
       }
       
       // Check client-side mod compatibility with new Minecraft version
       if (actualOldMinecraftVersion) { // Ensure there was an old version to compare against
-        console.log(`[ClientDownloadManager] Invoking client-side mod compatibility check. New MC: ${mcVersion}, Old MC: ${actualOldMinecraftVersion}`);
         try {
           const serverManagedFileNames = (allClientMods || []) // Use allClientMods
             .map(mod => (typeof mod === 'string' ? mod : mod.fileName || mod.name))
@@ -176,7 +162,6 @@ class ClientDownloadManager {
           });
           // The 'client-mod-compatibility-report' event is sent by the invoked IPC handler.
         } catch (ipcError) {
-          console.error(`[ClientDownloadManager] Error invoking client mod compatibility check via IPC:`, ipcError);
           // Don't fail the entire update process if compatibility check fails
         }
       }
@@ -187,7 +172,6 @@ class ClientDownloadManager {
 
     if (fabricVersion && fabricVersion !== current.fabricVersion) {
       if (current.fabricVersion && current.minecraftVersion) {
-        console.log(`[ClientDownloadManager] Cleaning up old Fabric version: ${current.fabricVersion}`);
         await this.cleanupOldFabricProfile(clientPath, current.minecraftVersion, current.fabricVersion);
       }
       await this.downloadFabricLoader({ clientPath, mcVersion, fabricVersion });
@@ -275,7 +259,6 @@ class ClientDownloadManager {
    */
   async cleanupOldVersion(clientPath, oldVersion, oldFabricVersion) {
     try {
-      console.log(`[ClientDownloadManager] Cleaning up old Minecraft version: ${oldVersion}`);
       
       const versionsDir = path.join(clientPath, 'versions');
       if (!fs.existsSync(versionsDir)) return;
@@ -284,7 +267,6 @@ class ClientDownloadManager {
       const oldVersionDir = path.join(versionsDir, oldVersion);
       if (fs.existsSync(oldVersionDir)) {
         fs.rmSync(oldVersionDir, { recursive: true, force: true });
-        console.log(`[ClientDownloadManager] Removed old vanilla version directory: ${oldVersion}`);
       }
 
       // Remove old Fabric profile if it existed
@@ -293,7 +275,6 @@ class ClientDownloadManager {
         const oldFabricDir = path.join(versionsDir, oldFabricProfile);
         if (fs.existsSync(oldFabricDir)) {
           fs.rmSync(oldFabricDir, { recursive: true, force: true });
-          console.log(`[ClientDownloadManager] Removed old Fabric profile directory: ${oldFabricProfile}`);
         }
       }
 
@@ -310,16 +291,13 @@ class ClientDownloadManager {
           for (const libPath of versionSpecificPaths) {
             if (fs.existsSync(libPath)) {
               fs.rmSync(libPath, { recursive: true, force: true });
-              console.log(`[ClientDownloadManager] Cleaned up old library: ${path.relative(librariesDir, libPath)}`);
             }
           }
         } catch (libCleanupError) {
-          console.warn(`[ClientDownloadManager] Could not clean up some libraries: ${libCleanupError.message}`);
         }
       }
 
     } catch (error) {
-      console.error(`[ClientDownloadManager] Error cleaning up old version ${oldVersion}:`, error);
     }
   }
 
@@ -331,7 +309,6 @@ class ClientDownloadManager {
    */
   async cleanupOldFabricProfile(clientPath, mcVersion, oldFabricVersion) {
     try {
-      console.log(`[ClientDownloadManager] Cleaning up old Fabric profile: ${oldFabricVersion}`);
       
       const versionsDir = path.join(clientPath, 'versions');
       if (!fs.existsSync(versionsDir)) return;
@@ -341,7 +318,6 @@ class ClientDownloadManager {
       const oldFabricDir = path.join(versionsDir, oldFabricProfile);
       if (fs.existsSync(oldFabricDir)) {
         fs.rmSync(oldFabricDir, { recursive: true, force: true });
-        console.log(`[ClientDownloadManager] Removed old Fabric profile: ${oldFabricProfile}`);
       }
 
       // Clean up old Fabric-specific libraries
@@ -351,15 +327,12 @@ class ClientDownloadManager {
           const fabricLibPath = path.join(librariesDir, 'net', 'fabricmc', 'fabric-loader', oldFabricVersion);
           if (fs.existsSync(fabricLibPath)) {
             fs.rmSync(fabricLibPath, { recursive: true, force: true });
-            console.log(`[ClientDownloadManager] Cleaned up old Fabric libraries: ${oldFabricVersion}`);
           }
         } catch (libCleanupError) {
-          console.warn(`[ClientDownloadManager] Could not clean up Fabric libraries: ${libCleanupError.message}`);
         }
       }
 
     } catch (error) {
-      console.error(`[ClientDownloadManager] Error cleaning up old Fabric profile ${oldFabricVersion}:`, error);
     }
   }
   /**
@@ -369,11 +342,9 @@ class ClientDownloadManager {
    */
   async cleanupObsoleteMods(clientPath, allClientMods = []) {
     try {
-      console.log(`[ClientDownloadManager] Starting smart mod cleanup...`);
       
       const modsDir = path.join(clientPath, 'mods');
       if (!fs.existsSync(modsDir)) {
-        console.log(`[ClientDownloadManager] Mods directory doesn't exist, nothing to clean up`);
         return;
       }
 
@@ -382,7 +353,6 @@ class ClientDownloadManager {
       );
 
       if (existingMods.length === 0) {
-        console.log(`[ClientDownloadManager] No existing mods found`);
         return;
       }
 
@@ -432,16 +402,12 @@ class ClientDownloadManager {
         try {
           const modPath = path.join(modsDir, obsoleteMod);
           fs.unlinkSync(modPath);
-          console.log(`[ClientDownloadManager] Removed obsolete mod: ${obsoleteMod}`);
         } catch (error) {
-          console.warn(`[ClientDownloadManager] Could not remove obsolete mod ${obsoleteMod}: ${error.message}`);
         }
       }
 
       // Log manual mods that were preserved
       if (manualMods.length > 0) {
-        console.log(`[ClientDownloadManager] Preserved ${manualMods.length} manual mods:`);
-        manualMods.forEach(mod => console.log(`  - ${mod}`));
         
         // Save manual mods list for UI to show warnings
         const manualModsConfig = path.join(clientPath, 'manual-mods.json');
@@ -452,10 +418,8 @@ class ClientDownloadManager {
         }, null, 2));
       }
 
-      console.log(`[ClientDownloadManager] Smart mod cleanup completed. Removed ${obsoleteMods.length} obsolete mods, preserved ${manualMods.length} manual mods`);
 
     } catch (error) {
-      console.error(`[ClientDownloadManager] Error during smart mod cleanup:`, error);
     }
   }
 
@@ -509,12 +473,10 @@ class ClientDownloadManager {
       // it's likely part of a server download. If it's older, more likely manual.
       const ageMinutes = (Date.now() - modStat.mtime.getTime()) / (1000 * 60);
       if (ageMinutes > 10) { // More than 10 minutes old
-        console.log(`[ClientDownloadManager] Mod ${fileName} is ${Math.round(ageMinutes)} minutes old, likely manual`);
         return true;
       }
       
       // For unknown mods that are recent, treat as potentially server-managed
-      console.log(`[ClientDownloadManager] Mod ${fileName} is recent (${Math.round(ageMinutes)} min), treating as server-managed`);
       return false;
         } catch (error) {
       // If we can't analyze the mod, check file age as fallback
@@ -523,12 +485,10 @@ class ClientDownloadManager {
         const modStat = fs.statSync(modPath);
         const ageMinutes = (Date.now() - modStat.mtime.getTime()) / (1000 * 60);
         
-        console.warn(`[ClientDownloadManager] Could not analyze mod ${fileName}, using age-based detection: ${Math.round(ageMinutes)} min old`);
         
         // If file is older than 10 minutes, likely manual
         return ageMinutes > 10;
       } catch (statError) {
-        console.warn(`[ClientDownloadManager] Could not analyze mod ${modPath}, treating as manual: ${error.message}`);
         return true; // Default to manual if we can't determine anything
       }
     }
@@ -594,7 +554,6 @@ class ClientDownloadManager {
    */
   async checkClientModCompatibility(clientPath, newMinecraftVersion) {
     try {
-      console.log(`[ClientDownloadManager] Checking client mod compatibility for Minecraft ${newMinecraftVersion}`);
       
       const modsDir = path.join(clientPath, 'mods');
       if (!fs.existsSync(modsDir)) {
@@ -655,7 +614,6 @@ class ClientDownloadManager {
           });
           
         } catch (modError) {
-          console.error(`[ClientDownloadManager] Error checking compatibility for ${fileName}:`, modError);
           compatibilityResults.push({
             fileName,
             name: fileName,
@@ -678,20 +636,10 @@ class ClientDownloadManager {
       
       report.hasIncompatible = report.incompatible.length > 0;
       report.hasUpdatable = report.needsUpdate.length > 0;
-      
-      console.log(`[ClientDownloadManager] Compatibility check complete:`, {
-        total: compatibilityResults.length,
-        compatible: report.compatible.length,
-        incompatible: report.incompatible.length,
-        needsUpdate: report.needsUpdate.length,
-        unknown: report.unknown.length,
-        errors: report.errors.length
-      });
-      
+
       return report;
       
     } catch (error) {
-      console.error(`[ClientDownloadManager] Error checking client mod compatibility:`, error);
       throw new Error(`Failed to check client mod compatibility: ${error.message}`);
     }
   }

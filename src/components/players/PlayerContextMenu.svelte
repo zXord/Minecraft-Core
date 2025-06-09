@@ -75,14 +75,11 @@
             // The result could be either { path: '...' } or just the path string
             serverPath = pathResult && typeof pathResult === 'object' ? pathResult.path : pathResult;
           } catch (err) {
-            console.error('Error getting server path:', err);
           }
         }
         
-        console.log('Using server path:', serverPath);
         
         if (!serverPath) {
-          console.error('Server path not found');
           return;
         }
         
@@ -99,7 +96,6 @@
               lastBannedPlayer: player
             }));
             
-            console.log(`Banning IP ${mockIp} for player ${player}`);
             
             // Create an object with both IP and player name
             const ipEntry = {
@@ -118,7 +114,6 @@
             
             // Reload the list to show all banned IPs
             const updatedList = await window.electron.invoke('read-players', listName, serverPath) || [];
-            console.log('Updated banned IP list:', updatedList);
             
             // Update the UI
             playerState.update(state => {
@@ -138,7 +133,6 @@
               await window.electron.invoke('send-command', { command: `ban-ip ${player}` });
             }
           } catch (err) {
-            console.error('Error banning player IP:', err);
           }
           
           return; // Exit early since we've handled the entire action
@@ -153,9 +147,7 @@
               serverPath,
               player
             );
-            console.log(`Player list update result for ${action}:`, actionResult || []);
           } catch (err) {
-            console.error('Error updating player list:', err);
             actionResult = [];
           }
         }
@@ -195,7 +187,6 @@
           });
         }
       } catch (err) {
-        console.error('Error performing player action:', err);
       }
     }
   }

@@ -222,14 +222,12 @@ eventBus.on('request-server-start', ({ targetPath, port, maxRam }) => {
 function startMinecraftServer(targetPath, port, maxRam) {
   if (serverProcess) return false;
   
-  console.log(`Starting server at ${targetPath} on port ${port} with ${maxRam}GB RAM`);
   
   serverStartMs = Date.now();
   serverMaxRam = maxRam;
 
   const launchJar = path.join(targetPath, 'fabric-server-launch.jar');
   if (!fs.existsSync(launchJar)) {
-    console.log('❌ fabric-server-launch.jar not found');
     return false;
   }
 
@@ -281,7 +279,6 @@ function startMinecraftServer(targetPath, port, maxRam) {
         const leaveMatch = text.match(/(\w+) left the game/);
         if (leaveMatch) {
           const playerName = leaveMatch[1];
-          console.log(`Player leave detected: ${playerName}`);
           
           // Immediately remove the player from our tracking
           if (playersInfo.names.includes(playerName)) {
@@ -338,13 +335,11 @@ function startMinecraftServer(targetPath, port, maxRam) {
     safeSend('server-status', 'running');
     
     serverProcess.on('exit', (code, signal) => {
-      console.log(`Server process exited with code ${code}${signal ? ` and signal ${signal}` : ''}`);
       
       const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
       
       const serverInfo = serverProcess ? { ...serverProcess.serverInfo } : null;
       
-      console.log(`[INFO] Server process exited with code ${code}${signal ? ` and signal ${signal}` : ''} (${isNormalExit ? 'normal exit' : 'crash detected'})`);
       
       if (!isNormalExit) {
         const restartInfo = {
@@ -360,11 +355,6 @@ function startMinecraftServer(targetPath, port, maxRam) {
           signal: signal
         };
         
-        console.log("Creating restart info with essential properties:", {
-          targetPath: restartInfo.serverInfo.targetPath,
-          port: restartInfo.serverInfo.port,
-          maxRam: restartInfo.serverInfo.maxRam
-        });
         
         eventBus.emit('server-crashed', restartInfo);
       } else {
@@ -404,13 +394,11 @@ function startMinecraftServer(targetPath, port, maxRam) {
     setTimeout(() => {
       if (serverProcess) {
         safeSend('server-status', 'running');
-        console.log('Sent delayed server running status to ensure UI update');
       }
     }, 300);
     
     return true;
   } catch (err) {
-    console.log(`Error starting server: ${err.message}`);
     return false;
   }
 }
@@ -423,7 +411,6 @@ function startMinecraftServer(targetPath, port, maxRam) {
 function stopMinecraftServer() {
   if (!serverProcess) return false;
   
-  console.log('Stopping Minecraft server gracefully');
   serverProcess.stdin.write('stop\n');
 
   if (listInterval) clearInterval(listInterval);
@@ -451,7 +438,6 @@ function stopMinecraftServer() {
   // Send a second status update after a small delay to ensure the UI updates
   setTimeout(() => {
     safeSend('server-status', 'stopped');
-    console.log('Sent delayed server stopped status to ensure UI update');
   }, 300);
   
   return true;
@@ -466,7 +452,6 @@ function killMinecraftServer() {
   if (!serverProcess) return false;
   const pid = serverProcess.pid;
   
-  console.log('Force killing Minecraft server process');
 
   if (process.platform === 'win32') {
     spawn('taskkill', ['/PID', pid.toString(), '/F', '/T']);
@@ -508,7 +493,6 @@ function killMinecraftServer() {
   // Send a second status update after a small delay to ensure the UI updates
   setTimeout(() => {
     safeSend('server-status', 'stopped');
-    console.log('Sent delayed server stopped status after kill to ensure UI update');
   }, 300);
   
   return true;

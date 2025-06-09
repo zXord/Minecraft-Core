@@ -89,7 +89,6 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   try {
     fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
   } catch (err) {
-    console.error('Failed to write backup metadata:', err);
     // Continue with backup even if metadata fails
   }
 
@@ -123,11 +122,9 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
         } catch (err) {
           backupError = err;
           attempts++;
-          console.error(`Backup attempt ${attempts} failed:`, err);
           
           if ((err.code === 'EBUSY' || err.code === 'DIRECTORYFUNCTIONINVALIDDATA') && attempts < maxAttempts) {
             const waitTime = 2000 * attempts; // Progressively longer wait
-            console.log(`Error on attempt ${attempts}, waiting ${waitTime}ms before retry...`);
             await sleep(waitTime);
             continue;
           }
@@ -154,7 +151,6 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
         try {
           fs.unlinkSync(zipPath);
         } catch (deleteErr) {
-          console.error('Failed to delete incomplete backup:', deleteErr);
           // Continue with error handling even if delete fails
         }
       }
@@ -176,11 +172,9 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
         } catch (err) {
           backupError = err;
           attempts++;
-          console.error(`Backup attempt ${attempts} failed:`, err);
           
           if ((err.code === 'EBUSY' || err.code === 'DIRECTORYFUNCTIONINVALIDDATA') && attempts < maxAttempts) {
             const waitTime = 1000 * attempts;
-            console.log(`Error on attempt ${attempts}, waiting ${waitTime}ms before retry...`);
             await sleep(waitTime);
             continue;
           }
@@ -194,13 +188,11 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
           try {
             fs.unlinkSync(zipPath);
           } catch (deleteErr) {
-            console.error('Failed to delete incomplete backup:', deleteErr);
           }
         }
         throw backupError;
       }
     } catch (err) {
-      console.error('Error creating backup:', err);
       throw err;
     }
   }
@@ -212,14 +204,12 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     
     // Verify the zip isn't empty (should be at least a few bytes)
     if (stats.size < 100) {
-      console.warn('Warning: Created backup is suspiciously small:', stats.size, 'bytes');
     }
     
     // Write updated metadata with the correct size
     try {
       fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
     } catch (err) {
-      console.error('Failed to update backup metadata with size:', err);
       // Continue anyway since the backup file exists
     }
     

@@ -20,26 +20,17 @@ try {
   if (typeof global !== 'undefined') {
     global.fetch = async (url, opts) => {
       if (url && url.includes && url.includes('sessionserver.mojang.com')) {
-        console.log('[SESSION DEBUG ►] Request to:', url);
         if (opts && opts.body) {
           try {
             const body = typeof opts.body === 'string' ? JSON.parse(opts.body) : opts.body;
-            console.log('[SESSION DEBUG ►] Request body:', {
-              accessToken: body.accessToken ? `${body.accessToken.substring(0, 10)}...` : 'missing',
-              selectedProfile: body.selectedProfile || 'missing',
-              serverId: body.serverId || 'missing'
-            });
           } catch (parseError) {
-            console.log('[SESSION DEBUG ►] Request body (raw):', opts.body);
           }
         }
         
         const response = await originalFetch(url, opts);
-        console.log('[SESSION DEBUG ◄] Response:', response.status, response.statusText);
         
         if (!response.ok) {
           const errorText = await response.clone().text();
-          console.error('[SESSION DEBUG ◄] Error response:', errorText);
         }
         
         return response;
@@ -49,27 +40,23 @@ try {
     };
   }
 } catch (debugError) {
-  console.warn('[MinecraftLauncher] Could not set up session debugging:', debugError.message);
 }
 
 // Console hiding removed - fixing the root cause instead (using javaw.exe)
 
 // Add global error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
-  console.warn('[MinecraftLauncher] Unhandled Promise Rejection:', reason);
   
   // Handle common authentication network errors gracefully
   if (reason && typeof reason === 'object' && reason.message) {
     if (reason.message.includes('ENOTFOUND') ||
         reason.message.includes('authserver.mojang.com') ||
         reason.message.includes('api.minecraftservices.com')) {
-      console.log('[MinecraftLauncher] Authentication network error handled gracefully');
       return; // Don't crash the app for authentication network issues
     }
   }
   
   // For other critical errors, we might want to log them differently
-  console.error('[MinecraftLauncher] Unhandled rejection details:', promise);
 });
 
 class MinecraftLauncher extends EventEmitter {
@@ -99,7 +86,6 @@ class MinecraftLauncher extends EventEmitter {
       try {
         await this.handleServerVersionChanged(info);
       } catch (err) {
-        console.error('[MinecraftLauncher] Error handling server version change:', err.message);
       }
     });
   }
@@ -131,10 +117,8 @@ class MinecraftLauncher extends EventEmitter {
   
   // Reset launcher state - used when launcher gets stuck
   resetLauncherState() {
-    console.log(`[MinecraftLauncher] Resetting launcher state...`);
     this.isLaunching = false;
     this.client = null;
-    console.log(`[MinecraftLauncher] Launcher state reset complete`);
   }
 
   // Check if authentication is valid and refresh if needed
@@ -152,7 +136,6 @@ class MinecraftLauncher extends EventEmitter {
       const { promisify } = require('util');
       const execAsync = promisify(exec);
       
-      console.log('[MinecraftLauncher] Checking for Java installation...');
       
       // Try different Java commands - prioritize javaw on Windows to avoid console
       const javaCommands = process.platform === 'win32' ? [
@@ -169,22 +152,17 @@ class MinecraftLauncher extends EventEmitter {
       
       for (const javaCommand of validCommands) {
         try {
-          console.log(`[MinecraftLauncher] Trying Java command: ${javaCommand}`);
           const { stdout, stderr } = await execAsync(`"${javaCommand}" -version`, { timeout: 5000 });
           const output = stdout + stderr; // Java version info often goes to stderr
           
           if (output.includes('version')) {
-            console.log(`[MinecraftLauncher] Java found with command: ${javaCommand}`);
-            console.log(`[MinecraftLauncher] Java version output: ${output.split('\n')[0]}`);
             
             // Check Java architecture (32-bit vs 64-bit)
             let is64Bit = false;
             try {
               const { stdout: archOutput } = await execAsync(`"${javaCommand}" -d64 -version`, { timeout: 3000 });
               is64Bit = true;
-              console.log(`[MinecraftLauncher] Java is 64-bit`);
             } catch (archError) {
-              console.log(`[MinecraftLauncher] Java appears to be 32-bit (cannot use -d64 flag)`);
               is64Bit = false;
             }
             
@@ -206,7 +184,6 @@ class MinecraftLauncher extends EventEmitter {
                   architecture: is64Bit ? '64-bit' : '32-bit'
                 };
               } else {
-                console.warn(`[MinecraftLauncher] Java version ${versionMatch[0]} is too old, need Java 8 or higher`);
               }
             } else {
               return { 
@@ -219,7 +196,6 @@ class MinecraftLauncher extends EventEmitter {
             }
           }
         } catch (cmdError) {
-          console.log(`[MinecraftLauncher] Java command '${javaCommand}' failed: ${cmdError.message}`);
         }
       }
       
@@ -230,7 +206,6 @@ class MinecraftLauncher extends EventEmitter {
       };
       
     } catch (error) {
-      console.error('[MinecraftLauncher] Error checking Java installation:', error);
       return { 
         success: false, 
         error: `Failed to check Java installation: ${error.message}`
@@ -280,18 +255,12 @@ class MinecraftLauncher extends EventEmitter {
       maxMemory = null // Accept memory setting from client
     } = options;
     
-    console.log(`[MinecraftLauncher] 🚀 LAUNCH ATTEMPT STARTED FOR ${minecraftVersion}`);
-    console.log(`[MinecraftLauncher] 📍 Client Path: ${clientPath}`);
     
     // CRITICAL: Check vanilla JAR immediately for LogUtils issue
     const immediateVanillaJar = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
-    console.log(`[MinecraftLauncher] 🔍 IMMEDIATE VANILLA JAR CHECK:`);
-    console.log(`[MinecraftLauncher] - Expected path: ${immediateVanillaJar}`);
-    console.log(`[MinecraftLauncher] - Exists: ${fs.existsSync(immediateVanillaJar)}`);
     
     if (fs.existsSync(immediateVanillaJar)) {
       const immediateJarStats = fs.statSync(immediateVanillaJar);
-      console.log(`[MinecraftLauncher] - Size: ${immediateJarStats.size} bytes (${(immediateJarStats.size / 1024 / 1024).toFixed(1)} MB)`);
       
       // Check for LogUtils class
       try {
@@ -300,33 +269,18 @@ class MinecraftLauncher extends EventEmitter {
         const entries = zip.getEntries();
         const logUtilsEntry = entries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
         
-        console.log(`[MinecraftLauncher] 🔍 LOGUTILS CHECK:`);
-        console.log(`[MinecraftLauncher] - Total JAR entries: ${entries.length}`);
-        console.log(`[MinecraftLauncher] - LogUtils.class present: ${!!logUtilsEntry}`);
         
         if (!logUtilsEntry) {
-          console.error(`[MinecraftLauncher] ❌ CRITICAL: LogUtils.class is MISSING from vanilla JAR!`);
-          console.error(`[MinecraftLauncher] This explains the ClassNotFoundException for com.mojang.logging.LogUtils`);
-          console.error(`[MinecraftLauncher] - LogUtils.class present: ${logUtilsPresent}`);
-          console.error(`[MinecraftLauncher] - Classes in com/mojang/logging/: ${loggingClasses.length}`);
           
-          console.log(`[MinecraftLauncher] 🔧 PHASE 1 REPAIR: Implementing automatic vanilla JAR re-download...`);
-          console.log(`[MinecraftLauncher] 🔧 Official JAR URL: ${profile.downloads.client.url}`);
-          console.log(`[MinecraftLauncher] 🔧 Expected SHA1: ${profile.downloads.client.sha1}`);
-          console.log(`[MinecraftLauncher] 🔧 Expected size: ${profile.downloads.client.size} bytes`);
           
           // Remove the old JAR
-          console.log(`[MinecraftLauncher] 🔧 Removing corrupted JAR: ${vanillaJar}`);
           fs.unlinkSync(vanillaJar);
           
           // Re-download the official JAR
-          console.log(`[MinecraftLauncher] 🔧 Re-downloading official vanilla JAR...`);
           await this.downloadFile(profile.downloads.client.url, vanillaJar);
           
           // Verify again
-          console.log(`[MinecraftLauncher] 🔧 Verifying downloaded JAR...`);
           const newJarStats = fs.statSync(vanillaJar);
-          console.log(`[MinecraftLauncher] 🔧 New JAR size: ${newJarStats.size} bytes`);
           
           // Check LogUtils again
           const newZip = new AdmZip(vanillaJar);
@@ -334,27 +288,18 @@ class MinecraftLauncher extends EventEmitter {
           const newLogUtilsEntry = newEntries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
           
           if (!newLogUtilsEntry) {
-            console.log(`[MinecraftLauncher] ❌ PHASE 1 UNEXPECTED: Even the official JAR doesn't contain LogUtils.class!`);
-            console.log(`[MinecraftLauncher] 💡 RECOMMENDATION: LogUtils was removed from Minecraft 1.21.5`);
-            console.log(`[MinecraftLauncher] 💡 SOLUTION: Try using Minecraft 1.21.3 instead, which still contains LogUtils`);
-            console.log(`[MinecraftLauncher] 🔍 Continuing with launch for further investigation...`);
           } else {
-            console.log(`[MinecraftLauncher] ✅ PHASE 1 SUCCESS: LogUtils.class found after re-download!`);
           }
           
         } else {
-          console.log(`[MinecraftLauncher] ✅ LogUtils.class found in vanilla JAR`);
         }
       } catch (zipError) {
-        console.error(`[MinecraftLauncher] ❌ Failed to check JAR contents:`, zipError.message);
       }
     } else {
-      console.error(`[MinecraftLauncher] ❌ CRITICAL: Vanilla JAR completely missing!`);
     }
     
     // PHASE 4 ENHANCEMENT: Continue with actual Minecraft launch
     try {
-      console.log(`[MinecraftLauncher] 🚀 Proceeding with Minecraft launch...`);
       
       // Determine launch version and setup
       const needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
@@ -369,16 +314,12 @@ class MinecraftLauncher extends EventEmitter {
             const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
             const loaders = await response.json();
             actualFabricVersion = loaders[0].version;
-            console.log(`[MinecraftLauncher] Using latest Fabric loader: ${actualFabricVersion}`);
           } catch (error) {
-            console.warn(`[MinecraftLauncher] Could not fetch latest Fabric version, using 0.16.14:`, error.message);
             actualFabricVersion = '0.16.14';
           }
         }
         launchVersion = `fabric-loader-${actualFabricVersion}-${minecraftVersion}`;
-        console.log(`[MinecraftLauncher] Launching with Fabric profile: ${launchVersion}`);
       } else {
-        console.log(`[MinecraftLauncher] Launching vanilla Minecraft: ${launchVersion}`);
       }
       
       // Get Java path
@@ -390,7 +331,6 @@ class MinecraftLauncher extends EventEmitter {
       }
       
       const javaPath = javaResult.javaPath;
-      console.log(`[MinecraftLauncher] Using Java: ${javaPath}`);
       
       // Prepare launch arguments
       const versionsDir = path.join(clientPath, 'versions');
@@ -410,7 +350,6 @@ class MinecraftLauncher extends EventEmitter {
       const vanillaJarPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
       if (fs.existsSync(vanillaJarPath)) {
         classpath.push(vanillaJarPath);
-        console.log(`[MinecraftLauncher] ✅ Added vanilla JAR to classpath`);
       } else {
         throw new Error(`Vanilla JAR not found: ${vanillaJarPath}`);
       }
@@ -445,7 +384,6 @@ class MinecraftLauncher extends EventEmitter {
       // Process libraries with deduplication
       const libraryMap = new Map();
       
-      console.log(`[MinecraftLauncher] Processing ${launchJson.libraries.length} libraries...`);
       
       for (const lib of launchJson.libraries) {
         if (!lib.name) continue;
@@ -462,16 +400,13 @@ class MinecraftLauncher extends EventEmitter {
             if (libraryMap.has(normalizedName)) {
               const existing = libraryMap.get(normalizedName);
               if (priority > existing.priority) {
-                console.log(`[MinecraftLauncher] 🔧 Replacing ${existing.name} with ${lib.name} (higher priority)`);
                 libraryMap.set(normalizedName, { name: lib.name, path: libPath, priority });
               } else {
-                console.log(`[MinecraftLauncher] 🔧 Skipping ${lib.name} (lower priority than ${existing.name})`);
               }
             } else {
               libraryMap.set(normalizedName, { name: lib.name, path: libPath, priority });
             }
           } else {
-            console.warn(`[MinecraftLauncher] Library not found: ${libPath}`);
           }
         }
         
@@ -487,14 +422,12 @@ class MinecraftLauncher extends EventEmitter {
               
               if (fs.existsSync(nativeLibPath)) {
                 const nativeLibName = `${lib.name}:${classifier}`;
-                console.log(`[MinecraftLauncher] 🔧 Found native library: ${nativeLibName}`);
                 libraryMap.set(nativeLibName, { 
                   name: nativeLibName, 
                   path: nativeLibPath, 
                   priority: 100 // High priority for natives
                 });
               } else {
-                console.warn(`[MinecraftLauncher] Native library not found: ${nativeLibPath}`);
               }
             }
           }
@@ -506,8 +439,6 @@ class MinecraftLauncher extends EventEmitter {
         classpath.push(libInfo.path);
       }
       
-      console.log(`[MinecraftLauncher] Built classpath with ${classpath.length} entries`);
-      console.log(`[MinecraftLauncher] 🔧 Deduplicated ${launchJson.libraries.length - libraryMap.size} duplicate libraries`);
       
       // Setup authentication
       if (!this.authHandler.authData) {
@@ -548,7 +479,6 @@ class MinecraftLauncher extends EventEmitter {
       if (serverIp && serverPort) {
         gameArgs.push('--server', serverIp);
         gameArgs.push('--port', serverPort.toString());
-        console.log(`[MinecraftLauncher] Added server connection: ${serverIp}:${serverPort}`);
       }
       
       // Build JVM arguments
@@ -577,23 +507,18 @@ class MinecraftLauncher extends EventEmitter {
       
       // Add native library paths - CRITICAL for LWJGL
       const nativesDir = path.join(clientPath, 'versions', launchVersion, 'natives');
-      console.log(`[MinecraftLauncher] 🔧 Natives directory: ${nativesDir}`);
-      console.log(`[MinecraftLauncher] 🔧 Natives directory exists: ${fs.existsSync(nativesDir)}`);
       
       // Ensure natives directory exists and extract natives if needed
       if (!fs.existsSync(nativesDir)) {
         fs.mkdirSync(nativesDir, { recursive: true });
-        console.log(`[MinecraftLauncher] 🔧 Created natives directory`);
       }
       
       // Extract native libraries from JARs
       let extractedNatives = 0;
-      console.log(`[MinecraftLauncher] 🔧 Extracting native libraries...`);
       
       for (const [, libInfo] of libraryMap) {
         // Look for native JAR files (containing DLL/SO files)
         if (libInfo.name.includes('-natives-') && libInfo.path.endsWith('.jar')) {
-          console.log(`[MinecraftLauncher] 🔧 Processing native JAR: ${libInfo.name}`);
           try {
             const AdmZip = require('adm-zip');
             const zip = new AdmZip(libInfo.path);
@@ -605,27 +530,21 @@ class MinecraftLauncher extends EventEmitter {
                 if (!fs.existsSync(nativePath)) {
                   fs.writeFileSync(nativePath, entry.getData());
                   extractedNatives++;
-                  console.log(`[MinecraftLauncher] 🔧   Extracted: ${path.basename(entry.entryName)}`);
                 }
               }
             }
           } catch (extractError) {
-            console.warn(`[MinecraftLauncher] ⚠️ Failed to extract natives from ${libInfo.path}:`, extractError.message);
           }
         }
       }
       
-      console.log(`[MinecraftLauncher] 🔧 Extracted ${extractedNatives} native libraries`);
       
       // List files in natives directory for debugging
       if (fs.existsSync(nativesDir)) {
         const nativeFiles = fs.readdirSync(nativesDir);
-        console.log(`[MinecraftLauncher] 🔧 Native files available: ${nativeFiles.length}`);
         nativeFiles.slice(0, 10).forEach(file => {
-          console.log(`[MinecraftLauncher] 🔧   - ${file}`);
         });
         if (nativeFiles.length > 10) {
-          console.log(`[MinecraftLauncher] 🔧   ... and ${nativeFiles.length - 10} more`);
         }
       }
       
@@ -642,7 +561,6 @@ class MinecraftLauncher extends EventEmitter {
       );
       
       // EMERGENCY WORKAROUND: Manually extract LWJGL natives from vanilla client
-      console.log(`[MinecraftLauncher] 🔧 EMERGENCY: Manually extracting LWJGL natives from vanilla...`);
       try {
         const vanillaVersionDir = path.join(clientPath, 'versions', minecraftVersion);
         const vanillaLibrariesDir = path.join(clientPath, 'libraries');
@@ -660,7 +578,6 @@ class MinecraftLauncher extends EventEmitter {
         for (const nativePath of lwjglNativePaths) {
           const fullNativePath = path.join(vanillaLibrariesDir, nativePath);
           if (fs.existsSync(fullNativePath)) {
-            console.log(`[MinecraftLauncher] 🔧 Found LWJGL native: ${nativePath}`);
             try {
               const AdmZip = require('adm-zip');
               const zip = new AdmZip(fullNativePath);
@@ -672,24 +589,19 @@ class MinecraftLauncher extends EventEmitter {
                   if (!fs.existsSync(dllPath)) {
                     fs.writeFileSync(dllPath, entry.getData());
                     manuallyExtracted++;
-                    console.log(`[MinecraftLauncher] 🔧 Manually extracted: ${path.basename(entry.entryName)}`);
                   }
                 }
               }
             } catch (extractError) {
-              console.warn(`[MinecraftLauncher] ⚠️ Failed to extract ${nativePath}:`, extractError.message);
             }
           }
         }
         
         if (manuallyExtracted > 0) {
-          console.log(`[MinecraftLauncher] 🔧 EMERGENCY SUCCESS: Manually extracted ${manuallyExtracted} LWJGL natives`);
         } else {
-          console.warn(`[MinecraftLauncher] ⚠️ EMERGENCY FAILED: Could not find any LWJGL natives to extract`);
         }
         
       } catch (emergencyError) {
-        console.error(`[MinecraftLauncher] ❌ Emergency extraction failed:`, emergencyError.message);
       }
       
       // Add classpath
@@ -715,9 +627,6 @@ class MinecraftLauncher extends EventEmitter {
         ...gameArgs
       ];
       
-      console.log(`[MinecraftLauncher] Launching Minecraft with ${allArgs.length} arguments`);
-      console.log(`[MinecraftLauncher] Main class: ${launchJson.mainClass}`);
-      console.log(`[MinecraftLauncher] Memory: ${maxMemory || 4096}MB`);
       
       // Launch Minecraft
       const { spawn } = require('child_process');
@@ -735,38 +644,30 @@ class MinecraftLauncher extends EventEmitter {
       // Handle process output
       child.stdout.on('data', (data) => {
         const output = data.toString();
-        console.log(`[Minecraft] ${output.trim()}`);
         
         // Check for successful launch indicators
         if (output.includes('Setting user:') || output.includes('Environment: authHost')) {
-          console.log(`[MinecraftLauncher] ✅ Minecraft authentication successful`);
         }
         
         if (output.includes('[Render thread/INFO]: Created')) {
-          console.log(`[MinecraftLauncher] ✅ Minecraft game window created`);
         }
       });
       
       child.stderr.on('data', (data) => {
         const output = data.toString();
-        console.error(`[Minecraft Error] ${output.trim()}`);
         
         // Check for the LogUtils error specifically
         if (output.includes('java.lang.ClassNotFoundException: com.mojang.logging.LogUtils')) {
-          console.error(`[MinecraftLauncher] ❌ CONFIRMED: LogUtils ClassNotFoundException occurred during runtime`);
-          console.error(`[MinecraftLauncher] This confirms the vanilla JAR is missing this class`);
         }
       });
       
       child.on('close', (code) => {
-        console.log(`[MinecraftLauncher] Minecraft process exited with code: ${code}`);
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
       });
       
       child.on('error', (error) => {
-        console.error(`[MinecraftLauncher] ❌ Launch error:`, error);
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
@@ -779,7 +680,6 @@ class MinecraftLauncher extends EventEmitter {
         throw new Error(`Minecraft failed to start. Exit code: ${child.exitCode}`);
       }
       
-      console.log(`[MinecraftLauncher] ✅ Minecraft launched successfully (PID: ${child.pid})`);
       
       return {
         success: true,
@@ -791,7 +691,6 @@ class MinecraftLauncher extends EventEmitter {
       };
       
     } catch (error) {
-      console.error(`[MinecraftLauncher] ❌ Launch failed:`, error);
       this.isLaunching = false;
       this.client = null;
       
@@ -806,13 +705,11 @@ class MinecraftLauncher extends EventEmitter {
   // Stop Minecraft if running
   async stopMinecraft() {
     try {
-      console.log('[MinecraftLauncher] Stopping Minecraft...');
       
       let stopped = false;
       
       // Method 1: Stop via direct process if available
       if (this.client && this.client.child) {
-        console.log('[MinecraftLauncher] Stopping via direct process reference...');
         try {
           // We have direct access to the child process from our spawn call
           this.client.child.kill('SIGTERM');
@@ -820,22 +717,18 @@ class MinecraftLauncher extends EventEmitter {
           // Wait a moment, then force kill if necessary
           setTimeout(() => {
             if (this.client && this.client.child && !this.client.child.killed) {
-              console.log('[MinecraftLauncher] Force killing Minecraft process...');
               this.client.child.kill('SIGKILL');
             }
           }, 3000);
           
           stopped = true;
-          console.log('[MinecraftLauncher] Direct process terminated');
         } catch (error) {
-          console.warn('[MinecraftLauncher] Error stopping direct process:', error.message);
         }
       }
       
       // Method 2: Targeted Java process killing (Windows-specific fallback)
       if (process.platform === 'win32') {
         try {
-          console.log('[MinecraftLauncher] Attempting to stop client Java processes on Windows...');
           const { exec } = require('child_process');
           const { promisify } = require('util');
           const execAsync = promisify(exec);
@@ -853,39 +746,31 @@ class MinecraftLauncher extends EventEmitter {
                 windowsHide: true,
                 timeout: 5000 
               }).catch(() => {
-                console.log('[MinecraftLauncher] No client-specific java.exe processes to kill');
               });
               
               await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, { 
                 windowsHide: true,
                 timeout: 5000 
               }).catch(() => {
-                console.log('[MinecraftLauncher] No client-specific javaw.exe processes to kill');
               });
               
-              console.log('[MinecraftLauncher] Targeted client Java process termination completed');
               stopped = true;
               
             } catch (wmicError) {
-              console.warn('[MinecraftLauncher] WMIC targeted kill failed, trying PID-based approach:', wmicError.message);
               
               // Fallback: Try to use the stored client PID if we have it
               if (this.client && this.client.child && this.client.child.pid) {
                 try {
                   await execAsync(`taskkill /F /PID ${this.client.child.pid}`, { windowsHide: true });
-                  console.log(`[MinecraftLauncher] Killed client process by PID: ${this.client.child.pid}`);
                   stopped = true;
                 } catch (pidError) {
-                  console.warn('[MinecraftLauncher] PID-based kill also failed:', pidError.message);
                 }
               }
             }
           } else {
-            console.log('[MinecraftLauncher] No client path available for targeted killing, skipping Windows process cleanup');
           }
           
         } catch (error) {
-          console.warn('[MinecraftLauncher] Error with Windows process termination:', error.message);
         }
       }
       
@@ -901,7 +786,6 @@ class MinecraftLauncher extends EventEmitter {
       }
       
     } catch (error) {
-      console.error('[MinecraftLauncher] Error stopping Minecraft:', error);
       // Reset state even on error
       this.isLaunching = false;
       this.client = null;
@@ -929,14 +813,12 @@ class MinecraftLauncher extends EventEmitter {
             isRunning = true;
           } catch (e) {
             // Process doesn't exist anymore
-            console.log(`[MinecraftLauncher] Process ${pid} no longer exists, cleaning up...`);
             this.isLaunching = false;
             this.client = null;
             isRunning = false;
           }
         }
       } catch (error) {
-        console.warn('[MinecraftLauncher] Error checking process status:', error);
         isRunning = false;
       }
     }
@@ -998,30 +880,23 @@ class MinecraftLauncher extends EventEmitter {
       const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
       const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
 
-      console.log(`[MinecraftLauncher] Merging vanilla ${vanillaVersion} components into Fabric profile ${profileName}`);
 
       // 1) Inject downloads.client if missing
       fabricJson.downloads = fabricJson.downloads || {};
       if (!fabricJson.downloads.client && vanillaJson.downloads?.client) {
         fabricJson.downloads.client = vanillaJson.downloads.client;
-        console.log('[MinecraftLauncher] ✅ Injected vanilla downloads.client into Fabric profile');
       } else if (fabricJson.downloads.client) {
-        console.log('[MinecraftLauncher] ✅ Fabric profile already has downloads.client');
       }
 
       // 1a) Inject vanilla asset index & asset downloads for sounds and textures
       if (vanillaJson.assetIndex && !fabricJson.assetIndex) {
         fabricJson.assetIndex = vanillaJson.assetIndex;
-        console.log('[MinecraftLauncher] ✅ Injected vanilla assetIndex');
       } else if (fabricJson.assetIndex) {
-        console.log('[MinecraftLauncher] ✅ Fabric profile already has assetIndex');
       }
 
       if (vanillaJson.downloads?.assets && !fabricJson.downloads.assets) {
         fabricJson.downloads.assets = vanillaJson.downloads.assets;
-        console.log('[MinecraftLauncher] ✅ Injected vanilla downloads.assets');
       } else if (fabricJson.downloads.assets) {
-        console.log('[MinecraftLauncher] ✅ Fabric profile already has downloads.assets');
       }
 
       // 2) Merge vanilla libraries *except* ASM to avoid conflicts
@@ -1047,7 +922,6 @@ class MinecraftLauncher extends EventEmitter {
             
             // Skip ASM libraries
             if (skipASM(lib)) {
-              console.log(`[MinecraftLauncher] Skipping ASM library: ${lib.name}`);
               return false;
             }
             
@@ -1068,14 +942,12 @@ class MinecraftLauncher extends EventEmitter {
             // If vanillaLib had a "natives" block, copy it verbatim
             if (vanillaLib.natives) {
               libCopy.natives = { ...vanillaLib.natives };
-              console.log(`[MinecraftLauncher] 🔧 Copying natives metadata for: ${vanillaLib.name}`);
             }
             
             // If vanillaLib already had download metadata for classifiers, copy it too
             if (vanillaLib.downloads && vanillaLib.downloads.classifiers) {
               libCopy.downloads = libCopy.downloads || {};
               libCopy.downloads.classifiers = { ...vanillaLib.downloads.classifiers };
-              console.log(`[MinecraftLauncher] 🔧 Copying classifiers metadata for: ${vanillaLib.name}`);
             }
             
             return libCopy;
@@ -1083,7 +955,6 @@ class MinecraftLauncher extends EventEmitter {
 
         // Merge vanilla libraries at the front of the array
         fabricJson.libraries = [...toInject, ...fabricJson.libraries];
-        console.log(`[MinecraftLauncher] ✅ Merged ${toInject.length} vanilla libraries into Fabric profile (skipping ASM, total: ${fabricJson.libraries.length})`);
 
         // 3) Explicit ASM cleanup - remove ALL ASM versions except Fabric's 9.8
         const beforeASMFilter = fabricJson.libraries.length;
@@ -1093,12 +964,10 @@ class MinecraftLauncher extends EventEmitter {
           // If it's ASM, only keep version 9.8.x (Fabric's version)
           const keepASM = /^org\.ow2\.asm:asm:9\.8/.test(lib.name);
           if (!keepASM) {
-            console.log(`[MinecraftLauncher] Removing duplicate ASM library: ${lib.name}`);
           }
           return keepASM;
         });
         const afterASMFilter = fabricJson.libraries.length;
-        console.log(`[MinecraftLauncher] ✅ Filtered ASM libraries—only Fabric's 9.8 remains (removed ${beforeASMFilter - afterASMFilter} duplicates)`);
 
         // 4) Verify key libraries are present
         const requiredLibraries = [
@@ -1111,14 +980,11 @@ class MinecraftLauncher extends EventEmitter {
         requiredLibraries.forEach(requiredLib => {
           const found = fabricJson.libraries.find(lib => lib.name?.startsWith(requiredLib));
           if (found) {
-            console.log(`[MinecraftLauncher] ✅ Key library found: ${found.name}`);
           } else {
-            console.warn(`[MinecraftLauncher] ⚠️ Key library missing: ${requiredLib}`);
           }
         });
 
       } else {
-        console.warn(`[MinecraftLauncher] ⚠️ No vanilla libraries found to merge`);
       }
 
       // 5) Ensure proper inheritance and type for MCLC
@@ -1127,12 +993,10 @@ class MinecraftLauncher extends EventEmitter {
 
       // Write the updated Fabric profile
       fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2), 'utf8');
-      console.log(`[MinecraftLauncher] ✅ Updated Fabric profile saved to: ${fabricJsonPath}`);
 
       return { success: true };
 
     } catch (error) {
-      console.error(`[MinecraftLauncher] Error injecting vanilla components:`, error);
       return { success: false, error: error.message };
     }
   }
@@ -1141,7 +1005,6 @@ class MinecraftLauncher extends EventEmitter {
   async validateSessionToken(accessToken, uuid) {
     try {
       const fetch = require('node-fetch');
-      console.log('[SESSION VALIDATION] Testing token against Mojang session servers...');
       
       const payload = {
         accessToken: accessToken,
@@ -1157,15 +1020,12 @@ class MinecraftLauncher extends EventEmitter {
       });
 
       if (response.status === 204) {
-        console.log('[SESSION VALIDATION] ✅ Token is valid - session servers responded successfully');
         return true;
       } else {
         const errorText = await response.text();
-        console.error('[SESSION VALIDATION] ❌ Token validation failed:', response.status, errorText);
         return false;
       }
     } catch (error) {
-      console.error('[SESSION VALIDATION] ❌ Error validating session token:', error.message);
       return false;
     }
   }
@@ -1173,7 +1033,6 @@ class MinecraftLauncher extends EventEmitter {
   // Validate Fabric version.json for authentication placeholders (from debugging guide)
   async verifyAndRepairLibraries(clientPath, fabricProfileName, vanillaVersion) {
     try {
-      console.log(`[MinecraftLauncher] Verifying critical libraries for ${fabricProfileName}...`);
       
       const versionsDir = path.join(clientPath, 'versions');
       const fabricJsonPath = path.join(versionsDir, fabricProfileName, `${fabricProfileName}.json`);
@@ -1213,28 +1072,22 @@ class MinecraftLauncher extends EventEmitter {
             
             if (fs.existsSync(libPath)) {
               presentLibraries.push(found.name);
-              console.log(`[MinecraftLauncher] ✅ Critical library verified: ${found.name}`);
             } else {
-              console.warn(`[MinecraftLauncher] ❌ Critical library JAR missing: ${libPath}`);
               missingLibraries.push(requiredLib);
             }
           }
         } else {
-          console.warn(`[MinecraftLauncher] ❌ Critical library not in profile: ${requiredLib}`);
           missingLibraries.push(requiredLib);
         }
       }
       
       if (missingLibraries.length === 0) {
-        console.log(`[MinecraftLauncher] ✅ All ${criticalLibraries.length} critical libraries verified`);
         return { success: true, message: `All critical libraries present` };
       }
       
-      console.warn(`[MinecraftLauncher] Missing ${missingLibraries.length} critical libraries:`, missingLibraries);
       
       // Try to repair by merging vanilla libraries if vanilla profile exists
       if (fs.existsSync(vanillaJsonPath)) {
-        console.log(`[MinecraftLauncher] Attempting to repair by merging vanilla libraries...`);
         
         const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
         let repairedCount = 0;
@@ -1247,7 +1100,6 @@ class MinecraftLauncher extends EventEmitter {
           for (const missingLib of missingLibraries) {
             const vanillaLib = vanillaJson.libraries.find(lib => lib.name?.startsWith(missingLib));
             if (vanillaLib && !fabricLibNames.has(vanillaLib.name)) {
-              console.log(`[MinecraftLauncher] 🔧 Adding missing library from vanilla: ${vanillaLib.name}`);
               fabricJson.libraries = fabricJson.libraries || [];
               fabricJson.libraries.unshift(vanillaLib); // Add at beginning for priority
               fabricLibNames.add(vanillaLib.name);
@@ -1258,7 +1110,6 @@ class MinecraftLauncher extends EventEmitter {
           if (repairedCount > 0) {
             // Save the updated Fabric profile
             fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2), 'utf8');
-            console.log(`[MinecraftLauncher] ✅ Repaired Fabric profile with ${repairedCount} missing libraries`);
             
             // Re-verify after repair
             const stillMissing = [];
@@ -1301,7 +1152,6 @@ class MinecraftLauncher extends EventEmitter {
       }
       
     } catch (error) {
-      console.error(`[MinecraftLauncher] Library verification failed:`, error);
       return { 
         success: false, 
         error: `Library verification error: ${error.message}` 
@@ -1314,16 +1164,11 @@ class MinecraftLauncher extends EventEmitter {
       const profilePath = path.join(clientPath, 'versions', profileName, `${profileName}.json`);
       
       if (!fs.existsSync(profilePath)) {
-        console.error('[FABRIC VALIDATION] ❌ Fabric profile JSON not found:', profilePath);
         return false;
       }
 
       const profileJson = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
       
-      console.log('[FABRIC VALIDATION] Checking Fabric profile for authentication support...');
-      console.log('[FABRIC VALIDATION] Profile ID:', profileJson.id);
-      console.log('[FABRIC VALIDATION] Inherits From:', profileJson.inheritsFrom);
-      console.log('[FABRIC VALIDATION] Main Class:', profileJson.mainClass);
 
       // Check for required authentication placeholders in game arguments
       const gameArgs = profileJson.arguments?.game || [];
@@ -1345,8 +1190,6 @@ class MinecraftLauncher extends EventEmitter {
       });
 
       if (missingPlaceholders.length > 0) {
-        console.warn('[FABRIC VALIDATION] ⚠️ Missing authentication placeholders:', missingPlaceholders);
-        console.log('[FABRIC VALIDATION] This profile will be automatically fixed during enrichment...');
         // Don't fail validation - let the enrichment process fix this
         return true;
       }
@@ -1358,7 +1201,6 @@ class MinecraftLauncher extends EventEmitter {
       );
 
       if (!hasAuthSession) {
-        console.log('[FABRIC VALIDATION] ⚠️ Missing ${auth_session} in JVM arguments - will be added during enrichment');
       }
 
       // Check for required authentication libraries
@@ -1368,18 +1210,14 @@ class MinecraftLauncher extends EventEmitter {
       );
 
       if (!authLibrary) {
-        console.warn('[FABRIC VALIDATION] ⚠️ Missing com.mojang:authlib library - this may be inherited from vanilla');
         // Don't fail for missing authlib as it may be inherited
       } else {
-        console.log('[FABRIC VALIDATION] ✅ Auth library found:', authLibrary.name);
       }
 
-      console.log('[FABRIC VALIDATION] ✅ Fabric profile validation passed');
       
       return true;
 
     } catch (error) {
-      console.error('[FABRIC VALIDATION] ❌ Error validating Fabric profile:', error.message);
       return false;
     }
   }
@@ -1387,7 +1225,6 @@ class MinecraftLauncher extends EventEmitter {
   // New method: Use proper launcher for LogUtils fix
   async launchMinecraftProper(options) {
     try {
-      console.log(`[MinecraftLauncher] 🔧 Using XMCL proper launcher to fix LogUtils issues...`);
       
       // Set authentication data
       if (this.authHandler.authData) {
@@ -1414,7 +1251,6 @@ class MinecraftLauncher extends EventEmitter {
       return result;
       
     } catch (error) {
-      console.error(`[MinecraftLauncher] Proper launcher failed:`, error);
       return {
         success: false,
         error: error.message,
@@ -1428,7 +1264,6 @@ class MinecraftLauncher extends EventEmitter {
       return;
     }
     const { minecraftVersion, loaderType, loaderVersion } = info;
-    console.log(`[MinecraftLauncher] Detected server version change:`, info);
     await this.clientDownloader.updateForServerVersion({
       clientPath: this.clientPath,
       mcVersion: minecraftVersion,

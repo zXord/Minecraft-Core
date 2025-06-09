@@ -24,7 +24,6 @@ const {
   getAutoRestartState
 } = require('./services/auto-restart.cjs');
 
-// Removed the global console.log override that was suppressing debug messages
 // This was preventing debug messages from appearing in minecraft launcher methods
 
 /**
@@ -34,7 +33,6 @@ const {
  */
 function setupIpcHandlers(win) {
   if (!win) {
-    console.error('Cannot setup IPC handlers: No window provided');
     return;
   }
 
@@ -77,7 +75,6 @@ function setupIpcHandlers(win) {
       Object.entries(handlers).forEach(([channel, handler]) => {
         // Skip if handler is not a function
         if (typeof handler !== 'function') {
-          console.warn(`Handler for channel '${channel}' is not a function`);
           return;
         }
         
@@ -134,13 +131,10 @@ function setupIpcHandlers(win) {
     // Initialize player-IP map with the last server path
     const lastServerPath = appStore.get('lastServerPath');
     if (lastServerPath && fs.existsSync(lastServerPath)) {
-      console.log('Initializing player-IP map with last server path:', lastServerPath);
       initializePlayerIpMap(lastServerPath);
     }
     
-    console.log('All IPC handlers successfully registered');
   } catch (error) {
-    console.error('Failed to setup IPC handlers:', error);
   }
 }
 
