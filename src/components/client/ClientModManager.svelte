@@ -692,6 +692,9 @@
     const { mod, versionId } = event.detail;
     const ver = versionId || mod.selectedVersionId;
 
+    // Refresh installed mod info so dependency checks see all current mods
+    await loadInstalledInfo();
+
     let modForInstall;
     if (mod.fileName && mod.projectId && !mod.id) {
       modForInstall = {
