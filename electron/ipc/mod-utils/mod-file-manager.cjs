@@ -16,15 +16,14 @@ if (!fsSync.existsSync(configDir)) {
 }
 
 // Simple store object to manage mod categories
-const modCategoriesStore = {
-  get: () => {
+const modCategoriesStore = {  get: () => {
     try {
       if (fsSync.existsSync(configFile)) {
         const data = fsSync.readFileSync(configFile, 'utf8');
         return JSON.parse(data);
       }
       return [];
-    } catch (error) {
+    } catch {
       return [];
     }
   },
@@ -32,7 +31,7 @@ const modCategoriesStore = {
     try {
       fsSync.writeFileSync(configFile, JSON.stringify(data, null, 2), 'utf8');
       return true;
-    } catch (error) {
+    } catch {
       return false;
     }
   }
@@ -51,12 +50,12 @@ function parseForgeToml(content) {
 
 async function readModMetadataFromJar(jarPath) {
   try {
+    // @ts-ignore - AdmZip constructor is valid
     const zip = new AdmZip(jarPath);
     const entries = zip.getEntries();
     const fabric = entries.find(e =>
       e.entryName === 'fabric.mod.json' || e.entryName.endsWith('/fabric.mod.json')
-    );
-    if (fabric) {
+    );    if (fabric) {
       try {
         const data = JSON.parse(fabric.getData().toString('utf8'));
         return {
@@ -64,7 +63,9 @@ async function readModMetadataFromJar(jarPath) {
           versionNumber: data.version || data.version_number,
           projectId: data.id
         };
-      } catch {}
+      } catch {
+        // Ignore fabric parsing errors
+      }
     }
     const quilt = entries.find(e =>
       e.entryName === 'quilt.mod.json' || e.entryName.endsWith('/quilt.mod.json')
@@ -77,15 +78,18 @@ async function readModMetadataFromJar(jarPath) {
           versionNumber: data.version,
           projectId: data.quilt_loader?.id
         };
-      } catch {}
+      } catch {
+        // Ignore quilt parsing errors
+      }
     }
     const forge = entries.find(e =>
       e.entryName === 'META-INF/mods.toml' || e.entryName.endsWith('/META-INF/mods.toml')
-    );
-    if (forge) {
+    );    if (forge) {
       const text = forge.getData().toString('utf8');
       return parseForgeToml(text);
-    }  } catch {
+    }
+  } catch {
+    // Ignore metadata reading errors
   }
   return {};
 }
@@ -95,11 +99,10 @@ async function listMods(serverPath) {
   if (!serverPath) {
     throw new Error('Server path is required for listing mods');
   }
-  
-  // Verify server path exists
+    // Verify server path exists
   try {
     await fs.access(serverPath);
-  } catch (err) {
+  } catch {
     throw new Error('Server directory does not exist or is inaccessible');
   }
   
@@ -109,19 +112,20 @@ async function listMods(serverPath) {
   const serverModsDir = path.join(serverPath, 'mods');
   const clientModsDir = path.join(clientPath, 'mods');
   const disabledModsDir = path.join(serverPath, 'mods_disabled');
-  
-  await fs.mkdir(serverModsDir, { recursive: true });
-  await fs.mkdir(clientModsDir, { recursive: true }).catch(err => {
+    await fs.mkdir(serverModsDir, { recursive: true });
+  await fs.mkdir(clientModsDir, { recursive: true }).catch(() => {
+    // Ignore client mods directory creation errors
   });
   await fs.mkdir(disabledModsDir, { recursive: true });
   
   const serverFiles = await fs.readdir(serverModsDir);
   const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar'));
-  
-  let clientModFiles = [];  try {
+    let clientModFiles = [];
+  try {
     const clientFiles = await fs.readdir(clientModsDir);
     clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   } catch {
+    // Ignore client directory read errors
   }
   
   const disabledFiles = await fs.readdir(disabledModsDir);
@@ -163,11 +167,11 @@ async function getInstalledModInfo(serverPath) {
   
   const enabledFiles = await fs.readdir(modsDir);
   const enabledMods = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
-    let clientMods = [];
-  try {
+    let clientMods = [];  try {
     const clientFiles = await fs.readdir(clientModsDir);
     clientMods = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   } catch {
+    // Ignore client mods directory read errors
   }
   
   const disabledDir = path.join(serverPath, 'mods_disabled');
@@ -188,13 +192,14 @@ async function getInstalledModInfo(serverPath) {
     for (const modFile of allModFiles) {
       const serverManifestPath = path.join(serverManifestDir, `${modFile}.json`);
       const clientManifestPath = path.join(clientManifestDir, `${modFile}.json`);
-      let manifest = null;
-        try {
-        const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
+      let manifest = null;      try {
+        await fs.readFile(clientManifestPath, 'utf8');
       } catch {
-        try {          const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
+        try {
+          const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
           manifest = JSON.parse(serverManifestContent);
         } catch {
+          // Ignore manifest parsing errors
         }
       }
         if (manifest) {
@@ -229,14 +234,16 @@ async function getInstalledModInfo(serverPath) {
                 projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
                 versionNumber: manifest.versionNumber || meta.versionNumber, 
                 name: manifest.name || meta.name 
-              };
-            }
-          } catch (metaErr) {
+              };            }
+          } catch {
+            // Ignore metadata extraction errors
           }
         }
         modInfo.push(manifest);
       }
-    }  } catch {
+    }
+  } catch {
+    // Ignore manifest processing errors
   }
   
   return modInfo;
@@ -302,12 +309,14 @@ async function getClientInstalledModInfo(clientPath) {
               projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
               versionNumber: manifest.versionNumber || meta.versionNumber, 
               name: manifest.name || meta.name 
-            };
-          }        } catch {
+            };          }
+        } catch {
+          // Ignore metadata extraction errors
         }
       }
       modInfo.push(manifest);
     } catch {
+      // Ignore manifest processing errors
     }
 
     if (!manifest) {
@@ -423,9 +432,10 @@ async function getDisabledMods(serverPath) {
     for (const modFile of disabledModFileNames) {
       if (!disabledMods.includes(modFile)) {
         disabledMods.push(modFile);
-      }
-    }
-    await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));  } catch {
+      }    }
+    await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
+  } catch {
+    // Ignore disabled mods file operations errors
   }
   
   return disabledMods;
@@ -460,9 +470,8 @@ async function addMod(serverPath, modPath) {
   } catch (copyErr) {
     throw new Error(`Failed to copy mod file: ${copyErr.message}`);
   }
-  
-  try {
-    const stats = await fs.stat(targetPath);
+    try {
+    await fs.stat(targetPath);
   } catch (verifyErr) {
     throw new Error(`Failed to verify copied file: ${verifyErr.message}`);
   }
@@ -491,14 +500,14 @@ async function deleteMod(serverPath, modName) {
   let deletedFromPaths = [];
   let deletionErrors = [];
   
-  for (const modPath of possiblePaths) {
-    try {
+  for (const modPath of possiblePaths) {    try {
       await fs.access(modPath);  // Check if file exists
       await fs.unlink(modPath);  // Delete the file
       deletedFromPaths.push(modPath);
       // Don't break - continue checking other locations
     } catch (error) {
       if (error.code === 'ENOENT') {
+        // File doesn't exist, ignore
       } else {
         deletionErrors.push({ path: modPath, error: error.message });
       }
@@ -514,10 +523,10 @@ async function deleteMod(serverPath, modName) {
   for (const manifestPath of manifestPaths) {
     try {
       await fs.access(manifestPath);
-      await fs.unlink(manifestPath);
-    } catch (error) {
+      await fs.unlink(manifestPath);    } catch (error) {
       // Silently ignore manifest deletion errors as they're not critical
       if (error.code !== 'ENOENT') {
+        // Log other errors but don't fail the operation
       }
     }
   }
@@ -557,11 +566,10 @@ async function saveTemporaryFile({ name, buffer }) {
   
   const hash = crypto.createHash('md5').update(`${name}-${Date.now()}`).digest('hex').slice(0, 8);
   const tempFilePath = path.join(tempDir, `${hash}-${name}`);
-  
-  const uint8Array = new Uint8Array(buffer);
+    const uint8Array = new Uint8Array(buffer);
   await fs.writeFile(tempFilePath, uint8Array);
   
-  const stats = await fs.stat(tempFilePath);
+  await fs.stat(tempFilePath);
   
   return tempFilePath;
 }
@@ -580,11 +588,10 @@ async function directAddMod({ serverPath, fileName, buffer }) {
   
   const modsDir = path.join(serverPath, 'mods');
   const targetPath = path.join(modsDir, fileName);
-  
-  await fs.mkdir(modsDir, { recursive: true });
+    await fs.mkdir(modsDir, { recursive: true });
   await fs.writeFile(targetPath, new Uint8Array(buffer));
   
-  const stats = await fs.stat(targetPath);
+  await fs.stat(targetPath);
   
   return true;
 }
@@ -650,12 +657,10 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
         if (!clientManifestExists) await copyAndUnlink(serverManifestPath, clientManifestPath);
         else await fs.unlink(serverManifestPath);
       }
-    } else if (disabledFileExists && !clientFileExists) {
-      await copyAndUnlink(disabledModPath, clientModPath);
-      if (serverManifestExists && !clientManifestExists) { // Manifest for disabled mod might be in server
+    } else if (disabledFileExists && !clientFileExists) {      await copyAndUnlink(disabledModPath, clientModPath);
+      if (serverManifestExists && !clientManifestExists) {
          await copyAndUnlink(serverManifestPath, clientManifestPath);
       }
-    } else {
     }
   } else if (newCategory === 'both') {
     if (serverFileExists && !clientFileExists) {

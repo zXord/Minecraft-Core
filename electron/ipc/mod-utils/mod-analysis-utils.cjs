@@ -6,14 +6,12 @@ const AdmZip = require('adm-zip');
 
 async function extractDependenciesFromJar(jarPath) {
   try {
-
     try {
       await fs.access(jarPath);
-    } catch (err) {
+    } catch {
       throw new Error(`Mod file does not exist: ${jarPath}`);
-    }
-
-    try {
+    }    try {
+      // @ts-ignore - AdmZip constructor is valid
       const zip = new AdmZip(jarPath);
       const zipEntries = zip.getEntries();
 
@@ -24,15 +22,14 @@ async function extractDependenciesFromJar(jarPath) {
       );
 
       if (fabricEntry) {
-        const content = fabricEntry.getData().toString('utf8');
-        try {
+        const content = fabricEntry.getData().toString('utf8');        try {
           const metadata = JSON.parse(content);
           metadata.loaderType = metadata.loaderType || 'fabric';
-          metadata.projectId = metadata.projectId || metadata.id; // Often 'id' is used for project identifier
+          metadata.projectId = metadata.projectId || metadata.id;
           metadata.authors = metadata.authors || (metadata.author ? [metadata.author] : (metadata.contributors ? Object.keys(metadata.contributors) : []));
           metadata.name = metadata.name || metadata.id;
-          return metadata; // Return full metadata
-        } catch (parseErr) {
+          return metadata;
+        } catch {
           return null;
         }
       }
@@ -41,14 +38,12 @@ async function extractDependenciesFromJar(jarPath) {
       const forgeEntry = zipEntries.find(entry =>
         entry.entryName === 'META-INF/mods.toml' ||
         entry.entryName.endsWith('/META-INF/mods.toml')
-      );
-
-      if (forgeEntry) {
+      );      if (forgeEntry) {
         const content = forgeEntry.getData().toString('utf8');
         try {
           const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
           const lines = content.split(/\r?\n/);
-          let currentModTable = null; // To hold data for the current [[mods]] entry
+          let currentModTable = {};
           let inModsArray = false;
           let inDescription = false;
           let currentDescription = [];
@@ -65,7 +60,7 @@ async function extractDependenciesFromJar(jarPath) {
               } else {
                 currentDescription.push(trimmedLine);
               }
-              return; // Continue to next line if processing multi-line description
+              return;
             }
 
             if (trimmedLine.startsWith('modLoader')) metadata.modLoader = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
@@ -73,12 +68,8 @@ async function extractDependenciesFromJar(jarPath) {
             if (trimmedLine.startsWith('license')) metadata.license = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
             if (trimmedLine.startsWith('issueTrackerURL')) metadata.issueTrackerURL = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
 
-
             if (trimmedLine === '[[mods]]') {
               inModsArray = true;
-              // If we already have a currentModTable, it means a new mod entry is starting.
-              // For simplicity, we'll prioritize the first [[mods]] entry or one that matches the JAR name if possible.
-              // Here, we'll just take the first one encountered.
               if (!currentModTable) {
                 currentModTable = {};
               }
@@ -86,14 +77,13 @@ async function extractDependenciesFromJar(jarPath) {
 
             if (inModsArray && currentModTable) {
               if (trimmedLine.startsWith('modId')) currentModTable.id = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
-              if (trimmedLine.startsWith('version')) currentModTable.version = trimmedLine.split('=')[1]?.trim().replace(/"/g, '') || '${file.jarVersion}'; // Default from Forge if version is dynamic
+              if (trimmedLine.startsWith('version')) currentModTable.version = trimmedLine.split('=')[1]?.trim().replace(/"/g, '') || '${file.jarVersion}';
               if (trimmedLine.startsWith('displayName')) currentModTable.name = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
               if (trimmedLine.startsWith('authors')) currentModTable.authors = (trimmedLine.split('=')[1]?.trim().replace(/"/g, '') || '').split(',').map(a => a.trim()).filter(a => a);
               if (trimmedLine.startsWith('description')) {
-                // Handle multi-line descriptions
                 let desc = trimmedLine.substring(trimmedLine.indexOf('=') + 1).trim();
                 if (desc.startsWith("'''")) {
-                  if (desc.endsWith("'''") && desc.length > 5) { // Single line triple-quote
+                  if (desc.endsWith("'''") && desc.length > 5) {
                      currentModTable.description = desc.slice(3, -3).trim();
                   } else {
                     inDescription = true;
@@ -102,21 +92,19 @@ async function extractDependenciesFromJar(jarPath) {
                 } else if (desc.startsWith('"') && desc.endsWith('"')) {
                   currentModTable.description = desc.slice(1, -1).trim();
                 } else {
-                    currentModTable.description = desc; // Plain string if not quoted
+                    currentModTable.description = desc;
                 }
               }
             }
-             // If we encounter another top-level key or a new section, assume the current [[mods]] block has ended.
             if (inModsArray && (trimmedLine.startsWith('[') && !trimmedLine.startsWith('[[dependencies')) && trimmedLine !== '[[mods]]') {
-                inModsArray = false; // Exited mods array
+                inModsArray = false;
             }
           });
           
-          // Populate main metadata from the first found mod table
           if (currentModTable) {
             metadata.id = metadata.id || currentModTable.id;
             metadata.version = metadata.version || currentModTable.version;
-            metadata.name = metadata.name || currentModTable.name || metadata.id; // Fallback to id if name is missing
+            metadata.name = metadata.name || currentModTable.name || metadata.id;
             if (currentModTable.authors && currentModTable.authors.length > 0) {
                  metadata.authors = currentModTable.authors;
             }
@@ -124,9 +112,8 @@ async function extractDependenciesFromJar(jarPath) {
           }
           metadata.projectId = metadata.projectId || metadata.id;
 
-
           return metadata;
-        } catch (parseErr) {
+        } catch {
           return null;
         }
       }
@@ -157,20 +144,17 @@ async function extractDependenciesFromJar(jarPath) {
             metadata.authors = Object.keys(qmd.metadata.contributors);
           } else if (quiltJson.contributors) { // Fallback for older formats
              metadata.authors = Object.keys(quiltJson.contributors);
-          }
-
-
-          return metadata;
-        } catch (parseErr) {
+          }          return metadata;
+        } catch {
           return null;
         }
       }
       
-      return null; // Return null if no metadata file is found or parsable
-    } catch (zipErr) {
+      return null;
+    } catch {
       return null;
     }
-  } catch (error) {
+  } catch {
     return null;
   }
 }
@@ -189,26 +173,26 @@ async function analyzeModFromUrl(url, modId) {
         method: 'GET',
         responseType: 'arraybuffer' // Changed to arraybuffer for direct writing
       });
+        await fs.writeFile(tempFile, response.data);
       
-      await fs.writeFile(tempFile, response.data);
-      
-      // Now call the local extractDependenciesFromJar
       const dependencies = await extractDependenciesFromJar(tempFile);
-        try {
+      try {
         await fs.unlink(tempFile);
       } catch {
+        // Ignore cleanup errors
       }
       
       return dependencies;
-    } catch (err) {      try {
-        await fs.unlink(tempFile); // Attempt cleanup on error too
+    } catch (err) {
+      try {
+        await fs.unlink(tempFile);
       } catch {
-        // Ignore cleanup errors if main operation already failed
+        // Ignore cleanup errors
       }
-      throw err; // Re-throw the error to be caught by the outer try-catch
+      throw err;
     }
-  } catch (error) {
-    return []; // Return empty or re-throw as per desired error handling
+  } catch {
+    return [];
   }
 }
 
