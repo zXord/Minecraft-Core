@@ -1,32 +1,5 @@
-const os = require('os');
-const fs = require('fs'); // For calculateFileChecksum
-const { createHash } = require('crypto'); // For calculateFileChecksum
-const { exec } = require('child_process'); // For logSystemInfo's ulimit
-
-function logSystemInfo() {
-  try {
-    
-    if (process.platform !== 'win32') {
-      try {
-        exec('ulimit -n', (error, stdout) => {
-          if (!error) {
-          }
-        });
-      } catch (e) {
-        // Ignore
-      }
-    }
-  } catch (error) {
-  }
-}
-
-function logMemoryUsage() {
-  try {
-    const memUsage = process.memoryUsage();
-  } catch (error) {
-    // Ignore
-  }
-}
+const fs = require('fs');
+const { createHash } = require('crypto');
 
 function getRequiredJavaVersion(minecraftVersion) {
   const version = minecraftVersion.split('.');
@@ -56,8 +29,6 @@ function calculateFileChecksum(filePath) {
 }
 
 module.exports = {
-  logSystemInfo,
-  logMemoryUsage,
   getRequiredJavaVersion,
   calculateFileChecksum
 };

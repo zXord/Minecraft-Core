@@ -230,9 +230,12 @@
     </div>
 
     <div class="mods-grid">
-      {#each mods as mod}
-        <div class="mod-card {expanded === mod.fileName ? 'expanded' : ''} {!mod.enabled ? 'disabled' : ''}">
-          <div class="mod-header" on:click={() => toggleExpanded(mod.fileName)}>
+      {#each mods as mod}        <div class="mod-card {expanded === mod.fileName ? 'expanded' : ''} {!mod.enabled ? 'disabled' : ''}">
+          <div class="mod-header" 
+               role="button" 
+               tabindex="0"
+               on:click={() => toggleExpanded(mod.fileName)}
+               on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpanded(mod.fileName); } }}>
             <div class="mod-info">
               <div class="mod-name">{mod.name || mod.fileName}</div>
               {#if mod.authors && mod.authors.length > 0}
@@ -258,14 +261,12 @@
                 <span class="version-tag">v{mod.version}</span>
               {:else}
                 <span class="version-tag unknown">Unknown</span>
-              {/if}
-            </div>
+              {/if}            </div>
             
-            <div class="mod-actions" on:click|stopPropagation>
-              {#if mod.hasUpdate}
+            <div class="mod-actions">              {#if mod.hasUpdate}
                 <button 
                   class="action-btn update-btn"
-                  on:click={() => updateMod(mod)}
+                  on:click|stopPropagation={() => updateMod(mod)}
                   disabled={updatingMods.has(mod.fileName)}
                   title="Update to v{mod.latestVersion}"
                 >
@@ -274,14 +275,14 @@
               {/if}
               <button 
                 class="action-btn toggle-btn" 
-                on:click={() => toggleMod(mod)}
+                on:click|stopPropagation={() => toggleMod(mod)}
                 title={mod.enabled ? 'Disable mod' : 'Enable mod'}
               >
                 {mod.enabled ? 'Disable' : 'Enable'}
               </button>
               <button
                 class="action-btn delete-btn"
-                on:click={() => promptRemove(mod)}
+                on:click|stopPropagation={() => promptRemove(mod)}
                 title="Remove mod"
               >
                 Remove
@@ -340,56 +341,18 @@
   on:cancel={() => { showRemoveDialog = false; modToRemove = null; }}
 />
 
-<style>
-  .loading-container, .error-container, .no-mods {
+<style>  .loading-container, .error-container {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 3rem;
-    text-align: center;
+    padding: 3rem;    text-align: center;
     color: rgba(255, 255, 255, 0.7);
-  }
-
-  .loading-spinner {
-    width: 40px;
-    height: 40px;
-    border: 3px solid rgba(255, 255, 255, 0.2);
-    border-top: 3px solid #3b82f6;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    margin-bottom: 1rem;
-  }
-
-  @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
   }
 
   .error-message {
     color: #ef4444;
     margin-bottom: 1rem;
-  }
-
-  .retry-btn {
-    padding: 0.5rem 1rem;
-    background: rgba(59, 130, 246, 0.2);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-
-  .retry-btn:hover {
-    background: rgba(59, 130, 246, 0.3);
-    border-color: rgba(59, 130, 246, 0.5);
-  }
-
-  .hint {
-    font-size: 0.9rem;
-    color: rgba(255, 255, 255, 0.5);
-    margin-top: 0.5rem;
   }
 
   .manual-mods-container {
