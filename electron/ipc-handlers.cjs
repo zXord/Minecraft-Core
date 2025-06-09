@@ -1,6 +1,5 @@
 // IPC handlers for the Electron app
-const { ipcMain, dialog } = require('electron');
-const path = require('path');
+const { ipcMain } = require('electron');
 const fs = require('fs');
 const { registerIpcHandlers, registeredHandlers } = require('./utils/ipc-helpers.cjs');
 const appStore = require('./utils/app-store.cjs');
@@ -36,9 +35,8 @@ function setupIpcHandlers(win) {
     return;
   }
 
-  try {
-    // Initialize track registered handler names
-    registeredHandlers.clear();
+  // Initialize track registered handler names
+  registeredHandlers.clear();
     
     // Get all handler modules
     const fileHandlers = createFileHandlers(win);
@@ -134,8 +132,7 @@ function setupIpcHandlers(win) {
       initializePlayerIpMap(lastServerPath);
     }
     
-  } catch (error) {
-  }
+  
 }
 
 module.exports = { setupIpcHandlers };
