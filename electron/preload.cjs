@@ -1,11 +1,9 @@
 const isDev = process.env.NODE_ENV === 'development';
 if (isDev) {
-  console.log('=== ROOT/PRELOAD.CJS IS LOADED ===');
 }
 const { contextBridge, ipcRenderer } = require('electron');
 
 if (isDev) {
-  console.log('Loading preload.cjs with server-properties channels - v1');
 }
 
 // Expose protected methods that allow the renderer process to use
@@ -15,7 +13,6 @@ contextBridge.exposeInMainWorld('electron', {
   invoke: (channel, ...args) => {
     // Log all requested channels for debugging
     if (isDev) {
-      console.log('Requested IPC channel:', channel);
     }
     
     const validChannels = [
@@ -150,14 +147,12 @@ contextBridge.exposeInMainWorld('electron', {
     // Debug: print validChannels at runtime (only once)
     if (!window.__ipcChannelsLogged) {
       if (isDev) {
-        console.log('Valid IPC channels at runtime:', validChannels);
       }
       window.__ipcChannelsLogged = true;
     }
 
     if (validChannels.includes(channel)) {
       // Only log failed channels, not successful ones
-      // console.log('invoke: validChannels =', validChannels, 'channel =', channel);
       // For dropped files, we need special handling
       if (channel === 'handle-dropped-files') {
         // Just forward the files directly to the main process
@@ -331,7 +326,6 @@ contextBridge.exposeInMainWorld('serverPath', {
 contextBridge.exposeInMainWorld('folderOpener', {
   open: (folderPath) => {
     if (isDev) {
-      console.log('[Preload] Folder opener called for path:', folderPath);
     }
     return ipcRenderer.invoke('open-folder', folderPath);
   }

@@ -21,7 +21,6 @@ async function createZip(items, outputPath) {
       
       // Listen for all errors
       output.on('error', (err) => {
-        console.error('Output stream error:', err);
         // Try to close things properly
         try {
           output.end();
@@ -30,7 +29,6 @@ async function createZip(items, outputPath) {
       });
       
       archive.on('error', (err) => {
-        console.error('Archive error:', err);
         // Try to close things properly
         try {
           output.end();
@@ -40,7 +38,6 @@ async function createZip(items, outputPath) {
       
       // Wait for close event to resolve the promise
       output.on('close', () => {
-        console.log(`Backup created: ${outputPath} (${archive.pointer()} bytes)`);
         resolve();
       });
       
@@ -48,9 +45,7 @@ async function createZip(items, outputPath) {
       archive.on('warning', (err) => {
         if (err.code === 'ENOENT') {
           // Log warning but continue
-          console.warn('Archive warning (missing file):', err.path || err.message);
         } else {
-          console.error('Archive warning:', err);
           reject(err);
         }
       });
@@ -62,7 +57,6 @@ async function createZip(items, outputPath) {
       for (const item of items) {
         try {
           if (!fs.existsSync(item)) {
-            console.warn(`Skipping non-existent item: ${item}`);
             continue;
           }
           
@@ -84,11 +78,9 @@ async function createZip(items, outputPath) {
               fs.accessSync(item, fs.constants.R_OK);
               archive.file(item, { name: itemName });
             } catch (fileErr) {
-              console.warn(`Skipping potentially locked file: ${item}`, fileErr);
             }
           }
         } catch (itemErr) {
-          console.warn(`Error processing item ${item}:`, itemErr);
           // Continue with other items
         }
       }
@@ -96,7 +88,6 @@ async function createZip(items, outputPath) {
       // Finalize the archive
       archive.finalize();
     } catch (err) {
-      console.error('Error creating backup:', err);
       reject(err);
     }
   });
@@ -151,7 +142,6 @@ async function createServerBackup(serverPath, folders = null) {
     
     return backupPath;
   } catch (err) {
-    console.error('Error creating server backup:', err);
     throw err;
   }
 }
@@ -186,7 +176,6 @@ async function listBackups(serverPath) {
     
     return backupFiles;
   } catch (err) {
-    console.error('Error listing backups:', err);
     return [];
   }
 }

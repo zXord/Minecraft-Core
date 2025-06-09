@@ -5,18 +5,11 @@ const { exec } = require('child_process'); // For logSystemInfo's ulimit
 
 function logSystemInfo() {
   try {
-    console.log(`[Utils] System Information:`); // Changed log prefix
-    console.log(`[Utils] - Platform: ${process.platform}`);
-    console.log(`[Utils] - Architecture: ${process.arch}`);
-    console.log(`[Utils] - Total Memory: ${Math.round(os.totalmem() / 1024 / 1024 / 1024)}GB`);
-    console.log(`[Utils] - Free Memory: ${Math.round(os.freemem() / 1024 / 1024 / 1024)}GB`);
-    console.log(`[Utils] - CPU Cores: ${os.cpus().length}`);
     
     if (process.platform !== 'win32') {
       try {
         exec('ulimit -n', (error, stdout) => {
           if (!error) {
-            console.log(`[Utils] - File Handle Limit: ${stdout.trim()}`);
           }
         });
       } catch (e) {
@@ -24,14 +17,12 @@ function logSystemInfo() {
       }
     }
   } catch (error) {
-    console.warn(`[Utils] Could not get system information:`, error.message);
   }
 }
 
 function logMemoryUsage() {
   try {
     const memUsage = process.memoryUsage();
-    console.log(`[Utils] Memory Usage: RSS=${Math.round(memUsage.rss/1024/1024)}MB, ` + // Changed log prefix
                 `Heap=${Math.round(memUsage.heapUsed/1024/1024)}MB/${Math.round(memUsage.heapTotal/1024/1024)}MB, ` +
                 `External=${Math.round(memUsage.external/1024/1024)}MB, ` +
                 `Free System=${Math.round(os.freemem()/1024/1024/1024)}GB`);
@@ -63,7 +54,6 @@ function calculateFileChecksum(filePath) {
     const fileContent = fs.readFileSync(filePath);
     return createHash('md5').update(fileContent).digest('hex');
   } catch (error) {
-    console.warn('[Utils] Could not calculate checksum for:', filePath, error.message); // Added error to log
     return null;
   }
 }

@@ -34,45 +34,36 @@
   let showRemoveDialog = false;
   let modToRemove: DetailedMod | null = null;
   onMount(async () => {
-    console.log('ClientManualModList: onMount - clientPath:', clientPath);
     await loadManualMods();
   });
 
   // React to clientPath changes
   $: if (clientPath) {
-    console.log('ClientManualModList: clientPath changed to:', clientPath);
     loadManualMods();
   }
   async function loadManualMods() {
     if (!clientPath) {
-      console.log('ClientManualModList: No client path provided');
       return;
     }
     
-    console.log('ClientManualModList: Loading manual mods for path:', clientPath);
     loading = true;
     error = '';
     
     try {
-      console.log('ClientManualModList: Invoking get-manual-mods-detailed...');
       // Pass the set of server managed files to the IPC handler
       const managedFilesSet = get(serverManagedFiles);
       const result = await window.electron.invoke('get-manual-mods-detailed', { 
         clientPath,
         serverManagedFiles: Array.from(managedFilesSet) // Convert Set to Array for IPC
       });
-      console.log('ClientManualModList: Got result:', result);
       
       if (result.success) {
         mods = result.mods;
-        console.log('ClientManualModList: Loaded', result.mods.length, 'manual mods');
       } else {
         error = result.error || 'Failed to load manual mods';
-        console.error('ClientManualModList: Failed to load mods:', error);
       }
     } catch (err) {
       error = err.message || 'Failed to load manual mods';
-      console.error('ClientManualModList: Error loading manual mods:', err);
     } finally {
       loading = false;
     }
@@ -87,7 +78,6 @@
       const managedFiles = get(serverManagedFiles); // Get the server managed files from the store
 
       if (!currentMinecraftVersion) {
-        console.error('ClientManualModList: Minecraft version not available for update check.');
         checkingUpdates = false;
         return;
       }
@@ -113,7 +103,6 @@
         });
       }
     } catch (err) {
-      console.error('Error checking for updates:', err);
     } finally {
       checkingUpdates = false;
     }
@@ -129,10 +118,8 @@
       if (result.success) {
         await loadManualMods(); // Refresh the list
       } else {
-        console.error('Failed to toggle mod:', result.error);
       }
     } catch (err) {
-      console.error('Error toggling mod:', err);
     }
   }
 
@@ -152,10 +139,8 @@
       if (result.success) {
         await loadManualMods(); // Refresh the list
       } else {
-        console.error('Failed to update mod:', result.error);
       }
     } catch (err) {
-      console.error('Error updating mod:', err);
     } finally {
       updatingMods.delete(mod.fileName);
       updatingMods = updatingMods; // Trigger reactivity
@@ -183,10 +168,8 @@
       if (result.success) {
         await loadManualMods(); // Refresh the list
       } else {
-        console.error('Failed to remove mod:', result.error);
       }
     } catch (err) {
-      console.error('Error removing mod:', err);
     }
   }
 

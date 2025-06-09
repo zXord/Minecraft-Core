@@ -81,7 +81,6 @@
           checkForUpdates(serverPath);
         }
       } catch (error) {
-        console.error(`Failed to fetch versions for ${modName}:`, error);
       }
     }
   }
@@ -211,7 +210,6 @@
         proceedWithUpdate(modName, modInfo.projectId, updateInfo.id, updateInfo);
       }
     } catch (error) {
-      console.error(`Failed to update ${modName}:`, error);
     }
   }
   
@@ -309,7 +307,6 @@
           successMessage.set('');
         }, 3000);
       } catch (error) {
-        console.error('Failed to save disabled mods:', error);
         errorMessage.set(`Failed to toggle mod: ${error.message}`);
       }
       
@@ -333,7 +330,6 @@
       // Notify parent component
       dispatch('refresh');
     } catch (error) {
-      console.error('Error refreshing mod list:', error);
     }
   }
   
@@ -356,7 +352,6 @@
         successMessage.set('');
       }, 3000);
     } catch (error) {
-      console.error('Error checking for updates:', error);
       errorMessage.set(`Failed to check for updates: ${error.message}`);
     }
   }
@@ -391,9 +386,7 @@
             selectedVersionId: mod.versionId,
             source: mod.source || 'modrinth'
           });
-          console.log(`[DEBUG] Dependencies for ${mod.fileName}:`, deps); // Debug log
           checkedCount++;
-          console.log(`[DEBUG] Found ${deps.length} dependencies for installed mod: ${mod.fileName}`, deps);
           
           // Now check for compatibility issues (missing, mismatches, updates)
           if (deps && deps.length > 0) {
@@ -407,7 +400,6 @@
             }
           }
         } catch (error) {
-          console.error(`Failed to check mod ${mod.fileName}:`, error);
         }
       }
       
@@ -723,7 +715,6 @@
         }
       });
     } catch (error) {
-      console.error('Failed to load disabled mods:', error);
     }
     
     // Clean up the interval when the component is destroyed
@@ -806,7 +797,6 @@
       const newCategory = select.value;
       const fileName = typeof mod === 'string' ? mod : mod.fileName;
       
-      console.log(`Updating category for ${fileName} to ${newCategory}`);
       
       // First, update the category in the store
       await updateModCategory(fileName, newCategory);
@@ -827,7 +817,6 @@
       // Reload mods list to update UI without navigating away
       await loadMods(serverPath);
     } catch (err) {
-      console.error('Error updating mod category:', err);
       errorMessage.set(`Failed to update mod category: ${err.message}`);
     }
   }
@@ -842,14 +831,12 @@
       const required = checkbox.checked;
       const fileName = typeof mod === 'string' ? mod : mod.fileName;
       
-      console.log(`Updating requirement for ${fileName} to ${required}`);
       
       // Update the required status in the store
       await updateModRequired(fileName, required);
       
       successMessage.set(`${fileName} is now ${required ? 'required' : 'optional'} for clients`);
     } catch (err) {
-      console.error('Error updating mod requirement:', err);
       errorMessage.set(`Failed to update mod requirement: ${err.message}`);
     }
   }

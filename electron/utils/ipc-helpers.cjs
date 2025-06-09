@@ -13,12 +13,10 @@ const registeredHandlers = new Set();
 function safeIpcHandle(channel, handler) {
   try {
     if (!channel || typeof channel !== 'string') {
-      console.error('Invalid channel name:', channel);
       return false;
     }
     
     if (typeof handler !== 'function') {
-      console.error(`Handler for '${channel}' is not a function`);
       return false;
     }
     
@@ -39,7 +37,6 @@ function safeIpcHandle(channel, handler) {
     registeredHandlers.add(channel);
     return true;
   } catch (error) {
-    console.error(`Failed to register handler for '${channel}':`, error);
     return false;
   }
 }

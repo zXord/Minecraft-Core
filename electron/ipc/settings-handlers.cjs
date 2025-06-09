@@ -49,7 +49,6 @@ function createSettingsHandlers(win) {
         
         // If serverPath is provided, update the lastServerPath
         if (serverPath && typeof serverPath === 'string' && serverPath.trim() !== '') {
-          console.log('Saving last server path:', serverPath);
           appStore.set('lastServerPath', serverPath);
         }
         
@@ -65,7 +64,6 @@ function createSettingsHandlers(win) {
                 const fileContent = fs.readFileSync(configPath, 'utf-8');
                 config = JSON.parse(fileContent);
               } catch (parseErr) {
-                console.error('Error parsing config file:', parseErr);
                 // Continue with empty config
               }
             }
@@ -77,7 +75,6 @@ function createSettingsHandlers(win) {
             // Write back to file
             fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
           } catch (configErr) {
-            console.error('Error updating server config file:', configErr);
             // Continue even if config file update fails
           }
         }
@@ -90,7 +87,6 @@ function createSettingsHandlers(win) {
           }
         };
       } catch (err) {
-        console.error('Error updating settings:', err);
         return { success: false, error: err.message };
       }
     },
@@ -113,7 +109,6 @@ function createSettingsHandlers(win) {
           }
         };
       } catch (err) {
-        console.error('Error getting settings:', err);
         return { success: false, error: err.message };
       }
     },
@@ -121,7 +116,6 @@ function createSettingsHandlers(win) {
     'save-instances': async (_e, instances) => {
       try {
         if (!Array.isArray(instances)) {
-          console.error('Invalid instances data received (not an array):', instances);
           return { success: false, error: 'Invalid instances data: not an array' };
         }
         
@@ -166,7 +160,6 @@ function createSettingsHandlers(win) {
         
         if (validInstances.length === 0 && instances.length > 0) {
           const error = 'All instances were filtered out due to invalid data';
-          console.error(error);
           return { success: false, error };
         }
         
@@ -188,21 +181,18 @@ function createSettingsHandlers(win) {
           
           if (!Array.isArray(savedInstances)) {
             const error = 'Saved instances is not an array';
-            console.error(error, savedInstances);
             return { success: false, error };
           }
           
           return { success: true, instances: savedInstances };
           
         } catch (err) {
-          console.error('Error saving instances:', err);
           return { 
             success: false, 
             error: `Failed to save instances: ${err.message}` 
           };
         }
       } catch (err) {
-        console.error('Error saving instances:', err);
         return { success: false, error: err.message };
       }
     },
@@ -220,7 +210,6 @@ function createSettingsHandlers(win) {
         
         return validInstances;
       } catch (error) {
-        console.error('Error getting instances:', error);
         return [];
       }
     },
@@ -228,7 +217,6 @@ function createSettingsHandlers(win) {
     // Rename instance
     'rename-instance': async (_e, { id, newName }) => {
       try {
-        console.log(`Renaming instance ${id} to ${newName}`);
         
         if (!id || typeof newName !== 'string' || newName.trim() === '') {
           return { success: false, error: 'Invalid parameters' };
@@ -244,10 +232,8 @@ function createSettingsHandlers(win) {
         instances[idx].name = newName;
         appStore.set('instances', instances);
         
-        console.log('Instance renamed successfully');
         return { success: true, instances };
       } catch (err) {
-        console.error('Error renaming instance:', err);
         return { success: false, error: err.message };
       }
     },
@@ -255,7 +241,6 @@ function createSettingsHandlers(win) {
     // Delete instance (with optional dir deletion)
     'delete-instance': async (_e, { id, deleteFiles }) => {
       try {
-        console.log(`Deleting instance ${id} (deleteFiles: ${deleteFiles})`);
         
         if (!id) {
           return { success: false, error: 'Invalid instance ID' };
@@ -273,18 +258,14 @@ function createSettingsHandlers(win) {
         
         // also clear lastServerPath if it was the deleted one
         if (inst.path && appStore.get('lastServerPath') === inst.path) {
-          console.log('Clearing lastServerPath as it matched deleted instance');
           appStore.set('lastServerPath', null);
         }
         
         // optionally delete directory
         if (deleteFiles && inst.path) {
           try {
-            console.log(`Deleting server directory: ${inst.path}`);
             await rm(inst.path, { recursive: true, force: true });
-            console.log('Server directory deleted successfully');
           } catch (err) {
-            console.error('Failed to delete folder:', err);
             return { 
               success: true, 
               instances: remaining,
@@ -295,7 +276,6 @@ function createSettingsHandlers(win) {
         
         return { success: true, instances: remaining };
       } catch (err) {
-        console.error('Error deleting instance:', err);
         return { success: false, error: err.message };
       }
     },
@@ -303,7 +283,6 @@ function createSettingsHandlers(win) {
     // Save client configuration
     'save-client-config': async (_e, { path: clientPath, serverIp, serverPort, clientId, clientName }) => {
       try {
-        console.log(`Saving client configuration for path: ${clientPath}, server: ${serverIp}:${serverPort}`);
         
         if (!clientPath || typeof clientPath !== 'string' || clientPath.trim() === '') {
           return { success: false, error: 'Invalid client path' };
@@ -319,7 +298,6 @@ function createSettingsHandlers(win) {
         
         // Create directory if it doesn't exist
         if (!fs.existsSync(clientPath)) {
-          console.log(`Creating client directory: ${clientPath}`);
           fs.mkdirSync(clientPath, { recursive: true });
         }
         
@@ -334,14 +312,11 @@ function createSettingsHandlers(win) {
         };
         
         await fsPromises.writeFile(configFile, JSON.stringify(config, null, 2));
-        console.log('Client configuration saved to file successfully');
 
         // Create servers.dat so the server appears in multiplayer list
         const datResult = await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
         if (!datResult.success) {
-          console.warn('Failed to create servers.dat:', datResult.error);
         } else {
-          console.log('servers.dat created or updated successfully');
         }
         
         // ALSO update the instance in the app store so it persists across app restarts
@@ -364,7 +339,6 @@ function createSettingsHandlers(win) {
               path: clientPath,
               lastConnected: config.lastConnected
             };
-            console.log('Updated existing client instance in app store');
           } else {
             // Create new client instance entry
             const newInstance = {
@@ -379,20 +353,16 @@ function createSettingsHandlers(win) {
               lastConnected: config.lastConnected
             };
             instances.push(newInstance);
-            console.log('Added new client instance to app store');
           }
           
           appStore.set('instances', instances);
-          console.log('Client instance data saved to app store');
           
         } catch (storeError) {
-          console.error('Error updating app store:', storeError);
           // Continue anyway since file save succeeded
         }
         
         return { success: true };
       } catch (err) {
-        console.error('Error saving client configuration:', err);
         return { success: false, error: err.message };
       }
     }

@@ -101,7 +101,6 @@
   // Connect to the Management Server (port 8080)
   async function connectToServer() {
     if (!instance || !instance.serverIp || !instance.serverPort) {
-      console.error('Server address not configured');
       setConnectionStatus('disconnected');
       return;
     }
@@ -110,7 +109,6 @@
     
     try {
       const managementUrl = `http://${instance.serverIp}:${instance.serverPort}/api/test`;
-      console.log(`[Client] Testing connection to management server: ${managementUrl}`);
       
       const response = await fetch(managementUrl, {
         method: 'GET',
@@ -127,7 +125,6 @@
       const data = await response.json();
       if (data.success) {
         setConnectionStatus('connected');
-        console.log('[Client] Successfully connected to management server');
         
         // Register with the server
         await registerWithServer();
@@ -141,7 +138,6 @@
         throw new Error('Management server returned unsuccessful response');
       }
     } catch (err) {
-      console.error('[Client] Failed to connect to management server:', err);
       setConnectionStatus('disconnected');
       setManagementServerStatus('unknown');
       setMinecraftServerStatus('unknown');
@@ -168,7 +164,6 @@
       
       if (response.ok) {
         const data = await response.json();
-        console.log('[Client] Successfully registered with management server');
         
         // Update instance with client info if needed
         if (!instance.clientId) {
@@ -186,7 +181,6 @@
         }
       }
     } catch (err) {
-      console.warn('[Client] Failed to register with server:', err);
     }
   }
   
@@ -219,7 +213,6 @@
       
       lastCheck = new Date();
     } catch (err) {
-      console.error('[Client] Failed to check server status:', err);
       setConnectionStatus('disconnected');
       setManagementServerStatus('unknown');
       setMinecraftServerStatus('unknown');
@@ -258,7 +251,6 @@
         }
       }
     } catch (err) {
-      console.warn('[Client] Could not get server info:', err);
       setMinecraftServerStatus('unknown');
     }
   }
@@ -266,7 +258,6 @@
   // Check if client mods are synchronized with server
   async function checkModSynchronization() {
     if (isDownloadingMods || isDownloadingClient) {
-      console.log('[Client] Skipping mod sync check - downloads in progress');
       return;
     }
     
@@ -292,17 +283,12 @@
           downloadStatus = 'needed';
         }
         
-        console.log(`[Client] Mod sync status: ${result.totalPresent}/${result.totalRequired} mods present, ${result.needsDownload} need download`);
-        console.log('[Client] Full mod sync result:', result);
-        console.log('[Client] clientModChanges:', result.clientModChanges);
         if (result.clientModChanges?.removals) {
-          console.log('[Client] Removals found:', result.clientModChanges.removals);
         }
       } else {
         downloadStatus = 'ready'; // Assume ready if check fails
       }
     } catch (err) {
-      console.error('[Client] Error checking mod synchronization:', err);
       downloadStatus = 'ready';
     }
   }
@@ -310,12 +296,10 @@
   // Check if Minecraft client files are synchronized
   async function checkClientSynchronization() {
     if (isDownloadingMods || isDownloadingClient) {
-      console.log('[Client] Skipping client sync check - downloads in progress');
       return;
     }
     
     if (!instance.path || !serverInfo?.minecraftVersion) {
-      console.log('[Client] Cannot check client sync - missing path or version');
       clientSyncStatus = 'ready';
       return;
     }
@@ -336,34 +320,27 @@
         serverInfo: serverInfo
       });
       
-      console.log('[Client] Check client result:', result);
       
       if (result.success) {
         clientSyncInfo = result;
         
         if (result.synchronized) {
           clientSyncStatus = 'ready';
-          console.log(`[Client] Client files are ready: ${result.reason}`);
         } else {
           clientSyncStatus = 'needed';
-          console.log(`[Client] Client files needed: ${result.reason}`);
         }
       } else {
-        console.error('[Client] Error checking client:', result.error);
         clientSyncStatus = 'ready'; // Assume ready if check fails
       }
     } catch (err) {
-      console.error('[Client] Error checking client synchronization:', err);
       clientSyncStatus = 'ready';
     }
   }
   
   // Check authentication status
   async function checkAuthentication() {
-    console.log('[Client] checkAuthentication() called, current authStatus:', authStatus);
     
     if (!instance.path) {
-      console.log('[Client] No instance path, setting authStatus to needs-auth');
       authStatus = 'needs-auth';
       return;
     }
@@ -371,16 +348,13 @@
     // Only set to checking if we're not already authenticated
     // and not currently authenticating
     if (authStatus !== 'authenticated' && authStatus !== 'authenticating') {
-      console.log('[Client] Setting authStatus to checking');
       authStatus = 'checking';
     }
     
     try {
-      console.log('[Client] About to call minecraft-load-auth IPC...');
       
       // Add timeout to prevent getting stuck in checking state
       const authTimeout = setTimeout(() => {
-        console.warn('[Client] Authentication check timed out');
         if (authStatus === 'checking') {
           authStatus = 'needs-auth';
         }
@@ -390,7 +364,6 @@
         clientPath: instance.path
       });
       
-      console.log('[Client] minecraft-load-auth result:', result);
       clearTimeout(authTimeout);
       
       if (result.success) {
@@ -399,11 +372,9 @@
         authData = { username: result.username, uuid: result.uuid };
 
         if (result.needsRefresh) {
-          console.log('[Client] Authentication may need refresh');
           await refreshAuthToken();
         }
         
-        console.log(`[Client] Authentication loaded: ${result.username}`);
       } else {
         // Only set to needs-auth if we're not currently authenticating
         if (authStatus !== 'authenticating') {
@@ -411,10 +382,8 @@
           username = '';
           authData = null;
         }
-        console.log('[Client] No valid authentication found');
       }
     } catch (err) {
-      console.error('[Client] Error checking authentication:', err);
       // Only set to needs-auth if we're not currently authenticating
       if (authStatus !== 'authenticating') {
         authStatus = 'needs-auth';
@@ -426,22 +395,18 @@
   
   // Authenticate with Microsoft
   async function authenticateWithMicrosoft() {
-    console.log('[Client] authenticateWithMicrosoft() called');
     
     // Check if already authenticated
     if (authStatus === 'authenticated' && username && authData) {
-      console.log('[Client] User is already authenticated, skipping authentication');
       successMessage.set(`Already authenticated as ${username}`);
       setTimeout(() => successMessage.set(''), 3000);
       return;
     }
     
-    console.log('[Client] Starting Microsoft authentication...');
     authStatus = 'authenticating';
     
     // Add a timeout to prevent getting stuck
     const authTimeout = setTimeout(async () => {
-      console.log('[Client] Authentication timeout, checking if auth actually succeeded...');
       
       // Only check if we're still in authenticating state
       if (authStatus === 'authenticating') {
@@ -449,12 +414,10 @@
         
         // If we have username/authData after checking, the auth actually worked
         if (username && authData) {
-          console.log('[Client] Authentication actually succeeded despite timeout');
           authStatus = 'authenticated';
           successMessage.set(`Authentication recovered for ${username}`);
           setTimeout(() => successMessage.set(''), 3000);
         } else {
-          console.log('[Client] Authentication actually failed - resetting to needs-auth');
           authStatus = 'needs-auth';
           errorMessage.set('Authentication timed out. Please try again.');
           setTimeout(() => errorMessage.set(''), 5000);
@@ -463,17 +426,14 @@
     }, 15000); // 15 second timeout
     
     try {
-      console.log('[Client] About to call minecraft-auth IPC...');
       const result = await window.electron.invoke('minecraft-auth', {
         clientPath: instance.path
       });
-      console.log('[Client] minecraft-auth result:', result);
       
       // Clear the timeout since we got a response
       clearTimeout(authTimeout);
       
       if (result.success) {
-        console.log(`[Client] Authentication successful: ${result.username}`);
         
         // Update authentication state
         authStatus = 'authenticated';
@@ -493,7 +453,6 @@
         setTimeout(() => successMessage.set(''), 3000);
         
       } else {
-        console.error('[Client] Authentication failed:', result.error);
         authStatus = 'needs-auth';
         errorMessage.set('Authentication failed: ' + result.error);
         setTimeout(() => errorMessage.set(''), 5000);
@@ -502,13 +461,11 @@
       // Clear the timeout since we got an error
       clearTimeout(authTimeout);
       
-      console.error('[Client] Authentication error:', err);
       
       // Check if auth actually succeeded despite the error
       const savedAuthStatus = authStatus;
       await checkAuthentication();
       if (username && authData && authStatus === 'authenticated') {
-        console.log('[Client] Authentication succeeded despite error');
         successMessage.set(`Authentication completed for ${username}`);
         setTimeout(() => successMessage.set(''), 3000);
       } else {
@@ -531,24 +488,18 @@
       });
 
       if (result.success && result.refreshed) {
-        console.log('[Client] Authentication token refreshed');
         successMessage.set('Authentication refreshed');
         setTimeout(() => successMessage.set(''), 3000);
       } else if (!result.success && result.needsReauth) {
-        console.log('[Client] Authentication expired, user should re-authenticate manually');
         errorMessage.set('Authentication expired. Use the "Re-authenticate" button in Settings.');
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
-      console.error('[Client] Error refreshing authentication:', err);
     }
   }
   
   // Download required mods with debug wrapper
   async function onDownloadModsClick() {
-    console.log('[Client] Download Mods button clicked!');
-    console.log('[Client] Button click timestamp:', new Date().toISOString());
-    console.log('[Client] Current button state:', { downloadStatus, requiredModsLength: requiredMods?.length });
     
     // Show immediate loading state
     downloadStatus = 'downloading';
@@ -557,7 +508,6 @@
     try {
       await downloadMods();
     } catch (error) {
-      console.error('[Client] Error in download mods click handler:', error);
       errorMessage.set(`Download error: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
       downloadStatus = 'needed'; // Reset status on error
@@ -566,8 +516,6 @@
   
   // Download required mods
   async function downloadMods() {
-    console.log('[Client] downloadMods() called');
-    console.log('[Client] Current state:', {
       requiredMods: requiredMods,
       requiredModsLength: requiredMods ? requiredMods.length : 'undefined',
       downloadStatus: downloadStatus,
@@ -578,14 +526,12 @@
     
     // Validate required parameters
     if (!instance?.path) {
-      console.error('[Client] No instance path provided');
       errorMessage.set('No client path configured');
       setTimeout(() => errorMessage.set(''), 5000);
       return;
     }
     
     if (!requiredMods || requiredMods.length === 0) {
-      console.log('[Client] No required mods, setting downloadStatus to ready');
       downloadStatus = 'ready';
       return;
     }
@@ -596,15 +542,12 @@
     // Validate that each mod has necessary properties
     const invalidMods = requiredMods.filter(mod => !mod.fileName || !mod.downloadUrl);
     if (invalidMods.length > 0) {
-      console.error('[Client] Invalid mods found:', invalidMods);
       errorMessage.set(`Invalid mod data: ${invalidMods.length} mods missing required properties`);
       setTimeout(() => errorMessage.set(''), 5000);
       isDownloadingMods = false;
       return;
     }
     
-    console.log('[Client] Starting mod download process...');
-    console.log('[Client] Required mods details:', requiredMods.map(m => ({
       fileName: m.fileName,
       downloadUrl: m.downloadUrl,
       hasChecksum: !!m.checksum,
@@ -622,7 +565,6 @@
     downloadStatus = 'downloading';
     
     try {
-      console.log('[Client] Calling minecraft-download-mods IPC...');
       const result = await window.electron.invoke('minecraft-download-mods', {
         clientPath: instance.path,
         requiredMods,
@@ -633,7 +575,6 @@
         }
       });
       
-      console.log('[Client] Download result:', result);
       
       if (result.success) {
         downloadStatus = 'ready';
@@ -670,7 +611,6 @@
         
         if (result.failures && result.failures.length > 0) {
           failureMsg = `Failed to download ${result.failures.length} mods`;
-          console.error('[Client] Download failures:', result.failures);
           
           // Show details of first few failures
           const firstFailures = result.failures.slice(0, 3);
@@ -688,7 +628,6 @@
         setTimeout(() => errorMessage.set(''), 8000);
       }
     } catch (err) {
-      console.error('[Client] Error downloading mods:', err);
       downloadStatus = 'needed';
       
       let errorMsg = 'Error downloading mods';
@@ -719,7 +658,6 @@
       return;
     }
     
-    console.log(`[Client] Starting client download for Minecraft ${serverInfo.minecraftVersion}...`);
     isDownloadingClient = true;
     clientSyncStatus = 'downloading';
     clientDownloadProgress = { type: 'Preparing', task: 'Starting download...', total: 0 };
@@ -735,7 +673,6 @@
         }
       });
       
-      console.log('[Client] Client download result:', result);
       
       if (result.success) {
         clientSyncStatus = 'ready';
@@ -756,7 +693,6 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
-      console.error('[Client] Error downloading client files:', err);
       clientSyncStatus = 'needed';
       errorMessage.set('Error downloading client files: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
@@ -776,7 +712,6 @@
     }
     
     try {
-      console.log(`[Client] Clearing and re-downloading client files...`);
       
       // Clear existing client files first
       const clearResult = await window.electron.invoke('minecraft-clear-client', {
@@ -796,7 +731,6 @@
       }
       
     } catch (err) {
-      console.error('[Client] Error clearing client files:', err);
       errorMessage.set('Error clearing client files: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
     }
@@ -874,7 +808,6 @@
         setTimeout(() => errorMessage.set(''), 8000); // Longer timeout for detailed error messages
       }
     } catch (err) {
-      console.error('[Client] Launch error:', err);
       launchStatus = 'error';
       isLaunching = false;
       
@@ -895,17 +828,14 @@
   // Stop Minecraft if running
   async function stopMinecraft() {
     try {
-      console.log('[Client] Stopping Minecraft...');
       isLaunching = false;
       launchStatus = 'ready';
       
       const result = await window.electron.invoke('minecraft-stop');
-      console.log('[Client] Stop result:', result);
       
       successMessage.set(result.message || 'Minecraft stopped successfully');
       setTimeout(() => successMessage.set(''), 3000);
     } catch (err) {
-      console.error('[Client] Error stopping Minecraft:', err);
       launchStatus = 'ready'; // Reset status anyway
       errorMessage.set('Error stopping Minecraft: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
@@ -920,7 +850,6 @@
     window.electron.on('launcher-download-start', (data) => {
       downloadStatus = 'downloading';
       downloadProgress = 0;
-      console.log(`[Client] Starting download of ${data.total} mods`);
     });
     
     window.electron.on('launcher-download-progress', (data) => {
@@ -952,14 +881,12 @@
         }
       }
       
-      console.log(`[Client] Download progress: ${downloadProgress}% (${data.current}) - File: ${fileProgress}%`);
     });
     
     window.electron.on('launcher-download-complete', (data) => {
       downloadStatus = data.success ? 'ready' : 'needed';
       downloadProgress = 100;
       currentDownloadFile = '';
-      console.log(`[Client] Download complete: ${data.downloaded} downloaded, ${data.failed} failed`);
     });
     
     // Launch events
@@ -991,12 +918,10 @@
     
     window.electron.on('launcher-minecraft-closed', (data) => {
       launchStatus = 'ready';
-      console.log(`[Client] Minecraft closed with code: ${data.code}`);
     });
     
     // Auth events
     window.electron.on('launcher-auth-success', (data) => {
-      console.log('[Client] Auth success event received:', data);
       
       // Only update if we have valid data and we're not already authenticated with this user
       if (data && data.username && (!username || username !== data.username)) {
@@ -1012,7 +937,6 @@
     });
     
     window.electron.on('launcher-auth-error', (error) => {
-      console.error('[Client] Auth error event received:', error);
       authStatus = 'needs-auth';
       errorMessage.set('Authentication failed: ' + error);
       setTimeout(() => errorMessage.set(''), 5000);
@@ -1022,7 +946,6 @@
     window.electron.on('launcher-client-download-start', (data) => {
       clientSyncStatus = 'downloading';
       clientDownloadProgress = { type: 'Starting', task: `Downloading Minecraft ${data.version}...`, total: 0 };
-      console.log(`[Client] Starting client download for ${data.version}`);
     });
     
     window.electron.on('launcher-client-download-progress', (data) => {
@@ -1030,7 +953,6 @@
     });
     
     window.electron.on('launcher-client-download-complete', (data) => {
-      console.log('[Client] Client download complete:', data);
       isDownloadingClient = false;
       clientDownloadProgress = { type: 'Complete', task: 'Client download finished', total: 100 };
       clientSyncStatus = 'ready';
@@ -1048,18 +970,15 @@
         setTimeout(() => errorMessage.set(''), 8000);
       }
       
-      console.log(`[Client] Client download complete for ${data.version}`);
     });
       window.electron.on('launcher-client-download-error', (data) => {
       clientSyncStatus = 'needed';
       errorMessage.set('Client download failed: ' + data.error);
       setTimeout(() => errorMessage.set(''), 5000);
-      console.error(`[Client] Client download error: ${data.error}`);
     });
     
     // Client mod compatibility events
     window.electron.on('client-mod-compatibility-report', (report) => {
-      console.log('[Client] Received compatibility report:', report);
       compatibilityReport = report;
       
       // Show dialog if there are compatibility issues
@@ -1129,7 +1048,6 @@
         try {
           const status = await window.electron.invoke('minecraft-get-status');
           if (status && !status.isRunning && !status.isLaunching) {
-            console.log('[Client] Detected Minecraft has stopped running');
             launchStatus = 'ready';
           }
         } catch (err) {
@@ -1160,7 +1078,6 @@
   
   // Force refresh all status checks
   async function forceRefresh() {
-    console.log('[Client] Force refreshing all status checks...');
     
     // Reset states to force re-check
     authStatus = 'checking';
@@ -1176,7 +1093,6 @@
       await checkModSynchronization();
       await checkClientSynchronization();
     } catch (error) {
-      console.error('[Client] Error during force refresh:', error);
     }
   }
   
@@ -1188,14 +1104,12 @@
     setupChecks();
     
     window.electron.on('client-mod-compatibility-report', (data) => {
-      console.log('[Client] Received client-mod-compatibility-report:', data);
       if (data && data.report && data.newMinecraftVersion && data.oldMinecraftVersion) {
         compatibilityReport = data.report;
         newMcVersion = data.newMinecraftVersion; 
         oldMcVersion = data.oldMinecraftVersion; 
         showCompatibilityDialog = true; 
       } else {
-        console.error('[Client] Invalid data received for client-mod-compatibility-report:', data);
       }
     });
   });
@@ -1251,19 +1165,16 @@
   // Prevent sync check when downloads are in progress
   async function checkSyncStatus() {
     if (isDownloadingClient || isDownloadingMods || isCheckingSync) {
-      console.log('[Client] Skipping sync check - downloads in progress');
       return;
     }
 
     if (!instance?.path || !serverInfo?.minecraftVersion) {
-      console.log('[Client] Cannot check sync - missing instance or server info');
       return;
     }
 
     isCheckingSync = true;
 
     try {
-      console.log('[Client] Checking sync status...');
 
       // Refresh client and mod synchronization separately
       await checkClientSynchronization();
@@ -1294,7 +1205,6 @@
       } else {
         downloadButtonText = 'Setup Required';
       }    } catch (error) {
-      console.error('[Client] Error checking sync status:', error);
       downloadStatus = 'error';
       downloadButtonText = 'Check Failed - Retry';
     } finally {
@@ -1306,7 +1216,6 @@
   function handleCompatibilityDialogContinue() {
     showCompatibilityDialog = false;
     compatibilityReport = null;
-    console.log('[Client] User chose to continue with version change despite compatibility issues');
   }
   
   async function handleCompatibilityDialogUpdateMods() {
@@ -1319,7 +1228,6 @@
     showCompatibilityDialog = false;
     
     try {
-      console.log('[Client] Updating client mods from compatibility dialog...');
       
       // Update each mod that has an available update
       const updatePromises = compatibilityReport.needsUpdate.map(async (mod) => {
@@ -1333,14 +1241,11 @@
             });
             
             if (result.success) {
-              console.log(`[Client] Successfully updated ${mod.fileName} to ${mod.availableUpdate.version}`);
               return { success: true, mod: mod.fileName };
             } else {
-              console.error(`[Client] Failed to update ${mod.fileName}:`, result.error);
               return { success: false, mod: mod.fileName, error: result.error };
             }
           } catch (error) {
-            console.error(`[Client] Error updating ${mod.fileName}:`, error);
             return { success: false, mod: mod.fileName, error: error.message };
           }
         }
@@ -1357,13 +1262,11 @@
       }
       
       if (failed.length > 0) {
-        console.error('[Client] Some mod updates failed:', failed);
         errorMessage.set(`Failed to update ${failed.length} mod${failed.length > 1 ? 's' : ''}: ${failed.map(f => f.mod).join(', ')}`);
         setTimeout(() => errorMessage.set(''), 8000);
       }
       
     } catch (error) {
-      console.error('[Client] Error during mod updates:', error);
       errorMessage.set('Error updating mods: ' + error.message);
       setTimeout(() => errorMessage.set(''), 5000);
     }
@@ -1381,7 +1284,6 @@
     showCompatibilityDialog = false;
     
     try {
-      console.log('[Client] Disabling incompatible client mods...');
       
       const disablePromises = compatibilityReport.incompatible.map(async (mod) => {
         try {
@@ -1391,14 +1293,11 @@
           });
           
           if (result.success) {
-            console.log(`[Client] Successfully disabled ${mod.fileName}`);
             return { success: true, mod: mod.fileName };
           } else {
-            console.error(`[Client] Failed to disable ${mod.fileName}:`, result.error);
             return { success: false, mod: mod.fileName, error: result.error };
           }
         } catch (error) {
-          console.error(`[Client] Error disabling ${mod.fileName}:`, error);
           return { success: false, mod: mod.fileName, error: error.message };
         }
       });
@@ -1413,13 +1312,11 @@
       }
       
       if (failed.length > 0) {
-        console.error('[Client] Some mod disables failed:', failed);
         errorMessage.set(`Failed to disable ${failed.length} mod${failed.length > 1 ? 's' : ''}: ${failed.map(f => f.mod).join(', ')}`);
         setTimeout(() => errorMessage.set(''), 8000);
       }
       
     } catch (error) {
-      console.error('[Client] Error during mod disabling:', error);
       errorMessage.set('Error disabling mods: ' + error.message);
       setTimeout(() => errorMessage.set(''), 5000);
     }

@@ -115,7 +115,6 @@
         }
       }
     } catch (e) {
-      console.error('Failed to load automation settings:', e);
     }
   }
   

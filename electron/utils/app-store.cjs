@@ -31,10 +31,8 @@ const ensureDataDir = () => {
     
     return true;
   } catch (err) {
-    console.error('Error accessing app data directory:', err);
     // Fallback to a different directory if needed
     if (appDataDir !== path.join(os.homedir(), '.minecraft-core-fallback')) {
-      console.log('Falling back to home directory');
       return ensureDataDir();
     }
     throw err;
@@ -164,7 +162,6 @@ try {
   // Quick sanity check
   appStore.get('__test__');
 } catch (err) {
-  console.error('Failed to initialize electron-store, falling back to in-memory:', err);
   // Fallback to in-memory store
   appStore = new Store({
     ...storeConfig,
@@ -181,7 +178,6 @@ const safeStore = {
     try {
       return appStore.get(key);
     } catch (error) {
-      console.error(`Error getting ${key} from store:`, error);
       return null;
     }
   },
@@ -199,9 +195,7 @@ const safeStore = {
         return true;
       } catch (error) {
         retries++;
-        console.warn(`Retry ${retries}/${maxRetries} for setting ${key}:`, error.message);
         if (retries >= maxRetries) {
-          console.error(`Failed to set ${key} after ${maxRetries} attempts:`, error);
           return false;
         }
       }
@@ -211,7 +205,6 @@ const safeStore = {
     try {
       return appStore.has(key);
     } catch (error) {
-      console.error(`Error checking for ${key} in store:`, error);
       return false;
     }
   },
@@ -219,7 +212,6 @@ const safeStore = {
     try {
       return appStore.delete(key);
     } catch (error) {
-      console.error(`Error deleting ${key} from store:`, error);
       return false;
     }
   },
@@ -227,7 +219,6 @@ const safeStore = {
     try {
       return appStore.clear();
     } catch (error) {
-      console.error('Error clearing store:', error);
       return false;
     }
   },
