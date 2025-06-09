@@ -220,6 +220,29 @@ async function getInstalledModInfo(serverPath) {
       }
       
       if (manifest) {
+        if (!manifest.projectId || !manifest.versionNumber) {
+          try {
+            const jarBase = path.join(modsDir, modFile);
+            const jarPath = await fs
+              .access(jarBase)
+              .then(() => jarBase)
+              .catch(async () => {
+                const disabledPath = jarBase + '.disabled';
+                try {
+                  await fs.access(disabledPath);
+                  return disabledPath;
+                } catch {
+                  return null;
+                }
+              });
+            if (jarPath) {
+              const meta = await readModMetadataFromJar(jarPath);
+              manifest = { ...meta, ...manifest, projectId: manifest.projectId || meta.projectId, versionNumber: manifest.versionNumber || meta.versionNumber, name: manifest.name || meta.name };
+            }
+          } catch (metaErr) {
+            console.warn('[ModManager] Failed to enhance manifest with metadata:', metaErr.message);
+          }
+        }
         modInfo.push(manifest);
       }
     }
@@ -268,6 +291,29 @@ async function getClientInstalledModInfo(clientPath) {
       const content = await fs.readFile(manifestPath, 'utf8');
       manifest = JSON.parse(content);
       console.log('[ModManager] Found manifest for', file, ':', manifest);
+      if (!manifest.projectId || !manifest.versionNumber) {
+        try {
+          const jarBase = path.join(modsDir, file);
+          const jarPath = await fs
+            .access(jarBase)
+            .then(() => jarBase)
+            .catch(async () => {
+              const disabledPath = jarBase + '.disabled';
+              try {
+                await fs.access(disabledPath);
+                return disabledPath;
+              } catch {
+                return null;
+              }
+            });
+          if (jarPath) {
+            const meta = await readModMetadataFromJar(jarPath);
+            manifest = { ...meta, ...manifest, projectId: manifest.projectId || meta.projectId, versionNumber: manifest.versionNumber || meta.versionNumber, name: manifest.name || meta.name };
+          }
+        } catch (metaErr) {
+          console.warn('[ModManager] Failed to enhance manifest with metadata:', metaErr.message);
+        }
+      }
       modInfo.push(manifest);
     } catch (err) {
       console.log(`[ModManager] No manifest found for ${file}, trying to read JAR metadata`);
