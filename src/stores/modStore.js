@@ -202,7 +202,6 @@ export async function saveModCategories() {
     // Get the paths from localStorage
     let serverPath = '';
     let clientPath = '';
-    try {
       // First try to get paths from the instances list
       const storedInstances = localStorage.getItem('instances');
       if (storedInstances) {
@@ -231,11 +230,7 @@ export async function saveModCategories() {
           }
         }
       }
-    } catch (storageError) {
-    }
-    
-    if (!serverPath) {
-    }
+
 
     // Convert Map to array of objects for storage
     const categoriesArray = Array.from(get(modCategories)).map(([modId, info]) => ({

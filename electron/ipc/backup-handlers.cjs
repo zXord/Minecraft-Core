@@ -355,11 +355,8 @@ function initializeAutomatedBackups(win) {
       
       // Always start the scheduler regardless
       startAutomatedBackups(win, settings, serverPath);
-    } else {
     }
-  } else {
   }
-}
 
 /**
  * Initializes the backup manager and starts automated backups if configured
@@ -367,7 +364,6 @@ function initializeAutomatedBackups(win) {
  * @param {BrowserWindow} win - The main application window
  */
 function loadBackupManager(win) {
-  try {
     
     // Load backup settings
     const settings = appStore.get('backupSettings') || {
@@ -439,8 +435,6 @@ function loadBackupManager(win) {
         });
       }
     }
-  } catch (err) {
-  }
 }
 
 module.exports = { createBackupHandlers, loadBackupManager, initializeAutomatedBackups }; 
