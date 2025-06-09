@@ -10,6 +10,3 @@ const store = new Store({
 
 // Clear all data
 store.clear();
-
-console.log('Electron store cleared successfully!');
-console.log('Current data:', store.store); 

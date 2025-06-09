@@ -1,6 +1,5 @@
 // IPC handlers for the Electron app
-const { ipcMain, dialog } = require('electron');
-const path = require('path');
+const { ipcMain } = require('electron');
 const fs = require('fs');
 const { registerIpcHandlers, registeredHandlers } = require('./utils/ipc-helpers.cjs');
 const appStore = require('./utils/app-store.cjs');

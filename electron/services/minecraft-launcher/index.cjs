@@ -11,37 +11,6 @@ const utils = require('./utils.cjs'); // Added import for utils
 const { ProperMinecraftLauncher } = require('./proper-launcher.cjs'); // Import proper launcher
 const eventBus = require('../../utils/event-bus.cjs');
 
-// CRITICAL DEBUG: Intercept session join requests to debug authentication
-try {
-  const originalFetch = require('node-fetch');
-  const fetch = require('node-fetch');
-  
-  // Override global fetch to log session requests
-  if (typeof global !== 'undefined') {
-    global.fetch = async (url, opts) => {
-      if (url && url.includes && url.includes('sessionserver.mojang.com')) {
-        if (opts && opts.body) {
-          try {
-            const body = typeof opts.body === 'string' ? JSON.parse(opts.body) : opts.body;
-          } catch (parseError) {
-          }
-        }
-        
-        const response = await originalFetch(url, opts);
-        
-        if (!response.ok) {
-          const errorText = await response.clone().text();
-        }
-        
-        return response;
-      }
-      
-      return originalFetch(url, opts);
-    };
-  }
-} catch (debugError) {
-}
-
 // Console hiding removed - fixing the root cause instead (using javaw.exe)
 
 // Add global error handling for unhandled promise rejections
