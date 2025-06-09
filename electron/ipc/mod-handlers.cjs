@@ -26,7 +26,6 @@ function createModHandlers(win) {
     // Select mod files using native dialog
     'select-mod-files': async () => {
       try {
-        console.log('[IPC:Mods] Opening file dialog for mod selection');
         const result = await dialog.showOpenDialog(win, {
           properties: ['openFile', 'multiSelections'],
           filters: [{ name: 'Mod Files', extensions: ['jar'] }],
@@ -35,14 +34,11 @@ function createModHandlers(win) {
         });
         
         if (result.canceled) {
-          console.log('[IPC:Mods] File selection canceled');
           return [];
         }
         
-        console.log('[IPC:Mods] Selected files:', result.filePaths);
         return result.filePaths;
       } catch (err) {
-        console.error('[IPC:Mods] Error selecting mod files:', err);
         throw new Error(`Failed to select mod files: ${err.message}`);
       }
     },
@@ -50,7 +46,6 @@ function createModHandlers(win) {
     // Process dropped files to get their paths
     'get-dropped-file-paths': async (_event, fileIdentifiers) => {
       try {
-        console.log('[IPC:Mods] Processing dropped files:', fileIdentifiers);
         
         if (!fileIdentifiers || !Array.isArray(fileIdentifiers) || !fileIdentifiers.length) {
           return [];
@@ -61,27 +56,22 @@ function createModHandlers(win) {
           .filter(file => file && file.path)
           .map(file => file.path);
           
-        console.log('[IPC:Mods] Extracted file paths:', filePaths);
         
         return filePaths;
       } catch (err) {
-        console.error('[IPC:Mods] Error processing dropped files:', err);
         throw new Error(`Failed to process dropped files: ${err.message}`);
       }
     },
 
     'list-mods': async (_event, serverPath) => {
       try {
-        console.log('[IPC:Mods] Listing mods, calling modFileManager.listMods for serverPath:', serverPath);
         return await modFileManager.listMods(serverPath);
       } catch (err) {
-        console.error('[IPC:Mods] Failed to list mods:', err);
         throw new Error(`Failed to list mods: ${err.message}`);
       }
     },
 
     'search-mods': async (_event, { keyword, loader, version, source, page = 1, limit = 20, sortBy = 'popular', environmentType = 'all' }) => {
-      console.log('[IPC:Mods] Searching mods with:', { keyword, loader, version, source, page, limit, sortBy, environmentType });
       try {
         if (source === 'modrinth') {
           if (!keyword || keyword.trim() === '') {
@@ -99,13 +89,11 @@ function createModHandlers(win) {
           throw new Error(`Invalid source: ${source}`);
         }
       } catch (error) {
-        console.error(`[IPC:Mods] Error searching ${source} mods:`, error);
         throw new Error(`Failed to search mods: ${error.message}`);
       }
     },
 
     'get-mod-versions': async (_event, { modId, loader, mcVersion, source, loadLatestOnly }) => {
-      console.log(`[IPC:Mods] Getting versions for mod ${modId} (source: ${source}, loadLatestOnly: ${loadLatestOnly})`);
       try {
         if (source === 'modrinth') {
           return await modApiService.getModrinthVersions(modId, loader, mcVersion, loadLatestOnly);
@@ -114,13 +102,11 @@ function createModHandlers(win) {
           throw new Error('Only Modrinth version fetching is currently fully supported via modApiService.');
         }
       } catch (err) {
-        console.error('[IPC:Mods] Failed to get mod versions:', err);
         throw new Error(`Failed to get mod versions: ${err.message}`);
       }
     },
     
     'get-version-info': async (_event, { modId, versionId, source, gameVersion, loader }) => {
-      console.log(`[IPC:Mods] Getting version info for mod ${modId}, version ${versionId} (source: ${source})`);
       try {
         if (source === 'modrinth') {
           return await modApiService.getModrinthVersionInfo(modId, versionId, gameVersion, loader);
@@ -130,9 +116,7 @@ function createModHandlers(win) {
       } catch (err) {
         // Only log as error if it's not a 404 (which can be normal for missing/removed versions)
         if (err.message && err.message.includes('404')) {
-          console.warn(`[IPC:Mods] Version not found for mod ${modId}, version ${versionId}: ${err.message}`);
         } else {
-          console.error('[IPC:Mods] Failed to get version info:', err);
         }
         throw new Error(`Failed to get version info: ${err.message}`);
       }
@@ -140,40 +124,32 @@ function createModHandlers(win) {
     
     'get-installed-mod-info': async (_event, serverPath) => {
       try {
-        console.log('[IPC:Mods] Getting installed mod info, calling modFileManager.getInstalledModInfo for serverPath:', serverPath);
         return await modFileManager.getInstalledModInfo(serverPath);
       } catch (err) {
-        console.error('[IPC:Mods] Failed to get installed mod info:', err);
         throw new Error(`Failed to get installed mod info: ${err.message}`);
       }
     },
 
     'get-client-installed-mod-info': async (_event, clientPath) => {
       try {
-        console.log('[IPC:Mods] Getting client installed mod info for path:', clientPath);
         return await modFileManager.getClientInstalledModInfo(clientPath);
       } catch (err) {
-        console.error('[IPC:Mods] Failed to get client installed mod info:', err);
         throw new Error(`Failed to get client installed mod info: ${err.message}`);
       }
     },
 
     'save-disabled-mods': async (_event, serverPath, disabledMods) => {
       try {
-        console.log('[IPC:Mods] Saving disabled mods, calling modFileManager.saveDisabledMods for serverPath:', serverPath);
         return await modFileManager.saveDisabledMods(serverPath, disabledMods);
       } catch (err) {
-        console.error('[IPC:Mods] Failed to save disabled mods:', err);
         throw new Error(`Failed to save disabled mods: ${err.message}`);
       }
     },
     
     'get-disabled-mods': async (_event, serverPath) => {
       try {
-        console.log('[IPC:Mods] Getting disabled mods, calling modFileManager.getDisabledMods for serverPath:', serverPath);
         return await modFileManager.getDisabledMods(serverPath);
       } catch (err) {
-        console.error('[IPC:Mods] Failed to get disabled mods:', err);
         throw new Error(`Failed to get disabled mods: ${err.message}`);
       }
     },    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
@@ -230,7 +206,6 @@ function createModHandlers(win) {
               });
             }
           } catch (err) {
-            console.error('[IPC:Mods] Compatibility check error for', projectId, err);
             results.push({ 
               projectId, 
               fileName, 
@@ -244,18 +219,15 @@ function createModHandlers(win) {
 
         return results;
       } catch (err) {
-        console.error('[IPC:Mods] check-mod-compatibility error:', err);
         throw err;
       }
     },
 
     'install-mod': async (_event, serverPath, modDetails) => {
       try {
-        console.log('[IPC:Mods] Installing mod, calling modInstallService.installModToServer for serverPath:', serverPath);
         // Pass 'win' object for progress reporting
         return await modInstallService.installModToServer(win, serverPath, modDetails);
       } catch (err) {
-        console.error('[IPC:Mods] Failed to install mod:', err);
         // The service function should format the error appropriately
         throw err; // Re-throw the error to be caught by the invoker in the renderer
       }
@@ -263,26 +235,21 @@ function createModHandlers(win) {
 
     'add-mod': async (_event, serverPath, modPath) => {
       try {
-        console.log('[IPC:Mods] Adding mod, calling modFileManager.addMod for serverPath:', serverPath);
         return await modFileManager.addMod(serverPath, modPath);
       } catch (err) {
-        console.error('[IPC:Mods] Failed to add mod:', err);
         throw new Error(`Failed to add mod: ${err.message}`);
       }
     },
       'delete-mod': async (_event, serverPath, modName) => {
       try {
-        console.log('[IPC:Mods] Deleting mod, calling modFileManager.deleteMod for serverPath:', serverPath);
         return await modFileManager.deleteMod(serverPath, modName);
       } catch (err) {
-        console.error('[IPC:Mods] Failed to delete mod:', err);
         throw new Error(`Failed to delete mod: ${err.message}`);
       }    },
 
     // Update a mod to a new version
     'update-mod': async (_event, { serverPath, projectId, targetVersion, fileName }) => {
       try {
-        console.log('[IPC:Mods] Updating mod:', { serverPath, projectId, targetVersion, fileName });
           // Step 1: Get the new version details
         const versions = await modApiService.getModrinthVersions(projectId, 'fabric', null, false);
         const targetVersionInfo = versions.find(v => v.versionNumber === targetVersion);
@@ -290,9 +257,7 @@ function createModHandlers(win) {
           throw new Error(`Target version ${targetVersion} not found for mod ${projectId}`);
         }
 
-        console.log('[IPC:Mods] Target version info structure:', JSON.stringify(targetVersionInfo, null, 2));        // Step 1.5: Get complete version details including files
         const completeVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionInfo.id);
-        console.log('[IPC:Mods] Complete version info:', JSON.stringify(completeVersionInfo, null, 2));
 
         // Step 2: Install the new version (installation service will handle cleanup)
         const modDetails = {
@@ -305,10 +270,10 @@ function createModHandlers(win) {
           source: 'modrinth',
           forceReinstall: true, // This flag triggers location detection and preservation
           oldFileName: fileName // Pass the old filename for proper location detection
-        };        console.log('[IPC:Mods] Installing new version:', modDetails);
+        };
+
         const result = await modInstallService.installModToServer(win, serverPath, modDetails);
         
-        console.log('[IPC:Mods] Mod update completed successfully');
         return { 
           success: true, 
           modName: modDetails.name,
@@ -319,7 +284,6 @@ function createModHandlers(win) {
         };
         
       } catch (err) {
-        console.error('[IPC:Mods] Failed to update mod:', err);
         throw new Error(`Failed to update mod: ${err.message}`);
       }
     },
@@ -327,10 +291,8 @@ function createModHandlers(win) {
     // Process dropped files directly
     'handle-dropped-files': async (_event, files) => {
       try {
-        console.log('[IPC:Mods] Processing dropped files:', files);
         
         if (!files || !files.length) {
-          console.log('[IPC:Mods] No files provided');
           return [];
         }
         
@@ -340,7 +302,6 @@ function createModHandlers(win) {
         
         // Try different ways to extract paths
         if (Array.isArray(files)) {
-          console.log('[IPC:Mods] Files is an array');
           
           // Try to extract paths if files is an array of objects with path property
           if (files[0] && typeof files[0] === 'object') {
@@ -356,39 +317,32 @@ function createModHandlers(win) {
           filePaths = [files.path];
         }
         
-        console.log('[IPC:Mods] Extracted file paths:', filePaths);
         
         // Just return whatever paths we were able to extract
         // No fallback dialog needed
         return filePaths;
       } catch (err) {
-        console.error('[IPC:Mods] Error processing dropped files:', err);
         throw new Error(`Failed to process dropped files: ${err.message}`);
       }
     },
     
     'save-temp-file': async (_event, { name, buffer }) => {
       try {
-        console.log(`[IPC:Mods] Saving temporary file, calling modFileManager.saveTemporaryFile for name: ${name}`);
         return await modFileManager.saveTemporaryFile({ name, buffer });
       } catch (err) {
-        console.error('[IPC:Mods] Failed to save temporary file:', err);
         throw new Error(`Failed to save temporary file: ${err.message}`);
       }
     },
 
     'direct-add-mod': async (_event, { serverPath, fileName, buffer }) => {
       try {
-        console.log(`[IPC:Mods] Directly adding mod, calling modFileManager.directAddMod for serverPath: ${serverPath}, fileName: ${fileName}`);
         return await modFileManager.directAddMod({ serverPath, fileName, buffer });
       } catch (err) {
-        console.error('[IPC:Mods] Failed to directly add mod:', err);
         throw new Error(`Failed to add mod: ${err.message}`);
       }
     },
 
     'get-mod-info': async (_event, { modId, source }) => {
-      console.log(`[IPC:Mods] Getting mod info for ${modId} (source: ${source})`);
       try {
         if (source === 'modrinth') {
           return await modApiService.getModInfo(modId, source);
@@ -396,13 +350,11 @@ function createModHandlers(win) {
           throw new Error('Only Modrinth mod info is currently fully supported via modApiService.');
         }
       } catch (err) {
-        console.error('[IPC:Mods] Failed to get mod info:', err);
         throw new Error(`Failed to get mod info: ${err.message}`);
       }
     },
 
     'get-project-info': async (_event, { projectId, source }) => {
-      console.log(`[IPC:Mods] Getting project info for ${projectId} (source: ${source})`);
       try {
         if (source === 'modrinth') {
           return await modApiService.getModrinthProjectInfo(projectId);
@@ -410,38 +362,31 @@ function createModHandlers(win) {
           throw new Error('Only Modrinth project info is currently fully supported via modApiService.');
         }
       } catch (err) {
-        console.error('[IPC:Mods] Failed to get project info:', err);
         throw new Error(`Failed to get project info: ${err.message}`);
       }
     },
 
     'extract-jar-dependencies': async (_event, modPath) => {
       try {
-        console.log('[IPC:Mods] Extracting JAR dependencies, calling modAnalysisUtils.extractDependenciesFromJar for modPath:', modPath);
         return await modAnalysisUtils.extractDependenciesFromJar(modPath);
       } catch (error) {
-        console.error('[IPC:Mods] Failed to extract JAR dependencies:', error);
         throw new Error(`Failed to extract dependencies: ${error.message}`);
       }
     },
 
     'analyze-mod-from-url': async (_event, { url, modId }) => {
       try {
-        console.log(`[IPC:Mods] Analyzing mod from URL, calling modAnalysisUtils.analyzeModFromUrl for url: ${url}`);
         return await modAnalysisUtils.analyzeModFromUrl(url, modId);
       } catch (error) {
-        console.error('[IPC:Mods] Failed to analyze mod from URL:', error);
         throw new Error(`Failed to analyze mod: ${error.message}`);
       }
     },
 
     'save-mod-categories': async (_event, categories, serverPath, clientPath) => {
       try {
-        console.log('[IPC:Mods] Saving mod categories, calling modFileManager.modCategoriesStore.set');
         // First, save the categories to the store
         const storeSuccess = modFileManager.modCategoriesStore.set(categories);
         if (!storeSuccess) {
-           console.warn('[IPC:Mods] Failed to save categories to store, but attempting file operations if serverPath provided.');
         }
 
         // If serverPath is provided, proceed with physical file movements
@@ -453,7 +398,6 @@ function createModHandlers(win) {
         // A more complete solution might involve iterating `categories` and calling `moveModFile`
         // for each mod that changed its category, or a new batch function in modFileManager.
         if (serverPath) {
-            console.log(`[IPC:Mods] Mod category data saved to store. Physical file moves based on categories are now typically handled by individual 'move-mod-file' calls or a batch process if implemented in modFileManager.`);
             // Example of how one might trigger moves (conceptual):
             // for (const modCat of categories) {
             //   // Determine old category if possible, then call moveModFile
@@ -463,38 +407,31 @@ function createModHandlers(win) {
         return { success: true, message: "Categories saved to store. File moves require separate/refined logic." };
 
       } catch (error) {
-        console.error('[IPC:Mods] Error saving mod categories:', error);
         throw new Error(`Failed to save mod categories: ${error.message}`);
       }
     },
     
     'get-mod-categories': async () => {
       try {
-        console.log('[IPC:Mods] Getting mod categories, calling modFileManager.modCategoriesStore.get');
         return modFileManager.modCategoriesStore.get() || [];
       } catch (error) {
-        console.error('[IPC:Mods] Error getting mod categories:', error);
         throw new Error(`Failed to get mod categories: ${error.message}`);
       }
     },
 
     'move-mod-file': async (_event, { fileName, newCategory, serverPath }) => {
       try {
-        console.log(`[IPC:Mods] Moving mod file, calling modFileManager.moveModFile for fileName: ${fileName}`);
         return await modFileManager.moveModFile({ fileName, newCategory, serverPath });
       } catch (err) {
-        console.error('[IPC:Mods] Error moving mod file:', err);
         throw new Error(`Failed to move mod file: ${err.message}`);
       }
     },    'install-client-mod': async (_event, modData) => {
       try {
-        console.log('[IPC:Mods] Installing client mod, calling modInstallService.installModToClient');
         // Pass 'win' object for progress reporting, if the service function is adapted for it
         // The service function currently doesn't take 'win', but it could be added
         // or a callback mechanism implemented. For now, passing win as per general plan.
         return await modInstallService.installModToClient(win, modData);
       } catch (error) {
-        console.error('[IPC:Mods] Error installing client mod:', error);
         throw error; // Re-throw the error
       }
     },
@@ -503,7 +440,6 @@ function createModHandlers(win) {
     'check-client-mod-compatibility': async (_event, options) => {
       try {
         const { newMinecraftVersion, clientPath } = options;
-        console.log(`[IPC:Mods] Checking client mod compatibility for Minecraft ${newMinecraftVersion}`);
         
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
@@ -550,7 +486,6 @@ function createModHandlers(win) {
                       reason = `Update available for Minecraft ${newMinecraftVersion}`;
                     }
                   } catch (updateError) {
-                    console.warn(`[IPC:Mods] Failed to check updates for ${mod.fileName}:`, updateError);
                   }
                 }
               }
@@ -576,7 +511,6 @@ function createModHandlers(win) {
             });
             
           } catch (modError) {
-            console.error(`[IPC:Mods] Error checking compatibility for ${mod.fileName}:`, modError);
             compatibilityResults.push({
               fileName: mod.fileName,
               name: mod.fileName,
@@ -599,25 +533,14 @@ function createModHandlers(win) {
         
         report.hasIncompatible = report.incompatible.length > 0;
         report.hasUpdatable = report.needsUpdate.length > 0;
-        
-        console.log(`[IPC:Mods] Compatibility check complete:`, {
-          total: compatibilityResults.length,
-          compatible: report.compatible.length,
-          incompatible: report.incompatible.length,
-          needsUpdate: report.needsUpdate.length,
-          unknown: report.unknown.length,
-          errors: report.errors.length
-        });
           return report;
         
       } catch (error) {
-        console.error('[IPC:Mods] Error checking client mod compatibility:', error);
         throw new Error(`Failed to check client mod compatibility: ${error.message}`);
       }
     },    // Update a client-side mod to a newer version
     'update-client-mod': async (_event, { modInfo, clientPath }) => {
       try {
-        console.log('[IPC:Mods] Updating client mod:', modInfo.name);
         
         if (!modInfo.downloadUrl) {
           throw new Error('No download URL available for mod update');
@@ -640,7 +563,6 @@ function createModHandlers(win) {
         const targetPath = path.join(modsDir, fileName);
         
         // Download the updated mod
-        console.log('[IPC:Mods] Downloading mod update from:', modInfo.downloadUrl);
         const writer = createWriteStream(targetPath);
         const response = await axios({
           url: modInfo.downloadUrl,
@@ -658,21 +580,17 @@ function createModHandlers(win) {
           
           if (oldFileName !== newFileName) {
             await fs.unlink(modInfo.currentFilePath);
-            console.log('[IPC:Mods] Removed old mod file:', oldFileName);
           }
         }
         
-        console.log('[IPC:Mods] Successfully updated mod:', modInfo.name);
         return { success: true, filePath: targetPath };
         
       } catch (error) {
-        console.error('[IPC:Mods] Error updating client mod:', error);
         throw new Error(`Failed to update mod "${modInfo.name}": ${error.message}`);
       }
     },    // Disable a client-side mod by moving it to disabled folder
     'disable-client-mod': async (_event, { modFilePath, clientPath }) => {
       try {
-        console.log('[IPC:Mods] Disabling client mod:', modFilePath);
         
         if (!fs.existsSync(modFilePath)) {
           throw new Error('Mod file not found');
@@ -692,11 +610,9 @@ function createModHandlers(win) {
         // Move the mod file to the disabled directory
         fs.renameSync(modFilePath, disabledPath);
         
-        console.log('[IPC:Mods] Successfully disabled mod:', fileName);
         return { success: true, disabledPath };
         
       } catch (error) {
-        console.error('[IPC:Mods] Error disabling client mod:', error);
         throw new Error(`Failed to disable mod: ${error.message}`);
       }
     },
@@ -704,8 +620,6 @@ function createModHandlers(win) {
     // Get detailed information about manual mods
     'get-manual-mods-detailed': async (_event, { clientPath, serverManagedFiles }) => {
       try {
-        console.log('[IPC:Mods] Getting detailed manual mods info for:', clientPath);
-        console.log('[IPC:Mods] Server managed files to exclude:', serverManagedFiles);
 
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
@@ -728,7 +642,6 @@ function createModHandlers(win) {
         // Process enabled mods
         for (const fileName of enabledFiles) {
           if (serverManagedFilesSet.has(fileName.toLowerCase())) {
-            console.log(`[IPC:Mods] Skipping server managed file (enabled): ${fileName}`);
             continue;
           }
           const filePath = path.join(modsDir, fileName);
@@ -750,7 +663,6 @@ function createModHandlers(win) {
               enabled: true
             });
           } catch (metadataError) {
-            console.warn(`[IPC:Mods] Failed to read metadata for ${fileName}:`, metadataError);
             mods.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -770,7 +682,6 @@ function createModHandlers(win) {
         // Process disabled mods
         for (const fileName of disabledFiles) {
           if (serverManagedFilesSet.has(fileName.toLowerCase())) {
-            console.log(`[IPC:Mods] Skipping server managed file (disabled): ${fileName}`);
             continue;
           }
           const filePath = path.join(disabledDir, fileName);
@@ -792,7 +703,6 @@ function createModHandlers(win) {
               enabled: false
             });
           } catch (metadataError) {
-            console.warn(`[IPC:Mods] Failed to read metadata for disabled ${fileName}:`, metadataError);
             mods.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -809,17 +719,14 @@ function createModHandlers(win) {
           }
         }
         
-        console.log(`[IPC:Mods] Found ${mods.length} manual mods after filtering`);
         return { success: true, mods };
 
       } catch (error) {
-        console.error('[IPC:Mods] Error getting manual mods detailed:', error);
         return { success: false, error: error.message, mods: [] };
       }
     },    // Check manual mods for basic compatibility
     'check-manual-mods': async (_event, { clientPath, minecraftVersion }) => {
       try {
-        console.log('[IPC:Mods] Checking manual mods compatibility for Minecraft:', minecraftVersion);
         
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
@@ -870,7 +777,6 @@ function createModHandlers(win) {
               enabled: true
             });
           } catch (metadataError) {
-            console.warn(`[IPC:Mods] Failed to read metadata for ${fileName}:`, metadataError);
             compatibilityResults.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -913,7 +819,6 @@ function createModHandlers(win) {
               enabled: false
             });
           } catch (metadataError) {
-            console.warn(`[IPC:Mods] Failed to read metadata for disabled ${fileName}:`, metadataError);
             compatibilityResults.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -927,7 +832,6 @@ function createModHandlers(win) {
         return { success: true, results: compatibilityResults };
         
       } catch (error) {
-        console.error('[IPC:Mods] Error checking manual mods:', error);
         return { success: false, error: error.message, results: [] };
       }
     },
@@ -935,7 +839,6 @@ function createModHandlers(win) {
     // Remove manual mods
     'remove-manual-mods': async (_event, { clientPath, fileNames }) => {
       try {
-        console.log('[IPC:Mods] Removing manual mods:', fileNames);
         
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
@@ -974,12 +877,10 @@ function createModHandlers(win) {
               errors.push({ fileName, error: 'File not found' });
             }
           } catch (fileError) {
-            console.error(`[IPC:Mods] Error removing ${fileName}:`, fileError);
             errors.push({ fileName, error: fileError.message });
           }
         }
         
-        console.log(`[IPC:Mods] Removed ${removedFiles.length} mods, ${errors.length} errors`);
         return { 
           success: errors.length === 0, 
           removedFiles, 
@@ -988,7 +889,6 @@ function createModHandlers(win) {
         };
         
       } catch (error) {
-        console.error('[IPC:Mods] Error removing manual mods:', error);
         return { success: false, error: error.message, removedFiles: [], errors: [] };
       }
     },
@@ -996,7 +896,6 @@ function createModHandlers(win) {
     // Toggle manual mod enabled/disabled state
     'toggle-manual-mod': async (_event, { clientPath, fileName, enable }) => {
       try {
-        console.log('[IPC:Mods] Toggling manual mod:', fileName, 'enable:', enable);
         
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
@@ -1038,7 +937,6 @@ function createModHandlers(win) {
         // Move the file
         fs.renameSync(sourceFile, targetFile);
         
-        console.log(`[IPC:Mods] Successfully ${enable ? 'enabled' : 'disabled'} mod:`, fileName);
         return { 
           success: true, 
           message: `Mod ${enable ? 'enabled' : 'disabled'} successfully`,
@@ -1046,7 +944,6 @@ function createModHandlers(win) {
         };
         
       } catch (error) {
-        console.error('[IPC:Mods] Error toggling manual mod:', error);
         return { success: false, error: error.message };
       }
     },
@@ -1054,7 +951,6 @@ function createModHandlers(win) {
     // Update a manual mod to a newer version
     'update-manual-mod': async (_event, { clientPath, fileName, newVersion, downloadUrl }) => {
       try {
-        console.log('[IPC:Mods] Updating manual mod:', fileName, 'to version:', newVersion);
         
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
@@ -1093,7 +989,6 @@ function createModHandlers(win) {
         const targetPath = path.join(targetDir, newFileName);
         
         // Download the new version
-        console.log('[IPC:Mods] Downloading mod update from:', downloadUrl);
         const writer = createWriteStream(targetPath);
         const response = await axios({
           url: downloadUrl,
@@ -1110,10 +1005,8 @@ function createModHandlers(win) {
         // Remove old file if name changed
         if (currentFilePath !== targetPath && fs.existsSync(currentFilePath)) {
           fs.unlinkSync(currentFilePath);
-          console.log('[IPC:Mods] Removed old mod file:', fileName);
         }
         
-        console.log('[IPC:Mods] Successfully updated mod:', fileName);
         return { 
           success: true, 
           message: `Mod updated to version ${newVersion}`,
@@ -1122,20 +1015,16 @@ function createModHandlers(win) {
         };
         
       } catch (error) {
-        console.error('[IPC:Mods] Error updating manual mod:', error);
         return { success: false, error: error.message };
       }
     },    // Check for updates for manual mods
     'check-manual-mod-updates': async (_event, { clientPath, minecraftVersion, serverManagedFiles }) => {
       try {
-        console.log(`[IPC:Mods] Checking for manual mod updates for: ${clientPath}, Minecraft version: ${minecraftVersion}`);
-        console.log('[IPC:Mods] Server managed files to exclude for update check:', serverManagedFiles);
 
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
         }
         if (!minecraftVersion) {
-          console.warn('[IPC:Mods] Minecraft version not provided for update check. This might lead to inaccurate results.');
         }
         
         const modsDir = path.join(clientPath, 'mods');
@@ -1162,7 +1051,6 @@ function createModHandlers(win) {
             const metadata = await readModMetadata(filePath);
             
             if (metadata && metadata.projectId) {
-              console.log(`[IPC:Mods] Checking updates for mod ${metadata.name} (${metadata.projectId})`);
               
               const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
               const latestInfo = await modApiService.getLatestModrinthVersionInfo(metadata.projectId, minecraftVersion, loader);
@@ -1194,7 +1082,6 @@ function createModHandlers(win) {
               });
             }
           } catch (modError) {
-            console.warn(`[IPC:Mods] Failed to check updates for ${fileName}:`, modError);
             updates.push({
               fileName,
               hasUpdate: false,
@@ -1214,7 +1101,6 @@ function createModHandlers(win) {
             const metadata = await readModMetadata(filePath);
             
             if (metadata && metadata.projectId) {
-              console.log(`[IPC:Mods] Checking updates for disabled mod ${metadata.name} (${metadata.projectId})`);
               
               const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
               const latestInfo = await modApiService.getLatestModrinthVersionInfo(metadata.projectId, minecraftVersion, loader);
@@ -1246,7 +1132,6 @@ function createModHandlers(win) {
               });
             }
           } catch (modError) {
-            console.warn(`[IPC:Mods] Failed to check updates for disabled ${fileName}:`, modError);
             updates.push({
               fileName,
               hasUpdate: false,
@@ -1257,7 +1142,6 @@ function createModHandlers(win) {
         }
         
         const updatesAvailable = updates.filter(u => u.hasUpdate).length;
-        console.log(`[IPC:Mods] Found ${updatesAvailable} mods with updates available`);
         
         return { 
           success: true, 
@@ -1269,7 +1153,6 @@ function createModHandlers(win) {
         };
         
       } catch (error) {
-        console.error('[IPC:Mods] Error checking manual mod updates:', error);
         return { success: false, error: error.message, updates: [] };
       }
     },
@@ -1277,7 +1160,6 @@ function createModHandlers(win) {
     // Update multiple client-side mods to new versions
     'update-client-mods': async (_event, { mods, clientPath, minecraftVersion, loaderType }) => {
       try {
-        console.log('[IPC:Mods] Updating client mods:', mods);
         
         if (!mods || !Array.isArray(mods) || mods.length === 0) {
           return { success: false, error: 'No mods specified for update.', updatedCount: 0 };
@@ -1317,17 +1199,13 @@ function createModHandlers(win) {
             // Disable old mod file (rename to .disabled)
             if (oldFileName && fs.existsSync(path.join(modsDir, oldFileName))) {
               await disableMod(modsDir, oldFileName);
-              console.log(`Disabled old mod file: ${oldFileName}`);
             }
 
             // Download new mod file
-            console.log(`Downloading update for ${modToUpdate.name || oldFileName}: ${newFileName} from ${fileToDownload.url}`);
             await downloadWithProgress(fileToDownload.url, modsDir, newFileName, fileToDownload.hashes?.sha512 || fileToDownload.hashes?.sha1);
-            console.log(`Successfully downloaded ${newFileName}`);
             updatedCount++;
 
           } catch (error) {
-            console.error(`Error updating mod ${modToUpdate.name || modToUpdate.fileName}:`, error);
             errors.push(`${modToUpdate.name || modToUpdate.fileName}: ${error.message}`);
           }
         }
@@ -1337,7 +1215,6 @@ function createModHandlers(win) {
         }
         return { success: true, updatedCount };
       } catch (error) {
-        console.error('[IPC:Mods] Error updating client mods:', error);
         return { success: false, error: error.message };
       }
     },
@@ -1345,7 +1222,6 @@ function createModHandlers(win) {
     // Disable multiple client-side mods
     'disable-client-mods': async (_event, { mods, clientPath }) => {
       try {
-        console.log('[IPC:Mods] Disabling client mods:', mods);
         
         if (!mods || !Array.isArray(mods) || mods.length === 0) {
           return { success: false, error: 'No mods specified for disabling.', disabledCount: 0 };
@@ -1371,14 +1247,11 @@ function createModHandlers(win) {
             const modPath = path.join(modsDir, modToDisable.fileName);
             if (fs.existsSync(modPath)) {
               await disableMod(modsDir, modToDisable.fileName);
-              console.log(`Disabled mod: ${modToDisable.fileName}`);
               disabledCount++;
             } else {
-              console.warn(`Mod file not found for disabling: ${modToDisable.fileName}`);
               // Optionally, count this as a non-error if the goal is to ensure it's disabled
             }
           } catch (error) {
-            console.error(`Error disabling mod ${modToDisable.fileName}:`, error);
             errors.push(`${modToDisable.fileName}: ${error.message}`);
           }
         }
@@ -1388,7 +1261,6 @@ function createModHandlers(win) {
         }
         return { success: true, disabledCount };
       } catch (error) {
-        console.error('[IPC:Mods] Error disabling client mods:', error);
         return { success: false, error: error.message };
       }
     }
@@ -1405,7 +1277,6 @@ async function readModMetadata(filePath) {
     const result = await modAnalysisUtils.extractDependenciesFromJar(filePath);
     return result;
   } catch (error) {
-    console.warn(`[IPC:Mods] Failed to read metadata for ${filePath}:`, error);
     return null;
   }
 }

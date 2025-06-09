@@ -24,7 +24,6 @@ class ProperMinecraftLauncher extends EventEmitter {
   // Properly install/verify Minecraft client using XMCL packages
   async ensureMinecraftClient(clientPath, version) {
     try {
-      console.log(`[ProperLauncher] Ensuring Minecraft ${version} is properly installed using XMCL...`);
       
       this.clientPath = clientPath;
       
@@ -40,13 +39,11 @@ class ProperMinecraftLauncher extends EventEmitter {
       }
 
       // Step 1: Install version using the correct XMCL function (installVersion not installVersionProfile)
-      console.log(`[ProperLauncher] Installing version ${version} using XMCL installVersion...`);
       const versionInstallResult = await installVersion(version, clientPath, {
         // Options for version installation
         side: 'client'
       });
       
-      console.log(`[ProperLauncher] Version installation result:`, versionInstallResult);
       
       // Verify the version JSON exists
       const versionJsonPath = path.join(versionsDir, version, `${version}.json`);
@@ -57,18 +54,14 @@ class ProperMinecraftLauncher extends EventEmitter {
       const versionJson = JSON.parse(fs.readFileSync(versionJsonPath, 'utf8'));
       
       // Step 2: Install libraries
-      console.log(`[ProperLauncher] Installing libraries for ${version}...`);
       await installLibraries(versionJson, clientPath);
       
       // Step 3: Install assets
-      console.log(`[ProperLauncher] Installing assets for ${version}...`);
       await installAssets(versionJson, clientPath);
       
       // Step 4: Install native dependencies
-      console.log(`[ProperLauncher] Installing native dependencies for ${version}...`);
       await installDependencies(versionJson, clientPath);
       
-      console.log(`[ProperLauncher] ✅ Minecraft ${version} installation complete!`);
       
       // Verify the vanilla JAR has LogUtils
       const vanillaJar = path.join(versionsDir, version, `${version}.jar`);
@@ -79,23 +72,18 @@ class ProperMinecraftLauncher extends EventEmitter {
         const logUtilsEntry = entries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
         
         if (logUtilsEntry) {
-          console.log(`[ProperLauncher] ✅ LogUtils.class verified in vanilla JAR - LogUtils issue should be fixed!`);
         } else {
-          console.warn(`[ProperLauncher] ⚠️ LogUtils.class still missing - may be normal for ${version}`);
           
           // Show what logging classes are available
           const loggingClasses = entries.filter(entry => entry.entryName.startsWith('com/mojang/logging/') && entry.entryName.endsWith('.class'));
-          console.log(`[ProperLauncher] Available logging classes: ${loggingClasses.map(c => c.entryName).join(', ')}`);
         }
         
         const jarStats = fs.statSync(vanillaJar);
-        console.log(`[ProperLauncher] Vanilla JAR size: ${(jarStats.size / 1024 / 1024).toFixed(1)} MB`);
       }
       
       return { success: true };
       
     } catch (error) {
-      console.error(`[ProperLauncher] Failed to ensure Minecraft client:`, error);
       throw error;
     }
   }
@@ -103,7 +91,6 @@ class ProperMinecraftLauncher extends EventEmitter {
   // Install Fabric loader properly
   async installFabric(clientPath, minecraftVersion, fabricVersion = 'latest') {
     try {
-      console.log(`[ProperLauncher] Installing Fabric loader ${fabricVersion} for ${minecraftVersion}...`);
       
       // Get latest Fabric version if needed
       if (fabricVersion === 'latest') {
@@ -120,11 +107,9 @@ class ProperMinecraftLauncher extends EventEmitter {
         versionId: `fabric-loader-${fabricVersion}-${minecraftVersion}`
       }, clientPath);
       
-      console.log(`[ProperLauncher] ✅ Fabric ${fabricVersion} installed successfully`);
       return { success: true, version: `fabric-loader-${fabricVersion}-${minecraftVersion}` };
       
     } catch (error) {
-      console.error(`[ProperLauncher] Failed to install Fabric:`, error);
       throw error;
     }
   }
@@ -142,7 +127,6 @@ class ProperMinecraftLauncher extends EventEmitter {
         fabricVersion = 'latest'
       } = options;
 
-      console.log(`[ProperLauncher] 🚀 Launching Minecraft ${minecraftVersion}...`);
       
       if (this.isLaunching) {
         throw new Error('Minecraft is already launching');
@@ -181,14 +165,12 @@ class ProperMinecraftLauncher extends EventEmitter {
       const vanillaJar = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
       if (fs.existsSync(vanillaJar)) {
         classpath.push(vanillaJar);
-        console.log(`[ProperLauncher] ✅ Added vanilla JAR to classpath: ${vanillaJar}`);
       } else {
         throw new Error(`Vanilla JAR not found: ${vanillaJar}`);
       }
       
       // Add all libraries from the launch profile
       if (launchJson.libraries && Array.isArray(launchJson.libraries)) {
-        console.log(`[ProperLauncher] Processing ${launchJson.libraries.length} libraries...`);
         
         for (const lib of launchJson.libraries) {
           if (lib.name && lib.downloads?.artifact) {
@@ -196,13 +178,11 @@ class ProperMinecraftLauncher extends EventEmitter {
             if (fs.existsSync(libPath)) {
               classpath.push(libPath);
             } else {
-              console.warn(`[ProperLauncher] Library not found: ${libPath}`);
             }
           }
         }
       }
       
-      console.log(`[ProperLauncher] Built classpath with ${classpath.length} entries`);
       
       // Build JVM arguments
       const jvmArgs = [
@@ -273,7 +253,6 @@ class ProperMinecraftLauncher extends EventEmitter {
       if (serverIp && serverPort) {
         gameArgs.push('--server', serverIp);
         gameArgs.push('--port', serverPort.toString());
-        console.log(`[ProperLauncher] Added server connection: ${serverIp}:${serverPort}`);
       }
       
       // Final arguments - use javaw.exe on Windows to avoid console
@@ -284,10 +263,6 @@ class ProperMinecraftLauncher extends EventEmitter {
         ...gameArgs
       ];
       
-      console.log(`[ProperLauncher] Launching with ${allArgs.length} arguments`);
-      console.log(`[ProperLauncher] Main class: ${launchJson.mainClass}`);
-      console.log(`[ProperLauncher] Memory: ${maxMemory}MB`);
-      console.log(`[ProperLauncher] Java command: ${javaCommand}`);
       
       // Launch Minecraft
       const child = spawn(javaCommand, allArgs, {
@@ -301,37 +276,29 @@ class ProperMinecraftLauncher extends EventEmitter {
       // Handle process output
       child.stdout.on('data', (data) => {
         const output = data.toString();
-        console.log(`[Minecraft] ${output.trim()}`);
         
         if (output.includes('Setting user:') || output.includes('Environment: authHost')) {
-          console.log(`[ProperLauncher] ✅ Authentication successful`);
         }
         
         if (output.includes('[Render thread/INFO]: Created')) {
-          console.log(`[ProperLauncher] ✅ Game window created`);
         }
       });
       
       child.stderr.on('data', (data) => {
         const output = data.toString();
-        console.error(`[Minecraft Error] ${output.trim()}`);
         
         // The LogUtils error should be fixed now
         if (output.includes('java.lang.ClassNotFoundException: com.mojang.logging.LogUtils')) {
-          console.error(`[ProperLauncher] ❌ LogUtils error still occurring despite proper installation!`);
-          console.error(`[ProperLauncher] This is unexpected - the XMCL installer should have fixed this.`);
         }
       });
       
       child.on('close', (code) => {
-        console.log(`[ProperLauncher] Minecraft process exited with code: ${code}`);
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
       });
       
       child.on('error', (error) => {
-        console.error(`[ProperLauncher] Launch error:`, error);
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
@@ -344,7 +311,6 @@ class ProperMinecraftLauncher extends EventEmitter {
         throw new Error(`Minecraft failed to start. Exit code: ${child.exitCode}`);
       }
       
-      console.log(`[ProperLauncher] ✅ Minecraft launched successfully (PID: ${child.pid})`);
       
       return {
         success: true,
@@ -356,7 +322,6 @@ class ProperMinecraftLauncher extends EventEmitter {
       };
       
     } catch (error) {
-      console.error(`[ProperLauncher] Launch failed:`, error);
       this.isLaunching = false;
       this.client = null;
       

@@ -86,7 +86,6 @@
   // Function to check updates for mods in the current search results
   async function checkUpdatesForDisplayedMods() {
     try {
-      console.log('[ModSearch] Checking updates for displayed mods');
       
       // Get installed mod IDs
       const installedMods = $installedModInfo.filter(info => info.projectId);
@@ -101,7 +100,6 @@
         }
       }
     } catch (error) {
-      console.error('[ModSearch] Error checking for updates:', error);
     }
   }
   
@@ -126,7 +124,6 @@
     displayTotalPages = $totalPages || 1;
     
     // Debug log to check pagination values
-    console.log(`Pagination: Current=${$currentPage}, Total Pages=${displayTotalPages}, API Total=${$totalPages}, Total Results=${$totalResults}, Filter=${filterType}`);
   }
   
   // Calculate visible mods - just use the search results directly since filtering is done by API
@@ -142,7 +139,6 @@
       environmentType: filterOptions?.environmentType || filterType // Include the environment filter type
     };
     
-    console.log('Searching with options:', searchOptions);
     
     await searchMods(searchOptions);
   }
@@ -194,14 +190,12 @@
     
     // Get filter values
     if (event && event.detail) {
-      console.log('ModSearch: Received filter change', event.detail);
       
       // Update local filter type from the event
       filterType = event.detail.filterType;
       sortBy = event.detail.sortBy;
       
       // Force a re-filtering of all results
-      console.log(`Applying ${filterType} filter to ${$searchResults.length} mods`);
       
       // Show feedback message
       showSortMessage(sortBy);
@@ -218,7 +212,6 @@
   function switchSource(source) {
     // Only allow switching to modrinth for now
     if (source !== 'modrinth') {
-      console.log('[ModSearch] CurseForge support not implemented yet. Staying on Modrinth.');
       // Show a message to the user
       successMessage.set('CurseForge support is coming soon. Using Modrinth for now.');
       return;
@@ -286,7 +279,6 @@
     versionsError = { ...versionsError, [modId]: null };
     
     try {
-      console.log(`[ModSearch] Loading versions for ${modId}, latest only: ${loadLatestOnly}, load all: ${loadAll}`);
       const versions = await fetchModVersions(modId, $modSource, loadLatestOnly, loadAll);
       versionsCache = { ...versionsCache, [modId]: versions };
     } catch (error) {

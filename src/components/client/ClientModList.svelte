@@ -110,7 +110,6 @@
         const versions = await fetchModVersions(info.projectId);
         versionsCache = { ...versionsCache, [info.projectId]: versions };
       } catch (err) {
-        console.error('Failed to load versions', err);
         versionsCache = { ...versionsCache, [info.projectId]: [] };
       } finally {
         versionsLoading[info.projectId] = false;

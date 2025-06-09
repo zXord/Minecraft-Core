@@ -86,7 +86,6 @@ function createFileHandlers(win) {  return {
             fs.mkdirSync(path.join(folder, dir), { recursive: true });
           });
         } catch (err) {
-          console.error('[IPC:Files] Failed to create directories:', err);
           throw new Error(`Failed to create directories: ${err.message}`);
         }
         
@@ -121,7 +120,6 @@ function createFileHandlers(win) {  return {
   
         return folder;
       } catch (err) {
-        console.error('[IPC:Files] Failed to select folder:', err);
         throw err;
       }
     },
@@ -131,11 +129,9 @@ function createFileHandlers(win) {  return {
         if (!folderPath || !fs.existsSync(folderPath)) {
           throw new Error('Invalid or non-existent folder path');
         }
-        console.log('[IPC:Files] Opening folder in explorer:', folderPath);
         await shell.openPath(folderPath);
         return { success: true };
       } catch (err) {
-        console.error('[IPC:Files] Failed to open folder:', err);
         throw new Error(`Failed to open folder: ${err.message}`);
       }
     },
@@ -151,7 +147,6 @@ function createFileHandlers(win) {  return {
         }
         return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       } catch (err) {
-        console.error('[IPC:Files] Failed to read config:', err);
         return null;
       }
     },
@@ -169,7 +164,6 @@ function createFileHandlers(win) {  return {
           try {
             config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
           } catch (parseErr) {
-            console.error('[IPC:Files] Error parsing config, creating new one:', parseErr);
             // Continue with empty config
           }
         }
@@ -181,7 +175,6 @@ function createFileHandlers(win) {  return {
         fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
         return true;
       } catch (err) {
-        console.error('[IPC:Files] Failed to save version selection:', err);
         throw err;
       }
     },
@@ -194,7 +187,6 @@ function createFileHandlers(win) {  return {
         fs.writeFileSync(path.join(targetPath, 'eula.txt'), content);
         return true;
       } catch (err) {
-        console.error('[IPC:Files] Failed to write EULA:', err);
         throw err;
       }
     },
@@ -204,10 +196,8 @@ function createFileHandlers(win) {  return {
         if (!serverPath) {
           throw new Error('Server path is required');
         }
-        console.log('[IPC:Files] Deleting world folders for server:', serverPath);
         return await deleteWorld(serverPath);
       } catch (err) {
-        console.error('[IPC:Files] Failed to delete world:', err);
         throw new Error(`Failed to delete world: ${err.message}`);
       }
     },
@@ -217,10 +207,8 @@ function createFileHandlers(win) {  return {
         if (!options || !win) {
           throw new Error('Invalid parameters or window not available');
         }
-        console.log('[IPC:Files] Showing confirmation dialog');
         return await dialog.showMessageBox(win, options);
       } catch (err) {
-        console.error('[IPC:Files] Failed to show dialog:', err);
         throw new Error(`Failed to show dialog: ${err.message}`);
       }
     }
@@ -254,12 +242,10 @@ async function deleteWorld(serverPath) {
     const worldEndExists = await fsPromises.access(worldEndPath).then(() => true).catch(() => false);
     
     if (!worldExists && !worldNetherExists && !worldEndExists) {
-      console.log('[IPC:Files] No world folders found to delete, skipping deletion');
       return { success: false, error: 'World folders not found' };
     }
     
     // Create a backup before deletion
-    console.log('[IPC:Files] Creating backup before world deletion');
     const backupPath = path.join(serverPath, 'backups');
     await fsPromises.mkdir(backupPath, { recursive: true });
     
@@ -281,9 +267,7 @@ async function deleteWorld(serverPath) {
         const stat = fs.existsSync(backupFilePath) ? fs.statSync(backupFilePath) : null;
         const isZip = stat && stat.isFile() && backupFilePath.endsWith('.zip');
         const backupDirContents = fs.readdirSync(backupPath);
-        console.log('[IPC:Files] Backups dir contents after backup:', backupDirContents);
         if (!isZip) {
-          console.error('[IPC:Files] Backup is not a zip file:', backupFilePath, stat);
           return { success: false, error: 'Backup was not created as a zip file. World was NOT deleted.' };
         }
         // Write metadata for backup
@@ -295,10 +279,8 @@ async function deleteWorld(serverPath) {
           trigger: 'delete-world'
         };
         fs.writeFileSync(backupFilePath.replace('.zip', '.json'), JSON.stringify(metadata, null, 2));
-        console.log('[IPC:Files] World backup created:', backupFilePath);
         backupCreated = true;
       } catch (err) {
-        console.error('[IPC:Files] Failed to create backup:', err);
         return { success: false, error: 'Failed to create world backup zip. World was NOT deleted.' };
       }
     }
@@ -318,14 +300,12 @@ async function deleteWorld(serverPath) {
       deletePromises.push(fsPromises.rm(worldEndPath, { recursive: true, force: true }));
     }
     await Promise.all(deletePromises);
-    console.log('[IPC:Files] World folders deleted successfully');
     
     return { 
       success: true, 
       backup: backupCreated ? backupFilePath : null 
     };
   } catch (err) {
-    console.error('[IPC:Files] Failed to delete world:', err);
     return { success: false, error: err.message };
   }
 }

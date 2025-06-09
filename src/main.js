@@ -17,14 +17,12 @@ if (typeof window !== 'undefined') {
 window.electron.invoke('get-instances')
   .then(instances => {
     const initialInstances = Array.isArray(instances) ? instances : [];
-    console.log('Loaded initial instances:', initialInstances);
     
     // Store them in our simple store
     initialInstanceStore.instances = initialInstances;
     initialInstanceStore.loaded = true;
   })
   .catch(error => {
-    console.error('Error loading initial instances:', error);
     
     // Mark as loaded anyway
     initialInstanceStore.loaded = true;

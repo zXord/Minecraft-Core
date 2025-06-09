@@ -52,7 +52,6 @@ const MIN_VERSION_FETCH_INTERVAL = 500; // Minimum time between version fetches 
  * @returns {Promise<boolean>} - True if successful
  */
 export async function loadMods(serverPath) {
-  console.log(`[API] loadMods called from:`, new Error().stack);
   
   // Prevent concurrent loadMods calls
   if (get(isLoading)) {
@@ -87,50 +86,40 @@ export async function loadMods(serverPath) {
     }
     
     // Log the results for debugging
-    console.log('[ModAPI] Loaded mods with categories:', result.mods);
-    console.log('[ModAPI] Using mod filenames:', modsList);
     
     // Store all mods in the installedMods store
     installedMods.set(modsList);
     
     // Load existing saved categories first
     const { loadModCategories } = await import('../../stores/modStore.js');
-    console.log(`[ModAPI] About to load mod categories from storage...`);
     await loadModCategories();
     
     // Get current categories to merge with new mod data
     let currentCategories = get(modCategories);
-    console.log(`[ModAPI] Current categories after loading:`, Array.from(currentCategories));
     
     // If categories are unexpectedly empty but we have mods, try loading again
     if (currentCategories.size === 0 && result.mods && result.mods.length > 0) {
-      console.log(`[ModAPI] Categories are empty but we have mods, retrying load...`);
       await loadModCategories();
       currentCategories = get(modCategories);
-      console.log(`[ModAPI] Categories after retry:`, Array.from(currentCategories));
     }
     
     // If we have saved categories, preserve them and only update location info
     if (currentCategories.size > 0) {
-      console.log(`[ModAPI] Found ${currentCategories.size} saved categories, preserving them`);
       
       // Update mod categories based on file locations, preserving existing settings
       const updatedCategories = new Map(currentCategories);
       
       result.mods?.forEach(mod => {
         const existingCategoryInfo = currentCategories.get(mod.fileName);
-        console.log(`[ModAPI] Processing mod ${mod.fileName}, existing info:`, existingCategoryInfo);
         
         if (existingCategoryInfo) {
           // Existing mod - preserve saved settings but update category if file location changed
-          console.log(`[ModAPI] Preserving saved required status for ${mod.fileName}: ${existingCategoryInfo.required}`);
           updatedCategories.set(mod.fileName, {
             category: mod.category, // Update to match current file location
             required: existingCategoryInfo.required // Preserve saved requirement status
           });
         } else {
           // New mod not in saved categories - set defaults
-          console.log(`[ModAPI] New mod ${mod.fileName}, setting defaults`);
           updatedCategories.set(mod.fileName, {
             category: mod.category,
             required: true // Default to required for new mods
@@ -138,23 +127,19 @@ export async function loadMods(serverPath) {
         }
       });
       
-      console.log(`[ModAPI] Final updated categories:`, Array.from(updatedCategories));
       modCategories.set(updatedCategories);
     } else {
-      console.log(`[ModAPI] No saved categories found, setting up initial categories`);
       
       // No saved categories - set up initial categories
       const initialCategories = new Map();
       
       result.mods?.forEach(mod => {
-        console.log(`[ModAPI] Setting up initial category for ${mod.fileName}`);
         initialCategories.set(mod.fileName, {
           category: mod.category,
           required: true // Default to required for initial setup
         });
       });
       
-      console.log(`[ModAPI] Initial categories:`, Array.from(initialCategories));
       modCategories.set(initialCategories);
     }
     
@@ -192,12 +177,10 @@ export async function loadMods(serverPath) {
       // Automatically check for updates after loading mods
       setTimeout(() => {
         checkForUpdates(serverPath)
-          .catch(err => console.error('Error checking for updates:', err));
       }, 500);
       
       return true;
     } catch (error) {
-      console.error('Error loading mod info:', error);
       // Continue without installed mod IDs, still consider this a success
       return true;
     }
@@ -257,7 +240,6 @@ export async function searchMods(options = {}) {
   // Rate limiting protection
   const now = Date.now();
   if (now - lastSearchRequestTime < MIN_SEARCH_INTERVAL) {
-    console.log(`[API] Search request throttled. Last request was ${now - lastSearchRequestTime}ms ago.`);
     await new Promise(resolve => setTimeout(resolve, MIN_SEARCH_INTERVAL - (now - lastSearchRequestTime)));
   }
   lastSearchRequestTime = Date.now();
@@ -267,7 +249,6 @@ export async function searchMods(options = {}) {
   const currentSearchId = ++searchId;
   
   try {
-    console.log('[DEBUG] searchMods called');
     // Read filters from the centralized stores
     const query = get(searchKeyword);
     const source = get(modSource);
@@ -279,7 +260,6 @@ export async function searchMods(options = {}) {
     const sortBy = options.sortBy || 'relevance';
     const environmentType = options.environmentType || 'all';
     
-    console.log('[DEBUG] searchMods params:', { query, source, version: currentMinecraftVer, loader, page, limit, sortBy, environmentType });
     
     const invokeArgs = {
       keyword: query,
@@ -292,12 +272,10 @@ export async function searchMods(options = {}) {
       environmentType // Include the environment filter
     };
     
-    console.log('[API] Search invoke args:', invokeArgs);
 
     const result = await safeInvoke('search-mods', invokeArgs);
     
     if (currentSearchId !== searchId) {
-      console.log(`[API] Search ${currentSearchId} was superseded by newer search ${searchId}`);
       return null;
     }
     
@@ -321,7 +299,6 @@ export async function searchMods(options = {}) {
         totalPages.set(1);
         currentPage.set(page);
       }
-      console.log('[DEBUG] searchMods success, mods:', mods.length);
       return {
         hits: mods,
         totalHits: result.pagination?.totalResults || mods.length,
@@ -335,17 +312,14 @@ export async function searchMods(options = {}) {
       if (result && result.error) {
         searchError.set(result.error);
       }
-      console.log('[DEBUG] searchMods: no results or error');
       return { hits: [], totalHits: 0, totalPages: 1 };
     }
   } catch (err) {
     searchError.set(`Search failed: ${err.message || 'Unknown error'}`);
     searchResults.set([]);
-    console.log('[DEBUG] searchMods: exception', err);
     return { hits: [], totalHits: 0, totalPages: 1, error: err.message };
   } finally {
     isSearching.set(false);
-    console.log('[DEBUG] searchMods: isSearching set to false');
   }
 }
 
@@ -366,14 +340,12 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
   // Check if we already have this version information cached
   const versionCache = get(modVersionsCache);
   if (versionCache[cacheKey] && versionCache[cacheKey].length > 0) {
-    console.log(`[API] Using cached versions for ${modId}`);
     return versionCache[cacheKey];
     }
     
   // Apply rate limiting to avoid hitting API limits
   const now = Date.now();
   if (now - lastVersionFetchTime < MIN_VERSION_FETCH_INTERVAL) {
-    console.log(`[API] Version fetch throttled. Last fetch was ${now - lastVersionFetchTime}ms ago.`);
     await new Promise(resolve => setTimeout(resolve, MIN_VERSION_FETCH_INTERVAL - (now - lastVersionFetchTime)));
   }
   lastVersionFetchTime = Date.now();
@@ -402,7 +374,6 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
     
     return versions;
   } catch (error) {
-    console.error('Failed to fetch mod versions:', error);
     
     // Return empty array on error
     return [];
@@ -464,7 +435,6 @@ export async function installMod(mod, serverPath) {
   } catch (error) {
     // Handle error
     errorMessage.set(`Failed to install mod: ${error.message}`);
-    console.error('Install mod error:', error);
     return false;
   } finally {
     // Always update the installing state

@@ -34,7 +34,6 @@
   
   // Debug completed updates
   $: if (completedUpdates.length > 0) {
-    console.log('Completed updates changed:', completedUpdates);
   }
   onMount(() => {
     fetchMinecraftVersions();
@@ -66,7 +65,6 @@
       const data = await res.json();
       mcVersions = data.filter(v => v.stable).map(v => v.version);
     } catch (err) {
-      console.error('Failed to fetch MC versions', err);
       mcVersions = [];
     }
   }
@@ -78,7 +76,6 @@
     try {
       fabricVersions = await fetchAllFabricVersions(selectedMC);
     } catch (err) {
-      console.error('Failed to fetch Fabric versions', err);    fabricVersions = [];
     }
   }    async function checkCompatibility() {
     if (!selectedMC || !selectedFabric) return;
@@ -145,7 +142,6 @@
               }
             }
           } catch (error) {
-            console.warn(`Failed to check updates for ${mod.projectId}:`, error);
           }
         }
         
@@ -166,7 +162,6 @@
       
       compatChecked = true;
     } catch (err) {
-      console.error('Compatibility check failed', err);
     }
     checking = false;
   }
@@ -232,12 +227,9 @@
                 oldFileName: updateResult.oldFileName,
                 newFileName: updateResult.newFileName
               });
-              console.log(`Successfully updated ${mod.name}. Completed updates:`, completedUpdates);
             } else {
-              console.warn(`Update failed for ${mod.name}:`, updateResult);
             }
           } catch (modError) {
-            console.error(`Failed to update ${mod.name}:`, modError);
             // Continue with other mods even if one fails
           }
         }
@@ -278,8 +270,6 @@
         completedAt: new Date().toLocaleString()
       };
       
-      console.log(`Update process completed. Final completed updates:`, completedUpdates);
-      console.log('Complete update summary:', updateSummary);
       currentTask = `Update completed successfully!`;
       updateProgress = 100;
         // Clear progress after a delay but keep completed updates visible
@@ -291,7 +281,6 @@
       }, 3000);
       
     } catch (err) {
-      console.error('Update failed', err);
       currentTask = `Update failed: ${err.message}`;
       updateProgress = 0;
     }
