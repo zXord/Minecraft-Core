@@ -14,16 +14,12 @@ function initializePlayerIpMap(serverPath) {
   
   const playerMapFile = path.join(serverPath, 'player-ip-map.json');
   if (fs.existsSync(playerMapFile)) {
-    try {
-      const mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
-      
-      // Populate the in-memory map
-      Object.entries(mapData).forEach(([ip, playerName]) => {
-        playerIpMap.set(ip, playerName);
-      });
-      
-    } catch (err) {
-    }
+    const mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
+
+    // Populate the in-memory map
+    Object.entries(mapData).forEach(([ip, playerName]) => {
+      playerIpMap.set(ip, playerName);
+    });
   }
 }
 
@@ -75,10 +71,7 @@ function createPlayerHandlers() {
             const playerMapFile = path.join(serverPath, 'player-ip-map.json');
             let mapData = {};
             if (fs.existsSync(playerMapFile)) {
-              try {
-                mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
-              } catch (err) {
-              }
+              mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
             }
             
             // Ensure each entry has a valid playerName field if possible
@@ -138,10 +131,7 @@ function createPlayerHandlers() {
                     // Also update our in-memory map and persistent file
                     playerIpMap.set(item.ip, specialName);
                     mapData[item.ip] = specialName;
-                    try {
-                      fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
-                    } catch (err) {
-                    }
+                    fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
                   }
                 }
               }
@@ -245,9 +235,7 @@ function createPlayerHandlers() {
             }
             mapData[entry] = playerName;
             fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
-          } catch (err) {
           }
-        }
         
         // Format objects based on the list type
         let newEntry = entry;
@@ -426,34 +414,28 @@ function createPlayerHandlers() {
         // Fallback to checking banned-ips.json
         const file = path.join(serverPath, 'banned-ips.json');
         if (fs.existsSync(file)) {
-          try {
-            const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
-            
-            for (const item of data) {
-              if (item && typeof item === 'object' && item.playerName && 
-                  item.playerName !== 'Unknown') {
-                return { lastBannedPlayer: item.playerName };
-              }
+          const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+
+          for (const item of data) {
+            if (item && typeof item === 'object' && item.playerName &&
+                item.playerName !== 'Unknown') {
+              return { lastBannedPlayer: item.playerName };
             }
-          } catch (err) {
           }
         }
         
         // Fallback to checking banned-players.json for a player name
         const bannedPlayersFile = path.join(serverPath, 'banned-players.json');
         if (fs.existsSync(bannedPlayersFile)) {
-          try {
-            const data = JSON.parse(fs.readFileSync(bannedPlayersFile, 'utf-8'));
-            if (Array.isArray(data) && data.length > 0) {
-              for (const item of data) {
-                if (item && typeof item === 'object' && item.name) {
-                  return { lastBannedPlayer: item.name };
-                } else if (typeof item === 'string') {
-                  return { lastBannedPlayer: item };
-                }
+          const data = JSON.parse(fs.readFileSync(bannedPlayersFile, 'utf-8'));
+          if (Array.isArray(data) && data.length > 0) {
+            for (const item of data) {
+              if (item && typeof item === 'object' && item.name) {
+                return { lastBannedPlayer: item.name };
+              } else if (typeof item === 'string') {
+                return { lastBannedPlayer: item };
               }
             }
-          } catch (err) {
           }
         }
         
@@ -471,10 +453,9 @@ function createPlayerHandlers() {
                 }
               }
             }
-          } catch (err) {
           }
         }
-        
+
         return { lastBannedPlayer: null };
       } catch (err) {
         return { lastBannedPlayer: null };

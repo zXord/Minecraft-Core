@@ -2,9 +2,6 @@
 const fs = require('fs');
 const path = require('path');
 const { rm } = require('fs/promises');
-const fetch = require('node-fetch');
-const nbt = require('prismarine-nbt');
-const zlib = require('zlib');
 const appStore = require('../utils/app-store.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 

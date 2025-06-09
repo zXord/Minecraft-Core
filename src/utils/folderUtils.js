@@ -19,13 +19,9 @@ export async function openFolder(folderPath) {
   try {
     // Method 1: Try the dedicated folder opener if available
     if (window.folderOpener) {
-      try {
-        const result = await window.folderOpener.open(folderPath);
-        if (result && result.success) {
-          return true;
-        }
-      } catch (err) {
-        // Continue to fallback method
+      const result = await window.folderOpener.open(folderPath);
+      if (result && result.success) {
+        return true;
       }
     }
     
