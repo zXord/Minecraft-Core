@@ -379,7 +379,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
       return [];
     }
     
-
     
     // Resolve direct dependencies
     const directDeps = await filterAndResolveDependencies(filteredDeps);
