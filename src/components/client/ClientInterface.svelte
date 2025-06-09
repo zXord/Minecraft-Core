@@ -516,13 +516,6 @@
   
   // Download required mods
   async function downloadMods() {
-      requiredMods: requiredMods,
-      requiredModsLength: requiredMods ? requiredMods.length : 'undefined',
-      downloadStatus: downloadStatus,
-      instancePath: instance?.path,
-      serverIp: instance?.serverIp,
-      serverPort: instance?.serverPort
-    });
     
     // Validate required parameters
     if (!instance?.path) {

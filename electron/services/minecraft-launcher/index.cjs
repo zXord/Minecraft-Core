@@ -23,10 +23,6 @@ try {
         if (opts && opts.body) {
           try {
             const body = typeof opts.body === 'string' ? JSON.parse(opts.body) : opts.body;
-              accessToken: body.accessToken ? `${body.accessToken.substring(0, 10)}...` : 'missing',
-              selectedProfile: body.selectedProfile || 'missing',
-              serverId: body.serverId || 'missing'
-            });
           } catch (parseError) {
           }
         }

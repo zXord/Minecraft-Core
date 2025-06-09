@@ -62,48 +62,6 @@ async function installModToServer(win, serverPath, modDetails) {
   }
   
   const targetPath = destinationPath;
-  if (modDetails.forceReinstall) {
-    try {
-      const manifestDir = path.join(serverPath, 'minecraft-core-manifests');
-      const manifestFiles = await fs.readdir(manifestDir).catch(() => []);
-      
-      for (const manifestFile of manifestFiles) {
-        if (!manifestFile.endsWith('.json')) continue;
-        try {
-          const manifestPath = path.join(manifestDir, manifestFile);
-          const manifestContent = await fs.readFile(manifestPath, 'utf8');
-          const manifest = JSON.parse(manifestContent);
-          
-          if (manifest.projectId === modDetails.id) {
-            const existingFileName = manifest.fileName;
-            
-            // Clean up from both locations during update
-            const serverFilePath = path.join(modsDir, existingFileName);
-            const clientFilePath = path.join(clientModsDir, existingFileName);
-            
-            break;
-          }
-        } catch (err) {
-      }
-      
-      // Also clean up using oldFileName if provided (for direct updates)
-      if (modDetails.oldFileName && modDetails.oldFileName !== fileName) {
-        const oldServerPath = path.join(modsDir, modDetails.oldFileName);
-        const oldClientPath = path.join(clientModsDir, modDetails.oldFileName);
-        
-      }
-      
-      if (modDetails.name) {
-        const modFiles = await fs.readdir(modsDir);
-        const baseName = modDetails.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-        const possibleMatches = modFiles.filter(file => file.startsWith(baseName) && file.endsWith('.jar') && file !== fileName);
-        for (const match of possibleMatches) {
-          await fs.unlink(path.join(modsDir, match)).catch(() => {});
-        }
-      }
-    } catch (err) {
-    }
-  }
   try {
     let downloadUrl, versionInfoToSave;
     
@@ -259,14 +217,8 @@ async function installModToClient(win, modData) {
   }
 
   try {
-    const loader = modData.loader || 'fabric'; // Default or passed
-    const mcVersion = modData.version || '1.20.1'; // Default or passed
-    
-      modId: modData.id,
-      loader,
-      mcVersion,
-      selectedVersionId: modData.selectedVersionId
-    });
+  const loader = modData.loader || 'fabric'; // Default or passed
+  const mcVersion = modData.version || '1.20.1'; // Default or passed
 
     let versionInfo;
     let versionToInstall;

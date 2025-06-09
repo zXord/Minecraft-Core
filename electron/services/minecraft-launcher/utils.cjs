@@ -23,9 +23,6 @@ function logSystemInfo() {
 function logMemoryUsage() {
   try {
     const memUsage = process.memoryUsage();
-                `Heap=${Math.round(memUsage.heapUsed/1024/1024)}MB/${Math.round(memUsage.heapTotal/1024/1024)}MB, ` +
-                `External=${Math.round(memUsage.external/1024/1024)}MB, ` +
-                `Free System=${Math.round(os.freemem()/1024/1024/1024)}GB`);
   } catch (error) {
     // Ignore
   }

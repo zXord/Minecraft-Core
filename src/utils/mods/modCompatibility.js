@@ -512,11 +512,6 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
     }
   }
   
-    compatible: compatibilityReport.compatible.length,
-    incompatible: compatibilityReport.incompatible.length,
-    needsUpdate: compatibilityReport.needsUpdate.length,
-    unknown: compatibilityReport.unknown.length
-  });
   
   return compatibilityReport;
 }

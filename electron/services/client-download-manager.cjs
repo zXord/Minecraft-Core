@@ -636,15 +636,6 @@ class ClientDownloadManager {
       
       report.hasIncompatible = report.incompatible.length > 0;
       report.hasUpdatable = report.needsUpdate.length > 0;
-      
-        total: compatibilityResults.length,
-        compatible: report.compatible.length,
-        incompatible: report.incompatible.length,
-        needsUpdate: report.needsUpdate.length,
-        unknown: report.unknown.length,
-        errors: report.errors.length
-      });
-      
       return report;
       
     } catch (error) {

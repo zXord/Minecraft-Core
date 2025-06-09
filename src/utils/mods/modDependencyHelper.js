@@ -379,13 +379,6 @@ export async function checkModDependencies(mod, visited = new Set()) {
       return [];
     }
     
-    // Update dependency logging to use filteredDeps
-    filteredDeps.forEach((dep, index) => {
-        projectId: dep.project_id || dep.projectId,
-        type: dep.dependency_type || dep.dependencyType,
-        version: dep.version_requirement || dep.versionRequirement
-      });
-    });
     
     // Resolve direct dependencies
     const directDeps = await filterAndResolveDependencies(filteredDeps);
