@@ -298,7 +298,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
               const versionInfo = await safeInvoke('get-version-info', {
                 modId: mod.id,
                 versionId: versionId,
-                source: mod.source || 'modrinth'
+                source: mod.source || 'modrinth',
+                loader: get(loaderType),
+                gameVersion: get(minecraftVersion)
               });
               
               if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
@@ -371,7 +373,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
             const versionInfo = await safeInvoke('get-version-info', {
               modId: mod.id,
               versionId: versionId,
-              source: mod.source || 'modrinth'
+              source: mod.source || 'modrinth',
+              loader: get(loaderType),
+              gameVersion: get(minecraftVersion)
             });
             
             console.log(`[DEBUG] Version info for compatibility check:`, versionInfo);

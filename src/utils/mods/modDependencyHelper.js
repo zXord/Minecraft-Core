@@ -96,7 +96,9 @@ export async function checkModDependencies(mod, visited = new Set()) {
         console.log(`[DEBUG] No specific version ID, getting latest version info for ${mod.id}`);
         versionInfo = await safeInvoke('get-version-info', {
           modId: mod.id,
-          source: mod.source || 'modrinth'
+          source: mod.source || 'modrinth',
+          loader: get(loaderType),
+          gameVersion: get(minecraftVersion)
         });
         console.log(`[DEBUG] Received version info for ${mod.id}:`, versionInfo?.id || 'none');
       } else {
@@ -105,7 +107,9 @@ export async function checkModDependencies(mod, visited = new Set()) {
         versionInfo = await safeInvoke('get-version-info', {
           modId: mod.id,
           versionId,
-          source: mod.source || 'modrinth'
+          source: mod.source || 'modrinth',
+          loader: get(loaderType),
+          gameVersion: get(minecraftVersion)
         });
         console.log(`[DEBUG] Received version info for ${mod.id}:`, versionInfo?.id || 'none');
       }
@@ -618,7 +622,7 @@ export function showDependencyModal(mod, dependencies) {
  * @param {string} serverPath - Server path
  * @returns {Promise<boolean>} - True if successful
  */
-export async function installWithDependencies(serverPath) {
+export async function installWithDependencies(serverPath, installFn = installMod) {
   const mod = get(modToInstall);
   // Get and dedupe dependencies by projectId to avoid duplicate downloads
   const allDeps = get(currentDependencies);
@@ -843,7 +847,7 @@ export async function installWithDependencies(serverPath) {
         });
         
         // Install the dependency
-        await installMod(depMod, serverPath);
+        await installFn(depMod, serverPath);
         installedCount++;
       } catch (depErr) {
         console.error(`Error installing dependency ${dependency.name}:`, depErr);
@@ -852,7 +856,7 @@ export async function installWithDependencies(serverPath) {
     }
     
     // Now install the main mod
-    await installMod(mod, serverPath);
+    await installFn(mod, serverPath);
     
     // Update success message
     successMessage.set(`Installed ${mod.name} with ${installedCount} dependencies`);
