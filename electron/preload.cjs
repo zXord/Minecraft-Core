@@ -1,10 +1,5 @@
 const isDev = process.env.NODE_ENV === 'development';
-if (isDev) {
-}
 const { contextBridge, ipcRenderer } = require('electron');
-
-if (isDev) {
-}
 
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
@@ -12,8 +7,6 @@ contextBridge.exposeInMainWorld('electron', {
   // Add file path handling for dropped files
   invoke: (channel, ...args) => {
     // Log all requested channels for debugging
-    if (isDev) {
-    }
     
     const validChannels = [
       'select-mod-files',
@@ -145,11 +138,9 @@ contextBridge.exposeInMainWorld('electron', {
     ];
 
     // Debug: print validChannels at runtime (only once)
-    if (!window.__ipcChannelsLogged) {
-      if (isDev) {
+      if (!window.__ipcChannelsLogged) {
+        window.__ipcChannelsLogged = true;
       }
-      window.__ipcChannelsLogged = true;
-    }
 
     if (validChannels.includes(channel)) {
       // Only log failed channels, not successful ones
@@ -324,9 +315,5 @@ contextBridge.exposeInMainWorld('serverPath', {
 
 // Add direct folder opening function
 contextBridge.exposeInMainWorld('folderOpener', {
-  open: (folderPath) => {
-    if (isDev) {
-    }
-    return ipcRenderer.invoke('open-folder', folderPath);
-  }
+  open: (folderPath) => ipcRenderer.invoke('open-folder', folderPath)
 });

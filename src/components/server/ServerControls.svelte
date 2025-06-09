@@ -109,11 +109,6 @@
   $: mcUpdateAvailable = currentMcVersion && latestMcVersion && compareVersions(latestMcVersion, currentMcVersion) > 0;
   $: fabricUpdateAvailable = currentFabricVersion && latestFabricVersion && compareVersions(latestFabricVersion, currentFabricVersion) > 0;
 
-  // Debug logging for version changes
-  $: if (currentMcVersion !== undefined) {
-  }
-  $: if (currentFabricVersion !== undefined) {
-  }
 
   let updateChecked = false;
   $: upToDate = updateChecked && !mcUpdateAvailable && !fabricUpdateAvailable && latestMcVersion && latestFabricVersion;
@@ -122,13 +117,7 @@
     await refreshLatestVersions(currentMcVersion);
     
     
-    if (currentMcVersion && latestMcVersion) {
-      const mcComparison = compareVersions(latestMcVersion, currentMcVersion);
-    }
-    
-    if (currentFabricVersion && latestFabricVersion) {
-      const fabricComparison = compareVersions(latestFabricVersion, currentFabricVersion);
-    }
+
     
     updateChecked = true;
   }
