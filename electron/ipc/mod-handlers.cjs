@@ -10,7 +10,6 @@ const modInstallService = require('./mod-utils/mod-installation-service.cjs');
 const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { downloadWithProgress } = require('../services/download-manager.cjs'); // Corrected import
 const { disableMod, enableMod } = require('./mod-utils/mod-file-utils.cjs');
-const { mainWindow } = require('../main.cjs'); // Import mainWindow
 
 // fs/promises, axios, createWriteStream, pipeline, promisify, pipelineAsync are now mainly used within the services.
 // If any handler directly needs them (e.g. a simple file op not covered by services), they can be re-added or operations moved.

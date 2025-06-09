@@ -531,8 +531,7 @@
     
     // Set downloading state
     isDownloadingMods = true;
-    
-    // Validate that each mod has necessary properties
+      // Validate that each mod has necessary properties
     const invalidMods = requiredMods.filter(mod => !mod.fileName || !mod.downloadUrl);
     if (invalidMods.length > 0) {
       errorMessage.set(`Invalid mod data: ${invalidMods.length} mods missing required properties`);
@@ -540,12 +539,6 @@
       isDownloadingMods = false;
       return;
     }
-    
-      fileName: m.fileName,
-      downloadUrl: m.downloadUrl,
-      hasChecksum: !!m.checksum,
-      size: m.size
-    })));
     
     // Reset download state
     downloadProgress = 0;
@@ -1939,11 +1932,6 @@
     background-color: rgba(239, 68, 68, 0.1);
     border: 1px solid #ef4444;
   }
-    .missing-mods, .outdated-mods {
-    font-size: 0.8rem;
-    color: #fbbf24;
-    font-family: monospace;
-  }
 
   /* Mod changes section styles */
   .mod-changes-section {
@@ -2009,23 +1997,7 @@
   .download-button:hover {
     background-color: #2563eb;
   }
-  
-  .check-sync-button {
-    background-color: #6b7280;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 0.5rem 1rem;
-    font-size: 0.8rem;
-    cursor: pointer;
-    margin-top: 0.5rem;
-  }
-  
-  .check-sync-button:hover {
-    background-color: #4b5563;
-  }
-  
-  /* Progress bar styles */
+    /* Progress bar styles */
   .progress-bar {
     width: 100%;
     height: 0.75rem;
@@ -2400,26 +2372,10 @@
     background-color: #d97706;
   }
   
-  .client-info-text {
-    text-align: left;
+  .client-info-text {    text-align: left;
     font-size: 0.8rem;
     color: #9ca3af;
     margin-top: 0.5rem;
-  }
-  
-  .debug-java-button {
-    background-color: #6366f1;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 0.5rem 1rem;
-    font-size: 0.85rem;
-    cursor: pointer;
-    transition: background-color 0.2s;
-  }
-  
-  .debug-java-button:hover {
-    background-color: #4f46e5;
   }
   
   /* Memory Settings */
@@ -2476,49 +2432,11 @@
     font-size: 0.85rem;
     margin-top: 0.25rem;
   }
-  
-  .memory-disabled-note {
+    .memory-disabled-note {
     color: #f59e0b;
     font-size: 0.8rem;
     margin-top: 0.5rem;
     text-align: left;
-  }
-  
-  /* Launch Progress */
-  .launch-progress-section {
-    background: rgba(16, 185, 129, 0.1);
-    border: 1px solid #10b981;
-    border-radius: 8px;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
-    text-align: center;
-  }
-  
-  .launch-progress-section h3 {
-    margin-top: 0;
-    margin-bottom: 1rem;
-    color: #10b981;
-  }
-  
-  .progress-indicator {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1rem;
-  }
-  
-  .spinner {
-    width: 40px;
-    height: 40px;
-    border: 4px solid rgba(16, 185, 129, 0.3);
-    border-top: 4px solid #10b981;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
-  
-  @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
   }
   
   .progress-text {
