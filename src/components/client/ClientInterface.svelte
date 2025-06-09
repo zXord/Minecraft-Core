@@ -65,34 +65,28 @@
   // Settings
   let deleteFiles = false;
   let showDeleteConfirmation = false;
-  
-  // Track download states more precisely
+    // Track download states more precisely
   let isDownloadingClient = false;
   let isDownloadingMods = false;
   let isCheckingSync = false;
-  let lastSyncCheck = null;
-  
-  // UI state variables
-  let clientSync = { synchronized: false, reason: '' };
-  let modSync = { synchronized: false, reason: '' };
-  let downloadButtonText = 'Check Setup';
   
   // Memory/RAM settings
   let maxMemory = 2; // Default 2GB (in GB instead of MB)
-  let systemMemoryGB = 8; // Will be detected from system
   
   // Launch progress tracking
   let isLaunching = false;
-  let launchProgressText = '';
-    // Console spam reduction variables
+  
+  // Console spam reduction variables
   let previousServerInfo = null;
   let lastSyncKey = null;
   
   // Client mod compatibility dialog state
   let showCompatibilityDialog = false;
   let compatibilityReport = null;
-  let newMcVersion = ''; // Defined here
-  let oldMcVersion = ''; // Defined here
+  
+  // Download progress tracking
+  let downloadedBytes = 0;
+  let totalBytes = 0;
   
   // Connect to the Management Server (port 8080)
   async function connectToServer() {
@@ -113,13 +107,12 @@
         },
         signal: AbortSignal.timeout(5000) // 5 second timeout
       });
-      
-      if (!response.ok) {
+        if (!response.ok) {
         throw new Error(`Management server responded with ${response.status}`);
       }
 
-      const data = await response.json();
-      if (data.success) {
+      const testData = await response.json();
+      if (testData.success) {
         setConnectionStatus('connected');
         
         // Register with the server
@@ -156,10 +149,9 @@
           clientId,
           name: clientName
         })
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
+      });        
+        if (response.ok) {
+          const registerData = await response.json();
         
         // Update instance with client info if needed
         if (!instance.clientId) {
@@ -453,13 +445,11 @@
         errorMessage.set('Authentication failed: ' + result.error);
         setTimeout(() => errorMessage.set(''), 5000);
       }
-  } catch (err) {
-      // Clear the timeout since we got an error
+  } catch (err) {      // Clear the timeout since we got an error
       clearTimeout(authTimeout);
       
       
       // Check if auth actually succeeded despite the error
-      const savedAuthStatus = authStatus;
       await checkAuthentication();
       if (username && authData && authStatus === 'authenticated') {
         successMessage.set(`Authentication completed for ${username}`);
@@ -746,7 +736,6 @@
     
     isLaunching = true;
     launchStatus = 'launching';
-    launchProgressText = 'Preparing to launch Minecraft...';
     launchProgress = { type: 'Preparing', task: 'Initializing launcher...', total: 0 };
     
     try {
@@ -875,7 +864,6 @@
     window.electron.on('launcher-launch-start', () => {
       isLaunching = true;
       launchStatus = 'launching';
-      launchProgressText = 'Starting launcher...';
       launchProgress = { type: 'Starting', task: 'Preparing to launch...', total: 0 };
     });
     
@@ -898,7 +886,7 @@
       setTimeout(() => errorMessage.set(''), 5000);
     });
     
-    window.electron.on('launcher-minecraft-closed', (data) => {
+    window.electron.on('launcher-minecraft-closed', () => {
       launchStatus = 'ready';
     });
     
@@ -1058,26 +1046,6 @@
     cleanupLauncherEvents();
   });
   
-  // Force refresh all status checks
-  async function forceRefresh() {
-    
-    // Reset states to force re-check
-    authStatus = 'checking';
-    setConnectionStatus('connecting');
-    downloadStatus = 'checking';
-    clientSyncStatus = 'checking';
-    
-    try {
-      await connectToServer();
-      await checkAuthentication();
-      await checkServerStatus();
-      await getServerInfo();
-      await checkModSynchronization();
-      await checkClientSynchronization();
-    } catch (error) {
-    }
-  }
-  
   // Debug Java installation function removed - no longer needed
   
   onMount(() => {
@@ -1170,8 +1138,6 @@
       } else if (downloadStatus === 'needed') {
         downloadStatus = 'needs-mods';
       }
-
-      lastSyncCheck = Date.now();
 
       // Update download button text
       if (downloadStatus === 'ready') {
@@ -1309,8 +1275,6 @@
   function handleCloseCompatibilityDialog() {
     showCompatibilityDialog = false; 
     compatibilityReport = null;
-    newMcVersion = '';
-    oldMcVersion = '';
   }
 
 </script>
@@ -2433,18 +2397,5 @@
     font-size: 0.8rem;
     margin-top: 0.5rem;
     text-align: left;
-  }
-  
-  .progress-text {
-    color: #e2e8f0;
-    font-size: 0.9rem;
-    margin: 0;
-  }
-
-  /* Mods Container */
-  .mods-container {
-    width: 100%;
-    max-width: 1200px;
-    margin: 0 auto;
   }
 </style>
