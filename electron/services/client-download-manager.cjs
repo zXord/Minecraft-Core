@@ -636,7 +636,6 @@ class ClientDownloadManager {
       
       report.hasIncompatible = report.incompatible.length > 0;
       report.hasUpdatable = report.needsUpdate.length > 0;
-
       return report;
       
     } catch (error) {
