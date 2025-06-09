@@ -674,9 +674,8 @@ function createMinecraftLauncherHandlers(win) {
         };
       }
     },
-    
-    // Check if mods are synchronized
-    'minecraft-check-mods': async (_e, { clientPath, requiredMods, allClientMods = [] }) => {
+      // Check if mods are synchronized
+    'minecraft-check-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverManagedFiles = [] }) => {
       try {
         if (!clientPath || !requiredMods || !Array.isArray(requiredMods)) {
           return { success: false, error: 'Invalid parameters' };
@@ -760,15 +759,8 @@ function createMinecraftLauncherHandlers(win) {
         const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
         const extraMods = [];
         
-        // Get server-managed files from the store to differentiate server-managed from client-installed mods
-        let serverManagedFiles = new Set();
-        try {
-          const appStore = require('../utils/app-store.cjs');
-          const serverManagedFilesArray = appStore.get('serverManagedFiles') || [];
-          serverManagedFiles = new Set(serverManagedFilesArray);
-        } catch (storeErr) {
-          console.warn('[minecraft-check-mods] Could not access server managed files from store:', storeErr.message);
-        }
+        // Use the passed serverManagedFiles parameter instead of accessing the store
+        const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
 
         try {
           if (fs.existsSync(manifestDir)) {
@@ -780,11 +772,10 @@ function createMinecraftLauncherHandlers(win) {
             
             for (const file of manifests) {
               try {
-                const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
-                if (data.fileName && !allowed.has(data.fileName)) {
+                const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));                if (data.fileName && !allowed.has(data.fileName)) {
                   // Only flag as "extra" if this mod was previously managed by the server
                   // Client-installed mods should not be flagged for removal
-                  if (serverManagedFiles.has(data.fileName)) {
+                  if (serverManagedFilesSet.has(data.fileName.toLowerCase())) {
                     extraMods.push(data.fileName);
                   }
                 }
@@ -801,10 +792,9 @@ function createMinecraftLauncherHandlers(win) {
           
           // Check all present mods (enabled and disabled) for client-downloaded mods
           const allPresentMods = [...presentMods, ...disabledMods];
-          
-          // Build comprehensive list of server-managed mod names (including ones that will be downloaded)
+            // Build comprehensive list of server-managed mod names (including ones that will be downloaded)
           const allServerManagedFiles = new Set([
-            ...serverManagedFiles,
+            ...(serverManagedFiles || []).map(f => f.toLowerCase()),
             ...requiredMods.map(rm => rm.fileName.toLowerCase()),
             ...(allClientMods || []).filter(m => m.required).map(m => m.fileName.toLowerCase())
           ]);
@@ -817,15 +807,11 @@ function createMinecraftLauncherHandlers(win) {
           
           console.log('[minecraft-check-mods] Server managed files:', Array.from(allServerManagedFiles));
           console.log('[minecraft-check-mods] All allowed mods:', Array.from(allAllowedMods));
-          console.log('[minecraft-check-mods] Present mods to analyze:', allPresentMods);
-            for (const modFileName of allPresentMods) {
+          console.log('[minecraft-check-mods] Present mods to analyze:', allPresentMods);            for (const modFileName of allPresentMods) {
             const modFileNameLower = modFileName.toLowerCase();
-            
-            console.log(`[minecraft-check-mods] Analyzing client mod: ${modFileName}`);
             
             // Skip server-managed mods (mods that are/will be managed by the server)
             if (allServerManagedFiles.has(modFileNameLower)) {
-              console.log(`[minecraft-check-mods] Skipping ${modFileName} - server managed`);
               continue;
             }
             
@@ -890,29 +876,23 @@ function createMinecraftLauncherHandlers(win) {
                   currentVersion: clientModMetadata.version || 'Unknown',
                   serverVersion: serverVersion,
                   action: 'update'
-                });
-              } else if (compatibleServerMatch?.isCompatible) {
+                });              } else if (compatibleServerMatch?.isCompatible) {
                 // This mod might be compatible and should be kept, not disabled
-                console.log(`[minecraft-check-mods] ${modFileName} is compatible, keeping as-is`);
                 // Don't add to updates or removals - just keep it
               } else {
                 // Check if this mod is in the allowed list (could be optional mod)
                 const isExplicitlyAllowed = allAllowedMods.has(modFileNameLower);
                 
-                console.log(`[minecraft-check-mods] ${modFileName} allowed: ${isExplicitlyAllowed}`);
-                
                 if (!isExplicitlyAllowed) {
                   // This client mod is not allowed by the server - it will be disabled
-                  console.log(`[minecraft-check-mods] ${modFileName} will be disabled`);
                   clientModChanges.removals.push({
                     fileName: modFileName,
                     name: clientModMetadata.name || modFileName,
                     currentVersion: clientModMetadata.version || 'Unknown',
                     action: 'disable'
                   });
-                } else {
-                  console.log(`[minecraft-check-mods] ${modFileName} is allowed, keeping as-is`);
                 }
+                // If explicitly allowed, keep as-is (no action needed)
                 // If it's explicitly allowed, we don't need to do anything - it stays as-is
               }
             } catch (metadataError) {
@@ -939,27 +919,22 @@ function createMinecraftLauncherHandlers(win) {
             
             return false;
           });
-          
-          if (serverMod) {
+            if (serverMod) {
             serverModsWithClientUpdates.add(serverMod.fileName);
-            console.log(`[minecraft-check-mods] Server mod ${serverMod.fileName} is an update for client mod ${update.fileName}`);
           }
         }
-        
-        console.log('[minecraft-check-mods] Server mods with client updates:', Array.from(serverModsWithClientUpdates));
-        console.log('[minecraft-check-mods] Missing/outdated server mods:', missingMods.concat(outdatedMods));
-        console.log('[minecraft-check-mods] Updates found:', clientModChanges.updates.map(u => u.fileName));
-        
-        // Add only mods that are not updates of existing client mods
+          // Add only mods that are not updates of existing client mods
         for (const modFileName of missingMods.concat(outdatedMods)) {
           if (!serverModsWithClientUpdates.has(modFileName)) {
             clientModChanges.newDownloads.push(modFileName);
-            console.log(`[minecraft-check-mods] ${modFileName} is a new download (not an update)`);
-          } else {
-            console.log(`[minecraft-check-mods] ${modFileName} is an update, not adding to newDownloads`);
           }
         }// Synchronized means all required mods are present, up to date, and no extras remain
           const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && extraMods.length === 0;
+        
+        // Debug: Show final removal results
+        console.log('[minecraft-check-mods] Final removal results:');
+        console.log('[minecraft-check-mods] - Extra mods (to be removed):', extraMods);
+        console.log('[minecraft-check-mods] - Client mod removals:', clientModChanges.removals);
         
         return {
           success: true,

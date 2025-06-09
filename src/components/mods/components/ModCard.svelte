@@ -34,6 +34,7 @@
   $: isInstalling = $installingModIds.has(mod.id);
   $: isChangingVersion = isInstalled && selectedVersionId && selectedVersionId !== installedVersionId;
   
+  
   // Get installed mod information
   $: installedModData = $installedModInfo.find(info => info.projectId === mod.id);
   $: installedVersionNumber = installedModData?.versionNumber || '';
@@ -1018,4 +1019,4 @@
     font-style: normal;
     font-size: 0.8rem;
   }
-</style> 
+</style>

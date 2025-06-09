@@ -3,9 +3,9 @@
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import ClientModManager from './ClientModManager.svelte';
   import ClientHeader from './ClientHeader.svelte';
-  import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
-  import { errorMessage, successMessage } from '../../stores/modStore.js';
+  import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';  import { errorMessage, successMessage, serverManagedFiles } from '../../stores/modStore.js';
   import { createEventDispatcher } from 'svelte';
+  import { get } from 'svelte/store';
   import { openFolder } from '../../utils/folderUtils.js';
   import {
     clientState,
@@ -276,14 +276,14 @@
     }
     
     downloadStatus = 'checking';
-    
-    try {
+      try {
+      const managedFiles = get(serverManagedFiles);
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
-        requiredMods
+        requiredMods,
+        serverManagedFiles: Array.from(managedFiles)
       });
-      
-      if (result.success) {
+        if (result.success) {
         modSyncStatus = result;
         
         if (result.synchronized) {
@@ -293,6 +293,11 @@
         }
         
         console.log(`[Client] Mod sync status: ${result.totalPresent}/${result.totalRequired} mods present, ${result.needsDownload} need download`);
+        console.log('[Client] Full mod sync result:', result);
+        console.log('[Client] clientModChanges:', result.clientModChanges);
+        if (result.clientModChanges?.removals) {
+          console.log('[Client] Removals found:', result.clientModChanges.removals);
+        }
       } else {
         downloadStatus = 'ready'; // Assume ready if check fails
       }
@@ -1582,16 +1587,14 @@
                           {/each}
                         </ul>
                       </div>
-                    {/if}
-
-                    <!-- Client Mod Removals -->
+                    {/if}                    <!-- Client Mod Removals -->
                     {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}
                       <div class="mod-changes-section">
-                        <h4>❌ Mods to be Disabled:</h4>
+                        <h4>❌ Mods to be Removed:</h4>
                         <ul class="mod-list">
                           {#each modSyncStatus.clientModChanges.removals as removal}
                             <li class="mod-item mod-removal">
-                              {removal.name} → disabled
+                              {removal.name} → {removal.reason || (removal.action === 'remove' ? 'no longer required' : 'disabled')}
                             </li>
                           {/each}
                         </ul>

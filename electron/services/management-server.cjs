@@ -698,8 +698,7 @@ class ManagementServer {
       }
       
       let requiredMods = [];
-      
-      // Client-only mods (mods that should be installed on client)
+        // Client-only mods (mods that should be installed on client)
       if (fs.existsSync(clientModsDir)) {
         const clientMods = fs.readdirSync(clientModsDir)
           .filter(file => file.endsWith('.jar'))
@@ -711,6 +710,26 @@ class ManagementServer {
             const savedCategory = categoryMap.get(file);
             const isRequired = savedCategory ? savedCategory.required !== false : true; // Default to required if not specified
             
+            // Try to read manifest to get proper Modrinth project ID
+            let projectId = null;
+            let versionId = null;
+            let versionNumber = null;
+            let name = null;
+            
+            try {
+              const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${file}.json`);
+              if (fs.existsSync(manifestPath)) {
+                const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+                const manifest = JSON.parse(manifestContent);
+                projectId = manifest.projectId || null;
+                versionId = manifest.versionId || null;
+                versionNumber = manifest.versionNumber || null;
+                name = manifest.name || null;
+              }
+            } catch (manifestErr) {
+              console.warn(`[ManagementServer] Could not read manifest for ${file}:`, manifestErr.message);
+            }
+            
             return {
               fileName: file,
               location: 'client',
@@ -718,7 +737,11 @@ class ManagementServer {
               lastModified: stats.mtime,
               required: isRequired,
               checksum: this.calculateFileChecksum(modPath),
-              downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`
+              downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
+              projectId: projectId,
+              versionId: versionId,
+              versionNumber: versionNumber,
+              name: name
             };
           });
         requiredMods = requiredMods.concat(clientMods);
@@ -731,8 +754,7 @@ class ManagementServer {
         const clientMods = fs.readdirSync(clientModsDir)
           .filter(file => file.endsWith('.jar'))
           .map(f => f);
-        
-        // Find mods that exist in both directories
+          // Find mods that exist in both directories
         for (const serverMod of serverMods) {
           if (clientMods.includes(serverMod)) {
             const modPath = path.join(clientModsDir, serverMod);
@@ -744,6 +766,26 @@ class ManagementServer {
               const savedCategory = categoryMap.get(serverMod);
               const isRequired = savedCategory ? savedCategory.required !== false : true; // Default to required if not specified
               
+              // Try to read manifest to get proper Modrinth project ID
+              let projectId = null;
+              let versionId = null;
+              let versionNumber = null;
+              let name = null;
+              
+              try {
+                const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${serverMod}.json`);
+                if (fs.existsSync(manifestPath)) {
+                  const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+                  const manifest = JSON.parse(manifestContent);
+                  projectId = manifest.projectId || null;
+                  versionId = manifest.versionId || null;
+                  versionNumber = manifest.versionNumber || null;
+                  name = manifest.name || null;
+                }
+              } catch (manifestErr) {
+                console.warn(`[ManagementServer] Could not read manifest for ${serverMod}:`, manifestErr.message);
+              }
+              
               requiredMods.push({
                 fileName: serverMod,
                 location: 'both',
@@ -751,7 +793,11 @@ class ManagementServer {
                 lastModified: stats.mtime,
                 required: isRequired,
                 checksum: this.calculateFileChecksum(modPath),
-                downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`
+                downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
+                projectId: projectId,
+                versionId: versionId,
+                versionNumber: versionNumber,
+                name: name
               });
             }
           }
@@ -805,8 +851,7 @@ class ManagementServer {
       }
       
       let allClientMods = [];
-      
-      // Client-only mods
+        // Client-only mods
       if (fs.existsSync(clientModsDir)) {
         const clientMods = fs.readdirSync(clientModsDir)
           .filter(file => file.endsWith('.jar'))
@@ -818,6 +863,26 @@ class ManagementServer {
             const savedCategory = categoryMap.get(file);
             const isRequired = savedCategory ? savedCategory.required !== false : true; // Default to required if not specified
             
+            // Try to read manifest to get proper Modrinth project ID
+            let projectId = null;
+            let versionId = null;
+            let versionNumber = null;
+            let name = null;
+            
+            try {
+              const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${file}.json`);
+              if (fs.existsSync(manifestPath)) {
+                const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+                const manifest = JSON.parse(manifestContent);
+                projectId = manifest.projectId || null;
+                versionId = manifest.versionId || null;
+                versionNumber = manifest.versionNumber || null;
+                name = manifest.name || null;
+              }
+            } catch (manifestErr) {
+              console.warn(`[ManagementServer] Could not read manifest for ${file}:`, manifestErr.message);
+            }
+            
             return {
               fileName: file,
               location: 'client',
@@ -825,7 +890,11 @@ class ManagementServer {
               lastModified: stats.mtime,
               required: isRequired,
               checksum: this.calculateFileChecksum(modPath),
-              downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`
+              downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
+              projectId: projectId,
+              versionId: versionId,
+              versionNumber: versionNumber,
+              name: name
             };
           });
         allClientMods = allClientMods.concat(clientMods);
@@ -838,8 +907,7 @@ class ManagementServer {
         const clientMods = fs.readdirSync(clientModsDir)
           .filter(file => file.endsWith('.jar'))
           .map(f => f);
-        
-        // Find mods that exist in both directories
+          // Find mods that exist in both directories
         for (const serverMod of serverMods) {
           if (clientMods.includes(serverMod)) {
             const modPath = path.join(clientModsDir, serverMod);
@@ -851,6 +919,26 @@ class ManagementServer {
               const savedCategory = categoryMap.get(serverMod);
               const isRequired = savedCategory ? savedCategory.required !== false : true; // Default to required if not specified
               
+              // Try to read manifest to get proper Modrinth project ID
+              let projectId = null;
+              let versionId = null;
+              let versionNumber = null;
+              let name = null;
+              
+              try {
+                const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${serverMod}.json`);
+                if (fs.existsSync(manifestPath)) {
+                  const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+                  const manifest = JSON.parse(manifestContent);
+                  projectId = manifest.projectId || null;
+                  versionId = manifest.versionId || null;
+                  versionNumber = manifest.versionNumber || null;
+                  name = manifest.name || null;
+                }
+              } catch (manifestErr) {
+                console.warn(`[ManagementServer] Could not read manifest for ${serverMod}:`, manifestErr.message);
+              }
+              
               allClientMods.push({
                 fileName: serverMod,
                 location: 'both',
@@ -858,7 +946,11 @@ class ManagementServer {
                 lastModified: stats.mtime,
                 required: isRequired,
                 checksum: this.calculateFileChecksum(modPath),
-                downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`
+                downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
+                projectId: projectId,
+                versionId: versionId,
+                versionNumber: versionNumber,
+                name: name
               });
             }
           }

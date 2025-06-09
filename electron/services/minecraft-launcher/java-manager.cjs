@@ -62,7 +62,7 @@ class JavaManager {
   getJavaExecutablePath(javaVersion) {
     const javaDir = path.join(this.javaBaseDir, `java-${javaVersion}`);
     
-    console.log(`[JavaManager] Looking for Java ${javaVersion} in: ${javaDir}`);
+    // console.log(`[JavaManager] Looking for Java ${javaVersion} in: ${javaDir}`);
     
     if (!fs.existsSync(javaDir)) {
       console.log(`[JavaManager] Java directory does not exist: ${javaDir}`);
@@ -272,7 +272,7 @@ class JavaManager {
       
       // Verify installation using the robust path detection
       const javaExe = this.getJavaExecutablePath(javaVersion);
-      console.log(`[JavaManager] Checking for Java executable...`);
+      // console.log(`[JavaManager] Checking for Java executable...`);
       
       if (!javaExe) {
         console.error(`[JavaManager] Java executable not found after extraction`);

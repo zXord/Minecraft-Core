@@ -156,9 +156,8 @@ class AuthHandler {
           console.warn('[AuthHandler] Could not restore refresh capability:', restoreError.message);
         }
       }
-      
-      console.log(`[AuthHandler] ✅ Loaded saved authentication for: ${savedAuthData.name}`);
-      console.log(`[AuthHandler] Token age: ${hoursSinceSaved.toFixed(1)} hours`);
+        console.log(`[AuthHandler] ✅ Loaded saved authentication for: ${savedAuthData.name}`);
+      // console.log(`[AuthHandler] Token age: ${hoursSinceSaved.toFixed(1)} hours`);
       
       const hasRefreshCapability = this.authData.meta && typeof this.authData.meta.launch === 'function';
       console.log(`[AuthHandler] Refresh capability: ${hasRefreshCapability ? 'Available' : 'Limited'}`);
@@ -183,11 +182,10 @@ class AuthHandler {
     
     try {
       // Check token age first
-      const savedDate = new Date(this.authData.savedAt || 0);
-      const now = new Date();
+      const savedDate = new Date(this.authData.savedAt || 0);      const now = new Date();
       const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
       
-      console.log(`[AuthHandler] Token age: ${hoursSinceSaved.toFixed(1)} hours`);
+      // console.log(`[AuthHandler] Token age: ${hoursSinceSaved.toFixed(1)} hours`);
       
       // If token is very fresh (less than 30 minutes), just use it
       if (hoursSinceSaved < 0.5) {
