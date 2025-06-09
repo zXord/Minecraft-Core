@@ -21,7 +21,6 @@ function startMetricsReporting(win) {
   // System metrics update every half second
   setInterval(() => {
     publishSystemMetrics().catch(err => {
-      console.error('publishSystemMetrics error:', err);
     });
   }, 500); // 500ms for faster UI updates
   
@@ -30,7 +29,6 @@ function startMetricsReporting(win) {
   
   // Reset metrics when server stops
   eventBus.on('server-normal-exit', () => {
-    console.log('Event: Server normal exit detected, resetting metrics');
     
     // Send zeroed metrics on server exit
     sendMetricsUpdate({
@@ -92,7 +90,6 @@ async function getServerMemoryUsage(serverProcess) {
     process.kill(serverProcess.pid, 0);
   } catch (e) {
     // If process doesn't exist, return 0 immediately
-    console.log(`Process ${serverProcess.pid} no longer exists, skipping memory measurement`);
     return currentLookupMem;
   }
   
@@ -133,7 +130,6 @@ async function getServerMemoryUsage(serverProcess) {
         }
       } catch (wmicErr) {
         if (process.env.DEBUG) {
-          console.log(`WMIC memory lookup failed, trying direct PowerShell: ${wmicErr.message}`);
         }
       }
         // If the first method failed, try direct PowerShell as backup
@@ -155,17 +151,14 @@ async function getServerMemoryUsage(serverProcess) {
               currentLookupMem = memoryValue;
             }
           } else {
-            console.log(`Process ${serverProcess.pid} not found in PowerShell check, skipping memory measurement`);
           }
         } catch (psErr) {
           // Silently handle the error and don't output to console as this is expected sometimes
           if (process.env.DEBUG) {
-            console.log(`PowerShell direct measurement failed: ${psErr.message}`);
           }
         }
       }
     } catch (err) {
-      console.error('Memory lookup error:', err);
     }
   } else {
     // For non-Windows systems, use pidusage
@@ -173,7 +166,6 @@ async function getServerMemoryUsage(serverProcess) {
       const stats = await pidusage(serverProcess.pid);
       currentLookupMem = parseFloat((stats.memory / 1024 / 1024).toFixed(1));
     } catch (err) {
-      console.error('pidusage error:', err);
     }
   }
   
@@ -206,7 +198,6 @@ async function publishSystemMetrics() {
           cpuPct = parseFloat(stat.cpu.toFixed(1));
         } catch (err) {
           cpuPct = 0; // Fallback
-          if (process.env.DEBUG) console.error('Failed to get CPU usage:', err);
         }
       } else {
         // Skip per-process CPU usage on Windows to avoid pidusage errors
@@ -223,7 +214,6 @@ async function publishSystemMetrics() {
       // If server is not running, explicitly reset all metrics to zero
       // Only log the first time we zero out metrics to avoid log spam
       if (publishSystemMetrics.lastMemUsedMB > 0) {
-        console.log('Server not running, zeroing all metrics');
       }
       
       cpuPct = 0;
@@ -258,7 +248,6 @@ async function publishSystemMetrics() {
       names: playersInfo.names
     });
   } catch (err) {
-    console.error('publishSystemMetrics outer error:', err);
   }
 }
 

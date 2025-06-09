@@ -9,9 +9,7 @@ export async function saveInstances(instances) {
 
     const result = await window.electron.invoke('save-instances', validInstances);
     if (!result || !result.success) {
-      console.error('Failed to save instances:', result?.error || 'Unknown error');
     }
   } catch (err) {
-    console.error('Failed to save instances:', err);
   }
 }

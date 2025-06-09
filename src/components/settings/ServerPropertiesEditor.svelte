@@ -231,26 +231,20 @@
         throw new Error('Server path is not set');
       }
       
-      console.log('Loading server properties from:', serverPath);
       
       // Create an IPC function in the main process to read the file
-      console.log('Invoking read-server-properties...');
       const result = await window.electron.invoke('read-server-properties', serverPath);
-      console.log('Server properties result:', result);
       
       if (result && result.success) {
         const properties = result.properties || {};
-        console.log('Loaded properties:', properties);
         originalProperties = { ...properties }; // Store original for dirty checking
         propertiesMap.set(properties);
         isLoading = false;
         hasChanges = false;
       } else {
-        console.error('Error from read-server-properties:', result?.error || 'Unknown error');
         throw new Error(result?.error || 'Failed to read server.properties');
       }
     } catch (err) {
-      console.error('Error loading server.properties:', err);
       error = err.message;
       isLoading = false;
     }
@@ -300,7 +294,6 @@
         throw new Error(result.error || 'Failed to save server.properties');
       }
     } catch (err) {
-      console.error('Error saving server.properties:', err);
       error = err.message;
       
       // Show error indicator briefly
@@ -340,7 +333,6 @@
       // Clear restart-needed flag after successful restart
       propertiesRestartNeeded.set(false);
     } catch (err) {
-      console.error('Error restarting server:', err);
       error = err.message;
       // Reset restart flag in case of error
       isRestarting.set(false);
@@ -360,7 +352,6 @@
       const result = await window.electron.invoke('restore-backup-properties', serverPath);
       
       if (result.success) {
-        console.log('Default properties restored:', result.properties);
         // If the server returned the default properties, use them directly
         if (result.properties) {
           // Check if there's actually a change from current properties
@@ -387,7 +378,6 @@
         throw new Error(result.error || 'Failed to restore default properties');
       }
     } catch (err) {
-      console.error('Error restoring default properties:', err);
       error = err.message;
       isLoading = false;
     }

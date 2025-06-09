@@ -16,11 +16,9 @@ class JavaManager {
     // Use client-specific Java directory if clientPath is provided
     if (clientPath) {
       this.javaBaseDir = path.join(clientPath, 'java');
-      console.log(`[JavaManager] Using client-specific Java directory: ${this.javaBaseDir}`);
     } else {
       // Fallback to global directory for backwards compatibility
       this.javaBaseDir = path.join(os.homedir(), '.minecraft-core', 'java');
-      console.log(`[JavaManager] Using global Java directory: ${this.javaBaseDir}`);
     }
     
     // Ensure Java directory exists
@@ -33,7 +31,6 @@ class JavaManager {
   setClientPath(clientPath) {
     this.clientPath = clientPath;
     this.javaBaseDir = path.join(clientPath, 'java');
-    console.log(`[JavaManager] Updated Java directory to: ${this.javaBaseDir}`);
     
     // Ensure Java directory exists
     if (!fs.existsSync(this.javaBaseDir)) {
@@ -62,10 +59,8 @@ class JavaManager {
   getJavaExecutablePath(javaVersion) {
     const javaDir = path.join(this.javaBaseDir, `java-${javaVersion}`);
     
-    // console.log(`[JavaManager] Looking for Java ${javaVersion} in: ${javaDir}`);
     
     if (!fs.existsSync(javaDir)) {
-      console.log(`[JavaManager] Java directory does not exist: ${javaDir}`);
       return null;
     }
     
@@ -81,7 +76,6 @@ class JavaManager {
         // First, check if this directory directly contains bin/java
         const binDir = path.join(dir, 'bin');
         if (fs.existsSync(binDir)) {
-          console.log(`[JavaManager] Found bin directory at: ${binDir}`);
           
           // On Windows, prefer javaw.exe (no console) over java.exe
           const possibleExecutables = this.platform === 'windows' ? 
@@ -91,7 +85,6 @@ class JavaManager {
           for (const exe of possibleExecutables) {
             const exePath = path.join(binDir, exe);
             if (fs.existsSync(exePath)) {
-              console.log(`[JavaManager] Found Java executable: ${exePath}`);
               return exePath;
             }
           }
@@ -104,19 +97,16 @@ class JavaManager {
           try {
             const stat = fs.statSync(itemPath);
             if (stat.isDirectory()) {
-              console.log(`[JavaManager] Searching subdirectory: ${itemPath}`);
               const result = findJavaExecutableRecursively(itemPath, maxDepth, currentDepth + 1);
               if (result) {
                 return result;
               }
             }
           } catch (statError) {
-            console.warn(`[JavaManager] Could not stat ${itemPath}: ${statError.message}`);
           }
         }
         
       } catch (readError) {
-        console.warn(`[JavaManager] Could not read directory ${dir}: ${readError.message}`);
       }
       
       return null;
@@ -126,13 +116,11 @@ class JavaManager {
     const foundExecutable = findJavaExecutableRecursively(javaDir);
     
     if (foundExecutable) {
-      console.log(`[JavaManager] Successfully found Java executable: ${foundExecutable}`);
       return foundExecutable;
     }
     
     // If recursive search failed, log what we actually have
     try {
-      console.log(`[JavaManager] Could not find Java executable. Directory structure:`);
       const listDirectoryStructure = (dir, indent = '') => {
         try {
           const items = fs.readdirSync(dir);
@@ -140,25 +128,20 @@ class JavaManager {
             const itemPath = path.join(dir, item);
             const stat = fs.statSync(itemPath);
             if (stat.isDirectory()) {
-              console.log(`${indent}📁 ${item}/`);
               if (indent.length < 8) { // Limit depth to avoid excessive logging
                 listDirectoryStructure(itemPath, indent + '  ');
               }
             } else {
-              console.log(`${indent}📄 ${item}`);
             }
           }
         } catch (e) {
-          console.log(`${indent}❌ Error reading directory: ${e.message}`);
         }
       };
       
       listDirectoryStructure(javaDir);
     } catch (debugError) {
-      console.warn(`[JavaManager] Could not debug directory structure: ${debugError.message}`);
     }
     
-    console.warn(`[JavaManager] No Java executable found in ${javaDir} or its subdirectories`);
     return null;
   }
   
@@ -169,7 +152,6 @@ class JavaManager {
   
   async downloadJava(javaVersion, progressCallback) {
     try {
-      console.log(`[JavaManager] Downloading Java ${javaVersion} for ${this.platform} ${this.architecture}...`);
       
       if (progressCallback) {
         progressCallback({ type: 'Preparing', task: `Preparing to download Java ${javaVersion}...`, progress: 0 });
@@ -178,7 +160,6 @@ class JavaManager {
       // Get download URL from Adoptium API
       const apiUrl = `https://api.adoptium.net/v3/assets/latest/${javaVersion}/hotspot?architecture=${this.architecture}&image_type=jre&os=${this.platform}&vendor=eclipse`;
       
-      console.log(`[JavaManager] Fetching Java download info from: ${apiUrl}`);
       
       // const fetch = require('node-fetch'); // Now top-level
       const response = await fetch(apiUrl);
@@ -196,7 +177,6 @@ class JavaManager {
       const downloadUrl = release.binary.package.link;
       const filename = release.binary.package.name;
       
-      console.log(`[JavaManager] Downloading Java from: ${downloadUrl}`);
       
       if (progressCallback) {
         progressCallback({ type: 'Downloading', task: `Downloading ${filename}...`, progress: 0 });
@@ -242,7 +222,6 @@ class JavaManager {
         fileStream.on('error', reject);
       });
       
-      console.log(`[JavaManager] Java downloaded to: ${tempFile}`);
       
       if (progressCallback) {
         progressCallback({ type: 'Extracting', task: 'Extracting Java runtime...', progress: 0 });
@@ -264,7 +243,6 @@ class JavaManager {
           `The Java archive may have an unexpected directory structure.`
         );
       }
-      console.log(`[JavaManager] Post-extraction verification passed: Java found at ${javaExeCheck}`);
       
       if (progressCallback) {
         progressCallback({ type: 'Verifying', task: 'Verifying Java installation...', progress: 90 });
@@ -272,18 +250,14 @@ class JavaManager {
       
       // Verify installation using the robust path detection
       const javaExe = this.getJavaExecutablePath(javaVersion);
-      // console.log(`[JavaManager] Checking for Java executable...`);
       
       if (!javaExe) {
-        console.error(`[JavaManager] Java executable not found after extraction`);
         
         // List what we actually have in the directory for debugging
         try {
           const extractedContents = fs.readdirSync(path.join(this.javaBaseDir, `java-${javaVersion}`));
-          console.error(`[JavaManager] Directory contents: ${extractedContents.join(', ')}`);
           
           // Log the full directory structure for debugging
-          console.error(`[JavaManager] Full directory structure:`);
           const debugDir = path.join(this.javaBaseDir, `java-${javaVersion}`);
           const logDirectoryStructure = (dir, indent = '') => {
             try {
@@ -292,36 +266,29 @@ class JavaManager {
                 const itemPath = path.join(dir, item);
                 const stat = fs.statSync(itemPath);
                 if (stat.isDirectory()) {
-                  console.error(`${indent}📁 ${item}/`);
                   if (indent.length < 6) { // Limit depth
                     logDirectoryStructure(itemPath, indent + '  ');
                   }
                 } else {
-                  console.error(`${indent}📄 ${item}`);
                 }
               }
             } catch (e) {
-              console.error(`${indent}❌ Error: ${e.message}`);
             }
           };
           logDirectoryStructure(debugDir);
           
         } catch (debugError) {
-          console.error(`[JavaManager] Error debugging extraction: ${debugError.message}`);
         }
         
         throw new Error(`Java extraction verification failed - executable not found in expected locations. The Java archive may have an unexpected structure.`);
       }
       
-      console.log(`[JavaManager] Found Java executable at: ${javaExe}`);
       
       if (!fs.existsSync(javaExe)) {
         throw new Error(`Java executable path returned but file does not exist: ${javaExe}`);
       }
       
       const javaStats = fs.statSync(javaExe);
-      console.log(`[MinecraftLauncher] - Java file size: ${javaStats.size} bytes`);
-      console.log(`[MinecraftLauncher] - Java file permissions: ${javaStats.mode.toString(8)}`);
       
       // Test if Java actually works
       try {
@@ -339,10 +306,7 @@ class JavaManager {
           timeout: 5000,
           windowsHide: true // Hide console window on Windows
         });
-        console.log(`[JavaManager] - Java ${javaVersion} test: SUCCESS`);
-        console.log(`[JavaManager] - Version output: ${stdout.split('\n')[0]}`);
       } catch (testError) {
-        console.log(`[JavaManager] - Java ${javaVersion} test: FAILED - ${testError.message}`);
       }
       
       if (progressCallback) {
@@ -352,7 +316,6 @@ class JavaManager {
       return { success: true, javaPath: javaExe };
       
     } catch (error) {
-      console.error(`[JavaManager] Failed to download Java ${javaVersion}:`, error);
       throw error;
     }
   }
@@ -374,7 +337,6 @@ class JavaManager {
         throw new Error('Unsupported archive format');
       }
     } catch (error) {
-      console.error(`[JavaManager] Extraction failed:`, error);
       throw error;
     }
   }
@@ -383,11 +345,9 @@ class JavaManager {
     // const AdmZip = require('adm-zip'); // Now top-level
     
     try {
-      console.log(`[JavaManager] Starting ZIP extraction from ${zipPath} to ${extractPath}`);
       
       // Remove existing installation with retry logic for Windows
       if (fs.existsSync(extractPath)) {
-        console.log(`[JavaManager] Removing existing directory: ${extractPath}`);
         await this.removeDirectoryWithRetry(extractPath, 3);
       }
       
@@ -397,7 +357,6 @@ class JavaManager {
       const zip = new AdmZip(zipPath);
       const entries = zip.getEntries();
       
-      console.log(`[JavaManager] Extracting ${entries.length} files from ZIP...`);
       
       // Extract all files
       zip.extractAllTo(extractPath, true);
@@ -405,10 +364,8 @@ class JavaManager {
       // Handle nested directory structure more reliably
       await this.flattenJavaDirectory(extractPath);
       
-      console.log(`[JavaManager] ZIP extraction complete`);
       
     } catch (error) {
-      console.error(`[JavaManager] ZIP extraction error:`, error);
       throw error;
     }
   }
@@ -417,12 +374,10 @@ class JavaManager {
   async removeDirectoryWithRetry(dirPath, maxRetries = 3) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`[JavaManager] Removing directory attempt ${attempt}/${maxRetries}: ${dirPath}`);
         
         if (fs.existsSync(dirPath)) {
           // On Windows, sometimes we need to wait for file handles to be released
           if (attempt > 1) {
-            console.log(`[JavaManager] Waiting 2 seconds for file handles to be released...`);
             await new Promise(resolve => setTimeout(resolve, 2000));
           }
           
@@ -440,7 +395,6 @@ class JavaManager {
                 fs.chmodSync(itemPath, 0o666);
                 fs.unlinkSync(itemPath);
               } catch (fileError) {
-                console.warn(`[JavaManager] Could not remove file ${itemPath}:`, fileError.message);
               }
             }
           }
@@ -449,11 +403,9 @@ class JavaManager {
           fs.rmdirSync(dirPath);
         }
         
-        console.log(`[JavaManager] Successfully removed directory: ${dirPath}`);
         return; // Success!
         
       } catch (error) {
-        console.warn(`[JavaManager] Remove attempt ${attempt} failed:`, error.message);
         
         if (attempt === maxRetries) {
           if (error.code === 'EPERM' || error.code === 'EBUSY') {
@@ -462,15 +414,12 @@ class JavaManager {
             const tempName = `${dirPath}_old_${timestamp}`;
             try {
               fs.renameSync(dirPath, tempName);
-              console.log(`[JavaManager] Could not remove directory, renamed to: ${tempName}`);
               return; // Consider this success
             } catch (renameError) {
-              console.warn(`[JavaManager] Could not rename directory either:`, renameError.message);
               // Continue with extraction anyway
             }
           }
           
-          console.warn(`[JavaManager] Failed to remove directory after ${maxRetries} attempts, continuing anyway...`);
           return; // Don't throw error, just continue
         }
         
@@ -484,7 +433,6 @@ class JavaManager {
   async flattenJavaDirectory(extractPath) {
     try {
       const entries = fs.readdirSync(extractPath);
-      console.log(`[JavaManager] After extraction, entries: ${entries.join(', ')}`);
 
       // Find any single subdirectory that itself contains a 'bin' folder
       const nestedRoots = entries.filter(name => {
@@ -500,7 +448,6 @@ class JavaManager {
       // If exactly one such nested folder, move its contents up
       if (nestedRoots.length === 1) {
         const nested = path.join(extractPath, nestedRoots[0]);
-        console.log(`[JavaManager] Flattening nested Java folder: ${nestedRoots[0]}`);
 
         const tmp = extractPath + `_tmp_${Date.now()}`;
         fs.renameSync(nested, tmp);
@@ -509,15 +456,11 @@ class JavaManager {
         // move temp back to extractPath
         fs.renameSync(tmp, extractPath);
 
-        console.log(`[JavaManager] Directory flattened successfully`);
       } else {
-        console.log(`[JavaManager] No single nested JRE/JDK folder to flatten (found ${nestedRoots.length} candidates)`);
         if (nestedRoots.length > 1) {
-          console.log(`[JavaManager] Multiple nested roots found: ${nestedRoots.join(', ')}`);
         }
       }
     } catch (err) {
-      console.warn(`[JavaManager] flattenJavaDirectory error: ${err.message}`);
       // we continue — recursive search can still find it
     }
   }
@@ -534,7 +477,6 @@ class JavaManager {
       
       tar.on('close', (code) => {
         if (code === 0) {
-          console.log(`[JavaManager] TAR.GZ extraction complete`);
           
           // Find the Java directory (it might be nested)
           const contents = fs.readdirSync(extractPath);
@@ -559,27 +501,16 @@ class JavaManager {
   }
   
   async ensureJava(javaVersion, progressCallback) {
-    console.log(`[JavaManager] ===== ENSURING JAVA ${javaVersion} =====`);
-    console.log(`[JavaManager] Java base directory: ${this.javaBaseDir}`);
-    console.log(`[JavaManager] Client path: ${this.clientPath}`);
     
     const javaInstalled = this.isJavaInstalled(javaVersion);
-    console.log(`[JavaManager] Java ${javaVersion} installed check: ${javaInstalled}`);
     
     if (javaInstalled) {
       const javaPath = this.getJavaExecutablePath(javaVersion);
-      console.log(`[JavaManager] Java ${javaVersion} is already installed at: ${javaPath}`);
       return { success: true, javaPath: javaPath };
     }
     
-    console.log(`[JavaManager] Java ${javaVersion} not found, downloading...`);
     const result = await this.downloadJava(javaVersion, progressCallback);
     
-    console.log(`[JavaManager] Download result:`, result);
-    console.log(`[JavaManager] Final Java path: ${result.javaPath}`);
-    console.log(`[JavaManager] Java path includes client directory: ${result.javaPath.includes(this.javaBaseDir) ? 'YES (GOOD)' : 'NO (BAD)'}`);
-    console.log(`[JavaManager] Java path includes Program Files: ${result.javaPath.includes('Program Files') ? 'YES (BAD)' : 'NO (GOOD)'}`);
-    console.log(`[JavaManager] ==========================================`);
     
     return result;
   }
@@ -589,7 +520,6 @@ class JavaManager {
   // Helper method to kill any running Java processes for this client
   async killClientJavaProcesses(clientPath) {
     try {
-      console.log(`[JavaManager] Attempting to kill Java processes for client: ${clientPath}`);
       
       if (process.platform === 'win32') {
         // const { exec } = require('child_process'); // Now top-level
@@ -604,30 +534,23 @@ class JavaManager {
           if (clientPath) {
             const clientPathEscaped = clientPath.replace(/\\/g, '\\\\');
             
-            console.log(`[JavaManager] Looking for Java processes with client path: ${clientPath}`);
             
             await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, { 
               timeout: 5000 
             }).catch(() => {
-              console.log(`[JavaManager] No client-specific java.exe processes found`);
             });
             
             await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, { 
               timeout: 5000 
             }).catch(() => {
-              console.log(`[JavaManager] No client-specific javaw.exe processes found`);
             });
             
-            console.log(`[JavaManager] Targeted client Java process cleanup completed`);
           } else {
-            console.log(`[JavaManager] No client path provided, skipping Java process cleanup`);
           }
         } catch (killError) {
-          console.warn(`[JavaManager] Could not kill client-specific Java processes: ${killError.message}`);
         }
       }
     } catch (error) {
-      console.warn(`[JavaManager] Error in killClientJavaProcesses: ${error.message}`);
     }
   }
 
@@ -642,12 +565,10 @@ class JavaManager {
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`[JavaManager] Removing directory attempt ${attempt}/${maxRetries}: ${dirPath}`);
         
         if (fs.existsSync(dirPath)) {
           // On Windows, sometimes we need to wait for file handles to be released
           if (attempt > 1) {
-            console.log(`[JavaManager] Waiting ${2 * attempt} seconds for file handles to be released...`);
             await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
           }
           
@@ -667,7 +588,6 @@ class JavaManager {
                     makeWritableRecursive(itemPath);
                   }
                 } catch (chmodError) {
-                  console.warn(`[JavaManager] Could not chmod ${itemPath}: ${chmodError.message}`);
                 }
               }
             };
@@ -675,7 +595,6 @@ class JavaManager {
             makeWritableRecursive(dirPath);
             fs.chmodSync(dirPath, 0o777);
           } catch (chmodError) {
-            console.warn(`[JavaManager] Could not make directory writable: ${chmodError.message}`);
           }
           
           // Try to remove the directory
@@ -687,11 +606,9 @@ class JavaManager {
           });
         }
         
-        console.log(`[JavaManager] Successfully removed directory: ${dirPath}`);
         return; // Success!
         
       } catch (error) {
-        console.warn(`[JavaManager] Remove attempt ${attempt} failed:`, error.message);
         
         if (attempt === maxRetries) {
           if (error.code === 'EPERM' || error.code === 'EBUSY' || error.code === 'ENOTEMPTY') {
@@ -700,16 +617,12 @@ class JavaManager {
             const tempName = `${dirPath}_old_${timestamp}`;
             try {
               fs.renameSync(dirPath, tempName);
-              console.log(`[JavaManager] Could not remove directory, renamed to: ${tempName}`);
-              console.log(`[JavaManager] You may need to manually delete this folder after restarting your computer`);
               return; // Consider this success
             } catch (renameError) {
-              console.warn(`[JavaManager] Could not rename directory either:`, renameError.message);
               // Continue with extraction anyway
             }
           }
           
-          console.warn(`[JavaManager] Failed to remove directory after ${maxRetries} attempts, continuing anyway...`);
           return; // Don't throw error, just continue
         }
         

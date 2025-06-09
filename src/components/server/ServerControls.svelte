@@ -79,20 +79,13 @@
   }
   async function loadServerConfig(path) {
     try {
-      console.log('[ServerControls] Loading config for server path:', path);
       const configResult = await window.electron.invoke('read-config', path);
-      console.log('[ServerControls] Config result:', configResult);
       
       if (configResult && (configResult.version || configResult.fabric)) {
-        console.log('[ServerControls] Loading server config:', configResult);
         loadSettings(configResult);
-        console.log('[ServerControls] Current versions loaded - MC:', configResult.version, 'Fabric:', configResult.fabric);
-        console.log('[ServerControls] Settings store after loading:', get(settingsStore));
       } else {
-        console.warn('[ServerControls] Config result does not contain version information:', configResult);
       }
     } catch (error) {
-      console.error('[ServerControls] Error loading server config:', error);
     }
   }
 
@@ -118,34 +111,23 @@
 
   // Debug logging for version changes
   $: if (currentMcVersion !== undefined) {
-    console.log('[ServerControls] Current MC version changed to:', currentMcVersion);
   }
   $: if (currentFabricVersion !== undefined) {
-    console.log('[ServerControls] Current Fabric version changed to:', currentFabricVersion);
   }
 
   let updateChecked = false;
   $: upToDate = updateChecked && !mcUpdateAvailable && !fabricUpdateAvailable && latestMcVersion && latestFabricVersion;
   async function checkVersionUpdates() {
-    console.log('[VersionCheck] Starting version check...');
-    console.log('[VersionCheck] Current MC:', currentMcVersion);
-    console.log('[VersionCheck] Current Fabric:', currentFabricVersion);
     
     await refreshLatestVersions(currentMcVersion);
     
-    console.log('[VersionCheck] Latest MC:', latestMcVersion);
-    console.log('[VersionCheck] Latest Fabric:', latestFabricVersion);
-    console.log('[VersionCheck] MC update available:', mcUpdateAvailable);
-    console.log('[VersionCheck] Fabric update available:', fabricUpdateAvailable);
     
     if (currentMcVersion && latestMcVersion) {
       const mcComparison = compareVersions(latestMcVersion, currentMcVersion);
-      console.log('[VersionCheck] MC version comparison result:', mcComparison);
     }
     
     if (currentFabricVersion && latestFabricVersion) {
       const fabricComparison = compareVersions(latestFabricVersion, currentFabricVersion);
-      console.log('[VersionCheck] Fabric version comparison result:', fabricComparison);
     }
     
     updateChecked = true;
@@ -235,7 +217,6 @@
           connectedClients = result.status.clientCount || 0;
         }
       } catch (error) {
-        console.error('Error checking management server status:', error);
       }
     }
   }
@@ -325,7 +306,6 @@
             connectedClients = result.status.clientCount || 0;
           }
         } catch (error) {
-          console.error('Error loading management server status:', error);
         }
         
         // Handle auto-start servers if enabled
@@ -423,27 +403,22 @@
   // Handle auto-start functionality
   async function handleAutoStart() {
     if (!validateServerPath(serverPath)) {
-      console.log('Cannot auto-start servers: invalid server path');
       return;
     }
     
     // Auto-start management server first if enabled
     if (autoStartManagement && managementServerStatus === 'stopped') {
-      console.log('Auto-starting management server...');
       try {
         await startManagementServer();
       } catch (error) {
-        console.error('Failed to auto-start management server:', error);
       }
     }
     
     // Auto-start Minecraft server if enabled
     if (autoStartMinecraft && status === 'Stopped') {
-      console.log('Auto-starting Minecraft server...');
       try {
         startServer();
       } catch (error) {
-        console.error('Failed to auto-start Minecraft server:', error);
       }
     }
   }
@@ -488,16 +463,13 @@
       
       if (result.success) {
         managementServerStatus = 'running';
-        console.log('Management server started successfully');
       } else {
         managementServerStatus = 'stopped';
-        console.error('Failed to start management server:', result.error);
         errorMessage.set(`Failed to start management server: ${result.error}`);
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
       managementServerStatus = 'stopped';
-      console.error('Error starting management server:', error);
       errorMessage.set(`Error starting management server: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
     }
@@ -511,16 +483,13 @@
       if (result.success) {
         managementServerStatus = 'stopped';
         connectedClients = 0;
-        console.log('Management server stopped successfully');
       } else {
         managementServerStatus = 'running';
-        console.error('Failed to stop management server:', result.error);
         errorMessage.set(`Failed to stop management server: ${result.error}`);
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
       managementServerStatus = 'running';
-      console.error('Error stopping management server:', error);
       errorMessage.set(`Error stopping management server: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
     }

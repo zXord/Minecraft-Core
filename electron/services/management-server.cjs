@@ -36,7 +36,6 @@ class ManagementServer {
     
     // Logging middleware
     this.app.use((req, res, next) => {
-      console.log(`[ManagementServer] ${req.method} ${req.path}`);
       next();
     });
   }
@@ -93,7 +92,6 @@ class ManagementServer {
         lastSeen: new Date()
       });
       
-      console.log(`[ManagementServer] Client registered: ${name} (${clientId})`);
       
       res.json({ 
         success: true, 
@@ -134,7 +132,6 @@ class ManagementServer {
       const client = this.clients.get(clientId);
       if (client) {
         this.clients.delete(clientId);
-        console.log(`[ManagementServer] Client disconnected: ${client.name} (${clientId})`);
         res.json({ success: true });
       } else {
         res.status(404).json({ error: 'Client not found' });
@@ -175,10 +172,8 @@ class ManagementServer {
               const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
               if (coreConfig.version) {
                 minecraftVersion = coreConfig.version;
-                console.log(`[ManagementServer] Found version in .minecraft-core.json: ${minecraftVersion}`);
               }
             } catch (err) {
-              console.warn('[ManagementServer] Error reading .minecraft-core.json:', err.message);
             }
           }
           
@@ -197,13 +192,11 @@ class ManagementServer {
             );          
           if (serverJars.length > 0) {
             const jarName = serverJars[0];
-            console.log(`[ManagementServer] Found server jar: ${jarName}`);
             
             // Extract version from jar name (e.g., "minecraft_server.1.20.1.jar" or "paper-1.20.1-196.jar")
             const versionMatch = jarName.match(/(\d+\.\d+(?:\.\d+)?)/);
             if (versionMatch) {
               minecraftVersion = versionMatch[1];
-              console.log(`[ManagementServer] Extracted version from jar name: ${minecraftVersion}`);
             }
           }
           }
@@ -215,7 +208,6 @@ class ManagementServer {
               const versionData = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
               if (versionData.name || versionData.id) {
                 minecraftVersion = versionData.name || versionData.id;
-                console.log(`[ManagementServer] Found version in version.json: ${minecraftVersion}`);
               }
             }
           }
@@ -231,12 +223,10 @@ class ManagementServer {
                   const match = file.match(/minecraft-(\d+\.\d+(?:\.\d+)?)/);
                   if (match) {
                     minecraftVersion = match[1];
-                    console.log(`[ManagementServer] Found version in Fabric files: ${minecraftVersion}`);
                     break;
                   }
                 }
               } catch (err) {
-                console.warn('[ManagementServer] Error reading Fabric directory:', err.message);
               }
             }
           }
@@ -253,11 +243,9 @@ class ManagementServer {
                   const versionMatch = logContent.match(/Starting minecraft server version (\d+\.\d+(?:\.\d+)?)|Minecraft (\d+\.\d+(?:\.\d+)?)|version (\d+\.\d+(?:\.\d+)?)/i);
                   if (versionMatch) {
                     minecraftVersion = versionMatch[1] || versionMatch[2] || versionMatch[3];
-                    console.log(`[ManagementServer] Found version in server logs: ${minecraftVersion}`);
                   }
                 }
               } catch (err) {
-                console.warn('[ManagementServer] Error reading server logs:', err.message);
               }
             }
           }
@@ -273,11 +261,9 @@ class ManagementServer {
                   const versionMatch = scriptContent.match(/(\d+\.\d+(?:\.\d+)?)/);
                   if (versionMatch) {
                     minecraftVersion = versionMatch[1];
-                    console.log(`[ManagementServer] Found version in ${scriptFile}: ${minecraftVersion}`);
                     break;
                   }
                 } catch (err) {
-                  console.warn(`[ManagementServer] Error reading ${scriptFile}:`, err.message);
                 }
               }
             }
@@ -298,7 +284,6 @@ class ManagementServer {
                 const match = jarName.match(pattern);
                 if (match) {
                   minecraftVersion = match[1];
-                  console.log(`[ManagementServer] Found version using pattern ${pattern} on ${jarName}: ${minecraftVersion}`);
                   break;
                 }
               }
@@ -308,7 +293,6 @@ class ManagementServer {
           }
           
         } catch (versionError) {
-          console.warn('[ManagementServer] Could not determine Minecraft version:', versionError);
         }
         
         // Get required mods for clients
@@ -331,10 +315,8 @@ class ManagementServer {
             if (coreConfig.fabric) {
               loaderType = 'fabric';
               loaderVersion = coreConfig.fabric;
-              console.log(`[ManagementServer] Found Fabric version in .minecraft-core.json: ${loaderVersion}`);
             }
           } catch (err) {
-            console.warn('[ManagementServer] Error reading .minecraft-core.json for loader info:', err.message);
           }
         }
         
@@ -389,7 +371,6 @@ class ManagementServer {
           }
         });
       } catch (error) {
-        console.error('[ManagementServer] Error reading server info:', error);
         res.status(500).json({ error: 'Failed to read server information' });
       }
     });
@@ -461,7 +442,6 @@ class ManagementServer {
           }
         });
       } catch (error) {
-        console.error('[ManagementServer] Error reading mod list:', error);
         res.status(500).json({ error: 'Failed to read mod list' });
       }
     });
@@ -499,9 +479,7 @@ class ManagementServer {
         const fileStream = fs.createReadStream(modPath);
         fileStream.pipe(res);
         
-        console.log(`[ManagementServer] Serving mod file: ${fileName} from ${location}`);
       } catch (error) {
-        console.error('[ManagementServer] Error serving mod file:', error);
         res.status(500).json({ error: 'Failed to serve mod file' });
       }
     });
@@ -518,7 +496,6 @@ class ManagementServer {
           port: this.port
         });
       } catch (error) {
-        console.error('[ManagementServer] Error getting required mods for debug:', error);
         res.status(500).json({ error: 'Failed to get required mods', details: error.message });
       }
     });
@@ -552,7 +529,6 @@ class ManagementServer {
   
   async start(port = 8080, serverPath = null) {
     if (this.isRunning) {
-      console.log('[ManagementServer] Server is already running');
       return { success: true, port: this.port };
     }
     
@@ -562,8 +538,6 @@ class ManagementServer {
     return new Promise((resolve) => {
       this.server = this.app.listen(port, () => {
         this.isRunning = true;
-        console.log(`[ManagementServer] Management server started on port ${port}`);
-        console.log(`[ManagementServer] Server path: ${serverPath || 'Not set'}`);
 
         // Start client cleanup interval (check every 30 seconds)
         this.startClientCleanup();
@@ -574,7 +548,6 @@ class ManagementServer {
       });
       
       this.server.on('error', (error) => {
-        console.error('[ManagementServer] Server error:', error);
         this.isRunning = false;
         if (error.code === 'EADDRINUSE') {
           resolve({ success: false, error: `Port ${port} is already in use` });
@@ -587,7 +560,6 @@ class ManagementServer {
   
   async stop() {
     if (!this.isRunning || !this.server) {
-      console.log('[ManagementServer] Server is not running');
       return { success: true };
     }
     
@@ -601,7 +573,6 @@ class ManagementServer {
         this.stopClientCleanup();
         this.stopVersionWatcher();
 
-        console.log('[ManagementServer] Management server stopped');
         resolve({ success: true });
       });
     });
@@ -609,7 +580,6 @@ class ManagementServer {
   
   updateServerPath(newPath) {
     this.serverPath = newPath;
-    console.log(`[ManagementServer] Server path updated: ${newPath}`);
     this.stopVersionWatcher();
     this.startVersionWatcher();
     this.checkVersionChange();
@@ -639,7 +609,6 @@ class ManagementServer {
             return 'stopped';
           }
         } catch (error) {
-          console.warn('[ManagementServer] Could not check process list:', error.message);
           return 'unknown';
         }
       } else {
@@ -656,7 +625,6 @@ class ManagementServer {
         }
       }
     } catch (error) {
-      console.error('[ManagementServer] Error checking Minecraft server status:', error);
       return 'unknown';
     }
   }
@@ -681,10 +649,8 @@ class ManagementServer {
         if (fs.existsSync(configFile)) {
           const data = fs.readFileSync(configFile, 'utf8');
           savedCategories = JSON.parse(data);
-          console.log(`[ManagementServer] Loaded ${savedCategories.length} saved mod categories`);
         }
       } catch (configError) {
-        console.warn('[ManagementServer] Could not load mod categories config:', configError.message);
       }
       
       // Convert categories array to map for easier lookup
@@ -727,7 +693,6 @@ class ManagementServer {
                 name = manifest.name || null;
               }
             } catch (manifestErr) {
-              console.warn(`[ManagementServer] Could not read manifest for ${file}:`, manifestErr.message);
             }
             
             return {
@@ -783,7 +748,6 @@ class ManagementServer {
                   name = manifest.name || null;
                 }
               } catch (manifestErr) {
-                console.warn(`[ManagementServer] Could not read manifest for ${serverMod}:`, manifestErr.message);
               }
               
               requiredMods.push({
@@ -807,10 +771,8 @@ class ManagementServer {
       // Filter to only return mods that are actually marked as required
       const actuallyRequiredMods = requiredMods.filter(mod => mod.required);
       
-      console.log(`[ManagementServer] Found ${actuallyRequiredMods.length} required mods out of ${requiredMods.length} total client mods`);
       return actuallyRequiredMods;
     } catch (error) {
-      console.error('[ManagementServer] Error getting required mods:', error);
       return [];
     }
   }
@@ -837,7 +799,6 @@ class ManagementServer {
           savedCategories = JSON.parse(data);
         }
       } catch (configError) {
-        console.warn('[ManagementServer] Could not load mod categories config:', configError.message);
       }
       
       // Convert categories array to map for easier lookup
@@ -880,7 +841,6 @@ class ManagementServer {
                 name = manifest.name || null;
               }
             } catch (manifestErr) {
-              console.warn(`[ManagementServer] Could not read manifest for ${file}:`, manifestErr.message);
             }
             
             return {
@@ -936,7 +896,6 @@ class ManagementServer {
                   name = manifest.name || null;
                 }
               } catch (manifestErr) {
-                console.warn(`[ManagementServer] Could not read manifest for ${serverMod}:`, manifestErr.message);
               }
               
               allClientMods.push({
@@ -957,10 +916,8 @@ class ManagementServer {
         }
       }
       
-      console.log(`[ManagementServer] Found ${allClientMods.length} total client mods (${allClientMods.filter(m => m.required).length} required, ${allClientMods.filter(m => !m.required).length} optional)`);
       return allClientMods;
     } catch (error) {
-      console.error('[ManagementServer] Error getting all client mods:', error);
       return [];
     }
   }
@@ -971,7 +928,6 @@ class ManagementServer {
       const fileContent = fs.readFileSync(filePath);
       return createHash('md5').update(fileContent).digest('hex');
     } catch (error) {
-      console.warn('[ManagementServer] Could not calculate checksum for:', filePath);
       return null;
     }
   }
@@ -987,7 +943,6 @@ class ManagementServer {
       this.cleanupStaleClients();
     }, 30000);
     
-    console.log('[ManagementServer] Started client cleanup interval');
   }
   
   // Stop client cleanup interval
@@ -995,7 +950,6 @@ class ManagementServer {
     if (this.clientCleanupInterval) {
       clearInterval(this.clientCleanupInterval);
       this.clientCleanupInterval = null;
-      console.log('[ManagementServer] Stopped client cleanup interval');
     }
   }
   
@@ -1013,11 +967,9 @@ class ManagementServer {
     }
     
     if (staleClients.length > 0) {
-      console.log(`[ManagementServer] Removing ${staleClients.length} stale clients`);
       staleClients.forEach(clientId => {
         const client = this.clients.get(clientId);
         if (client) {
-          console.log(`[ManagementServer] Removed stale client: ${client.name} (${clientId})`);
           this.clients.delete(clientId);
         }
       });
@@ -1069,7 +1021,6 @@ class ManagementServer {
             loaderVersion = coreConfig.fabric;
           }
         } catch (err) {
-          console.warn('[ManagementServer] Error reading .minecraft-core.json in detectServerVersions:', err.message);
         }
       }
       

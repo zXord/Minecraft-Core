@@ -6,12 +6,10 @@ const AdmZip = require('adm-zip');
 
 async function extractDependenciesFromJar(jarPath) {
   try {
-    // console.log(`[ModAnalysis] Analyzing mod file for metadata: ${jarPath}`); // Keep console logs for debugging if necessary
 
     try {
       await fs.access(jarPath);
     } catch (err) {
-      // console.error(`[ModAnalysis] Mod file does not exist: ${jarPath}`);
       throw new Error(`Mod file does not exist: ${jarPath}`);
     }
 
@@ -26,7 +24,6 @@ async function extractDependenciesFromJar(jarPath) {
       );
 
       if (fabricEntry) {
-        // console.log('[ModAnalysis] Found fabric.mod.json');
         const content = fabricEntry.getData().toString('utf8');
         try {
           const metadata = JSON.parse(content);
@@ -34,10 +31,8 @@ async function extractDependenciesFromJar(jarPath) {
           metadata.projectId = metadata.projectId || metadata.id; // Often 'id' is used for project identifier
           metadata.authors = metadata.authors || (metadata.author ? [metadata.author] : (metadata.contributors ? Object.keys(metadata.contributors) : []));
           metadata.name = metadata.name || metadata.id;
-          // console.log('[ModAnalysis] Extracted metadata from fabric.mod.json:', metadata);
           return metadata; // Return full metadata
         } catch (parseErr) {
-          console.error('[ModAnalysis] Error parsing fabric.mod.json:', parseErr);
           return null;
         }
       }
@@ -49,7 +44,6 @@ async function extractDependenciesFromJar(jarPath) {
       );
 
       if (forgeEntry) {
-        // console.log('[ModAnalysis] Found Forge mods.toml');
         const content = forgeEntry.getData().toString('utf8');
         try {
           const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
@@ -131,10 +125,8 @@ async function extractDependenciesFromJar(jarPath) {
           metadata.projectId = metadata.projectId || metadata.id;
 
 
-          // console.log('[ModAnalysis] Extracted metadata from mods.toml:', metadata);
           return metadata;
         } catch (parseErr) {
-          console.error('[ModAnalysis] Error parsing mods.toml:', parseErr);
           return null;
         }
       }
@@ -146,7 +138,6 @@ async function extractDependenciesFromJar(jarPath) {
       );
 
       if (quiltEntry) {
-        // console.log('[ModAnalysis] Found quilt.mod.json');
         const content = quiltEntry.getData().toString('utf8');
         try {
           const quiltJson = JSON.parse(content);
@@ -169,29 +160,23 @@ async function extractDependenciesFromJar(jarPath) {
           }
 
 
-          // console.log('[ModAnalysis] Extracted metadata from quilt.mod.json:', metadata);
           return metadata;
         } catch (parseErr) {
-          console.error('[ModAnalysis] Error parsing quilt.mod.json:', parseErr);
           return null;
         }
       }
       
-      // console.log('[ModAnalysis] No recognized mod metadata file found in JAR');
       return null; // Return null if no metadata file is found or parsable
     } catch (zipErr) {
-      console.error('[ModAnalysis] Error processing JAR file:', zipErr);
       return null;
     }
   } catch (error) {
-    console.error('[ModAnalysis] Failed to extract metadata from JAR:', error);
     return null;
   }
 }
 
 async function analyzeModFromUrl(url, modId) {
   try {
-    console.log(`[ModAnalysis] Downloading and analyzing mod from URL: ${url}`);
     if (!url) throw new Error('URL is required for mod analysis');
     
     const tempDir = path.join(os.tmpdir(), 'minecraft-core-temp-analysis');
@@ -213,12 +198,10 @@ async function analyzeModFromUrl(url, modId) {
       try {
         await fs.unlink(tempFile);
       } catch (cleanupErr) {
-        console.warn(`[ModAnalysis] Error cleaning up temporary file: ${cleanupErr.message}`);
       }
       
       return dependencies;
     } catch (err) {
-      console.error(`[ModAnalysis] Error downloading or analyzing mod from URL: ${err.message}`);
       try {
         await fs.unlink(tempFile); // Attempt cleanup on error too
       } catch (cleanupErr) {
@@ -227,7 +210,6 @@ async function analyzeModFromUrl(url, modId) {
       throw err; // Re-throw the error to be caught by the outer try-catch
     }
   } catch (error) {
-    console.error('[ModAnalysis] Failed to analyze mod from URL:', error);
     return []; // Return empty or re-throw as per desired error handling
   }
 }

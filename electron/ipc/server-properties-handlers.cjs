@@ -13,19 +13,15 @@ function createServerPropertiesHandlers(win) {
   return {
     'read-server-properties': async (_e, serverPath) => {
       try {
-        console.log('[ServerProperties] Read request received for path:', serverPath);
         if (!serverPath) {
-          console.log('[ServerProperties] Error: Server path is required');
           return { success: false, error: 'Server path is required' };
         }
         
         const propertiesFilePath = path.join(serverPath, 'server.properties');
         const backupFilePath = path.join(serverPath, 'server.properties.default');
-        console.log('[ServerProperties] Looking for file at:', propertiesFilePath);
         
         // Check if file exists
         if (!fs.existsSync(propertiesFilePath)) {
-          console.log('[ServerProperties] Error: File not found:', propertiesFilePath);
           return { 
             success: false, 
             error: 'server.properties file not found. Run the server for the first time to generate this file.',
@@ -37,21 +33,16 @@ function createServerPropertiesHandlers(win) {
         if (!fs.existsSync(backupFilePath)) {
           try {
             fs.copyFileSync(propertiesFilePath, backupFilePath);
-            console.log('[ServerProperties] Created default backup at:', backupFilePath);
           } catch (backupErr) {
-            console.warn('[ServerProperties] Failed to create default backup:', backupErr.message);
           }
         }
         
         // Read and parse the file
-        console.log('[ServerProperties] Reading file...');
         const fileContent = fs.readFileSync(propertiesFilePath, 'utf-8');
         const properties = parsePropertiesFile(fileContent);
-        console.log('[ServerProperties] Parsed properties:', Object.keys(properties).length, 'items');
         
         return { success: true, properties };
       } catch (err) {
-        console.error('[IPC:ServerProperties] Failed to read server.properties:', err);
         return { success: false, error: err.message };
       }
     },
@@ -73,9 +64,7 @@ function createServerPropertiesHandlers(win) {
           try {
             const backupPath = `${propertiesFilePath}.bak`;
             fs.copyFileSync(propertiesFilePath, backupPath);
-            console.log('[ServerProperties] Created backup at:', backupPath);
           } catch (backupErr) {
-            console.warn('[ServerProperties] Failed to create backup:', backupErr.message);
             // Continue anyway
           }
         }
@@ -85,11 +74,9 @@ function createServerPropertiesHandlers(win) {
         
         // Write to file
         fs.writeFileSync(propertiesFilePath, fileContent, 'utf-8');
-        console.log('[ServerProperties] Successfully wrote file:', propertiesFilePath);
         
         return { success: true };
       } catch (err) {
-        console.error('[IPC:ServerProperties] Failed to write server.properties:', err);
         return { success: false, error: err.message };
       }
     },
@@ -107,9 +94,7 @@ function createServerPropertiesHandlers(win) {
           try {
             const backupPath = `${propertiesFilePath}.bak`;
             fs.copyFileSync(propertiesFilePath, backupPath);
-            console.log('[ServerProperties] Created backup before restore at:', backupPath);
           } catch (backupErr) {
-            console.warn('[ServerProperties] Failed to create backup:', backupErr.message);
             // Continue anyway
           }
         }
@@ -120,18 +105,15 @@ function createServerPropertiesHandlers(win) {
         // Convert to file format and write
         const fileContent = serializePropertiesFile(defaultProperties);
         fs.writeFileSync(propertiesFilePath, fileContent, 'utf-8');
-        console.log('[ServerProperties] Generated default server.properties at:', propertiesFilePath);
         
         return { success: true, properties: defaultProperties };
       } catch (err) {
-        console.error('[IPC:ServerProperties] Failed to generate server.properties:', err);
         return { success: false, error: err.message };
       }
     },
 
     'restore-backup-properties': async (_e, serverPath) => {
       try {
-        console.log('[ServerProperties] Restore request received for path:', serverPath);
         if (!serverPath) {
           return { success: false, error: 'Server path is required' };
         }
@@ -143,13 +125,11 @@ function createServerPropertiesHandlers(win) {
         }
         // Restore backup
         fs.copyFileSync(backupFilePath, propertiesFilePath);
-        console.log('[ServerProperties] Restored backup from:', backupFilePath);
         // Read restored file
         const fileContent = fs.readFileSync(propertiesFilePath, 'utf-8');
         const properties = parsePropertiesFile(fileContent);
         return { success: true, properties };
       } catch (err) {
-        console.error('[IPC:ServerProperties] Failed to restore backup properties:', err);
         return { success: false, error: err.message };
       }
     }

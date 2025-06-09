@@ -13,7 +13,6 @@ export async function refreshLatestVersions(currentMcVersion) {
     latestVersions.set({ mc, fabric });
     return { mc, fabric };
   } catch (err) {
-    console.error('Failed to refresh latest versions:', err);
     latestVersions.set({ mc: null, fabric: null });
     return null;
   }

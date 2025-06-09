@@ -17,7 +17,6 @@ class ClientDownloader {
 
   // Download Minecraft client files for a specific version (simplified approach)
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
-    console.log('🎯 DOWNLOAD STARTED - Method called with params:', { clientPath, minecraftVersion, options });
     
     this.emitter.emit('client-download-start', { version: minecraftVersion });
     
@@ -31,17 +30,14 @@ class ClientDownloader {
     let needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
     let fabricVersion = serverInfo?.loaderVersion || 'latest';
     
-    console.log('[ClientDownloader] Download with Fabric requirements: needsFabric=${needsFabric}, version=${fabricVersion}');
     
     const maxRetries = 2; 
     let retryCount = 0;
     
     while (retryCount < maxRetries) {
       try {
-        console.log(`[ClientDownloader] Downloading Minecraft ${minecraftVersion} client files... (attempt ${retryCount + 1}/${maxRetries})`);
         
         if (retryCount > 0) {
-          console.log(`[ClientDownloader] Waiting 10 seconds before retry for system cleanup...`);
           await new Promise(resolve => setTimeout(resolve, 10000));
         }
         
@@ -51,7 +47,6 @@ class ClientDownloader {
         }
         
         const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion); // Use imported utils
-        console.log(`[ClientDownloader] Ensuring Java ${requiredJavaVersion} is available for Minecraft ${minecraftVersion}...`);
         
         this.emitter.emit('client-download-progress', {
           type: 'Java',
@@ -72,13 +67,11 @@ class ClientDownloader {
           throw new Error(`Failed to obtain Java ${requiredJavaVersion}: ${javaResult.error}`);
         }
         
-        console.log(`[ClientDownloader] Java ${requiredJavaVersion} is ready: ${javaResult.javaPath}`);
         
         const essentialDirs = ['versions', 'libraries', 'assets', 'mods'];
         for (const dir of essentialDirs) {
           const dirPath = path.join(clientPath, dir);
           if (!fs.existsSync(dirPath)) {
-            console.log(`[ClientDownloader] Creating directory: ${dirPath}`);
             fs.mkdirSync(dirPath, { recursive: true });
           }
         }
@@ -90,7 +83,6 @@ class ClientDownloader {
         });
         
         // Use @xmcl/installer for downloads instead of deprecated MCLC Client
-        console.log(`[ClientDownloader] Using @xmcl/installer for ${minecraftVersion} download...`);
         
         this.emitter.emit('client-download-progress', {
           type: 'Downloading',
@@ -99,10 +91,8 @@ class ClientDownloader {
         });
         
         let downloadSuccess = false;
-        console.log('[ClientDownloader] Starting @xmcl-based download...');
         
         try {
-          console.log(`[ClientDownloader] Installing version profile for ${minecraftVersion}...`);
           
           // Use @xmcl/installer to install the version profile
           await installVersionProfile({
@@ -110,7 +100,6 @@ class ClientDownloader {
             version: minecraftVersion
           });
           
-          console.log(`[ClientDownloader] Installing assets for ${minecraftVersion}...`);
           
           // Install assets
           await installAssets({
@@ -118,7 +107,6 @@ class ClientDownloader {
             version: minecraftVersion
           });
           
-          console.log(`[ClientDownloader] Installing libraries for ${minecraftVersion}...`);
           
           // Install libraries
           await installLibraries({
@@ -127,17 +115,12 @@ class ClientDownloader {
           });
           
           downloadSuccess = true;
-          console.log(`[ClientDownloader] @xmcl download completed successfully`);
           
         } catch (xmclError) {
-          console.error(`[ClientDownloader] @xmcl download failed:`, xmclError.message);
-          console.log(`[ClientDownloader] Falling back to manual download...`);
           
           try {
             downloadSuccess = await this.downloadMinecraftManually(clientPath, minecraftVersion, javaResult.javaPath);
-            console.log(`[ClientDownloader] Manual download completed: ${downloadSuccess}`);
           } catch (manualError) {
-            console.error(`[ClientDownloader] Manual download also failed:`, manualError.message);
           }
         }
         
@@ -151,7 +134,6 @@ class ClientDownloader {
           total: 4
         });
         
-        console.log(`[ClientDownloader] Waiting for file operations to complete...`);
         await new Promise(resolve => setTimeout(resolve, 8000));
         
         if (global.gc) {
@@ -159,57 +141,41 @@ class ClientDownloader {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
         
-        console.log(`[ClientDownloader] Verifying vanilla Minecraft download...`);
         const versionsDir = path.join(clientPath, 'versions');
         const versionDir = path.join(versionsDir, minecraftVersion);
         const jarFile = path.join(versionDir, `${minecraftVersion}.jar`);
         
-        console.log(`[ClientDownloader] Checking download results:`);
-        console.log(`[ClientDownloader] - Versions dir exists: ${fs.existsSync(versionsDir)}`);
-        console.log(`[ClientDownloader] - Version dir exists: ${fs.existsSync(versionDir)}`);
-        console.log(`[ClientDownloader] - JAR file exists: ${fs.existsSync(jarFile)}`);
         
         if (fs.existsSync(jarFile)) {
           const jarStats = fs.statSync(jarFile);
-          console.log(`[ClientDownloader] - JAR file size: ${jarStats.size} bytes`);
           if (jarStats.size === 0) {
-            console.error(`[ClientDownloader] JAR file is empty! Download failed.`);
             try {
               if (fs.existsSync(versionsDir)) {
                 const versionsList = fs.readdirSync(versionsDir);
-                console.log(`[ClientDownloader] Versions directory contents: ${versionsList.join(', ')}`);
                 if (fs.existsSync(versionDir)) {
                   const versionContents = fs.readdirSync(versionDir);
-                  console.log(`[ClientDownloader] Version ${minecraftVersion} directory contents: ${versionContents.join(', ')}`);
                 }
               }
             } catch (debugError) {
-              console.error(`[ClientDownloader] Error debugging directory contents:`, debugError);
             }
             throw new Error(`Download failed: Minecraft JAR file is empty. This usually indicates a network connectivity issue or the download was interrupted.`);
           }
         } else {
-          console.error(`[ClientDownloader] JAR file was not created at all!`);
         }
         
         const vanillaVerificationResult = await this.checkMinecraftClient(clientPath, minecraftVersion);
         if (!vanillaVerificationResult.synchronized) {
-          console.error(`[ClientDownloader] Vanilla verification failed:`, vanillaVerificationResult);
           throw new Error(`Vanilla client download verification failed: ${vanillaVerificationResult.reason}`);
         }
-        console.log(`[ClientDownloader] Successfully downloaded and verified vanilla Minecraft ${minecraftVersion}`);
         
         let finalVersion = minecraftVersion;
         let fabricProfileName = null;
         
         if (needsFabric) {
-          console.log(`[ClientDownloader] Installing Fabric loader ${fabricVersion} for Minecraft ${minecraftVersion}...`);
           const vanillaJarPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
           if (fs.existsSync(vanillaJarPath)) {
             const preFabricStats = fs.statSync(vanillaJarPath);
-            console.log(`[ClientDownloader] 🔍 PRE-FABRIC: Vanilla JAR exists with ${preFabricStats.size} bytes`);
           } else {
-            console.log(`[ClientDownloader] 🔍 PRE-FABRIC: Vanilla JAR does not exist!`);
           }
           this.emitter.emit('client-download-progress', {
             type: 'Fabric',
@@ -221,12 +187,9 @@ class ClientDownloader {
             if (fabricResult.success) {
               fabricProfileName = fabricResult.profileName;
               finalVersion = fabricProfileName;
-              console.log(`[ClientDownloader] Fabric installed successfully. Profile: ${fabricProfileName}`);
               if (fs.existsSync(vanillaJarPath)) {
                 const postFabricStats = fs.statSync(vanillaJarPath);
-                console.log(`[ClientDownloader] 🔍 POST-FABRIC: Vanilla JAR exists with ${postFabricStats.size} bytes`);
               } else {
-                console.log(`[ClientDownloader] 🔍 POST-FABRIC: Vanilla JAR does not exist!`);
               }
               this.emitter.emit('client-download-progress', {
                 type: 'Fabric',
@@ -237,7 +200,6 @@ class ClientDownloader {
               throw new Error(`Fabric installation failed: ${fabricResult.error}`);
             }
           } catch (fabricError) {
-            console.error(`[ClientDownloader] Fabric installation failed:`, fabricError);
             
             // Check if we have required mods vs optional mods
             const hasRequiredMods = requiredMods && requiredMods.length > 0;
@@ -247,7 +209,6 @@ class ClientDownloader {
               throw new Error(`Cannot install Fabric for required mods: ${fabricError.message}`);
             } else {
               // If no required mods, we can fall back to vanilla
-              console.warn(`[ClientDownloader] Fabric installation failed but no required mods detected. Continuing with vanilla Minecraft.`);
               needsFabric = false; // Update the flag
               finalVersion = minecraftVersion; // Use vanilla version
               
@@ -261,7 +222,6 @@ class ClientDownloader {
         }
         
         // CRITICAL FIX: Download assets for both Fabric and Vanilla
-        console.log(`[ClientDownloader] 🔧 Ensuring assets are downloaded for ${minecraftVersion}...`);
         this.emitter.emit('client-download-progress', {
           type: 'Assets',
           task: 'Downloading game assets...',
@@ -271,34 +231,21 @@ class ClientDownloader {
         try {
           const assetResult = await this.downloadAssets(clientPath, minecraftVersion);
           if (assetResult.success) {
-            console.log(`[ClientDownloader] ✅ Assets downloaded: ${assetResult.downloaded} new, ${assetResult.skipped} existing, ${assetResult.total} total`);
             this.emitter.emit('client-download-progress', {
               type: 'Assets',
               task: `Assets downloaded successfully (${assetResult.total} files)`,
               total: 5
             });
           } else {
-            console.warn(`[ClientDownloader] ⚠️ Asset download had issues: ${assetResult.error}`);
           }
         } catch (assetError) {
-          console.error(`[ClientDownloader] ❌ Asset download failed:`, assetError);
           // Don't fail the entire process for asset errors, but warn
-          console.warn(`[ClientDownloader] Continuing without assets - game may have black screen`);
         }
         
         // NEW: Add server to Minecraft server list if server info is provided
         const serverInfo = options.serverInfo;
         
-        console.log(`[ClientDownloader] ▶️ EVALUATING SERVER AUTO-ADD FEATURE:`);
-        console.log(`[ClientDownloader] ▶️ - serverInfo object:`, serverInfo ? 'EXISTS' : 'NULL/UNDEFINED');
         if (serverInfo) {
-          console.log(`[ClientDownloader] ▶️ - serverInfo.minecraftPort:`, serverInfo.minecraftPort);
-          console.log(`[ClientDownloader] ▶️ - serverInfo.port:`, serverInfo.port);
-          console.log(`[ClientDownloader] ▶️ - serverInfo.serverInfo?.port:`, serverInfo.serverInfo?.port);
-          console.log(`[ClientDownloader] ▶️ - serverInfo.ip:`, serverInfo.ip);
-          console.log(`[ClientDownloader] ▶️ - serverInfo.serverIp:`, serverInfo.serverIp);
-          console.log(`[ClientDownloader] ▶️ - serverInfo keys:`, Object.keys(serverInfo));
-          console.log(`[ClientDownloader] ▶️ - Full serverInfo structure:`, JSON.stringify(serverInfo, null, 2));
         }
         
         // ROBUST SERVER INFO CHECK - try multiple possible field combinations
@@ -310,11 +257,8 @@ class ClientDownloader {
           serverInfo.serverIp
         );
         
-        console.log(`[ClientDownloader] ▶️ hasServerInfo evaluation result:`, hasServerInfo);
-        console.log(`[ClientDownloader] ▶️ ABOUT TO CHECK IF WE SHOULD ADD SERVER...`);
         
         if (hasServerInfo) {
-          console.log(`[ClientDownloader] Adding server to Minecraft server list...`);
           
           this.emitter.emit('client-download-progress', {
             type: 'Server',
@@ -326,45 +270,26 @@ class ClientDownloader {
             const serverResult = await this.addServerToList(clientPath, serverInfo);
             
             if (serverResult.success) {
-              console.log(`[ClientDownloader] ✅ Server setup completed: ${serverResult.message}`);
             } else {
-              console.log(`[ClientDownloader] ⚠️ Server setup had issues: ${serverResult.message}`);
             }
           } catch (serverError) {
-            console.error(`[ClientDownloader] ❌ Server addition failed:`, serverError.message);
-            console.error(`[ClientDownloader] ❌ Server addition error stack:`, serverError.stack);
           }
         } else {
-          console.log(`[ClientDownloader] ℹ️ Server addition skipped. Detailed analysis:`);
-          console.log(`[ClientDownloader] ℹ️ - serverInfo exists:`, !!serverInfo);
           if (serverInfo) {
-            console.log(`[ClientDownloader] ℹ️ - serverInfo.minecraftPort:`, serverInfo.minecraftPort, typeof serverInfo.minecraftPort);
-            console.log(`[ClientDownloader] ℹ️ - serverInfo.port:`, serverInfo.port, typeof serverInfo.port);
-            console.log(`[ClientDownloader] ℹ️ - serverInfo.serverInfo?.port:`, serverInfo.serverInfo?.port, typeof serverInfo.serverInfo?.port);
-            console.log(`[ClientDownloader] ℹ️ - serverInfo.ip:`, serverInfo.ip, typeof serverInfo.ip);
-            console.log(`[ClientDownloader] ℹ️ - serverInfo.serverIp:`, serverInfo.serverIp, typeof serverInfo.serverIp);
-            console.log(`[ClientDownloader] ℹ️ - serverInfo keys:`, Object.keys(serverInfo));
-            console.log(`[ClientDownloader] ℹ️ - serverInfo structure:`, JSON.stringify(serverInfo, null, 2));
           }
-          console.log(`[ClientDownloader] ℹ️ Server info provided but missing required fields – skipping server list addition`);
         }
         
-        console.log(`[ClientDownloader] 🔍 STARTING FINAL VERIFICATION for ${minecraftVersion}...`);
         const finalVerificationJarPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
         if (fs.existsSync(finalVerificationJarPath)) {
           const finalVerificationStats = fs.statSync(finalVerificationJarPath);
-          console.log(`[ClientDownloader] 🔍 FINAL-VERIFICATION: Vanilla JAR exists with ${finalVerificationStats.size} bytes`);
         } else {
-          console.log(`[ClientDownloader] 🔍 FINAL-VERIFICATION: Vanilla JAR does not exist!`);
         }
         const finalVerificationOptions = needsFabric ? { requiredMods, serverInfo } : {};
         const finalVerificationResult = await this.checkMinecraftClient(clientPath, minecraftVersion, finalVerificationOptions);
-        console.log(`[ClientDownloader] 🔍 FINAL VERIFICATION RESULT:`, finalVerificationResult);
         
         if (finalVerificationResult.synchronized) {
           const clientType = needsFabric ? `Fabric ${fabricVersion}` : 'Vanilla';
           const finalMessage = `Successfully downloaded Minecraft ${minecraftVersion} (${clientType}) with Java ${requiredJavaVersion} and all required libraries and assets.`;
-          console.log(`[ClientDownloader] ${finalMessage}`);
           this.emitter.emit('client-download-complete', { 
             success: true, 
             version: finalVersion,
@@ -382,13 +307,10 @@ class ClientDownloader {
             message: finalMessage
           };
         } else {
-          console.log('[ClientDownloader] Final verification failed:', JSON.stringify(finalVerificationResult, null, 2));
           throw new Error(`Final verification failed: ${finalVerificationResult.reason}`);
         }
       } catch (error) {
-        console.error(`[ClientDownloader] Failed to download Minecraft ${minecraftVersion} (attempt ${retryCount + 1}):`, error);
         if ((error.code === 'EMFILE' || error.message.includes('too many open files')) && retryCount < maxRetries - 1) {
-          console.log(`[ClientDownloader] EMFILE error detected, will retry after cleanup...`);
           if (global.gc) {
             global.gc();
           }
@@ -413,7 +335,6 @@ class ClientDownloader {
   }
 
   async downloadMinecraftManually(clientPath, minecraftVersion, javaPath) {
-    console.log(`[ClientDownloader] Starting manual download for Minecraft ${minecraftVersion}`);
     
     try {
       // Setup directories
@@ -435,7 +356,6 @@ class ClientDownloader {
         current: 0
       });
       
-      console.log(`[ClientDownloader] Manual download: Getting version manifest...`);
       const manifestResponse = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json');
       const manifest = await manifestResponse.json();
       
@@ -452,7 +372,6 @@ class ClientDownloader {
         current: 0.3
       });
       
-      console.log(`[ClientDownloader] Manual download: Getting version details...`);
       const versionDetails = await this.downloadJson(versionInfo.url);
       
       const versionJsonPath = path.join(versionDir, `${minecraftVersion}.json`);
@@ -466,7 +385,6 @@ class ClientDownloader {
         current: 0
       });
 
-      console.log(`[ClientDownloader] Downloading Minecraft ${minecraftVersion} JAR...`);
       const clientJarPath = path.join(versionDir, `${minecraftVersion}.jar`);
       const expectedJarSize = versionDetails.downloads.client.size;
       
@@ -474,7 +392,6 @@ class ClientDownloader {
         fs.unlinkSync(clientJarPath);
       }
       
-      console.log(`[ClientDownloader] Starting JAR download...`);
       const jarDownloadSuccess = await this._downloadFileSingle(
         versionDetails.downloads.client.url, 
         clientJarPath,
@@ -493,7 +410,6 @@ class ClientDownloader {
       }
       
       const finalJarStats = fs.statSync(clientJarPath);
-      console.log(`[ClientDownloader] JAR downloaded successfully: ${finalJarStats.size} bytes`);
 
       // Phase 4: Download Libraries
       this.emitter.emit('client-download-progress', {
@@ -503,7 +419,6 @@ class ClientDownloader {
         current: 0
       });
 
-      console.log(`[ClientDownloader] Manual download: Downloading all required libraries...`);
       const libraries = versionDetails.libraries || [];
       const downloadableLibraries = libraries.filter(lib => {
         if (lib.rules) {
@@ -516,7 +431,6 @@ class ClientDownloader {
         return lib.downloads && lib.downloads.artifact;
       });
 
-      console.log(`[ClientDownloader] Total libraries to download: ${downloadableLibraries.length}`);
       let librariesDownloaded = 0;
       let librariesFailed = 0;
 
@@ -535,7 +449,6 @@ class ClientDownloader {
           let shouldSkip = false;
           for (const rule of lib.rules) {
             if (rule.action === 'disallow' && rule.os && rule.os.name === 'windows') {
-              console.log(`[ClientDownloader] Skipping library ${lib.name} (not allowed for this OS)`);
               shouldSkip = true;
               break;
             }
@@ -555,13 +468,11 @@ class ClientDownloader {
           try {
             // Only log occasionally to reduce spam
             if (i % 20 === 0) {
-              console.log(`[ClientDownloader] Downloading library ${i + 1}/${downloadableLibraries.length}: ${artifact.path}`);
             }
             
             await this._downloadFileSingle(artifact.url, libPath);
               librariesDownloaded++;
             } catch (libError) {
-            console.error(`[ClientDownloader] Failed to download library ${artifact.path}:`, libError.message);
               librariesFailed++;
             }
           }
@@ -575,7 +486,6 @@ class ClientDownloader {
         current: 0
       });
       
-      console.log(`[ClientDownloader] Manual download: Setting up assets structure...`);
       const assetsIndexesDir = path.join(assetsDir, 'indexes');
       if (!fs.existsSync(assetsIndexesDir)) {
         fs.mkdirSync(assetsIndexesDir, { recursive: true });
@@ -585,9 +495,7 @@ class ClientDownloader {
         const assetIndexUrl = versionDetails.assetIndex.url;
         const assetIndexPath = path.join(assetsIndexesDir, `${versionDetails.assetIndex.id}.json`);
         
-        console.log(`[ClientDownloader] Downloading asset index...`);
         await this._downloadFileSingle(assetIndexUrl, assetIndexPath);
-          console.log(`[ClientDownloader] Downloaded asset index: ${versionDetails.assetIndex.id}`);
 
         // Prepare assets for MCLC
         const assetIndexData = JSON.parse(fs.readFileSync(assetIndexPath, 'utf8'));
@@ -603,8 +511,6 @@ class ClientDownloader {
         }
         
         fs.writeFileSync(assetIndexPath, JSON.stringify(assetIndexData, null, 2));
-        console.log(`[ClientDownloader] Asset index validated: ${objectCount} entries with proper URLs`);
-        console.log(`[ClientDownloader] Asset structure prepared - MCLC will handle actual downloads`);
       }
 
       // Final completion
@@ -618,14 +524,8 @@ class ClientDownloader {
       const finalJsonPath = path.join(versionDir, `${minecraftVersion}.json`);
       const assetsContents = fs.readdirSync(assetsIndexesDir);
       
-      console.log(`[ClientDownloader] Manual download completed successfully:`);
-      console.log(`[ClientDownloader] - JAR: ${finalJarStats.size} bytes`);
-      console.log(`[ClientDownloader] - JSON: ${fs.statSync(finalJsonPath).size} bytes`);
-      console.log(`[ClientDownloader] - Libraries: ${librariesDownloaded} downloaded, ${librariesFailed} failed`);
-      console.log(`[ClientDownloader] - Assets: Structure created with ${assetsContents.length} items`);
       return true;
     } catch (error) {
-      console.error(`[ClientDownloader] Manual download failed:`, error);
       throw error;
     }
   }
@@ -635,7 +535,6 @@ class ClientDownloader {
       try {
         return await this._downloadJsonSingle(url);
       } catch (error) {
-        console.warn(`[ClientDownloader] JSON download attempt ${attempt}/${maxRetries} failed for ${url}: ${error.message}`);
         if (attempt === maxRetries) {
           throw new Error(`Failed to download JSON from ${url} after ${maxRetries} attempts: ${error.message}`);
         }
@@ -680,7 +579,6 @@ class ClientDownloader {
         await this._downloadFileSingle(url, filePath, progressCallback);
         return;
       } catch (error) {
-        console.warn(`[ClientDownloader] Download attempt ${attempt}/${maxRetries} failed for ${url}: ${error.message}`);
         if (attempt === maxRetries) {
           throw new Error(`Failed to download ${url} after ${maxRetries} attempts: ${error.message}`);
         }
@@ -760,11 +658,9 @@ class ClientDownloader {
 
   async installFabricLoader(clientPath, minecraftVersion, fabricVersion = 'latest') {
     try {
-      console.log(`[ClientDownloader] Installing Fabric loader ${fabricVersion} for Minecraft ${minecraftVersion}...`);
       const fabricInstallerUrl = 'https://maven.fabricmc.net/net/fabricmc/fabric-installer/0.11.2/fabric-installer-0.11.2.jar';
       const installerPath = path.join(clientPath, 'fabric-installer.jar');
       if (!fs.existsSync(installerPath)) {
-        console.log(`[ClientDownloader] Downloading Fabric installer...`);
         // const fetch = require('node-fetch'); // Imported at top
         const response = await fetch(fabricInstallerUrl);
         if (!response.ok) {
@@ -776,7 +672,6 @@ class ClientDownloader {
           fileStream.on('finish', resolve);
           fileStream.on('error', reject);
         });
-        console.log(`[ClientDownloader] Fabric installer downloaded`);
       }
       let loaderVersion = fabricVersion;
       if (fabricVersion === 'latest') {
@@ -785,9 +680,7 @@ class ClientDownloader {
           const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
           const loaders = await response.json();
           loaderVersion = loaders[0].version;
-          console.log(`[ClientDownloader] Using latest Fabric loader: ${loaderVersion}`);
         } catch (error) {
-          console.warn(`[ClientDownloader] Could not fetch latest Fabric version, using 0.14.21:`, error.message);
           loaderVersion = '0.14.21';
         }
       }
@@ -803,33 +696,27 @@ class ClientDownloader {
         // Verify the JAR is not empty
         const jarStats = fs.statSync(fabricJarPath);
         if (jarStats.size > 0) {
-          console.log(`[ClientDownloader] Fabric profile already exists and JAR is valid: ${fabricProfileName} (${jarStats.size} bytes)`);
         return { success: true, profileName: fabricProfileName };
         } else {
-          console.warn(`[ClientDownloader] Existing Fabric JAR is empty, reinstalling...`);
           // Remove the corrupt profile to force reinstall
           fs.rmSync(fabricProfileDir, { recursive: true, force: true });
       }
       }
       
       const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
-      console.log(`[ClientDownloader] Fabric installation requires Java ${requiredJavaVersion}`);
       let javaResult;
       try {
         javaResult = await this.javaManager.ensureJava(requiredJavaVersion, (progress) => {
-          console.log(`[ClientDownloader] Fabric Java progress: ${progress.type} - ${progress.task}`);
         });
         if (!javaResult.success) {
           throw new Error(`Failed to obtain Java ${requiredJavaVersion} for Fabric installation: ${javaResult.error}`);
         }
-        console.log(`[ClientDownloader] Java ${requiredJavaVersion} available for Fabric installation: ${javaResult.javaPath}`);
       } catch (javaError) {
         throw new Error(`Java not available for Fabric installation: ${javaError.message}`);
       }
       const javaExe = javaResult.javaPath;
       
       // CRITICAL FIX: Create launcher_profiles.json that Fabric installer expects
-      console.log(`[ClientDownloader] Creating launcher_profiles.json for Fabric installer...`);
       const launcherProfilesPath = path.join(clientPath, 'launcher_profiles.json');
       if (!fs.existsSync(launcherProfilesPath)) {
         const launcherProfiles = {
@@ -859,10 +746,8 @@ class ClientDownloader {
           }
         };
         fs.writeFileSync(launcherProfilesPath, JSON.stringify(launcherProfiles, null, 2));
-        console.log(`[ClientDownloader] Created launcher_profiles.json for Fabric installer`);
       }
       
-      console.log(`[ClientDownloader] Running Fabric installer...`);
       // const { spawn } = require('child_process'); // Imported at top
       const installerArgs = [
         '-jar', installerPath,
@@ -879,12 +764,10 @@ class ClientDownloader {
       installer.stdout.on('data', (data) => {
         const output = data.toString();
         installerOutput += output;
-        console.log(`[Fabric Installer] ${output.trim()}`);
       });
       installer.stderr.on('data', (data) => {
         const output = data.toString();
         installerOutput += output;
-        console.log(`[Fabric Installer Error] ${output.trim()}`);
       });
       const exitCode = await new Promise((resolve) => {
         installer.on('close', resolve);
@@ -906,24 +789,20 @@ class ClientDownloader {
       let needsJarRecreation = false;
       
       if (!fs.existsSync(fabricJarPath)) {
-        console.warn(`[ClientDownloader] Fabric profile JAR was not created by installer, creating manually...`);
         needsJarRecreation = true;
       } else {
         jarStats = fs.statSync(fabricJarPath);
         if (jarStats.size === 0) {
-          console.warn(`[ClientDownloader] Fabric profile JAR is empty (${jarStats.size} bytes), recreating...`);
           needsJarRecreation = true;
         }
       }
       
       if (needsJarRecreation) {
-        console.log(`[ClientDownloader] Creating Fabric profile JAR manually...`);
         await this.createFabricProfileJar(fabricJarPath, loaderVersion, minecraftVersion);
         
         // Verify the manually created JAR
         if (fs.existsSync(fabricJarPath)) {
           jarStats = fs.statSync(fabricJarPath);
-          console.log(`[ClientDownloader] Manually created Fabric JAR: ${jarStats.size} bytes`);
         } else {
           throw new Error(`Failed to create Fabric profile JAR: ${fabricJarPath}`);
         }
@@ -937,21 +816,14 @@ class ClientDownloader {
         throw new Error(`Fabric profile JAR is still empty after recreation: ${fabricJarPath}`);
       }
       
-      console.log(`[ClientDownloader] Fabric ${loaderVersion} installed successfully for Minecraft ${minecraftVersion}`);
-      console.log(`[ClientDownloader] - Profile JSON: ${fs.statSync(fabricJsonPath).size} bytes`);
-      console.log(`[ClientDownloader] - Profile JAR: ${jarStats.size} bytes`);
       
       // CRITICAL FIX: Post-process the Fabric JSON to add missing download metadata
-      console.log(`[ClientDownloader] Post-processing Fabric profile to add missing download metadata...`);
       try {
         await this.enrichFabricJson(clientPath, fabricProfileName);
-        console.log(`[ClientDownloader] Successfully enriched Fabric profile with download metadata`);
       } catch (enrichError) {
-        console.warn(`[ClientDownloader] Could not enrich Fabric profile: ${enrichError.message}`);
       }
       
       // CRITICAL FIX: Ensure Fabric profile properly inherits from vanilla version
-      console.log(`[ClientDownloader] Configuring Fabric profile to inherit from vanilla version...`);
       try {
         const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
           const vanillaJsonPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.json`);
@@ -964,15 +836,11 @@ class ClientDownloader {
           if (!fabricJson.downloads?.client && vanillaJson.downloads?.client) {
             fabricJson.downloads = fabricJson.downloads || {};
             fabricJson.downloads.client = vanillaJson.downloads.client;
-            console.log(`[ClientDownloader] ✅ CRITICAL: Injected vanilla downloads.client into Fabric profile`);
-            console.log(`[ClientDownloader] - Vanilla JAR: ${vanillaJson.downloads.client.url}`);
-            console.log(`[ClientDownloader] - Size: ${vanillaJson.downloads.client.size} bytes`);
             modified = true;
           }
           
           // CRITICAL FIX: Merge ALL vanilla libraries into Fabric profile to prevent missing library errors
           if (vanillaJson.libraries && Array.isArray(vanillaJson.libraries) && vanillaJson.libraries.length > 0) {
-            console.log(`[ClientDownloader] 🔧 CRITICAL: Merging ${vanillaJson.libraries.length} vanilla libraries into Fabric profile...`);
             
             // Initialize Fabric libraries array if it doesn't exist
             fabricJson.libraries = fabricJson.libraries || [];
@@ -994,7 +862,6 @@ class ClientDownloader {
               
               // Skip ASM libraries to prevent conflicts
               if (skipASM(lib)) {
-                console.log(`[ClientDownloader] Skipping ASM library to prevent conflict: ${lib.name}`);
                 return false;
               }
               
@@ -1010,8 +877,6 @@ class ClientDownloader {
             if (vanillaLibsToMerge.length > 0) {
               // Merge vanilla libraries at the front of the array for priority
               fabricJson.libraries = [...vanillaLibsToMerge, ...fabricJson.libraries];
-              console.log(`[ClientDownloader] ✅ CRITICAL: Successfully merged ${vanillaLibsToMerge.length} vanilla libraries into Fabric profile`);
-              console.log(`[ClientDownloader] - Total libraries now: ${fabricJson.libraries.length}`);
               
               // Verify critical libraries are present
               const criticalLibraries = [
@@ -1026,52 +891,42 @@ class ClientDownloader {
               criticalLibraries.forEach(requiredLib => {
                 const found = fabricJson.libraries.find(lib => lib.name?.startsWith(requiredLib));
                 if (found) {
-                  console.log(`[ClientDownloader] ✅ Critical library verified in Fabric profile: ${found.name}`);
                 } else {
-                  console.warn(`[ClientDownloader] ❌ Critical library still missing: ${requiredLib}`);
                   missingCritical.push(requiredLib);
                 }
               });
               
               if (missingCritical.length === 0) {
-                console.log(`[ClientDownloader] ✅ All critical libraries successfully merged into Fabric profile`);
               } else {
-                console.warn(`[ClientDownloader] ⚠️ ${missingCritical.length} critical libraries still missing after merge: ${missingCritical.join(', ')}`);
               }
               
               modified = true;
             } else {
-              console.warn(`[ClientDownloader] No new vanilla libraries to merge (${existingFabricLibs.size} already present)`);
             }
           } else {
-            console.warn(`[ClientDownloader] ⚠️ Vanilla profile has no libraries to merge`);
           }
           
           // CRITICAL: Add inheritsFrom field to explicitly link to vanilla
           if (!fabricJson.inheritsFrom) {
             fabricJson.inheritsFrom = minecraftVersion;
-            console.log(`[ClientDownloader] ✅ Added inheritsFrom field pointing to: ${minecraftVersion}`);
             modified = true;
           }
           
           // Ensure Fabric profile inherits essential properties from vanilla
           if (!fabricJson.assetIndex && vanillaJson.assetIndex) {
               fabricJson.assetIndex = vanillaJson.assetIndex;
-              console.log(`[ClientDownloader] Added asset index to Fabric profile: ${vanillaJson.assetIndex.id}`);
             modified = true;
           }
           
           // CRITICAL: Ensure mainClass points to Fabric's knot client (not vanilla)
           if (!fabricJson.mainClass) {
             fabricJson.mainClass = 'net.fabricmc.loader.impl.launch.knot.KnotClient';
-            console.log(`[ClientDownloader] Set Fabric mainClass: ${fabricJson.mainClass}`);
             modified = true;
           }
           
           // CRITICAL: Ensure Fabric profile can locate the vanilla JAR
           if (!fabricJson.jar && vanillaJson.jar) {
             fabricJson.jar = vanillaJson.jar;
-            console.log(`[ClientDownloader] Added JAR reference to Fabric profile: ${vanillaJson.jar}`);
             modified = true;
           }
           
@@ -1079,7 +934,6 @@ class ClientDownloader {
           if (fabricJson.assetIndex?.id === "24" || !fabricJson.assetIndex) {
             if (vanillaJson.assetIndex) {
               fabricJson.assetIndex = vanillaJson.assetIndex;
-              console.log(`[ClientDownloader] 🔧 PHASE 4: Fixed assetIndex from "${fabricJson.assetIndex?.id || 'missing'}" to vanilla "${vanillaJson.assetIndex.id}"`);
               modified = true;
             }
           }
@@ -1110,13 +964,11 @@ class ClientDownloader {
                 
                 if (newArg !== arg) {
                   gameArgs[i] = newArg;
-                  console.log(`[ClientDownloader] 🔧 PHASE 4: Fixed auth placeholder: ${arg} → ${newArg}`);
                 }
               }
             }
             
             if (authFixed) {
-              console.log(`[ClientDownloader] ✅ PHASE 4: Fixed auth placeholders to use camelCase format`);
               modified = true;
             }
           }
@@ -1127,7 +979,6 @@ class ClientDownloader {
             // If downloads.client doesn't match vanilla, use vanilla's version
             if (vanillaJson.downloads?.client && clientUrl !== vanillaJson.downloads.client.url) {
               fabricJson.downloads.client = vanillaJson.downloads.client;
-              console.log(`[ClientDownloader] 🔧 PHASE 4: Fixed downloads.client to point to vanilla JAR`);
               modified = true;
             }
           }
@@ -1135,7 +986,6 @@ class ClientDownloader {
           // Ensure type is set correctly
           if (!fabricJson.type) {
             fabricJson.type = vanillaJson.type || "release";
-            console.log(`[ClientDownloader] Added type to Fabric profile: ${fabricJson.type}`);
             modified = true;
           }
           
@@ -1151,22 +1001,16 @@ class ClientDownloader {
           
           if (modified) {
             fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-            console.log(`[ClientDownloader] ✅ FIXED: Enhanced Fabric profile with complete vanilla library inheritance`);
-            console.log(`[ClientDownloader] - Vanilla JAR and ALL vanilla libraries now available to Fabric!`);
           } else {
-            console.log(`[ClientDownloader] Fabric profile already properly configured`);
           }
         } else {
-          console.warn(`[ClientDownloader] Vanilla profile JSON not found: ${vanillaJsonPath}`);
         }
       } catch (fabricFixError) {
-        console.warn(`[ClientDownloader] Could not configure Fabric inheritance: ${fabricFixError.message}`);
       }
       
       try {
         fs.unlinkSync(installerPath);
       } catch (cleanupError) {
-        console.warn(`[ClientDownloader] Could not cleanup installer: ${cleanupError.message}`);
       }
       return { 
         success: true, 
@@ -1174,7 +1018,6 @@ class ClientDownloader {
         loaderVersion: loaderVersion 
       };
     } catch (error) {
-      console.error(`[ClientDownloader] Fabric installation failed:`, error);
       return { 
         success: false, 
         error: error.message 
@@ -1185,7 +1028,6 @@ class ClientDownloader {
   // CRITICAL NEW METHOD: Create Fabric profile JAR manually if installer fails
   async createFabricProfileJar(fabricJarPath, loaderVersion, minecraftVersion) {
     try {
-      console.log(`[ClientDownloader] Creating Fabric profile JAR: ${fabricJarPath}`);
       
       // Create a proper JAR file with the correct MANIFEST.MF
       // The JAR doesn't need to contain actual classes, just the correct manifest
@@ -1228,13 +1070,10 @@ Specification-Vendor: FabricMC
       zip.writeZip(fabricJarPath);
       
       const stats = fs.statSync(fabricJarPath);
-      console.log(`[ClientDownloader] Created Fabric profile JAR: ${stats.size} bytes`);
       
     } catch (error) {
-      console.error(`[ClientDownloader] Failed to create Fabric profile JAR:`, error);
       
       // Fallback: Create a minimal valid ZIP file structure manually
-      console.log(`[ClientDownloader] Creating minimal fallback JAR...`);
       
       const manifest = `Manifest-Version: 1.0\r\nMain-Class: net.fabricmc.loader.impl.launch.knot.KnotClient\r\n\r\n`;
       const manifestBuffer = Buffer.from(manifest, 'utf8');
@@ -1295,7 +1134,6 @@ Specification-Vendor: FabricMC
       const zipBuffer = Buffer.concat([localFileHeader, centralDirHeader, endOfCentralDir]);
       fs.writeFileSync(fabricJarPath, zipBuffer);
       
-      console.log(`[ClientDownloader] Created minimal fallback JAR: ${zipBuffer.length} bytes`);
     }
   }
 
@@ -1305,7 +1143,6 @@ Specification-Vendor: FabricMC
       const fabricJsonPath = path.join(versionsDir, fabricProfileName, `${fabricProfileName}.json`);
       const vanillaJsonPath = path.join(versionsDir, vanillaVersion, `${vanillaVersion}.json`);
       if (!fs.existsSync(fabricJsonPath) || !fs.existsSync(vanillaJsonPath)) {
-        console.warn(`[ClientDownloader] Cannot fix Fabric asset index - missing files`);
         return false;
       }
       const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
@@ -1313,20 +1150,16 @@ Specification-Vendor: FabricMC
       if (!fabricJson.assetIndex && vanillaJson.assetIndex) {
         fabricJson.assetIndex = vanillaJson.assetIndex;
         fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-        console.log(`[ClientDownloader] 🔧 Fixed Fabric profile with asset index: ${vanillaJson.assetIndex.id}`);
         return true;
       }
       return false;
     } catch (error) {
-      console.warn(`[ClientDownloader] Could not fix Fabric asset index: ${error.message}`);
       return false;
     }
   }
 
   async addServerToList(clientPath, rawServerInfo) {
     try {
-      console.log('[ClientDownloader] ▶️ ENTERED addServerToList()');
-      console.log('[ClientDownloader] ▶️ rawServerInfo:', JSON.stringify(rawServerInfo, null, 2));
 
       // === 1. Normalize keys ===
       const nested = rawServerInfo.serverInfo || {};
@@ -1338,18 +1171,15 @@ Specification-Vendor: FabricMC
                  || rawServerInfo.port 
                  || '25565', 10)
       };
-      console.log('[ClientDownloader] ▶️ Normalized server data:', JSON.stringify(flat, null, 2));
 
       // === 2. Ensure clientPath exists ===
       if (!fs.existsSync(clientPath)) {
-        console.log(`[ClientDownloader] ▶️ Creating client directory: ${clientPath}`);
         fs.mkdirSync(clientPath, { recursive: true });
       }
       
       // === 3. Update options.txt → lastServer:ip:port ===
       try {
         const optionsFile = path.join(clientPath, 'options.txt');
-        console.log(`[ClientDownloader] ▶️ Setting last multiplayer server in: ${optionsFile}`);
 
         let optionsContent = '';
         if (fs.existsSync(optionsFile)) {
@@ -1361,40 +1191,31 @@ Specification-Vendor: FabricMC
         const serverAddress = (flat.port === 25565) ? flat.ip : `${flat.ip}:${flat.port}`;
         lines.push(`lastServer:${serverAddress}`);
         fs.writeFileSync(optionsFile, lines.join('\n'), 'utf8');
-        console.log(`[ClientDownloader] ✅ Set lastServer to: ${serverAddress}`);
       } catch (err) {
-        console.warn(`[ClientDownloader] ⚠️ Could not set last multiplayer server (non-critical): ${err.message}`);
       }
 
       // === 4. Write a **valid** servers.dat NBT file ===
       try {
-        console.log(`[ClientDownloader] ▶️ Writing servers.dat NBT file...`);
         
         // Import required modules for NBT creation
       const nbt = require('prismarine-nbt');
         const zlib = require('zlib');
-        console.log(`[ClientDownloader] ✅ NBT modules loaded successfully`);
         
         const serversDatPath = path.join(clientPath, 'servers.dat');
-        console.log(`[ClientDownloader] ▶️ servers.dat path: ${serversDatPath}`);
         
         let existingServers = [];
 
         // Read existing servers if file exists
         if (fs.existsSync(serversDatPath)) {
-          console.log(`[ClientDownloader] ▶️ Existing servers.dat found, parsing...`);
           try {
             const existingBuffer = fs.readFileSync(serversDatPath);
-            console.log(`[ClientDownloader] ▶️ Read existing servers.dat: ${existingBuffer.length} bytes`);
             
             const uncompressed = zlib.gunzipSync(existingBuffer);
-            console.log(`[ClientDownloader] ▶️ Decompressed servers.dat: ${uncompressed.length} bytes`);
             
             const parsed = await nbt.parse(uncompressed);
             
             // Extract existing server entries
             const serversList = parsed.parsed.value.servers?.value || [];
-            console.log(`[ClientDownloader] ▶️ Found ${serversList.length} existing server entries`);
 
             // Filter out any duplicate of our new server, keep everything else
             const targetIpPort = `${flat.ip}:${flat.port}`;
@@ -1403,7 +1224,6 @@ Specification-Vendor: FabricMC
               const existingIpPort = serverEntry.value ? serverEntry.value.ip.value : serverEntry.ip;
               const isDuplicate = existingIpPort === targetIpPort;
               if (isDuplicate) {
-                console.log(`[ClientDownloader] ▶️ Removing duplicate entry: ${existingIpPort}`);
               }
               return !isDuplicate;
             }).map(serverEntry => {
@@ -1423,13 +1243,10 @@ Specification-Vendor: FabricMC
             });
             // Convert to simple JavaScript objects for easier handling
             
-            console.log(`[ClientDownloader] ▶️ After filtering duplicates: ${existingServers.length} entries remain`);
           } catch (parseError) {
-            console.warn(`[ClientDownloader] ⚠️ Could not parse existing servers.dat (will create new): ${parseError.message}`);
             existingServers = [];
           }
         } else {
-          console.log(`[ClientDownloader] ▶️ No existing servers.dat found, creating new one`);
         }
 
         // Create new server entry (simple object)
@@ -1442,15 +1259,12 @@ Specification-Vendor: FabricMC
 
         // Add our new server to the list
         existingServers.push(newServerEntry);
-        console.log(`[ClientDownloader] ▶️ Added new server entry. Total entries: ${existingServers.length}`);
-        console.log(`[ClientDownloader] ▶️ New server: "${flat.name}" at ${flat.ip}:${flat.port}`);
 
         // Create simple JavaScript object - prismarine-nbt will convert it
         const simpleObject = {
           servers: existingServers
         };
 
-        console.log(`[ClientDownloader] ▶️ Created simple object with ${existingServers.length} server entries`);
 
         // Use minecraft-data for prismarine-nbt initialization
         const mcData = require('minecraft-data')('1.21.1');
@@ -1467,27 +1281,19 @@ Specification-Vendor: FabricMC
           servers: nbt.list(nbt.comp(nbtServers))
         });
         
-        console.log(`[ClientDownloader] ▶️ Creating NBT with prismarine-nbt...`);
-        console.log(`[ClientDownloader] ▶️ Server count: ${existingServers.length}`);
         
         const rawBuffer = nbt.writeUncompressed(nbtData)
-        console.log(`[ClientDownloader] ▶️ Raw NBT buffer: ${rawBuffer.length} bytes`);
         
         // Compress the NBT data since Minecraft expects gzip-compressed servers.dat
         const compressedBuffer = zlib.gzipSync(rawBuffer);
-        console.log(`[ClientDownloader] ▶️ Compressed NBT buffer: ${compressedBuffer.length} bytes`);
         
         // Write to file
         fs.writeFileSync(serversDatPath, compressedBuffer);
         
         // Verify the file was written
         const writtenStats = fs.statSync(serversDatPath);
-        console.log(`[ClientDownloader] ✅ servers.dat written successfully → ${serversDatPath} (${writtenStats.size} bytes)`);
-        console.log(`[ClientDownloader] ✅ Server "${flat.name}" should now appear in Minecraft's Multiplayer list`);
         
       } catch (nbtErr) {
-        console.error(`[ClientDownloader] ❌ Failed to write servers.dat: ${nbtErr.message}`);
-        console.error(`[ClientDownloader] ❌ NBT Error stack:`, nbtErr.stack);
         return {
           success: false,
           method: 'nbt',
@@ -1497,7 +1303,6 @@ Specification-Vendor: FabricMC
       }
 
       // === 5. Return success ===
-      console.log(`[ClientDownloader] ▶️ addServerToList completed successfully!`);
       return {
         success: true,
         method: 'nbt',
@@ -1506,8 +1311,6 @@ Specification-Vendor: FabricMC
       };
 
     } catch (error) {
-      console.error('[ClientDownloader] ❌ addServerToList failed:', error);
-      console.error('[ClientDownloader] ❌ Error stack:', error.stack);
       return {
         success: false,
         error: error.message,
@@ -1517,12 +1320,9 @@ Specification-Vendor: FabricMC
   }
 
   async checkMinecraftClient(clientPath, requiredVersion, options = {}) {
-    console.log('💡 ENTERED ClientDownloader.checkMinecraftClient');
     try {
       this.javaManager.setClientPath(clientPath); // Set clientPath for JavaManager
-      console.log(`[ClientDownloader] Checking client files for ${requiredVersion} in: ${clientPath}`);
       if (!fs.existsSync(clientPath)) {
-        console.log(`[ClientDownloader] Client path does not exist: ${clientPath}`);
         return { synchronized: false, reason: 'Client path does not exist' };
       }
       const { 
@@ -1531,7 +1331,6 @@ Specification-Vendor: FabricMC
       } = options;
       let needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
       let fabricVersion = serverInfo?.loaderVersion || 'latest';
-      console.log(`[ClientDownloader] Fabric requirements: needsFabric=${needsFabric}, version=${fabricVersion}`);
       let targetVersion = requiredVersion;
       let fabricProfileName = null;
       if (needsFabric) {
@@ -1540,20 +1339,15 @@ Specification-Vendor: FabricMC
             const response = await fetch('https://meta.fabricmc.net/v2/versions/loader'); // fetch is already imported
             const loaders = await response.json();
             fabricVersion = loaders[0].version;
-            console.log(`[ClientDownloader] Using latest Fabric loader: ${fabricVersion}`);
           } catch (error) {
-            console.warn(`[ClientDownloader] Could not fetch latest Fabric version, using 0.14.21:`, error.message);
             fabricVersion = '0.14.21';
           }
         }
         fabricProfileName = `fabric-loader-${fabricVersion}-${requiredVersion}`;
         targetVersion = fabricProfileName;
-        console.log(`[ClientDownloader] Target Fabric profile: ${fabricProfileName}`);
       }
       const requiredJavaVersion = utils.getRequiredJavaVersion(requiredVersion); // Use imported utils
-      console.log(`[ClientDownloader] Minecraft ${requiredVersion} requires Java ${requiredJavaVersion}`);
       if (!this.javaManager.isJavaInstalled(requiredJavaVersion)) {
-        console.log(`[ClientDownloader] Java ${requiredJavaVersion} is not installed`);
         return { 
           synchronized: false, 
           reason: `Java ${requiredJavaVersion} is required for Minecraft ${requiredVersion} but is not installed`,
@@ -1561,7 +1355,6 @@ Specification-Vendor: FabricMC
           requiredJavaVersion: requiredJavaVersion
         };
       }
-      console.log(`[ClientDownloader] Java ${requiredJavaVersion} is available`);
       const versionsDir = path.join(clientPath, 'versions');
       const librariesDir = path.join(clientPath, 'libraries');
       const assetsDir = path.join(clientPath, 'assets');
@@ -1571,19 +1364,12 @@ Specification-Vendor: FabricMC
         jsonFile = path.join(versionDir, `${targetVersion}.json`);
         const vanillaVersionDir = path.join(versionsDir, requiredVersion);
         jarFile = path.join(vanillaVersionDir, `${requiredVersion}.jar`);
-        console.log(`[ClientDownloader] Checking Fabric profile directory: ${versionDir}`);
-        console.log(`[ClientDownloader] Checking Fabric JSON: ${jsonFile}`);
-        console.log(`[ClientDownloader] Checking vanilla JAR for Fabric: ${jarFile}`);
       } else {
         versionDir = path.join(versionsDir, targetVersion);
         jarFile = path.join(versionDir, `${targetVersion}.jar`);
         jsonFile = path.join(versionDir, `${targetVersion}.json`);
-        console.log(`[ClientDownloader] Checking vanilla version directory: ${versionDir}`);
-        console.log(`[ClientDownloader] Checking vanilla JAR: ${jarFile}`);
-        console.log(`[ClientDownloader] Checking vanilla JSON: ${jsonFile}`);
       }
       if (!fs.existsSync(versionDir)) {
-        console.log(`[ClientDownloader] Version directory missing: ${versionDir}`);
         if (needsFabric) {
           return { 
             synchronized: false, 
@@ -1597,18 +1383,14 @@ Specification-Vendor: FabricMC
         }
       }
       if (!fs.existsSync(jarFile)) {
-        console.log(`[ClientDownloader] JAR file missing: ${jarFile}`);
         return { synchronized: false, reason: needsFabric ? `Vanilla JAR missing for Fabric profile (${requiredVersion})` : `Client JAR missing for ${requiredVersion}` };
       }
       if (!fs.existsSync(jsonFile)) {
-        console.log(`[ClientDownloader] JSON file missing: ${jsonFile}`);
         return { synchronized: false, reason: needsFabric ? `Fabric profile manifest missing (${fabricProfileName})` : `Version manifest missing for ${requiredVersion}` };
       }
       const jarStats = fs.statSync(jarFile);
       const jsonStats = fs.statSync(jsonFile);
       // Reduced logging - only show size info
-      console.log(`[ClientDownloader] JAR file ${jarFile} exists with ${jarStats.size} bytes`);
-      console.log(`[ClientDownloader] JSON file ${jsonFile} exists with ${jsonStats.size} bytes`);
       if (jarStats.size === 0) {
         return { synchronized: false, reason: needsFabric ? `Vanilla JAR file is corrupted (empty) - required for Fabric` : `Client JAR file is corrupted (empty)` };
       }
@@ -1623,7 +1405,6 @@ Specification-Vendor: FabricMC
       if (!fs.existsSync(assetsDir) || !fs.existsSync(assetsIndexesDir) || fs.readdirSync(assetsIndexesDir).length === 0) {
         return { synchronized: false, reason: 'Client assets not downloaded or indexes empty' };
       }
-      console.log(`[ClientDownloader] Client files verified for ${targetVersion}`);
       const resultMessage = needsFabric 
         ? `All client files, Fabric ${fabricVersion}, and Java ${requiredJavaVersion} are present and verified`
         : `All client files and Java ${requiredJavaVersion} are present and verified`;
@@ -1637,14 +1418,12 @@ Specification-Vendor: FabricMC
         targetVersion: targetVersion
       };
     } catch (error) {
-      console.error('[ClientDownloader] Error checking client files:', error);
       return { synchronized: false, reason: 'Error checking client files: ' + error.message };
     }
   }
 
   async clearMinecraftClient(clientPath, minecraftVersion) {
     try {
-      console.log(`[ClientDownloader] Clearing Minecraft ${minecraftVersion} client files...`);
       if (!fs.existsSync(clientPath)) {
         return { success: true, message: 'Client path does not exist, nothing to clear' };
       }
@@ -1660,13 +1439,11 @@ Specification-Vendor: FabricMC
       if (fs.existsSync(assetsDir)) {
         fs.rmSync(assetsDir, { recursive: true, force: true });
       }
-      console.log(`[ClientDownloader] Successfully cleared client files for ${minecraftVersion}`);
       return { 
         success: true, 
         message: `Cleared Minecraft ${minecraftVersion} client files. Ready for fresh download.` 
       };
     } catch (error) {
-      console.error(`[ClientDownloader] Failed to clear client files:`, error);
       return { 
         success: false, 
         error: `Failed to clear client files: ${error.message}` 
@@ -1676,17 +1453,14 @@ Specification-Vendor: FabricMC
 
   async clearAssets(clientPath) {
     try {
-      console.log(`[ClientDownloader] Force clearing corrupted assets...`);
       const assetsDir = path.join(clientPath, 'assets');
       if (fs.existsSync(assetsDir)) {
         fs.rmSync(assetsDir, { recursive: true, force: true });
-        console.log(`[ClientDownloader] Assets directory cleared - will be re-downloaded with proper structure`);
         return { success: true, message: 'Assets cleared successfully' };
       } else {
         return { success: true, message: 'Assets directory does not exist' };
       }
     } catch (error) {
-      console.error(`[ClientDownloader] Failed to clear assets:`, error);
       return { success: false, error: error.message };
     }
   }
@@ -1705,7 +1479,6 @@ Specification-Vendor: FabricMC
     const base = 'https://maven.fabricmc.net/';
     
     // CRITICAL FIX: Add authentication placeholders to game arguments
-    console.log(`[ClientDownloader] Adding authentication placeholders to Fabric profile...`);
     
     // Ensure arguments structure exists
     fabricJson.arguments = fabricJson.arguments || {};
@@ -1731,7 +1504,6 @@ Specification-Vendor: FabricMC
     
     if (!hasAuthArgs) {
       // Only add if they're completely missing
-      console.log(`[ClientDownloader] ✅ Adding complete authentication placeholders: ${requiredAuthArgs.join(' ')}`);
       
       // Remove any existing partial auth args to prevent duplicates
       fabricJson.arguments.game = fabricJson.arguments.game.filter(arg => {
@@ -1747,7 +1519,6 @@ Specification-Vendor: FabricMC
       modified = true;
     } else if (gameArgsStr.includes('${auth_user_type}') && gameArgsStr.indexOf('${auth_user_type}') !== gameArgsStr.lastIndexOf('${auth_user_type}')) {
       // Check for duplicates and remove them
-      console.log(`[ClientDownloader] ⚠️ Duplicate authentication placeholders detected, cleaning up...`);
       
       const cleanedArgs = [];
       const seenArgs = new Set();
@@ -1766,10 +1537,8 @@ Specification-Vendor: FabricMC
       }
       
       fabricJson.arguments.game = cleanedArgs;
-      console.log(`[ClientDownloader] ✅ Removed duplicate authentication placeholders`);
       modified = true;
     } else {
-      console.log(`[ClientDownloader] ✅ Authentication placeholders already present and properly formatted`);
     }
     
     // Also ensure JVM auth session argument is present
@@ -1779,7 +1548,6 @@ Specification-Vendor: FabricMC
     
     if (!hasAuthSession) {
       fabricJson.arguments.jvm.push('-Dauth.session=${auth_session}');
-      console.log(`[ClientDownloader] ✅ Added JVM auth session argument`);
       modified = true;
     }
     
@@ -1795,10 +1563,8 @@ Specification-Vendor: FabricMC
             path: jar, 
             url: (lib.url || base) + jar 
           };
-          console.log(`[ClientDownloader] Added artifact metadata for ${lib.name}`);
           modified = true;
         } catch (parseError) {
-          console.warn(`[ClientDownloader] Could not parse library name: ${lib.name}`);
         }
       }
 
@@ -1815,19 +1581,15 @@ Specification-Vendor: FabricMC
               url: (lib.url || base) + jar
             };
           }
-          console.log(`[ClientDownloader] Added classifier metadata for ${lib.name} (${Object.keys(lib.natives).join(', ')})`);
           modified = true;
         } catch (parseError) {
-          console.warn(`[ClientDownloader] Could not parse natives for: ${lib.name}`);
         }
       }
     }
     
     if (modified) {
       fs.writeFileSync(jsonPath, JSON.stringify(fabricJson, null, 2));
-      console.log(`[ClientDownloader] 🔧 Enriched Fabric profile with authentication placeholders and ${fabricJson.libraries?.length || 0} libraries' download metadata`);
     } else {
-      console.log(`[ClientDownloader] Fabric profile already has complete download metadata and authentication placeholders`);
     }
   }
 
@@ -1855,36 +1617,29 @@ Specification-Vendor: FabricMC
       if (!fabricJson.downloads?.client && vanillaJson.downloads?.client) {
         fabricJson.downloads = fabricJson.downloads || {};
         fabricJson.downloads.client = vanillaJson.downloads.client;
-        console.log('[ClientDownloader] ✔ Injected vanilla downloads.client into Fabric profile');
         modified = true;
       } else if (fabricJson.downloads?.client) {
-        console.log('[ClientDownloader] ✔ Fabric profile already has downloads.client');
       }
 
       // 2) Double-check inheritsFrom
       if (!fabricJson.inheritsFrom) {
         fabricJson.inheritsFrom = vanillaVersion;
-        console.log('[ClientDownloader] ✔ Added inheritsFrom:', vanillaVersion);
         modified = true;
       }
 
       // 3) Ensure the JSON "type" matches release so MCLC will honor downloads.client
       if (fabricJson.type !== 'release') {
         fabricJson.type = 'release';
-        console.log('[ClientDownloader] ✔ Set type to "release" for MCLC compatibility');
         modified = true;
       }
 
       if (modified) {
         fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-        console.log('[ClientDownloader] ✅ Fabric JSON updated with vanilla downloads.client');
       } else {
-        console.log('[ClientDownloader] ✅ Fabric JSON already properly configured');
       }
 
       return { success: true, modified };
     } catch (error) {
-      console.error('[ClientDownloader] ❌ Failed to inject vanilla downloads:', error.message);
       return { success: false, error: error.message };
     }
   }
@@ -1898,7 +1653,6 @@ Specification-Vendor: FabricMC
    */
   async downloadAssets(clientPath, minecraftVersion) {
     try {
-      console.log(`[ClientDownloader] 🔧 Starting asset download for ${minecraftVersion}...`);
       
       // First, get the version manifest to find the asset index URL
       const versionJsonPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.json`);
@@ -1915,8 +1669,6 @@ Specification-Vendor: FabricMC
       const assetIndexUrl = assetIndex.url;
       const assetIndexId = assetIndex.id;
       
-      console.log(`[ClientDownloader] 🔧 Asset index ID: ${assetIndexId}`);
-      console.log(`[ClientDownloader] 🔧 Asset index URL: ${assetIndexUrl}`);
       
       // Setup directories
       const indexDir = path.join(clientPath, 'assets', 'indexes');
@@ -1927,10 +1679,8 @@ Specification-Vendor: FabricMC
       
       // Download asset index JSON
       const indexPath = path.join(indexDir, `${assetIndexId}.json`);
-      console.log(`[ClientDownloader] 🔧 Downloading asset index to: ${indexPath}`);
       
       await this.downloadFile(assetIndexUrl, indexPath);
-      console.log(`[ClientDownloader] ✅ Asset index downloaded successfully`);
       
       // Parse the asset index
       const indexJson = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
@@ -1939,7 +1689,6 @@ Specification-Vendor: FabricMC
       }
       
       const totalAssets = Object.keys(indexJson.objects).length;
-      console.log(`[ClientDownloader] 🔧 Found ${totalAssets} assets to download`);
 
       // Send initial progress event
       this.emitter.emit('client-download-progress', {
@@ -1996,7 +1745,6 @@ Specification-Vendor: FabricMC
             downloaded++;
             processed++;
             if (downloaded % 100 === 0) {
-              console.log(`[ClientDownloader] 🔧 Downloaded ${downloaded}/${totalAssets - skipped} assets...`);
             }
             if (processed % 50 === 0 || processed === totalAssets) {
               updateProgress();
@@ -2004,7 +1752,6 @@ Specification-Vendor: FabricMC
           })
           .catch(error => {
             processed++;
-            console.warn(`[ClientDownloader] ⚠️ Failed to download asset ${relPath} (${hash}):`, error.message);
             if (processed % 50 === 0 || processed === totalAssets) {
               updateProgress();
             }
@@ -2028,15 +1775,10 @@ Specification-Vendor: FabricMC
       processed = totalAssets;
       updateProgress();
       
-      console.log(`[ClientDownloader] ✅ Asset download complete!`);
-      console.log(`[ClientDownloader] ✅ Downloaded: ${downloaded} assets`);
-      console.log(`[ClientDownloader] ✅ Skipped (already present): ${skipped} assets`);
-      console.log(`[ClientDownloader] ✅ Total: ${totalAssets} assets`);
       
       return { success: true, downloaded, skipped, total: totalAssets };
       
     } catch (error) {
-      console.error(`[ClientDownloader] ❌ Asset download failed:`, error);
       return { success: false, error: error.message };
     }
   }

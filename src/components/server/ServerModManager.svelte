@@ -96,9 +96,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           } else {
             serverPath = '';
           }
-          console.log('ModManager: Retrieved server path:', serverPath);
         } catch (err) {
-          console.error('ModManager: Error getting server path:', err);
           serverPath = '';
         }
       }
@@ -157,7 +155,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         }
       }
     } catch (error) {
-      console.error('Error installing dependencies:', error);
       errorMessage.set(`Failed to install dependencies: ${error.message || 'Unknown error'}`);
       
       // Clean up all installing state
@@ -172,8 +169,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     const modToUpdate = { ...rawMod, source: rawMod.source || 'modrinth' };
     
     try {
-      console.log('Handling compatibility warning for mod:', modToUpdate);
-      console.log('Raw issues:', rawIssues);
       
       // Enrich dependency names for missing issues by fetching project titles
       const issues = await Promise.all(rawIssues.map(async issue => {
@@ -187,7 +182,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
             });
             if (projectInfo?.title) dep.name = projectInfo.title;
           } catch (err) {
-            console.warn(`Failed to fetch project title for ${dep.projectId}:`, err);
           }
         }
         return issue;
@@ -243,7 +237,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           }
         }
         
-        console.log(`Formatted dependency for modal: ${name} (${dependencyType})`);
         
         return {
           projectId: issue.dependency?.projectId,
@@ -261,7 +254,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       // Show the dependency modal with compatibility warnings
       showDependencyModal(modToUpdate, dependencies);
     } catch (error) {
-      console.error('Error handling compatibility warning:', error);
       errorMessage.set(`Error checking dependencies: ${error.message || 'Unknown error'}`);
     }
   }
@@ -292,7 +284,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         try {
           if (versionId) {
             // Get specific version info if we have a versionId
-            console.log(`Checking version info for mod: ${mod.id}, version: ${versionId}`);
             
             try {
               const versionInfo = await safeInvoke('get-version-info', {
@@ -306,7 +297,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
               if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
                 // Check for compatibility issues, passing the mod ID to avoid self-dependencies
                 const compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, mod.id);
-                console.log(`Found ${compatibilityIssues.length} compatibility issues for mod: ${mod.name || mod.title}`, compatibilityIssues);
                 
                 // If there are compatibility issues, show them
                 if (compatibilityIssues.length > 0) {
@@ -325,7 +315,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
                 }
               }
             } catch (versionError) {
-              console.error(`Error fetching version info for ${mod.id}:`, versionError);
               // Set a more user-friendly error message
               if (versionError.message && versionError.message.includes('404')) {
                 errorMessage.set(`Couldn't find version information for this mod. It may have been removed from Modrinth.`);
@@ -342,7 +331,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
             }
           }
         } catch (compatError) {
-          console.error('Error in compatibility checking:', compatError);
           // Continue with the regular dependency check
         }
         
@@ -360,10 +348,8 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       
       // Regular installation with dependency check
       // Always check for dependencies even for reinstalling mods
-      console.log(`[DEBUG] Checking dependencies for mod: ${mod.name || mod.title}`);
       try {
         const dependencies = await checkModDependencies(mod);
-        console.log(`[DEBUG] Found ${dependencies.length} dependencies for mod: ${mod.name || mod.title}`, dependencies);
         
         // Get the version info to also check for compatibility issues
         let compatibilityIssues = [];
@@ -378,25 +364,20 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
               gameVersion: get(minecraftVersion)
             });
             
-            console.log(`[DEBUG] Version info for compatibility check:`, versionInfo);
             
             if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
               // Check for compatibility issues, passing the mod ID to avoid self-dependencies
               compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, mod.id);
-              console.log(`[DEBUG] Found ${compatibilityIssues.length} compatibility issues for mod: ${mod.name || mod.title}`, compatibilityIssues);
             }
           }
         } catch (compatError) {
-          console.error('[ERROR] Error checking compatibility:', compatError);
           // Continue with the regular dependency check
         }
         
         // If has dependencies, show modal
         if (dependencies && dependencies.length > 0) {
-          console.log(`[DEBUG] Showing dependency modal for ${dependencies.length} dependencies`);
           // Add any compatibility issues to the dependencies message
           if (compatibilityIssues.length > 0) {
-            console.log(`[DEBUG] Adding ${compatibilityIssues.length} compatibility issues to dependency dialog`);
             // This will add compatibility issues to the dependency dialog
             dependencies.push(...compatibilityIssues.map(issue => ({
               projectId: issue.dependency.projectId,
@@ -407,7 +388,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           
           showDependencyModal(mod, dependencies);
         } else if (compatibilityIssues.length > 0) {
-          console.log(`[DEBUG] Showing dependency modal for ${compatibilityIssues.length} compatibility issues for mod: ${mod.name || mod.title}`);
           // Use existing compatibility warning handler to format and show dependency modal
           await handleCompatibilityWarning({ detail: {
             issues: compatibilityIssues,
@@ -424,7 +404,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           });
           return;
         } else {
-          console.log(`[DEBUG] No dependencies or compatibility issues, installing directly`);
           // No dependencies or compatibility issues, install directly
           await installMod(mod, serverPath);
           
@@ -435,7 +414,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           });
         }
       } catch (depError) {
-        console.error('[ERROR] Error during dependency checking:', depError);
         
         // Don't just try to install the mod if dependency checking fails
         // Instead, show a meaningful error to the user
@@ -444,10 +422,8 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         // Ask the user if they want to continue with installation
         if (confirm(`Warning: Failed to check if the mod "${mod.name || mod.title}" requires dependencies. Continue with installation anyway?`)) {
           // If user confirms, proceed with installation
-          console.log(`[DEBUG] User confirmed installation despite dependency check failure`);
           await installMod(mod, serverPath);
         } else {
-          console.log(`[DEBUG] User canceled installation due to dependency check failure`);
         }
         
         // Clear installing state after installation
@@ -648,7 +624,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         successMessage.set('');
       }, 2000);
     } catch (error) {
-      console.error('Error refreshing mods:', error);
       isLoading.set(false);
       errorMessage.set(`Failed to refresh mods: ${error.message}`);
     }
@@ -663,15 +638,12 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     const mod = { ...rawMod, source: rawMod.source || 'modrinth' };
     
     try {
-      console.log('Installing dependencies directly:', rawDependencies);
-      console.log('For mod:', mod);
       // Set up stores for installWithDependencies
       modToInstall.set(mod);
       currentDependencies.set(rawDependencies);
       // Perform the installation immediately
       await installWithDependencies(serverPath);
     } catch (error) {
-      console.error('Error installing dependencies:', error);
       errorMessage.set(`Error installing dependencies: ${error.message || 'Unknown error'}`);
     }
   }

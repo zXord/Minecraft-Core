@@ -25,10 +25,8 @@ function safeSend(channel, data) {
     try {
       mainWindow.webContents.send(channel, data);
     } catch (err) {
-      console.error(`Failed to send message on ${channel}:`, err);
     }
   } else {
-    console.warn(`Cannot send message on channel ${channel}: No valid main window reference`);
   }
 }
 

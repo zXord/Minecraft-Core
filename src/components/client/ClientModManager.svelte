@@ -200,7 +200,6 @@
           });
           
           if (serverMod && serverMod.projectId) {
-            console.log(`[ClientModManager] Enriching ${mod.fileName} with projectId: ${serverMod.projectId}`);
             return {
               ...mod,
               projectId: serverMod.projectId
@@ -211,7 +210,6 @@
         });
         
         const projectIds = new Set(enrichedInfo.map(i => i.projectId).filter(Boolean));
-        console.log('[ClientModManager] Setting installedModIds to:', Array.from(projectIds));
         installedModIds.set(projectIds);
         installedModInfo.set(enrichedInfo);
         
@@ -220,10 +218,8 @@
           updateManualMods();
         }, 100);
       } else {
-        console.warn('Received non-array mod info:', info);
       }
     } catch (err) {
-      console.error('Failed to load installed mod info:', err);
     }
   }// Load mods from the management server
   async function loadModsFromServer() {
@@ -243,14 +239,12 @@
       });
 
       if (!testResponse.ok) {
-        console.log('[ClientModManager] Server connection failed');
         connectionStatus = 'disconnected';
         serverManagedFiles.set(new Set());
         return;
       }
 
       connectionStatus = 'connected';
-      console.log('[ClientModManager] Connected to server successfully');
 
       // Get server info which includes required mods
       const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
@@ -261,14 +255,12 @@
 
       if (serverInfoResponse.ok) {
         const serverInfo = await serverInfoResponse.json();
-        console.log('[ClientModManager] Received server info:', serverInfo);
         if (serverInfo.success) {
           if (serverInfo.minecraftVersion) {
             minecraftVersion.set(serverInfo.minecraftVersion);
           }
           requiredMods = serverInfo.requiredMods || [];
           allClientMods = serverInfo.allClientMods || [];
-          console.log('[ClientModManager] Set requiredMods:', requiredMods);          console.log('[ClientModManager] Set allClientMods:', allClientMods);
           
           // Update global store with server-managed mod file names
           // IMPORTANT: Merge with existing store to preserve previously downloaded server mods
@@ -288,9 +280,6 @@
           ]);
           
           serverManagedFiles.set(mergedManaged);
-          console.log('[ClientModManager] Current server mods:', Array.from(currentServerMods));
-          console.log('[ClientModManager] Previously managed files:', Array.from(existingManagedFiles));
-          console.log('[ClientModManager] Merged server managed files:', Array.from(mergedManaged));          
           // Refresh installed mod info to enrich with server project IDs
           await loadInstalledInfo();
           
@@ -305,12 +294,10 @@
             if (currentServerMods.has(fileName) || installedFileNames.has(fileName)) {
               cleanedManaged.add(fileName);
             } else {
-              console.log(`[ClientModManager] Removing ${fileName} from server managed files - no longer installed or on server`);
             }
           }
           
           serverManagedFiles.set(cleanedManaged);
-          console.log('[ClientModManager] Final cleaned server managed files:', Array.from(cleanedManaged));
           
           // Get full mod list from server
           const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
@@ -321,7 +308,6 @@
 
           if (modsResponse.ok) {
             const modsData = await modsResponse.json();
-            console.log('[ClientModManager] Received mods data:', modsData);
             if (modsData.success) {
               serverMods = modsData.mods.server || [];
               const bothMods = modsData.mods.both || [];
@@ -347,7 +333,6 @@
 
       lastModCheck = new Date();
     } catch (err) {
-      console.error('[ClientModManager] Error loading mods from server:', err);
       connectionStatus = 'disconnected';
       serverManagedFiles.set(new Set());
       errorMessage.set('Failed to connect to server: ' + err.message);
@@ -388,7 +373,6 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
-      console.error('[ClientModManager] Error checking mod synchronization:', err);
       errorMessage.set('Failed to check mod synchronization.');
       setTimeout(() => errorMessage.set(''), 5000);
     }
@@ -432,7 +416,6 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
-      console.error('[ClientModManager] Error downloading mods:', err);
       errorMessage.set('Error downloading mods: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
     }
@@ -474,7 +457,6 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
-      console.error('[ClientModManager] Error downloading optional mods:', err);
       errorMessage.set('Error downloading optional mods: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
     }
@@ -535,7 +517,6 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
-      console.error('[ClientModManager] Error toggling mod:', err);
       errorMessage.set('Error toggling mod: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
     }
@@ -571,7 +552,6 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
-      console.error('[ClientModManager] Error deleting mod:', err);
       errorMessage.set('Error deleting mod: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
     }
@@ -649,7 +629,6 @@
         throw new Error(result?.error || 'Installation failed');
       }
     } catch (err) {
-      console.error('[ClientModManager] Error installing mod:', err);
       errorMessage.set(`Failed to install ${mod.name}: ${err.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
     } finally {
@@ -681,7 +660,6 @@
       await installClientMod(mod, mod.selectedVersionId, path);
       return true;
     } catch (error) {
-      console.error('[ClientModManager] Error installing client mod:', error);
       return false;
     }
   }
@@ -712,7 +690,6 @@
       const versions = await fetchModVersions(modId, get(modSource), !loadAll, loadAll);
       versionsCache[modId] = versions;
     } catch (error) {
-      console.error('Failed to load versions:', error);
       versionsError[modId] = error.message;
     } finally {
       versionsLoading[modId] = false;
@@ -753,7 +730,6 @@
         }
       }
     } catch (error) {
-      console.error('Error installing dependencies:', error);
       errorMessage.set(`Failed to install dependencies: ${error.message || 'Unknown error'}`);
       installingModIds.set(new Set());
     }
@@ -806,7 +782,6 @@
           }
         }
       } catch (compatErr) {
-        console.error('Error checking compatibility:', compatErr);
       }
 
       if ((dependencies && dependencies.length > 0) || compatibilityIssues.length > 0) {
@@ -834,7 +809,6 @@
 
       await installClientMod(modForInstall, ver);
     } catch (err) {
-      console.error('[ClientModManager] Error installing mod:', err);
       errorMessage.set(`Failed to install ${modForInstall.name}: ${err.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
       installingModIds.update(ids => {
