@@ -34,7 +34,6 @@
     sortBy = localSortBy;
     filterType = localFilterType;
     
-    console.log('ModFilters: Applying filters', { sortBy, filterType });
     
     // Dispatch a custom event when filters change
     const detail = {

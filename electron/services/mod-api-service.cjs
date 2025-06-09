@@ -18,7 +18,6 @@ async function rateLimit() {
   
   if (elapsed < RATE_LIMIT_MS && lastRequestTime > 0) {
     const delay = RATE_LIMIT_MS - elapsed;
-    console.log(`[API] Rate limiting: Waiting ${delay}ms before next request`);
     await new Promise(resolve => setTimeout(resolve, delay));
   }
   
@@ -34,7 +33,6 @@ const versionCache = new Map();
  * @returns {string} - Converted sort option
  */
 function convertSortToModrinthFormat(sortBy) {
-  console.log(`[API:Modrinth] Converting sort parameter: "${sortBy}"`);
   
   // Convert our sort values to Modrinth's expected format
   let modrinthSort;
@@ -55,11 +53,9 @@ function convertSortToModrinthFormat(sortBy) {
       modrinthSort = 'updated';
       break;
     default: 
-      console.log(`[API:Modrinth] Unknown sort value: "${sortBy}", defaulting to relevance`);
       modrinthSort = 'relevance';
   }
   
-  console.log(`[API:Modrinth] Converted sort parameter to: "${modrinthSort}"`);
   return modrinthSort;
 }
 
@@ -77,7 +73,6 @@ function convertSortToModrinthFormat(sortBy) {
 async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
   await rateLimit();
   
-  console.log(`[API:Modrinth] getModrinthPopular called with sortBy="${sortBy}" and environmentType="${environmentType}"`);
   
   const modrinthSortBy = convertSortToModrinthFormat(sortBy);
   
@@ -120,8 +115,6 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
   url.searchParams.append('index', modrinthSortBy);  // For newer API versions
   
   // Execute request
-  console.log(`[API:Modrinth] Fetching popular mods with index=${modrinthSortBy}, facets=${facetsParam}, page=${page}, limit=${limit}, environmentType=${environmentType}`);
-  console.log(`[API:Modrinth] Full URL: ${url.toString()}`);
   
   try {
     const response = await fetch(url.toString(), {
@@ -131,18 +124,14 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
     });
     
     if (!response.ok) {
-      console.error(`[API:Modrinth] Error response: ${response.status} ${response.statusText}`);
       throw new Error(`Modrinth API error: ${response.status}`);
     }
     
     const data = await response.json();
-    console.log(`[API:Modrinth] Got ${data.hits?.length || 0} results, total hits: ${data.total_hits || 0}`);
     
     // Debug: Log first few results to check if they're actually sorted correctly
     if (data.hits && data.hits.length > 0) {
-      console.log(`[API:Modrinth] First result: ${data.hits[0].title}, Downloads: ${data.hits[0].downloads}, Follows: ${data.hits[0].follows}`);
       if (data.hits.length > 1) {
-        console.log(`[API:Modrinth] Second result: ${data.hits[1].title}, Downloads: ${data.hits[1].downloads}, Follows: ${data.hits[1].follows}`);
       }
     }
     
@@ -172,7 +161,6 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
       }
     };
   } catch (error) {
-    console.error('Modrinth API error:', error);
     throw error;
   }
 }
@@ -190,11 +178,9 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
 async function searchModrinthMods({ query, loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
-  console.log('[API:Service] Searching mods with:', { keyword: query, loader, version, source: 'modrinth', page, limit, sortBy, environmentType });
   
   await rateLimit();
   
-  console.log(`[API:Modrinth] searchModrinthMods called with sortBy="${sortBy}" and environmentType="${environmentType}"`);
   
   const modrinthSortBy = convertSortToModrinthFormat(sortBy);
   
@@ -238,8 +224,6 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   url.searchParams.append('index', modrinthSortBy);  // For newer API versions
   
   // Execute request
-  console.log(`[API:Modrinth] Searching mods with query="${query}", index=${modrinthSortBy}, facets=${facetsParam}, page=${page}, limit=${limit}, environmentType=${environmentType}`);
-  console.log(`[API:Modrinth] Full URL: ${url.toString()}`);
   
   try {
     const response = await fetch(url.toString(), {
@@ -249,18 +233,14 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
     });
     
     if (!response.ok) {
-      console.error(`[API:Modrinth] Error response: ${response.status} ${response.statusText}`);
       throw new Error(`Modrinth API error (${response.status}): ${response.statusText}`);
     }
     
     const data = await response.json();
-    console.log(`[API:Modrinth] Got ${data.hits?.length || 0} results, total hits: ${data.total_hits || 0}`);
     
     // Debug: Log first few results to check if they're actually sorted correctly
     if (data.hits && data.hits.length > 0) {
-      console.log(`[API:Modrinth] First result: ${data.hits[0].title}, Downloads: ${data.hits[0].downloads}, Follows: ${data.hits[0].follows}`);
       if (data.hits.length > 1) {
-        console.log(`[API:Modrinth] Second result: ${data.hits[1].title}, Downloads: ${data.hits[1].downloads}, Follows: ${data.hits[1].follows}`);
       }
     }
     
@@ -291,7 +271,6 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
       }
     };
   } catch (error) {
-    console.error('[API:Service] Error searching Modrinth mods:', error);
     throw error;
   }
 }
@@ -400,7 +379,6 @@ async function getModrinthDownloadUrl(projectId, version, loader) {
     const primaryFile = versionInfo.files.find(file => file.primary) || versionInfo.files[0];
     return primaryFile.url;
   } catch (error) {
-    console.error('Modrinth download URL error:', error);
     throw error;
   }
 }
@@ -422,7 +400,6 @@ async function getModrinthProjectInfo(projectId) {
     
     return await response.json();
   } catch (error) {
-    console.error('Modrinth project info error:', error);
     throw error;
   }
 }
@@ -463,7 +440,6 @@ async function resolveModrinthDependencies(dependencies) {
           dependencyType: dep.dependency_type
         });
       } catch (error) {
-        console.error(`[API:Service] Failed to resolve dependency ${dep.project_id}:`, error);
         // Include the dependency even if we can't resolve its name
         resolvedDeps.push({
           projectId: dep.project_id,
@@ -491,7 +467,6 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     // Check cache first
     const cacheKey = `${projectId}:${loader || ''}:${gameVersion || ''}`;
     if (versionCache.has(cacheKey)) {
-      console.log(`[API:Service] Using cached versions for ${projectId}`);
       
       // If we only need the latest version, filter from cache
       if (loadLatestOnly) {
@@ -597,7 +572,6 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     
     return mappedVersions;
   } catch (error) {
-    console.error('Modrinth versions error:', error);
     throw error;
   }
 }
@@ -627,9 +601,7 @@ async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader)
   } catch (error) {
     // Only log as error if it's not a 404 (which can be normal for missing/removed versions)
     if (error.message && error.message.includes('404')) {
-      console.warn('Modrinth version not found (404):', versionId);
     } else {
-      console.error('Modrinth version info error:', error);
     }
     throw error;
   }
@@ -655,7 +627,6 @@ async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
     // Now fetch its full details.
     return await getModrinthVersionInfo(projectId, versions[0].id, gameVersion, loader);
   } catch (error) {
-    console.error('Modrinth latest version info error:', error);
     throw error;
   }
 }
@@ -671,7 +642,6 @@ async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
 async function getCurseForgePopular({ loader, version, page = 1, limit = 20, environmentType = 'all' }) {
-  console.log('[API:Service] CurseForge support not implemented for getPopular');
   // Return an empty result set
   return {
     mods: [],
@@ -696,7 +666,6 @@ async function getCurseForgePopular({ loader, version, page = 1, limit = 20, env
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
 async function searchCurseForgeMods({ query, loader, version, page = 1, limit = 20, environmentType = 'all' }) {
-  console.log('[API:Service] CurseForge support not implemented for searchMods');
   // Return an empty result set
   return {
     mods: [],
@@ -718,7 +687,6 @@ async function searchCurseForgeMods({ query, loader, version, page = 1, limit = 
  * @returns {Promise<string>} Download URL
  */
 async function getCurseForgeDownloadUrl(modId, version, loader) {
-  console.log('[API:Service] CurseForge support not implemented for getDownloadUrl');
   throw new Error('CurseForge support not implemented');
 }
 

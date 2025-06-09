@@ -12,7 +12,6 @@ class AuthHandler {
   // Microsoft Authentication
   async authenticateWithMicrosoft() {
     try {
-      console.log('[AuthHandler] Starting Microsoft authentication...');
       
       // Create MSMC Auth instance
       const authManager = new Auth("select_account");
@@ -36,7 +35,6 @@ class AuthHandler {
           savedAt: new Date().toISOString()
         };
         
-        console.log(`[AuthHandler] ✅ Authentication successful for user: ${token.profile.name}`);
         this.emitter.emit('auth-success', { username: token.profile.name, uuid: token.profile.id });
         
         return { success: true, username: token.profile.name, uuid: token.profile.id };
@@ -44,7 +42,6 @@ class AuthHandler {
         throw new Error('Authentication failed: No token received');
       }
     } catch (error) {
-      console.error('[AuthHandler] Authentication error:', error);
       this.emitter.emit('auth-error', error.message);
       return { success: false, error: error.message };
     }
@@ -88,10 +85,8 @@ class AuthHandler {
       };
       
       fs.writeFileSync(authFile, JSON.stringify(authDataToSave, null, 2));
-      console.log('[AuthHandler] ✅ Authentication data saved with refresh capability');
       return { success: true };
     } catch (error) {
-      console.error('[AuthHandler] Error saving auth data:', error);
       return { success: false, error: error.message };
     }
   }
@@ -130,12 +125,9 @@ class AuthHandler {
       
       // If we generated a new client_token, save it immediately
       if (!savedAuthData.client_token) {
-        console.log('[AuthHandler] Generated missing client_token, saving updated auth data...');
         try {
           await this.saveAuthData(clientPath);
-          console.log('[AuthHandler] ✅ Updated auth data saved with new client_token');
         } catch (saveError) {
-          console.warn('[AuthHandler] ⚠️ Could not save updated auth data:', saveError.message);
         }
       }
       
@@ -149,18 +141,13 @@ class AuthHandler {
             if (authManager.cache && savedAuthData.refreshData.cache) {
               authManager.cache = savedAuthData.refreshData.cache;
               this.authData.meta = authManager;
-              console.log('[AuthHandler] ✅ Restored MSMC auth manager with cache');
             }
           }
         } catch (restoreError) {
-          console.warn('[AuthHandler] Could not restore refresh capability:', restoreError.message);
         }
       }
-        console.log(`[AuthHandler] ✅ Loaded saved authentication for: ${savedAuthData.name}`);
-      // console.log(`[AuthHandler] Token age: ${hoursSinceSaved.toFixed(1)} hours`);
       
       const hasRefreshCapability = this.authData.meta && typeof this.authData.meta.launch === 'function';
-      console.log(`[AuthHandler] Refresh capability: ${hasRefreshCapability ? 'Available' : 'Limited'}`);
       
       return { 
         success: true, 
@@ -169,7 +156,6 @@ class AuthHandler {
         needsRefresh: hoursSinceSaved > 1 && !hasRefreshCapability // Only refresh if old and no capability
       };
     } catch (error) {
-      console.error('[AuthHandler] Error loading auth data:', error);
       return { success: false, error: error.message };
     }
   }
@@ -185,17 +171,14 @@ class AuthHandler {
       const savedDate = new Date(this.authData.savedAt || 0);      const now = new Date();
       const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
       
-      // console.log(`[AuthHandler] Token age: ${hoursSinceSaved.toFixed(1)} hours`);
       
       // If token is very fresh (less than 30 minutes), just use it
       if (hoursSinceSaved < 0.5) {
-        console.log('[AuthHandler] ✅ Token is very fresh, no refresh needed');
         return { success: true, refreshed: false };
       }
       
       // If we have MSMC meta data, try to refresh
       if (this.authData.meta && (typeof this.authData.meta.refresh === 'function' || typeof this.authData.meta.launch === 'function')) {
-        console.log('[AuthHandler] Attempting to refresh authentication token...');
         
         try {
           let refreshedToken = null;
@@ -225,14 +208,11 @@ class AuthHandler {
               savedAt: new Date().toISOString()
             };
             
-            console.log(`[AuthHandler] ✅ Authentication refreshed successfully for: ${refreshedToken.profile.name}`);
-            console.log(`[AuthHandler] ✅ Preserved original clientToken for session continuity`);
             return { success: true, refreshed: true };
           } else {
             throw new Error('Refresh succeeded but returned invalid token data');
           }
         } catch (refreshError) {
-          console.warn('[AuthHandler] Token refresh failed:', refreshError.message);
           
           // If it's a network error and token isn't too old, use cached token
           if (refreshError.message && (
@@ -244,20 +224,16 @@ class AuthHandler {
             refreshError.message.includes('ECONNRESET')
           )) {
             if (hoursSinceSaved < 4) {
-              console.log('[AuthHandler] ⚠️ Using cached token due to network issues');
               return { success: true, refreshed: false, networkError: true };
             } else {
-              console.log('[AuthHandler] Token too old and network refresh failed, continuing with cached token');
               return { success: true, refreshed: false, networkError: true, refreshFailed: true };
             }
           }
           
           // For other errors, check if token is still usable
           if (hoursSinceSaved < 3) {
-            console.log('[AuthHandler] ⚠️ Refresh failed but token is still relatively fresh, proceeding');
             return { success: true, refreshed: false, refreshFailed: true };
           } else {
-            console.log('[AuthHandler] Token refresh failed and token is old, continuing with cached token');
             return { success: true, refreshed: false, refreshFailed: true };
           }
       }
@@ -265,14 +241,11 @@ class AuthHandler {
 
       // If no refresh capability just log token age; we no longer force re-authentication
       if (hoursSinceSaved > 6) {
-        console.log('[AuthHandler] Token is old and cannot be refreshed, continuing with cached token');
       }
       
-      console.log('[AuthHandler] ✅ Token is acceptable, proceeding without refresh');
       return { success: true, refreshed: false };
       
     } catch (error) {
-      console.error('[AuthHandler] Error checking/refreshing authentication:', error);
       
       // Handle network errors gracefully
       if (error.message && (
@@ -288,7 +261,6 @@ class AuthHandler {
         const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
         
         if (hoursSinceSaved < 8) { // Allow up to 8 hours for network issues
-          console.log('[AuthHandler] ⚠️ Using cached token due to network issues');
           return { success: true, refreshed: false, networkError: true };
         }
       }

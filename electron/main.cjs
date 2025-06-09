@@ -19,14 +19,12 @@ function openFolderDirectly(folderPath) {
   const { exec } = require('child_process');
   const normalizedPath = path.normalize(folderPath);
   
-  console.log('[MAIN] Opening folder directly:', normalizedPath);
   
   return new Promise((resolve, reject) => {
     if (process.platform === 'win32') {
       // Windows - use explorer
       exec(`explorer "${normalizedPath}"`, (error) => {
         if (error) {
-          console.error('[MAIN] Error opening folder with explorer:', error);
           reject(error);
         } else {
           resolve(true);
@@ -36,7 +34,6 @@ function openFolderDirectly(folderPath) {
       // macOS - use open
       exec(`open "${normalizedPath}"`, (error) => {
         if (error) {
-          console.error('[MAIN] Error opening folder with open:', error);
           reject(error);
         } else {
           resolve(true);
@@ -46,7 +43,6 @@ function openFolderDirectly(folderPath) {
       // Linux - use xdg-open
       exec(`xdg-open "${normalizedPath}"`, (error) => {
         if (error) {
-          console.error('[MAIN] Error opening folder with xdg-open:', error);
           reject(error);
         } else {
           resolve(true);
@@ -72,7 +68,6 @@ function createWindow() {
 
   // Debug: print the preload script path
   const preloadPath = path.join(__dirname, 'preload.cjs');
-  console.log('Electron will use preload script at:', preloadPath);
 
   win = new BrowserWindow({
     width,
@@ -103,7 +98,6 @@ function createWindow() {
   // Load the app - try port 5173 first, then 5174 if that fails
   const tryLoadURL = (url) => {
     win.loadURL(url).catch(() => {
-      console.log(`Failed to load ${url}, trying alternative port...`);
       if (url.includes('5173')) {
         win.loadURL('http://localhost:5174');
       }
@@ -161,13 +155,11 @@ app.whenReady().then(() => {
     
     // Ensure the delete-instance handler is registered
     if (!registeredHandlers.has('delete-instance')) {
-      console.error('[MAIN] delete-instance handler is not registered');
     }
     
     // Define our folder openers but don't register them directly
     const openFolderHandler = async (_event, folderPath) => {
       try {
-        console.log('[MAIN] Opening folder in explorer:', folderPath);
         
         // Check if path exists
         if (!folderPath) {
@@ -179,14 +171,12 @@ app.whenReady().then(() => {
           await openFolderDirectly(folderPath);
           return { success: true, method: 'direct' };
         } catch (directError) {
-          console.error('[MAIN] Direct folder open failed:', directError);
           
           // Fall back to shell.openPath
           try {
             await shell.openPath(path.normalize(folderPath));
             return { success: true, method: 'shell' };
           } catch (shellError) {
-            console.error('[MAIN] shell.openPath failed:', shellError);
             
             // Final attempt with spawn
             if (process.platform === 'win32') {
@@ -194,7 +184,6 @@ app.whenReady().then(() => {
                 require('child_process').spawn('explorer', [folderPath], { detached: true });
                 return { success: true, method: 'spawn' };
               } catch (spawnError) {
-                console.error('[MAIN] Spawn failed:', spawnError);
                 return { 
                   success: false, 
                   error: 'All methods failed: ' + directError.message 
@@ -209,7 +198,6 @@ app.whenReady().then(() => {
           }
         }
       } catch (err) {
-        console.error('[MAIN] Unhandled error in open-folder:', err);
         return { success: false, error: err.message };
       }
     };
@@ -224,7 +212,6 @@ app.whenReady().then(() => {
       try {
         return await dialog.showMessageBox(win, options);
       } catch (err) {
-        console.error('[MAIN] Direct handler: Failed to show dialog:', err);
         throw new Error(`Failed to show dialog: ${err.message}`);
       }
     });
@@ -237,7 +224,6 @@ app.whenReady().then(() => {
 
   eventBus.on('server-started', () => {
     if (!fs.existsSync(appWatchdogPath)) {
-      console.error(`App watchdog script not found at: ${appWatchdogPath}`);
       return;
     }
     if (appWatchdogProcess) {
@@ -266,20 +252,16 @@ app.whenReady().then(() => {
         pid = parseInt(fs.readFileSync(runtimePaths.appWatchdogPid, 'utf8'));
       }
     } catch (err) {
-      console.error('Failed to read app-watchdog.pid:', err.message);
     }
     if (pid) {
       try {
         const { execSync } = require('child_process');
         execSync(`taskkill /PID ${pid} /F`);
-        console.log(`App watchdog process with PID ${pid} killed.`);
         // Remove the PID file after killing
         fs.unlinkSync(runtimePaths.appWatchdogPid);
       } catch (err) {
-        console.error('Failed to kill app watchdog process:', err.message);
       }
     } else {
-      console.log('No app watchdog PID found to kill.');
     }
     appWatchdogProcess = null;
   }
@@ -333,7 +315,6 @@ app.whenReady().then(() => {
         initFromServerConfig(lastServerPath);
       }
     } catch (err) {
-      console.error('Error restoring last server path:', err);
     }
   });
   

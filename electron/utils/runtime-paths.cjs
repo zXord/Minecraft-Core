@@ -29,7 +29,6 @@ function getRuntimeDir() {
       fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o755 });
     }
   } catch (err) {
-    console.error('Failed to create runtime directory:', err);
     // Use system temp as final fallback
     runtimeDir = path.join(os.tmpdir(), 'minecraft-core-runtime-' + Date.now());
     fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o755 });
@@ -78,14 +77,11 @@ function cleanupRuntimeFiles() {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
-          console.log(`Cleaned up runtime file: ${filePath}`);
         }
       } catch (err) {
-        console.warn(`Failed to clean up ${filePath}:`, err.message);
       }
     }
   } catch (err) {
-    console.error('Error during runtime cleanup:', err);
   }
 }
 

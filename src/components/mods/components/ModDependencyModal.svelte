@@ -40,7 +40,6 @@
         const cleanedName = cleanModName(dep.name);
         if (cleanedName && processedNames.has(cleanedName)) {
           // It's a duplicate by name
-          console.log(`Filtering out duplicate dependency by name: ${cleanedName}`);
           return false;
         }
         
@@ -236,7 +235,6 @@
       }
       
       // Log the cancel operation
-      console.log(`Canceled installation for mod: ${mod.name} (${mod.id})`);
     }
     
     // Clear the dependency modal state

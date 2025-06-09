@@ -25,7 +25,6 @@ function createConfigHandlers(win) {
         const configContent = fs.readFileSync(configPath, 'utf-8');
         return JSON.parse(configContent);
       } catch (err) {
-        console.error('Error reading server config:', err);
         throw err;
       }
     },
@@ -47,7 +46,6 @@ function createConfigHandlers(win) {
         
         return { success: true };
       } catch (err) {
-        console.error('Error writing server config:', err);
         return { success: false, error: err.message };
       }
     },
@@ -71,7 +69,6 @@ function createConfigHandlers(win) {
             const content = fs.readFileSync(configPath, 'utf-8');
             config = JSON.parse(content);
           } catch (parseErr) {
-            console.error('Error parsing existing config:', parseErr);
             // Continue with empty config
           }
         }
@@ -84,7 +81,6 @@ function createConfigHandlers(win) {
         
         return { success: true, config: updatedConfig };
       } catch (err) {
-        console.error('Error updating server config:', err);
         return { success: false, error: err.message };
       }
     }

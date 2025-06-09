@@ -16,16 +16,13 @@ function initializePlayerIpMap(serverPath) {
   if (fs.existsSync(playerMapFile)) {
     try {
       const mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
-      console.log('Loading player-IP map from file:', JSON.stringify(mapData, null, 2));
       
       // Populate the in-memory map
       Object.entries(mapData).forEach(([ip, playerName]) => {
         playerIpMap.set(ip, playerName);
       });
       
-      console.log(`Loaded ${playerIpMap.size} player-IP associations from persistent storage`);
     } catch (err) {
-      console.error('Error initializing player-IP map:', err);
     }
   }
 }
@@ -81,7 +78,6 @@ function createPlayerHandlers() {
               try {
                 mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
               } catch (err) {
-                console.error('Error reading player-ip-map.json:', err);
               }
             }
             
@@ -145,7 +141,6 @@ function createPlayerHandlers() {
                     try {
                       fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
                     } catch (err) {
-                      console.error('Error updating player-ip-map.json:', err);
                     }
                   }
                 }
@@ -161,11 +156,9 @@ function createPlayerHandlers() {
           
           return data;
         } catch (parseErr) {
-          console.error(`Error parsing ${file}:`, parseErr);
           return [];
         }
       } catch (err) {
-        console.error('Error reading player list:', err);
         throw err;
       }
     },
@@ -190,7 +183,6 @@ function createPlayerHandlers() {
         fs.writeFileSync(filePath, content);
         return { success: true };
       } catch (err) {
-        console.error('Error writing file:', err);
         throw err;
       }
     },
@@ -224,7 +216,6 @@ function createPlayerHandlers() {
           try {
             list = JSON.parse(fs.readFileSync(file, 'utf-8'));
           } catch (err) {
-            console.error(`Error reading ${file}:`, err);
             list = [];
           }
         }
@@ -254,9 +245,7 @@ function createPlayerHandlers() {
             }
             mapData[entry] = playerName;
             fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
-            console.log(`Stored player ${playerName} for IP ${entry} in player-ip-map.json`);
           } catch (err) {
-            console.error('Error updating player-ip map:', err);
           }
         }
         
@@ -310,7 +299,6 @@ function createPlayerHandlers() {
         fs.writeFileSync(file, JSON.stringify(list, null, 2));
         return list;
       } catch (err) {
-        console.error('Error adding player to list:', err);
         throw err;
       }
     },
@@ -344,7 +332,6 @@ function createPlayerHandlers() {
           try {
             list = JSON.parse(fs.readFileSync(file, 'utf-8'));
           } catch (err) {
-            console.error(`Error reading ${file}:`, err);
             list = [];
           }
         }
@@ -378,7 +365,6 @@ function createPlayerHandlers() {
         fs.writeFileSync(file, JSON.stringify(list, null, 2));
         return list;
       } catch (err) {
-        console.error('Error adding player with details to list:', err);
         throw err;
       }
     },
@@ -389,7 +375,6 @@ function createPlayerHandlers() {
         // In a real environment this would query the server logs or a player database
         return `127.0.0.${Math.floor(Math.random() * 255)}`;
       } catch (err) {
-        console.error('Error getting player IP:', err);
         return null;
       }
     },
@@ -435,7 +420,6 @@ function createPlayerHandlers() {
               return { lastBannedPlayer: playerName };
             }
           } catch (err) {
-            console.error('Error reading player-ip map:', err);
           }
         }
         
@@ -452,7 +436,6 @@ function createPlayerHandlers() {
               }
             }
           } catch (err) {
-            console.error('Error reading banned-ips.json:', err);
           }
         }
         
@@ -471,7 +454,6 @@ function createPlayerHandlers() {
               }
             }
           } catch (err) {
-            console.error('Error reading banned-players.json:', err);
           }
         }
         
@@ -490,13 +472,11 @@ function createPlayerHandlers() {
               }
             }
           } catch (err) {
-            console.error('Error reading whitelist.json:', err);
           }
         }
         
         return { lastBannedPlayer: null };
       } catch (err) {
-        console.error('Error getting last banned player:', err);
         return { lastBannedPlayer: null };
       }
     },
@@ -529,7 +509,6 @@ function createPlayerHandlers() {
         try {
           rawList = JSON.parse(fs.readFileSync(file, 'utf-8'));
         } catch (parseErr) {
-          console.error(`Error parsing ${file}:`, parseErr);
           return [];
         }
         
@@ -550,7 +529,6 @@ function createPlayerHandlers() {
         fs.writeFileSync(file, JSON.stringify(newList, null, 2));
         return newList;
       } catch (err) {
-        console.error('Error removing player from list:', err);
         throw err;
       }
     }

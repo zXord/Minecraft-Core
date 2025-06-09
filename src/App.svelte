@@ -30,7 +30,6 @@
   
   // Save instances whenever they change
   $: if (step === 'done' && instances) {
-    console.log('Instances changed, saving...');
     saveInstances(instances);
   }
   
@@ -74,10 +73,8 @@
         // Explicitly save instances to ensure persistence
         await saveInstances(instances);
       } else {
-        console.error('Failed to rename instance:', result.error);
       }
     } catch (err) {
-      console.error('Error renaming instance:', err);
     }
     
     // Reset edit state
@@ -111,7 +108,6 @@
     
     // 1) First, set up the restoration listeners BEFORE anything else
     window.electron.on('update-server-path', (newPath) => {
-      console.log('Received update-server-path:', newPath);
       if (newPath) {
         path = newPath;
         
@@ -129,7 +125,6 @@
     });
     
     window.electron.on('restore-server-settings', (settings) => {
-      console.log('Received restore-server-settings:', settings);
       if (settings) {
         // Update the serverState store with restored settings
         serverState.update(state => ({
@@ -157,13 +152,11 @@
           const store = window.getInitialInstances();
           if (store.loaded && Array.isArray(store.instances)) {
             initialInstances = store.instances;
-            console.log('Using pre-loaded instances from main.js:', initialInstances);
           }
         }
         
         // If no pre-loaded instances, fetch them (fallback)
         if (initialInstances.length === 0) {
-          console.log('No pre-loaded instances, fetching...');
           const instancesResult = await window.electron.invoke('get-instances');
           if (Array.isArray(instancesResult)) {
             initialInstances = instancesResult;
@@ -205,11 +198,9 @@
             
             // Set step to done to show the main UI
             step = 'done';
-            console.log('Instance restoration completed:', currentInstance);
           }
         } else {
           // No valid instances, show instance selection screen
-          console.log('No instances found, showing welcome screen');
           showInstanceSelector = true;
           step = 'loading'; // Keep in loading to avoid showing setup wizard
         }
@@ -217,7 +208,6 @@
         // Open sidebar by default only if we have instances
         isSidebarOpen = instances.length > 0;
       } catch (error) {
-        console.error('Error in checkExistingSetup:', error);
         // If any error occurs, show the instance selector
         showInstanceSelector = true;
         step = 'loading';
@@ -275,15 +265,12 @@
     window.electron.invoke('save-instances', instances)
       .then(result => {
         if (!result || !result.success) {
-          console.error('Failed to save instances:', result?.error || 'Unknown error');
         } else {
-          console.log('Instances saved successfully');
         }
         // Return to main view
         step = 'done';
       })
       .catch(err => {
-        console.error('Failed to save instances:', err);
         // Return to main view anyway
         step = 'done';
       });
@@ -373,14 +360,11 @@
       window.electron.invoke('save-instances', instances)
         .then(result => {
           if (!result || !result.success) {
-            console.error('Failed to save client instance:', result?.error || 'Unknown error');
           } else {
-            console.log('Client instance saved successfully');
           }
           step = 'done';
         })
         .catch(err => {
-          console.error('Failed to save client instance:', err);
           step = 'done';
         });
     }

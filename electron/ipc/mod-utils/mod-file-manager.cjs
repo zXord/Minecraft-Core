@@ -25,7 +25,6 @@ const modCategoriesStore = {
       }
       return [];
     } catch (error) {
-      console.error('Error reading mod categories:', error);
       return [];
     }
   },
@@ -34,7 +33,6 @@ const modCategoriesStore = {
       fsSync.writeFileSync(configFile, JSON.stringify(data, null, 2), 'utf8');
       return true;
     } catch (error) {
-      console.error('Error writing mod categories:', error);
       return false;
     }
   }
@@ -89,13 +87,11 @@ async function readModMetadataFromJar(jarPath) {
       return parseForgeToml(text);
     }
   } catch (err) {
-    console.warn('[ModManager] Failed to read metadata from', jarPath, err.message);
   }
   return {};
 }
 
 async function listMods(serverPath) {
-  console.log('[ModManager] Listing mods from:', serverPath);
   
   if (!serverPath) {
     throw new Error('Server path is required for listing mods');
@@ -110,8 +106,6 @@ async function listMods(serverPath) {
   
   const clientPath = path.join(serverPath, 'client');
   
-  console.log('[ModManager] Server path:', serverPath);
-  console.log('[ModManager] Client path:', clientPath);
   
   const serverModsDir = path.join(serverPath, 'mods');
   const clientModsDir = path.join(clientPath, 'mods');
@@ -119,7 +113,6 @@ async function listMods(serverPath) {
   
   await fs.mkdir(serverModsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true }).catch(err => {
-    console.warn('[ModManager] Could not create client mods directory:', err);
   });
   await fs.mkdir(disabledModsDir, { recursive: true });
   
@@ -131,7 +124,6 @@ async function listMods(serverPath) {
     const clientFiles = await fs.readdir(clientModsDir);
     clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   } catch (err) {
-    console.warn('[ModManager] Could not read client mods directory:', err);
   }
   
   const disabledFiles = await fs.readdir(disabledModsDir);
@@ -150,8 +142,6 @@ async function listMods(serverPath) {
   
   const allModFiles = [...new Set([...serverModFiles, ...clientModFiles, ...disabledModFiles])];
   
-  console.log('[ModManager] Found mods:', allMods);
-  console.log('[ModManager] All mod filenames:', allModFiles);
   
   return {
     mods: allMods,
@@ -162,7 +152,6 @@ async function listMods(serverPath) {
 }
 
 async function getInstalledModInfo(serverPath) {
-  console.log('[ModManager] Getting installed mod info from:', serverPath);
   
   if (!serverPath) {
     throw new Error('Server path is required');
@@ -182,7 +171,6 @@ async function getInstalledModInfo(serverPath) {
     const clientFiles = await fs.readdir(clientModsDir);
     clientMods = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
   } catch (err) {
-    console.warn('[ModManager] Could not read client mods:', err);
   }
   
   const disabledDir = path.join(serverPath, 'mods_disabled');
@@ -207,14 +195,11 @@ async function getInstalledModInfo(serverPath) {
       
       try {
         const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
-        manifest = JSON.parse(clientManifestContent);        // console.log(`[ModManager] Found client manifest for ${modFile}`);
       } catch (clientManifestErr) {
         try {
           const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
           manifest = JSON.parse(serverManifestContent);
-          // console.log(`[ModManager] Found server manifest for ${modFile}`);
         } catch (serverManifestErr) {
-          console.log(`[ModManager] No manifest found for ${modFile} in either location`);
         }
       }
         if (manifest) {
@@ -252,23 +237,19 @@ async function getInstalledModInfo(serverPath) {
               };
             }
           } catch (metaErr) {
-            console.warn('[ModManager] Failed to enhance manifest with metadata:', metaErr.message);
           }
         }
         modInfo.push(manifest);
       }
     }
   } catch (manifestDirErr) {
-    console.error('[ModManager] Error accessing manifest directories:', manifestDirErr);
   }
   
-  console.log(`[ModManager] Found ${modInfo.length} mod manifests out of ${allModFiles.length} total mods`);
   return modInfo;
 }
 
 // Get installed mod info for a standalone client path
 async function getClientInstalledModInfo(clientPath) {
-  console.log('[ModManager] Getting client installed mod info from:', clientPath);
 
   if (!clientPath) {
     throw new Error('Client path is required');
@@ -276,14 +257,11 @@ async function getClientInstalledModInfo(clientPath) {
 
   const modsDir = path.join(clientPath, 'mods');
   const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
-  console.log('[ModManager] Checking mods directory:', modsDir);
-  console.log('[ModManager] Checking manifest directory:', manifestDir);
   
   await fs.mkdir(modsDir, { recursive: true });
   await fs.mkdir(manifestDir, { recursive: true });
 
   const files = await fs.readdir(modsDir).catch(() => []);
-  console.log('[ModManager] Files in mods directory:', files);
   
   const modFiles = files
     .filter(f =>
@@ -291,17 +269,13 @@ async function getClientInstalledModInfo(clientPath) {
     )
     .map(f => f.replace('.disabled', ''));
 
-  console.log('[ModManager] Mod files found:', modFiles);
   const uniqueModFiles = Array.from(new Set(modFiles));
-  console.log('[ModManager] Unique mod files:', uniqueModFiles);
 
   const modInfo = [];
-  for (const file of uniqueModFiles) {    // console.log('[ModManager] Processing mod file:', file);
     const manifestPath = path.join(manifestDir, `${file}.json`);
     let manifest = null;    try {
       const content = await fs.readFile(manifestPath, 'utf8');
       manifest = JSON.parse(content);
-      // console.log('[ModManager] Found manifest for', file, ':', manifest);
       if (!manifest.projectId || !manifest.versionNumber) {
         try {
           const jarBase = path.join(modsDir, file);
@@ -336,12 +310,10 @@ async function getClientInstalledModInfo(clientPath) {
             };
           }
         } catch (metaErr) {
-          console.warn('[ModManager] Failed to enhance manifest with metadata:', metaErr.message);
         }
       }
       modInfo.push(manifest);
     } catch (err) {
-      console.log(`[ModManager] No manifest found for ${file}, trying to read JAR metadata`);
     }
 
     if (!manifest) {
@@ -349,39 +321,30 @@ async function getClientInstalledModInfo(clientPath) {
       const jarPath = await fs
         .access(jarBase)
         .then(() => {
-          console.log('[ModManager] Found JAR file:', jarBase);
           return jarBase;
         })
         .catch(async () => {
           const disabledPath = jarBase + '.disabled';
           try {
             await fs.access(disabledPath);
-            console.log('[ModManager] Found disabled JAR file:', disabledPath);
             return disabledPath;
           } catch {
-            console.log('[ModManager] No JAR file found for:', file);
             return null;
           }
         });      let meta = {};
       if (jarPath) {
-        // console.log('[ModManager] Reading metadata from JAR:', jarPath);
         meta = await readModMetadataFromJar(jarPath);
-        // console.log('[ModManager] Extracted metadata:', meta);
       }
 
       const modData = { fileName: file, ...meta };
-      // console.log('[ModManager] Adding mod info:', modData);
       modInfo.push(modData);
     }
   }
 
-  console.log(`[ModManager] Found ${modInfo.length} client mod manifests out of ${uniqueModFiles.length} total mods`);
-  console.log('[ModManager] Final mod info:', modInfo);
   return modInfo;
 }
 
 async function saveDisabledMods(serverPath, disabledMods) {
-  console.log('[ModManager] Saving disabled mods:', disabledMods);
   
   if (!serverPath) {
     throw new Error('Server path is required');
@@ -405,21 +368,15 @@ async function saveDisabledMods(serverPath, disabledMods) {
   const enabledFiles = await fs.readdir(modsDir);
   const currentDisabledFiles = await fs.readdir(disabledModsDir);
   
-  console.log(`[ModManager] Enabled mods directory (${modsDir}) contains:`, enabledFiles);
-  console.log(`[ModManager] Disabled mods directory (${disabledModsDir}) contains:`, currentDisabledFiles);
-  console.log(`[ModManager] Desired disabled mods list contains:`, disabledMods);
   
   for (const modFile of enabledFiles) {
     if (modFile.toLowerCase().endsWith('.jar') && disabledMods.includes(modFile)) {
       const sourcePath = path.join(modsDir, modFile);
       const destPath = path.join(disabledModsDir, modFile);
-      console.log(`[ModManager] Disabling mod by moving: ${sourcePath} -> ${destPath}`);
       try {
         await fs.copyFile(sourcePath, destPath);
         await fs.unlink(sourcePath);
-        console.log(`[ModManager] Successfully moved mod to disabled folder: ${modFile}`);
       } catch (moveErr) {
-        console.error(`[ModManager] Error moving mod to disabled folder: ${moveErr.message}`);
         throw new Error(`Failed to disable mod ${modFile}: ${moveErr.message}`);
       }
     }
@@ -429,13 +386,10 @@ async function saveDisabledMods(serverPath, disabledMods) {
     if (modFile.toLowerCase().endsWith('.jar') && !disabledMods.includes(modFile)) {
       const sourcePath = path.join(disabledModsDir, modFile);
       const destPath = path.join(modsDir, modFile);
-      console.log(`[ModManager] Enabling mod by moving: ${sourcePath} -> ${destPath}`);
       try {
         await fs.copyFile(sourcePath, destPath);
         await fs.unlink(sourcePath);
-        console.log(`[ModManager] Successfully moved mod back to enabled folder: ${modFile}`);
       } catch (moveErr) {
-        console.error(`[ModManager] Error moving mod from disabled folder: ${moveErr.message}`);
         throw new Error(`Failed to enable mod ${modFile}: ${moveErr.message}`);
       }
     }
@@ -443,15 +397,11 @@ async function saveDisabledMods(serverPath, disabledMods) {
   
   const newEnabledFiles = await fs.readdir(modsDir);
   const newDisabledFiles = await fs.readdir(disabledModsDir);
-  console.log(`[ModManager] After moves, enabled mods:`, newEnabledFiles);
-  console.log(`[ModManager] After moves, disabled mods:`, newDisabledFiles);
   
-  console.log('[ModManager] Disabled mods saved and physically moved');
   return true;
 }
 
 async function getDisabledMods(serverPath) {
-  console.log('[ModManager] Getting disabled mods from:', serverPath);
   
   if (!serverPath) {
     throw new Error('Server path is required');
@@ -475,7 +425,6 @@ async function getDisabledMods(serverPath) {
       throw new Error('Invalid disabled mods format');
     }
   } catch (fileErr) {
-    console.log('[ModManager] No disabled mods config found or error reading file:', fileErr.message);
     disabledMods = [];
   }
   
@@ -489,15 +438,12 @@ async function getDisabledMods(serverPath) {
     }
     await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
   } catch (disabledFolderErr) {
-    console.error('[ModManager] Error checking disabled mods folder:', disabledFolderErr);
   }
   
-  console.log('[ModManager] Loaded disabled mods:', disabledMods);
   return disabledMods;
 }
 
 async function addMod(serverPath, modPath) {
-  console.log('[ModManager] Adding mod:', { serverPath, modPath });
   
   if (!serverPath) {
     throw new Error('Server path is required');
@@ -511,9 +457,7 @@ async function addMod(serverPath, modPath) {
     if (!stats.isFile()) {
       throw new Error(`Not a file: ${modPath}`);
     }
-    console.log(`[ModManager] Source file exists: ${modPath} (${stats.size} bytes)`);
   } catch (statErr) {
-    console.error('[ModManager] Error checking source file:', statErr);
     throw new Error(`Source file not accessible: ${statErr.message}`);
   }
   
@@ -521,22 +465,17 @@ async function addMod(serverPath, modPath) {
   const fileName = path.basename(modPath);
   const targetPath = path.join(modsDir, fileName);
   
-  console.log('[ModManager] Target path:', targetPath);
   await fs.mkdir(modsDir, { recursive: true });
   
   try {
     await fs.copyFile(modPath, targetPath);
-    console.log('[ModManager] Copied mod to:', targetPath);
   } catch (copyErr) {
-    console.error('[ModManager] Error copying file:', copyErr);
     throw new Error(`Failed to copy mod file: ${copyErr.message}`);
   }
   
   try {
     const stats = await fs.stat(targetPath);
-    console.log(`[ModManager] Target file verified: ${targetPath} (${stats.size} bytes)`);
   } catch (verifyErr) {
-    console.error('[ModManager] Error verifying target file:', verifyErr);
     throw new Error(`Failed to verify copied file: ${verifyErr.message}`);
   }
   
@@ -544,7 +483,6 @@ async function addMod(serverPath, modPath) {
 }
 
 async function deleteMod(serverPath, modName) {
-  console.log('[ModManager] Deleting mod:', { serverPath, modName });
   
   if (!serverPath) {
     throw new Error('Server path is required');
@@ -567,17 +505,13 @@ async function deleteMod(serverPath, modName) {
   
   for (const modPath of possiblePaths) {
     try {
-      console.log('[ModManager] Checking path:', modPath);
       await fs.access(modPath);  // Check if file exists
       await fs.unlink(modPath);  // Delete the file
-      console.log('[ModManager] Successfully deleted mod from:', modPath);
       deletedFromPaths.push(modPath);
       // Don't break - continue checking other locations
     } catch (error) {
       if (error.code === 'ENOENT') {
-        console.log('[ModManager] File not found at:', modPath);
       } else {
-        console.error('[ModManager] Error deleting from:', modPath, error);
         deletionErrors.push({ path: modPath, error: error.message });
       }
     }
@@ -593,11 +527,9 @@ async function deleteMod(serverPath, modName) {
     try {
       await fs.access(manifestPath);
       await fs.unlink(manifestPath);
-      console.log('[ModManager] Deleted manifest:', manifestPath);
     } catch (error) {
       // Silently ignore manifest deletion errors as they're not critical
       if (error.code !== 'ENOENT') {
-        console.warn('[ModManager] Could not delete manifest:', manifestPath, error.message);
       }
     }
   }
@@ -607,7 +539,6 @@ async function deleteMod(serverPath, modName) {
       const errorMsg = deletionErrors.map(e => `${e.path}: ${e.error}`).join('; ');
       throw new Error(`Failed to delete mod from any location. Errors: ${errorMsg}`);
     } else {
-      console.warn('[ModManager] Mod file not found in any expected location:', fileName);
       // Return success even if file wasn't found - it's already "deleted"
       return { success: true, message: `Mod ${fileName} was not found (may have been already deleted)`, deletedFrom: 'not_found' };
     }
@@ -628,7 +559,6 @@ async function deleteMod(serverPath, modName) {
 }
 
 async function saveTemporaryFile({ name, buffer }) {
-  console.log(`[ModManager] Saving temporary file: ${name}, buffer length: ${buffer ? buffer.length : 'undefined'}`);
   
   if (!buffer || !Array.isArray(buffer) || buffer.length === 0) {
     throw new Error('Invalid or empty buffer received');
@@ -644,13 +574,11 @@ async function saveTemporaryFile({ name, buffer }) {
   await fs.writeFile(tempFilePath, uint8Array);
   
   const stats = await fs.stat(tempFilePath);
-  console.log(`[ModManager] Temporary file saved to: ${tempFilePath} (${stats.size} bytes)`);
   
   return tempFilePath;
 }
 
 async function directAddMod({ serverPath, fileName, buffer }) {
-  console.log(`[ModManager] Direct adding mod: ${fileName} to ${serverPath}`);
   
   if (!serverPath) {
     throw new Error('Server path is required');
@@ -665,18 +593,15 @@ async function directAddMod({ serverPath, fileName, buffer }) {
   const modsDir = path.join(serverPath, 'mods');
   const targetPath = path.join(modsDir, fileName);
   
-  console.log(`[ModManager] Target path for direct mod: ${targetPath}`);
   await fs.mkdir(modsDir, { recursive: true });
   await fs.writeFile(targetPath, new Uint8Array(buffer));
   
   const stats = await fs.stat(targetPath);
-  console.log(`[ModManager] Direct mod added: ${targetPath} (${stats.size} bytes)`);
   
   return true;
 }
 
 async function moveModFile({ fileName, newCategory, serverPath }) {
-  console.log(`[ModManager] Moving mod ${fileName} to category ${newCategory}, with serverPath ${serverPath}`);
   
   if (!fileName) throw new Error('Filename is required');
   if (!newCategory) throw new Error('New category is required');
@@ -691,7 +616,6 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
 
   await fs.mkdir(serverModsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true }).catch(err => {
-    console.warn('[ModManager] Could not create client mods directory:', err);
     throw new Error(`Could not create client mods directory: ${err.message}`);
   });
   await fs.mkdir(disabledModsDir, { recursive: true });
@@ -712,8 +636,6 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   const serverManifestExists = await fileExists(serverManifestPath);
   const clientManifestExists = await fileExists(clientManifestPath);
 
-  console.log('[ModManager] File exists status - Server:', serverFileExists, 'Client:', clientFileExists, 'Disabled:', disabledFileExists);
-  console.log('[ModManager] Manifest exists status - Server:', serverManifestExists, 'Client:', clientManifestExists);
 
   const copyAndUnlink = async (source, dest) => {
     await fs.copyFile(source, dest);
@@ -722,7 +644,6 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
 
   if (newCategory === 'server-only') {
     if (clientFileExists) {
-      console.log('[ModManager] Moving from client to server-only');
       if (!serverFileExists) await copyAndUnlink(clientModPath, serverModPath);
       else await fs.unlink(clientModPath); // Already in server, just remove from client
       if (clientManifestExists) {
@@ -734,7 +655,6 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
       // Manifest for disabled mods is usually in serverManifestDir, so no manifest move needed here
     }
   } else if (newCategory === 'client-only') {
-    console.log('[ModManager] Moving to client-only');
     if (serverFileExists) {
       if (!clientFileExists) await copyAndUnlink(serverModPath, clientModPath);
       else await fs.unlink(serverModPath);
@@ -748,7 +668,6 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
          await copyAndUnlink(serverManifestPath, clientManifestPath);
       }
     } else {
-      console.log('[ModManager] WARNING: Could not find the mod file in any location when moving to client-only');
     }
   } else if (newCategory === 'both') {
     if (serverFileExists && !clientFileExists) {

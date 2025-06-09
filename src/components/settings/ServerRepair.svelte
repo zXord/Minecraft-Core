@@ -23,9 +23,7 @@
   async function checkHealth() {
     try {
       healthReport = (await window.electron.invoke('check-health', serverPath)) || [];
-      console.log('Health report:', healthReport);
     } catch (err) {
-      console.error('Health check error:', err);
       healthReport = [];
     }
   }
@@ -36,7 +34,6 @@
       javaInstalled = result.installed;
       return result.installed;
     } catch (err) {
-      console.error('Java check error:', err);
       javaInstalled = false;
       return false;
     }
@@ -44,7 +41,6 @@
 
   async function startRepair() {
     try {
-      console.log('Repair button clicked');
       
       // Skip Java check for now and go directly to repair process
       repairing = true;
@@ -56,17 +52,14 @@
       
       if (!selectedMC || !selectedFabric) {
         // Try to get version info from config
-        console.log('Missing version info, loading from config');
         repairLogs = [...repairLogs, 'Looking for server configuration...'];
         
         try {
           const config = await window.electron.invoke('read-config', serverPath);
-          console.log('Config loaded:', config);
           
           if (config && config.version) {
             selectedMC = config.version;
             selectedFabric = config.fabric || 'latest';
-            console.log('Using version info from config:', { selectedMC, selectedFabric });
             repairLogs = [...repairLogs, `Found Minecraft version: ${selectedMC}`];
             repairLogs = [...repairLogs, `Found Fabric version: ${selectedFabric}`];
           } else {
@@ -74,13 +67,11 @@
             throw new Error('Missing version information. Please configure server settings first.');
           }
         } catch (configErr) {
-          console.error('Config error:', configErr);
           repairLogs = [...repairLogs, `Error: ${configErr.message || 'Failed to load server configuration'}`];
           throw configErr;
         }
       }
       
-      console.log('Starting repair with:', {
         targetPath: serverPath,
         mcVersion: selectedMC,
         fabricVersion: selectedFabric
@@ -90,7 +81,6 @@
 
       // Direct call to repair-health without delay
       try {
-        console.log('Directly calling repair-health handler');
         repairLogs = [...repairLogs, 'Sending repair request to server...'];
         
         const result = await window.electron.invoke('repair-health', {
@@ -99,14 +89,11 @@
           fabricVersion: selectedFabric
         });
         
-        console.log('Repair completed with result:', result);
       } catch (repairErr) {
-        console.error('Repair error from main process:', repairErr);
         repairLogs = [...repairLogs, `Error from server: ${repairErr.message || 'Unknown error during repair'}`];
         repairing = false;
       }
     } catch (err) {
-      console.error('Repair error:', err);
       repairLogs = [...repairLogs, `Error: ${err.message || 'Unknown error during repair'}`];
       repairing = false;
     }
@@ -119,7 +106,6 @@
     window.electron.removeAllListeners('repair-status');
     
     window.electron.on('repair-progress', (data) => {
-      console.log('Repair progress:', data);
       if (data && typeof data.percent === 'number') {
         repairProgress = data.percent;
         repairSpeed = data.speed || '0.00 MB/s';
@@ -127,12 +113,10 @@
     });
     
     window.electron.on('repair-log', msg => {
-      console.log('Repair log:', msg);
       repairLogs = [...repairLogs, msg];
     });
     
     window.electron.on('repair-status', status => {
-      console.log('Repair status:', status);
       if (status === 'done') {
         repairProgress = 100;
         setTimeout(() => {
@@ -148,7 +132,6 @@
     (async () => {
       try {
         // Initialize repair event listeners right away
-        console.log('Setting up repair listeners on mount');
         setupRepairListeners();
 
         // Load configuration to get versions
@@ -156,13 +139,11 @@
         if (config) {
           selectedMC = config.version;
           selectedFabric = config.fabric || 'latest';
-          console.log('Loaded config versions:', { selectedMC, selectedFabric });
         }
         
         // Initial health check
         await checkHealth();
       } catch (error) {
-        console.error('Init error:', error);
       }
     })();
     
@@ -202,7 +183,6 @@
       </div>
       
       <button class="repair-button" on:click={() => {
-        console.log('Repair button clicked directly in SVG');
         startRepair();
       }} disabled={repairing}>
         {repairing ? 'Repairing...' : 'Repair Server Core'}

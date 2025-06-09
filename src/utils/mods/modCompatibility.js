@@ -46,7 +46,6 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
     uniqueDependencies.push(dep);
   }
   
-  console.log('Checking dependencies:', uniqueDependencies);
   
   // Process each unique dependency
   for (const dep of uniqueDependencies) {
@@ -80,7 +79,6 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
           }
         }
       } catch (error) {
-        console.error(`Failed to fetch mod info for ${projectId}:`, error);
       }
     }
     
@@ -178,7 +176,6 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
             }
           }
         } catch (error) {
-          console.error(`Failed to fetch versions for missing dependency ${projectId}:`, error);
         }
         
         issues.push(missingIssue);
@@ -226,7 +223,6 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                   displayName = `Installed Mod (needs update)`;
                 }
               } catch (error) {
-                console.error(`Failed to fetch project info for compatibility check ${projectId}:`, error);
                 displayName = `Installed Mod (needs update)`;
               }
             }
@@ -257,7 +253,6 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 }
               }
             } catch (error) {
-              console.error(`Failed to fetch versions for compatibility check ${projectId}:`, error);
             }
             
             // Version mismatch - the installed version doesn't meet requirements
@@ -421,7 +416,6 @@ function compareVersions(versionA, versionB) {
  * @returns {Promise<Object>} - Compatibility report with incompatible mods and suggestions
  */
 export async function checkClientModCompatibility(newMinecraftVersion, clientMods = []) {
-  console.log(`[ModCompatibility] Checking client mod compatibility for Minecraft ${newMinecraftVersion}`);
   
   const compatibilityReport = {
     compatible: [],
@@ -433,7 +427,6 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
   };
   
   if (!clientMods || clientMods.length === 0) {
-    console.log('[ModCompatibility] No client mods to check');
     return compatibilityReport;
   }
   
@@ -441,12 +434,10 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
     try {
       // Skip if mod is disabled
       if (mod.disabled) {
-        console.log(`[ModCompatibility] Skipping disabled mod: ${mod.name || mod.fileName}`);
         continue;
       }
       
       const modName = mod.name || mod.fileName || 'Unknown Mod';
-      console.log(`[ModCompatibility] Checking compatibility for: ${modName}`);
       
       // Check if mod has version requirements
       if (mod.gameVersions && mod.gameVersions.length > 0) {
@@ -482,7 +473,6 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
                 compatibilityReport.hasUpdatable = true;
               }
             } catch (error) {
-              console.warn(`[ModCompatibility] Failed to check updates for ${modName}:`, error);
             }
           }
           
@@ -514,7 +504,6 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
         }
       }
     } catch (error) {
-      console.error(`[ModCompatibility] Error checking compatibility for mod:`, mod, error);
       compatibilityReport.unknown.push({
         ...mod,
         compatibilityStatus: 'unknown',
@@ -523,7 +512,6 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
     }
   }
   
-  console.log(`[ModCompatibility] Compatibility check complete:`, {
     compatible: compatibilityReport.compatible.length,
     incompatible: compatibilityReport.incompatible.length,
     needsUpdate: compatibilityReport.needsUpdate.length,
