@@ -366,6 +366,7 @@
         
         // Refresh mod sync status
         await checkModSynchronization();
+        await refreshInstalledMods();
       } else {
         errorMessage.set(`Failed to download mods: ${result.error || 'Unknown error'}`);
         setTimeout(() => errorMessage.set(''), 5000);
@@ -407,6 +408,7 @@
         
         // Refresh mod sync status
         await checkModSynchronization();
+        await refreshInstalledMods();
       } else {
         errorMessage.set(`Failed to download optional mods: ${result.error || 'Unknown error'}`);
         setTimeout(() => errorMessage.set(''), 5000);
