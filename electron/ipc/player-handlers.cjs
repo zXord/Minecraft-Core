@@ -31,7 +31,6 @@ function initializePlayerIpMap(serverPath) {
 function createPlayerHandlers() {
   return {
     'read-players': (_e, listName, serverPath) => {
-      try {
         if (!serverPath || !fs.existsSync(serverPath)) {
           throw new Error('Invalid server path');
         }
@@ -61,8 +60,7 @@ function createPlayerHandlers() {
             // Get the most recently used player name from the playerIpMap if available
             let lastUsedPlayerName = null;
             if (playerIpMap.size > 0) {
-              // Extract the last entry from the map
-              for (const [_, playerName] of playerIpMap) {
+              for (const [, playerName] of playerIpMap) {
                 lastUsedPlayerName = playerName;
               }
             }
@@ -100,7 +98,7 @@ function createPlayerHandlers() {
                 // Try to extract player name from string format
                 const matches = item.match(/^(.+)\s+\(Player:\s+(.+)\)$/);
                 if (matches) {
-                  const [_, ip, playerName] = matches;
+                  const [, ip, playerName] = matches;
                   return {
                     ip: ip.trim(),
                     playerName: playerName.trim(),
@@ -145,16 +143,12 @@ function createPlayerHandlers() {
           }
           
           return data;
-        } catch (parseErr) {
+        } catch {
           return [];
         }
-      } catch (err) {
-        throw err;
-      }
     },
     
     'write-file': (_e, filePath, content) => {
-      try {
         if (!filePath || typeof filePath !== 'string') {
           throw new Error('Invalid file path');
         }
@@ -172,13 +166,9 @@ function createPlayerHandlers() {
         // Write the file
         fs.writeFileSync(filePath, content);
         return { success: true };
-      } catch (err) {
-        throw err;
-      }
     },
     
     'add-player': (_e, listName, serverPath, entry) => {
-      try {
         if (!serverPath || !fs.existsSync(serverPath)) {
           throw new Error('Invalid server path');
         }
@@ -205,7 +195,7 @@ function createPlayerHandlers() {
         if (fs.existsSync(file)) {
           try {
             list = JSON.parse(fs.readFileSync(file, 'utf-8'));
-          } catch (err) {
+          } catch {
             list = [];
           }
         }
@@ -227,16 +217,12 @@ function createPlayerHandlers() {
           playerIpMap.set(entry, playerName);
             // Also store it in a persistent file
           const playerMapFile = path.join(serverPath, 'player-ip-map.json');
-          try {
-            let mapData = {};
-            if (fs.existsSync(playerMapFile)) {
-              mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
-            }
-            mapData[entry] = playerName;
-            fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
-          } catch (mapErr) {
-            // Ignore errors writing to player map file
+          let mapData = {};
+          if (fs.existsSync(playerMapFile)) {
+            mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
           }
+          mapData[entry] = playerName;
+          fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
         }// Format objects based on the list type
         let newEntry = entry;
         if (listName === 'ops' || listName === 'whitelist') {
@@ -286,13 +272,9 @@ function createPlayerHandlers() {
         
         fs.writeFileSync(file, JSON.stringify(list, null, 2));
         return list;
-      } catch (err) {
-        throw err;
-      }
     },
     
     'add-player-with-details': (_e, listName, serverPath, detailsObj) => {
-      try {
         if (!serverPath || !fs.existsSync(serverPath)) {
           throw new Error('Invalid server path');
         }
@@ -319,7 +301,7 @@ function createPlayerHandlers() {
         if (fs.existsSync(file)) {
           try {
             list = JSON.parse(fs.readFileSync(file, 'utf-8'));
-          } catch (err) {
+          } catch {
             list = [];
           }
         }
@@ -352,9 +334,6 @@ function createPlayerHandlers() {
         
         fs.writeFileSync(file, JSON.stringify(list, null, 2));
         return list;
-      } catch (err) {
-        throw err;
-      }
     },
     
     'get-player-ip': () => {
@@ -441,13 +420,12 @@ function createPlayerHandlers() {
         }
 
         return { lastBannedPlayer: null };
-      } catch (err) {
-        return { lastBannedPlayer: null };
-      }
+        } catch {
+          return { lastBannedPlayer: null };
+        }
     },
     
     'remove-player': (_e, listName, serverPath, entry) => {
-      try {
         if (!serverPath || !fs.existsSync(serverPath)) {
           throw new Error('Invalid server path');
         }
@@ -473,7 +451,7 @@ function createPlayerHandlers() {
         let rawList;
         try {
           rawList = JSON.parse(fs.readFileSync(file, 'utf-8'));
-        } catch (parseErr) {
+        } catch {
           return [];
         }
         
@@ -493,9 +471,6 @@ function createPlayerHandlers() {
         
         fs.writeFileSync(file, JSON.stringify(newList, null, 2));
         return newList;
-      } catch (err) {
-        throw err;
-      }
     }
   };
 }

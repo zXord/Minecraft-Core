@@ -241,7 +241,7 @@ export async function saveModCategories() {
     
     await safeInvoke('save-mod-categories', categoriesArray, serverPath, clientPath);
     return true;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -267,7 +267,7 @@ export async function loadModCategories() {
     }
     
     return true;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
