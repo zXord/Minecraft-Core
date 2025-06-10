@@ -50,28 +50,22 @@ function createSettingsHandlers() {
         // Also update the server's config file if we have a path
         const usePath = serverPath || appStore.get('lastServerPath');
         if (usePath) {
-          try {
-            const configPath = path.join(usePath, '.minecraft-core.json');
-            let config = {};
-            
-            if (fs.existsSync(configPath)) {
-              try {
-                const fileContent = fs.readFileSync(configPath, 'utf-8');
-                config = JSON.parse(fileContent);
-              } catch (parseErr) {
-                // Continue with empty config
-              }
+          const configPath = path.join(usePath, '.minecraft-core.json');
+          let config = {};
+
+          if (fs.existsSync(configPath)) {
+            try {
+              const fileContent = fs.readFileSync(configPath, 'utf-8');
+              config = JSON.parse(fileContent);
+            } catch {
+              config = {};
             }
-            
-            // Update port and maxRam in config
-            config.port = updatedSettings.port;
-            config.maxRam = updatedSettings.maxRam;
-            
-            // Write back to file
-            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-          } catch (configErr) {
-            // Continue even if config file update fails
           }
+
+          config.port = updatedSettings.port;
+          config.maxRam = updatedSettings.maxRam;
+
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
         }
         
         return { 
@@ -204,7 +198,7 @@ function createSettingsHandlers() {
         );
         
         return validInstances;
-      } catch (error) {
+      } catch {
         return [];
       }
     },
@@ -305,14 +299,10 @@ function createSettingsHandlers() {
         await fsPromises.writeFile(configFile, JSON.stringify(config, null, 2));
 
         // Create servers.dat so the server appears in multiplayer list
-        const datResult = await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
-        if (!datResult.success) {
-        } else {
-        }
+        await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
         
         // ALSO update the instance in the app store so it persists across app restarts
-        try {
-          const instances = appStore.get('instances') || [];
+        const instances = appStore.get('instances') || [];
           
           // Find the client instance by path
           const clientInstanceIndex = instances.findIndex(inst => 
@@ -346,12 +336,9 @@ function createSettingsHandlers() {
             instances.push(newInstance);
           }
           
-          appStore.set('instances', instances);
-          
-        } catch (storeError) {
-          // Continue anyway since file save succeeded
-        }
-        
+
+        appStore.set('instances', instances);
+
         return { success: true };
       } catch (err) {
         return { success: false, error: err.message };
