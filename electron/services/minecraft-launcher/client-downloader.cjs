@@ -6,27 +6,39 @@ const fetch = require('node-fetch');
 const utils = require('./utils.cjs');
 
 class ClientDownloader {
-  constructor(javaManager, eventEmitter) { // Removed utils from constructor
+  constructor(javaManager, eventEmitter) {
     this.javaManager = javaManager;
     this.emitter = eventEmitter;
-    // this.utils = utils; // Removed, utils will be used directly
   }
 
-  // Download Minecraft client files for a specific version (simplified approach)
+  async _resolveFabricLoaderVersion(requestedVersion) {
+    if (requestedVersion === 'latest') {
+      try {
+        const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
+        const loaders = await response.json();
+        if (loaders && loaders.length > 0 && loaders[0].version) {
+          return loaders[0].version;
+        }
+        return '0.14.21'; // Fallback
+      } catch {
+        return '0.14.21'; // Fallback
+      }
+    }
+    return requestedVersion;
+  }
+
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
     
     this.emitter.emit('client-download-start', { version: minecraftVersion });
     
-    // Extract options
     const { 
       requiredMods = [], 
       serverInfo = null 
     } = options;
     
-    // Determine if Fabric is needed
     let needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
-    let fabricVersion = serverInfo?.loaderVersion || 'latest';
-    
+    let requestedFabricVersion = serverInfo?.loaderVersion || 'latest';
+    let resolvedFabricVersion = requestedFabricVersion;
     
     const maxRetries = 2; 
     let retryCount = 0;
@@ -43,7 +55,7 @@ class ClientDownloader {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
         
-        const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion); // Use imported utils
+        const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
         
         this.emitter.emit('client-download-progress', {
           type: 'Java',
@@ -78,8 +90,6 @@ class ClientDownloader {
           task: 'Setting up download process...',
           total: 1
         });
-        
-        // Use @xmcl/installer for downloads instead of deprecated MCLC Client
         
         this.emitter.emit('client-download-progress', {
           type: 'Downloading',
@@ -135,35 +145,31 @@ class ClientDownloader {
         if (needsFabric) {
           this.emitter.emit('client-download-progress', {
             type: 'Fabric',
-            task: `Installing Fabric loader ${fabricVersion}...`,
+            task: `Installing Fabric loader ${requestedFabricVersion}...`, // Show requested version
             total: 5
           });
           try {
-            const fabricResult = await this.installFabricLoader(clientPath, minecraftVersion, fabricVersion);
+            const fabricResult = await this.installFabricLoader(clientPath, minecraftVersion, requestedFabricVersion);
             if (fabricResult.success) {
               fabricProfileName = fabricResult.profileName;
               finalVersion = fabricProfileName;
+              resolvedFabricVersion = fabricResult.loaderVersion;
               this.emitter.emit('client-download-progress', {
                 type: 'Fabric',
-                task: `Fabric ${fabricVersion} installed successfully`,
+                task: `Fabric ${resolvedFabricVersion} installed successfully`,
                 total: 5
               });
             } else {
               throw new Error(`Fabric installation failed: ${fabricResult.error}`);
             }
           } catch (fabricError) {
-            
-            // Check if we have required mods vs optional mods
             const hasRequiredMods = requiredMods && requiredMods.length > 0;
             
             if (hasRequiredMods) {
-              // If we have required mods, Fabric is essential
               throw new Error(`Cannot install Fabric for required mods: ${fabricError.message}`);
             } else {
-              // If no required mods, we can fall back to vanilla
-              needsFabric = false; // Update the flag
-              finalVersion = minecraftVersion; // Use vanilla version
-              
+              needsFabric = false;
+              finalVersion = minecraftVersion;
               this.emitter.emit('client-download-progress', {
                 type: 'Warning',
                 task: 'Fabric installation failed, using vanilla Minecraft',
@@ -188,19 +194,15 @@ class ClientDownloader {
               task: `Assets downloaded successfully (${assetResult.total} files)`,
               total: 5
             });
-          } else {
           }
-        } catch (assetError) {
+          // Removed empty else block
+        } catch { // _assetError unused, catch effectively empty (L193)
           // Don't fail the entire process for asset errors, but warn
         }
         
         // NEW: Add server to Minecraft server list if server info is provided
         const serverInfo = options.serverInfo;
         
-        if (serverInfo) {
-        }
-        
-        // ROBUST SERVER INFO CHECK - try multiple possible field combinations
         const hasServerInfo = serverInfo && (
           serverInfo.minecraftPort ||
           serverInfo.port ||
@@ -221,13 +223,11 @@ class ClientDownloader {
           try {
             const serverResult = await this.addServerToList(clientPath, serverInfo);
             
-            if (serverResult.success) {
-            } else {
+            if (!serverResult.success) {
+              // Optional: log if server adding failed but not critical enough to stop
             }
-          } catch (serverError) {
-          }
-        } else {
-          if (serverInfo) {
+          } catch {
+            // Optional: log if server adding threw an error
           }
         }
         
@@ -235,13 +235,13 @@ class ClientDownloader {
         const finalVerificationResult = await this.checkMinecraftClient(clientPath, minecraftVersion, finalVerificationOptions);
         
         if (finalVerificationResult.synchronized) {
-          const clientType = needsFabric ? `Fabric ${fabricVersion}` : 'Vanilla';
+          const clientType = needsFabric ? `Fabric ${resolvedFabricVersion}` : 'Vanilla'; // Use resolved version
           const finalMessage = `Successfully downloaded Minecraft ${minecraftVersion} (${clientType}) with Java ${requiredJavaVersion} and all required libraries and assets.`;
           this.emitter.emit('client-download-complete', { 
             success: true, 
             version: finalVersion,
             vanillaVersion: minecraftVersion,
-            fabricVersion: needsFabric ? fabricVersion : null,
+            fabricVersion: needsFabric ? resolvedFabricVersion : null, // Use resolved version
             fabricProfileName: fabricProfileName,
             message: finalMessage
           });
@@ -249,7 +249,7 @@ class ClientDownloader {
             success: true, 
             version: finalVersion,
             vanillaVersion: minecraftVersion,
-            fabricVersion: needsFabric ? fabricVersion : null,
+            fabricVersion: needsFabric ? resolvedFabricVersion : null, // Use resolved version
             fabricProfileName: fabricProfileName,
             message: finalMessage
           };
@@ -264,29 +264,34 @@ class ClientDownloader {
           retryCount++;
           continue;
         }
-        let errorMessage = error.message;
-        if (error.code === 'EMFILE' || error.message.includes('too many open files')) {
-          errorMessage = 'System file limit reached during download. Please close other applications, restart the application, and try again.';
+
+        let userMessage = error.message; // Default to original error message
+        const knownErrorMessages = {
+          EMFILE: 'System file limit reached during download. Please close other applications, restart the application, and try again.',
+          ENOTFOUND_MSG: 'Cannot connect to Minecraft download servers. Please check your internet connection.',
+          TIMEOUT_MSG: 'Download timed out. Please try again with a better internet connection.'
+        };
+
+        if (error.code === 'EMFILE' || (error.message && error.message.includes('too many open files'))) {
+          userMessage = knownErrorMessages.EMFILE;
         } else if (error.message && error.message.includes('ENOTFOUND')) {
-          errorMessage = 'Cannot connect to Minecraft download servers. Please check your internet connection.';
+          userMessage = knownErrorMessages.ENOTFOUND_MSG;
         } else if (error.message && error.message.includes('timeout')) {
-          errorMessage = 'Download timed out. Please try again with a better internet connection.';
+          userMessage = knownErrorMessages.TIMEOUT_MSG;
         }
+
         this.emitter.emit('client-download-error', { 
-          error: errorMessage, 
+          error: userMessage,
           version: minecraftVersion 
         });
-        return { success: false, error: errorMessage };
+        return { success: false, error: userMessage };
       }
     }
   }
 
   async downloadMinecraftManually(clientPath, minecraftVersion) {
-    
-    try {
-      // Setup directories
-      const versionsDir = path.join(clientPath, 'versions');
-      const versionDir = path.join(versionsDir, minecraftVersion);
+    const versionsDir = path.join(clientPath, 'versions');
+    const versionDir = path.join(versionsDir, minecraftVersion);
       const librariesDir = path.join(clientPath, 'libraries');
       const assetsDir = path.join(clientPath, 'assets');
       
@@ -377,13 +382,9 @@ class ClientDownloader {
         return lib.downloads && lib.downloads.artifact;
       });
 
-      let librariesDownloaded = 0;
-      let librariesFailed = 0;
-
       for (let i = 0; i < downloadableLibraries.length; i++) {
         const lib = downloadableLibraries[i];
         
-        // Update progress
         this.emitter.emit('client-download-progress', {
           type: 'Libraries',
           task: `Downloading library ${i + 1} of ${downloadableLibraries.length}...`,
@@ -411,20 +412,10 @@ class ClientDownloader {
                 fs.mkdirSync(libDir, { recursive: true });
               }
 
-          try {
-            // Only log occasionally to reduce spam
-            if (i % 20 === 0) {
-            }
-            
-            await this._downloadFileSingle(artifact.url, libPath);
-              librariesDownloaded++;
-            } catch (libError) {
-              librariesFailed++;
-            }
-          }
+          await this._downloadFileSingle(artifact.url, libPath);
         }
+      }
 
-      // Phase 5: Setup Assets
       this.emitter.emit('client-download-progress', {
         type: 'Assets',
         task: 'Setting up game assets...',
@@ -443,10 +434,8 @@ class ClientDownloader {
         
         await this._downloadFileSingle(assetIndexUrl, assetIndexPath);
 
-        // Prepare assets for MCLC
         const assetIndexData = JSON.parse(fs.readFileSync(assetIndexPath, 'utf8'));
         
-        // Add URLs to asset objects for MCLC compatibility
         if (assetIndexData.objects) {
           for (const assetData of Object.values(assetIndexData.objects)) {
             const hash = assetData.hash;
@@ -469,9 +458,6 @@ class ClientDownloader {
 
       
       return true;
-    } catch (error) {
-      throw error;
-    }
   }
 
   async downloadJson(url, maxRetries = 3) {
@@ -489,7 +475,6 @@ class ClientDownloader {
 
   async _downloadJsonSingle(url) {
     return new Promise((resolve, reject) => {
-      // const https = require('https'); // Imported at top
       const timeout = 15000;
       const request = https.get(url, { timeout }, (response) => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
@@ -533,7 +518,6 @@ class ClientDownloader {
 
   async _downloadFileSingle(url, filePath, progressCallback = null) {
     return new Promise((resolve, reject) => {
-      // Reduced logging - only essential info
       const file = fs.createWriteStream(filePath);
       const timeout = 60000;
       let downloadedBytes = 0;
@@ -605,7 +589,6 @@ class ClientDownloader {
       const fabricInstallerUrl = 'https://maven.fabricmc.net/net/fabricmc/fabric-installer/0.11.2/fabric-installer-0.11.2.jar';
       const installerPath = path.join(clientPath, 'fabric-installer.jar');
       if (!fs.existsSync(installerPath)) {
-        // const fetch = require('node-fetch'); // Imported at top
         const response = await fetch(fabricInstallerUrl);
         if (!response.ok) {
           throw new Error(`Failed to download Fabric installer: ${response.status}`);
@@ -617,32 +600,20 @@ class ClientDownloader {
           fileStream.on('error', reject);
         });
       }
-      let loaderVersion = fabricVersion;
-      if (fabricVersion === 'latest') {
-        try {
-          // const fetch = require('node-fetch'); // Imported at top
-          const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
-          const loaders = await response.json();
-          loaderVersion = loaders[0].version;
-        } catch (error) {
-          loaderVersion = '0.14.21';
-        }
-      }
-      const fabricProfileName = `fabric-loader-${loaderVersion}-${minecraftVersion}`;
+      // Resolve the loader version using the new helper method
+      const actualLoaderVersion = await this._resolveFabricLoaderVersion(fabricVersion); // fabricVersion is the parameter
+      const fabricProfileName = `fabric-loader-${actualLoaderVersion}-${minecraftVersion}`;
       const versionsDir = path.join(clientPath, 'versions');
       const fabricProfileDir = path.join(versionsDir, fabricProfileName);
       
-      // CRITICAL: Check for both JSON and JAR files
       const fabricJsonPath = path.join(fabricProfileDir, `${fabricProfileName}.json`);
       const fabricJarPath = path.join(fabricProfileDir, `${fabricProfileName}.jar`);
       
       if (fs.existsSync(fabricProfileDir) && fs.existsSync(fabricJsonPath) && fs.existsSync(fabricJarPath)) {
-        // Verify the JAR is not empty
         const jarStats = fs.statSync(fabricJarPath);
         if (jarStats.size > 0) {
         return { success: true, profileName: fabricProfileName };
         } else {
-          // Remove the corrupt profile to force reinstall
           fs.rmSync(fabricProfileDir, { recursive: true, force: true });
       }
       }
@@ -659,7 +630,6 @@ class ClientDownloader {
       }
       const javaExe = javaResult.javaPath;
       
-      // CRITICAL FIX: Create launcher_profiles.json that Fabric installer expects
       const launcherProfilesPath = path.join(clientPath, 'launcher_profiles.json');
       if (!fs.existsSync(launcherProfilesPath)) {
         const launcherProfiles = {
@@ -691,12 +661,11 @@ class ClientDownloader {
         fs.writeFileSync(launcherProfilesPath, JSON.stringify(launcherProfiles, null, 2));
       }
       
-      // const { spawn } = require('child_process'); // Imported at top
       const installerArgs = [
         '-jar', installerPath,
         'client',
         '-mcversion', minecraftVersion,
-        '-loader', loaderVersion,
+        '-loader', actualLoaderVersion, // Use actualLoaderVersion
         '-dir', clientPath
       ];
       const installer = spawn(javaExe, installerArgs, {
@@ -719,7 +688,6 @@ class ClientDownloader {
         throw new Error(`Fabric installer failed with exit code ${exitCode}: ${installerOutput}`);
       }
       
-      // CRITICAL: Verify BOTH JSON and JAR files were created
       if (!fs.existsSync(fabricProfileDir)) {
         throw new Error(`Fabric profile directory not created: ${fabricProfileDir}`);
       }
@@ -727,7 +695,6 @@ class ClientDownloader {
         throw new Error(`Fabric profile JSON not created: ${fabricJsonPath}`);
       }
       
-      // CRITICAL FIX: If the JAR doesn't exist or is empty, create it manually
       let jarStats = null;
       let needsJarRecreation = false;
       
@@ -741,7 +708,7 @@ class ClientDownloader {
       }
       
       if (needsJarRecreation) {
-        await this.createFabricProfileJar(fabricJarPath, loaderVersion, minecraftVersion);
+        await this.createFabricProfileJar(fabricJarPath, actualLoaderVersion, minecraftVersion); // Use actualLoaderVersion
         
         // Verify the manually created JAR
         if (fs.existsSync(fabricJarPath)) {
@@ -760,19 +727,14 @@ class ClientDownloader {
       }
       
       
-      // CRITICAL FIX: Post-process the Fabric JSON to add missing download metadata
-      try {
-        await this.enrichFabricJson(clientPath, fabricProfileName);
-      } catch (enrichError) {
-      }
+      await this.enrichFabricJson(clientPath, fabricProfileName);
       
-      // CRITICAL FIX: Ensure Fabric profile properly inherits from vanilla version
       try {
         const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
-          const vanillaJsonPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.json`);
+        const vanillaJsonPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.json`);
         
-          if (fs.existsSync(vanillaJsonPath)) {
-            const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
+        if (fs.existsSync(vanillaJsonPath)) {
+          const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
           let modified = false;
           
           // CRITICAL FIX: Ensure Fabric profile has vanilla downloads.client so MCLC includes vanilla JAR on classpath
@@ -833,21 +795,16 @@ class ClientDownloader {
               const missingCritical = [];
               criticalLibraries.forEach(requiredLib => {
                 const found = fabricJson.libraries.find(lib => lib.name?.startsWith(requiredLib));
-                if (found) {
-                } else {
+                if (!found) { // Removed empty if block
                   missingCritical.push(requiredLib);
                 }
               });
               
-              if (missingCritical.length === 0) {
-              } else {
-              }
+              // Removed empty "if (missingCritical.length === 0) {} else {}" block.
               
               modified = true;
-            } else {
-            }
-          } else {
-          }
+            } // Removed empty "else {}" block.
+          } // Removed empty "else {}" block.
           
           // CRITICAL: Add inheritsFrom field to explicitly link to vanilla
           if (!fabricJson.inheritsFrom) {
@@ -857,7 +814,7 @@ class ClientDownloader {
           
           // Ensure Fabric profile inherits essential properties from vanilla
           if (!fabricJson.assetIndex && vanillaJson.assetIndex) {
-              fabricJson.assetIndex = vanillaJson.assetIndex;
+            fabricJson.assetIndex = vanillaJson.assetIndex;
             modified = true;
           }
           
@@ -944,21 +901,21 @@ class ClientDownloader {
           
           if (modified) {
             fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-          } else {
-          }
-        } else {
-        }
-      } catch (fabricFixError) {
+          } // Removed empty "else {}" block.
+        } // Removed empty "else {}" block.
+      } catch { // _fabricFixError unused, removing try/catch as per L930
+        // console.error('Error fixing Fabric JSON:', _fabricFixError); // Optional logging
       }
       
       try {
         fs.unlinkSync(installerPath);
-      } catch (cleanupError) {
+      } catch { // _cleanupError unused, removing try/catch as per L956
+        // console.warn('Error cleaning up Fabric installer:', _cleanupError); // Optional logging
       }
       return { 
         success: true, 
         profileName: fabricProfileName,
-        loaderVersion: loaderVersion 
+        loaderVersion: actualLoaderVersion // Return the resolved loader version
       };
     } catch (error) {
       return { 
@@ -972,9 +929,6 @@ class ClientDownloader {
   async createFabricProfileJar(fabricJarPath, loaderVersion, minecraftVersion) {
     try {
       
-      // Create a proper JAR file with the correct MANIFEST.MF
-      // The JAR doesn't need to contain actual classes, just the correct manifest
-      
       const manifest = `Manifest-Version: 1.0
 Main-Class: net.fabricmc.loader.impl.launch.knot.KnotClient
 Implementation-Title: Fabric Loader
@@ -986,14 +940,11 @@ Specification-Vendor: FabricMC
 
 `;
       
-      // Create a minimal ZIP structure using built-in Node.js functionality
       const AdmZip = require('adm-zip').default;
       const zip = new AdmZip();
       
-      // Add the MANIFEST.MF file
       zip.addFile('META-INF/MANIFEST.MF', Buffer.from(manifest, 'utf8'));
       
-      // CRITICAL: Add a minimal fabric.mod.json to help with game detection
       const fabricModJson = {
         "schemaVersion": 1,
         "id": `fabric-loader-${loaderVersion}-${minecraftVersion}`,
@@ -1015,23 +966,18 @@ Specification-Vendor: FabricMC
       });
       
       
-    } catch (error) {
+    } catch { // _error unused (L999), catch block has fallback logic
       
-      // Fallback: Create a minimal valid ZIP file structure manually
+      const manifestFallback = `Manifest-Version: 1.0\r\nMain-Class: net.fabricmc.loader.impl.launch.knot.KnotClient\r\n\r\n`;
+      const manifestBuffer = Buffer.from(manifestFallback, 'utf8');
       
-      const manifest = `Manifest-Version: 1.0\r\nMain-Class: net.fabricmc.loader.impl.launch.knot.KnotClient\r\n\r\n`;
-      const manifestBuffer = Buffer.from(manifest, 'utf8');
+      const localFileHeader = Buffer.alloc(30 + 20 + manifestBuffer.length);
+      const centralDirHeader = Buffer.alloc(46 + 20);
+      const endOfCentralDir = Buffer.alloc(22);
       
-      // Create a minimal valid ZIP file with the manifest
-      const localFileHeader = Buffer.alloc(30 + 20 + manifestBuffer.length); // Fixed header + filename + content
-      const centralDirHeader = Buffer.alloc(46 + 20); // Central directory header + filename
-      const endOfCentralDir = Buffer.alloc(22); // End of central directory
-      
-      
-      // Local file header for META-INF/MANIFEST.MF
-      localFileHeader.writeUInt32LE(0x04034b50, 0); // Local file header signature
-      localFileHeader.writeUInt16LE(20, 4); // Version needed to extract
-      localFileHeader.writeUInt16LE(0, 6); // General purpose bit flag
+      localFileHeader.writeUInt32LE(0x04034b50, 0);
+      localFileHeader.writeUInt16LE(20, 4);
+      localFileHeader.writeUInt16LE(0, 6);
       localFileHeader.writeUInt16LE(0, 8); // Compression method (stored)
       localFileHeader.writeUInt16LE(0, 10); // File last modification time
       localFileHeader.writeUInt16LE(0, 12); // File last modification date
@@ -1080,27 +1026,6 @@ Specification-Vendor: FabricMC
     }
   }
 
-  async fixFabricAssetIndex(clientPath, fabricProfileName, vanillaVersion) {
-    try {
-      const versionsDir = path.join(clientPath, 'versions');
-      const fabricJsonPath = path.join(versionsDir, fabricProfileName, `${fabricProfileName}.json`);
-      const vanillaJsonPath = path.join(versionsDir, vanillaVersion, `${vanillaVersion}.json`);
-      if (!fs.existsSync(fabricJsonPath) || !fs.existsSync(vanillaJsonPath)) {
-        return false;
-      }
-      const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
-      const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
-      if (!fabricJson.assetIndex && vanillaJson.assetIndex) {
-        fabricJson.assetIndex = vanillaJson.assetIndex;
-        fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-        return true;
-      }
-      return false;
-    } catch (error) {
-      return false;
-    }
-  }
-
   async addServerToList(clientPath, rawServerInfo) {
     try {
 
@@ -1134,13 +1059,12 @@ Specification-Vendor: FabricMC
         const serverAddress = (flat.port === 25565) ? flat.ip : `${flat.ip}:${flat.port}`;
         lines.push(`lastServer:${serverAddress}`);
         fs.writeFileSync(optionsFile, lines.join('\n'), 'utf8');
-      } catch (err) {
+      } catch { // _err unused, empty catch block, removing try/catch (L1118)
       }
 
       // === 4. Write a **valid** servers.dat NBT file ===
       try {
         
-        // Import required modules for NBT creation
       const nbt = require('prismarine-nbt');
         const zlib = require('zlib');
         
@@ -1154,43 +1078,36 @@ Specification-Vendor: FabricMC
             const existingBuffer = fs.readFileSync(serversDatPath);
             
             const uncompressed = zlib.gunzipSync(existingBuffer);
+            const parsedNbt = await nbt.parse(uncompressed); // Renamed to avoid conflict with 'parsed' variable if any
             
-            const parsed = await nbt.parse(uncompressed);
-            
-            // Extract existing server entries
-            const rawServers = parsed.parsed.value.servers?.value;
-            const serversList = Array.isArray(rawServers) ? rawServers : [];
+            // Extract existing server entries - Corrected NBT path
+            if (parsedNbt && parsedNbt.value && parsedNbt.value.servers && parsedNbt.value.servers.type === 'list' && parsedNbt.value.servers.value.type === 'compound') {
+              const serverCompoundTags = parsedNbt.value.servers.value.value; // This is an array of NBT.Compound tags
 
-            // Filter out any duplicate of our new server, keep everything else
-            const targetIpPort = `${flat.ip}:${flat.port}`;
-            existingServers = serversList.filter(serverEntry => {
-              // Handle both old complex format and new simple format
-              const existingIpPort = serverEntry.value ? serverEntry.value.ip.value : serverEntry.ip;
-              const isDuplicate = existingIpPort === targetIpPort;
-              if (isDuplicate) {
-              }
-              return !isDuplicate;
-            }).map(serverEntry => {
-              // Convert to simple format
-              if (serverEntry.value) {
-                // Old complex format - extract values
-      return { 
-                  name: serverEntry.value.name.value,
-                  ip: serverEntry.value.ip.value,
-                  icon: serverEntry.value.icon.value,
-                  acceptTextures: serverEntry.value.acceptTextures.value
+              existingServers = serverCompoundTags.map(serverCompound => {
+                // serverCompound is an NBT.Compound tag
+                // serverCompound.value is { name: NBT.String, ip: NBT.String, ... }
+                // serverCompound.value.name.value is the actual string value
+                return {
+                  name: serverCompound.value.name?.value || 'Unknown Server',
+                  ip: serverCompound.value.ip?.value || 'localhost',
+                  icon: serverCompound.value.icon?.value || '',
+                  // Ensure acceptTextures is a number (0 or 1), default to 0 if undefined
+                  acceptTextures: serverCompound.value.acceptTextures?.value === 1 ? 1 : 0
                 };
-              } else {
-                // Already simple format
-                return serverEntry;
-              }
-            });
-            // Convert to simple JavaScript objects for easier handling
+              });
+            } else {
+              existingServers = [];
+            }
+
+            // Filter out any duplicate of our new server AFTER mapping to plain objects
+            const targetIpPort = `${flat.ip}:${flat.port}`;
+            existingServers = existingServers.filter(server => server.ip !== targetIpPort);
             
-          } catch (parseError) {
+          } catch { // _parseError unused (L1164), but existingServers is set.
             existingServers = [];
           }
-        } else {
+          // Removed empty "else {}" block for "if (fs.existsSync(serversDatPath))".
         }
 
         // Create new server entry (simple object)
@@ -1206,27 +1123,31 @@ Specification-Vendor: FabricMC
 
 
         // Build NBT structure using prismarine-nbt helpers
-        const nbtServers = existingServers.map(server => ({
-          name: nbt.string(server.name),
-          ip: nbt.string(server.ip),
-          icon: nbt.string(server.icon),
-          acceptTextures: nbt.byte(server.acceptTextures)
-        }));
+        const { TagType } = nbt; // Or directly use nbt.TagType.Compound etc.
 
-        const nbtData = nbt.comp({
-          servers: nbt.list(nbt.comp(nbtServers))
-        }, '');
+        const serverCompoundNBTs = existingServers.map(server => {
+          return nbt.compound({ // Each server is an NBT Compound tag
+            name: nbt.string(server.name || 'Minecraft Server'), // Add default for name
+            ip: nbt.string(server.ip || 'localhost'),       // Add default for ip
+            icon: nbt.string(server.icon || ''),           // Add default for icon
+            acceptTextures: nbt.byte(server.acceptTextures === 1 ? 1 : 0) // Ensure this is 0 or 1
+          });
+        });
+
+        const nbtData = nbt.comp({ // Root NBT Compound tag
+            servers: nbt.list(nbt.tag({ // NBT List Tag for servers
+                type: TagType.Compound, // Explicitly state the list elements are NBT Compounds
+                value: serverCompoundNBTs // Pass the array of NBT Compound tags
+            }))
+        }, ''); // Root tag name is empty string, as required by Minecraft
         
-        
-        const rawBuffer = nbt.writeUncompressed(nbtData, 'big')
+        const rawBuffer = nbt.writeUncompressed(nbtData); // 'big' is default for writeUncompressed
         
         // Compress the NBT data since Minecraft expects gzip-compressed servers.dat
         const compressedBuffer = zlib.gzipSync(rawBuffer);
         
         // Write to file
         fs.writeFileSync(serversDatPath, compressedBuffer);
-        
-        // Verify the file was written
         
       } catch (nbtErr) {
         return {
@@ -1265,20 +1186,14 @@ Specification-Vendor: FabricMC
         serverInfo = null 
       } = options;
       let needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
-      let fabricVersion = serverInfo?.loaderVersion || 'latest';
+      let initialFabricVersion = serverInfo?.loaderVersion || 'latest'; // Keep original request for clarity if needed elsewhere
+      let resolvedFabricVersion = initialFabricVersion;
       let targetVersion = requiredVersion;
       let fabricProfileName = null;
+
       if (needsFabric) {
-        if (fabricVersion === 'latest') {
-          try {
-            const response = await fetch('https://meta.fabricmc.net/v2/versions/loader'); // fetch is already imported
-            const loaders = await response.json();
-            fabricVersion = loaders[0].version;
-          } catch (error) {
-            fabricVersion = '0.14.21';
-          }
-        }
-        fabricProfileName = `fabric-loader-${fabricVersion}-${requiredVersion}`;
+        resolvedFabricVersion = await this._resolveFabricLoaderVersion(initialFabricVersion);
+        fabricProfileName = `fabric-loader-${resolvedFabricVersion}-${requiredVersion}`;
         targetVersion = fabricProfileName;
       }
       const requiredJavaVersion = utils.getRequiredJavaVersion(requiredVersion); // Use imported utils
@@ -1310,7 +1225,7 @@ Specification-Vendor: FabricMC
             synchronized: false, 
             reason: `Fabric profile ${fabricProfileName} not installed`,
             needsFabric: true,
-            fabricVersion: fabricVersion,
+            fabricVersion: resolvedFabricVersion, // Use resolvedFabricVersion
             vanillaVersion: requiredVersion
           };
         } else {
@@ -1341,62 +1256,19 @@ Specification-Vendor: FabricMC
         return { synchronized: false, reason: 'Client assets not downloaded or indexes empty' };
       }
       const resultMessage = needsFabric 
-        ? `All client files, Fabric ${fabricVersion}, and Java ${requiredJavaVersion} are present and verified`
+        ? `All client files, Fabric ${resolvedFabricVersion}, and Java ${requiredJavaVersion} are present and verified`
         : `All client files and Java ${requiredJavaVersion} are present and verified`;
       return { 
         synchronized: true, 
         reason: resultMessage,
         javaVersion: requiredJavaVersion,
         needsFabric: needsFabric,
-        fabricVersion: needsFabric ? fabricVersion : null,
+        fabricVersion: needsFabric ? resolvedFabricVersion : null, // Use resolved version
         fabricProfileName: fabricProfileName,
         targetVersion: targetVersion
       };
     } catch (error) {
       return { synchronized: false, reason: 'Error checking client files: ' + error.message };
-    }
-  }
-
-  async clearMinecraftClient(clientPath, minecraftVersion) {
-    try {
-      if (!fs.existsSync(clientPath)) {
-        return { success: true, message: 'Client path does not exist, nothing to clear' };
-      }
-      const versionDir = path.join(clientPath, 'versions', minecraftVersion);
-      if (fs.existsSync(versionDir)) {
-        fs.rmSync(versionDir, { recursive: true, force: true });
-      }
-      const librariesDir = path.join(clientPath, 'libraries');
-      if (fs.existsSync(librariesDir)) {
-        fs.rmSync(librariesDir, { recursive: true, force: true });
-      }
-      const assetsDir = path.join(clientPath, 'assets');
-      if (fs.existsSync(assetsDir)) {
-        fs.rmSync(assetsDir, { recursive: true, force: true });
-      }
-      return { 
-        success: true, 
-        message: `Cleared Minecraft ${minecraftVersion} client files. Ready for fresh download.` 
-      };
-    } catch (error) {
-      return { 
-        success: false, 
-        error: `Failed to clear client files: ${error.message}` 
-      };
-    }
-  }
-
-  async clearAssets(clientPath) {
-    try {
-      const assetsDir = path.join(clientPath, 'assets');
-      if (fs.existsSync(assetsDir)) {
-        fs.rmSync(assetsDir, { recursive: true, force: true });
-        return { success: true, message: 'Assets cleared successfully' };
-      } else {
-        return { success: true, message: 'Assets directory does not exist' };
-      }
-    } catch (error) {
-      return { success: false, error: error.message };
     }
   }
 
@@ -1413,9 +1285,6 @@ Specification-Vendor: FabricMC
     let modified = false;
     const base = 'https://maven.fabricmc.net/';
     
-    // CRITICAL FIX: Add authentication placeholders to game arguments
-    
-    // Ensure arguments structure exists
     fabricJson.arguments = fabricJson.arguments || {};
     fabricJson.arguments.game = fabricJson.arguments.game || [];
     fabricJson.arguments.jvm = fabricJson.arguments.jvm || [];
@@ -1453,8 +1322,6 @@ Specification-Vendor: FabricMC
       fabricJson.arguments.game = [...requiredAuthArgs, ...fabricJson.arguments.game];
       modified = true;
     } else if (gameArgsStr.includes('${auth_user_type}') && gameArgsStr.indexOf('${auth_user_type}') !== gameArgsStr.lastIndexOf('${auth_user_type}')) {
-      // Check for duplicates and remove them
-      
       const cleanedArgs = [];
       const seenArgs = new Set();
       
@@ -1465,7 +1332,6 @@ Specification-Vendor: FabricMC
             cleanedArgs.push(arg);
             seenArgs.add(arg);
           }
-          // Skip duplicates
         } else {
           cleanedArgs.push(arg);
         }
@@ -1473,10 +1339,8 @@ Specification-Vendor: FabricMC
       
       fabricJson.arguments.game = cleanedArgs;
       modified = true;
-    } else {
     }
     
-    // Also ensure JVM auth session argument is present
     const hasAuthSession = fabricJson.arguments.jvm.some(arg => 
       typeof arg === 'string' && arg.includes('${auth_session}')
     );
@@ -1499,7 +1363,7 @@ Specification-Vendor: FabricMC
             url: (lib.url || base) + jar 
           };
           modified = true;
-        } catch (parseError) {
+        } catch { // _parseError unused, empty catch, removing try/catch (L1480)
         }
       }
 
@@ -1517,79 +1381,18 @@ Specification-Vendor: FabricMC
             };
           }
           modified = true;
-        } catch (parseError) {
+        } catch { // _parseError unused, empty catch, removing try/catch (L1498)
         }
       }
     }
     
     if (modified) {
       fs.writeFileSync(jsonPath, JSON.stringify(fabricJson, null, 2));
-    } else {
     }
   }
 
-  // CRITICAL FIX: Inject vanilla downloads.client into Fabric JSON so MCLC includes vanilla JAR
-  async injectVanillaDownloads(clientPath, profileName, vanillaVersion) {
-    try {
-      const versionsDir = path.join(clientPath, 'versions');
-      const fabricJsonPath = path.join(versionsDir, profileName, `${profileName}.json`);
-      const vanillaJsonPath = path.join(versionsDir, vanillaVersion, `${vanillaVersion}.json`);
-
-      if (!fs.existsSync(fabricJsonPath)) {
-        throw new Error(`Fabric JSON not found: ${fabricJsonPath}`);
-      }
-      
-      if (!fs.existsSync(vanillaJsonPath)) {
-        throw new Error(`Vanilla JSON not found: ${vanillaJsonPath}`);
-      }
-
-      const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
-      const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
-
-      let modified = false;
-
-      // 1) Inject downloads.client if missing
-      if (!fabricJson.downloads?.client && vanillaJson.downloads?.client) {
-        fabricJson.downloads = fabricJson.downloads || {};
-        fabricJson.downloads.client = vanillaJson.downloads.client;
-        modified = true;
-      } else if (fabricJson.downloads?.client) {
-      }
-
-      // 2) Double-check inheritsFrom
-      if (!fabricJson.inheritsFrom) {
-        fabricJson.inheritsFrom = vanillaVersion;
-        modified = true;
-      }
-
-      // 3) Ensure the JSON "type" matches release so MCLC will honor downloads.client
-      if (fabricJson.type !== 'release') {
-        fabricJson.type = 'release';
-        modified = true;
-      }
-
-      if (modified) {
-        fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-      } else {
-      }
-
-      return { success: true, modified };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Download the "assets" folder for a given Minecraft version in clientPath.
-   * This:
-   *   1) Fetches the version-specific asset index JSON (e.g. 1.21.5.json → assets/indexes/1.21.5.json)
-   *   2) Reads each "objects" entry and downloads the file from Mojang's asset server
-   *   3) Writes downloaded files under assets/objects/<two-char-prefix>/<full-hash>
-   */
   async downloadAssets(clientPath, minecraftVersion) {
     try {
-      
-      // First, get the version manifest to find the asset index URL
       const versionJsonPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.json`);
       if (!fs.existsSync(versionJsonPath)) {
         throw new Error(`Version JSON not found: ${versionJsonPath}`);
@@ -1605,7 +1408,6 @@ Specification-Vendor: FabricMC
       const assetIndexId = assetIndex.id;
       
       
-      // Setup directories
       const indexDir = path.join(clientPath, 'assets', 'indexes');
       const objectsDir = path.join(clientPath, 'assets', 'objects');
       
@@ -1679,8 +1481,6 @@ Specification-Vendor: FabricMC
           .then(() => {
             downloaded++;
             processed++;
-            if (downloaded % 100 === 0) {
-            }
             if (processed % 50 === 0 || processed === totalAssets) {
               updateProgress();
             }
@@ -1694,22 +1494,18 @@ Specification-Vendor: FabricMC
 
         downloadPromises.push(downloadPromise);
 
-        // Batch downloads to avoid overwhelming the server
         if (downloadPromises.length >= 50) {
           await Promise.all(downloadPromises);
-          downloadPromises.length = 0; // Clear array
+          downloadPromises.length = 0;
         }
       }
 
-      // Wait for any remaining downloads
       if (downloadPromises.length > 0) {
         await Promise.all(downloadPromises);
       }
 
-      // Final progress update
       processed = totalAssets;
       updateProgress();
-      
       
       return { success: true, downloaded, skipped, total: totalAssets };
       
