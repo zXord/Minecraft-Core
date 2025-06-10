@@ -8,7 +8,7 @@ const eventBus = require('../utils/event-bus.cjs');
 const process = require('process');
 
 class ManagementServer {
-  /** @type {import('express').Express} */
+  /** @type {ReturnType<typeof express>} */
   app;
   /** @type {import('http').Server | null} */
   server = null;
@@ -527,7 +527,7 @@ class ManagementServer {
       
       this.server.on('error', (error) => {
         this.isRunning = false;
-        if (error.code === 'EADDRINUSE') {
+        if (error && error['code'] === 'EADDRINUSE') {
           resolve({ success: false, error: `Port ${port} is already in use` });
         } else {
           resolve({ success: false, error: error.message });

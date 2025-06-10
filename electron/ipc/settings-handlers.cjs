@@ -51,14 +51,14 @@ function createSettingsHandlers() {
         const usePath = serverPath || appStore.get('lastServerPath');
         if (usePath) {
           const configPath = path.join(usePath, '.minecraft-core.json');
-          let config = {};
+          let config = { port: updatedSettings.port, maxRam: updatedSettings.maxRam };
 
           if (fs.existsSync(configPath)) {
             try {
               const fileContent = fs.readFileSync(configPath, 'utf-8');
               config = JSON.parse(fileContent);
             } catch {
-              config = {};
+              config = { port: updatedSettings.port, maxRam: updatedSettings.maxRam };
             }
           }
 
