@@ -4,7 +4,7 @@ const os = require('os');
 const fs = require('fs');
 const { app } = require('electron');
 
-const Store = electronStore;
+const Store = electronStore.default || electronStore;
 
 const getAppDataDir = () => {
   const userData = app ? app.getPath('userData') : path.join(os.homedir(), '.minecraft-core');
