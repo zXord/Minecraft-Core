@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { onMount } from 'svelte';
   import { slide } from 'svelte/transition';
   import { get } from 'svelte/store'; // Import get
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
@@ -21,10 +21,8 @@
     latestVersion?: string;
     updateUrl?: string;
   }
-
   export let clientPath: string = '';
   
-  const dispatch = createEventDispatcher();
   let mods: DetailedMod[] = [];
   let loading = true;
   let error = '';

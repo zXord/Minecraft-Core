@@ -179,7 +179,7 @@ class ClientDownloader {
           }
         }
         
-        // CRITICAL FIX: Download assets for both Fabric and Vanilla
+        // Download assets for both Fabric and Vanilla
         this.emitter.emit('client-download-progress', {
           type: 'Assets',
           task: 'Downloading game assets...',
@@ -737,14 +737,14 @@ class ClientDownloader {
           const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
           let modified = false;
           
-          // CRITICAL FIX: Ensure Fabric profile has vanilla downloads.client so MCLC includes vanilla JAR on classpath
+          // Ensure Fabric profile has vanilla downloads.client for MCLC classpath
           if (!fabricJson.downloads?.client && vanillaJson.downloads?.client) {
             fabricJson.downloads = fabricJson.downloads || {};
             fabricJson.downloads.client = vanillaJson.downloads.client;
             modified = true;
           }
           
-          // CRITICAL FIX: Merge ALL vanilla libraries into Fabric profile to prevent missing library errors
+          // Merge vanilla libraries into Fabric profile to prevent missing library errors
           if (vanillaJson.libraries && Array.isArray(vanillaJson.libraries) && vanillaJson.libraries.length > 0) {
             
             // Initialize Fabric libraries array if it doesn't exist
@@ -792,21 +792,18 @@ class ClientDownloader {
                 'com.google.guava:guava'
               ];
               
-              const missingCritical = [];
-              criticalLibraries.forEach(requiredLib => {
+              const missingCritical = [];              criticalLibraries.forEach(requiredLib => {
                 const found = fabricJson.libraries.find(lib => lib.name?.startsWith(requiredLib));
-                if (!found) { // Removed empty if block
+                if (!found) {
                   missingCritical.push(requiredLib);
                 }
               });
-              
-              // Removed empty "if (missingCritical.length === 0) {} else {}" block.
               
               modified = true;
             } // Removed empty "else {}" block.
           } // Removed empty "else {}" block.
           
-          // CRITICAL: Add inheritsFrom field to explicitly link to vanilla
+          // Add inheritsFrom field to link to vanilla
           if (!fabricJson.inheritsFrom) {
             fabricJson.inheritsFrom = minecraftVersion;
             modified = true;
@@ -818,19 +815,18 @@ class ClientDownloader {
             modified = true;
           }
           
-          // CRITICAL: Ensure mainClass points to Fabric's knot client (not vanilla)
+          // Set mainClass to Fabric's knot client
           if (!fabricJson.mainClass) {
             fabricJson.mainClass = 'net.fabricmc.loader.impl.launch.knot.KnotClient';
             modified = true;
           }
           
-          // CRITICAL: Ensure Fabric profile can locate the vanilla JAR
+          // Ensure Fabric profile can locate the vanilla JAR
           if (!fabricJson.jar && vanillaJson.jar) {
             fabricJson.jar = vanillaJson.jar;
             modified = true;
-          }
-          
-          // PHASE 4 FIX: Ensure assetIndex is vanilla 1.21.5, NOT MCLC's "24" index
+          }          
+          // Fix asset index to use vanilla version instead of MCLC's "24" index
           if (fabricJson.assetIndex?.id === "24" || !fabricJson.assetIndex) {
             if (vanillaJson.assetIndex) {
               fabricJson.assetIndex = vanillaJson.assetIndex;
@@ -838,7 +834,7 @@ class ClientDownloader {
             }
           }
           
-          // PHASE 4 FIX: Ensure auth placeholders are camelCase (not snake_case)
+          // Fix auth placeholders to use camelCase format
           if (fabricJson.arguments?.game) {
             let authFixed = false;
             const gameArgs = fabricJson.arguments.game;
@@ -871,9 +867,8 @@ class ClientDownloader {
             if (authFixed) {
               modified = true;
             }
-          }
-          
-          // PHASE 4 FIX: Remove any incorrect MCLC downloads.client that points to wrong JAR
+          }          
+          // Fix incorrect downloads.client URL to use vanilla's version
           if (fabricJson.downloads?.client) {
             const clientUrl = fabricJson.downloads.client.url;
             // If downloads.client doesn't match vanilla, use vanilla's version
@@ -925,7 +920,7 @@ class ClientDownloader {
     }
   }
 
-  // CRITICAL NEW METHOD: Create Fabric profile JAR manually if installer fails
+  // Create Fabric profile JAR manually if installer fails
   async createFabricProfileJar(fabricJarPath, loaderVersion, minecraftVersion) {
     try {
       
@@ -1077,25 +1072,27 @@ Specification-Vendor: FabricMC
           try {
             const existingBuffer = fs.readFileSync(serversDatPath);
             
-            const uncompressed = zlib.gunzipSync(existingBuffer);
-            const parsedNbt = await nbt.parse(uncompressed); // Renamed to avoid conflict with 'parsed' variable if any
+            const uncompressed = zlib.gunzipSync(existingBuffer);            const parsedNbt = await nbt.parse(uncompressed);
             
-            // Extract existing server entries - Corrected NBT path
-            if (parsedNbt && parsedNbt.value && parsedNbt.value.servers && parsedNbt.value.servers.type === 'list' && parsedNbt.value.servers.value.type === 'compound') {
-              const serverCompoundTags = parsedNbt.value.servers.value.value; // This is an array of NBT.Compound tags
+            // Extract existing server entries - Fixed NBT path
+            if (parsedNbt && parsedNbt.parsed && parsedNbt.parsed.value && parsedNbt.parsed.value.servers) {
+              const serversTag = parsedNbt.parsed.value.servers;
+              if (serversTag.type === 'list' && Array.isArray(serversTag.value)) {
+                const serverCompoundTags = serversTag.value;
 
-              existingServers = serverCompoundTags.map(serverCompound => {
-                // serverCompound is an NBT.Compound tag
-                // serverCompound.value is { name: NBT.String, ip: NBT.String, ... }
-                // serverCompound.value.name.value is the actual string value
-                return {
-                  name: serverCompound.value.name?.value || 'Unknown Server',
-                  ip: serverCompound.value.ip?.value || 'localhost',
-                  icon: serverCompound.value.icon?.value || '',
-                  // Ensure acceptTextures is a number (0 or 1), default to 0 if undefined
-                  acceptTextures: serverCompound.value.acceptTextures?.value === 1 ? 1 : 0
-                };
-              });
+                existingServers = serverCompoundTags.map(serverCompound => {
+                  // serverCompound should have .value containing the server data
+                  const serverData = serverCompound.value || {};
+                  return {
+                    name: serverData.name?.value || 'Minecraft Server',
+                    ip: serverData.ip?.value || 'localhost',
+                    icon: serverData.icon?.value || '',
+                    acceptTextures: serverData.acceptTextures?.value || 0
+                  };
+                });
+              } else {
+                existingServers = [];
+              }
             } else {
               existingServers = [];
             }
@@ -1119,29 +1116,19 @@ Specification-Vendor: FabricMC
         };
 
         // Add our new server to the list
-        existingServers.push(newServerEntry);
+        existingServers.push(newServerEntry);        // Build NBT structure using prismarine-nbt helper functions (correct approach)
+        const nbtServers = existingServers.map(server => ({
+          name: nbt.string(server.name || 'Minecraft Server'),
+          ip: nbt.string(server.ip || 'localhost'),
+          icon: nbt.string(server.icon || ''),
+          acceptTextures: nbt.byte(server.acceptTextures === 1 ? 1 : 0)
+        }));
 
-
-        // Build NBT structure using prismarine-nbt helpers
-        const { TagType } = nbt; // Or directly use nbt.TagType.Compound etc.
-
-        const serverCompoundNBTs = existingServers.map(server => {
-          return nbt.compound({ // Each server is an NBT Compound tag
-            name: nbt.string(server.name || 'Minecraft Server'), // Add default for name
-            ip: nbt.string(server.ip || 'localhost'),       // Add default for ip
-            icon: nbt.string(server.icon || ''),           // Add default for icon
-            acceptTextures: nbt.byte(server.acceptTextures === 1 ? 1 : 0) // Ensure this is 0 or 1
-          });
+        const nbtData = nbt.comp({
+          servers: nbt.list(nbt.comp(nbtServers))
         });
-
-        const nbtData = nbt.comp({ // Root NBT Compound tag
-            servers: nbt.list(nbt.tag({ // NBT List Tag for servers
-                type: TagType.Compound, // Explicitly state the list elements are NBT Compounds
-                value: serverCompoundNBTs // Pass the array of NBT Compound tags
-            }))
-        }, ''); // Root tag name is empty string, as required by Minecraft
         
-        const rawBuffer = nbt.writeUncompressed(nbtData); // 'big' is default for writeUncompressed
+        const rawBuffer = nbt.writeUncompressed(/** @type {any} */(nbtData));
         
         // Compress the NBT data since Minecraft expects gzip-compressed servers.dat
         const compressedBuffer = zlib.gzipSync(rawBuffer);
@@ -1513,6 +1500,90 @@ Specification-Vendor: FabricMC
       return { success: false, error: error.message };
     }
   }
+  // Clear Minecraft client files for re-download
+  async clearMinecraftClient(clientPath, minecraftVersion) {
+    try {
+      const versionsDir = path.join(clientPath, 'versions');
+      
+      // Remove specific version directory
+      if (minecraftVersion) {
+        const versionDir = path.join(versionsDir, minecraftVersion);
+        if (fs.existsSync(versionDir)) {
+          fs.rmSync(versionDir, { recursive: true, force: true });
+        }
+        
+        // Also remove Fabric profiles for this version
+        const fabricProfileName = `fabric-loader-${minecraftVersion}`;
+        const fabricDir = path.join(versionsDir, fabricProfileName);
+        if (fs.existsSync(fabricDir)) {
+          fs.rmSync(fabricDir, { recursive: true, force: true });
+        }
+      }
+      
+      return { success: true, message: `Cleared client files for ${minecraftVersion}` };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Clear assets directory
+  async clearAssets(clientPath) {
+    try {
+      const assetsDir = path.join(clientPath, 'assets');
+      if (fs.existsSync(assetsDir)) {
+        fs.rmSync(assetsDir, { recursive: true, force: true });
+      }
+      return { success: true, message: 'Cleared assets directory' };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Fix Fabric profile asset index
+  async fixFabricAssetIndex(clientPath, fabricProfileName, vanillaVersion) {
+    try {
+      const versionsDir = path.join(clientPath, 'versions');
+      const fabricJsonPath = path.join(versionsDir, fabricProfileName, `${fabricProfileName}.json`);
+      const vanillaJsonPath = path.join(versionsDir, vanillaVersion, `${vanillaVersion}.json`);
+      
+      if (!fs.existsSync(fabricJsonPath)) {
+        return { success: false, error: `Fabric profile not found: ${fabricProfileName}` };
+      }
+      
+      if (!fs.existsSync(vanillaJsonPath)) {
+        return { success: false, error: `Vanilla profile not found: ${vanillaVersion}` };
+      }
+      
+      const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
+      const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
+      
+      let modified = false;
+      
+      // Fix asset index
+      if (vanillaJson.assetIndex && (!fabricJson.assetIndex || fabricJson.assetIndex.id !== vanillaJson.assetIndex.id)) {
+        fabricJson.assetIndex = vanillaJson.assetIndex;
+        modified = true;
+      }
+      
+      // Fix downloads.assets
+      if (vanillaJson.downloads?.assets && !fabricJson.downloads?.assets) {
+        fabricJson.downloads = fabricJson.downloads || {};
+        fabricJson.downloads.assets = vanillaJson.downloads.assets;
+        modified = true;
+      }
+      
+      if (modified) {
+        fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
+        return { success: true, message: 'Fixed Fabric asset index' };
+      }
+      
+      return { success: true, message: 'Asset index already correct' };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  // ...existing code...
 }
 
 module.exports = { ClientDownloader };
