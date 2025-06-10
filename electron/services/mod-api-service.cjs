@@ -597,9 +597,6 @@ async function searchCurseForgeMods({ page = 1, limit = 20 }) {
 /**
  * Get download URL for a CurseForge mod
  * 
- * @param {string} modId - CurseForge mod ID
- * @param {string} version - Minecraft version
- * @param {string} loader - Mod loader (fabric, forge, etc.)
  * @returns {Promise<string>} Download URL
  */
 async function getCurseForgeDownloadUrl() {

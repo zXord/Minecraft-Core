@@ -2,7 +2,7 @@
 // REMOVED unused @xmcl imports - we now use direct Java execution instead
 const fs = require('fs');
 const path = require('path');
-const AdmZip = require('adm-zip').default;
+const AdmZip = require('adm-zip');
 const { EventEmitter } = require('events');
 const { JavaManager } = require('./java-manager.cjs');
 const { AuthHandler } = require('./auth-handler.cjs');

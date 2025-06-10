@@ -158,84 +158,73 @@ function createModHandlers(win) {
         throw new Error(`Failed to get disabled mods: ${err.message}`);
       }
     },    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
-      try {
-        if (!serverPath || !fs.existsSync(serverPath)) {
-          throw new Error('Invalid server path');
+      if (!serverPath || !fs.existsSync(serverPath)) {
+        throw new Error('Invalid server path');
+      }
+      if (!mcVersion || !fabricVersion) {
+        throw new Error('Version information missing');
+      }
+
+      const installed = await modFileManager.getInstalledModInfo(serverPath);
+      const results = [];
+
+      for (const mod of installed) {
+        const projectId = mod.projectId;
+        const fileName = mod.fileName;
+        const name = mod.name || mod.title || fileName;
+        const currentVersion = mod.versionNumber || mod.version || null;
+
+        if (!projectId) {
+          results.push({ 
+            projectId: null, 
+            fileName, 
+            name, 
+            currentVersion, 
+            compatible: true, 
+            dependencies: [] 
+          });
+          continue;
         }
-        if (!mcVersion || !fabricVersion) {
-          throw new Error('Version information missing');
-        }
 
-        const installed = await modFileManager.getInstalledModInfo(serverPath);
-        const results = [];
+        try {
+          const versions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
+          const best = versions && versions[0];
 
-        for (const mod of installed) {
-          const projectId = mod.projectId;
-          const fileName = mod.fileName;
-          const name = mod.name || mod.title || fileName;
-          const currentVersion = mod.versionNumber || mod.version || null;
-
-          if (!projectId) {
-            results.push({ 
-              projectId: null, 
-              fileName, 
-              name, 
-              currentVersion, 
-              compatible: true, 
-              dependencies: [] 
-            });
-            continue;
-          }
-
-          try {
-            const versions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
-            const best = versions && versions[0];
-
-            if (!best) {
-              results.push({ 
-                projectId, 
-                fileName, 
-                name, 
-                currentVersion, 
-                compatible: false 
-              });
-            } else {
-              results.push({
-                projectId,
-                fileName,
-                name,
-                currentVersion,
-                latestVersion: best.version_number,
-                compatible: true,
-                dependencies: best.dependencies || []
-              });
-            }
-          } catch (err) {
+          if (!best) {
             results.push({ 
               projectId, 
               fileName, 
               name, 
               currentVersion, 
-              compatible: false, 
-              error: err.message 
+              compatible: false 
+            });
+          } else {
+            results.push({
+              projectId,
+              fileName,
+              name,
+              currentVersion,
+              latestVersion: best.version_number,
+              compatible: true,
+              dependencies: best.dependencies || []
             });
           }
+        } catch (err) {
+          results.push({ 
+            projectId, 
+            fileName, 
+            name, 
+            currentVersion, 
+            compatible: false, 
+            error: err.message 
+          });
         }
-
-        return results;
-      } catch (err) {
-        throw err;
       }
-    },
 
-    'install-mod': async (_event, serverPath, modDetails) => {
-      try {
-        // Pass 'win' object for progress reporting
-        return await modInstallService.installModToServer(win, serverPath, modDetails);
-      } catch (err) {
-        // The service function should format the error appropriately
-        throw err; // Re-throw the error to be caught by the invoker in the renderer
-      }
+      return results;
+    },    'install-mod': async (_event, serverPath, modDetails) => {
+      // Pass 'win' object for progress reporting
+      return await modInstallService.installModToServer(win, serverPath, modDetails);
     },
 
     'add-mod': async (_event, serverPath, modPath) => {
@@ -433,14 +422,10 @@ function createModHandlers(win) {
         throw new Error(`Failed to move mod file: ${err.message}`);
       }
     },    'install-client-mod': async (_event, modData) => {
-      try {
-        // Pass 'win' object for progress reporting, if the service function is adapted for it
-        // The service function currently doesn't take 'win', but it could be added
-        // or a callback mechanism implemented. For now, passing win as per general plan.
-        return await modInstallService.installModToClient(win, modData);
-      } catch (error) {
-        throw error; // Re-throw the error
-      }
+      // Pass 'win' object for progress reporting, if the service function is adapted for it
+      // The service function currently doesn't take 'win', but it could be added
+      // or a callback mechanism implemented. For now, passing win as per general plan.
+      return await modInstallService.installModToClient(win, modData);
     },
 
     // Check client-side mod compatibility with new Minecraft version
