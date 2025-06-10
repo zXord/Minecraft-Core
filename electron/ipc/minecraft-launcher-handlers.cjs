@@ -1,4 +1,4 @@
-const { BrowserWindow } = require('electron');
+
 const { getMinecraftLauncher } = require('../services/minecraft-launcher/index.cjs');
 const utils = require('../services/minecraft-launcher/utils.cjs');
 const fs = require('fs');
@@ -8,25 +8,13 @@ const https = require('https');
 const { readModMetadataFromJar } = require('./mod-utils/mod-file-manager.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 
-/**
- * Check if a mod is compatible with a specific Minecraft version
- * @param {string} modFileName - The name of the mod file
- * @param {string} targetVersion - The target Minecraft version
- * @returns {boolean} Whether the mod is compatible
- */
 function checkModCompatibility(modFileName, targetVersion) {
-  try {
-    const versionMatch = modFileName.match(/(\d+\.\d+(?:\.\d+)?)/);
-    if (versionMatch) {
-      const modVersion = versionMatch[1];
-      const targetMajorMinor = targetVersion.split('.').slice(0, 2).join('.');
-      const modMajorMinor = modVersion.split('.').slice(0, 2).join('.');
-      return targetMajorMinor === modMajorMinor;
-    }
-    return true;
-  } catch {
-    return true;
-  }
+  const versionMatch = modFileName.match(/(\d+\.\d+(?:\.\d+)?)/);
+  if (!versionMatch) return true;
+  const modVersion = versionMatch[1];
+  const targetMajorMinor = targetVersion.split('.').slice(0, 2).join('.');
+  const modMajorMinor = modVersion.split('.').slice(0, 2).join('.');
+  return targetMajorMinor === modMajorMinor;
 }
 
 function getBaseModName(fileName) {
@@ -53,12 +41,6 @@ function extractVersionFromFilename(fileName) {
   return null;
 }
 
-/**
- * Create Minecraft launcher IPC handlers
- * 
- * @param {BrowserWindow} win - The main application window
- * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
- */
 function createMinecraftLauncherHandlers(win) {
   const launcher = getMinecraftLauncher();
   
@@ -181,13 +163,7 @@ function createMinecraftLauncherHandlers(win) {
       try {
         const result = await launcher.authenticateWithMicrosoft();
         if (result.success && clientPath) {
-          try {
-            const saveResult = await launcher.saveAuthData(clientPath);
-            if (saveResult.success) {
-            } else {
-            }
-          } catch {
-          }
+          await launcher.saveAuthData(clientPath).catch(() => {});
         }
         
         return result;
@@ -218,10 +194,7 @@ function createMinecraftLauncherHandlers(win) {
       try {
         const result = await launcher.checkAndRefreshAuth();
         if (result.success && result.refreshed && clientPath) {
-          try {
-            await launcher.saveAuthData(clientPath);
-          } catch {
-          }
+          await launcher.saveAuthData(clientPath).catch(() => {});
         }
 
         return result;
@@ -339,29 +312,24 @@ function createMinecraftLauncherHandlers(win) {
                           }
                           
                           downloaded.push(mod.fileName);
-                          try {
-                            const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
-                            const manifestData = {
-                              fileName: mod.fileName,
-                              source: 'server',
-                              projectId: mod.projectId || null,
-                              versionId: mod.versionId || null,
-                              versionNumber: mod.versionNumber || null,
-                              name: mod.name || null
-                            };                            try {
-                              const meta = await readModMetadataFromJar(modPath);
-                              if (meta) {
-                                if (!manifestData.projectId) manifestData.projectId = meta.projectId;
-                                if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
-                                if (!manifestData.name) manifestData.name = meta.name;
-                              }
-                            } catch {
-                            }
-                            fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
-                          } catch {
+                          const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                          const manifestData = {
+                            fileName: mod.fileName,
+                            source: 'server',
+                            projectId: mod.projectId || null,
+                            versionId: mod.versionId || null,
+                            versionNumber: mod.versionNumber || null,
+                            name: mod.name || null
+                          };
+                          const meta = await readModMetadataFromJar(modPath).catch(() => null);
+                          if (meta) {
+                            if (!manifestData.projectId) manifestData.projectId = meta.projectId;
+                            if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
+                            if (!manifestData.name) manifestData.name = meta.name;
                           }
-                          resolve();
-                        });
+                          fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
+                      resolve();
+                    });
                         
                         file2.on('error', (err) => {
                           fs.unlinkSync(modPath);
@@ -387,27 +355,22 @@ function createMinecraftLauncherHandlers(win) {
                       }
                       
                       downloaded.push(mod.fileName);
-                      try {
-                        const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
-                        const manifestData = {
-                          fileName: mod.fileName,
-                          source: 'server',
-                          projectId: mod.projectId || null,
-                          versionId: mod.versionId || null,
-                          versionNumber: mod.versionNumber || null,
-                          name: mod.name || null
-                        };                        try {
-                          const meta = await readModMetadataFromJar(modPath);
+                          const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                          const manifestData = {
+                            fileName: mod.fileName,
+                            source: 'server',
+                            projectId: mod.projectId || null,
+                            versionId: mod.versionId || null,
+                            versionNumber: mod.versionNumber || null,
+                            name: mod.name || null
+                          };
+                          const meta = await readModMetadataFromJar(modPath).catch(() => null);
                           if (meta) {
                             if (!manifestData.projectId) manifestData.projectId = meta.projectId;
                             if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
                             if (!manifestData.name) manifestData.name = meta.name;
                           }
-                        } catch {
-                        }
-                        fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
-                      } catch {
-                      }
+                          fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
                       resolve();
                     });
                     
@@ -451,9 +414,7 @@ function createMinecraftLauncherHandlers(win) {
         const totalProcessed = downloaded.length + failures.length + skipped.length;
         const successCount = downloaded.length + skipped.length;
         
-        const removed = [];        try {
-          const modsDir = path.join(clientPath, 'mods');
-          const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        const removed = [];
 
           const allowedList = Array.isArray(allClientMods) && allClientMods.length > 0
             ? allClientMods
@@ -463,7 +424,6 @@ function createMinecraftLauncherHandlers(win) {
           if (fs.existsSync(manifestDir)) {
             const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
             for (const file of manifests) {
-              try {
                 const manifestPath = path.join(manifestDir, file);
                 const data = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
                 const fileName = data.fileName;
@@ -475,8 +435,6 @@ function createMinecraftLauncherHandlers(win) {
                   if (fs.existsSync(disabled)) fs.unlinkSync(disabled);                  fs.unlinkSync(manifestPath);
                   removed.push(fileName);
                 }
-              } catch {
-              }
             }
           }
           
@@ -485,7 +443,6 @@ function createMinecraftLauncherHandlers(win) {
             for (const modFile of existingMods) {
               const manifestPath = path.join(manifestDir, `${modFile}.json`);
               if (!fs.existsSync(manifestPath) && !allowed.has(modFile)) {
-                try {
                   if (!fs.existsSync(manifestDir)) {
                     fs.mkdirSync(manifestDir, { recursive: true });
                   }
@@ -495,13 +452,9 @@ function createMinecraftLauncherHandlers(win) {
                     preserved: true,
                     timestamp: new Date().toISOString()
                   }, null, 2));
-                } catch {
-                }
               }
             }
           }
-        } catch {
-        }
         
         const result = {
           success: failures.length === 0,
@@ -537,18 +490,13 @@ function createMinecraftLauncherHandlers(win) {
           useProperLauncher = true
         } = options;
 
-        try {
-          const datRes = await ensureServersDat(
-            clientPath,
-            serverIp,
-            managementPort,
-            clientName || 'Minecraft Server',
-            serverPort          );
-          if (datRes.success) {
-          } else {
-          }
-        } catch {
-        }
+        await ensureServersDat(
+          clientPath,
+          serverIp,
+          managementPort,
+          clientName || 'Minecraft Server',
+          serverPort
+        );
         
         if (useProperLauncher) {
           
@@ -563,9 +511,8 @@ function createMinecraftLauncherHandlers(win) {
             needsFabric: serverInfo?.loaderType === 'fabric' || requiredMods.length > 0,
             fabricVersion: serverInfo?.loaderVersion || 'latest'
           });
-            if (properResult.success) {
+          if (properResult.success) {
             return properResult;
-          } else {
           }
         }
         
@@ -695,7 +642,6 @@ function createMinecraftLauncherHandlers(win) {
         
         const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
 
-        try {
           if (fs.existsSync(manifestDir)) {
             const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
             const allowed = new Set([
@@ -704,22 +650,18 @@ function createMinecraftLauncherHandlers(win) {
             ]);
             
             for (const file of manifests) {
-              try {
                 const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));                if (data.fileName && !allowed.has(data.fileName)) {
                   if (serverManagedFilesSet.has(data.fileName.toLowerCase())) {
                     extraMods.push(data.fileName);
                   }
-                }              } catch {
-              }
+                }
             }
           }
-        } catch {
-        }
         const clientModChanges = {
           updates: [],
           removals: [],
           newDownloads: []
-        };try {
+        };
           const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
           
           const allPresentMods = [...presentMods, ...disabledMods];
@@ -745,7 +687,6 @@ function createMinecraftLauncherHandlers(win) {
               ? path.join(modsDir, modFileName)
               : path.join(modsDir, modFileName + '.disabled');
             
-            try {
               const clientModMetadata = await modAnalysisUtils.extractDependenciesFromJar(modPath);
               if (!clientModMetadata) continue;
               const exactServerMatch = requiredMods.find(rm => 
@@ -762,23 +703,6 @@ function createMinecraftLauncherHandlers(win) {
                 
                 return false;
               }) : null;
-              const compatibleServerMatch = !exactServerMatch && !similarServerMatch ? (() => {
-                const clientModName = (clientModMetadata.name || modFileName).toLowerCase();
-                
-                if (clientModName.includes('iris') || clientModName.includes('shader')) {
-                  const clientMcVersion = modFileName.match(/1\.21\.(\d+)/);
-                  if (clientMcVersion) {
-                    const clientMinor = parseInt(clientMcVersion[1]);
-                    if (clientMinor >= 2) return { isCompatible: true };
-                  }
-                }
-                
-                if (clientModName.includes('entity') && clientModName.includes('culling')) {
-                  return { isCompatible: true };
-                }
-                
-                return null;
-              })() : null;
                 if (exactServerMatch || similarServerMatch) {
                 const matchedServerMod = exactServerMatch || similarServerMatch;
                 const serverVersion = extractVersionFromFilename(matchedServerMod.fileName) || 'Server Version';
@@ -789,24 +713,20 @@ function createMinecraftLauncherHandlers(win) {
                   currentVersion: clientModMetadata.version || 'Unknown',
                   serverVersion: serverVersion,
                   action: 'update'
-                });              } else if (compatibleServerMatch?.isCompatible) {
-              } else {
-                const isExplicitlyAllowed = allAllowedMods.has(modFileNameLower);
-                
-                if (!isExplicitlyAllowed) {
-                  clientModChanges.removals.push({
-                    fileName: modFileName,
-                    name: clientModMetadata.name || modFileName,
-                    currentVersion: clientModMetadata.version || 'Unknown',
-                    action: 'disable'
-                  });
+                });
+                } else {
+                  const isExplicitlyAllowed = allAllowedMods.has(modFileNameLower);
+
+                  if (!isExplicitlyAllowed) {
+                    clientModChanges.removals.push({
+                      fileName: modFileName,
+                      name: clientModMetadata.name || modFileName,
+                      currentVersion: clientModMetadata.version || 'Unknown',
+                      action: 'disable'
+                    });
+                  }
                 }
-              }
-            } catch {
-            }
           }
-        } catch {
-        }
 
         const serverModsWithClientUpdates = new Set();
         for (const update of clientModChanges.updates) {
@@ -1006,16 +926,11 @@ function createMinecraftLauncherHandlers(win) {
         for (const file of files) {
           const base = file.replace('.disabled', '');
           if (!allowed.has(base)) {
-            const filePath = path.join(modsDir, file);            try {
-              fs.unlinkSync(filePath);
-            } catch {
-            }
+            const filePath = path.join(modsDir, file);
+            fs.unlinkSync(filePath);
 
-            try {
-              const manifestPath = path.join(manifestDir, `${base}.json`);
-              if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
-            } catch {
-            }
+            const manifestPath = path.join(manifestDir, `${base}.json`);
+            if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
 
             removed.push(base);
           }
