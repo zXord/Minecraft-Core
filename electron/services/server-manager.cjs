@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
+const process = require('process');
 const { safeSend } = require('../utils/safe-send.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const { resetCrashCount } = require('./auto-restart.cjs');
@@ -246,7 +247,7 @@ function startMinecraftServer(targetPath, port, maxRam) {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     
-    serverProcess.serverInfo = {
+    serverProcess['serverInfo'] = {
       id: serverIdentifier,
       jar: launchJar,
       port: port,
@@ -338,16 +339,16 @@ function startMinecraftServer(targetPath, port, maxRam) {
       
       const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
       
-      const serverInfo = serverProcess ? { ...serverProcess.serverInfo } : null;
+      const serverInfo = serverProcess ? { ...serverProcess['serverInfo'] } : null;
       
       
       if (!isNormalExit) {
         const restartInfo = {
           serverInfo: {
-            targetPath: serverProcess && serverProcess.serverInfo ? serverProcess.serverInfo.targetPath : null,
-            port: serverProcess && serverProcess.serverInfo ? serverProcess.serverInfo.port : 25565,
-            maxRam: serverProcess && serverProcess.serverInfo ? serverProcess.serverInfo.maxRam : 4,
-            jar: serverProcess && serverProcess.serverInfo ? serverProcess.serverInfo.jar : null,
+            targetPath: serverProcess && serverProcess['serverInfo'] ? serverProcess['serverInfo'].targetPath : null,
+            port: serverProcess && serverProcess['serverInfo'] ? serverProcess['serverInfo'].port : 25565,
+            maxRam: serverProcess && serverProcess['serverInfo'] ? serverProcess['serverInfo'].maxRam : 4,
+            jar: serverProcess && serverProcess['serverInfo'] ? serverProcess['serverInfo'].jar : null,
             ...serverInfo
           },
           pid: serverProcess ? serverProcess.pid : null,
@@ -399,6 +400,7 @@ function startMinecraftServer(targetPath, port, maxRam) {
     
     return true;
   } catch (err) {
+    console.error(err);
     return false;
   }
 }
