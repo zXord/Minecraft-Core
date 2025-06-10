@@ -4,11 +4,12 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { createHash } = require('crypto');
-const utils = require('./minecraft-launcher/utils.cjs'); // Import utils for calculateFileChecksum
+const process = require('process');
 const eventBus = require('../utils/event-bus.cjs');
 
 class ManagementServer {
   constructor() {
+    /** @type {import('express').Express} */
     this.app = express();
     this.server = null;
     this.port = 8080; // Default management port (different from Minecraft)
@@ -164,16 +165,13 @@ class ManagementServer {
         }
           // Get Minecraft version from .minecraft-core.json, server jar name or version.json
         let minecraftVersion = 'unknown';
-        try {
+        let serverJars = [];
           // First priority: check .minecraft-core.json config file
           const minecraftCoreConfigPath = path.join(this.serverPath, '.minecraft-core.json');
           if (fs.existsSync(minecraftCoreConfigPath)) {
-            try {
-              const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
-              if (coreConfig.version) {
-                minecraftVersion = coreConfig.version;
-              }
-            } catch (err) {
+            const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
+            if (coreConfig.version) {
+              minecraftVersion = coreConfig.version;
             }
           }
           
@@ -217,16 +215,13 @@ class ManagementServer {
             // Check for Fabric loader version info
             const fabricLoaderPath = path.join(this.serverPath, '.fabric', 'remappedJars');
             if (fs.existsSync(fabricLoaderPath)) {
-              try {
-                const fabricFiles = fs.readdirSync(fabricLoaderPath);
-                for (const file of fabricFiles) {
-                  const match = file.match(/minecraft-(\d+\.\d+(?:\.\d+)?)/);
-                  if (match) {
-                    minecraftVersion = match[1];
-                    break;
-                  }
+              const fabricFiles = fs.readdirSync(fabricLoaderPath);
+              for (const file of fabricFiles) {
+                const match = file.match(/minecraft-(\d+\.\d+(?:\.\d+)?)/);
+                if (match) {
+                  minecraftVersion = match[1];
+                  break;
                 }
-              } catch (err) {
               }
             }
           }
@@ -235,17 +230,13 @@ class ManagementServer {
           if (minecraftVersion === 'unknown') {
             const logsPath = path.join(this.serverPath, 'logs');
             if (fs.existsSync(logsPath)) {
-              try {
-                const latestLog = path.join(logsPath, 'latest.log');
-                if (fs.existsSync(latestLog)) {
-                  const logContent = fs.readFileSync(latestLog, 'utf8');
-                  // Look for version in server startup logs
-                  const versionMatch = logContent.match(/Starting minecraft server version (\d+\.\d+(?:\.\d+)?)|Minecraft (\d+\.\d+(?:\.\d+)?)|version (\d+\.\d+(?:\.\d+)?)/i);
-                  if (versionMatch) {
-                    minecraftVersion = versionMatch[1] || versionMatch[2] || versionMatch[3];
-                  }
+              const latestLog = path.join(logsPath, 'latest.log');
+              if (fs.existsSync(latestLog)) {
+                const logContent = fs.readFileSync(latestLog, 'utf8');
+                const versionMatch = logContent.match(/Starting minecraft server version (\d+\.\d+(?:\.\d+)?)|Minecraft (\d+\.\d+(?:\.\d+)?)|version (\d+\.\d+(?:\.\d+)?)/i);
+                if (versionMatch) {
+                  minecraftVersion = versionMatch[1] || versionMatch[2] || versionMatch[3];
                 }
-              } catch (err) {
               }
             }
           }
@@ -256,14 +247,11 @@ class ManagementServer {
             for (const scriptFile of scriptFiles) {
               const scriptPath = path.join(this.serverPath, scriptFile);
               if (fs.existsSync(scriptPath)) {
-                try {
-                  const scriptContent = fs.readFileSync(scriptPath, 'utf8');
-                  const versionMatch = scriptContent.match(/(\d+\.\d+(?:\.\d+)?)/);
-                  if (versionMatch) {
-                    minecraftVersion = versionMatch[1];
-                    break;
-                  }
-                } catch (err) {
+                const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+                const versionMatch = scriptContent.match(/(\d+\.\d+(?:\.\d+)?)/);
+                if (versionMatch) {
+                  minecraftVersion = versionMatch[1];
+                  break;
                 }
               }
             }
@@ -292,8 +280,6 @@ class ManagementServer {
             }
           }
           
-        } catch (versionError) {
-        }
         
         // Get required mods for clients
         const requiredMods = await this.getRequiredMods();
@@ -308,15 +294,11 @@ class ManagementServer {
         let loaderVersion = null;
         
         // First priority: check .minecraft-core.json config file for loader info
-        const minecraftCoreConfigPath = path.join(this.serverPath, '.minecraft-core.json');
         if (fs.existsSync(minecraftCoreConfigPath)) {
-          try {
-            const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
-            if (coreConfig.fabric) {
-              loaderType = 'fabric';
-              loaderVersion = coreConfig.fabric;
-            }
-          } catch (err) {
+          const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
+          if (coreConfig.fabric) {
+            loaderType = 'fabric';
+            loaderVersion = coreConfig.fabric;
           }
         }
         
@@ -325,16 +307,10 @@ class ManagementServer {
           const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
           if (fs.existsSync(fabricLaunchJar)) {
             loaderType = 'fabric';
-            
-            // Try to get Fabric version from config or files
-            try {
-              const configPath = path.join(this.serverPath, 'config.json');
-              if (fs.existsSync(configPath)) {
-                const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-                loaderVersion = config.fabric || config.loaderVersion;
-              }
-            } catch (e) {
-              // Ignore config read errors
+            const configPath = path.join(this.serverPath, 'config.json');
+            if (fs.existsSync(configPath)) {
+              const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+              loaderVersion = config.fabric || config.loaderVersion;
             }
           }
         }
@@ -370,7 +346,7 @@ class ManagementServer {
             difficulty: serverProps['difficulty'] || 'normal'
           }
         });
-      } catch (error) {
+      } catch {
         res.status(500).json({ error: 'Failed to read server information' });
       }
     });
@@ -441,7 +417,7 @@ class ManagementServer {
             total: serverMods.length + clientMods.length + bothMods.length
           }
         });
-      } catch (error) {
+      } catch {
         res.status(500).json({ error: 'Failed to read mod list' });
       }
     });
@@ -479,7 +455,7 @@ class ManagementServer {
         const fileStream = fs.createReadStream(modPath);
         fileStream.pipe(res);
         
-      } catch (error) {
+      } catch {
         res.status(500).json({ error: 'Failed to serve mod file' });
       }
     });
@@ -495,8 +471,8 @@ class ManagementServer {
           serverPath: this.serverPath,
           port: this.port
         });
-      } catch (error) {
-        res.status(500).json({ error: 'Failed to get required mods', details: error.message });
+      } catch {
+        res.status(500).json({ error: 'Failed to get required mods' });
       }
     });
     
@@ -608,7 +584,7 @@ class ManagementServer {
           } else {
             return 'stopped';
           }
-        } catch (error) {
+        } catch {
           return 'unknown';
         }
       } else {
@@ -620,11 +596,11 @@ class ManagementServer {
           } else {
             return 'stopped';
           }
-        } catch (error) {
-          return 'stopped'; // ps command failed or no processes found
+        } catch {
+          return 'stopped';
         }
       }
-    } catch (error) {
+    } catch {
       return 'unknown';
     }
   }
@@ -641,16 +617,13 @@ class ManagementServer {
       
       // Load saved mod categories to check requirement status
       let savedCategories = [];
-      try {
-        const { app } = require('electron');
-        const configDir = path.join(app.getPath('userData'), 'config');
-        const configFile = path.join(configDir, 'mod-categories.json');
-        
-        if (fs.existsSync(configFile)) {
-          const data = fs.readFileSync(configFile, 'utf8');
-          savedCategories = JSON.parse(data);
-        }
-      } catch (configError) {
+      const { app } = require('electron');
+      const configDir = path.join(app.getPath('userData'), 'config');
+      const configFile = path.join(configDir, 'mod-categories.json');
+
+      if (fs.existsSync(configFile)) {
+        const data = fs.readFileSync(configFile, 'utf8');
+        savedCategories = JSON.parse(data);
       }
       
       // Convert categories array to map for easier lookup
@@ -682,17 +655,14 @@ class ManagementServer {
             let versionNumber = null;
             let name = null;
             
-            try {
-              const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${file}.json`);
-              if (fs.existsSync(manifestPath)) {
-                const manifestContent = fs.readFileSync(manifestPath, 'utf8');
-                const manifest = JSON.parse(manifestContent);
-                projectId = manifest.projectId || null;
-                versionId = manifest.versionId || null;
-                versionNumber = manifest.versionNumber || null;
-                name = manifest.name || null;
-              }
-            } catch (manifestErr) {
+            const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${file}.json`);
+            if (fs.existsSync(manifestPath)) {
+              const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+              const manifest = JSON.parse(manifestContent);
+              projectId = manifest.projectId || null;
+              versionId = manifest.versionId || null;
+              versionNumber = manifest.versionNumber || null;
+              name = manifest.name || null;
             }
             
             return {
@@ -737,17 +707,14 @@ class ManagementServer {
               let versionNumber = null;
               let name = null;
               
-              try {
-                const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${serverMod}.json`);
-                if (fs.existsSync(manifestPath)) {
-                  const manifestContent = fs.readFileSync(manifestPath, 'utf8');
-                  const manifest = JSON.parse(manifestContent);
-                  projectId = manifest.projectId || null;
-                  versionId = manifest.versionId || null;
-                  versionNumber = manifest.versionNumber || null;
-                  name = manifest.name || null;
-                }
-              } catch (manifestErr) {
+              const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${serverMod}.json`);
+              if (fs.existsSync(manifestPath)) {
+                const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+                const manifest = JSON.parse(manifestContent);
+                projectId = manifest.projectId || null;
+                versionId = manifest.versionId || null;
+                versionNumber = manifest.versionNumber || null;
+                name = manifest.name || null;
               }
               
               requiredMods.push({
@@ -772,7 +739,7 @@ class ManagementServer {
       const actuallyRequiredMods = requiredMods.filter(mod => mod.required);
       
       return actuallyRequiredMods;
-    } catch (error) {
+    } catch {
       return [];
     }
   }
@@ -786,19 +753,16 @@ class ManagementServer {
     try {
       const clientModsDir = path.join(this.serverPath, 'client', 'mods');
       const serverModsDir = path.join(this.serverPath, 'mods');
-      
+
       // Load saved mod categories to check requirement status
       let savedCategories = [];
-      try {
-        const { app } = require('electron');
-        const configDir = path.join(app.getPath('userData'), 'config');
-        const configFile = path.join(configDir, 'mod-categories.json');
-        
-        if (fs.existsSync(configFile)) {
-          const data = fs.readFileSync(configFile, 'utf8');
-          savedCategories = JSON.parse(data);
-        }
-      } catch (configError) {
+      const { app } = require('electron');
+      const configDir = path.join(app.getPath('userData'), 'config');
+      const configFile = path.join(configDir, 'mod-categories.json');
+
+      if (fs.existsSync(configFile)) {
+        const data = fs.readFileSync(configFile, 'utf8');
+        savedCategories = JSON.parse(data);
       }
       
       // Convert categories array to map for easier lookup
@@ -830,17 +794,14 @@ class ManagementServer {
             let versionNumber = null;
             let name = null;
             
-            try {
-              const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${file}.json`);
-              if (fs.existsSync(manifestPath)) {
-                const manifestContent = fs.readFileSync(manifestPath, 'utf8');
-                const manifest = JSON.parse(manifestContent);
-                projectId = manifest.projectId || null;
-                versionId = manifest.versionId || null;
-                versionNumber = manifest.versionNumber || null;
-                name = manifest.name || null;
-              }
-            } catch (manifestErr) {
+            const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${file}.json`);
+            if (fs.existsSync(manifestPath)) {
+              const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+              const manifest = JSON.parse(manifestContent);
+              projectId = manifest.projectId || null;
+              versionId = manifest.versionId || null;
+              versionNumber = manifest.versionNumber || null;
+              name = manifest.name || null;
             }
             
             return {
@@ -885,17 +846,14 @@ class ManagementServer {
               let versionNumber = null;
               let name = null;
               
-              try {
-                const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${serverMod}.json`);
-                if (fs.existsSync(manifestPath)) {
-                  const manifestContent = fs.readFileSync(manifestPath, 'utf8');
-                  const manifest = JSON.parse(manifestContent);
-                  projectId = manifest.projectId || null;
-                  versionId = manifest.versionId || null;
-                  versionNumber = manifest.versionNumber || null;
-                  name = manifest.name || null;
-                }
-              } catch (manifestErr) {
+              const manifestPath = path.join(this.serverPath, 'client', 'minecraft-core-manifests', `${serverMod}.json`);
+              if (fs.existsSync(manifestPath)) {
+                const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+                const manifest = JSON.parse(manifestContent);
+                projectId = manifest.projectId || null;
+                versionId = manifest.versionId || null;
+                versionNumber = manifest.versionNumber || null;
+                name = manifest.name || null;
               }
               
               allClientMods.push({
@@ -917,7 +875,7 @@ class ManagementServer {
       }
       
       return allClientMods;
-    } catch (error) {
+    } catch {
       return [];
     }
   }
@@ -927,7 +885,7 @@ class ManagementServer {
     try {
       const fileContent = fs.readFileSync(filePath);
       return createHash('md5').update(fileContent).digest('hex');
-    } catch (error) {
+    } catch {
       return null;
     }
   }
@@ -955,12 +913,12 @@ class ManagementServer {
   
   // Remove clients that haven't been seen for more than 2 minutes
   cleanupStaleClients() {
-    const now = new Date();
+    const now = Date.now();
     const staleThreshold = 2 * 60 * 1000; // 2 minutes in milliseconds
     const staleClients = [];
-    
+
     for (const [clientId, client] of this.clients) {
-      const timeSinceLastSeen = now - client.lastSeen;
+      const timeSinceLastSeen = now - client.lastSeen.getTime();
       if (timeSinceLastSeen > staleThreshold) {
         staleClients.push(clientId);
       }
@@ -979,16 +937,16 @@ class ManagementServer {
   broadcastEvent(event, data) {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     this.sseClients.forEach(res => {
-      try {
+      if (!res.writableEnded) {
         res.write(payload);
-      } catch {}
+      }
     });
     eventBus.emit(event, data);
   }
 
   startVersionWatcher() {
     if (!this.serverPath) return;
-    this.versionWatcher = fs.watch(this.serverPath, (eventType, filename) => {
+    this.versionWatcher = fs.watch(this.serverPath, (_, filename) => {
       if (!filename) return;
       if (filename.endsWith('.jar') || filename === 'version.json') {
         this.checkVersionChange();
@@ -1011,16 +969,13 @@ class ManagementServer {
       // First priority: check .minecraft-core.json config file
       const minecraftCoreConfigPath = path.join(this.serverPath, '.minecraft-core.json');
       if (fs.existsSync(minecraftCoreConfigPath)) {
-        try {
-          const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
-          if (coreConfig.version) {
-            minecraftVersion = coreConfig.version;
-          }
-          if (coreConfig.fabric) {
-            loaderType = 'fabric';
-            loaderVersion = coreConfig.fabric;
-          }
-        } catch (err) {
+        const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
+        if (coreConfig.version) {
+          minecraftVersion = coreConfig.version;
+        }
+        if (coreConfig.fabric) {
+          loaderType = 'fabric';
+          loaderVersion = coreConfig.fabric;
         }
       }
       
@@ -1047,16 +1002,16 @@ class ManagementServer {
         const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
         if (fs.existsSync(fabricLaunchJar)) {
           loaderType = 'fabric';
-          try {
-            const configPath = path.join(this.serverPath, 'config.json');
-            if (fs.existsSync(configPath)) {
-              const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-              loaderVersion = cfg.fabric || cfg.loaderVersion || null;
-            }
-          } catch {}
+          const configPath = path.join(this.serverPath, 'config.json');
+          if (fs.existsSync(configPath)) {
+            const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            loaderVersion = cfg.fabric || cfg.loaderVersion || null;
+          }
         }
       }
-    } catch {}
+    } catch {
+      return { minecraftVersion, loaderType, loaderVersion };
+    }
     return { minecraftVersion, loaderType, loaderVersion };
   }
 
