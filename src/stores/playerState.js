@@ -18,7 +18,6 @@ export const playerState = writable({
 });
 
 // Debounce mechanism for player updates
-let lastPlayerListUpdate = 0;
 let pendingPlayerNames = null;
 let pendingUpdateTimer = null;
 const DEBOUNCE_DELAY = 1500; // 1.5 second debounce delay (reduced from 3 seconds)
@@ -38,7 +37,6 @@ export function updateOnlinePlayers(players) {
       count: players.length,
       onlinePlayers: players
     }));
-    lastPlayerListUpdate = now;
     
     // Also clear any pending debounced updates
     if (pendingUpdateTimer) {
@@ -56,7 +54,6 @@ export function updateOnlinePlayers(players) {
       count: players.length,
       onlinePlayers: players
     }));
-    lastPlayerListUpdate = now;
     return;
   }
   
@@ -97,7 +94,6 @@ export function updateOnlinePlayers(players) {
     count: players.length,
     onlinePlayers: players
   }));
-  lastPlayerListUpdate = now;
 }
 
 // Helper function to get current store value

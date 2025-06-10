@@ -277,7 +277,7 @@
     versionsError = { ...versionsError, [modId]: null };
     
     try {
-      const versions = await fetchModVersions(modId, $modSource, loadLatestOnly, loadAll);
+      const versions = await fetchModVersions(modId, $modSource, loadLatestOnly);
       versionsCache = { ...versionsCache, [modId]: versions };
     } catch (error) {
       versionsError = { 
