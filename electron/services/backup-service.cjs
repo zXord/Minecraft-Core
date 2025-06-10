@@ -152,40 +152,35 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
       }
       
       throw err;
-    }
-  } else {
+    }  } else {
     // Server not running, just create the backup normally
-    try {
-      let attempts = 0;
-      const maxAttempts = 3;
-      let backupError = null;
-      
-      while (attempts < maxAttempts) {
-        try {
-          await createZip(items, zipPath);
-          backupError = null;
-          break; // Success, exit the loop
-        } catch (err) {
-          backupError = err;
-          attempts++;
-          
-          if ((err.code === 'EBUSY' || err.code === 'DIRECTORYFUNCTIONINVALIDDATA') && attempts < maxAttempts) {
-            const waitTime = 1000 * attempts;
-            await sleep(waitTime);
-            continue;
-          }
-          break;
+    let attempts = 0;
+    const maxAttempts = 3;
+    let backupError = null;
+    
+    while (attempts < maxAttempts) {
+      try {
+        await createZip(items, zipPath);
+        backupError = null;
+        break; // Success, exit the loop
+      } catch (err) {
+        backupError = err;
+        attempts++;
+        
+        if ((err.code === 'EBUSY' || err.code === 'DIRECTORYFUNCTIONINVALIDDATA') && attempts < maxAttempts) {
+          const waitTime = 1000 * attempts;
+          await sleep(waitTime);
+          continue;
         }
+        break;
       }
-      
-        if (backupError) {
-          if (fs.existsSync(zipPath)) {
-            fs.rmSync(zipPath, { force: true });
-          }
-          throw backupError;
-        }
-    } catch (err) {
-      throw err;
+    }
+    
+    if (backupError) {
+      if (fs.existsSync(zipPath)) {
+        fs.rmSync(zipPath, { force: true });
+      }
+      throw backupError;
     }
   }
 
@@ -193,9 +188,9 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   if (fs.existsSync(zipPath)) {
     const stats = fs.statSync(zipPath);
     metadata.size = stats.size;
-    
-    // Verify the zip isn't empty (should be at least a few bytes)
+      // Verify the zip isn't empty (should be at least a few bytes)
     if (stats.size < 100) {
+      throw new Error('Backup file appears to be empty or corrupted');
     }
     
     // Write updated metadata with the correct size
@@ -212,10 +207,9 @@ async function listBackupsWithMetadata(serverPath) {
   return backups.map(b => {
     const metaPath = b.path.replace('.zip', '.json');
     let metadata = null;
-    if (fs.existsSync(metaPath)) {
-      try {
+    if (fs.existsSync(metaPath)) {      try {
         metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-      } catch (err) {
+      } catch {
         metadata = null;
       }
     }
@@ -260,11 +254,10 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
       return { success: false, error: 'Backup file not found.' };
     }
     let type = 'full';
-    if (fs.existsSync(metaPath)) {
-      try {
+    if (fs.existsSync(metaPath)) {      try {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
         if (meta.type) type = meta.type;
-      } catch (err) {
+      } catch {
         type = 'full';
       }
     }

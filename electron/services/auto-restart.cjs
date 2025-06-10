@@ -145,35 +145,27 @@ function setAutoRestartOptions(options) {
   
   if (typeof options.maxCrashes === 'number' && options.maxCrashes >= 1 && options.maxCrashes <= 10) {
     maxCrashesBeforeDisable = options.maxCrashes;
-  }
-    // Save settings to the app-level persistent store
-  try {
-    appStore.set('autoRestart', {
-      enabled: autoRestartEnabled,
-      delay: autoRestartDelay,
-      maxCrashes: maxCrashesBeforeDisable
-    });
-  } catch (err) {
-  }
-    // Also save these settings to the server's config file
+  }  // Save settings to the app-level persistent store
+  appStore.set('autoRestart', {
+    enabled: autoRestartEnabled,
+    delay: autoRestartDelay,
+    maxCrashes: maxCrashesBeforeDisable
+  });  // Also save these settings to the server's config file
   // First try targetPath if provided, otherwise use lastServerPath 
   const targetPath = options.targetPath || appStore.get('lastServerPath');
   if (targetPath) {
-    try {
-      const configPath = path.join(targetPath, '.minecraft-core.json');
-      const config = fs.existsSync(configPath) 
-        ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) 
-        : {};
+    const configPath = path.join(targetPath, '.minecraft-core.json');
+    const config = fs.existsSync(configPath) 
+      ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) 
+      : {};
       
-      config.autoRestart = {
-        enabled: autoRestartEnabled,
-        delay: autoRestartDelay,
-        maxCrashes: maxCrashesBeforeDisable
-      };
-      
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-    } catch (err) {
-    }
+    config.autoRestart = {
+      enabled: autoRestartEnabled,
+      delay: autoRestartDelay,
+      maxCrashes: maxCrashesBeforeDisable
+    };
+    
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   }
   
   // Reset crash count when enabling
@@ -243,41 +235,35 @@ function handleServerStarted() {
 function initFromServerConfig(serverPath) {
   if (!serverPath) return;
   
-  try {
-    const configPath = path.join(serverPath, '.minecraft-core.json');
+  const configPath = path.join(serverPath, '.minecraft-core.json');
+  
+  if (fs.existsSync(configPath)) {
+    let config;
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch {
+      return;
+    }
     
-    if (fs.existsSync(configPath)) {
-      let config;
-      try {
-        config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      } catch (parseErr) {
-        return;
+    if (config && config.autoRestart) {
+      if (typeof config.autoRestart.enabled === 'boolean') {
+        autoRestartEnabled = config.autoRestart.enabled;
       }
       
-      if (config && config.autoRestart) {
-        if (typeof config.autoRestart.enabled === 'boolean') {
-          autoRestartEnabled = config.autoRestart.enabled;
-        }
-        
-        if (typeof config.autoRestart.delay === 'number') {
-          autoRestartDelay = config.autoRestart.delay;
-        }
-        
-        if (typeof config.autoRestart.maxCrashes === 'number') {
-          maxCrashesBeforeDisable = config.autoRestart.maxCrashes;
-        }
-        
-        try {
-          appStore.set('autoRestart', {
-            enabled: autoRestartEnabled,
-            delay: autoRestartDelay,
-            maxCrashes: maxCrashesBeforeDisable
-          });
-        } catch (storeErr) {
-        }
+      if (typeof config.autoRestart.delay === 'number') {
+        autoRestartDelay = config.autoRestart.delay;
       }
+      
+      if (typeof config.autoRestart.maxCrashes === 'number') {
+        maxCrashesBeforeDisable = config.autoRestart.maxCrashes;
+      }
+      
+      appStore.set('autoRestart', {
+        enabled: autoRestartEnabled,
+        delay: autoRestartDelay,
+        maxCrashes: maxCrashesBeforeDisable
+      });
     }
-  } catch (err) {
   }
 }
 

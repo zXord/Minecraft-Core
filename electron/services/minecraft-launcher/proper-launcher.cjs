@@ -20,96 +20,79 @@ class ProperMinecraftLauncher extends EventEmitter {
   setAuthData(authData) {
     this.authData = authData;
   }
-
   // Properly install/verify Minecraft client using XMCL packages
   async ensureMinecraftClient(clientPath, version) {
-    try {
-      
-      this.clientPath = clientPath;
-      
-      // Ensure directories exist
-      const versionsDir = path.join(clientPath, 'versions');
-      const librariesDir = path.join(clientPath, 'libraries');
-      const assetsDir = path.join(clientPath, 'assets');
-      
-      for (const dir of [versionsDir, librariesDir, assetsDir]) {
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
+    this.clientPath = clientPath;
+    
+    // Ensure directories exist
+    const versionsDir = path.join(clientPath, 'versions');
+    const librariesDir = path.join(clientPath, 'libraries');
+    const assetsDir = path.join(clientPath, 'assets');
+    
+    for (const dir of [versionsDir, librariesDir, assetsDir]) {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
       }
-
-      // Step 1: Install version using the correct XMCL function (installVersion not installVersionProfile)
-      await installVersion(version, clientPath, {
-        side: 'client'
-      });
-      
-      
-      // Verify the version JSON exists
-      const versionJsonPath = path.join(versionsDir, version, `${version}.json`);
-      if (!fs.existsSync(versionJsonPath)) {
-        throw new Error(`Version JSON not found after installation: ${versionJsonPath}`);
-      }
-      
-      const versionJson = JSON.parse(fs.readFileSync(versionJsonPath, 'utf8'));
-      
-      // Step 2: Install libraries
-      await installLibraries(versionJson, clientPath);
-      
-      // Step 3: Install assets
-      await installAssets(versionJson, clientPath);
-      
-      // Step 4: Install native dependencies
-      await installDependencies(versionJson, clientPath);
-      
-      
-      // Verify the vanilla JAR has LogUtils
-      const vanillaJar = path.join(versionsDir, version, `${version}.jar`);
-      if (fs.existsSync(vanillaJar)) {
-        const AdmZip = require('adm-zip').default;
-        const zip = new AdmZip(vanillaJar);
-        const entries = zip.getEntries();
-        const logUtilsEntry = entries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
-        
-        if (logUtilsEntry) {
-        } else {
-          
-          // Show what logging classes are available
-          entries.filter(entry => entry.entryName.startsWith('com/mojang/logging/') && entry.entryName.endsWith('.class'));
-        }
-        
-      }
-      
-      return { success: true };
-      
-    } catch (error) {
-      throw error;
     }
-  }
 
+    // Step 1: Install version using the correct XMCL function (installVersion not installVersionProfile)
+    await installVersion(version, clientPath, {
+      side: 'client'
+    });
+    
+    
+    // Verify the version JSON exists
+    const versionJsonPath = path.join(versionsDir, version, `${version}.json`);
+    if (!fs.existsSync(versionJsonPath)) {
+      throw new Error(`Version JSON not found after installation: ${versionJsonPath}`);
+    }
+    
+    const versionJson = JSON.parse(fs.readFileSync(versionJsonPath, 'utf8'));
+    
+    // Step 2: Install libraries
+    await installLibraries(versionJson, clientPath);
+    
+    // Step 3: Install assets
+    await installAssets(versionJson, clientPath);
+    
+    // Step 4: Install native dependencies
+    await installDependencies(versionJson, clientPath);
+    
+    
+    // Verify the vanilla JAR has LogUtils
+    const vanillaJar = path.join(versionsDir, version, `${version}.jar`);
+    if (fs.existsSync(vanillaJar)) {
+      const AdmZip = require('adm-zip').default;
+      const zip = new AdmZip(vanillaJar);
+      const entries = zip.getEntries();
+      const logUtilsEntry = entries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
+      
+      if (!logUtilsEntry) {
+        // Show what logging classes are available
+        entries.filter(entry => entry.entryName.startsWith('com/mojang/logging/') && entry.entryName.endsWith('.class'));
+      }
+    }
+    
+    return { success: true };
+  }
   // Install Fabric loader properly
   async installFabric(clientPath, minecraftVersion, fabricVersion = 'latest') {
-    try {
-      
-      // Get latest Fabric version if needed
-      if (fabricVersion === 'latest') {
-        const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
-        const loaders = await response.json();
-        fabricVersion = loaders[0].version;
-      }
-      
-      // Use XMCL installer for Fabric
-      await installFabric({
-        minecraftVersion,
-        version: fabricVersion,
-        minecraft: clientPath,
-        side: 'client'
-      });
-      
-      return { success: true, version: `fabric-loader-${fabricVersion}-${minecraftVersion}` };
-      
-    } catch (error) {
-      throw error;
+    // Get latest Fabric version if needed
+    if (fabricVersion === 'latest') {
+      const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
+      const loaders = await response.json();
+      fabricVersion = loaders[0].version;
     }
+    
+    // Use XMCL installer for Fabric
+    await installFabric({
+      minecraftVersion,
+      version: fabricVersion,
+      minecraft: clientPath,
+      side: 'client'
+    });
+    
+    return { success: true, version: `fabric-loader-${fabricVersion}-${minecraftVersion}` };
   }
 
   // Launch Minecraft manually with proper classpath 
@@ -169,13 +152,11 @@ class ProperMinecraftLauncher extends EventEmitter {
       
       // Add all libraries from the launch profile
       if (launchJson.libraries && Array.isArray(launchJson.libraries)) {
-        
-        for (const lib of launchJson.libraries) {
+          for (const lib of launchJson.libraries) {
           if (lib.name && lib.downloads?.artifact) {
             const libPath = path.join(clientPath, 'libraries', lib.downloads.artifact.path);
             if (fs.existsSync(libPath)) {
               classpath.push(libPath);
-            } else {
             }
           }
         }
@@ -269,25 +250,13 @@ class ProperMinecraftLauncher extends EventEmitter {
         detached: false
       });
       
-      this.client = { child };
-      
-      // Handle process output
-      child.stdout.on('data', (data) => {
-        const output = data.toString();
-        
-        if (output.includes('Setting user:') || output.includes('Environment: authHost')) {
-        }
-        
-        if (output.includes('[Render thread/INFO]: Created')) {
-        }
+      this.client = { child };      // Handle process output
+      child.stdout.on('data', () => {
+        // Process output logging can be added here if needed
       });
       
-      child.stderr.on('data', (data) => {
-        const output = data.toString();
-        
-        // The LogUtils error should be fixed now
-        if (output.includes('java.lang.ClassNotFoundException: com.mojang.logging.LogUtils')) {
-        }
+      child.stderr.on('data', () => {
+        // The LogUtils error should be fixed now - error handling can be added here if needed
       });
       
       child.on('close', () => {
@@ -352,12 +321,11 @@ class ProperMinecraftLauncher extends EventEmitter {
   // Get launcher status
   getStatus() {
     let isRunning = false;
-    
-    if (this.client?.child) {
+      if (this.client?.child) {
       try {
         process.kill(this.client.child.pid, 0);
         isRunning = true;
-      } catch (e) {
+      } catch {
         this.client = null;
         isRunning = false;
       }
