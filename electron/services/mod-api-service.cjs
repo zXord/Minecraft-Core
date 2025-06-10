@@ -101,26 +101,19 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
   
   // Execute request
   
-  try {
-    const response = await fetch(url.toString(), {
-      headers: {
-        'User-Agent': 'minecraft-core/1.0.0'
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Modrinth API error: ${response.status}`);
+  const response = await fetch(url.toString(), {
+    headers: {
+      'User-Agent': 'minecraft-core/1.0.0'
     }
-    
-    const data = await response.json();
-    
-    // Debug: Log first few results to check if they're actually sorted correctly
-    if (data.hits && data.hits.length > 0) {
-      if (data.hits.length > 1) {
-      }
-    }
-    
-    const mods = data.hits.map(mod => ({
+  });
+
+  if (!response.ok) {
+    throw new Error(`Modrinth API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  const mods = data.hits.map(mod => ({
       id: mod.project_id,
       slug: mod.slug,
       name: mod.title,
@@ -136,18 +129,15 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
       serverSide: mod.server_side === 'required' || mod.server_side === 'optional'
     }));
     
-    return {
-      mods,
-      pagination: {
-        currentPage: page,
-        totalResults: data.total_hits,
-        totalPages: Math.ceil(data.total_hits / limit),
-        limit
-      }
-    };
-  } catch (error) {
-    throw error;
-  }
+  return {
+    mods,
+    pagination: {
+      currentPage: page,
+      totalResults: data.total_hits,
+      totalPages: Math.ceil(data.total_hits / limit),
+      limit
+    }
+  };
 }
 
 /**
@@ -195,27 +185,19 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   
   // Execute request
   
-  try {
-    const response = await fetch(url.toString(), {
-      headers: {
-        'User-Agent': 'minecraft-core/1.0.0'
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Modrinth API error (${response.status}): ${response.statusText}`);
+  const response = await fetch(url.toString(), {
+    headers: {
+      'User-Agent': 'minecraft-core/1.0.0'
     }
-    
-    const data = await response.json();
-    
-    // Debug: Log first few results to check if they're actually sorted correctly
-    if (data.hits && data.hits.length > 0) {
-      if (data.hits.length > 1) {
-      }
-    }
-    
-    // Process results
-    const mods = data.hits.map(project => ({
+  });
+
+  if (!response.ok) {
+    throw new Error(`Modrinth API error (${response.status}): ${response.statusText}`);
+  }
+
+  const data = await response.json();
+
+  const mods = data.hits.map(project => ({
       id: project.project_id,
       slug: project.slug,
       name: project.title,
@@ -231,18 +213,15 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
       lastUpdated: project.date_modified,
       source: 'modrinth'
     }));
-    
-    return {
-      mods,
-      pagination: {
-        totalResults: data.total_hits,
-        totalPages: Math.ceil(data.total_hits / limit),
-        currentPage: page
-      }
-    };
-  } catch (error) {
-    throw error;
-  }
+
+  return {
+    mods,
+    pagination: {
+      totalResults: data.total_hits,
+      totalPages: Math.ceil(data.total_hits / limit),
+      currentPage: page
+    }
+  };
 }
 
 /**
@@ -328,29 +307,21 @@ function formatModVersions(versions) {
  * @returns {Promise<string>} Download URL
  */
 async function getModrinthDownloadUrl(projectId, version, loader) {
-  try {
-    const versions = await getModrinthVersions(projectId, loader, version);
-    
-    if (versions.length === 0) {
-      throw new Error('No matching versions found for this mod');
-    }
-    
-    // Get latest version
-    const latest = versions[0];
-    
-    // Get the full version info
-    const versionInfo = await getModrinthVersionInfo(projectId, latest.id, version, loader);
-    
-    // Get primary file
-    if (!versionInfo.files || versionInfo.files.length === 0) {
-      throw new Error('No files found for this mod version');
-    }
-    
-    const primaryFile = versionInfo.files.find(file => file.primary) || versionInfo.files[0];
-    return primaryFile.url;
-  } catch (error) {
-    throw error;
+  const versions = await getModrinthVersions(projectId, loader, version);
+
+  if (versions.length === 0) {
+    throw new Error('No matching versions found for this mod');
   }
+
+  const latest = versions[0];
+  const versionInfo = await getModrinthVersionInfo(projectId, latest.id, version, loader);
+
+  if (!versionInfo.files || versionInfo.files.length === 0) {
+    throw new Error('No files found for this mod version');
+  }
+
+  const primaryFile = versionInfo.files.find(file => file.primary) || versionInfo.files[0];
+  return primaryFile.url;
 }
 
 /**
@@ -360,18 +331,14 @@ async function getModrinthDownloadUrl(projectId, version, loader) {
  * @returns {Promise<Object>} Project info
  */
 async function getModrinthProjectInfo(projectId) {
-  try {
-    await rateLimit(); // Ensure rate limiting
-    const response = await fetch(`${MODRINTH_API}/project/${projectId}`);
-    
-    if (!response.ok) {
-      throw new Error(`Modrinth API error: ${response.status}`);
-    }
-    
-    return await response.json();
-  } catch (error) {
-    throw error;
+  await rateLimit();
+  const response = await fetch(`${MODRINTH_API}/project/${projectId}`);
+
+  if (!response.ok) {
+    throw new Error(`Modrinth API error: ${response.status}`);
   }
+
+  return await response.json();
 }
 
 /**
@@ -401,16 +368,14 @@ async function resolveModrinthDependencies(dependencies) {
   for (const dep of dependencies) {
     if (dep.project_id && dep.dependency_type === 'required') {
       try {
-        // Get project info to get the name
         const projectInfo = await getModrinthProjectInfo(dep.project_id);
-        
+
         resolvedDeps.push({
           projectId: dep.project_id,
           name: projectInfo.title,
           dependencyType: dep.dependency_type
         });
-      } catch (error) {
-        // Include the dependency even if we can't resolve its name
+      } catch {
         resolvedDeps.push({
           projectId: dep.project_id,
           name: 'Unknown Mod',
@@ -433,10 +398,9 @@ async function resolveModrinthDependencies(dependencies) {
  * @returns {Promise<Array>} Array of version objects
  */
 async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnly = false) {
-  try {
-    // Check cache first
-    const cacheKey = `${projectId}:${loader || ''}:${gameVersion || ''}`;
-    if (versionCache.has(cacheKey)) {
+  // Check cache first
+  const cacheKey = `${projectId}:${loader || ''}:${gameVersion || ''}`;
+  if (versionCache.has(cacheKey)) {
       
       // If we only need the latest version, filter from cache
       if (loadLatestOnly) {
@@ -541,10 +505,7 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     }
     
     return mappedVersions;
-  } catch (error) {
-    throw error;
   }
-}
 
 /**
  * Get specific version info for a Modrinth mod
@@ -553,28 +514,19 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
  * @param {string} versionId - Version ID
  * @returns {Promise<Object>} Version info object
  */
-async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader) { // projectId not strictly needed for /version/{id}
-  try {
-    // If no version ID provided, fall back to latest version info
-    if (!versionId) {
-      return await getLatestModrinthVersionInfo(projectId, gameVersion, loader);
-    }
-
-    await rateLimit(); // Ensure rate limiting
-    const response = await fetch(`${MODRINTH_API}/version/${versionId}`);
-
-    if (!response.ok) {
-      throw new Error(`Modrinth API error: ${response.status}`);
-    }
-
-    return await response.json();
-  } catch (error) {
-    // Only log as error if it's not a 404 (which can be normal for missing/removed versions)
-    if (error.message && error.message.includes('404')) {
-    } else {
-    }
-    throw error;
+async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader) {
+  if (!versionId) {
+    return await getLatestModrinthVersionInfo(projectId, gameVersion, loader);
   }
+
+  await rateLimit();
+  const response = await fetch(`${MODRINTH_API}/version/${versionId}`);
+
+  if (!response.ok) {
+    throw new Error(`Modrinth API error: ${response.status}`);
+  }
+
+  return await response.json();
 }
 
 /**
@@ -586,19 +538,13 @@ async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader)
  * @returns {Promise<Object>} Version info object
  */
 async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
-  try {
-    const versions = await getModrinthVersions(projectId, loader, gameVersion, true); // Get only latest
-    
-    if (!versions || versions.length === 0) {
-      throw new Error('No matching versions found');
-    }
-    
-    // The getModrinthVersions with loadLatestOnly should already return the single best version.
-    // Now fetch its full details.
-    return await getModrinthVersionInfo(projectId, versions[0].id, gameVersion, loader);
-  } catch (error) {
-    throw error;
+  const versions = await getModrinthVersions(projectId, loader, gameVersion, true);
+
+  if (!versions || versions.length === 0) {
+    throw new Error('No matching versions found');
   }
+
+  return await getModrinthVersionInfo(projectId, versions[0].id, gameVersion, loader);
 }
 
 /**
@@ -635,7 +581,7 @@ async function getCurseForgePopular({ page = 1, limit = 20 }) {
  * @param {number} options.limit - Results per page
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function searchCurseForgeMods({ query, page = 1, limit = 20 }) {
+async function searchCurseForgeMods({ page = 1, limit = 20 }) {
   // Return an empty result set
   return {
     mods: [],
@@ -656,7 +602,7 @@ async function searchCurseForgeMods({ query, page = 1, limit = 20 }) {
  * @param {string} loader - Mod loader (fabric, forge, etc.)
  * @returns {Promise<string>} Download URL
  */
-async function getCurseForgeDownloadUrl(modId, version, loader) {
+async function getCurseForgeDownloadUrl() {
   throw new Error('CurseForge support not implemented');
 }
 
