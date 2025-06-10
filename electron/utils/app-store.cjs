@@ -165,7 +165,6 @@ try {
   // Fallback to in-memory store
   appStore = new Store({
     ...storeConfig,
-    // @ts-ignore
     name: 'in-memory-config',
     fileExtension: 'json',
     cwd: os.tmpdir(),
