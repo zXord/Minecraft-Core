@@ -145,12 +145,12 @@ async function installModToServer(win, serverPath, modDetails) {
           const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
           await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));
           await fs.writeFile(clientManifestPath, JSON.stringify(manifest, null, 2));
-        } else { // server-only or new install default
-          await fs.mkdir(serverManifestDir, { recursive: true });
+        } else { // server-only or new install default          await fs.mkdir(serverManifestDir, { recursive: true });
           const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
           await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));
         }
-      } catch (manifestErr) {
+      } catch {
+        // Ignore manifest write errors
       }
     }
     return { success: true };
@@ -196,23 +196,24 @@ async function installModToClient(win, modData) {
           const manifestContent = await fs.readFile(manifestPath, 'utf8');
           const manifest = JSON.parse(manifestContent);
           if (manifest.projectId === modData.id) {
-            const oldFilePath = path.join(clientModsDir, manifest.fileName);
-            await fs.unlink(oldFilePath).catch(() => {});
+            const oldFilePath = path.join(clientModsDir, manifest.fileName);            await fs.unlink(oldFilePath).catch(() => {});
             await fs.unlink(manifestPath).catch(() => {});
             break;
           }
-        } catch {}
+        } catch {
+          // Ignore manifest parsing errors
+        }
       }
 
       if (modData.name) {
         const modFiles = await fs.readdir(clientModsDir);
         const baseName = modData.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-        const possibleMatches = modFiles.filter(f => f.startsWith(baseName) && f.endsWith('.jar'));
-        for (const match of possibleMatches) {
+        const possibleMatches = modFiles.filter(f => f.startsWith(baseName) && f.endsWith('.jar'));        for (const match of possibleMatches) {
           await fs.unlink(path.join(clientModsDir, match)).catch(() => {});
         }
       }
-    } catch (err) {
+    } catch {
+      // Ignore cleanup errors
     }
   }
 
@@ -232,11 +233,10 @@ async function installModToClient(win, modData) {
           (!loader || versionInfo.loaders.includes(loader)) &&
           (!mcVersion || versionInfo.game_versions.includes(mcVersion))
         ) {
-          versionToInstall = { id: versionInfo.id, versionNumber: versionInfo.version_number };
-        } else {
+          versionToInstall = { id: versionInfo.id, versionNumber: versionInfo.version_number };        } else {
           versionInfo = null;
         }
-      } catch (err) {
+      } catch {
         versionInfo = null;
       }
     }

@@ -1,4 +1,6 @@
 // Minecraft launcher IPC handlers
+// eslint-disable-next-line no-unused-vars
+const { BrowserWindow } = require('electron'); // Used in JSDoc comments
 const { getMinecraftLauncher } = require('../services/minecraft-launcher/index.cjs');
 const utils = require('../services/minecraft-launcher/utils.cjs');
 const fs = require('fs');
@@ -26,10 +28,8 @@ function checkModCompatibility(modFileName, targetVersion) {
       const modMajorMinor = modVersion.split('.').slice(0, 2).join('.');
       return targetMajorMinor === modMajorMinor;
     }
-    
-    // If no version info in filename, assume compatible
-    return true;
-  } catch (error) {
+      // If no version info in filename, assume compatible
+    return true;  } catch {
     // On error, assume compatible to avoid breaking functionality
     return true;
   }
@@ -190,15 +190,17 @@ function createMinecraftLauncherHandlers(win) {
     'minecraft-auth': async (_e, { clientPath }) => {
       try {
         const result = await launcher.authenticateWithMicrosoft();
-        
-        // If authentication was successful and we have a client path, save the auth data immediately
+          // If authentication was successful and we have a client path, save the auth data immediately
         if (result.success && clientPath) {
           try {
             const saveResult = await launcher.saveAuthData(clientPath);
             if (saveResult.success) {
+              // Auth data saved successfully
             } else {
+              // Auth data save failed, but continue
             }
-          } catch (saveError) {
+          } catch {
+            // Ignore auth data save errors
           }
         }
         
@@ -231,13 +233,12 @@ function createMinecraftLauncherHandlers(win) {
     // Check and refresh authentication if needed
     'minecraft-check-refresh-auth': async (_e, { clientPath }) => {
       try {
-        const result = await launcher.checkAndRefreshAuth();
-
-        // If token was refreshed successfully, persist updated auth data
+        const result = await launcher.checkAndRefreshAuth();        // If token was refreshed successfully, persist updated auth data
         if (result.success && result.refreshed && clientPath) {
           try {
             await launcher.saveAuthData(clientPath);
-          } catch (saveError) {
+          } catch {
+            // Ignore auth data save errors
           }
         }
 
@@ -268,11 +269,10 @@ function createMinecraftLauncherHandlers(win) {
             const manifestPath = path.join(manifestDir, `${modFile}.json`);
             let isManual = true;
             
-            if (fs.existsSync(manifestPath)) {
-              try {
+            if (fs.existsSync(manifestPath)) {              try {
                 const manifestData = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
                 isManual = manifestData.source === 'manual';
-              } catch (e) {
+              } catch {
                 isManual = true;
               }
             }
@@ -312,11 +312,9 @@ function createMinecraftLauncherHandlers(win) {
         if (!fs.existsSync(manifestDir)) {
           fs.mkdirSync(manifestDir, { recursive: true });
         }
-        
-        // Process each required mod
+          // Process each required mod
         for (let i = 0; i < requiredMods.length; i++) {
           const mod = requiredMods[i];
-          const progressPercent = Math.round(((i + 1) / requiredMods.length) * 100);
           
           try {
             const modPath = path.join(clientPath, 'mods', mod.fileName);
@@ -378,17 +376,20 @@ function createMinecraftLauncherHandlers(win) {
                               versionId: mod.versionId || null,
                               versionNumber: mod.versionNumber || null,
                               name: mod.name || null
-                            };
-                            try {
+                            };                            try {
                               const meta = await readModMetadataFromJar(modPath);
                               if (meta) {
                                 if (!manifestData.projectId) manifestData.projectId = meta.projectId;
                                 if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
                                 if (!manifestData.name) manifestData.name = meta.name;
                               }
-                            } catch {}
+                            } catch {
+                              // Ignore metadata extraction errors
+                            }
                             fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
-                          } catch {}
+                          } catch {
+                            // Ignore manifest write errors
+                          }
                           resolve();
                         });
                         
@@ -426,17 +427,20 @@ function createMinecraftLauncherHandlers(win) {
                           versionId: mod.versionId || null,
                           versionNumber: mod.versionNumber || null,
                           name: mod.name || null
-                        };
-                        try {
+                        };                        try {
                           const meta = await readModMetadataFromJar(modPath);
                           if (meta) {
                             if (!manifestData.projectId) manifestData.projectId = meta.projectId;
                             if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
                             if (!manifestData.name) manifestData.name = meta.name;
                           }
-                        } catch {}
+                        } catch {
+                          // Ignore metadata extraction errors
+                        }
                         fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
-                      } catch {}
+                      } catch {
+                        // Ignore manifest write errors
+                      }
                       resolve();
                     });
                     
@@ -504,11 +508,12 @@ function createMinecraftLauncherHandlers(win) {
                   const jar = path.join(modsDir, fileName);
                   const disabled = jar + '.disabled';
                   if (fs.existsSync(jar)) fs.unlinkSync(jar);
-                  if (fs.existsSync(disabled)) fs.unlinkSync(disabled);
-                  fs.unlinkSync(manifestPath);
+                  if (fs.existsSync(disabled)) fs.unlinkSync(disabled);                  fs.unlinkSync(manifestPath);
                   removed.push(fileName);
                 }
-              } catch {}
+              } catch {
+                // Ignore file deletion errors
+              }
             }
           }
           
@@ -518,8 +523,7 @@ function createMinecraftLauncherHandlers(win) {
             for (const modFile of existingMods) {
               // If mod has no manifest, it's likely manual - preserve it
               const manifestPath = path.join(manifestDir, `${modFile}.json`);
-              if (!fs.existsSync(manifestPath) && !allowed.has(modFile)) {
-                // Create a simple marker file to track this as a preserved manual mod
+              if (!fs.existsSync(manifestPath) && !allowed.has(modFile)) {                // Create a simple marker file to track this as a preserved manual mod
                 try {
                   if (!fs.existsSync(manifestDir)) {
                     fs.mkdirSync(manifestDir, { recursive: true });
@@ -530,13 +534,17 @@ function createMinecraftLauncherHandlers(win) {
                     preserved: true,
                     timestamp: new Date().toISOString()
                   }, null, 2));
-                } catch (manifestError) {
+                } catch {
+                  // Ignore manifest creation errors
                 }
               }
             }
           }
-        } catch (cleanupErr) {
-        }        const result = {
+        } catch {
+          // Ignore cleanup errors
+        }
+        
+        const result = {
           success: failures.length === 0,
           downloaded: downloaded.length,
           skipped: skipped.length,
@@ -578,12 +586,14 @@ function createMinecraftLauncherHandlers(win) {
             serverIp,
             managementPort,
             clientName || 'Minecraft Server',
-            serverPort
-          );
+            serverPort          );
           if (datRes.success) {
+            // Server added to servers.dat successfully
           } else {
+            // Failed to add server to servers.dat, but continue anyway
           }
-        } catch (err) {
+        } catch {
+          // Ignore servers.dat errors and continue
         }
         
         // Try proper launcher first to fix LogUtils issues
@@ -600,10 +610,10 @@ function createMinecraftLauncherHandlers(win) {
             needsFabric: serverInfo?.loaderType === 'fabric' || requiredMods.length > 0,
             fabricVersion: serverInfo?.loaderVersion || 'latest'
           });
-          
-          if (properResult.success) {
+            if (properResult.success) {
             return properResult;
           } else {
+            // Proper launcher failed, fall back to original launcher
           }
         }
         
@@ -644,11 +654,10 @@ function createMinecraftLauncherHandlers(win) {
     },
     
     // Get launcher status (shorter alias)
-    'minecraft-get-status': async () => {
-      try {
+    'minecraft-get-status': async () => {      try {
         const status = launcher.getStatus();
         return status;
-      } catch (error) {
+      } catch {
         return { 
           isAuthenticated: false,
           isLaunching: false,
@@ -762,11 +771,14 @@ function createMinecraftLauncherHandlers(win) {
                   if (serverManagedFilesSet.has(data.fileName.toLowerCase())) {
                     extraMods.push(data.fileName);
                   }
-                }
-              } catch {}
+                }              } catch {
+                // Ignore JSON parsing errors
+              }
             }
           }
-        } catch {}        // Analyze client-downloaded mods that will be affected by server requirements
+        } catch {
+          // Ignore directory reading errors
+        }// Analyze client-downloaded mods that will be affected by server requirements
         const clientModChanges = {
           updates: [],
           removals: [],
@@ -821,12 +833,10 @@ function createMinecraftLauncherHandlers(win) {
                 
                 return false;
               }) : null;
-              
-              // Check for version compatibility with server requirements (for mods like Iris)
+                // Check for version compatibility with server requirements (for mods like Iris)
               const compatibleServerMatch = !exactServerMatch && !similarServerMatch ? (() => {
                 // Check if this is a mod that could be compatible across minor versions
                 const clientModName = (clientModMetadata.name || modFileName).toLowerCase();
-                const serverVersion = '1.21.2'; // Target server version
                 
                 // Extract client mod version compatibility
                 if (clientModName.includes('iris') || clientModName.includes('shader')) {
@@ -872,14 +882,15 @@ function createMinecraftLauncherHandlers(win) {
                     currentVersion: clientModMetadata.version || 'Unknown',
                     action: 'disable'
                   });
-                }
-                // If explicitly allowed, keep as-is (no action needed)
+                }                // If explicitly allowed, keep as-is (no action needed)
                 // If it's explicitly allowed, we don't need to do anything - it stays as-is
               }
-            } catch (metadataError) {
+            } catch {
+              // Ignore metadata errors
             }
           }
-        } catch (analysisError) {
+        } catch {
+          // Ignore analysis errors
         }
 
         // Populate newDownloads with mods that are truly new (not updates of existing client mods)
@@ -1102,16 +1113,19 @@ function createMinecraftLauncherHandlers(win) {
         for (const file of files) {
           const base = file.replace('.disabled', '');
           if (!allowed.has(base)) {
-            const filePath = path.join(modsDir, file);
-            try {
+            const filePath = path.join(modsDir, file);            try {
               fs.unlinkSync(filePath);
-            } catch {}
+            } catch {
+              // Ignore file deletion errors
+            }
 
             // remove corresponding manifest if exists
             try {
               const manifestPath = path.join(manifestDir, `${base}.json`);
               if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);
-            } catch {}
+            } catch {
+              // Ignore manifest deletion errors
+            }
 
             removed.push(base);
           }
