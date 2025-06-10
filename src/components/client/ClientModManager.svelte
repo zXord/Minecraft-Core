@@ -1,20 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { createEventDispatcher } from 'svelte';
-  import { 
+  import { createEventDispatcher } from 'svelte';  import { 
     errorMessage, 
     successMessage,
     searchKeyword,
-    modSource,
     searchResults,
-    isSearching,
-    searchError,
-    currentPage,
-    totalPages,
-    totalResults,
-    resultsPerPage,
-    expandedModId,
     minecraftVersion,
     loaderType,
     installingModIds,
@@ -22,18 +13,15 @@
     filterModLoader,
     serverManagedFiles,
     modToInstall,
-    currentDependencies,
-    dependencyModalOpen
+    currentDependencies
   } from '../../stores/modStore.js';
-  import { searchMods, fetchModVersions } from '../../utils/mods/modAPI.js';
+  import { searchMods } from '../../utils/mods/modAPI.js';
   import { installedModIds, installedModInfo } from '../../stores/modStore.js';
   import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
   import DownloadProgress from '../mods/components/DownloadProgress.svelte';
-  import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';
-  import ClientModList from './ClientModList.svelte';
+  import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';  import ClientModList from './ClientModList.svelte';
   import ClientManualModList from './ClientManualModList.svelte';
   import ClientModStatus from './ClientModStatus.svelte';
-  import ModCard from '../mods/components/ModCard.svelte';
   import ModSearch from '../mods/components/ModSearch.svelte';
   import ModDropZone from '../mods/components/ModDropZone.svelte';
   import { uploadDroppedMods } from '../../utils/directFileUpload.js';
@@ -90,18 +78,14 @@
   let modSyncStatus: ModSyncStatus | null = null;
   let isLoadingMods: boolean = false;
   let lastModCheck: Date | null = null;
-  
   // Client mod finding state
   let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
-  let versionsCache = {};
-  let versionsLoading = {};
-  let versionsError = {};
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
-  let manualMods: ClientMod[] = [];
   let filterType = 'client';
   let downloadManagerCleanup;
   let unsubscribeInstalledInfo;
   let previousPath: string | null = null;
+  let manualMods = []; // Declare manualMods here
 
   // Connect to server and get mod information
   onMount(() => {
@@ -674,34 +658,7 @@
       if (get(searchResults).length === 0 && get(searchKeyword)) {
         searchClientMods();
       }
-    }
-  }
-
-  // Load versions for a mod
-  async function loadVersions(event) {
-    const { modId, loadAll = false } = event.detail;
-    
-    if (versionsLoading[modId]) return;
-    
-    versionsLoading[modId] = true;
-    versionsError[modId] = null;
-    
-    try {
-      const versions = await fetchModVersions(modId, get(modSource), !loadAll);
-      versionsCache[modId] = versions;
-    } catch (error) {
-      versionsError[modId] = error.message;
-    } finally {
-      versionsLoading[modId] = false;
-    }
-  }
-
-  // Handle version selection
-  function handleVersionSelect(event) {
-    const { mod, versionId } = event.detail;
-    // Store the selected version for later installation
-    mod.selectedVersionId = versionId;
-  }
+    }  }
 
   // Install selected mod and its dependencies using helper
   async function handleInstallWithDependencies() {
@@ -816,28 +773,7 @@
         return ids;
       });
     }
-  }
-
-  // Handle pagination
-  async function handlePageChange(page) {
-    currentPage.set(page);
-    await searchClientMods();
-  }
-
-  // Navigate to previous page
-  function prevPage() {
-    if (get(currentPage) > 1) {
-      handlePageChange(get(currentPage) - 1);
-    }
-  }
-
-  // Navigate to next page
-  function nextPage() {
-    if (get(currentPage) < get(totalPages)) {
-      handlePageChange(get(currentPage) + 1);
-    }
-  }
-</script>
+  }</script>
 
 <div class="client-mod-manager">
   <DownloadProgress />

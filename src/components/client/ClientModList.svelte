@@ -1,13 +1,4 @@
-<script lang="ts">
-  import { createEventDispatcher } from 'svelte';
-  import { get } from 'svelte/store';
-  import {
-    installedModInfo,
-    modsWithUpdates,
-    expandedInstalledMod,
-    minecraftVersion
-  } from '../../stores/modStore.js';
-  import { fetchModVersions } from '../../utils/mods/modAPI.js';
+<script lang="ts">  import { createEventDispatcher } from 'svelte';
 
   // Types
   interface Mod {
@@ -33,12 +24,8 @@
   export let mods: Mod[] = [];
   export let type: 'required' | 'optional' = 'required';
   export let modSyncStatus: ModSyncStatus | null = null;
-
   // Create event dispatcher
   const dispatch = createEventDispatcher();
-
-  let versionsCache: Record<string, any[]> = {};
-  let versionsLoading: Record<string, boolean> = {};
 
   // Get mod status from sync status
   function getModStatus(mod: Mod): string {
@@ -94,36 +81,7 @@
     dispatch('download');
   }
 
-  async function toggleVersions(mod: Mod) {
-    const isExpanded = $expandedInstalledMod === mod.fileName;
-    if (isExpanded) {
-      expandedInstalledMod.set(null);
-      return;
-    }
 
-    expandedInstalledMod.set(mod.fileName);
-
-    const info = get(installedModInfo).find(m => m.fileName === mod.fileName);
-    if (info && info.projectId && !versionsCache[info.projectId]) {
-      versionsLoading[info.projectId] = true;
-      try {
-        const versions = await fetchModVersions(info.projectId);
-        versionsCache = { ...versionsCache, [info.projectId]: versions };
-      } catch (err) {
-        versionsCache = { ...versionsCache, [info.projectId]: [] };
-      } finally {
-        versionsLoading[info.projectId] = false;
-      }
-    }
-  }
-
-  function selectVersion(mod: Mod, versionId: string) {
-    const info = get(installedModInfo).find(m => m.fileName === mod.fileName);
-    if (info && info.projectId) {
-      dispatch('updateMod', { modName: mod.fileName, projectId: info.projectId, versionId });
-    }
-    expandedInstalledMod.set(null);
-  }
 </script>
 
 <div class="client-mod-list">
@@ -197,29 +155,8 @@
               </div>
               <button class="delete-button" on:click={() => handleDelete(mod)}>
                 🗑️ Delete
-              </button>
-            {/if}
+              </button>            {/if}
           </div>
-
-          {#if $expandedInstalledMod === mod.fileName}
-            {@const info = get(installedModInfo).find(m => m.fileName === mod.fileName)}
-            {#if info && info.projectId}
-              <div class="version-list">
-                {#if versionsLoading[info.projectId]}
-                  <div class="loading-versions">Loading versions...</div>
-                {:else}
-                  {#each versionsCache[info.projectId] || [] as v}
-                    <div class="version-item">
-                      <span class="version-number">{v.versionNumber || v.name}</span>
-                      <button class="select-version" on:click={() => selectVersion(mod, v.id)}>
-                        Select
-                      </button>
-                    </div>
-                  {/each}
-                {/if}
-              </div>
-            {/if}
-          {/if}
         </div>
       {/each}
     </div>
@@ -467,55 +404,13 @@
   .update-button:hover {
     background: #0ec258;
   }
-
-  .version-toggle-button {
-    background: rgba(255, 255, 255, 0.1);
-    border: none;
+  .version-chip {
+    padding: 0.2rem 0.4rem;
+    background: rgba(59, 130, 246, 0.2);
+    color: #3b82f6;
+    border: 1px solid rgba(59, 130, 246, 0.3);
     border-radius: 4px;
-    width: 2rem;
-    height: 2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: background 0.2s;
-  }
-
-  .version-toggle-button:hover {
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .version-toggle-icon {
     font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.7);
+    font-weight: 500;
   }
-
-  .version-list {
-    margin-top: 0.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .version-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.5rem;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 4px;
-  }
-
-  .select-version {
-    background: #646cff;
-    color: white;
-    border: none;
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-
-  .select-version:hover {
-    background: #7a81ff;
-  }
-</style> 
+</style>

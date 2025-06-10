@@ -79,14 +79,9 @@
   // Console spam reduction variables
   let previousServerInfo = null;
   let lastSyncKey = null;
-  
   // Client mod compatibility dialog state
   let showCompatibilityDialog = false;
-  let compatibilityReport = null;
-  
-  // Download progress tracking
-  let downloadedBytes = 0;
-  let totalBytes = 0;
+  let compatibilityReport = null;  // Download progress tracking
   
   // Connect to the Management Server (port 8080)
   async function connectToServer() {
@@ -149,9 +144,8 @@
           clientId,
           name: clientName
         })
-      });        
-        if (response.ok) {
-          const registerData = await response.json();
+      });        if (response.ok) {
+        
         
         // Update instance with client info if needed
         if (!instance.clientId) {
@@ -528,10 +522,7 @@
     
     // Reset download state
     downloadProgress = 0;
-    currentDownloadFile = '';
-    fileProgress = 0;
-    downloadedBytes = 0;
-    totalBytes = 0;
+    currentDownloadFile = '';    fileProgress = 0;
     
     // Set downloading status to show immediate feedback
     downloadStatus = 'downloading';
@@ -816,9 +807,8 @@
 
   
   // Set up launcher event listeners
-  function setupLauncherEvents() {
-    // Download events
-    window.electron.on('launcher-download-start', (data) => {
+  function setupLauncherEvents() {    // Download events
+    window.electron.on('launcher-download-start', () => {
       downloadStatus = 'downloading';
       downloadProgress = 0;
     });
@@ -830,12 +820,7 @@
       // Handle file-level progress if available
       if (data.fileProgress !== undefined) {
         fileProgress = data.fileProgress;
-      }
-      
-      if (data.downloadedBytes && data.totalSize) {
-        downloadedBytes = data.downloadedBytes;
-        totalBytes = data.totalSize;
-        
+      }      if (data.downloadedBytes && data.totalSize) {
         // Calculate download speed (rough estimate)
         const mbps = (data.downloadedBytes / (1024 * 1024)).toFixed(1);
         downloadSpeed = `${mbps} MB downloaded`;
@@ -865,13 +850,8 @@
       isLaunching = true;
       launchStatus = 'launching';
       launchProgress = { type: 'Starting', task: 'Preparing to launch...', total: 0 };
-    });
-    
-    window.electron.on('launcher-launch-progress', (data) => {
+    });    window.electron.on('launcher-launch-progress', (data) => {
       launchProgress = data;
-      if (data.task) {
-        launchProgressText = data.task;
-      }
     });
     
     window.electron.on('launcher-launch-success', () => {
@@ -1051,13 +1031,9 @@
   onMount(() => {
     // Initialize client functionality
     setupLauncherEvents();
-    setupChecks();
-    
-    window.electron.on('client-mod-compatibility-report', (data) => {
+    setupChecks();    window.electron.on('client-mod-compatibility-report', (data) => {
       if (data && data.report && data.newMinecraftVersion && data.oldMinecraftVersion) {
         compatibilityReport = data.report;
-        newMcVersion = data.newMinecraftVersion; 
-        oldMcVersion = data.oldMinecraftVersion; 
         showCompatibilityDialog = true; 
       } else {
       }
@@ -1132,29 +1108,14 @@
 
       // Determine overall status
       if (clientSyncStatus !== 'ready') {
-        downloadStatus = 'needs-client';
-      } else if (downloadStatus === 'ready') {
+        downloadStatus = 'needs-client';      } else if (downloadStatus === 'ready') {
         downloadStatus = 'ready';
       } else if (downloadStatus === 'needed') {
         downloadStatus = 'needs-mods';
       }
 
-      // Update download button text
-      if (downloadStatus === 'ready') {
-        downloadButtonText = 'Launch Game';
-      } else if (downloadStatus === 'needs-client') {
-        downloadButtonText = 'Download Game Files';
-      } else if (downloadStatus === 'needs-mods' || downloadStatus === 'needed') {
-        downloadButtonText = 'Download Required Mods';
-      } else if (downloadStatus === 'checking') {
-        downloadButtonText = 'Checking...';
-      } else if (downloadStatus === 'downloading') {
-        downloadButtonText = 'Downloading...';
-      } else {
-        downloadButtonText = 'Setup Required';
-      }    } catch (error) {
+    } catch (error) {
       downloadStatus = 'error';
-      downloadButtonText = 'Check Failed - Retry';
     } finally {
       isCheckingSync = false;
     }
@@ -1268,13 +1229,7 @@
       errorMessage.set('Error disabling mods: ' + error.message);
       setTimeout(() => errorMessage.set(''), 5000);
     }
-    
-    compatibilityReport = null;
-  }
-
-  function handleCloseCompatibilityDialog() {
-    showCompatibilityDialog = false; 
-    compatibilityReport = null;
+      compatibilityReport = null;
   }
 
 </script>

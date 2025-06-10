@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher } from 'svelte';
   
   // Props
   export let visible = false;
@@ -13,11 +13,8 @@
   const noop = () => {};
   
   // Event dispatcher
-  const dispatch = createEventDispatcher();
-  
-  // Reference to confirm button for focus management
+  const dispatch = createEventDispatcher();  // Reference to confirm button for focus management
   let confirmButton;
-  let modalContent;
   
   // Track previous focus to restore it when dialog closes
   let previousFocus;
@@ -51,11 +48,6 @@
     }
   }
   
-  // Handle modal content keydown for the stopPropagation
-  function handleContentKeydown(event) {
-    event.stopPropagation();
-  }
-  
   // Watch for visibility changes to manage focus
   $: if (visible) {
     // Store current focus before moving it to the dialog
@@ -85,11 +77,9 @@
     aria-labelledby="dialog-title"
     aria-describedby="dialog-message"
     tabindex="-1"
-  >
-    <div
+  >    <div
       class="modal-content"
       role="document"
-      bind:this={modalContent}
       on:click|stopPropagation
       on:keydown|stopPropagation
     >
@@ -240,4 +230,4 @@
       opacity: 1;
     }
   }
-</style> 
+</style>
