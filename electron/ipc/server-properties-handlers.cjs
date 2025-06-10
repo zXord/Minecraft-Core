@@ -1,15 +1,11 @@
 // Server Properties IPC handlers
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 
 /**
  * Create server properties IPC handlers
- * 
- * @param {BrowserWindow} win - The main application window
- * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
-function createServerPropertiesHandlers(win) {
+function createServerPropertiesHandlers() {
   return {
     'read-server-properties': async (_e, serverPath) => {
       try {
@@ -31,10 +27,7 @@ function createServerPropertiesHandlers(win) {
         
         // Create default backup if not present
         if (!fs.existsSync(backupFilePath)) {
-          try {
-            fs.copyFileSync(propertiesFilePath, backupFilePath);
-          } catch (backupErr) {
-          }
+          fs.copyFileSync(propertiesFilePath, backupFilePath);
         }
         
         // Read and parse the file
@@ -61,12 +54,8 @@ function createServerPropertiesHandlers(win) {
         
         // Make a backup of the original file
         if (fs.existsSync(propertiesFilePath)) {
-          try {
-            const backupPath = `${propertiesFilePath}.bak`;
-            fs.copyFileSync(propertiesFilePath, backupPath);
-          } catch (backupErr) {
-            // Continue anyway
-          }
+          const backupPath = `${propertiesFilePath}.bak`;
+          fs.copyFileSync(propertiesFilePath, backupPath);
         }
         
         // Convert properties object to file format
@@ -91,12 +80,8 @@ function createServerPropertiesHandlers(win) {
         
         // If file already exists, make a backup
         if (fs.existsSync(propertiesFilePath)) {
-          try {
-            const backupPath = `${propertiesFilePath}.bak`;
-            fs.copyFileSync(propertiesFilePath, backupPath);
-          } catch (backupErr) {
-            // Continue anyway
-          }
+          const backupPath = `${propertiesFilePath}.bak`;
+          fs.copyFileSync(propertiesFilePath, backupPath);
         }
         
         // Create default properties
