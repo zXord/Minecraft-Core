@@ -3,8 +3,7 @@
   /// <reference path="./electron.d.ts" />
   import { onMount } from 'svelte';
   import { serverState } from './stores/serverState.js';
-  import { playerState } from './stores/playerState.js';
-  import { errorMessage, successMessage } from './stores/modStore.js';
+  import { errorMessage } from './stores/modStore.js';
   import { route, navigate } from './router.js';
   import ServerDashboard from './routes/ServerDashboard.svelte';
   import ModsPage from './routes/ModsPage.svelte';
@@ -56,25 +55,21 @@
     // Prevent triggering the instance selection
     event.stopPropagation();
     
-    try {
-      const result = await window.electron.invoke('rename-instance', { 
-        id: editId, 
-        newName: editName.trim() 
-      });
-      
-      if (result.success) {
-        instances = result.instances;
-        
-        // If we're renaming the current instance, update it
-        if (currentInstance && currentInstance.id === editId) {
-          currentInstance = instances.find(i => i.id === editId);
-        }
-        
-        // Explicitly save instances to ensure persistence
-        await saveInstances(instances);
-      } else {
+    const result = await window.electron.invoke('rename-instance', {
+      id: editId,
+      newName: editName.trim()
+    });
+
+    if (result.success) {
+      instances = result.instances;
+
+      // If we're renaming the current instance, update it
+      if (currentInstance && currentInstance.id === editId) {
+        currentInstance = instances.find(i => i.id === editId);
       }
-    } catch (err) {
+
+      // Explicitly save instances to ensure persistence
+      await saveInstances(instances);
     }
     
     // Reset edit state
@@ -270,7 +265,7 @@
         // Return to main view
         step = 'done';
       })
-      .catch(err => {
+      .catch(() => {
         // Return to main view anyway
         step = 'done';
       });
@@ -364,7 +359,7 @@
           }
           step = 'done';
         })
-        .catch(err => {
+        .catch(() => {
           step = 'done';
         });
     }
