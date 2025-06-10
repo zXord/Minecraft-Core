@@ -17,9 +17,7 @@ class AuthHandler {
       const authManager = new Auth("select_account");
       
       // Launch authentication flow
-      const xboxManager = await authManager.launch("electron", {
-        /* You can add custom options here */
-      });
+      const xboxManager = await authManager.launch("electron");
       
       // Generate the Minecraft login token
       const token = await xboxManager.getMinecraft();
@@ -106,7 +104,7 @@ class AuthHandler {
       // Check if auth data is still valid (more lenient check)
       const savedDate = new Date(savedAuthData.savedAt);
       const now = new Date();
-      const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
+      const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
       
       // Previously we enforced a maximum token age which resulted in
       // users being forced to re-authenticate after a few hours.
@@ -125,25 +123,16 @@ class AuthHandler {
       
       // If we generated a new client_token, save it immediately
       if (!savedAuthData.client_token) {
-        try {
-          await this.saveAuthData(clientPath);
-        } catch (saveError) {
-        }
+        await this.saveAuthData(clientPath).catch(() => {});
       }
       
       // Try to restore refresh capability from saved data
-      if (savedAuthData.refreshData) {
-        try {
-          if (savedAuthData.refreshData.type === 'msmc_cache') {
-            // Try to restore MSMC with cache
-            const { Auth } = require('msmc');
-            const authManager = new Auth("select_account");
-            if (authManager.cache && savedAuthData.refreshData.cache) {
-              authManager.cache = savedAuthData.refreshData.cache;
-              this.authData.meta = authManager;
-            }
-          }
-        } catch (restoreError) {
+      if (savedAuthData.refreshData && savedAuthData.refreshData.type === 'msmc_cache') {
+        const { Auth } = require('msmc');
+        const authManager = new Auth("select_account");
+        if ('cache' in authManager && savedAuthData.refreshData.cache) {
+          authManager['cache'] = savedAuthData.refreshData.cache;
+          this.authData.meta = authManager;
         }
       }
       
@@ -168,8 +157,9 @@ class AuthHandler {
     
     try {
       // Check token age first
-      const savedDate = new Date(this.authData.savedAt || 0);      const now = new Date();
-      const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
+      const savedDate = new Date(this.authData.savedAt || 0);
+      const now = new Date();
+      const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
       
       
       // If token is very fresh (less than 30 minutes), just use it
@@ -238,11 +228,6 @@ class AuthHandler {
           }
       }
     }
-
-      // If no refresh capability just log token age; we no longer force re-authentication
-      if (hoursSinceSaved > 6) {
-      }
-      
       return { success: true, refreshed: false };
       
     } catch (error) {
@@ -258,7 +243,7 @@ class AuthHandler {
       )) {
         const savedDate = new Date(this.authData.savedAt || 0);
         const now = new Date();
-        const hoursSinceSaved = (now - savedDate) / (1000 * 60 * 60);
+        const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
         
         if (hoursSinceSaved < 8) { // Allow up to 8 hours for network issues
           return { success: true, refreshed: false, networkError: true };
