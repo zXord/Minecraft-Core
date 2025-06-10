@@ -1,5 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+let ipcChannelsLogged = false;
+const listenerMap = new Map();
+
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electron', {
@@ -136,10 +139,9 @@ contextBridge.exposeInMainWorld('electron', {
       'app-close-request',
     ];
 
-    // Debug: print validChannels at runtime (only once)
-      if (!window['__ipcChannelsLogged']) {
-        window['__ipcChannelsLogged'] = true;
-      }
+    if (!ipcChannelsLogged) {
+      ipcChannelsLogged = true;
+    }
 
     if (validChannels.includes(channel)) {
       // Only log failed channels, not successful ones
@@ -198,13 +200,10 @@ contextBridge.exposeInMainWorld('electron', {
     if (validChannels.includes(channel)) {
       // Wrap the listener so we can remove it later
       const wrapped = (_event, ...args) => listener(...args);
-      if (!window['__listenerMap']) {
-        window['__listenerMap'] = new Map();
+      if (!listenerMap.has(channel)) {
+        listenerMap.set(channel, new Map());
       }
-      if (!window['__listenerMap'].has(channel)) {
-        window['__listenerMap'].set(channel, new Map());
-      }
-      window['__listenerMap'].get(channel).set(listener, wrapped);
+      listenerMap.get(channel).set(listener, wrapped);
       ipcRenderer.on(channel, wrapped);
     }
   },
@@ -249,13 +248,13 @@ contextBridge.exposeInMainWorld('electron', {
       'app-close-request',
     ];
     if (validChannels.includes(channel)) {
-      const map = window['__listenerMap'] && window['__listenerMap'].get(channel);
+      const map = listenerMap.get(channel);
       const wrapped = map && map.get(listener);
       if (wrapped) {
         ipcRenderer.removeListener(channel, wrapped);
         map.delete(listener);
         if (map.size === 0) {
-          window['__listenerMap'].delete(channel);
+          listenerMap.delete(channel);
         }
       }
     }
@@ -302,6 +301,7 @@ contextBridge.exposeInMainWorld('electron', {
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.removeAllListeners(channel);
+      listenerMap.delete(channel);
     }
   }
 });
