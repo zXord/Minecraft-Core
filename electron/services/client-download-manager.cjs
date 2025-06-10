@@ -3,7 +3,6 @@ const path = require('path');
 const axios = require('axios');
 const { createWriteStream } = require('fs');
 const { mkdir } = require('fs/promises');
-const { ipcMain } = require('electron');
 
 /**
  * Client Download Manager
@@ -133,7 +132,11 @@ class ClientDownloadManager {
     const configPath = path.join(clientPath, 'client-config.json');
     let current = {};
     if (fs.existsSync(configPath)) {
-      try { current = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+      try {
+        current = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      } catch (err) {
+        current = {};
+      }
     }
     const actualOldMinecraftVersion = current.minecraftVersion; // Capture the true old version
 
@@ -182,52 +185,6 @@ class ClientDownloadManager {
     }
   }
 
-  /**
-   * Download a file with progress tracking
-   * @param {string} url - URL to download from
-   * @param {string} destination - Path to save file to
-   * @param {Object} [options] - Download options
-   */
-  async downloadFile(url, destination, options = {}) {
-    const { onProgress } = options;
-    let downloadedSize = 0;
-    let totalSize = 0;
-    let startTime = Date.now();
-    
-    const response = await axios({
-      url,
-      method: 'GET',
-      responseType: 'stream'
-    });
-    
-    totalSize = parseInt(response.headers['content-length'], 10);
-    
-    return new Promise((resolve, reject) => {
-      const writer = createWriteStream(destination);
-      
-      response.data.on('data', (chunk) => {
-        downloadedSize += chunk.length;
-        
-        if (onProgress) {
-          const elapsedSeconds = (Date.now() - startTime) / 1000;
-          const speedMBps = ((downloadedSize / elapsedSeconds) / (1024 * 1024)).toFixed(2);
-          const percent = Math.round((downloadedSize / totalSize) * 100);
-          
-          onProgress({
-            percent,
-            speed: `${speedMBps} MB/s`,
-            downloaded: downloadedSize,
-            total: totalSize
-          });
-        }
-      });
-      
-      response.data.pipe(writer);
-      
-      writer.on('finish', () => resolve());
-      writer.on('error', reject);
-    });
-  }
 
   /**
    * Clean up old Minecraft version directories
