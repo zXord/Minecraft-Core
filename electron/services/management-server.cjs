@@ -4,14 +4,16 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { createHash } = require('crypto');
-const process = require('process');
 const eventBus = require('../utils/event-bus.cjs');
+const process = require('process');
 
 class ManagementServer {
+  /** @type {import('express').Express} */
+  app;
+  /** @type {import('http').Server | null} */
+  server = null;
   constructor() {
-    /** @type {import('express').Express} */
     this.app = express();
-    this.server = null;
     this.port = 8080; // Default management port (different from Minecraft)
     this.isRunning = false;
     this.serverPath = null;
@@ -36,14 +38,14 @@ class ManagementServer {
     this.app.use(express.json({ limit: '50mb' }));
     
     // Logging middleware
-    this.app.use((req, res, next) => {
+    this.app.use((_, __, next) => {
       next();
     });
   }
   
   setupRoutes() {
     // Health check endpoint
-    this.app.get('/health', (req, res) => {
+    this.app.get('/health', (_, res) => {
       res.json({
         status: 'ok',
         server: 'minecraft-core-management',
@@ -67,7 +69,7 @@ class ManagementServer {
     });
 
     // Endpoint to query current server version
-    this.app.get('/api/server/version', (req, res) => {
+    this.app.get('/api/server/version', (_, res) => {
       res.json({ success: true, version: this.versionInfo });
     });
     
@@ -140,7 +142,7 @@ class ManagementServer {
     });
     
     // Get server information
-    this.app.get('/api/server/info', async (req, res) => {
+    this.app.get('/api/server/info', async (_, res) => {
       if (!this.serverPath) {
         return res.status(404).json({ error: 'No server configured' });
       }
@@ -178,25 +180,25 @@ class ManagementServer {
           // Second priority: try to find version from server jar files
           if (minecraftVersion === 'unknown') {
             const files = fs.readdirSync(this.serverPath);
-            const serverJars = files.filter(file => 
+            serverJars = files.filter(file =>
               file.endsWith('.jar') && (
-                file.includes('server') || 
-                file.includes('minecraft') || 
+                file.includes('server') ||
+                file.includes('minecraft') ||
                 file.includes('paper') || 
                 file.includes('forge') || 
                 file.includes('fabric') ||
                 file === 'fabric-server-launch.jar'
               )
             );          
-          if (serverJars.length > 0) {
-            const jarName = serverJars[0];
+            if (serverJars.length > 0) {
+              const jarName = serverJars[0];
             
             // Extract version from jar name (e.g., "minecraft_server.1.20.1.jar" or "paper-1.20.1-196.jar")
             const versionMatch = jarName.match(/(\d+\.\d+(?:\.\d+)?)/);
             if (versionMatch) {
               minecraftVersion = versionMatch[1];
             }
-          }
+            }
           }
           
           // If no version found from jar name, try reading from version.json if it exists
@@ -352,7 +354,7 @@ class ManagementServer {
     });
     
     // Get mod list
-    this.app.get('/api/mods/list', (req, res) => {
+    this.app.get('/api/mods/list', (_, res) => {
       if (!this.serverPath) {
         return res.status(404).json({ error: 'No server configured' });
       }
@@ -461,7 +463,7 @@ class ManagementServer {
     });
     
     // Debug: Get required mods endpoint
-    this.app.get('/api/debug/required-mods', async (req, res) => {
+    this.app.get('/api/debug/required-mods', async (_, res) => {
       try {
         const requiredMods = await this.getRequiredMods();
         res.json({
@@ -477,7 +479,7 @@ class ManagementServer {
     });
     
     // Test connection endpoint
-    this.app.get('/api/test', (req, res) => {
+    this.app.get('/api/test', (_, res) => {
       res.json({ 
         success: true, 
         message: 'Management server is running',
@@ -487,7 +489,7 @@ class ManagementServer {
     });
     
     // Get connected clients (for server admin)
-    this.app.get('/api/clients', (req, res) => {
+    this.app.get('/api/clients', (_, res) => {
       const clientList = Array.from(this.clients.values()).map(client => ({
         id: client.id,
         name: client.name,
