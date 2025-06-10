@@ -1,4 +1,3 @@
-// Helper for creating or updating Minecraft servers.dat
 const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
@@ -28,21 +27,17 @@ async function ensureServersDat(
   try {
     let minecraftPort = minecraftPortOverride || 25565;
 
-    // If minecraftPortOverride not given, fetch from management server
     if (!minecraftPortOverride && managementPort) {
-      try {
-        const infoRes = await fetch(
-          `http://${serverIp}:${managementPort}/api/server/info`,
-          { timeout: 5000 }
-        );
-        if (infoRes.ok) {
-          const info = await infoRes.json();
-          if (info.minecraftPort) {
-            const portNum = parseInt(info.minecraftPort, 10);
-            if (!Number.isNaN(portNum)) minecraftPort = portNum;
-          }
+      const infoRes = await fetch(
+        `http://${serverIp}:${managementPort}/api/server/info`,
+        { timeout: 5000 }
+      ).catch(() => null);
+      if (infoRes?.ok) {
+        const info = await infoRes.json();
+        if (info.minecraftPort) {
+          const portNum = parseInt(info.minecraftPort, 10);
+          if (!Number.isNaN(portNum)) minecraftPort = portNum;
         }
-      } catch (e) {
       }
     }
 
@@ -53,8 +48,7 @@ async function ensureServersDat(
     const serverAddress =
       minecraftPort === 25565 ? serverIp : `${serverIp}:${minecraftPort}`;
 
-    // Update lastServer option
-    const optionsFile = path.join(clientDir, 'options.txt');
+  const optionsFile = path.join(clientDir, 'options.txt');
     let optionsContent = '';
     if (fs.existsSync(optionsFile)) {
       optionsContent = fs.readFileSync(optionsFile, 'utf8');
@@ -63,16 +57,15 @@ async function ensureServersDat(
     lines.push(`lastServer:${serverAddress}`);
     fs.writeFileSync(optionsFile, lines.join('\n'), 'utf8');
 
-    // Update or create servers.dat
-    const serversDatPath = path.join(clientDir, 'servers.dat');
+  const serversDatPath = path.join(clientDir, 'servers.dat');
     let existingServers = [];
     if (fs.existsSync(serversDatPath)) {
       try {
         const buf = fs.readFileSync(serversDatPath);
         const uncompressed = zlib.gunzipSync(buf);
         const parsed = await nbt.parse(uncompressed);
-        const list = parsed.parsed.value.servers?.value || [];
-        existingServers = list.map(entry =>
+        const list = (parsed.parsed.value.servers?.value || []) ;
+        existingServers = /** @type {any[]} */(list).map(entry =>
           entry.value
             ? {
                 name: entry.value.name.value,
@@ -83,7 +76,7 @@ async function ensureServersDat(
             : entry
         );
         existingServers = existingServers.filter(s => s.ip !== serverAddress);
-      } catch (err) {
+      } catch {
         existingServers = [];
       }
     }
@@ -105,12 +98,7 @@ async function ensureServersDat(
     const nbtData = nbt.comp({
       servers: nbt.list(nbt.comp(nbtServers))
     });
-
-
-    const raw = nbt.writeUncompressed(nbtData);
-
-    // Minecraft's servers.dat is stored uncompressed, so simply write
-    // the raw NBT buffer without applying gzip compression.
+    const raw = nbt.writeUncompressed(/** @type {any} */(nbtData));
     fs.writeFileSync(serversDatPath, raw);
     return { success: true };
   } catch (err) {
