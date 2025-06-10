@@ -16,9 +16,8 @@ function getRuntimeDir() {
       runtimeDir = path.join(app.getPath('userData'), 'runtime');
     } else {
       // Fallback for when app is not available
-      runtimeDir = path.join(os.homedir(), '.minecraft-core', 'runtime');
-    }
-  } catch (err) {
+      runtimeDir = path.join(os.homedir(), '.minecraft-core', 'runtime');    }
+  } catch {
     // Final fallback to system temp
     runtimeDir = path.join(os.tmpdir(), 'minecraft-core-runtime');
   }
@@ -26,9 +25,8 @@ function getRuntimeDir() {
   // Ensure the directory exists
   try {
     if (!fs.existsSync(runtimeDir)) {
-      fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o755 });
-    }
-  } catch (err) {
+      fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o755 });    }
+  } catch {
     // Use system temp as final fallback
     runtimeDir = path.join(os.tmpdir(), 'minecraft-core-runtime-' + Date.now());
     fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o755 });
@@ -73,15 +71,15 @@ function cleanupRuntimeFiles() {
       paths.terminationRecord
     ];
     
-    for (const filePath of filesToClean) {
-      try {
+    for (const filePath of filesToClean) {      try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
         }
-      } catch (err) {
-      }
-    }
-  } catch (err) {
+      } catch {
+        // Ignore file deletion errors
+      }    }
+  } catch {
+    // Ignore cleanup errors
   }
 }
 

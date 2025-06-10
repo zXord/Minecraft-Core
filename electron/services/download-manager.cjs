@@ -4,7 +4,7 @@ const path = require('path');
 const progress = require('progress-stream');
 const { safeSend } = require('../utils/safe-send.cjs');
 
-const fetch = (...args) => import('node-fetch').then(({ default: fn }) => fn(...args));
+const fetch = (...args) => import('node-fetch').then(({ default: fn }) => fn.apply(null, args));
 
 /**
  * Download a file with progress reporting
@@ -140,28 +140,23 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
   const { spawn, exec } = require('child_process');
   const installerUrl = 'https://maven.fabricmc.net/net/fabricmc/fabric-installer/0.11.2/fabric-installer-0.11.2.jar';
   const installerJar = path.join(targetPath, 'fabric-installer.jar');
-
   // Check if Java is installed
-  try {
-    safeSend(logChannel, '🔍 Checking Java installation...');
-    
-    await new Promise((resolve, reject) => {
-      exec('java -version', (error, stdout, stderr) => {
-        if (error) {
-          safeSend(logChannel, '❌ Java not found. Please install Java to use Fabric.');
-          reject(new Error('Java is not installed or not in PATH. Please install Java to use Fabric.'));
-          return;
-        }
-        
-        // Java outputs version to stderr by default
-        const output = stderr || stdout;
-        safeSend(logChannel, '✓ Java found: ' + output.split('\n')[0]);
-        resolve();
-      });
+  safeSend(logChannel, '🔍 Checking Java installation...');
+  
+  await new Promise((resolve, reject) => {
+    exec('java -version', (error, stdout, stderr) => {
+      if (error) {
+        safeSend(logChannel, '❌ Java not found. Please install Java to use Fabric.');
+        reject(new Error('Java is not installed or not in PATH. Please install Java to use Fabric.'));
+        return;
+      }
+      
+      // Java outputs version to stderr by default
+      const output = stderr || stdout;
+      safeSend(logChannel, '✓ Java found: ' + output.split('\n')[0]);
+      resolve();
     });
-  } catch (javaError) {
-    throw javaError;
-  }
+  });
 
   safeSend(logChannel, '📥 Downloading Fabric installer...');
   await downloadWithProgress(installerUrl, installerJar, progressChannel);

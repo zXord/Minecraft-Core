@@ -58,11 +58,10 @@ try {
   log(`Error reading server process debug info: ${err.message}`);
 }
 
-function logRunningJavaProcesses() {
-  try {
+function logRunningJavaProcesses() {  try {
     log('Listing all running Java processes for debugging:');
     const stdout = execSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv', /** @type {import('child_process').ExecSyncOptions} */({ encoding: 'utf8' }));
-    const lines = stdout.trim().split('\n');
+    const lines = String(stdout).trim().split('\n');
     
     if (lines.length <= 1) {
       log('No Java processes found running.');
@@ -118,10 +117,9 @@ function killJavaProcesses() {
     log("Attempt 4: Searching for Java processes with Minecraft server in command line");
     const stdout = execSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv',
       /** @type {import('child_process').ExecSyncOptions} */({ encoding: 'utf8' }));
+      log(`Process list obtained: ${stdout.length} bytes`);
     
-    log(`Process list obtained: ${stdout.length} bytes`);
-    
-    const lines = stdout.trim().split('\n');
+    const lines = String(stdout).trim().split('\n');
     for (const line of lines) {
       if (line.includes('fabric-server-launch.jar') || 
           line.includes('minecraft_server.jar') || 
@@ -144,10 +142,9 @@ function killJavaProcesses() {
   } catch (e) {
     log(`Process search error: ${e.message}`);
   }
-  
-  try {
+    try {
     log("Final check for any remaining Java processes:");
-      const remainingJava = execSync('wmic process where "name=\'java.exe\'" get ProcessId', /** @type {import('child_process').ExecSyncOptions} */({ encoding: 'utf8' })).trim();
+      const remainingJava = String(execSync('wmic process where "name=\'java.exe\'" get ProcessId', /** @type {import('child_process').ExecSyncOptions} */({ encoding: 'utf8' }))).trim();
     
     if (remainingJava && remainingJava.includes('ProcessId')) {
       const lines = remainingJava.split('\n').filter(line => line.trim() && !line.includes('ProcessId'));
