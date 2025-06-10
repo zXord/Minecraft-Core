@@ -26,12 +26,10 @@ async function disableMod(modsDir, fileName) {
     // Check if target already exists
     if (fs.existsSync(targetPath)) {
       return false;
-    }
-
-    // Move the file to disabled directory
+    }    // Move the file to disabled directory
     fs.renameSync(sourcePath, targetPath);
     return true;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -56,12 +54,10 @@ async function enableMod(modsDir, fileName) {
     // Check if target already exists
     if (fs.existsSync(targetPath)) {
       return false;
-    }
-
-    // Move the file back to mods directory
+    }    // Move the file back to mods directory
     fs.renameSync(sourcePath, targetPath);
     return true;
-  } catch (error) {
+  } catch {
     return false;
   }
 }

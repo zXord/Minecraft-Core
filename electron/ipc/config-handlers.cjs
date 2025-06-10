@@ -8,24 +8,19 @@ const path = require('path');
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
 function createConfigHandlers() {
-  return {
-    'read-config': async (_e, serverPath) => {
-      try {
-        if (!serverPath || !fs.existsSync(serverPath)) {
-          throw new Error('Invalid server path');
-        }
-        
-        const configPath = path.join(serverPath, '.minecraft-core.json');
-        
-        if (!fs.existsSync(configPath)) {
-          return null; // No config file exists yet
-        }
-        
-        const configContent = fs.readFileSync(configPath, 'utf-8');
-        return JSON.parse(configContent);
-      } catch (err) {
-        throw err;
+  return {    'read-config': async (_e, serverPath) => {
+      if (!serverPath || !fs.existsSync(serverPath)) {
+        throw new Error('Invalid server path');
       }
+      
+      const configPath = path.join(serverPath, '.minecraft-core.json');
+      
+      if (!fs.existsSync(configPath)) {
+        return null; // No config file exists yet
+      }
+      
+      const configContent = fs.readFileSync(configPath, 'utf-8');
+      return JSON.parse(configContent);
     },
     
     'write-config': async (_e, { serverPath, config }) => {

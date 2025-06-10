@@ -33,9 +33,8 @@ function createManagementServerHandlers(win) {
         return { success: false, error: error.message };
       }
     },
-    
-    // Stop the management server
-    'stop-management-server': async (_event) => {
+      // Stop the management server
+    'stop-management-server': async () => {
       try {
         const result = await managementServer.stop();
         
@@ -56,9 +55,8 @@ function createManagementServerHandlers(win) {
         return { success: false, error: error.message };
       }
     },
-    
-    // Get management server status
-    'get-management-server-status': async (_event) => {
+      // Get management server status
+    'get-management-server-status': async () => {
       try {
         const status = managementServer.getStatus();
         return { success: true, status };

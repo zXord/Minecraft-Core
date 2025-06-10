@@ -77,26 +77,21 @@ function createInstallHandlers(win) {
         return { success: false, error: err.message };
       }
     },
-    
-    'check-health': (_e, targetPath) => {
-      try {
-        if (!targetPath || !fs.existsSync(targetPath)) {
-          throw new Error('Invalid target directory');
-        }
-        
-        const missing = [];
-        const files = ['server.jar', 'fabric-installer.jar', 'fabric-server-launch.jar'];
-        
-        files.forEach(file => {
-          if (!fs.existsSync(path.join(targetPath, file))) {
-            missing.push(file);
-          }
-        });
-        
-        return missing;
-      } catch (err) {
-        throw err;
+      'check-health': (_e, targetPath) => {
+      if (!targetPath || !fs.existsSync(targetPath)) {
+        throw new Error('Invalid target directory');
       }
+      
+      const missing = [];
+      const files = ['server.jar', 'fabric-installer.jar', 'fabric-server-launch.jar'];
+      
+      files.forEach(file => {
+        if (!fs.existsSync(path.join(targetPath, file))) {
+          missing.push(file);
+        }
+      });
+      
+      return missing;
     },
     
     'repair-health': async (_e, { targetPath, mcVersion, fabricVersion }) => {
