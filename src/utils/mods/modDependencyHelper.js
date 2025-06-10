@@ -4,7 +4,6 @@
 import { safeInvoke } from '../ipcUtils.js';
 import { get } from 'svelte/store';
 import {
-  installedModIds,
   currentDependencies,
   dependencyModalOpen,
   modToInstall,
@@ -215,9 +214,9 @@ export async function checkModDependencies(mod, visited = new Set()) {
         if (versionInfo.files && versionInfo.files.length > 0) {
           mod.downloadUrl = versionInfo.files[0].url;
         }
-      }    } catch {
-      // Error getting version info - this is acceptable
-    }
+        }    } catch {
+        void 0;
+      }
     
     // SECOND ATTEMPT: If we couldn't find dependencies through API, try to analyze installed file
     if (allDependencies.length === 0) {
@@ -237,12 +236,13 @@ export async function checkModDependencies(mod, visited = new Set()) {
             for (const dep of jarDeps) {
               let pid = dep.id;
               let depName = null;
-              try {
-                const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
-                if (projectInfo?.id) pid = projectInfo.id;
-                if (projectInfo?.title) depName = projectInfo.title;
-              } catch (err) {
-              }
+                try {
+                  const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
+                  if (projectInfo?.id) pid = projectInfo.id;
+                  if (projectInfo?.title) depName = projectInfo.title;
+                } catch {
+                  void 0;
+                }
               allDependencies.push({
                 project_id: pid,
                 dependency_type: dep.dependency_type,
@@ -270,12 +270,13 @@ export async function checkModDependencies(mod, visited = new Set()) {
             for (const dep of jarDeps) {
               let pid = dep.id;
               let depName = null;
-              try {
-                const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
-                if (projectInfo?.id) pid = projectInfo.id;
-                if (projectInfo?.title) depName = projectInfo.title;
-              } catch {
-              }
+                try {
+                  const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
+                  if (projectInfo?.id) pid = projectInfo.id;
+                  if (projectInfo?.title) depName = projectInfo.title;
+                } catch {
+                  void 0;
+                }
               allDependencies.push({
                 project_id: pid,
                 dependency_type: dep.dependency_type,
@@ -284,8 +285,9 @@ export async function checkModDependencies(mod, visited = new Set()) {
               });
             }
           }
-        }      } catch {
-      }
+          }      } catch {
+        void 0;
+        }
     }
     
     
@@ -306,8 +308,9 @@ export async function checkModDependencies(mod, visited = new Set()) {
               name: fapiName
             });
           }
-        }      } catch {
-      }
+          }      } catch {
+        void 0;
+        }
     }
     
     // Process the combined dependencies to normalize them
@@ -386,9 +389,9 @@ export async function checkModDependencies(mod, visited = new Set()) {
       }
     }
     return allDeps;
-  } catch (error) {
-    return [];
-  }
+    } catch {
+      return [];
+    }
 }
 
 /**
@@ -507,11 +510,11 @@ async function filterAndResolveDependencies(dependencies) {
           versionInfo = `Requirement: ${dep.version_requirement}`;
         }
       }
-    } catch (error) {
-      // Fall back to basic info if available
-      if (!name && dep.project_id) {
-        name = dep.project_id;
-      }
+      } catch {
+        // Fall back to basic info if available
+        if (!name && dep.project_id) {
+          name = dep.project_id;
+        }
       if (dep.version_requirement) {
         versionInfo = `Requirement: ${dep.version_requirement}`;
       }
@@ -611,7 +614,6 @@ export async function installWithDependencies(serverPath, installFn = installMod
           // Skip if no version requirement or installed version is compatible
           if (!dependency.versionRequirement || (installedInfoEntry && checkVersionCompatibility(installedInfoEntry.versionNumber, dependency.versionRequirement))) {
             skipDependency = true;
-          } else {
           }
         }
         if (skipDependency) {
@@ -689,10 +691,9 @@ export async function installWithDependencies(serverPath, installFn = installMod
               // Skip dependencies without a proper name or ID
               continue;
             }
-          } catch (error) {
-            // Skip if we can't get proper identification
-            continue;
-          }
+            } catch {
+              continue;
+            }
         }
         
         const depMod = {
@@ -765,9 +766,9 @@ export async function installWithDependencies(serverPath, installFn = installMod
         // Install the dependency
         await installFn(depMod, serverPath);
         installedCount++;
-      } catch (depErr) {
-        // Continue with other dependencies
-      }
+        } catch {
+          continue;
+        }
     }
     
     // Now install the main mod

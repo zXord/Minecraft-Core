@@ -231,7 +231,6 @@ class ClientDownloader {
           }
         }
         
-        const finalVerificationJarPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
         const finalVerificationOptions = needsFabric ? { requiredMods, serverInfo } : {};
         const finalVerificationResult = await this.checkMinecraftClient(clientPath, minecraftVersion, finalVerificationOptions);
         
@@ -614,7 +613,7 @@ class ClientDownloader {
         const fileStream = fs.createWriteStream(installerPath);
         response.body.pipe(fileStream);
         await new Promise((resolve, reject) => {
-          fileStream.on('finish', resolve);
+          fileStream.on('finish', () => resolve());
           fileStream.on('error', reject);
         });
       }
@@ -988,8 +987,8 @@ Specification-Vendor: FabricMC
 `;
       
       // Create a minimal ZIP structure using built-in Node.js functionality
-      const AdmZip = require('adm-zip');
-      const zip = AdmZip();
+      const AdmZip = require('adm-zip').default;
+      const zip = new AdmZip();
       
       // Add the MANIFEST.MF file
       zip.addFile('META-INF/MANIFEST.MF', Buffer.from(manifest, 'utf8'));
@@ -1011,7 +1010,9 @@ Specification-Vendor: FabricMC
       zip.addFile('fabric.mod.json', Buffer.from(JSON.stringify(fabricModJson, null, 2), 'utf8'));
       
       // Write the JAR file
-      zip.writeZip(fabricJarPath);
+      zip.writeZip(fabricJarPath, (e) => {
+        if (e) throw e;
+      });
       
       
     } catch (error) {
@@ -1157,7 +1158,8 @@ Specification-Vendor: FabricMC
             const parsed = await nbt.parse(uncompressed);
             
             // Extract existing server entries
-            const serversList = parsed.parsed.value.servers?.value || [];
+            const rawServers = parsed.parsed.value.servers?.value;
+            const serversList = Array.isArray(rawServers) ? rawServers : [];
 
             // Filter out any duplicate of our new server, keep everything else
             const targetIpPort = `${flat.ip}:${flat.port}`;
@@ -1216,7 +1218,7 @@ Specification-Vendor: FabricMC
         }, '');
         
         
-        const rawBuffer = nbt.writeUncompressed(nbtData)
+        const rawBuffer = nbt.writeUncompressed(nbtData, 'big')
         
         // Compress the NBT data since Minecraft expects gzip-compressed servers.dat
         const compressedBuffer = zlib.gzipSync(rawBuffer);
