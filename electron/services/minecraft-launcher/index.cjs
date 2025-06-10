@@ -2,22 +2,20 @@
 // REMOVED unused @xmcl imports - we now use direct Java execution instead
 const fs = require('fs');
 const path = require('path');
-const os = require('os'); // Re-enabled since it's used in memory calculations
+const AdmZip = require('adm-zip');
 const { EventEmitter } = require('events');
 const { JavaManager } = require('./java-manager.cjs');
 const { AuthHandler } = require('./auth-handler.cjs');
 const { ClientDownloader } = require('./client-downloader.cjs');
-const utils = require('./utils.cjs'); // Added import for utils
-const { ProperMinecraftLauncher } = require('./proper-launcher.cjs'); // Import proper launcher
-const eventBus = require('../../utils/event-bus.cjs');
+const { ProperMinecraftLauncher } = require('./proper-launcher.cjs');
 
 // Console hiding removed - fixing the root cause instead (using javaw.exe)
 
 // Add global error handling for unhandled promise rejections
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
   
   // Handle common authentication network errors gracefully
-  if (reason && typeof reason === 'object' && reason.message) {
+  if (reason instanceof Error) {
     if (reason.message.includes('ENOTFOUND') ||
         reason.message.includes('authserver.mojang.com') ||
         reason.message.includes('api.minecraftservices.com')) {
@@ -50,12 +48,6 @@ class MinecraftLauncher extends EventEmitter {
     // Update alias to use the downloader's method
     this.downloadMinecraftClient = this.clientDownloader.downloadMinecraftClientSimple.bind(this.clientDownloader);
 
-    eventBus.on('server-version-changed', async (info) => {
-      try {
-        await this.handleServerVersionChanged(info);
-      } catch (err) {
-      }
-    });
   }
   
   // Log system information to help with debugging - MOVED to utils.cjs
@@ -128,9 +120,9 @@ class MinecraftLauncher extends EventEmitter {
             // Check Java architecture (32-bit vs 64-bit)
             let is64Bit = false;
             try {
-              const { stdout: archOutput } = await execAsync(`"${javaCommand}" -d64 -version`, { timeout: 3000 });
+              await execAsync(`"${javaCommand}" -d64 -version`, { timeout: 3000 });
               is64Bit = true;
-            } catch (archError) {
+            } catch {
               is64Bit = false;
             }
             
@@ -151,7 +143,6 @@ class MinecraftLauncher extends EventEmitter {
                   is64Bit: is64Bit,
                   architecture: is64Bit ? '64-bit' : '32-bit'
                 };
-              } else {
               }
             } else {
               return { 
@@ -163,7 +154,8 @@ class MinecraftLauncher extends EventEmitter {
               };
             }
           }
-        } catch (cmdError) {
+        } catch {
+          continue;
         }
       }
       
@@ -225,46 +217,7 @@ class MinecraftLauncher extends EventEmitter {
     
     
     // CRITICAL: Check vanilla JAR immediately for LogUtils issue
-    const immediateVanillaJar = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
-    
-    if (fs.existsSync(immediateVanillaJar)) {
-      const immediateJarStats = fs.statSync(immediateVanillaJar);
-      
-      // Check for LogUtils class
-      try {
-        const AdmZip = require('adm-zip');
-        const zip = new AdmZip(immediateVanillaJar);
-        const entries = zip.getEntries();
-        const logUtilsEntry = entries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
-        
-        
-        if (!logUtilsEntry) {
-          
-          
-          // Remove the old JAR
-          fs.unlinkSync(vanillaJar);
-          
-          // Re-download the official JAR
-          await this.downloadFile(profile.downloads.client.url, vanillaJar);
-          
-          // Verify again
-          const newJarStats = fs.statSync(vanillaJar);
-          
-          // Check LogUtils again
-          const newZip = new AdmZip(vanillaJar);
-          const newEntries = newZip.getEntries();
-          const newLogUtilsEntry = newEntries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
-          
-          if (!newLogUtilsEntry) {
-          } else {
-          }
-          
-        } else {
-        }
-      } catch (zipError) {
-      }
-    } else {
-    }
+
     
     // PHASE 4 ENHANCEMENT: Continue with actual Minecraft launch
     try {
@@ -287,8 +240,7 @@ class MinecraftLauncher extends EventEmitter {
           }
         }
         launchVersion = `fabric-loader-${actualFabricVersion}-${minecraftVersion}`;
-      } else {
-      }
+
       
       // Get Java path
       const requiredJavaVersion = require('./utils.cjs').getRequiredJavaVersion(minecraftVersion);
@@ -311,8 +263,7 @@ class MinecraftLauncher extends EventEmitter {
       const launchJson = JSON.parse(fs.readFileSync(launchJsonPath, 'utf8'));
       
       // Build classpath
-      const classpath = [];
-      const seenLibraries = new Set(); // Track libraries to avoid duplicates
+        const classpath = [];
       
       // Add vanilla JAR first
       const vanillaJarPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
@@ -369,12 +320,10 @@ class MinecraftLauncher extends EventEmitter {
               const existing = libraryMap.get(normalizedName);
               if (priority > existing.priority) {
                 libraryMap.set(normalizedName, { name: lib.name, path: libPath, priority });
-              } else {
               }
             } else {
               libraryMap.set(normalizedName, { name: lib.name, path: libPath, priority });
             }
-          } else {
           }
         }
         
@@ -390,12 +339,11 @@ class MinecraftLauncher extends EventEmitter {
               
               if (fs.existsSync(nativeLibPath)) {
                 const nativeLibName = `${lib.name}:${classifier}`;
-                libraryMap.set(nativeLibName, { 
-                  name: nativeLibName, 
-                  path: nativeLibPath, 
-                  priority: 100 // High priority for natives
+                libraryMap.set(nativeLibName, {
+                  name: nativeLibName,
+                  path: nativeLibPath,
+                  priority: 100
                 });
-              } else {
               }
             }
           }
@@ -482,37 +430,25 @@ class MinecraftLauncher extends EventEmitter {
       }
       
       // Extract native libraries from JARs
-      let extractedNatives = 0;
       
       for (const [, libInfo] of libraryMap) {
         // Look for native JAR files (containing DLL/SO files)
         if (libInfo.name.includes('-natives-') && libInfo.path.endsWith('.jar')) {
           try {
-            const AdmZip = require('adm-zip');
             const zip = new AdmZip(libInfo.path);
             const entries = zip.getEntries();
-            
+
             for (const entry of entries) {
               if (!entry.isDirectory && (entry.entryName.endsWith('.dll') || entry.entryName.endsWith('.so') || entry.entryName.endsWith('.dylib'))) {
                 const nativePath = path.join(nativesDir, path.basename(entry.entryName));
                 if (!fs.existsSync(nativePath)) {
                   fs.writeFileSync(nativePath, entry.getData());
-                  extractedNatives++;
                 }
               }
             }
           } catch (extractError) {
+            console.error(extractError);
           }
-        }
-      }
-      
-      
-      // List files in natives directory for debugging
-      if (fs.existsSync(nativesDir)) {
-        const nativeFiles = fs.readdirSync(nativesDir);
-        nativeFiles.slice(0, 10).forEach(file => {
-        });
-        if (nativeFiles.length > 10) {
         }
       }
       
@@ -527,50 +463,6 @@ class MinecraftLauncher extends EventEmitter {
         `-Dorg.lwjgl.util.Debug=true`,
         `-Dorg.lwjgl.util.DebugLoader=true`
       );
-      
-      // EMERGENCY WORKAROUND: Manually extract LWJGL natives from vanilla client
-      try {
-        const vanillaVersionDir = path.join(clientPath, 'versions', minecraftVersion);
-        const vanillaLibrariesDir = path.join(clientPath, 'libraries');
-        
-        // Common LWJGL native paths for Windows
-        const lwjglNativePaths = [
-          'org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar',
-          'org/lwjgl/lwjgl-opengl/3.3.3/lwjgl-opengl-3.3.3-natives-windows.jar',
-          'org/lwjgl/lwjgl-glfw/3.3.3/lwjgl-glfw-3.3.3-natives-windows.jar',
-          'org/lwjgl/lwjgl-openal/3.3.3/lwjgl-openal-3.3.3-natives-windows.jar',
-          'org/lwjgl/lwjgl-stb/3.3.3/lwjgl-stb-3.3.3-natives-windows.jar'
-        ];
-        
-        let manuallyExtracted = 0;
-        for (const nativePath of lwjglNativePaths) {
-          const fullNativePath = path.join(vanillaLibrariesDir, nativePath);
-          if (fs.existsSync(fullNativePath)) {
-            try {
-              const AdmZip = require('adm-zip');
-              const zip = new AdmZip(fullNativePath);
-              const entries = zip.getEntries();
-              
-              for (const entry of entries) {
-                if (!entry.isDirectory && entry.entryName.endsWith('.dll')) {
-                  const dllPath = path.join(nativesDir, path.basename(entry.entryName));
-                  if (!fs.existsSync(dllPath)) {
-                    fs.writeFileSync(dllPath, entry.getData());
-                    manuallyExtracted++;
-                  }
-                }
-              }
-            } catch (extractError) {
-            }
-          }
-        }
-        
-        if (manuallyExtracted > 0) {
-        } else {
-        }
-        
-      } catch (emergencyError) {
-      }
       
       // Add classpath
       jvmArgs.push('-cp', classpath.join(process.platform === 'win32' ? ';' : ':'));
@@ -609,27 +501,9 @@ class MinecraftLauncher extends EventEmitter {
       
       this.client = { child };
       
-      // Handle process output
-      child.stdout.on('data', (data) => {
-        const output = data.toString();
-        
-        // Check for successful launch indicators
-        if (output.includes('Setting user:') || output.includes('Environment: authHost')) {
-        }
-        
-        if (output.includes('[Render thread/INFO]: Created')) {
-        }
-      });
+
       
-      child.stderr.on('data', (data) => {
-        const output = data.toString();
-        
-        // Check for the LogUtils error specifically
-        if (output.includes('java.lang.ClassNotFoundException: com.mojang.logging.LogUtils')) {
-        }
-      });
-      
-      child.on('close', (code) => {
+      child.on('close', () => {
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
@@ -657,7 +531,7 @@ class MinecraftLauncher extends EventEmitter {
         vanillaVersion: minecraftVersion,
         needsFabric: needsFabric
       };
-      
+    }
     } catch (error) {
       this.isLaunching = false;
       this.client = null;
@@ -691,6 +565,7 @@ class MinecraftLauncher extends EventEmitter {
           
           stopped = true;
         } catch (error) {
+          console.error(error);
         }
       }
       
@@ -710,36 +585,33 @@ class MinecraftLauncher extends EventEmitter {
             
             try {
               // Kill only Java processes with our client path in the command line
-              await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, { 
-                windowsHide: true,
-                timeout: 5000 
-              }).catch(() => {
-              });
-              
-              await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, { 
-                windowsHide: true,
-                timeout: 5000 
-              }).catch(() => {
-              });
+                await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, {
+                  windowsHide: true,
+                  timeout: 5000
+                });
+
+                await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, {
+                  windowsHide: true,
+                  timeout: 5000
+                });
               
               stopped = true;
               
-            } catch (wmicError) {
-              
-              // Fallback: Try to use the stored client PID if we have it
-              if (this.client && this.client.child && this.client.child.pid) {
-                try {
-                  await execAsync(`taskkill /F /PID ${this.client.child.pid}`, { windowsHide: true });
-                  stopped = true;
-                } catch (pidError) {
+              } catch (wmicError) {
+                if (this.client && this.client.child && this.client.child.pid) {
+                  try {
+                    await execAsync(`taskkill /F /PID ${this.client.child.pid}`, { windowsHide: true });
+                    stopped = true;
+                  } catch (pidError) {
+                    console.error(pidError);
+                  }
                 }
               }
             }
-          } else {
-          }
           
-        } catch (error) {
-        }
+          } catch (error) {
+            console.error(error);
+          }
       }
       
       // Reset launcher state
@@ -1227,20 +1099,6 @@ class MinecraftLauncher extends EventEmitter {
     }
   }
 
-  async handleServerVersionChanged(info) {
-    if (!this.clientPath) {
-      return;
-    }
-    const { minecraftVersion, loaderType, loaderVersion } = info;
-    await this.clientDownloader.updateForServerVersion({
-      clientPath: this.clientPath,
-      mcVersion: minecraftVersion,
-      fabricVersion: loaderType === 'fabric' ? loaderVersion : null,
-      serverPath: info.serverPath,
-      requiredMods: info.requiredMods || [],
-      allClientMods: info.allClientMods || []
-    });
-  }
 }
 
 // Singleton instance
