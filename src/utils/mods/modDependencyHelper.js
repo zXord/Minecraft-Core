@@ -397,13 +397,11 @@ export async function checkModDependencies(mod, visited = new Set()) {
  * @returns {Promise<Array>} - Filtered and resolved dependencies
  */
 async function filterAndResolveDependencies(dependencies) {
-  const installedIds = get(installedModIds);
   const disabled = get(disabledMods); // Get the set of disabled mods
   
   
   // Get the actual installed mod info to double-check physical installation
   const actualInstalledInfo = get(installedModInfo);
-  const actualInstalledIds = new Set(actualInstalledInfo.map(info => info.projectId));
   
   
   // Convert dependencies to standard format to handle different API response formats
@@ -575,8 +573,6 @@ export async function installWithDependencies(serverPath, installFn = installMod
       dependencies.push(dep);
     }
   }
-  const installedIds = get(installedModIds);
-  
   // Get the actual installed mod info to double-check physical installation
   const actualInstalledInfo = get(installedModInfo);
   const actualInstalledIds = new Set(actualInstalledInfo.map(info => info.projectId));

@@ -433,7 +433,6 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
         continue;
       }
       
-      const modName = mod.name || mod.fileName || 'Unknown Mod';
       
       // Check if mod has version requirements
       if (mod.gameVersions && mod.gameVersions.length > 0) {
