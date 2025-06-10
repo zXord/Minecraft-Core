@@ -91,7 +91,7 @@ class ClientDownloader {
 
         try {
           downloadSuccess = await this.downloadMinecraftManually(clientPath, minecraftVersion);
-        } catch {
+        } catch (e) {
           downloadSuccess = false;
         }
         
@@ -188,19 +188,17 @@ class ClientDownloader {
               task: `Assets downloaded successfully (${assetResult.total} files)`,
               total: 5
             });
-          } else {
           }
-        } catch (assetError) {
-          // Don't fail the entire process for asset errors, but warn
+        } catch (error) {
+          this.emitter.emit('client-download-progress', {
+            type: 'Warning',
+            task: `Asset download failed: ${error.message}`,
+            total: 5
+          });
         }
-        
-        // NEW: Add server to Minecraft server list if server info is provided
+
         const serverInfo = options.serverInfo;
         
-        if (serverInfo) {
-        }
-        
-        // ROBUST SERVER INFO CHECK - try multiple possible field combinations
         const hasServerInfo = serverInfo && (
           serverInfo.minecraftPort ||
           serverInfo.port ||
@@ -208,26 +206,21 @@ class ClientDownloader {
           serverInfo.ip ||
           serverInfo.serverIp
         );
-        
-        
+
         if (hasServerInfo) {
-          
           this.emitter.emit('client-download-progress', {
             type: 'Server',
             task: 'Adding server to multiplayer list...',
             total: 6
           });
-          
           try {
-            const serverResult = await this.addServerToList(clientPath, serverInfo);
-            
-            if (serverResult.success) {
-            } else {
-            }
-          } catch (serverError) {
-          }
-        } else {
-          if (serverInfo) {
+            await this.addServerToList(clientPath, serverInfo);
+          } catch (error) {
+            this.emitter.emit('client-download-progress', {
+              type: 'Warning',
+              task: `Failed to add server: ${error.message}`,
+              total: 6
+            });
           }
         }
         
@@ -282,8 +275,6 @@ class ClientDownloader {
   }
 
   async downloadMinecraftManually(clientPath, minecraftVersion) {
-    
-    try {
       // Setup directories
       const versionsDir = path.join(clientPath, 'versions');
       const versionDir = path.join(versionsDir, minecraftVersion);
@@ -377,9 +368,6 @@ class ClientDownloader {
         return lib.downloads && lib.downloads.artifact;
       });
 
-      let librariesDownloaded = 0;
-      let librariesFailed = 0;
-
       for (let i = 0; i < downloadableLibraries.length; i++) {
         const lib = downloadableLibraries[i];
         
@@ -411,16 +399,9 @@ class ClientDownloader {
                 fs.mkdirSync(libDir, { recursive: true });
               }
 
-          try {
-            // Only log occasionally to reduce spam
-            if (i % 20 === 0) {
-            }
-            
-            await this._downloadFileSingle(artifact.url, libPath);
-              librariesDownloaded++;
-            } catch (libError) {
-              librariesFailed++;
-            }
+          if (i % 20 === 0) {
+          }
+          await this._downloadFileSingle(artifact.url, libPath);
           }
         }
 
@@ -469,10 +450,7 @@ class ClientDownloader {
 
       
       return true;
-    } catch (error) {
-      throw error;
     }
-  }
 
   async downloadJson(url, maxRetries = 3) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -624,7 +602,7 @@ class ClientDownloader {
           const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
           const loaders = await response.json();
           loaderVersion = loaders[0].version;
-        } catch (error) {
+        } catch (e) {
           loaderVersion = '0.14.21';
         }
       }
@@ -763,13 +741,13 @@ class ClientDownloader {
       // CRITICAL FIX: Post-process the Fabric JSON to add missing download metadata
       try {
         await this.enrichFabricJson(clientPath, fabricProfileName);
-      } catch (enrichError) {
+      } catch (e) {
+        console.error(e);
       }
       
       // CRITICAL FIX: Ensure Fabric profile properly inherits from vanilla version
-      try {
-        const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
-          const vanillaJsonPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.json`);
+      const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
+        const vanillaJsonPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.json`);
         
           if (fs.existsSync(vanillaJsonPath)) {
             const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
@@ -833,21 +811,12 @@ class ClientDownloader {
               const missingCritical = [];
               criticalLibraries.forEach(requiredLib => {
                 const found = fabricJson.libraries.find(lib => lib.name?.startsWith(requiredLib));
-                if (found) {
-                } else {
+                if (!found) {
                   missingCritical.push(requiredLib);
                 }
               });
               
-              if (missingCritical.length === 0) {
-              } else {
-              }
-              
               modified = true;
-            } else {
-            }
-          } else {
-          }
           
           // CRITICAL: Add inheritsFrom field to explicitly link to vanilla
           if (!fabricJson.inheritsFrom) {
@@ -944,16 +913,13 @@ class ClientDownloader {
           
           if (modified) {
             fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-          } else {
           }
-        } else {
         }
-      } catch (fabricFixError) {
-      }
-      
+
       try {
         fs.unlinkSync(installerPath);
-      } catch (cleanupError) {
+      } catch (e) {
+        console.error(e);
       }
       return { 
         success: true, 
@@ -1096,7 +1062,7 @@ Specification-Vendor: FabricMC
         return true;
       }
       return false;
-    } catch (error) {
+    } catch (e) {
       return false;
     }
   }
@@ -1121,21 +1087,17 @@ Specification-Vendor: FabricMC
       }
       
       // === 3. Update options.txt → lastServer:ip:port ===
-      try {
-        const optionsFile = path.join(clientPath, 'options.txt');
+      const optionsFile = path.join(clientPath, 'options.txt');
 
-        let optionsContent = '';
-        if (fs.existsSync(optionsFile)) {
-          optionsContent = fs.readFileSync(optionsFile, 'utf8');
-        }
-
-        // Remove any existing lastServer line, then re-append
-        const lines = optionsContent.split('\n').filter(line => !line.startsWith('lastServer:'));
-        const serverAddress = (flat.port === 25565) ? flat.ip : `${flat.ip}:${flat.port}`;
-        lines.push(`lastServer:${serverAddress}`);
-        fs.writeFileSync(optionsFile, lines.join('\n'), 'utf8');
-      } catch (err) {
+      let optionsContent = '';
+      if (fs.existsSync(optionsFile)) {
+        optionsContent = fs.readFileSync(optionsFile, 'utf8');
       }
+
+      const lines = optionsContent.split('\n').filter(line => !line.startsWith('lastServer:'));
+      const serverAddress = (flat.port === 25565) ? flat.ip : `${flat.ip}:${flat.port}`;
+      lines.push(`lastServer:${serverAddress}`);
+      fs.writeFileSync(optionsFile, lines.join('\n'), 'utf8');
 
       // === 4. Write a **valid** servers.dat NBT file ===
       try {
@@ -1165,33 +1127,26 @@ Specification-Vendor: FabricMC
             const targetIpPort = `${flat.ip}:${flat.port}`;
             existingServers = serversList.filter(serverEntry => {
               // Handle both old complex format and new simple format
-              const existingIpPort = serverEntry.value ? serverEntry.value.ip.value : serverEntry.ip;
+              const existingIpPort = (serverEntry && typeof serverEntry === 'object' && 'value' in serverEntry)
+                ? serverEntry.value.ip.value
+                : serverEntry.ip;
               const isDuplicate = existingIpPort === targetIpPort;
-              if (isDuplicate) {
-              }
               return !isDuplicate;
             }).map(serverEntry => {
-              // Convert to simple format
-              if (serverEntry.value) {
-                // Old complex format - extract values
-      return { 
+              if (serverEntry && typeof serverEntry === 'object' && 'value' in serverEntry) {
+                return {
                   name: serverEntry.value.name.value,
                   ip: serverEntry.value.ip.value,
                   icon: serverEntry.value.icon.value,
                   acceptTextures: serverEntry.value.acceptTextures.value
                 };
-              } else {
-                // Already simple format
-                return serverEntry;
               }
+              return serverEntry;
             });
-            // Convert to simple JavaScript objects for easier handling
             
-          } catch (parseError) {
+          } catch (e) {
             existingServers = [];
           }
-        } else {
-        }
 
         // Create new server entry (simple object)
         const newServerEntry = {
@@ -1473,7 +1428,6 @@ Specification-Vendor: FabricMC
       
       fabricJson.arguments.game = cleanedArgs;
       modified = true;
-    } else {
     }
     
     // Also ensure JVM auth session argument is present
@@ -1499,7 +1453,8 @@ Specification-Vendor: FabricMC
             url: (lib.url || base) + jar 
           };
           modified = true;
-        } catch (parseError) {
+        } catch (e) {
+          console.error(e);
         }
       }
 
@@ -1517,14 +1472,14 @@ Specification-Vendor: FabricMC
             };
           }
           modified = true;
-        } catch (parseError) {
-        }
+          } catch (e) {
+            console.error(e);
+          }
       }
     }
-    
+
     if (modified) {
       fs.writeFileSync(jsonPath, JSON.stringify(fabricJson, null, 2));
-    } else {
     }
   }
 
@@ -1570,7 +1525,6 @@ Specification-Vendor: FabricMC
 
       if (modified) {
         fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-      } else {
       }
 
       return { success: true, modified };
@@ -1679,8 +1633,6 @@ Specification-Vendor: FabricMC
           .then(() => {
             downloaded++;
             processed++;
-            if (downloaded % 100 === 0) {
-            }
             if (processed % 50 === 0 || processed === totalAssets) {
               updateProgress();
             }
