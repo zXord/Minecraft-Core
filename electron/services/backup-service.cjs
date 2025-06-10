@@ -337,7 +337,7 @@ async function cleanupAutomaticBackups(serverPath, maxCount) {
     autoBackups.sort((a, b) => {
       const timeA = a.metadata?.timestamp ? new Date(a.metadata.timestamp) : new Date(a.created);
       const timeB = b.metadata?.timestamp ? new Date(b.metadata.timestamp) : new Date(b.created);
-      return timeB - timeA;
+      return timeB.getTime() - timeA.getTime();
     });
     
     // If we have more than the max, delete the oldest ones

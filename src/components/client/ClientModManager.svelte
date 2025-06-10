@@ -687,7 +687,7 @@
     versionsError[modId] = null;
     
     try {
-      const versions = await fetchModVersions(modId, get(modSource), !loadAll, loadAll);
+      const versions = await fetchModVersions(modId, get(modSource), !loadAll);
       versionsCache[modId] = versions;
     } catch (error) {
       versionsError[modId] = error.message;
