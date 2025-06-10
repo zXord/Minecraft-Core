@@ -239,7 +239,7 @@ export async function saveModCategories() {
     }));
     
     
-    const result = await safeInvoke('save-mod-categories', categoriesArray, serverPath, clientPath);
+    await safeInvoke('save-mod-categories', categoriesArray, serverPath, clientPath);
     return true;
   } catch (error) {
     return false;

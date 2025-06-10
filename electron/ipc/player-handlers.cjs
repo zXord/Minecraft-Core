@@ -357,14 +357,8 @@ function createPlayerHandlers() {
       }
     },
     
-    'get-player-ip': (_e, playerName) => {
-      try {
-        // For development/testing purposes, return a mock IP
-        // In a real environment this would query the server logs or a player database
-        return `127.0.0.${Math.floor(Math.random() * 255)}`;
-      } catch (err) {
-        return null;
-      }
+    'get-player-ip': () => {
+      return `127.0.0.${Math.floor(Math.random() * 255)}`;
     },
     
     'get-last-banned-player': (_e, serverPath) => {
@@ -377,7 +371,7 @@ function createPlayerHandlers() {
         let lastPlayerName = null;
         if (playerIpMap.size > 0) {
           // Extract the last entry from the map
-          for (const [_, playerName] of playerIpMap) {
+          for (const [, playerName] of playerIpMap) {
             if (playerName && playerName !== 'Unknown') {
               lastPlayerName = playerName;
             }
@@ -390,24 +384,17 @@ function createPlayerHandlers() {
         // Check our persistent player map file
         const playerMapFile = path.join(serverPath, 'player-ip-map.json');
         if (fs.existsSync(playerMapFile)) {
-          try {
-            const mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
-            
-            // Get the most recent entry (last in the object)
-            const entries = Object.entries(mapData);
-            if (entries.length > 0) {
-              // Check all entries to find an actual player name (not special names)
-              for (const [ip, playerName] of entries) {
-                if (playerName && playerName !== 'Unknown') {
-                  return { lastBannedPlayer: playerName };
-                }
+          const mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
+          const entries = Object.entries(mapData);
+          if (entries.length > 0) {
+            for (const [, playerName] of entries) {
+              if (playerName && playerName !== 'Unknown') {
+                return { lastBannedPlayer: playerName };
               }
-              
-              // If we only have special names, just use the last one
-              const [ip, playerName] = entries[entries.length - 1];
-              return { lastBannedPlayer: playerName };
             }
-          } catch (err) {
+
+            const [, playerName] = entries[entries.length - 1];
+            return { lastBannedPlayer: playerName };
           }
         }
         
@@ -441,19 +428,15 @@ function createPlayerHandlers() {
           // If we still don't have a player name, check whitelist.json
         const whitelistFile = path.join(serverPath, 'whitelist.json');
         if (fs.existsSync(whitelistFile)) {
-          try {
-            const data = JSON.parse(fs.readFileSync(whitelistFile, 'utf-8'));
-            if (Array.isArray(data) && data.length > 0) {
-              for (const item of data) {
-                if (item && typeof item === 'object' && item.name) {
-                  return { lastBannedPlayer: item.name };
-                } else if (typeof item === 'string') {
-                  return { lastBannedPlayer: item };
-                }
+          const data = JSON.parse(fs.readFileSync(whitelistFile, 'utf-8'));
+          if (Array.isArray(data) && data.length > 0) {
+            for (const item of data) {
+              if (item && typeof item === 'object' && item.name) {
+                return { lastBannedPlayer: item.name };
+              } else if (typeof item === 'string') {
+                return { lastBannedPlayer: item };
               }
             }
-          } catch (err) {
-            // Ignore errors reading whitelist file
           }
         }
 
