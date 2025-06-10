@@ -2,7 +2,7 @@
 // REMOVED unused @xmcl imports - we now use direct Java execution instead
 const fs = require('fs');
 const path = require('path');
-const AdmZip = require('adm-zip');
+const AdmZip = require('adm-zip').default;
 const { EventEmitter } = require('events');
 const { JavaManager } = require('./java-manager.cjs');
 const { AuthHandler } = require('./auth-handler.cjs');
@@ -179,8 +179,8 @@ class MinecraftLauncher extends EventEmitter {
   }
   
   // Manual download method for when automated downloads fail
-  async downloadMinecraftManually(clientPath, minecraftVersion, javaPath) {
-    return this.clientDownloader.downloadMinecraftManually(clientPath, minecraftVersion, javaPath);
+  async downloadMinecraftManually(clientPath, minecraftVersion) {
+    return this.clientDownloader.downloadMinecraftManually(clientPath, minecraftVersion);
   }
   
   // Helper method to download JSON with retry logic

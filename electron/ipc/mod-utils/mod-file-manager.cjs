@@ -4,7 +4,7 @@ const fsSync = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { app } = require('electron'); // Required for app.getPath('userData')
-const AdmZip = require('adm-zip');
+const AdmZip = require('adm-zip').default;
 
 // Simple store implementation to persist mod categories
 const configDir = path.join(app.getPath('userData'), 'config');
@@ -50,7 +50,6 @@ function parseForgeToml(content) {
 
 async function readModMetadataFromJar(jarPath) {
   try {
-    // @ts-ignore - AdmZip constructor is valid
     const zip = new AdmZip(jarPath);
     const entries = zip.getEntries();
     const fabric = entries.find(e =>

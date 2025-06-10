@@ -2,7 +2,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const axios = require('axios');
-const AdmZip = require('adm-zip');
+const AdmZip = require('adm-zip').default;
 
 async function extractDependenciesFromJar(jarPath) {
   try {
@@ -11,7 +11,6 @@ async function extractDependenciesFromJar(jarPath) {
     } catch {
       throw new Error(`Mod file does not exist: ${jarPath}`);
     }    try {
-      // @ts-ignore - AdmZip constructor is valid
       const zip = new AdmZip(jarPath);
       const zipEntries = zip.getEntries();
 

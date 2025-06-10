@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createZip, listBackups } = require('../utils/backup-util.cjs');
-const AdmZip = require('adm-zip');
+const AdmZip = require('adm-zip').default;
 const { sendServerCommand, getServerState } = require('./server-manager.cjs');
 
 // Add a utility to wait for a specified time
