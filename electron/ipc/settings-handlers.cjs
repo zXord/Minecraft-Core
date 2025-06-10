@@ -1,14 +1,15 @@
 // Settings IPC handlers
 const appStore = require('../utils/app-store.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
+const path = require('path');
+const fs = require('fs');
+const fsPromises = require('fs/promises');
+const { rm } = require('fs/promises');
 
 /**
  * Create settings IPC handlers
- * 
- * @param {BrowserWindow} win - The main application window
- * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
-function createSettingsHandlers(win) {
+function createSettingsHandlers() {
   return {
     'update-settings': async (_e, { port, maxRam, serverPath, autoStartMinecraft, autoStartManagement }) => {
       try {
@@ -286,17 +287,13 @@ function createSettingsHandlers(win) {
           return { success: false, error: 'Invalid server IP address' };
         }
         
-        const fs = require('fs');
-        const fsPromises = require('fs/promises');
-        const path_module = require('path');
-        
         // Create directory if it doesn't exist
         if (!fs.existsSync(clientPath)) {
           fs.mkdirSync(clientPath, { recursive: true });
         }
-        
+
         // Save client configuration to a JSON file
-        const configFile = path_module.join(clientPath, 'client-config.json');
+        const configFile = path.join(clientPath, 'client-config.json');
         const config = {
           serverIp,
           serverPort: serverPort || '8080', // Default to management server port

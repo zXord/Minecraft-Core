@@ -44,7 +44,8 @@ function setupIpcHandlers(win) {
     const configHandlers = createConfigHandlers();
     const playerHandlers = createPlayerHandlers();
     const serverHandlers = createServerHandlers(win);
-    const settingsHandlers = createSettingsHandlers(win);    const backupHandlers = createBackupHandlers();
+    const settingsHandlers = createSettingsHandlers();
+    const backupHandlers = createBackupHandlers();
     const managementServerHandlers = createManagementServerHandlers(win);
     const minecraftLauncherHandlers = createMinecraftLauncherHandlers(win);
     

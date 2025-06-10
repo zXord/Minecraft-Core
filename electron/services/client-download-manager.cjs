@@ -3,7 +3,7 @@ const path = require('path');
 const axios = require('axios');
 const { createWriteStream } = require('fs');
 const { mkdir } = require('fs/promises');
-const { app, BrowserWindow, ipcMain } = require('electron'); // Added ipcMain
+const { ipcMain } = require('electron');
 
 /**
  * Client Download Manager
@@ -29,8 +29,8 @@ class ClientDownloadManager {
       const { clientPath, mcVersion } = options;
 
       // Use the existing client downloader from minecraft-launcher
-      const ClientDownloader = require('./minecraft-launcher/client-downloader.cjs');
-      const JavaManager = require('./minecraft-launcher/java-manager.cjs');
+      const { ClientDownloader } = require('./minecraft-launcher/client-downloader.cjs');
+      const { JavaManager } = require('./minecraft-launcher/java-manager.cjs');
       const { EventEmitter } = require('events');
 
       const eventEmitter = new EventEmitter();
@@ -62,8 +62,8 @@ class ClientDownloadManager {
       const { clientPath, mcVersion, fabricVersion } = options;
 
       // Use the existing client downloader from minecraft-launcher
-      const ClientDownloader = require('./minecraft-launcher/client-downloader.cjs');
-      const JavaManager = require('./minecraft-launcher/java-manager.cjs');
+      const { ClientDownloader } = require('./minecraft-launcher/client-downloader.cjs');
+      const { JavaManager } = require('./minecraft-launcher/java-manager.cjs');
       const { EventEmitter } = require('events');
 
       const eventEmitter = new EventEmitter();
@@ -98,19 +98,16 @@ class ClientDownloadManager {
       await this.ensureDirectoryExists(modsDir);
 
       // Copy mods from server to client
-      for (const mod of requiredMods) {
+      for (const modFileName of requiredMods) {
         try {
-          const modFileName = typeof mod === 'string' ? mod : (mod.fileName || mod.name);
           const serverModPath = path.join(serverPath, 'mods', modFileName);
           const clientModPath = path.join(modsDir, modFileName);
 
           if (fs.existsSync(serverModPath)) {
-            // Copy mod from server to client
             const modData = fs.readFileSync(serverModPath);
             fs.writeFileSync(clientModPath, modData);
-          } else {
           }
-        } catch (modError) {
+        } catch {
         }
       }
 
@@ -146,25 +143,7 @@ class ClientDownloadManager {
         await this.cleanupOldVersion(clientPath, actualOldMinecraftVersion, current.fabricVersion);
       }
       
-      // Check client-side mod compatibility with new Minecraft version
-      if (actualOldMinecraftVersion) { // Ensure there was an old version to compare against
-        try {
-          const serverManagedFileNames = (allClientMods || []) // Use allClientMods
-            .map(mod => (typeof mod === 'string' ? mod : mod.fileName || mod.name))
-            .filter(Boolean);
 
-          // Invoke the IPC handler. It will send the report to the renderer.
-          await ipcMain.invoke('check-client-mod-compatibility', {
-            clientPath: clientPath,
-            newMinecraftVersion: mcVersion,
-            oldMinecraftVersion: actualOldMinecraftVersion,
-            serverManagedFiles: serverManagedFileNames
-          });
-          // The 'client-mod-compatibility-report' event is sent by the invoked IPC handler.
-        } catch (ipcError) {
-          // Don't fail the entire update process if compatibility check fails
-        }
-      }
       
       await this.downloadMinecraftClient({ clientPath, mcVersion });
       current.minecraftVersion = mcVersion;
@@ -207,8 +186,7 @@ class ClientDownloadManager {
    * Download a file with progress tracking
    * @param {string} url - URL to download from
    * @param {string} destination - Path to save file to
-   * @param {Object} options - Download options
-   * @param {Function} options.onProgress - Progress callback
+   * @param {Object} [options] - Download options
    */
   async downloadFile(url, destination, options = {}) {
     const { onProgress } = options;
@@ -246,7 +224,7 @@ class ClientDownloadManager {
       
       response.data.pipe(writer);
       
-      writer.on('finish', resolve);
+      writer.on('finish', () => resolve());
       writer.on('error', reject);
     });
   }
@@ -431,8 +409,6 @@ class ClientDownloadManager {
   async detectManualMod(modPath) {
     try {
       // Check if mod has custom metadata indicating manual installation
-      const modFileManager = require('../ipc/mod-utils/mod-file-manager.cjs');
-      
       // Try to read mod metadata
       const modInfo = await this.getModMetadata(modPath);
         // Heuristics for detecting manual mods:
@@ -481,7 +457,6 @@ class ClientDownloadManager {
         } catch (error) {
       // If we can't analyze the mod, check file age as fallback
       try {
-        const fileName = path.basename(modPath).toLowerCase();
         const modStat = fs.statSync(modPath);
         const ageMinutes = (Date.now() - modStat.mtime.getTime()) / (1000 * 60);
         
@@ -576,7 +551,7 @@ class ClientDownloadManager {
       for (const fileName of jarFiles) {
         try {
           const modPath = path.join(modsDir, fileName);
-          const metadata = await this.extractModMetadata(modPath);
+            const metadata = await this.getModMetadata(modPath);
           
           let compatibilityStatus = 'unknown';
           let reason = '';

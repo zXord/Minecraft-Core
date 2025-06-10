@@ -9,9 +9,7 @@ const appStore = require('./utils/app-store.cjs');
 const { ensureConfigFile } = require('./utils/config-manager.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const fs = require('fs');
-const { ipcMain, dialog } = require('electron');
-const { initializeAutomatedBackups } = require('./ipc/backup-handlers.cjs');
-const { registeredHandlers } = require('./utils/ipc-helpers.cjs');
+const { ipcMain } = require('electron');
 
 // Utility function to open folders directly using child_process
 function openFolderDirectly(folderPath) {
@@ -51,8 +49,6 @@ function openFolderDirectly(folderPath) {
   });
 }
 
-// Flags to track app state
-app.isQuitting = false;
 let handlersInitialized = false;
 
 // Global reference to the main window
@@ -96,7 +92,7 @@ function createWindow() {
     
     // Initialize automated backups system
     const { loadBackupManager } = require('./ipc/backup-handlers.cjs');
-    loadBackupManager(win);
+    loadBackupManager();
     
     // Add direct handlers for critical functions to ensure they work
     const fsPromises = require('fs/promises');
