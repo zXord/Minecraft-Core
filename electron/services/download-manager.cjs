@@ -4,7 +4,7 @@ const path = require('path');
 const progress = require('progress-stream');
 const { safeSend } = require('../utils/safe-send.cjs');
 
-const fetch = async (...args) => (await import('node-fetch')).default(...args);
+const fetch = (...args) => import('node-fetch').then(m => m.default(...args));
 
 /**
  * Download a file with progress reporting

@@ -89,7 +89,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   try {
     fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
   } catch (err) {
-    // Continue with backup even if metadata fails
+    console.error('Metadata write failed', err);
   }
 
   // Verify we have valid directories to backup
@@ -148,11 +148,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
       
       // Delete the incomplete zip file if it exists
       if (fs.existsSync(zipPath)) {
-        try {
-          fs.unlinkSync(zipPath);
-        } catch (deleteErr) {
-          // Continue with error handling even if delete fails
-        }
+        fs.rmSync(zipPath, { force: true });
       }
       
       throw err;
@@ -182,16 +178,12 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
         }
       }
       
-      if (backupError) {
-        // Delete the incomplete zip file if it exists
-        if (fs.existsSync(zipPath)) {
-          try {
-            fs.unlinkSync(zipPath);
-          } catch (deleteErr) {
+        if (backupError) {
+          if (fs.existsSync(zipPath)) {
+            fs.rmSync(zipPath, { force: true });
           }
+          throw backupError;
         }
-        throw backupError;
-      }
     } catch (err) {
       throw err;
     }
@@ -207,11 +199,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     }
     
     // Write updated metadata with the correct size
-    try {
-      fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
-    } catch (err) {
-      // Continue anyway since the backup file exists
-    }
+    fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
     
     return { name, size: stats.size, metadata };
   } else {
@@ -227,7 +215,9 @@ async function listBackupsWithMetadata(serverPath) {
     if (fs.existsSync(metaPath)) {
       try {
         metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-      } catch {}
+      } catch (err) {
+        metadata = null;
+      }
     }
     return { ...b, metadata };
   });
@@ -274,7 +264,9 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
       try {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
         if (meta.type) type = meta.type;
-      } catch {}
+      } catch (err) {
+        type = 'full';
+      }
     }
     // Determine if this is a world-type restore (including world-delete backups)
     const isWorldType = (type === 'world' || type === 'world-delete');
