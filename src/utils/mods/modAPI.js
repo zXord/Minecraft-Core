@@ -27,7 +27,6 @@ import {
   searchKeyword,
   modSource,
   resultsPerPage,
-  filterMinecraftVersion,
   filterModLoader,
   installingModIds,
   modCategories
@@ -327,10 +326,9 @@ export async function searchMods(options = {}) {
  * @param {string} modId - Mod ID
  * @param {string} source - Source ('modrinth' or 'curseforge')
  * @param {boolean} loadLatestOnly - Whether to only load the latest version
- * @param {boolean} loadAll - Whether to load all versions (ignore filtering)
  * @returns {Promise<Array>} - Array of version objects
- */
-export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false, loadAll = false) {
+*/
+export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false) {
   // Cache key
   const loader = get(loaderType);
   const gameVersion = get(minecraftVersion);
@@ -548,8 +546,6 @@ export async function checkForUpdates(serverPath) {
       return updatesMap;
     }
     
-    // Get cached installed mod versions
-    const modVersions = get(installedModVersionsCache);
     
     for (const modInfo of modsWithProjectIds) {
       // Check if a newer update check has started
