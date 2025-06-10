@@ -108,139 +108,131 @@ class JavaManager {
     const javaExe = this.getJavaExecutablePath(javaVersion);
     return javaExe !== null && fs.existsSync(javaExe);
   }
-  
-  async downloadJava(javaVersion, progressCallback) {
-    try {
-      
-      if (progressCallback) {
-        progressCallback({ type: 'Preparing', task: `Preparing to download Java ${javaVersion}...`, progress: 0 });
-      }
-      
-      // Get download URL from Adoptium API
-      const apiUrl = `https://api.adoptium.net/v3/assets/latest/${javaVersion}/hotspot?architecture=${this.architecture}&image_type=jre&os=${this.platform}&vendor=eclipse`;
-      
-      
-      // const fetch = require('node-fetch'); // Now top-level
-      const response = await fetch(apiUrl);
-      
-      if (!response.ok) {
-        throw new Error(`Failed to get Java download info: ${response.status} ${response.statusText}`);
-      }
-      
-      const releases = await response.json();
-      if (!releases || releases.length === 0) {
-        throw new Error(`No Java ${javaVersion} release found for ${this.platform} ${this.architecture}`);
-      }
-      
-      const release = releases[0];
-      const downloadUrl = release.binary.package.link;
-      const filename = release.binary.package.name;
-      
-      
-      if (progressCallback) {
-        progressCallback({ type: 'Downloading', task: `Downloading ${filename}...`, progress: 0 });
-      }
-      
-      // Download Java archive
-      const downloadResponse = await fetch(downloadUrl);
-      if (!downloadResponse.ok) {
-        throw new Error(`Failed to download Java: ${downloadResponse.status} ${downloadResponse.statusText}`);
-      }
-      
-      const totalSize = parseInt(downloadResponse.headers.get('content-length'), 10);
-      let downloadedSize = 0;
-      
-      const tempDir = path.join(this.javaBaseDir, 'temp');
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-      
-      const tempFile = path.join(tempDir, filename);
-      const fileStream = fs.createWriteStream(tempFile);
-      
-      // Track download progress
-      downloadResponse.body.on('data', (chunk) => {
-        downloadedSize += chunk.length;
-        const progress = totalSize ? Math.round((downloadedSize / totalSize) * 100) : 0;
-        
-        if (progressCallback && progress % 5 === 0) { // Update every 5%
-          progressCallback({ 
-            type: 'Downloading', 
-            task: `Downloading ${filename}...`, 
-            progress: progress,
-            downloadedMB: Math.round(downloadedSize / 1024 / 1024),
-            totalMB: Math.round(totalSize / 1024 / 1024)
-          });
-        }
-      });
-      
-      downloadResponse.body.pipe(fileStream);
-      
-      await new Promise((resolve, reject) => {
-        fileStream.on('finish', () => resolve());
-        fileStream.on('error', reject);
-      });
-      
-      
-      if (progressCallback) {
-        progressCallback({ type: 'Extracting', task: 'Extracting Java runtime...', progress: 0 });
-      }
-      
-      // Extract Java archive
-      await this.extractJava(tempFile, javaVersion);
-      
-      // Clean up temp file
-      fs.unlinkSync(tempFile);
-      
-      // CRITICAL: Verify that flattening actually produced a findable Java executable
-      // This prevents infinite download loops when extraction structure is unexpected
-      const javaExeCheck = this.getJavaExecutablePath(javaVersion);
-      if (!javaExeCheck) {
-        throw new Error(
-          `Fatal: Java executable still not found after extraction and flattening. ` +
-          `Stopping further downloads to avoid infinite loop. ` +
-          `The Java archive may have an unexpected directory structure.`
-        );
-      }
-      
-      if (progressCallback) {
-        progressCallback({ type: 'Verifying', task: 'Verifying Java installation...', progress: 90 });
-      }
-      
-      // Verify installation using the robust path detection
-      const javaExe = this.getJavaExecutablePath(javaVersion);
-      
-      if (!javaExe) {
-        throw new Error('Java extraction verification failed - executable not found in expected locations. The Java archive may have an unexpected structure.');
-      }
-      
-      
-      if (!fs.existsSync(javaExe)) {
-        throw new Error(`Java executable path returned but file does not exist: ${javaExe}`);
-      }
-      
-      const execAsync = promisify(exec);
-      let testJavaPath = javaExe;
-      if (process.platform === 'win32' && javaExe.includes('java.exe')) {
-        testJavaPath = javaExe.replace('java.exe', 'javaw.exe');
-      }
-      await execAsync(`"${testJavaPath}" -version`, {
-        timeout: 5000,
-        windowsHide: true
-      }).catch(() => {});
-      
-      if (progressCallback) {
-        progressCallback({ type: 'Complete', task: `Java ${javaVersion} ready!`, progress: 100 });
-      }
-      
-      return { success: true, javaPath: javaExe };
-      
-    } catch (error) {
-      throw error;
+    async downloadJava(javaVersion, progressCallback) {
+    if (progressCallback) {
+      progressCallback({ type: 'Preparing', task: `Preparing to download Java ${javaVersion}...`, progress: 0 });
     }
+    
+    // Get download URL from Adoptium API
+    const apiUrl = `https://api.adoptium.net/v3/assets/latest/${javaVersion}/hotspot?architecture=${this.architecture}&image_type=jre&os=${this.platform}&vendor=eclipse`;
+    
+    
+    // const fetch = require('node-fetch'); // Now top-level
+    const response = await fetch(apiUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to get Java download info: ${response.status} ${response.statusText}`);
+    }
+    
+    const releases = await response.json();
+    if (!releases || releases.length === 0) {
+      throw new Error(`No Java ${javaVersion} release found for ${this.platform} ${this.architecture}`);
+    }
+    
+    const release = releases[0];
+    const downloadUrl = release.binary.package.link;
+    const filename = release.binary.package.name;
+    
+    
+    if (progressCallback) {
+      progressCallback({ type: 'Downloading', task: `Downloading ${filename}...`, progress: 0 });
+    }
+    
+    // Download Java archive
+    const downloadResponse = await fetch(downloadUrl);
+    if (!downloadResponse.ok) {
+      throw new Error(`Failed to download Java: ${downloadResponse.status} ${downloadResponse.statusText}`);
+    }
+    
+    const totalSize = parseInt(downloadResponse.headers.get('content-length'), 10);
+    let downloadedSize = 0;
+    
+    const tempDir = path.join(this.javaBaseDir, 'temp');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    const tempFile = path.join(tempDir, filename);
+    const fileStream = fs.createWriteStream(tempFile);
+    
+    // Track download progress
+    downloadResponse.body.on('data', (chunk) => {
+      downloadedSize += chunk.length;
+      const progress = totalSize ? Math.round((downloadedSize / totalSize) * 100) : 0;
+      
+      if (progressCallback && progress % 5 === 0) { // Update every 5%
+        progressCallback({ 
+          type: 'Downloading', 
+          task: `Downloading ${filename}...`, 
+          progress: progress,
+          downloadedMB: Math.round(downloadedSize / 1024 / 1024),
+          totalMB: Math.round(totalSize / 1024 / 1024)
+        });
+      }
+    });
+    
+    downloadResponse.body.pipe(fileStream);
+    
+    await new Promise((resolve, reject) => {
+      fileStream.on('finish', () => resolve());
+      fileStream.on('error', reject);
+    });
+    
+    
+    if (progressCallback) {
+      progressCallback({ type: 'Extracting', task: 'Extracting Java runtime...', progress: 0 });
+    }
+    
+    // Extract Java archive
+    await this.extractJava(tempFile, javaVersion);
+    
+    // Clean up temp file
+    fs.unlinkSync(tempFile);
+    
+    // CRITICAL: Verify that flattening actually produced a findable Java executable
+    // This prevents infinite download loops when extraction structure is unexpected
+    const javaExeCheck = this.getJavaExecutablePath(javaVersion);
+    if (!javaExeCheck) {
+      throw new Error(
+        `Fatal: Java executable still not found after extraction and flattening. ` +
+        `Stopping further downloads to avoid infinite loop. ` +
+        `The Java archive may have an unexpected directory structure.`
+      );
+    }
+    
+    if (progressCallback) {
+      progressCallback({ type: 'Verifying', task: 'Verifying Java installation...', progress: 90 });
+    }
+    
+    // Verify installation using the robust path detection
+    const javaExe = this.getJavaExecutablePath(javaVersion);
+    
+    if (!javaExe) {
+      throw new Error('Java extraction verification failed - executable not found in expected locations. The Java archive may have an unexpected structure.');
+    }
+    
+    
+    if (!fs.existsSync(javaExe)) {
+      throw new Error(`Java executable path returned but file does not exist: ${javaExe}`);
+    }
+    
+    const execAsync = promisify(exec);
+    let testJavaPath = javaExe;
+    if (process.platform === 'win32' && javaExe.includes('java.exe')) {
+      testJavaPath = javaExe.replace('java.exe', 'javaw.exe');
+    }
+    await execAsync(`"${testJavaPath}" -version`, {
+      timeout: 5000,
+      windowsHide: true
+    }).catch(() => {});
+    
+    if (progressCallback) {
+      progressCallback({ type: 'Complete', task: `Java ${javaVersion} ready!`, progress: 100 });
+    }
+    
+    return { success: true, javaPath: javaExe };
   }
-  
-  async extractJava(archivePath, javaVersion) {
+    async extractJava(archivePath, javaVersion) {
     const extractPath = path.join(this.javaBaseDir, `java-${javaVersion}`);
     
     // Remove existing installation
@@ -248,66 +240,53 @@ class JavaManager {
       fs.rmSync(extractPath, { recursive: true, force: true });
     }
     
-    try {
-      if (archivePath.endsWith('.tar.gz')) {
-        await this.extractTarGz(archivePath, extractPath);
-      } else if (archivePath.endsWith('.zip')) {
-        await this.extractZip(archivePath, extractPath);
-      } else {
-        throw new Error('Unsupported archive format');
-      }
-    } catch (error) {
-      throw error;
+    if (archivePath.endsWith('.tar.gz')) {
+      await this.extractTarGz(archivePath, extractPath);
+    } else if (archivePath.endsWith('.zip')) {
+      await this.extractZip(archivePath, extractPath);
+    } else {
+      throw new Error('Unsupported archive format');
     }
   }
-  
-  async extractZip(zipPath, extractPath) {
-    try {
-      if (fs.existsSync(extractPath)) {
-        await this.removeDirectoryWithRetry(extractPath, 3);
-      }
-
-      fs.mkdirSync(extractPath, { recursive: true });
-
-      const AdmZip = require('adm-zip').default;
-      const zip = new AdmZip(zipPath);
-      zip.extractAllTo(extractPath, true);
-      await this.flattenJavaDirectory(extractPath);
-    } catch (error) {
-      throw error;
+    async extractZip(zipPath, extractPath) {
+    if (fs.existsSync(extractPath)) {
+      await this.removeDirectoryWithRetry(extractPath, 3);
     }
+
+    fs.mkdirSync(extractPath, { recursive: true });
+
+    const AdmZip = require('adm-zip');
+    const zip = new AdmZip(zipPath);
+    zip.extractAllTo(extractPath, true);
+    await this.flattenJavaDirectory(extractPath);
   }
   
-  // Helper method to remove directory with retry logic for Windows
-  // Helper method to flatten Java directory structure
+  // Helper method to remove directory with retry logic for Windows  // Helper method to flatten Java directory structure
   async flattenJavaDirectory(extractPath) {
-    try {
-      const entries = fs.readdirSync(extractPath);
+    const entries = fs.readdirSync(extractPath);
 
-      // Find any single subdirectory that itself contains a 'bin' folder
-      const nestedRoots = entries.filter(name => {
-        const full = path.join(extractPath, name);
-        try {
-          return fs.statSync(full).isDirectory()
-              && fs.existsSync(path.join(full, 'bin'));
-        } catch {
-          return false;
-        }
-      });
-
-      // If exactly one such nested folder, move its contents up
-      if (nestedRoots.length === 1) {
-        const nested = path.join(extractPath, nestedRoots[0]);
-
-        const tmp = extractPath + `_tmp_${Date.now()}`;
-        fs.renameSync(nested, tmp);
-        // wipe out the original extractPath (it should now be empty)
-        fs.rmSync(extractPath, { recursive: true, force: true });
-        // move temp back to extractPath
-        fs.renameSync(tmp, extractPath);
-
+    // Find any single subdirectory that itself contains a 'bin' folder
+    const nestedRoots = entries.filter(name => {
+      const full = path.join(extractPath, name);
+      try {
+        return fs.statSync(full).isDirectory()
+            && fs.existsSync(path.join(full, 'bin'));
+      } catch {
+        return false;
       }
-    } catch {}
+    });
+
+    // If exactly one such nested folder, move its contents up
+    if (nestedRoots.length === 1) {
+      const nested = path.join(extractPath, nestedRoots[0]);
+
+      const tmp = extractPath + `_tmp_${Date.now()}`;
+      fs.renameSync(nested, tmp);
+      // wipe out the original extractPath (it should now be empty)
+      fs.rmSync(extractPath, { recursive: true, force: true });
+      // move temp back to extractPath
+      fs.renameSync(tmp, extractPath);
+    }
   }
   
   async extractTarGz(tarPath, extractPath) {
@@ -425,11 +404,10 @@ class JavaManager {
           if (error.code === 'EPERM' || error.code === 'EBUSY' || error.code === 'ENOTEMPTY') {
             // Create a unique temp name and leave the old directory
             const timestamp = Date.now();
-            const tempName = `${dirPath}_old_${timestamp}`;
-            try {
+            const tempName = `${dirPath}_old_${timestamp}`;            try {
               fs.renameSync(dirPath, tempName);
               return; // Consider this success
-            } catch (renameError) {
+            } catch {
               // Continue with extraction anyway
             }
           }
