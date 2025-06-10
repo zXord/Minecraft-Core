@@ -231,11 +231,11 @@ class MinecraftLauncher extends EventEmitter {
         // Use latest Fabric version if needed
         let actualFabricVersion = fabricVersion;
         if (fabricVersion === 'latest') {
-          try {
+         try {
             const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
             const loaders = await response.json();
             actualFabricVersion = loaders[0].version;
-          } catch (error) {
+          } catch {
             actualFabricVersion = '0.16.14';
           }
         }
@@ -509,7 +509,7 @@ class MinecraftLauncher extends EventEmitter {
         this.emit('minecraft-stopped');
       });
       
-      child.on('error', (error) => {
+      child.on('error', () => {
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
@@ -597,7 +597,7 @@ class MinecraftLauncher extends EventEmitter {
               
               stopped = true;
               
-              } catch (wmicError) {
+              } catch {
                 if (this.client && this.client.child && this.client.child.pid) {
                   try {
                     await execAsync(`taskkill /F /PID ${this.client.child.pid}`, { windowsHide: true });
@@ -651,14 +651,14 @@ class MinecraftLauncher extends EventEmitter {
           try {
             process.kill(pid, 0); // Signal 0 just tests if process exists
             isRunning = true;
-          } catch (e) {
+          } catch {
             // Process doesn't exist anymore
             this.isLaunching = false;
             this.client = null;
             isRunning = false;
           }
         }
-      } catch (error) {
+      } catch {
         isRunning = false;
       }
     }
@@ -725,18 +725,15 @@ class MinecraftLauncher extends EventEmitter {
       fabricJson.downloads = fabricJson.downloads || {};
       if (!fabricJson.downloads.client && vanillaJson.downloads?.client) {
         fabricJson.downloads.client = vanillaJson.downloads.client;
-      } else if (fabricJson.downloads.client) {
       }
 
       // 1a) Inject vanilla asset index & asset downloads for sounds and textures
       if (vanillaJson.assetIndex && !fabricJson.assetIndex) {
         fabricJson.assetIndex = vanillaJson.assetIndex;
-      } else if (fabricJson.assetIndex) {
       }
 
       if (vanillaJson.downloads?.assets && !fabricJson.downloads.assets) {
         fabricJson.downloads.assets = vanillaJson.downloads.assets;
-      } else if (fabricJson.downloads.assets) {
       }
 
       // 2) Merge vanilla libraries *except* ASM to avoid conflicts
@@ -797,34 +794,14 @@ class MinecraftLauncher extends EventEmitter {
         fabricJson.libraries = [...toInject, ...fabricJson.libraries];
 
         // 3) Explicit ASM cleanup - remove ALL ASM versions except Fabric's 9.8
-        const beforeASMFilter = fabricJson.libraries.length;
         fabricJson.libraries = fabricJson.libraries.filter(lib => {
           // If it's not an ASM library, keep it
           if (!lib.name?.startsWith('org.ow2.asm:asm:')) return true;
           // If it's ASM, only keep version 9.8.x (Fabric's version)
           const keepASM = /^org\.ow2\.asm:asm:9\.8/.test(lib.name);
-          if (!keepASM) {
-          }
           return keepASM;
         });
-        const afterASMFilter = fabricJson.libraries.length;
 
-        // 4) Verify key libraries are present
-        const requiredLibraries = [
-          'net.sf.jopt-simple:jopt-simple',
-          'com.mojang:brigadier',
-          'com.mojang:authlib',
-          'com.mojang:datafixerupper'
-        ];
-        
-        requiredLibraries.forEach(requiredLib => {
-          const found = fabricJson.libraries.find(lib => lib.name?.startsWith(requiredLib));
-          if (found) {
-          } else {
-          }
-        });
-
-      } else {
       }
 
       // 5) Ensure proper inheritance and type for MCLC
@@ -861,11 +838,10 @@ class MinecraftLauncher extends EventEmitter {
 
       if (response.status === 204) {
         return true;
-      } else {
-        const errorText = await response.text();
-        return false;
       }
-    } catch (error) {
+      await response.text();
+      return false;
+    } catch {
       return false;
     }
   }
@@ -1032,32 +1008,10 @@ class MinecraftLauncher extends EventEmitter {
       if (missingPlaceholders.length > 0) {
         // Don't fail validation - let the enrichment process fix this
         return true;
-      }
-
-      // Check for auth session in JVM arguments
-      const jvmArgs = profileJson.arguments?.jvm || [];
-      const hasAuthSession = jvmArgs.some(arg => 
-        typeof arg === 'string' && arg.includes('${auth_session}')
-      );
-
-      if (!hasAuthSession) {
-      }
-
-      // Check for required authentication libraries
-      const libraries = profileJson.libraries || [];
-      const authLibrary = libraries.find(lib => 
-        lib.name && lib.name.includes('com.mojang:authlib')
-      );
-
-      if (!authLibrary) {
-        // Don't fail for missing authlib as it may be inherited
-      } else {
-      }
-
-      
+      }      
       return true;
 
-    } catch (error) {
+    } catch {
       return false;
     }
   }
