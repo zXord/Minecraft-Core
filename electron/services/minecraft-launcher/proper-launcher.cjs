@@ -39,8 +39,7 @@ class ProperMinecraftLauncher extends EventEmitter {
       }
 
       // Step 1: Install version using the correct XMCL function (installVersion not installVersionProfile)
-      const versionInstallResult = await installVersion(version, clientPath, {
-        // Options for version installation
+      await installVersion(version, clientPath, {
         side: 'client'
       });
       
@@ -66,8 +65,7 @@ class ProperMinecraftLauncher extends EventEmitter {
       // Verify the vanilla JAR has LogUtils
       const vanillaJar = path.join(versionsDir, version, `${version}.jar`);
       if (fs.existsSync(vanillaJar)) {
-        const AdmZip = require('adm-zip');
-        const zip = new AdmZip(vanillaJar);
+        const zip = new (require('adm-zip'))(vanillaJar);
         const entries = zip.getEntries();
         const logUtilsEntry = entries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
         
@@ -75,10 +73,9 @@ class ProperMinecraftLauncher extends EventEmitter {
         } else {
           
           // Show what logging classes are available
-          const loggingClasses = entries.filter(entry => entry.entryName.startsWith('com/mojang/logging/') && entry.entryName.endsWith('.class'));
+          entries.filter(entry => entry.entryName.startsWith('com/mojang/logging/') && entry.entryName.endsWith('.class'));
         }
         
-        const jarStats = fs.statSync(vanillaJar);
       }
       
       return { success: true };
@@ -102,10 +99,10 @@ class ProperMinecraftLauncher extends EventEmitter {
       // Use XMCL installer for Fabric
       await installFabric({
         minecraftVersion,
-        loaderVersion: fabricVersion,
-        inheritsFrom: minecraftVersion,
-        versionId: `fabric-loader-${fabricVersion}-${minecraftVersion}`
-      }, clientPath);
+        version: fabricVersion,
+        minecraft: clientPath,
+        side: 'client'
+      });
       
       return { success: true, version: `fabric-loader-${fabricVersion}-${minecraftVersion}` };
       
@@ -292,13 +289,13 @@ class ProperMinecraftLauncher extends EventEmitter {
         }
       });
       
-      child.on('close', (code) => {
+      child.on('close', () => {
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
       });
       
-      child.on('error', (error) => {
+      child.on('error', () => {
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
