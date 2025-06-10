@@ -1,37 +1,29 @@
-// AppStore for persistent app configurations
 const electronStore = require('electron-store');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { app } = require('electron');
 
-// Get the correct constructor (handles both ESM and CJS exports)
-const Store = electronStore.default || electronStore;
+const Store = electronStore;
 
-// Create a dedicated storage directory for the app
 const getAppDataDir = () => {
-  // Use app.getPath('userData') for proper app data directory
   const userData = app ? app.getPath('userData') : path.join(os.homedir(), '.minecraft-core');
   return path.join(userData, 'config');
 };
 
 const appDataDir = getAppDataDir();
 
-// Ensure directory exists and is writable
 const ensureDataDir = () => {
   try {
     if (!fs.existsSync(appDataDir)) {
       fs.mkdirSync(appDataDir, { recursive: true, mode: 0o755 });
     }
-    
-    // Test write access
     const testFile = path.join(appDataDir, '.writetest');
     fs.writeFileSync(testFile, 'test');
     fs.unlinkSync(testFile);
     
     return true;
   } catch (err) {
-    // Fallback to a different directory if needed
     if (appDataDir !== path.join(os.homedir(), '.minecraft-core-fallback')) {
       return ensureDataDir();
     }
@@ -39,101 +31,17 @@ const ensureDataDir = () => {
   }
 };
 
-// Ensure data directory is accessible
 ensureDataDir();
-
-// Log the exact path we're using
 const storePath = path.join(appDataDir, 'minecraft-core-config.json');
-
-// Configure the store with defaults
 const storeConfig = {
   name: 'minecraft-core-config',
   cwd: appDataDir,
-  clearInvalidConfig: false, // Don't clear when the store gets corrupted
+  clearInvalidConfig: false,
   fileExtension: 'json',
   serialize: JSON.stringify,
   deserialize: JSON.parse,
-  // Explicitly set the file path
   path: storePath,
-  // Ensure file is written atomically
   atomicSave: true,
-  // Set migrations to handle older versions
-  migrations: {
-    '>=1.0.0': store => {
-      // If instances array doesn't exist, initialize it
-      if (!store.has('instances')) {
-        store.set('instances', []);
-      }
-      
-      // Make sure instances are valid
-      const instances = store.get('instances');
-      if (instances && Array.isArray(instances)) {
-        const validInstances = instances.filter(instance => {
-          if (!instance || typeof instance !== 'object') return false;
-          return instance.id && instance.type;
-        });
-        store.set('instances', validInstances);
-      }
-      
-      // Migration: Check for old config file and migrate data
-      // Try multiple possible locations for the old config
-      const possibleOldPaths = [
-        path.join(process.env.HOME || process.env.USERPROFILE || '', '.minecraft-core', 'minecraft-core-config.json'),
-        path.join(os.homedir(), '.minecraft-core', 'minecraft-core-config.json'),
-        // Also check if there's an old config in the current appData location
-        path.join(appDataDir, '..', '..', '.minecraft-core', 'minecraft-core-config.json')
-      ];
-      
-      let oldConfigPath = null;
-      for (const possiblePath of possibleOldPaths) {
-        if (fs.existsSync(possiblePath)) {
-          oldConfigPath = possiblePath;
-          break;
-        }
-      }
-      
-      if (oldConfigPath) {
-        try {
-          const oldConfig = JSON.parse(fs.readFileSync(oldConfigPath, 'utf8'));
-          
-          // Migrate lastServerPath
-          if (oldConfig.lastServerPath && !store.has('lastServerPath')) {
-            store.set('lastServerPath', oldConfig.lastServerPath);
-          }
-          
-          // Migrate serverSettings
-          if (oldConfig.serverSettings && !store.has('serverSettings')) {
-            store.set('serverSettings', oldConfig.serverSettings);
-          }
-          
-          // Migrate instances
-          if (oldConfig.instances && Array.isArray(oldConfig.instances) && oldConfig.instances.length > 0) {
-            const currentInstances = store.get('instances') || [];
-            if (currentInstances.length === 0) {
-              store.set('instances', oldConfig.instances);
-            }
-          }
-          
-          // Create a server instance from lastServerPath if none exist
-          const currentInstances = store.get('instances') || [];
-          if (currentInstances.length === 0 && oldConfig.lastServerPath) {
-            const serverName = path.basename(oldConfig.lastServerPath);
-            const newInstance = {
-              id: `server-migrated-${Date.now()}`,
-              name: serverName || 'Migrated Server',
-              type: 'server',
-              path: oldConfig.lastServerPath
-            };
-            
-            store.set('instances', [newInstance]);
-          }
-          
-        } catch (error) {
-          // Silently handle migration errors
-        }
-      }
-    }
-  },
   defaults: {
     lastServerPath: null,
     instances: [],
@@ -155,29 +63,24 @@ const storeConfig = {
   }
 };
 
-// Initialize store synchronously
 let appStore;
 try {
   appStore = new Store(storeConfig);
-  // Quick sanity check
   appStore.get('__test__');
-} catch (err) {
-  // Fallback to in-memory store
+} catch {
   appStore = new Store({
     ...storeConfig,
-    // @ts-ignore
     name: 'in-memory-config',
     fileExtension: 'json',
     cwd: os.tmpdir(),
   });
 }
 
-// Create a robust proxy to catch errors and add retry logic
 const safeStore = {
   get: (key) => {
     try {
       return appStore.get(key);
-    } catch (error) {
+    } catch {
       return null;
     }
   },
@@ -188,12 +91,11 @@ const safeStore = {
     while (retries < maxRetries) {
       try {
         appStore.set(key, value);
-        // Verify write
         if (JSON.stringify(appStore.get(key)) !== JSON.stringify(value)) {
           throw new Error('Write verification failed');
         }
         return true;
-      } catch (error) {
+      } catch {
         retries++;
         if (retries >= maxRetries) {
           return false;
@@ -204,25 +106,24 @@ const safeStore = {
   has: (key) => {
     try {
       return appStore.has(key);
-    } catch (error) {
+    } catch {
       return false;
     }
   },
   delete: (key) => {
     try {
       return appStore.delete(key);
-    } catch (error) {
+    } catch {
       return false;
     }
   },
   clear: () => {
     try {
       return appStore.clear();
-    } catch (error) {
+    } catch {
       return false;
     }
   },
-  // Add store property for direct access
   get store() {
     return appStore.store || appStore;
   },
@@ -230,11 +131,9 @@ const safeStore = {
     if (appStore.store) {
       appStore.store = value;
     } else {
-      // Fallback for in-memory store
       Object.entries(value).forEach(([k, v]) => appStore.set(k, v));
     }
   },
-  // Add path for debugging
   get path() {
     return appStore.path || 'in-memory-store';
   }
