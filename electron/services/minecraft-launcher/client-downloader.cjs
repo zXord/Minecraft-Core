@@ -1,12 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const { exec, spawn } = require('child_process');
+const { spawn } = require('child_process');
 const fetch = require('node-fetch');
-// REMOVED: Old minecraft-launcher-core import - no longer used
-const { installVersionProfile, installAssets, installLibraries } = require('@xmcl/installer'); // Use official @xmcl/installer for downloads only
-const { promisify } = require('util'); // For promisifying exec, if needed directly
-const utils = require('./utils.cjs'); // Import utils
+const utils = require('./utils.cjs');
 
 class ClientDownloader {
   constructor(javaManager, eventEmitter) { // Removed utils from constructor
@@ -91,37 +88,11 @@ class ClientDownloader {
         });
         
         let downloadSuccess = false;
-        
+
         try {
-          
-          // Use @xmcl/installer to install the version profile
-          await installVersionProfile({
-            gameDirectory: clientPath,
-            version: minecraftVersion
-          });
-          
-          
-          // Install assets
-          await installAssets({
-            gameDirectory: clientPath,
-            version: minecraftVersion
-          });
-          
-          
-          // Install libraries
-          await installLibraries({
-            gameDirectory: clientPath,
-            version: minecraftVersion
-          });
-          
-          downloadSuccess = true;
-          
-        } catch (xmclError) {
-          
-          try {
-            downloadSuccess = await this.downloadMinecraftManually(clientPath, minecraftVersion, javaResult.javaPath);
-          } catch (manualError) {
-          }
+          downloadSuccess = await this.downloadMinecraftManually(clientPath, minecraftVersion);
+        } catch {
+          downloadSuccess = false;
         }
         
         if (!downloadSuccess) {
@@ -149,18 +120,8 @@ class ClientDownloader {
         if (fs.existsSync(jarFile)) {
           const jarStats = fs.statSync(jarFile);
           if (jarStats.size === 0) {
-            try {
-              if (fs.existsSync(versionsDir)) {
-                const versionsList = fs.readdirSync(versionsDir);
-                if (fs.existsSync(versionDir)) {
-                  const versionContents = fs.readdirSync(versionDir);
-                }
-              }
-            } catch (debugError) {
-            }
-            throw new Error(`Download failed: Minecraft JAR file is empty. This usually indicates a network connectivity issue or the download was interrupted.`);
+            throw new Error('Download failed: Minecraft JAR file is empty. This usually indicates a network connectivity issue or the download was interrupted.');
           }
-        } else {
         }
         
         const vanillaVerificationResult = await this.checkMinecraftClient(clientPath, minecraftVersion);
@@ -172,11 +133,6 @@ class ClientDownloader {
         let fabricProfileName = null;
         
         if (needsFabric) {
-          const vanillaJarPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
-          if (fs.existsSync(vanillaJarPath)) {
-            const preFabricStats = fs.statSync(vanillaJarPath);
-          } else {
-          }
           this.emitter.emit('client-download-progress', {
             type: 'Fabric',
             task: `Installing Fabric loader ${fabricVersion}...`,
@@ -187,10 +143,6 @@ class ClientDownloader {
             if (fabricResult.success) {
               fabricProfileName = fabricResult.profileName;
               finalVersion = fabricProfileName;
-              if (fs.existsSync(vanillaJarPath)) {
-                const postFabricStats = fs.statSync(vanillaJarPath);
-              } else {
-              }
               this.emitter.emit('client-download-progress', {
                 type: 'Fabric',
                 task: `Fabric ${fabricVersion} installed successfully`,
@@ -280,10 +232,6 @@ class ClientDownloader {
         }
         
         const finalVerificationJarPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
-        if (fs.existsSync(finalVerificationJarPath)) {
-          const finalVerificationStats = fs.statSync(finalVerificationJarPath);
-        } else {
-        }
         const finalVerificationOptions = needsFabric ? { requiredMods, serverInfo } : {};
         const finalVerificationResult = await this.checkMinecraftClient(clientPath, minecraftVersion, finalVerificationOptions);
         
@@ -334,7 +282,7 @@ class ClientDownloader {
     }
   }
 
-  async downloadMinecraftManually(clientPath, minecraftVersion, javaPath) {
+  async downloadMinecraftManually(clientPath, minecraftVersion) {
     
     try {
       // Setup directories
@@ -409,7 +357,6 @@ class ClientDownloader {
         throw new Error('Failed to download Minecraft client JAR');
       }
       
-      const finalJarStats = fs.statSync(clientJarPath);
 
       // Phase 4: Download Libraries
       this.emitter.emit('client-download-progress', {
@@ -499,11 +446,10 @@ class ClientDownloader {
 
         // Prepare assets for MCLC
         const assetIndexData = JSON.parse(fs.readFileSync(assetIndexPath, 'utf8'));
-        const objectCount = Object.keys(assetIndexData.objects || {}).length;
         
         // Add URLs to asset objects for MCLC compatibility
         if (assetIndexData.objects) {
-          for (const [assetPath, assetData] of Object.entries(assetIndexData.objects)) {
+          for (const assetData of Object.values(assetIndexData.objects)) {
             const hash = assetData.hash;
             const subPath = hash.substring(0, 2);
             assetData.url = `https://resources.download.minecraft.net/${subPath}/${hash}`;
@@ -521,8 +467,7 @@ class ClientDownloader {
         current: 1
       });
 
-      const finalJsonPath = path.join(versionDir, `${minecraftVersion}.json`);
-      const assetsContents = fs.readdirSync(assetsIndexesDir);
+
       
       return true;
     } catch (error) {
@@ -706,8 +651,7 @@ class ClientDownloader {
       const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
       let javaResult;
       try {
-        javaResult = await this.javaManager.ensureJava(requiredJavaVersion, (progress) => {
-        });
+        javaResult = await this.javaManager.ensureJava(requiredJavaVersion);
         if (!javaResult.success) {
           throw new Error(`Failed to obtain Java ${requiredJavaVersion} for Fabric installation: ${javaResult.error}`);
         }
@@ -1045,7 +989,7 @@ Specification-Vendor: FabricMC
       
       // Create a minimal ZIP structure using built-in Node.js functionality
       const AdmZip = require('adm-zip');
-      const zip = new AdmZip();
+      const zip = AdmZip();
       
       // Add the MANIFEST.MF file
       zip.addFile('META-INF/MANIFEST.MF', Buffer.from(manifest, 'utf8'));
@@ -1069,7 +1013,6 @@ Specification-Vendor: FabricMC
       // Write the JAR file
       zip.writeZip(fabricJarPath);
       
-      const stats = fs.statSync(fabricJarPath);
       
     } catch (error) {
       
@@ -1083,7 +1026,6 @@ Specification-Vendor: FabricMC
       const centralDirHeader = Buffer.alloc(46 + 20); // Central directory header + filename
       const endOfCentralDir = Buffer.alloc(22); // End of central directory
       
-      let offset = 0;
       
       // Local file header for META-INF/MANIFEST.MF
       localFileHeader.writeUInt32LE(0x04034b50, 0); // Local file header signature
@@ -1260,14 +1202,6 @@ Specification-Vendor: FabricMC
         // Add our new server to the list
         existingServers.push(newServerEntry);
 
-        // Create simple JavaScript object - prismarine-nbt will convert it
-        const simpleObject = {
-          servers: existingServers
-        };
-
-
-        // Use minecraft-data for prismarine-nbt initialization
-        const mcData = require('minecraft-data')('1.21.1');
 
         // Build NBT structure using prismarine-nbt helpers
         const nbtServers = existingServers.map(server => ({
@@ -1279,7 +1213,7 @@ Specification-Vendor: FabricMC
 
         const nbtData = nbt.comp({
           servers: nbt.list(nbt.comp(nbtServers))
-        });
+        }, '');
         
         
         const rawBuffer = nbt.writeUncompressed(nbtData)
@@ -1291,7 +1225,6 @@ Specification-Vendor: FabricMC
         fs.writeFileSync(serversDatPath, compressedBuffer);
         
         // Verify the file was written
-        const writtenStats = fs.statSync(serversDatPath);
         
       } catch (nbtErr) {
         return {
@@ -1573,7 +1506,7 @@ Specification-Vendor: FabricMC
         lib.downloads.classifiers = {};
         try {
           const [g, a, v] = lib.name.split(':');
-          for (const [osName, classifier] of Object.entries(lib.natives)) {
+          for (const classifier of Object.values(lib.natives)) {
             // e.g. 'windows' → 'artifact-version-natives-windows.jar'
             const jar = `${g.replace(/\./g,'/')}/${a}/${v}/${a}-${v}-${classifier}.jar`;
             lib.downloads.classifiers[classifier] = {
@@ -1713,7 +1646,7 @@ Specification-Vendor: FabricMC
         });
       };
       
-      for (const [relPath, meta] of Object.entries(indexJson.objects)) {
+      for (const meta of Object.values(indexJson.objects)) {
         const hash = meta.hash;
         const size = meta.size;
         const twoChar = hash.substring(0, 2);
@@ -1750,7 +1683,7 @@ Specification-Vendor: FabricMC
               updateProgress();
             }
           })
-          .catch(error => {
+          .catch(() => {
             processed++;
             if (processed % 50 === 0 || processed === totalAssets) {
               updateProgress();
