@@ -212,7 +212,7 @@ app.whenReady().then(() => {
   eventBus.on('server-crashed', stopAppWatchdog);
   
   // Start periodic metrics reporting
-  startMetricsReporting(win);
+  startMetricsReporting();
   
   // Initialize with last server path if available
   // IMPORTANT: Wait for the web contents to be ready before sending data

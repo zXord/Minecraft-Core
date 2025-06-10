@@ -39,7 +39,7 @@ function setupIpcHandlers(win) {
   registeredHandlers.clear();    // Get all handler modules
     const fileHandlers = createFileHandlers(win);
     const modHandlers = createModHandlers(win);
-    const serverPropertiesHandlers = createServerPropertiesHandlers(win);
+    const serverPropertiesHandlers = createServerPropertiesHandlers();
     const installHandlers = createInstallHandlers(win);
     const configHandlers = createConfigHandlers();
     const playerHandlers = createPlayerHandlers();
