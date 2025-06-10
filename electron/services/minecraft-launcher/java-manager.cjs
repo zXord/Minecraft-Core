@@ -3,7 +3,6 @@ const path = require('path');
 const os = require('os');
 const { exec, spawn } = require('child_process');
 const fetch = require('node-fetch');
-const AdmZip = require('adm-zip');
 const { promisify } = require('util');
 
 // Java Manager class to handle downloading and managing Java runtimes
@@ -270,7 +269,8 @@ class JavaManager {
 
       fs.mkdirSync(extractPath, { recursive: true });
 
-      const zip = new (require('adm-zip'))(zipPath);
+      const AdmZip = require('adm-zip').default;
+      const zip = new AdmZip(zipPath);
       zip.extractAllTo(extractPath, true);
       await this.flattenJavaDirectory(extractPath);
     } catch (error) {

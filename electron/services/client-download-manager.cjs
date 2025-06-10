@@ -1,7 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
-const { createWriteStream } = require('fs');
 const { mkdir } = require('fs/promises');
 
 /**
@@ -107,6 +105,7 @@ class ClientDownloadManager {
             fs.writeFileSync(clientModPath, modData);
           }
         } catch {
+          continue;
         }
       }
 
@@ -130,12 +129,12 @@ class ClientDownloadManager {
   async updateForServerVersion(options) {
     const { clientPath, mcVersion, fabricVersion, requiredMods = [], allClientMods = [], serverPath = null } = options;
     const configPath = path.join(clientPath, 'client-config.json');
-    let current = {};
+    let current = { minecraftVersion: null, fabricVersion: null };
     if (fs.existsSync(configPath)) {
       try {
         current = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      } catch (err) {
-        current = {};
+      } catch {
+        current = { minecraftVersion: null, fabricVersion: null };
       }
     }
     const actualOldMinecraftVersion = current.minecraftVersion; // Capture the true old version
@@ -433,7 +432,7 @@ class ClientDownloadManager {
    */
   async getModMetadata(modPath) {
     try {
-      const AdmZip = require('adm-zip');
+      const AdmZip = require('adm-zip').default;
       const zip = new AdmZip(modPath);
       
       // Try to read fabric.mod.json (Fabric mods)
