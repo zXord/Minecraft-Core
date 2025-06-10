@@ -26,7 +26,6 @@ const DEBOUNCE_DELAY = 1500; // 1.5 second debounce delay (reduced from 3 second
 export function updateOnlinePlayers(players) {
   if (!Array.isArray(players)) return;
   
-  const now = Date.now();
   const currentState = getStore();
   
   // If the player count decreased (someone left), update immediately

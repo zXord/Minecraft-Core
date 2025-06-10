@@ -584,7 +584,7 @@ export async function checkForUpdates(serverPath) {
     // Update the store
     modsWithUpdates.set(updatesMap);
     return updatesMap;
-  } catch (err) {
+  } catch {
     return updatesMap;
   } finally {
     isCheckingUpdates.set(false);
