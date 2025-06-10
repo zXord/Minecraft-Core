@@ -70,7 +70,7 @@ function convertSortToModrinthFormat(sortBy) {
  * @param {string} options.sortBy - Sort method (popular, recent, downloads, name)
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
+async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortBy = 'relevance' }) {
   await rateLimit();
   
   
@@ -85,30 +85,15 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
     facets.push(["versions:" + version]);
   }
   
-  // Add environment type facet if specified
-  if (environmentType !== 'all') {
-    // Convert our environment types to Modrinth's format
-    if (environmentType === 'client') {
-      // For client-side, include both 'required' and 'optional' to catch all client-compatible mods
-      facets.push(['client_side:required', 'client_side:optional']);
-    } else if (environmentType === 'server') {
-      // For server-side, include both 'required' and 'optional' to catch all server-compatible mods
-      facets.push(['server_side:required', 'server_side:optional']);
-    } else if (environmentType === 'both') {
-      // For "both", we need mods that work on both client and server
-      // Use separate AND condition with both client and server support
-      facets.push(['client_side:required', 'client_side:optional']);
-      facets.push(['server_side:required', 'server_side:optional']);
-    }
-  }
+
   
   // Convert facets to JSON string
   const facetsParam = JSON.stringify(facets);
   
   // Build request URL
   const url = new URL(`${MODRINTH_API}/search`);
-  url.searchParams.append('offset', (page - 1) * limit);
-  url.searchParams.append('limit', limit);
+  url.searchParams.append('offset', ((page - 1) * limit).toString());
+  url.searchParams.append('limit', limit.toString());
   url.searchParams.append('facets', facetsParam);
   
   // Add sorting parameter in multiple formats to ensure compatibility
@@ -177,7 +162,7 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
  * @param {string} [options.sortBy='relevance'] - Sort by option
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function searchModrinthMods({ query, loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
+async function searchModrinthMods({ query, loader, version, page = 1, limit = 20, sortBy = 'relevance' }) {
   
   await rateLimit();
   
@@ -193,22 +178,7 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
     facets.push(["versions:" + version]);
   }
   
-  // Add environment type facet if specified
-  if (environmentType !== 'all') {
-    // Convert our environment types to Modrinth's format
-    if (environmentType === 'client') {
-      // For client-side, include both 'required' and 'optional' to catch all client-compatible mods
-      facets.push(['client_side:required', 'client_side:optional']);
-    } else if (environmentType === 'server') {
-      // For server-side, include both 'required' and 'optional' to catch all server-compatible mods
-      facets.push(['server_side:required', 'server_side:optional']);
-    } else if (environmentType === 'both') {
-      // For "both", we need mods that work on both client and server
-      // Use separate AND condition with both client and server support
-      facets.push(['client_side:required', 'client_side:optional']);
-      facets.push(['server_side:required', 'server_side:optional']);
-    }
-  }
+
   
   // Convert facets to JSON string
   const facetsParam = JSON.stringify(facets);
@@ -216,8 +186,8 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   // Build request URL
   const url = new URL(`${MODRINTH_API}/search`);
   url.searchParams.append('query', query);
-  url.searchParams.append('offset', (page - 1) * limit);
-  url.searchParams.append('limit', limit);
+  url.searchParams.append('offset', ((page - 1) * limit).toString());
+  url.searchParams.append('limit', limit.toString());
   url.searchParams.append('facets', facetsParam);
   
   // Add sorting parameter in multiple formats to ensure compatibility
@@ -369,7 +339,7 @@ async function getModrinthDownloadUrl(projectId, version, loader) {
     const latest = versions[0];
     
     // Get the full version info
-    const versionInfo = await getModrinthVersionInfo(projectId, latest.id, gameVersion, loader);
+    const versionInfo = await getModrinthVersionInfo(projectId, latest.id, version, loader);
     
     // Get primary file
     if (!versionInfo.files || versionInfo.files.length === 0) {
@@ -641,7 +611,7 @@ async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
  * @param {number} options.limit - Results per page
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function getCurseForgePopular({ loader, version, page = 1, limit = 20, environmentType = 'all' }) {
+async function getCurseForgePopular({ page = 1, limit = 20 }) {
   // Return an empty result set
   return {
     mods: [],
@@ -665,7 +635,7 @@ async function getCurseForgePopular({ loader, version, page = 1, limit = 20, env
  * @param {number} options.limit - Results per page
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function searchCurseForgeMods({ query, loader, version, page = 1, limit = 20, environmentType = 'all' }) {
+async function searchCurseForgeMods({ query, page = 1, limit = 20 }) {
   // Return an empty result set
   return {
     mods: [],

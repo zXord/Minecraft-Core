@@ -2,8 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { exec, spawn } = require('child_process');
-const fetch = require('node-fetch'); // Changed from dynamic to top-level
-const AdmZip = require('adm-zip'); // Changed from dynamic to top-level
+const fetch = require('node-fetch');
+const AdmZip = require('adm-zip');
 const { promisify } = require('util');
 
 // Java Manager class to handle downloading and managing Java runtimes
@@ -69,46 +69,29 @@ class JavaManager {
       if (currentDepth > maxDepth) {
         return null;
       }
-      
-      try {
-        const items = fs.readdirSync(dir);
-        
-        // First, check if this directory directly contains bin/java
-        const binDir = path.join(dir, 'bin');
-        if (fs.existsSync(binDir)) {
-          
-          // On Windows, prefer javaw.exe (no console) over java.exe
-          const possibleExecutables = this.platform === 'windows' ? 
-            ['javaw.exe', 'java.exe'] : 
-            ['java'];
-          
-          for (const exe of possibleExecutables) {
-            const exePath = path.join(binDir, exe);
-            if (fs.existsSync(exePath)) {
-              return exePath;
-            }
+
+      const items = fs.readdirSync(dir);
+      const binDir = path.join(dir, 'bin');
+      if (fs.existsSync(binDir)) {
+        const possibleExecutables = this.platform === 'windows' ? ['javaw.exe', 'java.exe'] : ['java'];
+        for (const exe of possibleExecutables) {
+          const exePath = path.join(binDir, exe);
+          if (fs.existsSync(exePath)) {
+            return exePath;
           }
         }
-        
-        // If not found directly, search in subdirectories
-        for (const item of items) {
-          const itemPath = path.join(dir, item);
-          
-          try {
-            const stat = fs.statSync(itemPath);
-            if (stat.isDirectory()) {
-              const result = findJavaExecutableRecursively(itemPath, maxDepth, currentDepth + 1);
-              if (result) {
-                return result;
-              }
-            }
-          } catch (statError) {
-          }
-        }
-        
-      } catch (readError) {
       }
-      
+
+      for (const item of items) {
+        const itemPath = path.join(dir, item);
+        if (fs.statSync(itemPath).isDirectory()) {
+          const result = findJavaExecutableRecursively(itemPath, maxDepth, currentDepth + 1);
+          if (result) {
+            return result;
+          }
+        }
+      }
+
       return null;
     };
     
@@ -117,29 +100,6 @@ class JavaManager {
     
     if (foundExecutable) {
       return foundExecutable;
-    }
-    
-    // If recursive search failed, log what we actually have
-    try {
-      const listDirectoryStructure = (dir, indent = '') => {
-        try {
-          const items = fs.readdirSync(dir);
-          for (const item of items.slice(0, 10)) { // Limit to first 10 items to avoid spam
-            const itemPath = path.join(dir, item);
-            const stat = fs.statSync(itemPath);
-            if (stat.isDirectory()) {
-              if (indent.length < 8) { // Limit depth to avoid excessive logging
-                listDirectoryStructure(itemPath, indent + '  ');
-              }
-            } else {
-            }
-          }
-        } catch (e) {
-        }
-      };
-      
-      listDirectoryStructure(javaDir);
-    } catch (debugError) {
     }
     
     return null;
@@ -218,7 +178,7 @@ class JavaManager {
       downloadResponse.body.pipe(fileStream);
       
       await new Promise((resolve, reject) => {
-        fileStream.on('finish', resolve);
+        fileStream.on('finish', () => resolve());
         fileStream.on('error', reject);
       });
       
@@ -228,7 +188,7 @@ class JavaManager {
       }
       
       // Extract Java archive
-      await this.extractJava(tempFile, javaVersion, progressCallback);
+      await this.extractJava(tempFile, javaVersion);
       
       // Clean up temp file
       fs.unlinkSync(tempFile);
@@ -252,35 +212,7 @@ class JavaManager {
       const javaExe = this.getJavaExecutablePath(javaVersion);
       
       if (!javaExe) {
-        
-        // List what we actually have in the directory for debugging
-        try {
-          const extractedContents = fs.readdirSync(path.join(this.javaBaseDir, `java-${javaVersion}`));
-          
-          // Log the full directory structure for debugging
-          const debugDir = path.join(this.javaBaseDir, `java-${javaVersion}`);
-          const logDirectoryStructure = (dir, indent = '') => {
-            try {
-              const items = fs.readdirSync(dir);
-              for (const item of items) {
-                const itemPath = path.join(dir, item);
-                const stat = fs.statSync(itemPath);
-                if (stat.isDirectory()) {
-                  if (indent.length < 6) { // Limit depth
-                    logDirectoryStructure(itemPath, indent + '  ');
-                  }
-                } else {
-                }
-              }
-            } catch (e) {
-            }
-          };
-          logDirectoryStructure(debugDir);
-          
-        } catch (debugError) {
-        }
-        
-        throw new Error(`Java extraction verification failed - executable not found in expected locations. The Java archive may have an unexpected structure.`);
+        throw new Error('Java extraction verification failed - executable not found in expected locations. The Java archive may have an unexpected structure.');
       }
       
       
@@ -288,26 +220,15 @@ class JavaManager {
         throw new Error(`Java executable path returned but file does not exist: ${javaExe}`);
       }
       
-      const javaStats = fs.statSync(javaExe);
-      
-      // Test if Java actually works
-      try {
-        // const { exec } = require('child_process'); // Now top-level
-        // const { promisify } = require('util'); // Now top-level
-        const execAsync = promisify(exec);
-        
-        // Use javaw.exe for testing to avoid console window (Windows)
-        let testJavaPath = javaExe;
-        if (process.platform === 'win32' && javaExe.includes('java.exe')) {
-          testJavaPath = javaExe.replace('java.exe', 'javaw.exe');
-        }
-        
-        const { stdout } = await execAsync(`"${testJavaPath}" -version`, { 
-          timeout: 5000,
-          windowsHide: true // Hide console window on Windows
-        });
-      } catch (testError) {
+      const execAsync = promisify(exec);
+      let testJavaPath = javaExe;
+      if (process.platform === 'win32' && javaExe.includes('java.exe')) {
+        testJavaPath = javaExe.replace('java.exe', 'javaw.exe');
       }
+      await execAsync(`"${testJavaPath}" -version`, {
+        timeout: 5000,
+        windowsHide: true
+      }).catch(() => {});
       
       if (progressCallback) {
         progressCallback({ type: 'Complete', task: `Java ${javaVersion} ready!`, progress: 100 });
@@ -320,7 +241,7 @@ class JavaManager {
     }
   }
   
-  async extractJava(archivePath, javaVersion, progressCallback) {
+  async extractJava(archivePath, javaVersion) {
     const extractPath = path.join(this.javaBaseDir, `java-${javaVersion}`);
     
     // Remove existing installation
@@ -330,9 +251,9 @@ class JavaManager {
     
     try {
       if (archivePath.endsWith('.tar.gz')) {
-        await this.extractTarGz(archivePath, extractPath, progressCallback);
+        await this.extractTarGz(archivePath, extractPath);
       } else if (archivePath.endsWith('.zip')) {
-        await this.extractZip(archivePath, extractPath, progressCallback);
+        await this.extractZip(archivePath, extractPath);
       } else {
         throw new Error('Unsupported archive format');
       }
@@ -341,94 +262,23 @@ class JavaManager {
     }
   }
   
-  async extractZip(zipPath, extractPath, progressCallback) {
-    // const AdmZip = require('adm-zip'); // Now top-level
-    
+  async extractZip(zipPath, extractPath) {
     try {
-      
-      // Remove existing installation with retry logic for Windows
       if (fs.existsSync(extractPath)) {
         await this.removeDirectoryWithRetry(extractPath, 3);
       }
-      
-      // Create the extract directory
+
       fs.mkdirSync(extractPath, { recursive: true });
-      
-      const zip = new AdmZip(zipPath);
-      const entries = zip.getEntries();
-      
-      
-      // Extract all files
+
+      const zip = new (require('adm-zip'))(zipPath);
       zip.extractAllTo(extractPath, true);
-      
-      // Handle nested directory structure more reliably
       await this.flattenJavaDirectory(extractPath);
-      
-      
     } catch (error) {
       throw error;
     }
   }
   
   // Helper method to remove directory with retry logic for Windows
-  async removeDirectoryWithRetry(dirPath, maxRetries = 3) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        
-        if (fs.existsSync(dirPath)) {
-          // On Windows, sometimes we need to wait for file handles to be released
-          if (attempt > 1) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          }
-          
-          // Try to remove files first, then the directory
-          const contents = fs.readdirSync(dirPath);
-          for (const item of contents) {
-            const itemPath = path.join(dirPath, item);
-            const stat = fs.statSync(itemPath);
-            
-            if (stat.isDirectory()) {
-              await this.removeDirectoryWithRetry(itemPath, 1); // Single attempt for subdirs
-            } else {
-              // Make file writable before deletion
-              try {
-                fs.chmodSync(itemPath, 0o666);
-                fs.unlinkSync(itemPath);
-              } catch (fileError) {
-              }
-            }
-          }
-          
-          // Remove the directory itself
-          fs.rmdirSync(dirPath);
-        }
-        
-        return; // Success!
-        
-      } catch (error) {
-        
-        if (attempt === maxRetries) {
-          if (error.code === 'EPERM' || error.code === 'EBUSY') {
-            // Create a unique temp name and leave the old directory
-            const timestamp = Date.now();
-            const tempName = `${dirPath}_old_${timestamp}`;
-            try {
-              fs.renameSync(dirPath, tempName);
-              return; // Consider this success
-            } catch (renameError) {
-              // Continue with extraction anyway
-            }
-          }
-          
-          return; // Don't throw error, just continue
-        }
-        
-        // Wait before retry
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-      }
-    }
-  }
-  
   // Helper method to flatten Java directory structure
   async flattenJavaDirectory(extractPath) {
     try {
@@ -456,16 +306,11 @@ class JavaManager {
         // move temp back to extractPath
         fs.renameSync(tmp, extractPath);
 
-      } else {
-        if (nestedRoots.length > 1) {
-        }
       }
-    } catch (err) {
-      // we continue — recursive search can still find it
-    }
+    } catch {}
   }
   
-  async extractTarGz(tarPath, extractPath, progressCallback) {
+  async extractTarGz(tarPath, extractPath) {
     // const { spawn } = require('child_process'); // Now top-level
     
     return new Promise((resolve, reject) => {
@@ -519,38 +364,13 @@ class JavaManager {
 
   // Helper method to kill any running Java processes for this client
   async killClientJavaProcesses(clientPath) {
-    try {
-      
-      if (process.platform === 'win32') {
-        // const { exec } = require('child_process'); // Now top-level
-        // const { promisify } = require('util'); // Now top-level
-        const execAsync = promisify(exec);
-        
-        // CRITICAL FIX: Only kill Java processes that are specifically related to this client
-        // DO NOT kill all Java processes as this would stop the Minecraft server!
-        
-        try {
-          // Use WMIC to kill only processes with this client path in command line
-          if (clientPath) {
-            const clientPathEscaped = clientPath.replace(/\\/g, '\\\\');
-            
-            
-            await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, { 
-              timeout: 5000 
-            }).catch(() => {
-            });
-            
-            await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, { 
-              timeout: 5000 
-            }).catch(() => {
-            });
-            
-          } else {
-          }
-        } catch (killError) {
-        }
+    if (process.platform === 'win32') {
+      const execAsync = promisify(exec);
+      if (clientPath) {
+        const clientPathEscaped = clientPath.replace(/\\/g, '\\\\');
+        await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, { timeout: 5000 }).catch(() => {});
+        await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, { timeout: 5000 }).catch(() => {});
       }
-    } catch (error) {
     }
   }
 
@@ -573,29 +393,20 @@ class JavaManager {
           }
           
           // Make all files and directories writable first
-          try {
-            const makeWritableRecursive = (dir) => {
-              const items = fs.readdirSync(dir);
-              for (const item of items) {
-                const itemPath = path.join(dir, item);
-                try {
-                  const stat = fs.statSync(itemPath);
-                  
-                  // Make the item writable
-                  fs.chmodSync(itemPath, 0o777);
-                  
-                  if (stat.isDirectory()) {
-                    makeWritableRecursive(itemPath);
-                  }
-                } catch (chmodError) {
-                }
+          const makeWritableRecursive = (dir) => {
+            const items = fs.readdirSync(dir);
+            for (const item of items) {
+              const itemPath = path.join(dir, item);
+              const stat = fs.statSync(itemPath);
+              fs.chmodSync(itemPath, 0o777);
+              if (stat.isDirectory()) {
+                makeWritableRecursive(itemPath);
               }
-            };
-            
-            makeWritableRecursive(dirPath);
-            fs.chmodSync(dirPath, 0o777);
-          } catch (chmodError) {
-          }
+            }
+          };
+
+          makeWritableRecursive(dirPath);
+          fs.chmodSync(dirPath, 0o777);
           
           // Try to remove the directory
           fs.rmSync(dirPath, { 
