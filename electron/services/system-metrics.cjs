@@ -2,26 +2,18 @@
 const os = require('os');
 const pidusage = require('pidusage');
 const { execSync } = require('child_process');
-const { safeSend } = require('../utils/safe-send.cjs');
 const { getServerState, sendMetricsUpdate } = require('./server-manager.cjs');
+const process = require('process');
 
 // Initialize metrics state
 let prevCpuTimes = os.cpus().map(cpu => ({ ...cpu.times }));
 let memLookupTimer = 0;
-let mainWindow = null;
 
-/**
- * Start periodic metrics reporting
- * 
- * @param {BrowserWindow} win - Main window
- */
-function startMetricsReporting(win) {
-  mainWindow = win; // Store reference to the main window
+function startMetricsReporting() {
   
   // System metrics update every half second
   setInterval(() => {
-    publishSystemMetrics().catch(err => {
-    });
+    publishSystemMetrics().catch(console.error);
   }, 500); // 500ms for faster UI updates
   
   // Also listen for server state changes to ensure metrics are updated
@@ -88,8 +80,7 @@ async function getServerMemoryUsage(serverProcess) {
     // In Node.js, sending signal 0 is a way to check if a process exists
     // without actually sending a signal to it
     process.kill(serverProcess.pid, 0);
-  } catch (e) {
-    // If process doesn't exist, return 0 immediately
+  } catch {
     return currentLookupMem;
   }
   
@@ -150,8 +141,8 @@ async function getServerMemoryUsage(serverProcess) {
             if (!isNaN(memoryValue) && memoryValue > 0) {
               currentLookupMem = memoryValue;
             }
-          } else {
-          }        } catch (psErr) {
+          }
+        } catch (psErr) {
           // Silently handle the error and don't output to console as this is expected sometimes
           if (process.env.DEBUG) {
             console.error('PowerShell memory lookup failed:', psErr.message);
@@ -159,6 +150,7 @@ async function getServerMemoryUsage(serverProcess) {
         }
       }
     } catch (err) {
+      console.error(err);
     }
   } else {
     // For non-Windows systems, use pidusage
@@ -166,6 +158,7 @@ async function getServerMemoryUsage(serverProcess) {
       const stats = await pidusage(serverProcess.pid);
       currentLookupMem = parseFloat((stats.memory / 1024 / 1024).toFixed(1));
     } catch (err) {
+      console.error(err);
     }
   }
   
@@ -196,7 +189,7 @@ async function publishSystemMetrics() {
         try {
           const stat = await pidusage(serverProcess.pid);
           cpuPct = parseFloat(stat.cpu.toFixed(1));
-        } catch (err) {
+        } catch {
           cpuPct = 0; // Fallback
         }
       } else {
@@ -213,8 +206,6 @@ async function publishSystemMetrics() {
     } else {
       // If server is not running, explicitly reset all metrics to zero
       // Only log the first time we zero out metrics to avoid log spam
-      if (publishSystemMetrics.lastMemUsedMB > 0) {
-      }
       
       cpuPct = 0;
       memUsedMB = 0;
@@ -248,6 +239,7 @@ async function publishSystemMetrics() {
       names: playersInfo.names
     });
   } catch (err) {
+    console.error(err);
   }
 }
 

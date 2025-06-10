@@ -3,13 +3,6 @@ const { ipcMain } = require('electron');
 // Track registered handlers
 const registeredHandlers = new Set();
 
-/**
- * Register a single IPC handler with error handling and duplicate prevention
- * 
- * @param {string} channel - The IPC channel name
- * @param {Function} handler - The handler function
- * @returns {boolean} Success status
- */
 function safeIpcHandle(channel, handler) {
   try {
     if (!channel || typeof channel !== 'string') {
@@ -28,8 +21,8 @@ function safeIpcHandle(channel, handler) {
     // Remove any existing handlers with the same name
     try {
       ipcMain.removeHandler(channel);
-    } catch (e) {
-      // Ignore errors if no handler exists
+    } catch (error) {
+      console.error(error);
     }
     
     // Register handler
@@ -37,16 +30,11 @@ function safeIpcHandle(channel, handler) {
     registeredHandlers.add(channel);
     return true;
   } catch (error) {
+    console.error(error);
     return false;
   }
 }
 
-/**
- * Register multiple IPC handlers at once
- * 
- * @param {Object.<string, Function>} handlers - Object with channel names as keys and handler functions as values
- * @returns {Object} Object with success status for each handler
- */
 function registerIpcHandlers(handlers) {
   const results = {};
   
