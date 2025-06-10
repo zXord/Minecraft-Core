@@ -1,10 +1,10 @@
-const electronStore = require('electron-store');
+const ElectronStore = require('electron-store');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { app } = require('electron');
 
-const Store = electronStore.default || electronStore;
+const Store = ElectronStore;
 
 const getAppDataDir = () => {
   const userData = app ? app.getPath('userData') : path.join(os.homedir(), '.minecraft-core');

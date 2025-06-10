@@ -22,13 +22,12 @@ function ensureConfigFile(serverPath, defaultSettings = {}) {
     
     const configPath = path.join(serverPath, '.minecraft-core.json');
     let config = defaultSettings;
-    
-    // Try to read existing config
+      // Try to read existing config
     if (fs.existsSync(configPath)) {
       try {
         const configData = fs.readFileSync(configPath, 'utf8');
         config = JSON.parse(configData);
-      } catch (err) {
+      } catch {
         // Will use the default settings if there's an error
       }
     }
@@ -38,15 +37,14 @@ function ensureConfigFile(serverPath, defaultSettings = {}) {
       ...defaultSettings,
       ...config
     };
-    
-    // Write the config back to ensure all fields are present
+      // Write the config back to ensure all fields are present
     try {
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
-    } catch (err) {
+    } catch {
+      // Ignore write errors - will return config anyway
     }
-    
-    return config;
-  } catch (err) {
+      return config;
+  } catch {
     return null;
   }
 }

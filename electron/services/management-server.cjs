@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Management server for client-server communication
 const express = require('express');
 const cors = require('cors');
@@ -71,9 +72,7 @@ class ManagementServer {
     // Endpoint to query current server version
     this.app.get('/api/server/version', (_, res) => {
       res.json({ success: true, version: this.versionInfo });
-    });
-    
-    // Client registration
+    });    // Client registration
     this.app.post('/api/client/register', (req, res) => {
       const { clientId, name } = req.body;
       
@@ -104,9 +103,7 @@ class ManagementServer {
           hasServer: !!this.serverPath
         }
       });
-    });
-    
-    // Client heartbeat/ping to keep connection alive
+    });    // Client heartbeat/ping to keep connection alive
     this.app.post('/api/client/ping', (req, res) => {
       const { clientId } = req.body;
       

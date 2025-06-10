@@ -1,3 +1,4 @@
+// @ts-nocheck
 const { execSync } = require('child_process');
 const fs = require('fs');
 const { getRuntimePaths } = require('../utils/runtime-paths.cjs');
@@ -21,10 +22,9 @@ function isMinecraftServerRunning() {
   if (fs.existsSync(serverRunningFlagPath)) {
     return true;
   }
-
   try {
     const stdout = execSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv', execOptions);
-    const lines = stdout.trim().split('\n');
+    const lines = stdout.toString().trim().split('\n');
     
     for (const line of lines) {
       if (line.includes('minecraft') ||
@@ -55,11 +55,10 @@ try {
   log(`Failed to write app watchdog PID file: ${err.message}`);
 }
 
-function logRunningJavaProcesses() {
-  try {
+function logRunningJavaProcesses() {  try {
     log('Listing all running Java processes for debugging:');
     const stdout = execSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv', execOptions);
-    const lines = stdout.trim().split('\n');
+    const lines = stdout.toString().trim().split('\n');
     
     if (lines.length <= 1) {
       log('No Java processes found running.');
@@ -110,10 +109,9 @@ function killJavaProcesses() {
   } catch (e) {
     log(`Minecraft server jar kill error: ${e.message}`);
   }
-  
-  try {
+    try {
     log("Final check for any remaining Java processes that may be Minecraft servers:");
-    const remainingJava = execSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv', execOptions).trim();
+    const remainingJava = execSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv', execOptions).toString().trim();
     
     if (remainingJava && remainingJava.includes('ProcessId')) {
       const lines = remainingJava.split('\n').filter(line => line.trim() && !line.includes('ProcessId'));
