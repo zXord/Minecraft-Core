@@ -83,10 +83,9 @@ async function installModToServer(win, serverPath, modDetails) {
         // This part might need adjustment if getModrinthDownloadUrl is not just a URL string
         downloadUrl = await getModrinthDownloadUrl(modDetails.id, modDetails.version, modDetails.loader);
         versionInfoToSave = await getLatestModrinthVersionInfo(modDetails.id, modDetails.version, modDetails.loader);
-      }
-    } else if (modDetails.source === 'curseforge') {
-      // Assuming getCurseForgeDownloadUrl exists and works similarly
-      downloadUrl = await getCurseForgeDownloadUrl(modDetails.id, modDetails.version, modDetails.loader);
+      }    } else if (modDetails.source === 'curseforge') {
+      // CurseForge support not implemented
+      downloadUrl = await getCurseForgeDownloadUrl();
       // versionInfoToSave would need to be fetched for CurseForge too if manifest saving is desired for it
     } else {
       downloadUrl = modDetails.downloadUrl; // Direct URL
