@@ -98,11 +98,7 @@ function createWindow() {
     const fsPromises = require('fs/promises');
     
     // Remove any existing handlers first to avoid duplicates
-    try {
-      ipcMain.removeHandler('open-folder-direct');
-    } catch (e) {
-      // Handler doesn't exist, which is fine
-    }
+  ipcMain.removeHandler('open-folder-direct');
     
     // Register the direct folder opening handler
     ipcMain.handle('open-folder-direct', async (_event, folderPath) => {
@@ -116,7 +112,7 @@ function createWindow() {
         // Check if path exists
         try {
           await fsPromises.access(normalizedPath);
-        } catch (accessError) {
+        } catch {
           return { success: false, error: 'Folder does not exist or is inaccessible' };
         }
         
@@ -193,21 +189,21 @@ app.whenReady().then(() => {
     const { getRuntimePaths } = require('./utils/runtime-paths.cjs');
     const runtimePaths = getRuntimePaths();
     let pid = null;
-    try {
-      if (fs.existsSync(runtimePaths.appWatchdogPid)) {
+    if (fs.existsSync(runtimePaths.appWatchdogPid)) {
+      try {
         pid = parseInt(fs.readFileSync(runtimePaths.appWatchdogPid, 'utf8'));
+      } catch {
+        pid = null;
       }
-    } catch (err) {
     }
     if (pid) {
       try {
         const { execSync } = require('child_process');
         execSync(`taskkill /PID ${pid} /F`);
-        // Remove the PID file after killing
         fs.unlinkSync(runtimePaths.appWatchdogPid);
-      } catch (err) {
+      } catch {
+        pid = null;
       }
-    } else {
     }
     appWatchdogProcess = null;
   }
@@ -260,7 +256,8 @@ app.whenReady().then(() => {
         const { initFromServerConfig } = require('./services/auto-restart.cjs');
         initFromServerConfig(lastServerPath);
       }
-    } catch (err) {
+    } catch {
+      return;
     }
   });
   
