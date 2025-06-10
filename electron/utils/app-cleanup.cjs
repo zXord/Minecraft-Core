@@ -1,6 +1,7 @@
 // Application cleanup utilities
 const { ipcMain } = require('electron');
 const { safeSend } = require('./safe-send.cjs');
+let isQuitting = false;
 
 /**
  * Set up application cleanup handlers
@@ -12,7 +13,7 @@ function setupAppCleanup(app, win) {
   // Handle window close event to ensure server is stopped before app quits
   if (win) {
     win.on('close', async (e) => {
-      if (!app.isQuitting) {
+      if (!isQuitting) {
         e.preventDefault();
         
         // Import server manager here to avoid circular dependencies
@@ -34,16 +35,16 @@ function setupAppCleanup(app, win) {
             try {
               killMinecraftServer();
               await new Promise(resolve => setTimeout(resolve, 500));
-              app.isQuitting = true;
+              isQuitting = true;
               win.close();
             } catch (err) {
-              app.isQuitting = true;
+              isQuitting = true;
               win.close();
             }
           } else {
           }
         } else {
-          app.isQuitting = true;
+          isQuitting = true;
           win.close();
         }
       }

@@ -1,4 +1,3 @@
-const isDev = process.env.NODE_ENV === 'development';
 const { contextBridge, ipcRenderer } = require('electron');
 
 // Expose protected methods that allow the renderer process to use
@@ -138,8 +137,8 @@ contextBridge.exposeInMainWorld('electron', {
     ];
 
     // Debug: print validChannels at runtime (only once)
-      if (!window.__ipcChannelsLogged) {
-        window.__ipcChannelsLogged = true;
+      if (!window['__ipcChannelsLogged']) {
+        window['__ipcChannelsLogged'] = true;
       }
 
     if (validChannels.includes(channel)) {
@@ -199,13 +198,13 @@ contextBridge.exposeInMainWorld('electron', {
     if (validChannels.includes(channel)) {
       // Wrap the listener so we can remove it later
       const wrapped = (_event, ...args) => listener(...args);
-      if (!window.__listenerMap) {
-        window.__listenerMap = new Map();
+      if (!window['__listenerMap']) {
+        window['__listenerMap'] = new Map();
       }
-      if (!window.__listenerMap.has(channel)) {
-        window.__listenerMap.set(channel, new Map());
+      if (!window['__listenerMap'].has(channel)) {
+        window['__listenerMap'].set(channel, new Map());
       }
-      window.__listenerMap.get(channel).set(listener, wrapped);
+      window['__listenerMap'].get(channel).set(listener, wrapped);
       ipcRenderer.on(channel, wrapped);
     }
   },
@@ -250,13 +249,13 @@ contextBridge.exposeInMainWorld('electron', {
       'app-close-request',
     ];
     if (validChannels.includes(channel)) {
-      const map = window.__listenerMap && window.__listenerMap.get(channel);
+      const map = window['__listenerMap'] && window['__listenerMap'].get(channel);
       const wrapped = map && map.get(listener);
       if (wrapped) {
         ipcRenderer.removeListener(channel, wrapped);
         map.delete(listener);
         if (map.size === 0) {
-          window.__listenerMap.delete(channel);
+          window['__listenerMap'].delete(channel);
         }
       }
     }
