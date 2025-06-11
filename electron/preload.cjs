@@ -65,11 +65,11 @@ contextBridge.exposeInMainWorld('electron', {
       'delete-world',
       // Repair operations
       'repair-health',
-      'set-server-path',
-      // Server properties management
+      'set-server-path',      // Server properties management
       'read-server-properties',
       'write-server-properties',
       'generate-server-properties',
+      'restore-backup-properties',
       'backups:create',
       'backups:list',
       'backups:delete',
