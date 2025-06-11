@@ -103,10 +103,55 @@
             <span class="status-text info">ℹ️ None available</span>
           </div>
         {/if}
-      </div>
-    </div>
+      </div>    </div>
   </div>
 
+  <!-- Overall Status Message -->
+  <div class="overall-status">
+    {#if modSyncStatus}
+      {#if modSyncStatus.synchronized && (!modSyncStatus.needsOptionalDownload || modSyncStatus.needsOptionalDownload === 0)}
+        <div class="status-message success">
+          <span class="status-icon">🎉</span>
+          <div class="status-content">
+            <h4>All mods are ready!</h4>
+            <p>You can start playing immediately. All required mods are synchronized.</p>
+          </div>
+        </div>
+      {:else if modSyncStatus.synchronized && modSyncStatus.needsOptionalDownload > 0}
+        <div class="status-message info">
+          <span class="status-icon">ℹ️</span>
+          <div class="status-content">
+            <h4>Required mods ready!</h4>
+            <p>You can start playing now. There {modSyncStatus.needsOptionalDownload === 1 ? 'is' : 'are'} {modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's' : ''} available for download if you want {modSyncStatus.needsOptionalDownload === 1 ? 'it' : 'them'}.</p>
+          </div>
+        </div>
+      {:else if modSyncStatus.needsDownload > 0}
+        <div class="status-message warning">
+          <span class="status-icon">⚠️</span>
+          <div class="status-content">
+            <h4>Action required</h4>
+            <p>You need to download {modSyncStatus.needsDownload} required mod{modSyncStatus.needsDownload > 1 ? 's' : ''} before you can play.</p>
+          </div>
+        </div>
+      {:else}
+        <div class="status-message info">
+          <span class="status-icon">🔄</span>
+          <div class="status-content">
+            <h4>Checking mod status...</h4>
+            <p>Please wait while we verify your mod installation.</p>
+          </div>
+        </div>
+      {/if}
+    {:else}
+      <div class="status-message info">
+        <span class="status-icon">📡</span>
+        <div class="status-content">
+          <h4>Connecting to server...</h4>
+          <p>Fetching mod requirements from the server.</p>
+        </div>
+      </div>
+    {/if}
+  </div>
   <!-- Action Buttons -->
   <div class="action-buttons">
     {#if modSyncStatus && !modSyncStatus.synchronized}
@@ -117,8 +162,12 @@
     
     {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
       <button class="download-action-button optional" on:click={downloadOptional}>
-        📥 Download Optional Mods ({modSyncStatus.needsOptionalDownload})
+        📥 Download All Optional Mods ({modSyncStatus.needsOptionalDownload})
       </button>
+      <div class="optional-mod-note">
+        <span class="note-icon">💡</span>
+        <span class="note-text">You can also download individual optional mods from the mods list below.</span>
+      </div>
     {/if}
   </div>
 
@@ -227,10 +276,64 @@
   .status-text.pending {
     color: #9ca3af;
   }
-
   .progress-info {
     font-size: 0.8rem;
     color: #9ca3af;
+  }
+
+  .overall-status {
+    margin: 1.5rem 0;
+    padding: 1rem;
+    border-radius: 8px;
+    border: 1px solid #374151;
+  }
+  .status-message {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    text-align: center;
+  }
+
+  .status-message.success {
+    background-color: rgba(16, 185, 129, 0.1);
+    border-color: #10b981;
+  }
+
+  .status-message.warning {
+    background-color: rgba(245, 158, 11, 0.1);
+    border-color: #f59e0b;
+  }
+
+  .status-message.info {
+    background-color: rgba(59, 130, 246, 0.1);
+    border-color: #3b82f6;
+  }
+
+  .status-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+    margin-top: 0.25rem;
+  }
+
+  .status-content {
+    flex: 1;
+    text-align: center;
+  }
+
+  .status-content h4 {
+    margin: 0 0 0.5rem 0;
+    color: white;
+    font-size: 1.1rem;
+    font-weight: 600;
+    text-align: center;
+  }
+
+  .status-content p {
+    margin: 0;
+    color: #d1d5db;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    text-align: center;
   }
 
   .action-buttons {
@@ -263,9 +366,30 @@
   .download-action-button.optional {
     background-color: #3b82f6;
   }
-
   .download-action-button.optional:hover {
     background-color: #2563eb;
+  }
+
+  .optional-mod-note {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 6px;
+  }
+
+  .note-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+  }
+
+  .note-text {
+    font-size: 0.85rem;
+    color: #d1d5db;
+    line-height: 1.4;
   }
 
   .sync-info {

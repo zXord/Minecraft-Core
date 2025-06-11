@@ -77,10 +77,14 @@
   function handleDelete(mod: Mod): void {
     dispatch('delete', { fileName: mod.fileName });
   }
-
   // Handle download for missing mods
   function handleDownload(): void {
     dispatch('download');
+  }
+
+  // Handle download for single optional mod
+  function handleDownloadSingle(mod: Mod): void {
+    dispatch('downloadSingle', { mod });
   }
 
 
@@ -135,8 +139,7 @@
               <span class="version-tag unknown">Unknown</span>
             {/if}
           </div>
-          
-          <div class="mod-actions">
+            <div class="mod-actions">
             {#if type === 'required'}
               <span class="required-label">Required</span>
               {#if getModStatus(mod) === 'missing'}
@@ -145,31 +148,34 @@
                 </button>
               {/if}
             {:else if type === 'optional'}
-              <button 
-                class="action-btn toggle-btn"
-                on:click={() => handleToggle(mod, getModStatus(mod) !== 'installed')}
-                disabled={getModStatus(mod) === 'missing'}
-                title={getModStatus(mod) === 'missing' ? 'Mod is missing - download first' : (getModStatus(mod) === 'installed' ? 'Disable mod' : 'Enable mod')}
-              >
-                {#if getModStatus(mod) === 'missing'}
-                  Missing
-                {:else if getModStatus(mod) === 'installed'}
-                  Disable
-                {:else}
-                  Enable
-                {/if}
-              </button>
-              <button class="action-btn delete-btn" on:click={() => handleDelete(mod)} title="Remove mod">
-                Remove
-              </button>
+              {#if getModStatus(mod) === 'missing'}
+                <button class="download-button" on:click={() => handleDownloadSingle(mod)}>
+                  📥 Download
+                </button>
+              {:else}
+                <button 
+                  class="action-btn toggle-btn"
+                  on:click={() => handleToggle(mod, getModStatus(mod) !== 'installed')}
+                  title={getModStatus(mod) === 'installed' ? 'Disable mod' : 'Enable mod'}
+                >
+                  {#if getModStatus(mod) === 'installed'}
+                    Disable
+                  {:else}
+                    Enable
+                  {/if}
+                </button>
+              {/if}
+              {#if getModStatus(mod) !== 'missing'}
+                <button class="action-btn delete-btn" on:click={() => handleDelete(mod)} title="Remove mod">
+                  Remove
+                </button>
+              {/if}
             {/if}
           </div>
         </div>
       {/each}
-    </div>
-
-    <!-- Summary for missing mods -->
-    {#if modSyncStatus && modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
+    </div>    <!-- Summary for missing mods -->
+    {#if type === 'required' && modSyncStatus && modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
       <div class="summary">
         <div class="missing-summary">
           <span class="summary-text">
@@ -177,6 +183,20 @@
           </span>
           <button class="download-all-button" on:click={handleDownload}>
             📥 Download All Missing
+          </button>
+        </div>
+      </div>
+    {/if}
+    
+    <!-- Summary for missing optional mods -->
+    {#if type === 'optional' && modSyncStatus && modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0}
+      <div class="summary">
+        <div class="missing-summary optional">
+          <span class="summary-text">
+            {modSyncStatus.missingOptionalMods.length} optional mod(s) available for download
+          </span>
+          <button class="download-all-button optional" on:click={handleDownload}>
+            📥 Download All Optional
           </button>
         </div>
       </div>
@@ -411,15 +431,31 @@
     border-radius: 6px;
     border: 1px solid #4b5563;
   }
-
   .missing-summary {
     display: flex;
     justify-content: space-between;
     align-items: center;
   }
 
+  .missing-summary.optional {
+    background-color: rgba(59, 130, 246, 0.1);
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+
   .summary-text {
     color: #f59e0b;
     font-weight: 500;
+  }
+
+  .missing-summary.optional .summary-text {
+    color: #3b82f6;
+  }
+
+  .download-all-button.optional {
+    background-color: #3b82f6;
+  }
+
+  .download-all-button.optional:hover {
+    background-color: #2563eb;
   }
 </style>

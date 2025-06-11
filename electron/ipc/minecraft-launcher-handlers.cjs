@@ -928,8 +928,7 @@ function createMinecraftLauncherHandlers(win) {
             action: 'remove'
           });
         }const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && extraMods.length === 0;
-        
-        // Calculate actual needs more conservatively to avoid "0 out of X" issues
+          // Calculate actual needs more conservatively to avoid "0 out of X" issues
         const actualNeedsDownload = missingMods.length + outdatedMods.length;
         const actualNeedsOptionalDownload = missingOptionalMods.length + outdatedOptionalMods.length;
         
@@ -945,7 +944,7 @@ function createMinecraftLauncherHandlers(win) {
           totalPresent: requiredMods.length - missingMods.length - outdatedMods.length,
           totalOptionalPresent: (allClientMods.filter(m => !m.required).length) - missingOptionalMods.length - outdatedOptionalMods.length,
           needsDownload: synchronized ? 0 : actualNeedsDownload, // Force 0 if synchronized
-          needsOptionalDownload: synchronized ? 0 : actualNeedsOptionalDownload, // Force 0 if synchronized  
+          needsOptionalDownload: actualNeedsOptionalDownload, // Always show actual count, even if required mods are synchronized
           needsRemoval: extraMods.length,
           presentEnabledMods: presentMods,
           presentDisabledMods: disabledMods

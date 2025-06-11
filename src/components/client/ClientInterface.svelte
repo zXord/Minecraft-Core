@@ -1490,11 +1490,21 @@
                   <div class="sync-status error">
                     <h3>Mod Check Failed</h3>
                     <p>Unable to verify mod status. Please refresh and try again.</p>
-                  </div>
-                {:else if downloadStatus === 'ready'}
+                  </div>                {:else if downloadStatus === 'ready'}
                   <div class="sync-status ready">
-                    <h3>✅ All Mods Ready</h3>
-                    <p>All required mods are installed and up to date.</p>
+                    <h3>✅ All Required Mods Ready</h3>
+                    {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
+                      <p>All required mods are installed and up to date.</p>
+                      <div class="optional-mods-notice">
+                        <span class="optional-icon">ℹ️</span>
+                        <span class="optional-text">
+                          {modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's are' : ' is'} available for download. 
+                          Check the <strong>Mods</strong> tab to download them.
+                        </span>
+                      </div>
+                    {:else}
+                      <p>All mods are installed and up to date.</p>
+                    {/if}
                   </div>
                 {/if}
               
@@ -2419,10 +2429,39 @@
     font-size: 0.85rem;
     margin-top: 0.25rem;
   }
-    .memory-disabled-note {
+  .memory-disabled-note {
     color: #f59e0b;
     font-size: 0.8rem;
     margin-top: 0.5rem;
     text-align: left;
+  }
+
+  /* Optional Mods Notice */
+  .optional-mods-notice {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 6px;
+  }
+
+  .optional-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+    color: #3b82f6;
+  }
+
+  .optional-text {
+    font-size: 0.9rem;
+    color: #e2e8f0;
+    line-height: 1.4;
+  }
+
+  .optional-text strong {
+    color: #3b82f6;
+    font-weight: 600;
   }
 </style>

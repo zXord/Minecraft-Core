@@ -393,9 +393,44 @@
       } else {
         errorMessage.set(`Failed to download optional mods: ${result.error || 'Unknown error'}`);
         setTimeout(() => errorMessage.set(''), 5000);
+      }    } catch (err) {
+      errorMessage.set('Error downloading optional mods: ' + err.message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  }
+
+  // Download single optional mod
+  async function downloadSingleOptionalMod(mod) {
+    if (!instance.path) {
+      return;
+    }
+
+    try {
+      const result = await window.electron.invoke('minecraft-download-mods', {
+        clientPath: instance.path,
+        requiredMods: [mod], // Download just this one mod
+        allClientMods,
+        serverInfo: {
+          serverIp: instance.serverIp,
+          serverPort: instance.serverPort
+        }
+      });
+
+      if (result.success) {
+        successMessage.set(`Successfully downloaded ${mod.fileName}`);
+        setTimeout(() => successMessage.set(''), 3000);
+        
+        // Refresh mod sync status with delay to allow file I/O to complete
+        setTimeout(async () => {
+          await checkModSynchronization();
+          await refreshInstalledMods();
+        }, 1500);
+      } else {
+        errorMessage.set(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`);
+        setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (err) {
-      errorMessage.set('Error downloading optional mods: ' + err.message);
+      errorMessage.set(`Error downloading ${mod.fileName}: ${err.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
@@ -787,8 +822,7 @@
           <h3>🔄 Loading Mods...</h3>
           <p>Fetching mod information from server...</p>
         </div>
-      {:else}
-        <!-- Mod Status Overview -->
+      {:else}        <!-- Mod Status Overview -->
         <ClientModStatus
           {modSyncStatus}
           requiredModsCount={requiredMods.length}
@@ -796,8 +830,7 @@
           on:download-required={downloadRequiredMods}
           on:download-optional={downloadOptionalMods}
           on:refresh={refreshMods}
-        />        <!-- ModDropZone -->
-        <ModDropZone on:filesDropped={handleDroppedFiles} />
+        />
 
         <!-- Mod Lists -->
         <div class="mod-sections">
@@ -822,13 +855,13 @@
               <h3>Optional Mods</h3>
               <p class="section-description">
                 These mods are available but not required. You can enable or disable them before playing.
-              </p>
-          <ClientModList
+              </p>          <ClientModList
             mods={optionalMods}
             type="optional"
             {modSyncStatus}
             on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
-            on:download={downloadRequiredMods}
+            on:download={downloadOptionalMods}
+            on:downloadSingle={(e) => downloadSingleOptionalMod(e.detail.mod)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
             on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
           />
@@ -850,6 +883,9 @@
           />
           </div>
         </div>
+
+        <!-- ModDropZone at the bottom -->
+        <ModDropZone on:filesDropped={handleDroppedFiles} />
       {/if}
     {:else if activeTab === 'find-mods'}
       <!-- Client mod finding and installation -->
