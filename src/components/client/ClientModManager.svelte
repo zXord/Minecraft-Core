@@ -65,13 +65,17 @@
 
   // Props
   export let instance: Instance | null = null; // Client instance
-
   // Create event dispatcher
   const dispatch = createEventDispatcher();
-  // State
+  // Listen for refresh events from parent
+  async function handleRefreshFromParent() {
+    await refreshMods();
+  }
+
+  // Export the refresh function so parent can call it
+  export { handleRefreshFromParent as refreshFromDashboard };// State
   let connectionStatus: string = 'disconnected';
   let serverMods: ClientMod[] = [];
-  let clientMods: ClientMod[] = [];
   let requiredMods: ClientMod[] = [];
   let optionalMods: ClientMod[] = [];
   let allClientMods: ClientMod[] = []; // All client mods (required + optional)
@@ -105,9 +109,8 @@
     
     if (instance && instance.serverIp && instance.serverPort) {
       loadModsFromServer();
-      
-      // Set up periodic mod checking
-      const interval = setInterval(loadModsFromServer, 30000); // Check every 30 seconds
+        // Set up periodic mod checking - reduced frequency to prevent flashing
+      const interval = setInterval(loadModsFromServer, 5 * 60 * 1000); // Check every 5 minutes instead of 30 seconds
       
       return () => {
         clearInterval(interval);
@@ -251,21 +254,14 @@
           const modsResponse = await fetch(modsUrl, {
             method: 'GET',
             signal: AbortSignal.timeout(5000)
-          });
-
-          if (modsResponse.ok) {
+          });          if (modsResponse.ok) {
             const modsData = await modsResponse.json();
-            if (modsData.success) {
-              serverMods = modsData.mods.server || [];
-              const bothMods = modsData.mods.both || [];
-              const clientOnlyMods = modsData.mods.client || [];
-              
-              // Combine client and both mods for client mod list
-              clientMods = [...clientOnlyMods, ...bothMods];
+            if (modsData.success) {              serverMods = modsData.mods.server || [];
               
               // Separate required and optional mods based on server configuration
               // Required mods are those specified by the server
-              optionalMods = clientMods.filter(mod => 
+              // Use allClientMods (which has version info) instead of server response for optional mods
+              optionalMods = allClientMods.filter(mod => 
                 !requiredMods.some(reqMod => reqMod.fileName === mod.fileName)
               );
             }
@@ -302,14 +298,15 @@
       });
 
       if (result.success) {
-        modSyncStatus = result;
-
-        // Emit event to parent about sync status
+        modSyncStatus = result;        // Emit event to parent about sync status
         dispatch('mod-sync-status', {
           synchronized: result.synchronized,
           needsDownload: result.needsDownload,
           totalRequired: result.totalRequired,
-          totalPresent: result.totalPresent
+          totalPresent: result.totalPresent,
+          needsRemoval: result.needsRemoval,
+          clientModChanges: result.clientModChanges,
+          fullSyncResult: result // Pass the full result for complete info
         });
       } else {
         errorMessage.set(
@@ -343,15 +340,15 @@
           serverIp: instance.serverIp,
           serverPort: instance.serverPort
         }
-      });
-
-      if (result.success) {
+      });      if (result.success) {
         successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
         setTimeout(() => successMessage.set(''), 5000);
         
-        // Refresh mod sync status
-        await checkModSynchronization();
-        await refreshInstalledMods();
+        // Refresh mod sync status with delay to allow file I/O to complete
+        setTimeout(async () => {
+          await checkModSynchronization();
+          await refreshInstalledMods();
+        }, 1500);
       } else {
         errorMessage.set(`Failed to download mods: ${result.error || 'Unknown error'}`);
         setTimeout(() => errorMessage.set(''), 5000);
@@ -384,15 +381,15 @@
           serverIp: instance.serverIp,
           serverPort: instance.serverPort
         }
-      });
-
-      if (result.success) {
+      });      if (result.success) {
         successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
         setTimeout(() => successMessage.set(''), 5000);
         
-        // Refresh mod sync status
-        await checkModSynchronization();
-        await refreshInstalledMods();
+        // Refresh mod sync status with delay to allow file I/O to complete
+        setTimeout(async () => {
+          await checkModSynchronization();
+          await refreshInstalledMods();
+        }, 1500);
       } else {
         errorMessage.set(`Failed to download optional mods: ${result.error || 'Unknown error'}`);
         setTimeout(() => errorMessage.set(''), 5000);
@@ -433,7 +430,6 @@
       }
     }
   }
-
   // Handle mod enable/disable for optional mods
   async function handleModToggle(modFileName, enabled) {
     if (!instance.path) return;
@@ -451,8 +447,8 @@
         successMessage.set(`Mod ${enabled ? 'enabled' : 'disabled'}: ${modFileName}`);
         setTimeout(() => successMessage.set(''), 3000);
         
-        // Refresh mod status
-        await checkModSynchronization();
+        // Use lighter-weight sync check instead of full refresh
+        checkModSynchronization();
       } else {
         errorMessage.set(`Failed to ${enabled ? 'enable' : 'disable'} mod: ${result.error}`);
         setTimeout(() => errorMessage.set(''), 5000);
@@ -462,7 +458,6 @@
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
-
   // Delete a mod from the client
   async function handleModDelete(modFileName) {
     if (!instance.path) return;
@@ -487,7 +482,8 @@
           }
           return updated;
         });
-        await refreshInstalledMods();
+        // Use lighter-weight sync check instead of full refresh
+        checkModSynchronization();
       } else {
         errorMessage.set(`Failed to delete mod: ${result.error}`);
         setTimeout(() => errorMessage.set(''), 5000);

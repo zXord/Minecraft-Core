@@ -105,25 +105,36 @@
       checkingUpdates = false;
     }
   }
-
-  async function toggleMod(mod: DetailedMod) {    try {
+  async function toggleMod(mod: DetailedMod) {
+    // Optimistic UI update - update the mod state immediately
+    const originalEnabled = mod.enabled;
+    mod.enabled = !mod.enabled;
+    mods = mods; // Trigger reactivity
+    
+    try {
       const result = await window.electron.invoke('toggle-manual-mod', {
         clientPath,
         fileName: mod.fileName,
-        enable: !mod.enabled
+        enable: mod.enabled
       });
       
-      if (result.success) {
-        await loadManualMods(); // Refresh the list
-      } else {
+      if (!result.success) {
+        // Revert the optimistic update if the operation failed
+        mod.enabled = originalEnabled;
+        mods = mods; // Trigger reactivity
+        error = result.error || 'Failed to toggle mod';
       }
     } catch (err) {
+      // Revert the optimistic update if an error occurred
+      mod.enabled = originalEnabled;
+      mods = mods; // Trigger reactivity
+      error = err.message || 'Failed to toggle mod';
     }
   }
-
   async function updateMod(mod: DetailedMod) {
     if (!mod.hasUpdate || updatingMods.has(mod.fileName)) return;
-      updatingMods.add(mod.fileName);
+    
+    updatingMods.add(mod.fileName);
     updatingMods = updatingMods; // Trigger reactivity
     
     try {
@@ -135,10 +146,24 @@
       });
       
       if (result.success) {
-        await loadManualMods(); // Refresh the list
+        // Update the mod in place instead of reloading everything
+        const modIndex = mods.findIndex(m => m.fileName === mod.fileName);
+        if (modIndex !== -1) {
+          // Update the mod properties with new version info
+          mods[modIndex] = {
+            ...mods[modIndex],
+            version: mod.latestVersion,
+            hasUpdate: false,
+            latestVersion: undefined,
+            updateUrl: undefined
+          };
+          mods = mods; // Trigger reactivity
+        }
       } else {
+        error = result.error || 'Failed to update mod';
       }
     } catch (err) {
+      error = err.message || 'Failed to update mod';
     } finally {
       updatingMods.delete(mod.fileName);
       updatingMods = updatingMods; // Trigger reactivity
@@ -149,12 +174,20 @@
     modToRemove = mod;
     showRemoveDialog = true;
   }
-
   async function confirmRemove() {
     if (!modToRemove) return;
 
     const mod = modToRemove;
     showRemoveDialog = false;
+    
+    // Optimistically remove the mod from the UI
+    const modIndex = mods.findIndex(m => m.fileName === mod.fileName);
+    const originalMods = [...mods];
+    
+    if (modIndex !== -1) {
+      mods = mods.filter(m => m.fileName !== mod.fileName);
+    }
+    
     modToRemove = null;
 
     try {
@@ -163,11 +196,15 @@
         fileNames: [mod.fileName]
       });
 
-      if (result.success) {
-        await loadManualMods(); // Refresh the list
-      } else {
+      if (!result.success) {
+        // Restore the mod if removal failed
+        mods = originalMods;
+        error = result.error || 'Failed to remove mod';
       }
     } catch (err) {
+      // Restore the mod if an error occurred
+      mods = originalMods;
+      error = err.message || 'Failed to remove mod';
     }
   }
 
@@ -431,13 +468,12 @@
     flex-direction: column;
     gap: 0.5rem;
   }
-
   .mod-card {
     background: rgba(255, 255, 255, 0.05);
     border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     overflow: hidden;
-    transition: all 0.2s ease;
+    transition: all 0.3s ease; /* Increased duration for smoother transitions */
   }
 
   .mod-card:hover {
@@ -448,6 +484,7 @@
   .mod-card.disabled {
     opacity: 0.7;
     background: rgba(139, 69, 19, 0.15);
+    transition: all 0.3s ease; /* Smooth transition when disabling */
   }
 
   .mod-header {
@@ -491,13 +528,13 @@
     align-items: center;
     gap: 0.25rem;
   }
-
   .status-tag {
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
     font-size: 0.75rem;
     font-weight: 500;
     text-transform: uppercase;
+    transition: all 0.3s ease; /* Smooth transition for status changes */
   }
 
   .status-tag.enabled {

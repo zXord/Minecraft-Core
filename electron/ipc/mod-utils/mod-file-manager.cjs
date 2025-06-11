@@ -107,28 +107,38 @@ async function listMods(serverPath) {
   
   const clientPath = path.join(serverPath, 'client');
   
-  
-  const serverModsDir = path.join(serverPath, 'mods');
+    const serverModsDir = path.join(serverPath, 'mods');
   const clientModsDir = path.join(clientPath, 'mods');
-  const disabledModsDir = path.join(serverPath, 'mods_disabled');
-    await fs.mkdir(serverModsDir, { recursive: true });
+  
+  await fs.mkdir(serverModsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true }).catch(() => {
     // Ignore client mods directory creation errors
   });
-  await fs.mkdir(disabledModsDir, { recursive: true });
   
   const serverFiles = await fs.readdir(serverModsDir);
-  const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar'));
-    let clientModFiles = [];
+  const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));  const disabledModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
+    .map(file => file.replace('.disabled', '')); // Remove .disabled extension for display
+  
+  let clientModFiles = [];
   try {
     const clientFiles = await fs.readdir(clientModsDir);
-    clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
+    clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));
   } catch {
     // Ignore client directory read errors
   }
   
-  const disabledFiles = await fs.readdir(disabledModsDir);
-  const disabledModFiles = disabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
+  // Migration: Also check old mods_disabled folder for any remaining files
+  let legacyDisabledFiles = [];
+  try {
+    const oldDisabledModsDir = path.join(serverPath, 'mods_disabled');
+    const oldDisabledFiles = await fs.readdir(oldDisabledModsDir);
+    legacyDisabledFiles = oldDisabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
+  } catch {
+    // Old disabled folder doesn't exist, which is fine
+  }
+  
+  // Combine current disabled mods with any legacy ones
+  const allDisabledModFiles = [...new Set([...disabledModFiles, ...legacyDisabledFiles])];
   
   const modsInBoth = serverModFiles.filter(mod => clientModFiles.includes(mod));
   const serverOnlyMods = serverModFiles.filter(mod => !clientModFiles.includes(mod));
@@ -138,10 +148,10 @@ async function listMods(serverPath) {
     ...serverOnlyMods.map(mod => ({ fileName: mod, locations: ['server'], category: 'server-only' })),
     ...clientOnlyMods.map(mod => ({ fileName: mod, locations: ['client'], category: 'client-only' })),
     ...modsInBoth.map(mod => ({ fileName: mod, locations: ['server', 'client'], category: 'both' })),
-    ...disabledModFiles.map(mod => ({ fileName: mod, locations: ['disabled'], category: 'disabled' }))
+    ...allDisabledModFiles.map(mod => ({ fileName: mod, locations: ['disabled'], category: 'disabled' }))
   ];
   
-  const allModFiles = [...new Set([...serverModFiles, ...clientModFiles, ...disabledModFiles])];
+  const allModFiles = [...new Set([...serverModFiles, ...clientModFiles, ...allDisabledModFiles])];
   
   
   return {
@@ -163,22 +173,36 @@ async function getInstalledModInfo(serverPath) {
   const clientModsDir = path.join(clientPath, 'mods');
   await fs.mkdir(modsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true });
+    const enabledFiles = await fs.readdir(modsDir);
+  const enabledMods = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));
   
-  const enabledFiles = await fs.readdir(modsDir);
-  const enabledMods = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
-    let clientMods = [];  try {
+  // Get disabled mods (with .disabled extension)
+  const disabledModFiles = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
+    .map(file => file.replace('.disabled', '')); // Remove .disabled extension for processing
+    let clientMods = [];
+  let clientDisabledMods = [];
+  try {
     const clientFiles = await fs.readdir(clientModsDir);
-    clientMods = clientFiles.filter(file => file.toLowerCase().endsWith('.jar'));
+    clientMods = clientFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));
+    clientDisabledMods = clientFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
+      .map(file => file.replace('.disabled', '')); // Remove .disabled extension for processing
   } catch {
     // Ignore client mods directory read errors
   }
   
-  const disabledDir = path.join(serverPath, 'mods_disabled');
-  await fs.mkdir(disabledDir, { recursive: true });
-  const disabledFiles = (await fs.readdir(disabledDir).catch(() => []))
-    .filter(file => file.toLowerCase().endsWith('.jar'));
+  // Migration: Also check old mods_disabled folder for any remaining files
+  let legacyDisabledFiles = [];
+  try {
+    const oldDisabledDir = path.join(serverPath, 'mods_disabled');
+    const oldDisabledFiles = await fs.readdir(oldDisabledDir).catch(() => []);
+    legacyDisabledFiles = oldDisabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
+  } catch {
+    // Old disabled folder doesn't exist, which is fine
+  }
+    // Combine current disabled mods with any legacy ones
+  const allDisabledFiles = [...new Set([...disabledModFiles, ...clientDisabledMods, ...legacyDisabledFiles])];
   
-  const allModFiles = [...new Set([...enabledMods, ...clientMods, ...disabledFiles])];
+  const allModFiles = [...new Set([...enabledMods, ...clientMods, ...allDisabledFiles])];
   
   const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
   const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
@@ -202,21 +226,27 @@ async function getInstalledModInfo(serverPath) {
           // Ignore manifest parsing errors
         }
       }
-        if (manifest) {
-        if (!manifest.projectId || !manifest.versionNumber) {
+        if (manifest) {        if (!manifest.projectId || !manifest.versionNumber) {
           try {
-            const jarBase = path.join(modsDir, modFile);
-            const jarPath = await fs
-              .access(jarBase)
-              .then(() => jarBase)
-              .catch(async () => {
-                const disabledPath = jarBase + '.disabled';
-                try {
-                  await fs.access(disabledPath);
-                  return disabledPath;
-                } catch {
-                  return null;
-                }              });
+            // Check multiple possible locations for the jar file
+            const possibleJarPaths = [
+              path.join(modsDir, modFile), // Server enabled
+              path.join(modsDir, modFile + '.disabled'), // Server disabled
+              path.join(clientModsDir, modFile), // Client enabled
+              path.join(clientModsDir, modFile + '.disabled') // Client disabled
+            ];
+            
+            let jarPath = null;
+            for (const possiblePath of possibleJarPaths) {
+              try {
+                await fs.access(possiblePath);
+                jarPath = possiblePath;
+                break; // Found the file, stop looking
+              } catch {
+                // File doesn't exist at this location, try next
+              }
+            }
+            
             if (jarPath) {
               const meta = await readModMetadataFromJar(jarPath);
               // Preserve manifest projectId if it exists and looks like a Modrinth ID
@@ -366,38 +396,42 @@ async function saveDisabledMods(serverPath, disabledMods) {
   await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
   
   const modsDir = path.join(serverPath, 'mods');
-  const disabledModsDir = path.join(serverPath, 'mods_disabled');
-  
+  const clientModsDir = path.join(serverPath, 'client', 'mods');
   await fs.mkdir(modsDir, { recursive: true });
-  await fs.mkdir(disabledModsDir, { recursive: true });
+  await fs.mkdir(clientModsDir, { recursive: true });
   
-  const enabledFiles = await fs.readdir(modsDir);
-  const currentDisabledFiles = await fs.readdir(disabledModsDir);
+  // Process server mods directory
+  await processModsDirectory(modsDir, disabledMods);
   
+  // Process client mods directory
+  await processModsDirectory(clientModsDir, disabledMods);
   
-  for (const modFile of enabledFiles) {
-    if (modFile.toLowerCase().endsWith('.jar') && disabledMods.includes(modFile)) {
-      const sourcePath = path.join(modsDir, modFile);
-      const destPath = path.join(disabledModsDir, modFile);
-      try {
-        await fs.copyFile(sourcePath, destPath);
-        await fs.unlink(sourcePath);
-      } catch (moveErr) {
-        throw new Error(`Failed to disable mod ${modFile}: ${moveErr.message}`);
+  // Migration: Move any mods from old mods_disabled folder to new .disabled extension
+  const oldDisabledModsDir = path.join(serverPath, 'mods_disabled');
+  try {
+    const oldDisabledFiles = await fs.readdir(oldDisabledModsDir);
+    for (const oldFile of oldDisabledFiles) {
+      if (oldFile.toLowerCase().endsWith('.jar')) {
+        const sourcePath = path.join(oldDisabledModsDir, oldFile);
+        const destPath = path.join(modsDir, oldFile + '.disabled');
+        try {
+          await fs.copyFile(sourcePath, destPath);
+          await fs.unlink(sourcePath);
+          // Also add to disabled mods list if not already there
+          if (!disabledMods.includes(oldFile)) {
+            disabledMods.push(oldFile);
+          }
+        } catch (migrationErr) {
+          // Log migration error but don't fail the entire operation
+          console.warn(`Warning: Failed to migrate disabled mod ${oldFile}: ${migrationErr.message}`);
+        }
       }
     }
-  }
-  
-  for (const modFile of currentDisabledFiles) {
-    if (modFile.toLowerCase().endsWith('.jar') && !disabledMods.includes(modFile)) {
-      const sourcePath = path.join(disabledModsDir, modFile);
-      const destPath = path.join(modsDir, modFile);
-      try {
-        await fs.copyFile(sourcePath, destPath);
-        await fs.unlink(sourcePath);
-      } catch (moveErr) {
-        throw new Error(`Failed to enable mod ${modFile}: ${moveErr.message}`);      }
-    }
+    // Update the disabled mods config with any migrated mods
+    if (disabledMods.length > 0) {
+      await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
+    }  } catch {
+    // Old folder doesn't exist or can't be read, which is fine
   }
   
   return true;
@@ -410,35 +444,72 @@ async function getDisabledMods(serverPath) {
   }
   
   const modsDir = path.join(serverPath, 'mods');
-  const disabledModsDir = path.join(serverPath, 'mods_disabled');
-  
   await fs.mkdir(modsDir, { recursive: true });
-  await fs.mkdir(disabledModsDir, { recursive: true });
   
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
   await fs.mkdir(configDirMgr, { recursive: true });
   
   const disabledModsPath = path.join(configDirMgr, 'disabled-mods.json');
   let disabledMods = [];
+  
+  // First, try to read from config file
   try {
     const disabledModsContent = await fs.readFile(disabledModsPath, 'utf8');
     disabledMods = JSON.parse(disabledModsContent);
     if (!Array.isArray(disabledMods)) {
-      throw new Error('Invalid disabled mods format');    }
+      throw new Error('Invalid disabled mods format');
+    }
   } catch {
     disabledMods = [];
   }
+    // Get currently disabled files (with .disabled extension) and add to list
+  // Check both server and client mods directories
+  const modsDirectories = [
+    modsDir,
+    path.join(serverPath, 'client', 'mods')
+  ];
   
+  for (const currentModsDir of modsDirectories) {
+    try {
+      const allFiles = await fs.readdir(currentModsDir);
+      const disabledFiles = allFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'));
+      
+      for (const disabledFile of disabledFiles) {
+        const modFile = disabledFile.replace('.disabled', '');
+        if (!disabledMods.includes(modFile)) {
+          disabledMods.push(modFile);
+        }
+      }
+    } catch {
+      // Ignore file system errors for directory read (client directory might not exist)
+    }
+  }
+  
+  // Update the config file with the current state
   try {
-    const currentDisabledFiles = await fs.readdir(disabledModsDir);
-    const disabledModFileNames = currentDisabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
-    for (const modFile of disabledModFileNames) {
-      if (!disabledMods.includes(modFile)) {
-        disabledMods.push(modFile);
-      }    }
     await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
   } catch {
-    // Ignore disabled mods file operations errors
+    // Ignore config file write errors
+  }
+  
+  // Migration: Check old mods_disabled folder for any remaining files
+  try {
+    const oldDisabledModsDir = path.join(serverPath, 'mods_disabled');
+    const oldDisabledFiles = await fs.readdir(oldDisabledModsDir);
+    const oldDisabledModFileNames = oldDisabledFiles.filter(file => file.toLowerCase().endsWith('.jar'));
+    
+    for (const modFile of oldDisabledModFileNames) {
+      if (!disabledMods.includes(modFile)) {
+        disabledMods.push(modFile);
+      }
+    }
+    
+    if (oldDisabledModFileNames.length > 0) {
+      // Update config with any found old disabled mods
+      await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
+    }
+  } catch {
+    // Old folder doesn't exist or can't be read, which is fine
   }
   
   return disabledMods;
@@ -490,14 +561,14 @@ async function deleteMod(serverPath, modName) {
   if (!modName) {
     throw new Error('Mod name is required');
   }
-  
-  const fileName = modName.endsWith('.jar') ? modName : `${modName}.jar`;
-  
-  // Check multiple possible locations for the mod file
+    const fileName = modName.endsWith('.jar') ? modName : `${modName}.jar`;
+    // Check multiple possible locations for the mod file
   const possiblePaths = [
     path.join(serverPath, 'mods', fileName),
     path.join(serverPath, 'client', 'mods', fileName),
-    path.join(serverPath, 'mods_disabled', fileName)
+    path.join(serverPath, 'mods', fileName + '.disabled'), // Check for disabled mods with .disabled extension
+    path.join(serverPath, 'client', 'mods', fileName + '.disabled'), // Check for disabled mods in client directory
+    path.join(serverPath, 'mods_disabled', fileName) // Legacy: Also check old disabled folder for migration
   ];
   
   let deletedFromPaths = [];
@@ -608,7 +679,6 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   const clientPath = path.join(serverPath, 'client');
   const serverModsDir = path.join(serverPath, 'mods');
   const clientModsDir = path.join(clientPath, 'mods');
-  const disabledModsDir = path.join(serverPath, 'mods_disabled');
   const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
   const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
 
@@ -616,13 +686,12 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   await fs.mkdir(clientModsDir, { recursive: true }).catch(err => {
     throw new Error(`Could not create client mods directory: ${err.message}`);
   });
-  await fs.mkdir(disabledModsDir, { recursive: true });
   await fs.mkdir(serverManifestDir, { recursive: true });
   await fs.mkdir(clientManifestDir, { recursive: true });
 
   const serverModPath = path.join(serverModsDir, fileName);
   const clientModPath = path.join(clientModsDir, fileName);
-  const disabledModPath = path.join(disabledModsDir, fileName);
+  const disabledModPath = path.join(serverModsDir, fileName + '.disabled');
   const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
   const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
 
@@ -633,7 +702,6 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   const disabledFileExists = await fileExists(disabledModPath);
   const serverManifestExists = await fileExists(serverManifestPath);
   const clientManifestExists = await fileExists(clientManifestPath);
-
 
   const copyAndUnlink = async (source, dest) => {
     await fs.copyFile(source, dest);
@@ -660,7 +728,8 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
         if (!clientManifestExists) await copyAndUnlink(serverManifestPath, clientManifestPath);
         else await fs.unlink(serverManifestPath);
       }
-    } else if (disabledFileExists && !clientFileExists) {      await copyAndUnlink(disabledModPath, clientModPath);
+    } else if (disabledFileExists && !clientFileExists) {
+      await copyAndUnlink(disabledModPath, clientModPath);
       if (serverManifestExists && !clientManifestExists) {
          await copyAndUnlink(serverManifestPath, clientManifestPath);
       }
@@ -696,6 +765,47 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   return { success: true, category: newCategory };
 }
 
+// Helper function to process enable/disable mods in a given directory
+async function processModsDirectory(modsDir, disabledMods) {
+  try {
+    // Get all files in mods directory (enabled and disabled)
+    const allFiles = await fs.readdir(modsDir);
+    const enabledFiles = allFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));
+    const disabledFiles = allFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'));
+    
+    // Disable mods that should be disabled but are currently enabled
+    for (const modFile of enabledFiles) {
+      if (disabledMods.includes(modFile)) {
+        const sourcePath = path.join(modsDir, modFile);
+        const destPath = path.join(modsDir, modFile + '.disabled');
+        try {
+          await fs.rename(sourcePath, destPath);
+        } catch (moveErr) {
+          // Only log error, don't fail entirely (directory might not be accessible)
+          console.warn(`Warning: Failed to disable mod ${modFile} in ${modsDir}: ${moveErr.message}`);
+        }
+      }
+    }
+    
+    // Enable mods that should be enabled but are currently disabled
+    for (const disabledFile of disabledFiles) {
+      const modFile = disabledFile.replace('.disabled', '');
+      if (!disabledMods.includes(modFile)) {
+        const sourcePath = path.join(modsDir, disabledFile);
+        const destPath = path.join(modsDir, modFile);
+        try {
+          await fs.rename(sourcePath, destPath);
+        } catch (moveErr) {
+          // Only log error, don't fail entirely (directory might not be accessible)
+          console.warn(`Warning: Failed to enable mod ${modFile} in ${modsDir}: ${moveErr.message}`);
+        }
+      }
+    }
+  } catch (readErr) {
+    // If we can't read the directory, just log a warning (client directory might not exist)
+    console.warn(`Warning: Could not process mods directory ${modsDir}: ${readErr.message}`);
+  }
+}
 
 module.exports = {
   modCategoriesStore,

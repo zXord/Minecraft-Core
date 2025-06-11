@@ -1,11 +1,13 @@
 <script lang="ts">  import { createEventDispatcher } from 'svelte';
-
   // Types
   interface Mod {
     fileName: string;
     size?: number;
     lastModified?: string;
     location?: string;
+    name?: string;
+    versionNumber?: string;
+    projectId?: string;
   }
 
   interface ModSyncStatus {
@@ -89,25 +91,18 @@
     <div class="empty-state">
       <p>No {type} mods found.</p>
     </div>  {:else}
-    <div class="mod-list">
+    <div class="grid-header">
+      <div class="header-cell">Mod Details</div>
+      <div class="header-cell">Status</div>
+      <div class="header-cell">Version</div>
+      <div class="header-cell">Actions</div>
+    </div>
+    
+    <div class="mods-grid">
       {#each mods as mod (mod.fileName)}
-        <div class="mod-item {type}">
+        <div class="mod-card {type}">
           <div class="mod-info">
-            <div class="mod-header">
-              <span class="mod-name">{mod.fileName}</span>
-              <div class="mod-status">
-                {#if getModStatus(mod) === 'installed'}
-                  <span class="status-badge installed">✅ Enabled</span>
-                {:else if getModStatus(mod) === 'disabled'}
-                  <span class="status-badge disabled">⏸️ Disabled</span>
-                {:else if getModStatus(mod) === 'missing'}
-                  <span class="status-badge missing">❌ Missing</span>
-                {:else}
-                  <span class="status-badge unknown">❓ Unknown</span>
-                {/if}
-              </div>
-            </div>
-            
+            <div class="mod-name">{mod.name || mod.fileName}</div>
             <div class="mod-details">
               {#if mod.size}
                 <span class="mod-size">{formatFileSize(mod.size)}</span>
@@ -120,9 +115,28 @@
               {/if}
             </div>
           </div>
-
+          
+          <div class="mod-status">
+            {#if getModStatus(mod) === 'installed'}
+              <span class="status-badge installed">✅ Enabled</span>
+            {:else if getModStatus(mod) === 'disabled'}
+              <span class="status-badge disabled">⏸️ Disabled</span>
+            {:else if getModStatus(mod) === 'missing'}
+              <span class="status-badge missing">❌ Missing</span>
+            {:else}
+              <span class="status-badge unknown">❓ Unknown</span>
+            {/if}
+          </div>
+          
+          <div class="mod-version">
+            {#if mod.versionNumber}
+              <span class="version-tag">v{mod.versionNumber}</span>
+            {:else}
+              <span class="version-tag unknown">Unknown</span>
+            {/if}
+          </div>
+          
           <div class="mod-actions">
-
             {#if type === 'required'}
               <span class="required-label">Required</span>
               {#if getModStatus(mod) === 'missing'}
@@ -131,30 +145,24 @@
                 </button>
               {/if}
             {:else if type === 'optional'}
-              <div class="toggle-control">
-                <label class="toggle-label">
-                  <input
-                    type="checkbox"
-                    checked={getModStatus(mod) === 'installed'}
-                    on:change={(e) => handleToggle(mod, (e.target as HTMLInputElement).checked)}
-                    class="toggle-input"
-                    disabled={getModStatus(mod) === 'missing'}
-                  />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-text">
-                    {#if getModStatus(mod) === 'missing'}
-                      Missing
-                    {:else if getModStatus(mod) === 'installed'}
-                      Enabled
-                    {:else}
-                      Disabled
-                    {/if}
-                  </span>
-                </label>
-              </div>
-              <button class="delete-button" on:click={() => handleDelete(mod)}>
-                🗑️ Delete
-              </button>            {/if}
+              <button 
+                class="action-btn toggle-btn"
+                on:click={() => handleToggle(mod, getModStatus(mod) !== 'installed')}
+                disabled={getModStatus(mod) === 'missing'}
+                title={getModStatus(mod) === 'missing' ? 'Mod is missing - download first' : (getModStatus(mod) === 'installed' ? 'Disable mod' : 'Enable mod')}
+              >
+                {#if getModStatus(mod) === 'missing'}
+                  Missing
+                {:else if getModStatus(mod) === 'installed'}
+                  Disable
+                {:else}
+                  Enable
+                {/if}
+              </button>
+              <button class="action-btn delete-btn" on:click={() => handleDelete(mod)} title="Remove mod">
+                Remove
+              </button>
+            {/if}
           </div>
         </div>
       {/each}
@@ -188,64 +196,99 @@
     font-style: italic;
   }
 
-  .mod-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-
-  .mod-item {
-    background-color: #374151;
+  .grid-header {
+    display: grid;
+    grid-template-columns: 2.5fr 1fr 1fr 2fr;
+    gap: 1rem;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.05);
     border-radius: 6px;
-    border: 1px solid #4b5563;
-    padding: 1rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    margin-bottom: 0.5rem;
+  }
+
+  .header-cell {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    transition: border-color 0.2s;
   }
 
-  .mod-item.required {
-    border-left: 4px solid #ef4444;
+  .header-cell:nth-child(2),
+  .header-cell:nth-child(3) {
+    justify-content: center;
   }
 
-  .mod-item.optional {
-    border-left: 4px solid #3b82f6;
+  .header-cell:nth-child(4) {
+    justify-content: flex-end;
   }
 
-  .mod-item:hover {
-    border-color: #6b7280;
-  }
-
-  .mod-info {
-    flex: 1;
+  .mods-grid {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
   }
 
-  .mod-header {
-    display: flex;
-    justify-content: space-between;
+  .mod-card {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+    transition: all 0.3s ease;
+    display: grid;
+    grid-template-columns: 2.5fr 1fr 1fr 2fr;
+    gap: 1rem;
+    padding: 1rem;
     align-items: center;
+  }
+
+  .mod-card:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+
+  .mod-card.required {
+    border-left: 4px solid #ef4444;
+  }
+
+  .mod-card.optional {
+    border-left: 4px solid #3b82f6;
+  }
+
+  .mod-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
   }
 
   .mod-name {
     color: white;
     font-weight: 600;
     font-size: 1rem;
+    word-break: break-word;
+  }
+
+  .mod-details {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.5);
+    flex-wrap: wrap;
   }
 
   .mod-status {
     display: flex;
+    justify-content: center;
     align-items: center;
   }
 
   .status-badge {
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     font-weight: 500;
+    text-align: center;
   }
 
   .status-badge.installed {
@@ -268,18 +311,35 @@
     color: #9ca3af;
   }
 
-  .mod-details {
+  .mod-version {
     display: flex;
-    gap: 1rem;
-    font-size: 0.8rem;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .version-tag {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    background: rgba(59, 130, 246, 0.2);
+    color: #3b82f6;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    text-align: center;
+  }
+
+  .version-tag.unknown {
+    background: rgba(156, 163, 175, 0.2);
     color: #9ca3af;
+    border: 1px solid rgba(156, 163, 175, 0.3);
   }
 
   .mod-actions {
     display: flex;
+    justify-content: flex-end;
     align-items: center;
-    gap: 1rem;
-    margin-left: 1rem;
+    gap: 0.5rem;
+    flex-wrap: wrap;
   }
 
   .required-label {
@@ -293,8 +353,8 @@
     color: white;
     border: none;
     border-radius: 4px;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.8rem;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.75rem;
     cursor: pointer;
     transition: background-color 0.2s;
   }
@@ -303,71 +363,45 @@
     background-color: #2563eb;
   }
 
-  .toggle-control {
-    display: flex;
-    align-items: center;
-  }
-
-  .toggle-label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .toggle-input {
-    display: none;
-  }
-
-  .toggle-slider {
-    position: relative;
-    width: 44px;
-    height: 24px;
-    background-color: #4b5563;
-    border-radius: 12px;
-    transition: background-color 0.2s;
-  }
-
-  .toggle-slider::before {
-    content: '';
-    position: absolute;
-    width: 20px;
-    height: 20px;
-    border-radius: 10px;
-    background-color: white;
-    top: 2px;
-    left: 2px;
-    transition: transform 0.2s;
-  }
-
-  .toggle-input:checked + .toggle-slider {
-    background-color: #3b82f6;
-  }
-
-  .toggle-input:checked + .toggle-slider::before {
-    transform: translateX(20px);
-  }
-
-  .toggle-text {
-    color: #e5e7eb;
-    font-size: 0.9rem;
-    font-weight: 500;
-  }
-
-  .delete-button {
-    background-color: rgba(244, 67, 54, 0.2);
-    color: #ff6b6b;
+  .action-btn {
+    padding: 0.4rem 0.8rem;
     border: none;
     border-radius: 4px;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.8rem;
+    font-size: 0.75rem;
+    font-weight: 500;
     cursor: pointer;
-    transition: background-color 0.2s;
+    transition: all 0.2s ease;
+    white-space: nowrap;
   }
 
-  .delete-button:hover {
-    background-color: rgba(244, 67, 54, 0.3);
+  .toggle-btn {
+    background: rgba(168, 85, 247, 0.2);
+    color: #a855f7;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+  }
+
+  .toggle-btn:hover:not(:disabled) {
+    background: rgba(168, 85, 247, 0.3);
+    border-color: rgba(168, 85, 247, 0.5);
+  }
+
+  .toggle-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    background: rgba(156, 163, 175, 0.2);
+    color: #9ca3af;
+    border: 1px solid rgba(156, 163, 175, 0.3);
+  }
+
+  .delete-btn {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+  
+  .delete-btn:hover {
+    background: rgba(239, 68, 68, 0.3);
+    border-color: rgba(239, 68, 68, 0.5);
   }
 
   .summary {
@@ -386,30 +420,6 @@
 
   .summary-text {
     color: #f59e0b;
-    font-weight: 500;
-  }
-
-  .update-button {
-    background: #1bd96a;
-    color: #000;
-    font-weight: 600;
-    padding: 0.35rem 0.75rem;
-    border-radius: 6px;
-    border: none;
-    cursor: pointer;
-    transition: background-color 0.2s;
-  }
-
-  .update-button:hover {
-    background: #0ec258;
-  }
-  .version-chip {
-    padding: 0.2rem 0.4rem;
-    background: rgba(59, 130, 246, 0.2);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    border-radius: 4px;
-    font-size: 0.7rem;
     font-weight: 500;
   }
 </style>

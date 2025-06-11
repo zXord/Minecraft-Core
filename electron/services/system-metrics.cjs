@@ -8,11 +8,16 @@ const process = require('process');
 // Initialize metrics state
 let prevCpuTimes = os.cpus().map(cpu => ({ ...cpu.times }));
 let memLookupTimer = 0;
+let metricsInterval = null;
 
 function startMetricsReporting() {
+  // Clear any existing interval
+  if (metricsInterval) {
+    clearInterval(metricsInterval);
+  }
   
   // System metrics update every half second
-  setInterval(() => {
+  metricsInterval = setInterval(() => {
     publishSystemMetrics().catch(console.error);
   }, 500); // 500ms for faster UI updates
   
@@ -246,8 +251,16 @@ async function publishSystemMetrics() {
 // Initialize the last memory value
 publishSystemMetrics.lastMemUsedMB = 0;
 
+function stopMetricsReporting() {
+  if (metricsInterval) {
+    clearInterval(metricsInterval);
+    metricsInterval = null;
+  }
+}
+
 module.exports = {
   startMetricsReporting,
+  stopMetricsReporting,
   getSystemCpuPct,
   publishSystemMetrics
 };
