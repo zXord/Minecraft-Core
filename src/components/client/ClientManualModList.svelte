@@ -225,10 +225,8 @@
       <div class="header-cell">Status</div>
       <div class="header-cell">Version</div>
       <div class="header-cell">Actions</div>
-    </div>
-
-    <div class="mods-grid">
-      {#each mods as mod}        <div class="mod-card {expanded === mod.fileName ? 'expanded' : ''} {!mod.enabled ? 'disabled' : ''}">
+    </div>    <div class="mods-grid">
+      {#each mods as mod (mod.fileName)}        <div class="mod-card {expanded === mod.fileName ? 'expanded' : ''} {!mod.enabled ? 'disabled' : ''}">
           <div class="mod-header" 
                role="button" 
                tabindex="0"
@@ -312,11 +310,10 @@
                     <span class="loader-tag">{mod.loaderType}</span>
                   </div>
                 {/if}
-                {#if mod.gameVersions && mod.gameVersions.length > 0}
-                  <div class="detail-item">
+                {#if mod.gameVersions && mod.gameVersions.length > 0}                  <div class="detail-item">
                     <div class="detail-label">Game Versions:</div>
                     <div class="game-versions">
-                      {#each mod.gameVersions as version}
+                      {#each mod.gameVersions as version (version)}
                         <span class="version-chip">{version}</span>
                       {/each}
                     </div>

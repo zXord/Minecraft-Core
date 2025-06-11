@@ -513,9 +513,8 @@
     {#if searchQuery && !searchHasResults()}
       <div class="no-results">No properties match your search</div>
     {/if}
-    
-    <!-- Properties by category -->
-    {#each Object.keys(propertyCategories) as category}
+      <!-- Properties by category -->
+    {#each Object.keys(propertyCategories) as category (category)}
       {#if !searchQuery || categoryHasMatchingProperties(category)}
         <div class="property-category">          <button class="category-header" on:click={() => toggleCategory(category)} type="button">
             <span class="category-arrow">{expandedCategories[category] ? '▼' : '►'}</span>
@@ -524,10 +523,9 @@
               <span class="match-count">({getCategoryProperties(category).length} matches)</span>
             {/if}
           </button>
-          
-          {#if expandedCategories[category]}
+            {#if expandedCategories[category]}
             <div class="category-properties">
-              {#each getCategoryProperties(category) as property}
+              {#each getCategoryProperties(category) as property (property)}
                 <div class="property-row">
                   <label for={property}>
                     {propertyLabels[property] || property}:
@@ -543,13 +541,12 @@
                         on:change={e => updateProperty(property, e.currentTarget.checked ? 'true' : 'false')}
                       />
                     {:else if isEnum(property)}
-                      <!-- Enum as dropdown -->
-                      <select 
+                      <!-- Enum as dropdown -->                      <select 
                         id={property}
                         value={get(propertiesMap)[property]} 
                         on:change={e => updateProperty(property, e.currentTarget.value)}
                       >
-                        {#each propertyTypes[property].options as option}
+                        {#each propertyTypes[property].options as option (option)}
                           <option value={option}>{option}</option>
                         {/each}
                       </select>

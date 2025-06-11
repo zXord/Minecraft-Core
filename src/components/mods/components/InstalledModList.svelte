@@ -857,10 +857,9 @@
         <div class="header-cell">Location</div>
         <div class="header-cell">Current Version</div>
         <div class="header-cell">Available Update</div>
-        <div class="header-cell">Actions</div>
-      </div>
+        <div class="header-cell">Actions</div>      </div>
       <div class="mods-grid">
-        {#each $installedMods.filter(mod => !$disabledMods.has(mod)) as mod}
+        {#each $installedMods.filter(mod => !$disabledMods.has(mod)) as mod (mod)}
           {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
           {@const modCategoryInfo = $categorizedMods.find(m => m.fileName === mod)}
           <div class="mod-card {$expandedInstalledMod === mod ? 'expanded' : ''} {modCategoryInfo?.category || ''}">
@@ -1003,9 +1002,8 @@
                     <div class="loading-versions">Loading versions...</div>
                   {:else if installedModVersionsCache[modInfo.projectId].length === 0}
                     <div class="no-versions">No versions available</div>
-                  {:else}
-                    <div class="mod-versions" transition:slide|local={{ duration: 200 }}>
-                      {#each installedModVersionsCache[modInfo.projectId] as version}
+                  {:else}                    <div class="mod-versions" transition:slide|local={{ duration: 200 }}>
+                      {#each installedModVersionsCache[modInfo.projectId] as version (version.id)}
                         {@const isCurrentVersion = modInfo && modInfo.versionId === version.id}
                         {@const statusKey = `${modInfo.fileName}:${version.id}`}
                         {@const status = modStatus.get(statusKey) || ""}
@@ -1095,10 +1093,9 @@
           <div class="header-cell">Mod Name</div>
           <div class="header-cell">Current Version</div>
           <div class="header-cell">Available Update</div>
-          <div class="header-cell">Actions</div>
-        </div>
+          <div class="header-cell">Actions</div>        </div>
         <div class="mods-grid">
-          {#each Array.from($disabledMods).filter(mod => $installedMods.includes(mod)) as mod}
+          {#each Array.from($disabledMods).filter(mod => $installedMods.includes(mod)) as mod (mod)}
             <div class="mod-card disabled">
               <div class="mod-item-header-container">
                 <div class="select-cell">

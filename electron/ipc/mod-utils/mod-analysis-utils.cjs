@@ -2,7 +2,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const axios = require('axios');
-const AdmZip = require('adm-zip').default;
+const AdmZip = require('adm-zip');
 
 async function extractDependenciesFromJar(jarPath) {
   try {

@@ -82,11 +82,10 @@
     <label for="filter-mc-version">Minecraft Version:</label>
     <div class="filter-with-button">
       <select
-        id="filter-mc-version"
-        bind:value={filterMinecraftVersion}
+        id="filter-mc-version"        bind:value={filterMinecraftVersion}
         class="disabled-select"
       >
-        {#each minecraftVersionOptions as ver}
+        {#each minecraftVersionOptions as ver (ver)}
           <option value={ver}>{ver}</option>
         {/each}
       </select>

@@ -88,10 +88,9 @@
   {#if mods.length === 0}
     <div class="empty-state">
       <p>No {type} mods found.</p>
-    </div>
-  {:else}
+    </div>  {:else}
     <div class="mod-list">
-      {#each mods as mod}
+      {#each mods as mod (mod.fileName)}
         <div class="mod-item {type}">
           <div class="mod-info">
             <div class="mod-header">

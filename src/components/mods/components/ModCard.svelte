@@ -481,10 +481,9 @@
         <div class="no-versions">
           No compatible versions for Minecraft {filterMinecraftVersion}
         </div>
-      {:else}
-        {#if filteredVersions.some(v => v.gameVersions.includes(filterMinecraftVersion))}
+      {:else}        {#if filteredVersions.some(v => v.gameVersions.includes(filterMinecraftVersion))}
           <div class="version-list">
-            {#each filteredVersions as version}
+            {#each filteredVersions as version (version.id)}
               <div
                 class="version-item"
                 class:selected={version.id === selectedVersionId}
@@ -520,9 +519,8 @@
         {:else}
           <div class="version-note">
             No versions are officially tagged for Minecraft {filterMinecraftVersion}, but these versions may be compatible:
-          </div>
-          <div class="version-list">
-            {#each filteredVersions as version}
+          </div>          <div class="version-list">
+            {#each filteredVersions as version (version.id)}
               <div
                 class="version-item"
                 class:selected={version.id === selectedVersionId}

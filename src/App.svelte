@@ -388,8 +388,7 @@
 
   <!-- Sidebar -->
   <div class="sidebar" class:open={isSidebarOpen}>
-    <h2>Instances</h2>
-    <div class="instances-list">      {#each instances as instance}
+    <h2>Instances</h2>    <div class="instances-list">      {#each instances as instance (instance.id)}
         <div 
           class="instance-item" 
           class:active={currentInstance && currentInstance.id === instance.id}
@@ -499,9 +498,8 @@
     {:else if step === 'done'}
       {#if instanceType === 'server'}
         <header class="app-header">
-          <h1>Minecraft Core</h1>
-          <nav class="tabs-container">
-            {#each tabs as t}
+          <h1>Minecraft Core</h1>          <nav class="tabs-container">
+            {#each tabs as t (t)}
               <button
                 class="tab-button"
                 class:active={$route === '/' + t}

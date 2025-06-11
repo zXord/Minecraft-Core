@@ -197,22 +197,20 @@
   {:else if step === 'chooseVersion'}
     <div class="version-selection">
       <h2>Choose Minecraft version</h2>
-      <select bind:value={selectedMC} on:change={onMCVersionChange}>
-        <option disabled selected value={null}>
+      <select bind:value={selectedMC} on:change={onMCVersionChange}>        <option disabled selected value={null}>
           -- Select Minecraft Version --
         </option>
-        {#each mcVersions as v}
+        {#each mcVersions as v (v)}
           <option value={v}>{v}</option>
         {/each}
       </select>
 
       {#if selectedMC}
         <h2>Choose Fabric loader version</h2>
-        <select bind:value={selectedFabric}>
-          <option disabled selected value={null}>
+        <select bind:value={selectedFabric}>          <option disabled selected value={null}>
             -- Select Fabric Loader --
           </option>
-          {#each fabricVersions as v}
+          {#each fabricVersions as v (v)}
             <option value={v}>{v}</option>
           {/each}
         </select>
@@ -247,10 +245,9 @@
           </div>
           <p class="progress-text">Progress: {installProgress}% ({installSpeed})</p>
           
-          <div class="install-logs">
-            <h3>Installation Logs</h3>
+          <div class="install-logs">            <h3>Installation Logs</h3>
             <div class="logs-container">
-              {#each installLogs as log}
+              {#each installLogs as log, index (index)}
                 <p>{log}</p>
               {/each}
               <!-- Auto-scroll to bottom -->

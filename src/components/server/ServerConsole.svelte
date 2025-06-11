@@ -8,8 +8,7 @@
   let consoleEl;
   let autoScroll = true;
   let command = '';
-  
-  // Access the logs from the store
+    // Access the logs from the store
   $: serverLogs = $serverState.logs;
   
   // Virtual scrolling variables
@@ -20,7 +19,7 @@
   $: visibleLogs = serverLogs.slice(startIndex, endIndex);
   
   // Calculate the height for spacers
-  $: itemHeight = 21; // Approximate height of each log line in pixels
+  const itemHeight = 21; // Approximate height of each log line in pixels
   $: topSpacerHeight = startIndex * itemHeight;
   $: bottomSpacerHeight = Math.max(0, (totalLogs - endIndex) * itemHeight);
   
@@ -82,11 +81,10 @@
       <div class="virtual-spacer" style="height: {topSpacerHeight}px;"></div>
     {/if}
       <!-- Visible log lines -->
-    {#if visibleLogs.length === 0}
-      <!-- Add empty line to maintain height when no logs -->
+    {#if visibleLogs.length === 0}      <!-- Add empty line to maintain height when no logs -->
       <div class="console-line console-empty">Server console ready.</div>
     {:else}
-      {#each visibleLogs as line}
+      {#each visibleLogs as line, index (startIndex + index)}
         <div class="console-line">{line}</div>
       {/each}
     {/if}

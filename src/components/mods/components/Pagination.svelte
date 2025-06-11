@@ -79,7 +79,7 @@
       ←
     </button>
     
-    {#each pageNumbers as pageNum}
+    {#each pageNumbers as pageNum (pageNum)}
       {#if pageNum === '...'}
         <span class="pagination-ellipsis" aria-hidden="true">...</span>
       {:else}
