@@ -54,9 +54,20 @@ function isSystemDependency(id) {
 function isBundledFabricModule(id) {
   if (!id) return false;
   const canonical = String(id).toLowerCase();
+  
+  // Fabric Loader is a system dependency, not a mod
   if (canonical === 'fabricloader') return true;
+  
+  // Fabric API itself is a real mod that should be checked
   if (canonical === 'fabric-api') return false;
-  return /^fabric-.*-v\d+$/.test(canonical);
+  if (canonical === 'p7dkfbws') return false; // Fabric API's actual project ID
+  
+  // Individual Fabric API modules are bundled with the main Fabric API mod
+  // These typically follow the pattern: fabric-[module-name]-v[version]
+  return /^fabric-.*-v\d+$/.test(canonical) || 
+         // Also check for other common Fabric API module patterns
+         /^fabric[_-]api[_-]/.test(canonical) ||
+         (canonical.startsWith('fabric') && canonical.includes('api') && /v\d+/.test(canonical));
 }
 
 /**
