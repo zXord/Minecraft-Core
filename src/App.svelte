@@ -190,22 +190,20 @@
                 }
               }
             }
-            
-            // Set step to done to show the main UI
+              // Set step to done to show the main UI
             step = 'done';
           }
         } else {
-          // No valid instances, show instance selection screen
-          showInstanceSelector = true;
-          step = 'loading'; // Keep in loading to avoid showing setup wizard
+          // No valid instances found - but don't show instance selector automatically
+          // User can manually open it via the sidebar button
+          step = 'done'; // Show the main UI with empty state
         }
         
-        // Open sidebar by default only if we have instances
-        isSidebarOpen = instances.length > 0;
+        // Don't open sidebar automatically - let user open it manually if needed
+        // isSidebarOpen = instances.length > 0;
       } catch (error) {
-        // If any error occurs, show the instance selector
-        showInstanceSelector = true;
-        step = 'loading';
+        // If any error occurs, don't show the instance selector automatically
+        step = 'done';
         isLoading = false;
       }
     };
@@ -494,9 +492,19 @@
       <!-- Loading screen -->
       <div class="loading-screen">
         <p>Loading your Minecraft server...</p>
-      </div>
-    {:else if step === 'done'}
-      {#if instanceType === 'server'}
+      </div>    {:else if step === 'done'}
+      {#if currentInstance === null || instances.length === 0}
+        <!-- Empty state - show welcome message -->
+        <div class="empty-state">
+          <div class="empty-state-content">
+            <h1>Welcome to Minecraft Core</h1>
+            <p>You haven't created any instances yet. Get started by creating your first server or client instance.</p>
+            <button class="create-instance-btn" on:click={showAddInstanceScreen}>
+              <span class="plus-icon">+</span> Create Your First Instance
+            </button>
+          </div>
+        </div>
+      {:else if instanceType === 'server'}
         <header class="app-header">
           <h1>Minecraft Core</h1>          <nav class="tabs-container">
             {#each tabs as t (t)}
@@ -536,14 +544,13 @@
             <div class="content-panel">
               <Backups serverPath={path} />
             </div>          {:else if $route === '/settings'}
-            <SettingsPage 
-              serverPath={path} 
+            <SettingsPage              serverPath={path} 
               currentInstance={currentInstance} 
               on:deleted={(e) => {
                 // Remove the instance from the list
                 instances = instances.filter(i => i.id !== e.detail.id);
                 
-                // Switch to a different instance if available, otherwise show selection screen
+                // Switch to a different instance if available, otherwise show empty state
                 if (instances.length > 0) {
                   currentInstance = instances[0];
                   if (currentInstance.type === 'server') {
@@ -553,20 +560,21 @@
                     instanceType = 'client';
                   }
                 } else {
-                  showInstanceSelector = true;
+                  // Show empty state instead of forcing instance selector
+                  currentInstance = null;
+                  step = 'done';
                 }
               }}
             />
           {/if}
         </div>
-      {:else if instanceType === 'client'}
-        <ClientInterface 
+      {:else if instanceType === 'client'}        <ClientInterface 
           instance={currentInstance} 
           on:deleted={(e) => {
             // Remove the instance from the list
             instances = instances.filter(i => i.id !== e.detail.id);
             
-            // Switch to a different instance if available, otherwise show selection screen
+            // Switch to a different instance if available, otherwise show empty state
             if (instances.length > 0) {
               currentInstance = instances[0];
               if (currentInstance.type === 'server') {
@@ -576,7 +584,9 @@
                 instanceType = 'client';
               }
             } else {
-              showInstanceSelector = true;
+              // Show empty state instead of forcing instance selector
+              currentInstance = null;
+              step = 'done';
             }
           }}
         />
@@ -986,7 +996,6 @@
     font-size: 3rem;
     margin-bottom: 1rem;
   }
-
   /* Loading screen */
   .loading-screen {
     display: flex;
@@ -994,6 +1003,59 @@
     align-items: center;
     justify-content: center;
     height: 100vh;
+  }
+
+  /* Empty state */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    padding: 2rem;
+  }
+
+  .empty-state-content {
+    text-align: center;
+    max-width: 600px;
+  }
+
+  .empty-state-content h1 {
+    color: #3b82f6;
+    margin-bottom: 1rem;
+    font-size: 2.5rem;
+  }
+
+  .empty-state-content p {
+    color: #d1d5db;
+    margin-bottom: 2rem;
+    font-size: 1.2rem;
+    line-height: 1.6;
+  }
+
+  .create-instance-btn {
+    background-color: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 1rem 2rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 1.1rem;
+    transition: all 0.2s ease;
+    gap: 0.5rem;
+  }
+
+  .create-instance-btn:hover {
+    background-color: #2563eb;
+    transform: translateY(-2px);
+  }
+
+  .create-instance-btn .plus-icon {
+    font-size: 1.3rem;
   }
 
   /* Ensure client components use consistent styling */
