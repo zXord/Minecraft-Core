@@ -14,15 +14,11 @@ export async function safeInvoke(channel, ...args) {
     throw new Error('Channel name is required');
   }
   
-  try {
-    if (!window.electron || typeof window.electron.invoke !== 'function') {
-      throw new Error('Electron IPC bridge not available');
-    }
-    
-    return await window.electron.invoke(channel, ...args);
-  } catch (err) {
-    throw err;
+  if (!window.electron || typeof window.electron.invoke !== 'function') {
+    throw new Error('Electron IPC bridge not available');
   }
+  
+  return await window.electron.invoke(channel, ...args);
 }
 
 /**
@@ -72,9 +68,8 @@ export async function showConfirmationDialog(message, title = 'Confirm') {
       title: title,
       message: message
     });
-    
-    return result && result.response === 0; // 0 = "Yes" button
-  } catch (err) {
+      return result && result.response === 0; // 0 = "Yes" button
+  } catch {
     // Fallback to browser confirm
     return window.confirm(message);
   }

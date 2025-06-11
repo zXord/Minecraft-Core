@@ -12,7 +12,7 @@ export async function refreshLatestVersions(currentMcVersion) {
     const fabric = await fetchLatestFabricVersion(currentMcVersion || mc);
     latestVersions.set({ mc, fabric });
     return { mc, fabric };
-  } catch (err) {
+  } catch {
     latestVersions.set({ mc: null, fabric: null });
     return null;
   }

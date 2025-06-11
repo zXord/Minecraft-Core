@@ -26,13 +26,13 @@ export async function openFolder(folderPath) {
     }
     
     // Method 2: Use regular IPC channel - only use one method, not multiple
-    try {
+  try {
       const result = await safeInvoke('open-folder', folderPath);
       return result && result.success;
-    } catch (err) {
+    } catch {
       return false;
     }
-  } catch (err) {
+  } catch {
     return false;
   }
 }

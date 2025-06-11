@@ -75,41 +75,37 @@ async function fetchWithRetry(url, options = {}, maxRetries = 3, initialDelay = 
 export async function getModrinthPopular(options = {}) {
   const { loader, version } = options;
   
-  try {
-    const params = new URLSearchParams({
-      limit: '20',
-      offset: '0',
-      facets: JSON.stringify([
-        ['categories:forge', 'categories:fabric', 'categories:quilt'].includes(`categories:${loader}`) 
-          ? [`categories:${loader}`] 
-          : [],
-        version ? [`versions:${version}`] : [],
-      ].filter(facet => facet.length > 0))
-    });
+  const params = new URLSearchParams({
+    limit: '20',
+    offset: '0',
+    facets: JSON.stringify([
+      ['categories:forge', 'categories:fabric', 'categories:quilt'].includes(`categories:${loader}`) 
+        ? [`categories:${loader}`] 
+        : [],
+      version ? [`versions:${version}`] : [],
+    ].filter(facet => facet.length > 0))
+  });
 
-    const response = await fetchWithRetry(`${MODRINTH_API}/search?${params.toString()}`);
-    
-    if (!response.ok) {
-      throw new Error(`Modrinth API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    return data.hits.map(mod => ({
-      id: mod.project_id,
-      name: mod.title,
-      description: mod.description,
-      author: mod.author,
-      downloads: mod.downloads,
-      versions: mod.versions,
-      iconUrl: mod.icon_url,
-      source: 'modrinth',
-      downloadUrl: mod.project_id, // We'll need the project ID to get the correct download URL later
-      clientSide: mod.client_side === 'required' ? true : mod.client_side === 'optional',
-      serverSide: mod.server_side === 'required' ? true : mod.server_side === 'optional'
-    }));
-  } catch (error) {
-    throw error;
+  const response = await fetchWithRetry(`${MODRINTH_API}/search?${params.toString()}`);
+  
+  if (!response.ok) {
+    throw new Error(`Modrinth API error: ${response.status}`);
   }
+  
+  const data = await response.json();
+  return data.hits.map(mod => ({
+    id: mod.project_id,
+    name: mod.title,
+    description: mod.description,
+    author: mod.author,
+    downloads: mod.downloads,
+    versions: mod.versions,
+    iconUrl: mod.icon_url,
+    source: 'modrinth',
+    downloadUrl: mod.project_id, // We'll need the project ID to get the correct download URL later
+    clientSide: mod.client_side === 'required' ? true : mod.client_side === 'optional',
+    serverSide: mod.server_side === 'required' ? true : mod.server_side === 'optional'
+  }));
 }
 
 /**
@@ -128,42 +124,38 @@ export async function searchModrinthMods(options = {}) {
     return [];
   }
   
-  try {
-    const params = new URLSearchParams({
-      query,
-      limit: '20',
-      offset: '0',
-      facets: JSON.stringify([
-        ['categories:forge', 'categories:fabric', 'categories:quilt'].includes(`categories:${loader}`) 
-          ? [`categories:${loader}`] 
-          : [],
-        version ? [`versions:${version}`] : [],
-      ].filter(facet => facet.length > 0))
-    });
+  const params = new URLSearchParams({
+    query,
+    limit: '20',
+    offset: '0',
+    facets: JSON.stringify([
+      ['categories:forge', 'categories:fabric', 'categories:quilt'].includes(`categories:${loader}`) 
+        ? [`categories:${loader}`] 
+        : [],
+      version ? [`versions:${version}`] : [],
+    ].filter(facet => facet.length > 0))
+  });
 
-    const response = await fetchWithRetry(`${MODRINTH_API}/search?${params.toString()}`);
-    
-    if (!response.ok) {
-      throw new Error(`Modrinth API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    return data.hits.map(mod => ({
-      id: mod.project_id,
-      name: mod.title,
-      description: mod.description,
-      author: mod.author,
-      downloads: mod.downloads,
-      versions: mod.versions,
-      iconUrl: mod.icon_url,
-      source: 'modrinth',
-      downloadUrl: mod.project_id, // We'll need the project ID to get the correct download URL later
-      clientSide: mod.client_side === 'required' ? true : mod.client_side === 'optional',
-      serverSide: mod.server_side === 'required' ? true : mod.server_side === 'optional'
-    }));
-  } catch (error) {
-    throw error;
+  const response = await fetchWithRetry(`${MODRINTH_API}/search?${params.toString()}`);
+  
+  if (!response.ok) {
+    throw new Error(`Modrinth API error: ${response.status}`);
   }
+  
+  const data = await response.json();
+  return data.hits.map(mod => ({
+    id: mod.project_id,
+    name: mod.title,
+    description: mod.description,
+    author: mod.author,
+    downloads: mod.downloads,
+    versions: mod.versions,
+    iconUrl: mod.icon_url,
+    source: 'modrinth',
+    downloadUrl: mod.project_id, // We'll need the project ID to get the correct download URL later
+    clientSide: mod.client_side === 'required' ? true : mod.client_side === 'optional',
+    serverSide: mod.server_side === 'required' ? true : mod.server_side === 'optional'
+  }));
 }
 
 /**
@@ -179,40 +171,36 @@ export async function getModrinthDownloadUrl(projectId, version, loader) {
     throw new Error('Project ID is required');
   }
   
-  try {
-    const response = await fetchWithRetry(`${MODRINTH_API}/project/${projectId}/version`);
-    
-    if (!response.ok) {
-      throw new Error(`Modrinth API error: ${response.status}`);
-    }
-    
-    const versions = await response.json();
-    
-    // Filter versions that match our requirements
-    const matchingVersions = versions.filter(v => {
-      return (
-        (!version || v.game_versions.includes(version)) &&
-        (!loader || v.loaders.includes(loader))
-      );
-    });
-    
-    if (matchingVersions.length === 0) {
-      throw new Error('No matching versions found for this mod');
-    }
-    
-    // Get latest version
-    const latest = matchingVersions[0];
-    
-    // Get primary file
-    if (latest.files.length === 0) {
-      throw new Error('No files found for this mod version');
-    }
-    
-    const primaryFile = latest.files.find(file => file.primary) || latest.files[0];
-    return primaryFile.url;
-  } catch (error) {
-    throw error;
+  const response = await fetchWithRetry(`${MODRINTH_API}/project/${projectId}/version`);
+  
+  if (!response.ok) {
+    throw new Error(`Modrinth API error: ${response.status}`);
   }
+  
+  const versions = await response.json();
+  
+  // Filter versions that match our requirements
+  const matchingVersions = versions.filter(v => {
+    return (
+      (!version || v.game_versions.includes(version)) &&
+      (!loader || v.loaders.includes(loader))
+    );
+  });
+  
+  if (matchingVersions.length === 0) {
+    throw new Error('No matching versions found for this mod');
+  }
+  
+  // Get latest version
+  const latest = matchingVersions[0];
+  
+  // Get primary file
+  if (latest.files.length === 0) {
+    throw new Error('No files found for this mod version');
+  }
+  
+  const primaryFile = latest.files.find(file => file.primary) || latest.files[0];
+  return primaryFile.url;
 }
 
 /**
@@ -254,13 +242,11 @@ export async function getCurseForgePopular({ loader, version }) {
       description: mod.summary,
       author: mod.authors[0]?.name || 'Unknown',
       downloads: mod.downloadCount,
-      versions: mod.latestFiles.map(file => file.gameVersion),
-      iconUrl: mod.logo?.thumbnailUrl,
+      versions: mod.latestFiles.map(file => file.gameVersion),      iconUrl: mod.logo?.thumbnailUrl,
       source: 'curseforge',
       downloadUrl: mod.id, // We'll need the mod ID to get the correct download URL later
     }));
-  } catch (error) {
-    
+  } catch {
     // Return an empty array rather than throwing, since CurseForge might be behind a paywall
     return [];
   }
@@ -309,8 +295,7 @@ export async function searchCurseForgeMods({ query, loader, version }) {
       iconUrl: mod.logo?.thumbnailUrl,
       source: 'curseforge',
       downloadUrl: mod.id, // We'll need the mod ID to get the correct download URL later
-    }));
-  } catch (error) {
+    }));  } catch {
     
     // Return an empty array rather than throwing, since CurseForge might be behind a paywall
     return [];
@@ -326,38 +311,34 @@ export async function searchCurseForgeMods({ query, loader, version }) {
  * @returns {Promise<string>} Download URL
  */
 export async function getCurseForgeDownloadUrl(modId, version, loader) {
-  try {
-    const modLoaderId = loader === 'fabric' ? 4 : loader === 'forge' ? 1 : null;
-    
-    const response = await fetch(`${CURSEFORGE_API}/mods/${modId}`, {
-      headers: {
-        'x-api-key': CF_API_KEY,
-      },
-    });
-    
-    if (!response.ok) {
-      throw new Error(`CurseForge API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    const files = data.data.latestFiles;
-    
-    // Filter files that match our requirements
-    const matchingFiles = files.filter(file => {
-      return (
-        (!version || file.gameVersions.includes(version)) &&
-        (!modLoaderId || file.modLoaderType === modLoaderId)
-      );
-    });
-    
-    if (matchingFiles.length === 0) {
-      throw new Error('No matching files found for this mod');
-    }
-    
-    // Get latest file
-    const latest = matchingFiles[0];
-    return latest.downloadUrl;
-  } catch (error) {
-    throw error;
+  const modLoaderId = loader === 'fabric' ? 4 : loader === 'forge' ? 1 : null;
+  
+  const response = await fetch(`${CURSEFORGE_API}/mods/${modId}`, {
+    headers: {
+      'x-api-key': CF_API_KEY,
+    },
+  });
+  
+  if (!response.ok) {
+    throw new Error(`CurseForge API error: ${response.status}`);
   }
-} 
+  
+  const data = await response.json();
+  const files = data.data.latestFiles;
+  
+  // Filter files that match our requirements
+  const matchingFiles = files.filter(file => {
+    return (
+      (!version || file.gameVersions.includes(version)) &&
+      (!modLoaderId || file.modLoaderType === modLoaderId)
+    );
+  });
+  
+  if (matchingFiles.length === 0) {
+    throw new Error('No matching files found for this mod');
+  }
+  
+  // Get latest file
+  const latest = matchingFiles[0];
+  return latest.downloadUrl;
+}

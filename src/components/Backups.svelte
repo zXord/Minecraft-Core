@@ -166,24 +166,7 @@
 
   function cleanErrorMessage(msg) {
     if (!msg) return '';
-    // Remove Electron's remote method error prefix
-    return msg.replace(/^Error invoking remote method '[^']+':\s*/i, '');
-  }
-
-  async function createBackup(type) {
-    loading = true;
-    status = `Creating ${type} backup...`;
-    error = '';
-    try {
-      const result = await window.electron.invoke('backups:create', { serverPath, type, trigger: 'manual' });
-      if (result.error) throw new Error(result.error);
-      status = 'Backup complete!';
-      await fetchBackups();
-    } catch (e) {
-      error = cleanErrorMessage(e.message) || 'Backup failed';
-    }
-    loading = false;
-    setTimeout(() => status = '', 2000);
+    // Remove Electron's remote method error prefix    return msg.replace(/^Error invoking remote method '[^']+':\s*/i, '');
   }
 
   function confirmDelete(backup) {
@@ -405,10 +388,10 @@
             {/each}
           </select>
         </div>
-        
-        <div class="grid-item">
-          <label>Content:</label>
-          <div class="radio-group horizontal">
+          <div class="grid-item">
+          <label for="backup-content">Content:</label>
+          <div class="radio-group horizontal" id="backup-content" role="group" aria-labelledby="backup-content-label">
+            <span id="backup-content-label" class="sr-only">Backup content type</span>
             <label class="radio-label">
               <input 
                 type="radio" 
@@ -449,11 +432,11 @@
             <span>backups</span>
           </div>
         </div>
-        
-        {#if showTimeSelector}
+          {#if showTimeSelector}
           <div class="grid-item schedule-item">
-            <label>Schedule at:</label>
-            <div class="time-selectors">
+            <label for="schedule-controls">Schedule at:</label>
+            <div class="time-selectors" id="schedule-controls" role="group" aria-labelledby="schedule-controls-label">
+              <span id="schedule-controls-label" class="sr-only">Schedule time controls</span>
               {#if showDaySelector}
                 <select 
                   id="backup-day"
@@ -812,20 +795,8 @@
   }
   
   .time-selectors select {
-    width: auto;
-    min-width: 55px;
+    width: auto;    min-width: 55px;
     text-align: center;
-  }
-  
-  .backup-warning {
-    color: #ff9800;
-    background: #232323;
-    border: 1px solid #ff9800;
-    border-radius: 5px;
-    padding: 0.5rem 1rem;
-    margin-top: 0.5rem;
-    font-size: 0.95rem;
-    display: inline-block;
   }
   
   .bulk-delete {
@@ -862,8 +833,19 @@
     border-top: 1px solid #444;
     padding-top: 1rem;
   }
-  
-  .backups-list-header h3 {
+    .backups-list-header h3 {
     margin: 0;
   }
-</style> 
+  
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+</style>
