@@ -3,17 +3,14 @@
   import { get } from 'svelte/store';
   import { createEventDispatcher } from 'svelte';
   import { safeInvoke } from '../../utils/ipcUtils.js';
-  
   // Import stores
   import { 
-    installedModInfo,
     installingModIds,
     searchResults,
     successMessage, 
     errorMessage,
     minecraftVersion,
     loaderType,
-    currentPage,
     totalPages,
     totalResults,
     isLoading,
@@ -23,28 +20,21 @@
     expandedInstalledMod,
     modsWithUpdates,
     currentDependencies,
-    modToInstall,
-    categorizedMods,
-    updateModCategory,
-    updateModRequired
+    modToInstall
   } from '../../stores/modStore.js';
-  
-  // Import components
+    // Import components
 import ModSearch from '../mods/components/ModSearch.svelte';
 import InstalledModList from '../mods/components/InstalledModList.svelte';
 import ModDropZone from '../mods/components/ModDropZone.svelte';
-import Pagination from '../mods/components/Pagination.svelte';
 import StatusManager from '../common/StatusManager.svelte';
 import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';
 import DownloadProgress from '../mods/components/DownloadProgress.svelte';
-  
-  // Import API utilities
+    // Import API utilities
   import { 
     loadMods, 
     searchMods,
     loadServerConfig,
     installMod,
-    deleteMod,
     checkForUpdates
   } from '../../utils/mods/modAPI.js';
   import { 
@@ -441,10 +431,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       });
     }
   }
-  
-  // Handle mod update from InstalledModList
+    // Handle mod update from InstalledModList
   async function handleUpdateMod(event) {
-    const { modName, projectId, versionId, version } = event.detail;
+    const { modName, projectId, versionId } = event.detail;
     
     try {
       // Find the mod name without file extension
@@ -458,16 +447,11 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         selectedVersionId: versionId,
         source: 'modrinth'
       };
-      
-      // Remove this mod from the updates list immediately to prevent duplicate clicks
+        // Remove this mod from the updates list immediately to prevent duplicate clicks
       modsWithUpdates.update(updates => {
         updates.delete(modName);
         return updates;
       });
-      
-      // First check if the filename might change due to version update
-      // This helps ensure we properly detect and update the file
-      const oldModInfo = get(installedModInfo).find(m => m.fileName === modName);
       
       // Install the new version (it will replace the old one automatically)
       const success = await installMod(mod, serverPath);
@@ -485,15 +469,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       }
     } catch (error) {
       errorMessage.set(`Failed to update mod: ${error.message || 'Unknown error'}`);
-    }
-  }
-  
-  // Handle page change
-  async function handlePageChange(event) {
-    const { page } = event.detail;
-    currentPage.set(page);
-    await handleSearch();
-  }
+    }  }
   
   // Handle filter change
   async function handleFilterChange(event) {

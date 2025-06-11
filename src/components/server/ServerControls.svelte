@@ -3,7 +3,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';  import { serverState, updateServerMetrics } from '../../stores/serverState.js';
   import { playerState, updateOnlinePlayers, showContextMenu } from '../../stores/playerState.js';
-  import PlayerContextMenu from '../players/PlayerContextMenu.svelte';  import { openFolder, validateServerPath } from '../../utils/folderUtils.js';
+  import PlayerContextMenu from '../players/PlayerContextMenu.svelte';
+  import { validateServerPath } from '../../utils/folderUtils.js';
   import { errorMessage } from '../../stores/modStore.js';
   import { settingsStore, loadSettings } from '../../stores/settingsStore.js';
   import { latestVersions, refreshLatestVersions } from '../../stores/versionUpdates.js';
@@ -87,9 +88,7 @@
     } catch (error) {
     }
   }
-
-  // Server status tracking
-  $: serverStatus = $serverState?.status || 'stopped';
+  // Server status tracking  
   $: port = $serverState?.port || 25565;
   $: maxRam = $serverState?.maxRam || 4;
 
@@ -377,12 +376,11 @@
       maxRam: maxRam
     }));
     // Save settings to electron store
-    window.electron.invoke('update-settings', {
-      port: port,
+    window.electron.invoke('update-settings', {      port: port,
       maxRam: maxRam,
       autoStartMinecraft: autoStartMinecraft,
       autoStartManagement: autoStartManagement
-    }).catch(err => {
+    }).catch(() => {
       // Failed to save settings - silent fail
     });
   }
@@ -409,28 +407,6 @@
       }
     }
   }
-
-  // Open server folder in explorer
-  async function openFolderInExplorer() {
-    if (!validateServerPath(serverPath)) return;
-    
-    // Add a debounce flag to the window to prevent multiple opens
-    if (window._folderOpenInProgress) {
-      return;
-    }
-    
-    window._folderOpenInProgress = true;
-    
-    try {
-      await openFolder(serverPath);
-    } finally {
-      // Reset the flag after a short delay
-      setTimeout(() => {
-        window._folderOpenInProgress = false;
-      }, 1000);
-    }
-  }
-
   // Show context menu for player
   function showPlayerContextMenu(event, playerName) {
     event.preventDefault();

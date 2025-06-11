@@ -2,8 +2,6 @@
 <script>
   /// <reference path="../../electron.d.ts" />
   import { playerState, hideContextMenu } from '../../stores/playerState.js';
-  import { onMount } from 'svelte';
-  import path from 'path';
   
   // Access the context menu state from the store
   $: contextMenu = $playerState.contextMenu;
@@ -67,13 +65,17 @@
     if (listName) {
       try {
         // Get server path from global context - properly await the Promise
-        let serverPath = '';
-        if (window.serverPath) {
-          try {
-            // Make sure to await the Promise and extract the path property
-            const pathResult = await window.serverPath.get() || '';
+        let serverPath = '';        if (window.serverPath) {
+          try {            // Make sure to await the Promise and extract the path property
+            const pathResult = await window.serverPath.get();
             // The result could be either { path: '...' } or just the path string
-            serverPath = pathResult && typeof pathResult === 'object' ? pathResult.path : pathResult;
+            if (pathResult) {
+              if (typeof pathResult === 'object' && pathResult && 'path' in pathResult) {
+                serverPath = /** @type {any} */ (pathResult).path;
+              } else {
+                serverPath = String(pathResult);
+              }
+            }
           } catch (err) {
           }
         }
@@ -94,18 +96,7 @@
             playerState.update(state => ({
               ...state,
               lastBannedPlayer: player
-            }));
-            
-            
-            // Create an object with both IP and player name
-            const ipEntry = {
-              ip: mockIp,
-              playerName: player,
-              created: new Date().toISOString(),
-              source: "Minecraft Core",
-              expires: "forever"
-            };
-            
+            }));            
             // Create a specially formatted string that our backend can parse
             const formattedEntry = `${mockIp} (Player: ${player})`;
             
@@ -135,20 +126,18 @@
           } catch (err) {
           }
           
-          return; // Exit early since we've handled the entire action
-        } else {
+          return; // Exit early since we've handled the entire action        } else {
           // Regular player actions
           // Update list in backend
-          let actionResult;
           try {
-            actionResult = await window.electron.invoke(
+            await window.electron.invoke(
               action.startsWith('un') ? 'remove-player' : 'add-player', 
               listName, 
               serverPath,
               player
             );
           } catch (err) {
-            actionResult = [];
+            // Error handled silently
           }
         }
         

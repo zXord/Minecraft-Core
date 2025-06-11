@@ -16,11 +16,8 @@
   let originalProperties = {}; // For dirty state tracking
   let isLoading = true;
   let error = null;
-  let searchQuery = '';
-  let hasChanges = false;
+  let searchQuery = '';  let hasChanges = false;
   let showRestoreConfirmation = false;
-  // Reference to the button to position the confirmation dialog
-  let restoreButtonRef;
   
   // propertiesRestartNeeded persists across component unmounts
   // Clear restart-needed only when server transitions from Stopped to Running
@@ -159,29 +156,7 @@
     'enable-command-block': 'Enable Command Blocks',
     'snooper-enabled': 'Snooper Enabled',
     'broadcast-console-to-ops': 'Broadcast Console to OPs',
-    'broadcast-rcon-to-ops': 'Broadcast RCON to OPs'
-  };
-
-  // Auto-detect property types for unlisted properties
-  function getPropertyType(property, value) {
-    // If type is explicitly defined, use that
-    if (propertyTypes[property]) {
-      return propertyTypes[property];
-    }
-    
-    // Otherwise, guess based on the value
-    if (value === 'true' || value === 'false') {
-      return 'boolean';
-    }
-    
-    // Check if it's a number
-    if (!isNaN(Number(value)) && value.trim() !== '') {
-      return { type: 'number', min: 0, max: 99999 };
-    }
-    
-    // Default to text
-    return 'text';
-  }
+    'broadcast-rcon-to-ops': 'Broadcast RCON to OPs'  };
 
   // Helper functions for property type checking
   function isBoolean(property) {
@@ -203,22 +178,8 @@
     const value = get(propertiesMap)[property];
     return !isNaN(Number(value)) && value?.trim() !== '';
   }
-
   function isEnum(property) {
     return propertyTypes[property]?.type === 'enum' || false;
-  }
-
-  function validateProperty(property, value) {
-    if (isBoolean(property)) {
-      return String(value) === 'true' || String(value) === 'false';
-    } else if (isNumber(property)) {
-      const num = Number(value);
-      const config = propertyTypes[property] || { min: 0, max: 99999 };
-      return !isNaN(num) && num >= config.min && num <= config.max;
-    } else if (isEnum(property)) {
-      return propertyTypes[property].options.includes(String(value));
-    }
-    return true; // String values are always valid
   }
 
   // Load server.properties file
@@ -518,12 +479,10 @@
         >
           🔄 Reload
         </button>
-        <div class="restore-button-container">
-          <button 
+        <div class="restore-button-container">          <button 
             class="restore-button" 
             title="Restore default properties" 
             on:click={() => showRestoreConfirmation = true}
-            bind:this={restoreButtonRef}
           >
             ↩️ Defaults
           </button>
@@ -558,14 +517,13 @@
     <!-- Properties by category -->
     {#each Object.keys(propertyCategories) as category}
       {#if !searchQuery || categoryHasMatchingProperties(category)}
-        <div class="property-category">
-          <div class="category-header" on:click={() => toggleCategory(category)}>
+        <div class="property-category">          <button class="category-header" on:click={() => toggleCategory(category)} type="button">
             <span class="category-arrow">{expandedCategories[category] ? '▼' : '►'}</span>
             <h4>{category.charAt(0).toUpperCase() + category.slice(1)}</h4>
             {#if searchQuery}
               <span class="match-count">({getCategoryProperties(category).length} matches)</span>
             {/if}
-          </div>
+          </button>
           
           {#if expandedCategories[category]}
             <div class="category-properties">
@@ -663,12 +621,6 @@
     color: #ff5555;
   }
   
-  .error-message {
-    margin: 1rem 0;
-    padding: 0.5rem;
-    background: rgba(255, 85, 85, 0.1);
-    border-radius: 4px;
-  }
   
   .error-actions {
     display: flex;
@@ -811,13 +763,20 @@
     border-radius: 4px;
     overflow: hidden;
   }
-  
-  .category-header {
+    .category-header {
+    width: 100%;
     padding: 0.5rem;
     background: #333;
     cursor: pointer;
     display: flex;
     align-items: center;
+    border: none;
+    color: white;
+    text-align: left;
+  }
+  
+  .category-header:hover {
+    background: #3a3a3a;
   }
   
   .category-header h4 {

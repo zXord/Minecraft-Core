@@ -198,10 +198,16 @@
       proceedWithInstall();
     }
   }
-  
-  function closeModal(event) {
+    function closeModal(event) {
     // Only close if clicking directly on the backdrop
     if (event.target === event.currentTarget) {
+      cancel();
+    }
+  }
+  
+  function handleBackdropKeydown(event) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
       cancel();
     }
   }
@@ -266,14 +272,14 @@
   <div 
     class="modal-overlay" 
     on:click={closeModal}
+    on:keydown={handleBackdropKeydown}
     role="dialog"
     aria-modal="true"
     aria-labelledby="dependency-modal-title"
     aria-describedby="dependency-modal-description"
-  >
-    <div 
+    tabindex="-1"
+  >    <div 
       class="modal-content" 
-      on:click|stopPropagation
       role="document"
     >
       <h3 id="dependency-modal-title">Required Dependencies</h3>

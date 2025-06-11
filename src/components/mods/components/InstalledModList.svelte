@@ -28,22 +28,8 @@
   
   // Event dispatcher
   const dispatch = createEventDispatcher();
-  
-  // Track download events
+    // Track download events
   let downloadListener;
-  
-  // Browser-compatible path utilities
-  function dirname(path) {
-    return path.replace(/\\/g, '/').replace(/\/[^/]*$/, '');
-  }
-  
-  function basename(path) {
-    return path.replace(/\\/g, '/').split('/').pop();
-  }
-  
-  function join(...parts) {
-    return parts.map(part => part.replace(/^\/|\/$/g, '')).filter(Boolean).join('/');
-  }
   
   /**
    * Toggle version selector for an installed mod
@@ -312,25 +298,7 @@
       // Reset the state
       modToToggle = null;
       confirmDisableVisible = false;
-    }
-  }
-  
-  /**
-   * Handle Refresh button click
-   */
-  async function handleRefreshClick() {
-    try {
-      // Reload mods first
-      await loadMods(serverPath);
-      
-      // Then check for updates
-      await checkForUpdates(serverPath);
-      
-      // Notify parent component
-      dispatch('refresh');
-    } catch (error) {
-    }
-  }
+    }  }
   
   /**
    * Handle Check Updates button click
@@ -836,18 +804,7 @@
       successMessage.set(`${fileName} is now ${required ? 'required' : 'optional'} for clients`);
     } catch (err) {
       errorMessage.set(`Failed to update mod requirement: ${err.message}`);
-    }
-  }
-  
-  // Update a mod's required status
-  async function handleUpdateRequired(mod, required) {
-    try {
-      await updateModRequired(mod.fileName, required);
-      successMessage.set(`${mod.title} is now ${required ? 'required' : 'optional'}`);
-    } catch (error) {
-      errorMessage.set(`Failed to update mod requirement: ${error.message}`);
-    }
-  }
+    }  }
 </script>
 
 <div class="installed-mods-section">
@@ -977,10 +934,8 @@
                   <span class="up-to-date">Up to date</span>
                 {/if}
               </div>
-              
-              <div class="mod-actions">
+                <div class="mod-actions">
                 {#if $modsWithUpdates.has(mod)}
-                  {@const updateInfo = $modsWithUpdates.get(mod)}
                   <button class="update-button" on:click={() => updateModToLatest(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
                     {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Update
                   </button>

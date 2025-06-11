@@ -82,10 +82,8 @@
   let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
   let filterType = 'client';
-  let downloadManagerCleanup;
-  let unsubscribeInstalledInfo;
+  let downloadManagerCleanup;  let unsubscribeInstalledInfo;
   let previousPath: string | null = null;
-  let manualMods = []; // Declare manualMods here
 
   // Connect to server and get mod information
   onMount(() => {
@@ -134,38 +132,9 @@
       if (!minecraftVersionOptions.includes($minecraftVersion)) {
         minecraftVersionOptions = [$minecraftVersion, ...minecraftVersionOptions.filter(v => v !== $minecraftVersion)];
       }
-    }
-  }
-  // Update manual mods based on current synchronization status
-  function updateManualMods() {
-    const info = get(installedModInfo);
-    
-    if (!info || info.length === 0) {
-      manualMods = [];
-      return;
-    }
-    // Also include server-only mods in the 'managed' set so they don't appear as manual client mods
-    const managed = new Set([
-      ...requiredMods.map(m => m.fileName.toLowerCase()),
-      ...optionalMods.map(m => m.fileName.toLowerCase()),
-      ...serverMods.map(m => m.fileName.toLowerCase()) // Include server-only mods
-    ]);
+    }  }
 
-    const disabledSet = new Set(
-      (modSyncStatus?.presentDisabledMods || []).map(f => f.toLowerCase())
-    );
-
-    const filteredMods = info.filter(mod => !managed.has(mod.fileName.toLowerCase()));
-
-    manualMods = filteredMods.map(mod => ({
-        fileName: mod.fileName,
-        location: disabledSet.has(mod.fileName.toLowerCase()) ? 'disabled' : 'client',
-        projectId: mod.projectId,
-        versionId: mod.versionId,
-        versionNumber: mod.versionNumber,
-        name: mod.name
-      }));
-  }  async function loadInstalledInfo() {
+  async function loadInstalledInfo() {
     try {
       const info = await window.electron.invoke('get-client-installed-mod-info', instance.path);
       
@@ -193,14 +162,8 @@
           return mod;
         });
         
-        const projectIds = new Set(enrichedInfo.map(i => i.projectId).filter(Boolean));
-        installedModIds.set(projectIds);
+        const projectIds = new Set(enrichedInfo.map(i => i.projectId).filter(Boolean));        installedModIds.set(projectIds);
         installedModInfo.set(enrichedInfo);
-        
-        // Force update manual mods after setting the store
-        setTimeout(() => {
-          updateManualMods();
-        }, 100);
       } else {
       }
     } catch (err) {
@@ -320,10 +283,8 @@
       connectionStatus = 'disconnected';
       serverManagedFiles.set(new Set());
       errorMessage.set('Failed to connect to server: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    } finally {
+      setTimeout(() => errorMessage.set(''), 5000);    } finally {
       isLoadingMods = false;
-      updateManualMods();
     }
   }
 
@@ -356,19 +317,15 @@
         );
         setTimeout(() => errorMessage.set(''), 5000);
       }
-    } catch (err) {
-      errorMessage.set('Failed to check mod synchronization.');
+    } catch (err) {      errorMessage.set('Failed to check mod synchronization.');
       setTimeout(() => errorMessage.set(''), 5000);
     }
-    updateManualMods();
   }
 
   // Reload installed mod info and update synchronization status
   async function refreshInstalledMods() {
     if (!instance?.path) return;
-    await loadInstalledInfo();
-    await checkModSynchronization();
-    updateManualMods();
+    await loadInstalledInfo();    await checkModSynchronization();
   }
 
   // Download required mods

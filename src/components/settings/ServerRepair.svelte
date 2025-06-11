@@ -2,7 +2,6 @@
 <script>
   /// <reference path="../../electron.d.ts" />
   import { onMount } from 'svelte';
-  import { serverState } from '../../stores/serverState.js';
   
   export let serverPath = '';
   
@@ -17,25 +16,11 @@
   let selectedMC;
   let selectedFabric;
   
-  // Java installation check
-  let javaInstalled = null;
-  
-  async function checkHealth() {
+    async function checkHealth() {
     try {
       healthReport = (await window.electron.invoke('check-health', serverPath)) || [];
     } catch (err) {
       healthReport = [];
-    }
-  }
-
-  async function checkJava() {
-    try {
-      const result = await window.electron.invoke('check-java');
-      javaInstalled = result.installed;
-      return result.installed;
-    } catch (err) {
-      javaInstalled = false;
-      return false;
     }
   }
 
@@ -73,13 +58,11 @@
       }
       
       
-      repairLogs = [...repairLogs, `Repairing server with Minecraft ${selectedMC} and Fabric ${selectedFabric}`];
-
-      // Direct call to repair-health without delay
+      repairLogs = [...repairLogs, `Repairing server with Minecraft ${selectedMC} and Fabric ${selectedFabric}`];      // Direct call to repair-health without delay
       try {
         repairLogs = [...repairLogs, 'Sending repair request to server...'];
         
-        const result = await window.electron.invoke('repair-health', {
+        await window.electron.invoke('repair-health', {
           targetPath: serverPath,
           mcVersion: selectedMC,
           fabricVersion: selectedFabric

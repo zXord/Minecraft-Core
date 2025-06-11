@@ -1,8 +1,7 @@
 <!-- @ts-ignore -->
-<script>
-  import { createEventDispatcher } from 'svelte';
+<script>  import { createEventDispatcher } from 'svelte';
   import { onMount } from 'svelte';
-  import { get } from 'svelte/store';  import {
+  import {
     searchKeyword,
     modSource,
     searchResults,
@@ -11,14 +10,12 @@
     currentPage,
     totalPages,
     totalResults,
-    resultsPerPage,
     expandedModId,
     minecraftVersion,
     loaderType,
     filterMinecraftVersion,
     filterModLoader,
     installedModInfo,
-    modsWithUpdates,
     isCheckingUpdates,
     successMessage
   } from '../../../stores/modStore.js';
@@ -31,13 +28,11 @@
   export let filterType = 'all';
   /** @type {Set<string> | undefined} */
   export let serverManagedSet = undefined;
-  
-  // Local state
+    // Local state
   let versionsCache = {};
   let versionsLoading = {};
   let versionsError = {};
   let displayTotalPages = 1; // For UI pagination display
-  let visibleModIds = new Set(); // Track which mods are visible
   let visibleMods = []; // Mods to display on current page
   let hasLoadedOnce = false;
   let pageDebounceTimer = null;
@@ -100,9 +95,8 @@
     } catch (error) {
     }
   }
-  
-  // Load mods or search results
-  async function loadMods(page = 1) {
+    // Load mods or search results
+  async function loadMods() {
     await searchMods({ sortBy });
   }
   
@@ -110,19 +104,8 @@
   $: if ($searchResults.length > 0 && $filterMinecraftVersion) {
     // We don't need to auto-load versions anymore
     // This will be done on-demand when a user expands a mod card
-  }
-  
-  // We no longer need client-side filtering since we're using the API's filtering
-  $: filteredResults = $searchResults;
-  
-  // Update display total pages based on filtered results and API response
-  $: {
-    // Always use the API-provided total pages and total results
-    // This will automatically update when filters change since we're making new API calls
-    displayTotalPages = $totalPages || 1;
-    
-    // Debug log to check pagination values
-  }
+  }  // Update display total pages based on API response
+  $: displayTotalPages = $totalPages || 1;
   
   // Calculate visible mods - just use the search results directly since filtering is done by API
   $: visibleMods = $searchResults;
@@ -288,25 +271,14 @@
       versionsLoading = { ...versionsLoading, [modId]: false };
     }
   }
-  
   // Handle version selection
-  function handleVersionSelect(event) {
-    const { mod, versionId } = event.detail;
+  function handleVersionSelect() {
+    // Version selection handled by parent component
   }
-  
-  // Handle install
+    // Handle install
   function handleInstall(event) {
     const { mod, versionId } = event.detail;
     dispatch('install', { mod, versionId });
-  }
-  
-  // Optimize initial loading of versions to prevent too many concurrent requests
-  function handleVisibleMod(mod, isVisible) {
-    if (isVisible) {
-      visibleModIds.add(mod.id);
-    } else {
-      visibleModIds.delete(mod.id);
-    }
   }
 </script>
 
