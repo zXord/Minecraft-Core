@@ -153,24 +153,35 @@ export async function loadMods(serverPath) {
       if (currentLoadId !== loadId) {
         return false;
       }
-      
-      // Process installed mod info to ensure we have version IDs
+        // Process installed mod info to ensure we have version IDs and proper data
       const modVersionsFromCache = get(installedModVersionsCache);
       const updatedModInfo = modInfo.map(info => {
-        if (info.projectId) {
+        // Ensure we have a clean object with all necessary properties
+        const cleanInfo = {
+          fileName: info.fileName,
+          projectId: info.projectId || null,
+          versionId: info.versionId || null,
+          versionNumber: info.versionNumber || null,
+          name: info.name || (info.fileName ? info.fileName.replace(/\.jar$/i, '') : null),
+          source: info.source || 'modrinth'
+        };
+
+        if (cleanInfo.projectId) {
           // If we have cached version info, match version number to version ID
-          if (modVersionsFromCache[info.projectId]) {
-            const versions = modVersionsFromCache[info.projectId];
-            const matchingVersion = versions.find(v => v.versionNumber === info.versionNumber);
+          if (modVersionsFromCache[cleanInfo.projectId] && cleanInfo.versionNumber) {
+            const versions = modVersionsFromCache[cleanInfo.projectId];
+            const matchingVersion = versions.find(v => v.versionNumber === cleanInfo.versionNumber);
             if (matchingVersion) {
-              info.versionId = matchingVersion.id;
+              cleanInfo.versionId = matchingVersion.id;
             }
           }
         }
-        return info;
+        return cleanInfo;
       });
       
-      installedModIds.set(new Set(updatedModInfo.map(info => info.projectId).filter(Boolean)));
+      // Update stores with clean, properly structured data
+      const validProjectIds = new Set(updatedModInfo.map(info => info.projectId).filter(Boolean));
+      installedModIds.set(validProjectIds);
       installedModInfo.set(updatedModInfo);
       
       // Automatically check for updates after loading mods

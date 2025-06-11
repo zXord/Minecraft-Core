@@ -192,7 +192,8 @@ async function getInstalledModInfo(serverPath) {
       const serverManifestPath = path.join(serverManifestDir, `${modFile}.json`);
       const clientManifestPath = path.join(clientManifestDir, `${modFile}.json`);
       let manifest = null;      try {
-        await fs.readFile(clientManifestPath, 'utf8');
+        const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
+        manifest = JSON.parse(clientManifestContent);
       } catch {
         try {
           const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
@@ -225,8 +226,7 @@ async function getInstalledModInfo(serverPath) {
               
               // Store the original manifest projectId before merging
               const originalProjectId = manifest.projectId;
-              
-              manifest = { 
+                manifest = { 
                 ...meta, 
                 ...manifest, 
                 // Always preserve proper Modrinth project ID if it exists in manifest
@@ -238,6 +238,8 @@ async function getInstalledModInfo(serverPath) {
             // Ignore metadata extraction errors
           }
         }
+        // Ensure fileName property is always set
+        manifest.fileName = modFile;
         modInfo.push(manifest);
       }
     }
@@ -300,8 +302,7 @@ async function getClientInstalledModInfo(clientPath) {
             
             // Store the original manifest projectId before merging
             const originalProjectId = manifest.projectId;
-            
-            manifest = { 
+              manifest = { 
               ...meta, 
               ...manifest, 
               // Always preserve proper Modrinth project ID if it exists in manifest
@@ -311,9 +312,12 @@ async function getClientInstalledModInfo(clientPath) {
             };          }
         } catch {
           // Ignore metadata extraction errors
-        }
+        }      }
+      // Ensure fileName property is always set
+      if (manifest) {
+        manifest.fileName = file;
+        modInfo.push(manifest);
       }
-      modInfo.push(manifest);
     } catch {
       // Ignore manifest processing errors
     }
