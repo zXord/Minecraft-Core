@@ -299,11 +299,10 @@
             <div class="progress-fill" style="width: {installProgress}%"></div>
           </div>
           <p class="progress-text">Progress: {installProgress}% ({installSpeed})</p>
-          
-          <div class="install-logs">
+            <div class="install-logs">
             <h3>Setup Logs</h3>
             <div class="logs-container">
-              {#each installLogs as log}
+              {#each installLogs as log, index (index)}
                 <p>{log}</p>
               {/each}
               <!-- Auto-scroll to bottom -->
@@ -311,11 +310,10 @@
             </div>
           </div>
         </div>
-      {:else if installLogs.length > 0}
-        <div class="install-logs">
+      {:else if installLogs.length > 0}        <div class="install-logs">
           <h3>Connection Logs</h3>
           <div class="logs-container">
-            {#each installLogs as log}
+            {#each installLogs as log, index (index)}
               <p>{log}</p>
             {/each}
             <!-- Auto-scroll to bottom -->

@@ -150,19 +150,25 @@
       status = 'Backup completed!';
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Backup failed';
-    }
-    loading = false;
+    }    loading = false;
     setTimeout(() => status = '', 2000);
   }
-
-  $: if (showRenameDialog && renameInputEl && renameDialogJustOpened) {
-    tick().then(() => {
-      renameInputEl.focus();
-      const base = newName.endsWith('.zip') ? newName.slice(0, -4) : newName;
-      renameInputEl.setSelectionRange(0, base.length);
+  // Handle rename dialog focus without reactive loop
+  function handleRenameDialogFocus(dialogVisible, inputElement, justOpened) {
+    if (dialogVisible && inputElement && justOpened) {
+      tick().then(() => {
+        if (inputElement) {
+          inputElement.focus();
+          const base = newName.endsWith('.zip') ? newName.slice(0, -4) : newName;
+          inputElement.setSelectionRange(0, base.length);
+        }
+      });
       renameDialogJustOpened = false;
-    });
+    }
   }
+
+  // Call focus handler when needed
+  $: handleRenameDialogFocus(showRenameDialog, renameInputEl, renameDialogJustOpened);
 
   function cleanErrorMessage(msg) {
     if (!msg) return '';
@@ -381,9 +387,8 @@
             id="backup-frequency"
             bind:value={backupFrequency} 
             on:change={saveAutomationSettings}
-            disabled={!autoBackupEnabled}
-          >
-            {#each frequencyOptions as option}
+            disabled={!autoBackupEnabled}          >
+            {#each frequencyOptions as option (option.value)}
               <option value={option.value}>{option.label}</option>
             {/each}
           </select>
@@ -443,9 +448,8 @@
                   bind:value={backupDay} 
                   on:change={saveAutomationSettings}
                   disabled={!autoBackupEnabled}
-                  title="Day of the week"
-                >
-                  {#each dayNames as day, index}
+                  title="Day of the week"                >
+                  {#each dayNames as day, index (index)}
                     <option value={index}>{day.slice(0,3)}</option>
                   {/each}
                 </select>
@@ -455,9 +459,8 @@
                 bind:value={backupHour} 
                 on:change={saveAutomationSettings}
                 disabled={!autoBackupEnabled}
-                title="Hour"
-              >
-                {#each Array(24).fill().map((_, i) => i) as hour}
+                title="Hour"              >
+                {#each Array(24).fill().map((_, i) => i) as hour (hour)}
                   <option value={hour}>{hour.toString().padStart(2, '0')}</option>
                 {/each}
               </select>
@@ -466,9 +469,8 @@
                 bind:value={backupMinute} 
                 on:change={saveAutomationSettings}
                 disabled={!autoBackupEnabled}
-                title="Minute"
-              >
-                {#each [0, 15, 30, 45] as minute}
+                title="Minute"              >
+                {#each [0, 15, 30, 45] as minute (minute)}
                   <option value={minute}>{minute.toString().padStart(2, '0')}</option>
                 {/each}
               </select>
@@ -532,9 +534,8 @@
         <th>Timestamp</th>
         <th>Actions</th>
       </tr>
-    </thead>
-    <tbody>
-      {#each backups as b}
+    </thead>    <tbody>
+      {#each backups as b (b.name)}
         <tr class:world-delete-backup={b.metadata?.type === 'world-delete'} class:auto-backup={b.metadata?.automated}>
           <td><input type="checkbox" checked={$selectedBackups.has(b.name)} on:change={() => toggleSelect(b.name)} /></td>
           <td>

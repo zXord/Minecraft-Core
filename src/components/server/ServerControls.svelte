@@ -558,10 +558,10 @@
   <div class="players-section">
     <h4>Online Players ({playerNames.length})</h4>
     {#if playerNames.length === 0}
-      <p class="no-players">No players online</p>
+    <p class="no-players">No players online</p>
     {:else}
       <ul class="player-list">
-        {#each playerNames as playerName}
+        {#each playerNames as playerName (playerName)}
           <li class="player-item" on:contextmenu={(e) => showPlayerContextMenu(e, playerName)}>
             {playerName}
           </li>

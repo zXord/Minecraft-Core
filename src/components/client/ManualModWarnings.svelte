@@ -67,11 +67,10 @@
     
     <div class="warning-content">
       <p class="warning-message">{manualModInfo.warning}</p>
-      
-      <div class="manual-mods-list">
+        <div class="manual-mods-list">
         <h4>Manual Mods Found ({manualModInfo.manualMods.length}):</h4>
         <ul>
-          {#each manualModInfo.manualMods as mod}
+          {#each manualModInfo.manualMods as mod (mod)}
             <li>{mod}</li>
           {/each}
         </ul>

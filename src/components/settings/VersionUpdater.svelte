@@ -289,10 +289,9 @@
 </script>
 
 <div class="version-updater">
-  <h3>Server Version Updater</h3>  <div class="version-select">
-    <select bind:value={selectedMC} on:change={onMCChange}>
+  <h3>Server Version Updater</h3>  <div class="version-select">    <select bind:value={selectedMC} on:change={onMCChange}>
       <option value="" disabled selected>Select Minecraft Version</option>
-      {#each mcVersions as v}
+      {#each mcVersions as v (v)}
         <option value={v}>
           {#if $settingsStore.mcVersion && $settingsStore.mcVersion !== v}
             {$settingsStore.mcVersion} → {v}
@@ -303,10 +302,9 @@
       {/each}
     </select>
 
-    {#if selectedMC}
-      <select bind:value={selectedFabric}>
+    {#if selectedMC}      <select bind:value={selectedFabric}>
         <option value="" disabled selected>Select Fabric Loader</option>
-        {#each fabricVersions as f}
+        {#each fabricVersions as f (f)}
           <option value={f}>
             {#if $settingsStore.fabricVersion && $settingsStore.fabricVersion !== f}
               {$settingsStore.fabricVersion} → {f}
@@ -326,10 +324,9 @@
     <div class="compat-results-container">
       <!-- Mod Updates Available -->
       {#if modsWithUpdates.length > 0}
-        <div class="compat-results info">
-          <h4>🔄 Mod Updates Available ({modsWithUpdates.length})</h4>
+        <div class="compat-results info">          <h4>🔄 Mod Updates Available ({modsWithUpdates.length})</h4>
           <ul class="mod-updates-list">
-            {#each modsWithUpdates as mod}
+            {#each modsWithUpdates as mod (mod.name)}
               <li class="mod-update-item">
                 <span class="mod-name">{mod.name}</span>
                 <span class="version-change">{mod.currentVersion} → {mod.newVersion}</span>
@@ -352,10 +349,9 @@
       <!-- Incompatible Mods -->
       {#if incompatibleMods.length > 0}
         <div class="compat-results warning">
-          <h4>⚠️ Incompatible Mods ({incompatibleMods.length})</h4>
-          <p class="warning-text">These mods will be disabled during the update:</p>
+          <h4>⚠️ Incompatible Mods ({incompatibleMods.length})</h4>          <p class="warning-text">These mods will be disabled during the update:</p>
           <ul class="incompatible-mods-list">
-            {#each incompatibleMods as mod}
+            {#each incompatibleMods as mod (mod.name)}
               <li class="incompatible-mod-item">
                 <span class="mod-name">{mod.name}</span>
                 {#if mod.currentVersion}
@@ -448,10 +444,9 @@
 
       <!-- Mod Updates -->
       {#if updateSummary.modUpdates.length > 0}
-        <div class="summary-section">
-          <h4>🔄 Mod Updates ({updateSummary.modUpdates.length})</h4>
+        <div class="summary-section">          <h4>🔄 Mod Updates ({updateSummary.modUpdates.length})</h4>
           <ul class="mod-updates-summary">
-            {#each updateSummary.modUpdates as update}
+            {#each updateSummary.modUpdates as update (update.name)}
               <li class="mod-update-summary-item">
                 <div class="mod-update-header">
                   <span class="mod-name">{update.name}</span>
@@ -470,10 +465,9 @@
       <!-- Disabled Mods -->
       {#if updateSummary.disabledMods.length > 0}
         <div class="summary-section">
-          <h4>⚠️ Disabled Mods ({updateSummary.disabledMods.length})</h4>
-          <p class="disabled-explanation">These mods were disabled because they're not compatible with the new version:</p>
+          <h4>⚠️ Disabled Mods ({updateSummary.disabledMods.length})</h4>          <p class="disabled-explanation">These mods were disabled because they're not compatible with the new version:</p>
           <ul class="disabled-mods-summary">
-            {#each updateSummary.disabledMods as mod}
+            {#each updateSummary.disabledMods as mod (mod.name)}
               <li class="disabled-mod-item">
                 <span class="mod-name">{mod.name}</span>
                 {#if mod.currentVersion}
@@ -523,10 +517,9 @@
 
   <!-- Fallback: Simple Completed Updates (if no summary available) -->
   {#if completedUpdates.length > 0 && !updateSummary}
-    <div class="completed-updates-container">
-      <h4>✅ Completed Mod Updates ({completedUpdates.length})</h4>
+    <div class="completed-updates-container">      <h4>✅ Completed Mod Updates ({completedUpdates.length})</h4>
       <ul class="completed-updates-list">
-        {#each completedUpdates as update}
+        {#each completedUpdates as update (update.name)}
           <li class="completed-update-item">
             <span class="mod-name">{update.name}</span>
             <span class="version-change">{update.oldVersion} → {update.newVersion}</span>

@@ -4,7 +4,7 @@ const fsSync = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { app } = require('electron'); // Required for app.getPath('userData')
-const AdmZip = require('adm-zip').default;
+const AdmZip = require('adm-zip');
 
 // Simple store implementation to persist mod categories
 const configDir = path.join(app.getPath('userData'), 'config');

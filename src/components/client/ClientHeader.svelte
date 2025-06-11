@@ -62,9 +62,8 @@
       </div>
     {/if}
   </div>
-
   <div class="client-tabs">
-    {#each tabs as tab}
+    {#each tabs as tab (tab)}
       <button class="tab-button {state.activeTab === tab ? 'active' : ''}" on:click={() => selectTab(tab)}>
         {#if tab === 'play'}
           🎮 Play

@@ -301,7 +301,7 @@
 
 <div class="players-page-container">
   <div class="players-grid">
-{#each Object.entries(lists) as [name, list]}
+{#each Object.entries(lists) as [name, list] (name)}
       <section class="player-card">
         <div class="section-header">
           <h3>{listNames[name]} <span class="player-count">{list.length}</span></h3>
@@ -327,18 +327,17 @@
       </button>
     </div>
     
-        <div class="player-list-content">
-          {#if list.length === 0}
+        <div class="player-list-content">        {#if list.length === 0}
             <div class="no-players">No entries</div>
           {:else}
-      {#each list as entry}
+      {#each list as entry (entry)}
               <div class="player-row">
                 <div class="player-info">
                   <div class="player-avatar">
                     {#if name !== 'banned-ips'}
                       <img 
                         src={`https://minotar.net/avatar/${entry}/24`} 
-                        alt="Player avatar" 
+                        alt="Player avatar"
                         loading="lazy"
                         on:error={e => {
                           const target = /** @type {HTMLImageElement} */ (e.target);

@@ -290,9 +290,8 @@
       
       <div class="dependencies-container">
         {#if requiredDeps.length > 0}
-          <h4>Missing Dependencies</h4>
-          <ul class="dependencies-list required" aria-label="Required dependencies list">
-            {#each requiredDeps as dependency}
+          <h4>Missing Dependencies</h4>          <ul class="dependencies-list required" aria-label="Required dependencies list">
+            {#each requiredDeps as dependency (dependency.name)}
               {@const displayName = cleanModName(dependency.name)}
               <li class="dependency-item">
                 <span class="dependency-name">
@@ -308,9 +307,8 @@
         {/if}
         
         {#if compatibilityDeps.length > 0}
-          <h4>Version Compatibility Issues</h4>
-          <ul class="dependencies-list compatibility" aria-label="Compatibility issues list">
-            {#each compatibilityDeps as dependency}
+          <h4>Version Compatibility Issues</h4>          <ul class="dependencies-list compatibility" aria-label="Compatibility issues list">
+            {#each compatibilityDeps as dependency (dependency.name)}
               {@const displayName = dependency.name}
               <li class="dependency-item">
                 <span class="dependency-name">
@@ -327,9 +325,8 @@
         {/if}
         
         {#if optionalDeps.length > 0}
-          <h4>Optional Updates</h4>
-          <ul class="dependencies-list optional" aria-label="Optional updates list">
-            {#each optionalDeps as dependency}
+          <h4>Optional Updates</h4>          <ul class="dependencies-list optional" aria-label="Optional updates list">
+            {#each optionalDeps as dependency (dependency.name)}
               {@const displayName = cleanModName(dependency.name)}
               <li class="dependency-item">
                 <span class="dependency-name">

@@ -143,11 +143,10 @@
     Check Core Files
   </button>
 
-  {#if healthReport.length}
-    <div class="status-panel warning">
+  {#if healthReport.length}    <div class="status-panel warning">
       <h4>Missing Core Files Detected</h4>
       <ul class="file-list">
-        {#each healthReport as f}
+        {#each healthReport as f (f)}
           <li class="missing-file">⚠️ Missing: {f}</li>
         {/each}
       </ul>
@@ -155,7 +154,7 @@
       <div class="repair-info">
         <p>The repair will download these essential server files:</p>
         <ul class="file-list">
-          {#each healthReport as f}
+          {#each healthReport as f (f)}
             <li class="repair-file">↻ {f}</li>
           {/each}
         </ul>
@@ -175,9 +174,8 @@
           </div>
           <progress max="100" value={repairProgress}></progress>
         </div>
-        
-        <div class="repair-logs">
-          {#each repairLogs as l}
+          <div class="repair-logs">
+          {#each repairLogs as l, index (index)}
             <div class="log-line">{l}</div>
           {/each}
         </div>

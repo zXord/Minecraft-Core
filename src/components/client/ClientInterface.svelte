@@ -1362,11 +1362,10 @@
                     <p>{modSyncStatus.needsDownload} out of {modSyncStatus.totalRequired} mods need to be downloaded.</p>
                     
                     <!-- New Downloads (Server-managed mods) -->
-                    {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
-                      <div class="mod-changes-section">
+                    {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}                      <div class="mod-changes-section">
                         <h4>📥 New Downloads:</h4>
                         <ul class="mod-list">
-                          {#each modSyncStatus.missingMods as modName}
+                          {#each modSyncStatus.missingMods as modName (modName)}
                             <li class="mod-item new-download">{modName}</li>
                           {/each}
                         </ul>
@@ -1374,11 +1373,10 @@
                     {/if}
 
                     <!-- Client Mod Updates -->
-                    {#if modSyncStatus.clientModChanges?.updates && modSyncStatus.clientModChanges.updates.length > 0}
-                      <div class="mod-changes-section">
+                    {#if modSyncStatus.clientModChanges?.updates && modSyncStatus.clientModChanges.updates.length > 0}                      <div class="mod-changes-section">
                         <h4>🔄 Mod Updates:</h4>
                         <ul class="mod-list">
-                          {#each modSyncStatus.clientModChanges.updates as update}
+                          {#each modSyncStatus.clientModChanges.updates as update (update.name)}
                             <li class="mod-item mod-update">
                               {update.name} v{update.currentVersion} → {update.serverVersion}
                             </li>
@@ -1386,11 +1384,10 @@
                         </ul>
                       </div>
                     {/if}                    <!-- Client Mod Removals -->
-                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}
-                      <div class="mod-changes-section">
+                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}                      <div class="mod-changes-section">
                         <h4>❌ Mods to be Removed:</h4>
                         <ul class="mod-list">
-                          {#each modSyncStatus.clientModChanges.removals as removal}
+                          {#each modSyncStatus.clientModChanges.removals as removal (removal.name)}
                             <li class="mod-item mod-removal">
                               {removal.name} → {removal.reason || (removal.action === 'remove' ? 'no longer required' : 'disabled')}
                             </li>
