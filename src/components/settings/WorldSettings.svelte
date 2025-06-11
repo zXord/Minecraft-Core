@@ -43,7 +43,7 @@
         backupMessage = 'Error: No response received from delete operation';
       } else if (result.success) {
         backupTitle = 'World Deleted';
-        backupMessage = `World deleted successfully${result.backup ? `\nBackup created at: ${result.backup}` : ''}`;
+        backupMessage = `World deleted successfully.${result.backup ? `\n\nBackup created at:\n${result.backup}` : ''}`;
       } else if (result.error && result.error.includes('World folders not found')) {
         backupTitle = 'World Deletion';
         backupMessage = 'No world folders found. There is nothing to delete.';

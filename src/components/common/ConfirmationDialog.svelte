@@ -150,12 +150,15 @@
   .modal-body {
     padding: 1.5rem 1rem;
   }
-  
-  .modal-body p {
+    .modal-body p {
     margin: 0;
     color: rgba(255, 255, 255, 0.8);
     font-size: 1rem;
     line-height: 1.5;
+    word-wrap: break-word;
+    word-break: break-word;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
   }
   
   .modal-footer {
