@@ -1,12 +1,9 @@
 <!-- @ts-ignore -->
-<script>
-  import { createEventDispatcher } from 'svelte';
-  import { get } from 'svelte/store';
+<script>  import { createEventDispatcher } from 'svelte';
   import { 
     installedModIds, 
     installingModIds, 
     expandedModId, 
-    minecraftVersion,
     modsWithUpdates,
     installedModInfo
   } from '../../../stores/modStore.js';
@@ -204,24 +201,7 @@
       // Load all versions when expanding the mod card
       // This ensures we get the full version list when the user wants to see it
       dispatch('loadVersions', { modId: mod.id, loadAll: true });
-    }
-  }
-  
-  /**
-   * Toggle between showing version-filtered list and all versions
-   * @param {boolean} showAll - Whether to show all versions
-   */
-  function toggleVersionFiltering(showAll = true) {
-    if (showAll) {
-      // Show all stable versions
-      filteredVersions = unfilteredVersions.length > 0 ? unfilteredVersions : versions;
-    } else if (filterMinecraftVersion) {
-      // Apply filter again
-      filteredVersions = versions.filter(v => 
-        v.gameVersions.includes(filterMinecraftVersion) && v.isStable !== false
-      );
-    }
-  }
+    }  }
   
   // When the component is mounted, conditionally load versions
   onMount(() => {
@@ -677,21 +657,7 @@
     flex-wrap: wrap;
     gap: 10px;
     font-size: 12px;
-    color: rgba(255, 255, 255, 0.5);
-  }
-  
-  .version-selector-toggle {
-    border-bottom: 1px dotted rgba(255, 255, 255, 0.3);
-    padding-bottom: 1px;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  
-  .version-dropdown-icon {
-    font-size: 10px;
-    opacity: 0.7;
-  }
+    color: rgba(255, 255, 255, 0.5);  }
   
   .mod-author {
     white-space: nowrap;
@@ -750,36 +716,7 @@
   .version-list {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-  }
-  
-  .filter-notice {
-    background: rgba(255, 152, 0, 0.1);
-    border: 1px solid rgba(255, 152, 0, 0.3);
-    border-radius: 4px;
-    padding: 8px;
-    margin-bottom: 8px;
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.8);
-    text-align: center;
-  }
-  
-  .filter-toggle {
-    display: block;
-    margin: 5px auto 0;
-    padding: 2px 8px;
-    background: rgba(255, 152, 0, 0.2);
-    border: 1px solid rgba(255, 152, 0, 0.4);
-    border-radius: 4px;
-    color: rgba(255, 255, 255, 0.9);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  
-  .filter-toggle:hover {
-    background: rgba(255, 152, 0, 0.3);
-  }
+    gap: 6px;  }
   
   .version-item {
     display: flex;
@@ -863,25 +800,7 @@
   }
   
   .version-error {
-    color: #ff6b6b;
-  }
-  
-  .show-all-versions {
-    display: block;
-    margin: 8px auto 0;
-    padding: 4px 10px;
-    background: rgba(100, 108, 255, 0.2);
-    border: 1px solid rgba(100, 108, 255, 0.5);
-    border-radius: 4px;
-    color: rgba(255, 255, 255, 0.9);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  
-  .show-all-versions:hover {
-    background: rgba(100, 108, 255, 0.3);
-  }
+    color: #ff6b6b;  }
   
   .warning-badge {
     display: inline-flex;

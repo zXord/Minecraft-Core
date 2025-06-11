@@ -1,6 +1,6 @@
 <script>
   import { fade, fly } from 'svelte/transition';
-  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+  import { onDestroy, createEventDispatcher } from 'svelte';
   
   // Props
   export let message = '';

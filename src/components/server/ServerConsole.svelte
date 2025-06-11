@@ -81,13 +81,12 @@
     {#if topSpacerHeight > 0}
       <div class="virtual-spacer" style="height: {topSpacerHeight}px;"></div>
     {/if}
-    
-    <!-- Visible log lines -->
+      <!-- Visible log lines -->
     {#if visibleLogs.length === 0}
       <!-- Add empty line to maintain height when no logs -->
       <div class="console-line console-empty">Server console ready.</div>
     {:else}
-      {#each visibleLogs as line, i}
+      {#each visibleLogs as line}
         <div class="console-line">{line}</div>
       {/each}
     {/if}
