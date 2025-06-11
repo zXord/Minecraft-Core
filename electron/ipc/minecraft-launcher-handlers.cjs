@@ -37,8 +37,125 @@ function extractVersionFromFilename(fileName) {
     if (/^mc\d+(?:\.\d+)*$/i.test(seg)) continue;
     const match = seg.match(/^v?(\d+\.\d+(?:\.\d+)?)/);
     if (match) return match[1];
+  }  return null;
+}
+
+/**
+ * Analyzes client-side (manual) mods to find their dependencies
+ * @param {string} clientPath - Path to the client mods directory
+ * @param {Array} serverManagedFiles - List of server-managed mod files
+ * @returns {Promise<Set<string>>} Set of dependency mod names (lowercase)
+ */
+async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
+  const { extractDependenciesFromJar } = require('./mod-utils/mod-analysis-utils.cjs');
+  
+  const dependencies = new Set();
+  
+  try {
+    if (!fs.existsSync(clientPath)) {
+      return dependencies;
+    }
+    
+    // Get list of server-managed files for comparison
+    const serverManagedSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
+    
+    // Get all jar files in client directory
+    const modFiles = fs.readdirSync(clientPath).filter(file => 
+      file.toLowerCase().endsWith('.jar')
+    );
+      // Find client-side (manual) mods - those not managed by server
+    // Also include mods that were converted from server-managed to manual
+    const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+    const convertedMods = new Set();
+    
+    if (fs.existsSync(manifestDir)) {
+      const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
+      for (const file of manifests) {
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
+          if (data.source === 'manual' || data.convertedFromServer) {
+            convertedMods.add(data.fileName.toLowerCase());
+          }        } catch {
+          // Ignore manifest parsing errors
+        }
+      }
+    }
+    
+    const clientSideMods = modFiles.filter(file => 
+      !serverManagedSet.has(file.toLowerCase()) || convertedMods.has(file.toLowerCase())
+    );
+    
+    // Analyze dependencies for each client-side mod
+    for (const modFile of clientSideMods) {
+      const modPath = path.join(clientPath, modFile);
+      
+      try {
+        const metadata = await extractDependenciesFromJar(modPath);
+        
+        if (metadata && metadata.dependencies) {
+          // Handle both array and object format dependencies
+          let deps = metadata.dependencies;
+          
+          if (Array.isArray(deps)) {
+            // Fabric format - array of dependency objects
+            for (const dep of deps) {
+              if (typeof dep === 'object' && dep.modid) {
+                dependencies.add(dep.modid.toLowerCase());
+              } else if (typeof dep === 'string') {
+                dependencies.add(dep.toLowerCase());
+              }
+            }
+          } else if (typeof deps === 'object') {            // Forge format - object with dependency entries
+            for (const depName of Object.keys(deps)) {
+              dependencies.add(depName.toLowerCase());
+            }
+          }
+        }        // Also check for common dependency formats in mod metadata
+        if (metadata) {
+          // Check for 'depends' field
+          if (metadata.depends && Array.isArray(metadata.depends)) {
+            for (const dep of metadata.depends) {
+              if (typeof dep === 'string') {
+                dependencies.add(dep.toLowerCase());
+              } else if (typeof dep === 'object' && dep.modid) {
+                dependencies.add(dep.modid.toLowerCase());
+              }
+            }
+          }
+          
+          // Check for 'requires' field
+          if (metadata.requires && Array.isArray(metadata.requires)) {
+            for (const dep of metadata.requires) {
+              if (typeof dep === 'string') {
+                dependencies.add(dep.toLowerCase());
+              } else if (typeof dep === 'object' && dep.modid) {
+                dependencies.add(dep.modid.toLowerCase());
+              }
+            }
+          }
+        }
+        
+      } catch (error) {
+        console.warn(`Failed to analyze dependencies for ${modFile}:`, error.message);
+        // Continue processing other mods even if one fails
+      }
+    }
+    
+    // Filter out common non-mod dependencies
+    const commonNonModDeps = new Set([
+      'minecraft', 'forge', 'fabric', 'fabric-loader', 'fabricloader',
+      'java', 'mcp', 'mappings', 'quilt', 'quilt-loader'
+    ]);
+    
+    for (const dep of commonNonModDeps) {
+      dependencies.delete(dep);
+    }
+    
+  } catch (error) {
+    console.error('Error analyzing client-side dependencies:', error);
   }
-  return null;
+  
+  return dependencies;
 }
 
 function createMinecraftLauncherHandlers(win) {
@@ -420,20 +537,36 @@ function createMinecraftLauncherHandlers(win) {
             ? allClientMods
             : requiredMods;
           const allowed = new Set(allowedList.map(m => (typeof m === 'string' ? m : m.fileName)));
-          
-          if (fs.existsSync(manifestDir)) {
+            if (fs.existsSync(manifestDir)) {
             const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
             for (const file of manifests) {
                 const manifestPath = path.join(manifestDir, file);
                 const data = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
                 const fileName = data.fileName;
                 
+                // Check if this mod is actually present in the client directory
+                const modPath = path.join(modsDir, fileName);
+                const modExists = fs.existsSync(modPath) || fs.existsSync(modPath + '.disabled');
+                
                 if (!allowed.has(fileName) && data.source === 'server') {
-                  const jar = path.join(modsDir, fileName);
-                  const disabled = jar + '.disabled';
-                  if (fs.existsSync(jar)) fs.unlinkSync(jar);
-                  if (fs.existsSync(disabled)) fs.unlinkSync(disabled);                  fs.unlinkSync(manifestPath);
-                  removed.push(fileName);
+                  // If the mod exists in client directory but is no longer server-managed,
+                  // convert it to a manual mod instead of removing it
+                  if (modExists) {
+                    // Update manifest to mark as manual
+                    data.source = 'manual';
+                    data.convertedFromServer = true;
+                    data.convertedAt = new Date().toISOString();
+                    fs.writeFileSync(manifestPath, JSON.stringify(data, null, 2));
+                    console.log(`Converted ${fileName} from server-managed to manual mod`);
+                  } else {
+                    // Only remove if the mod doesn't exist
+                    const jar = path.join(modsDir, fileName);
+                    const disabled = jar + '.disabled';
+                    if (fs.existsSync(jar)) fs.unlinkSync(jar);
+                    if (fs.existsSync(disabled)) fs.unlinkSync(disabled);
+                    fs.unlinkSync(manifestPath);
+                    removed.push(fileName);
+                  }
                 }
             }
           }
@@ -637,21 +770,66 @@ function createMinecraftLauncherHandlers(win) {
             }
           }
         }
-        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
-        const extraMods = [];
+        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');        const extraMods = [];
         
         const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
 
           if (fs.existsSync(manifestDir)) {
             const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
-            const allowed = new Set([
-              ...requiredMods.map(m => m.fileName),
-              ...allClientMods.map(m => m.fileName)
-            ]);
             
-            for (const file of manifests) {
-                const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));                if (data.fileName && !allowed.has(data.fileName)) {
-                  if (serverManagedFilesSet.has(data.fileName.toLowerCase())) {
+            // Create a set of currently allowed server mods (both required and optional)
+            const currentServerMods = new Set([
+              ...requiredMods.map(m => m.fileName.toLowerCase()),
+              ...allClientMods.map(m => m.fileName.toLowerCase())
+            ]);            // Get client-side (manual) mods and their dependencies
+            const clientSideDependencies = await getClientSideDependencies(clientPath, serverManagedFiles);
+            
+            // Get list of actual mods present in client directory
+            const actualClientMods = new Set();
+            if (fs.existsSync(clientPath)) {
+              const clientModFiles = fs.readdirSync(clientPath).filter(f => f.toLowerCase().endsWith('.jar'));
+              clientModFiles.forEach(f => actualClientMods.add(f.toLowerCase()));
+            }
+              for (const file of manifests) {
+                const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
+                if (data.fileName) {
+                  const fileNameLower = data.fileName.toLowerCase();
+                  const baseModName = getBaseModName(data.fileName).toLowerCase();
+                  
+                  // Check if mod actually exists in client directory
+                  const modExists = actualClientMods.has(fileNameLower);
+                  
+                  // If the mod exists but was previously server-managed and is no longer in server list,
+                  // convert it to manual status right here during the check phase
+                  if (modExists && 
+                      serverManagedFilesSet.has(fileNameLower) && 
+                      !currentServerMods.has(fileNameLower) &&
+                      data.source === 'server') {
+                    
+                    // Convert to manual mod immediately
+                    const manifestPath = path.join(manifestDir, file);
+                    data.source = 'manual';
+                    data.convertedFromServer = true;
+                    data.convertedAt = new Date().toISOString();
+                    fs.writeFileSync(manifestPath, JSON.stringify(data, null, 2));
+                    console.log(`Converted ${data.fileName} from server-managed to manual during check phase`);
+                    
+                    // Don't add to removal list since it's now manual
+                    continue;
+                  }
+                  
+                  // Only consider a mod for removal if:
+                  // 1. It was previously server-managed (tracked in serverManagedFiles)
+                  // 2. AND it's no longer in the current server mod list
+                  // 3. AND it's not required by any client-side mods (by mod ID)
+                  // 4. AND it's not required by any client-side mods (by base file name)
+                  // 5. AND it doesn't exist in the client directory (truly absent)
+                  if (serverManagedFilesSet.has(fileNameLower) && 
+                      !currentServerMods.has(fileNameLower) &&
+                      !clientSideDependencies.has(fileNameLower) &&
+                      !clientSideDependencies.has(baseModName) &&
+                      !clientSideDependencies.has(data.name?.toLowerCase() || '') &&
+                      !modExists) {
                     extraMods.push(data.fileName);
                   }
                 }
@@ -663,22 +841,15 @@ function createMinecraftLauncherHandlers(win) {
           newDownloads: []
         };
           const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
-          
-          const allPresentMods = [...presentMods, ...disabledMods];
+            const allPresentMods = [...presentMods, ...disabledMods];
           const allServerManagedFiles = new Set([
             ...(serverManagedFiles || []).map(f => f.toLowerCase()),
             ...requiredMods.map(rm => rm.fileName.toLowerCase()),
             ...(allClientMods || []).filter(m => m.required).map(m => m.fileName.toLowerCase())
-          ]);
-          
-          const allAllowedMods = new Set([
-            ...requiredMods.map(rm => rm.fileName.toLowerCase()),
-            ...(allClientMods || []).map(m => m.fileName.toLowerCase())
-          ]);
-
-          for (const modFileName of allPresentMods) {
+          ]);for (const modFileName of allPresentMods) {
             const modFileNameLower = modFileName.toLowerCase();
             
+            // Skip mods that are known to be server-managed
             if (allServerManagedFiles.has(modFileNameLower)) {
               continue;
             }
@@ -687,45 +858,42 @@ function createMinecraftLauncherHandlers(win) {
               ? path.join(modsDir, modFileName)
               : path.join(modsDir, modFileName + '.disabled');
             
-              const clientModMetadata = await modAnalysisUtils.extractDependenciesFromJar(modPath);
-              if (!clientModMetadata) continue;
-              const exactServerMatch = requiredMods.find(rm => 
-                rm.fileName.toLowerCase() === modFileNameLower
-              );
-              const similarServerMatch = !exactServerMatch ? requiredMods.find(rm => {
-                const serverFileName = rm.fileName.toLowerCase();
-                const clientFileName = modFileNameLower;
-                
-                const clientBase = getBaseModName(clientFileName);
-                const serverBase = getBaseModName(serverFileName);
-                if (clientBase && serverBase && clientBase === serverBase) return true;
-                if (clientModMetadata.name && serverBase === getBaseModName(clientModMetadata.name.toLowerCase().replace(/\s+/g, '_'))) return true;
-                
-                return false;
-              }) : null;
-                if (exactServerMatch || similarServerMatch) {
-                const matchedServerMod = exactServerMatch || similarServerMatch;
-                const serverVersion = extractVersionFromFilename(matchedServerMod.fileName) || 'Server Version';
-                
-                clientModChanges.updates.push({
-                  fileName: modFileName,
-                  name: clientModMetadata.name || modFileName,
-                  currentVersion: clientModMetadata.version || 'Unknown',
-                  serverVersion: serverVersion,
-                  action: 'update'
-                });
-                } else {
-                  const isExplicitlyAllowed = allAllowedMods.has(modFileNameLower);
+            const clientModMetadata = await modAnalysisUtils.extractDependenciesFromJar(modPath);
+            if (!clientModMetadata) continue;
+            
+            // Check if this mod matches any server mod (exact or similar)
+            const exactServerMatch = requiredMods.find(rm => 
+              rm.fileName.toLowerCase() === modFileNameLower
+            );
+            const similarServerMatch = !exactServerMatch ? requiredMods.find(rm => {
+              const serverFileName = rm.fileName.toLowerCase();
+              const clientFileName = modFileNameLower;
+              
+              const clientBase = getBaseModName(clientFileName);
+              const serverBase = getBaseModName(serverFileName);
+              if (clientBase && serverBase && clientBase === serverBase) return true;
+              if (clientModMetadata.name && serverBase === getBaseModName(clientModMetadata.name.toLowerCase().replace(/\s+/g, '_'))) return true;
+              
+              return false;
+            }) : null;
 
-                  if (!isExplicitlyAllowed) {
-                    clientModChanges.removals.push({
-                      fileName: modFileName,
-                      name: clientModMetadata.name || modFileName,
-                      currentVersion: clientModMetadata.version || 'Unknown',
-                      action: 'disable'
-                    });
-                  }
-                }
+            // If this mod matches a server mod, it needs updating
+            if (exactServerMatch || similarServerMatch) {
+              const matchedServerMod = exactServerMatch || similarServerMatch;
+              const serverVersion = extractVersionFromFilename(matchedServerMod.fileName) || 'Server Version';
+              
+              clientModChanges.updates.push({
+                fileName: modFileName,
+                name: clientModMetadata.name || modFileName,
+                currentVersion: clientModMetadata.version || 'Unknown',
+                serverVersion: serverVersion,
+                action: 'update'
+              });
+            } 
+            // IMPORTANT: If this mod doesn't match any server mod, it's a manual/client-side mod
+            // and should be left alone (not added to removals). Only server-managed mods that
+            // are no longer on the server should be considered for removal.
+            // Manual mods are completely independent of server synchronization.
           }
 
         const serverModsWithClientUpdates = new Set();
@@ -745,14 +913,25 @@ function createMinecraftLauncherHandlers(win) {
             if (serverMod) {
             serverModsWithClientUpdates.add(serverMod.fileName);
           }
-        }
-        for (const modFileName of missingMods.concat(outdatedMods)) {
+        }        for (const modFileName of missingMods.concat(outdatedMods)) {
           if (!serverModsWithClientUpdates.has(modFileName)) {
             clientModChanges.newDownloads.push(modFileName);
           }
         }
-          const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && extraMods.length === 0;
+
+        // Populate removals with server-managed mods that are no longer on the server
+        for (const extraMod of extraMods) {
+          clientModChanges.removals.push({
+            name: extraMod,
+            fileName: extraMod,
+            reason: 'no longer required by server',
+            action: 'remove'
+          });
+        }const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && extraMods.length === 0;
         
+        // Calculate actual needs more conservatively to avoid "0 out of X" issues
+        const actualNeedsDownload = missingMods.length + outdatedMods.length;
+        const actualNeedsOptionalDownload = missingOptionalMods.length + outdatedOptionalMods.length;
         
         return {
           success: true,
@@ -765,8 +944,8 @@ function createMinecraftLauncherHandlers(win) {
           totalOptional: allClientMods.filter(m => !m.required).length,
           totalPresent: requiredMods.length - missingMods.length - outdatedMods.length,
           totalOptionalPresent: (allClientMods.filter(m => !m.required).length) - missingOptionalMods.length - outdatedOptionalMods.length,
-          needsDownload: missingMods.length + outdatedMods.length,
-          needsOptionalDownload: missingOptionalMods.length + outdatedOptionalMods.length,
+          needsDownload: synchronized ? 0 : actualNeedsDownload, // Force 0 if synchronized
+          needsOptionalDownload: synchronized ? 0 : actualNeedsOptionalDownload, // Force 0 if synchronized  
           needsRemoval: extraMods.length,
           presentEnabledMods: presentMods,
           presentDisabledMods: disabledMods

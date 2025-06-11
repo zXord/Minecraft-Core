@@ -23,6 +23,8 @@
     name: '',
     type: 'client'
   }; // Client instance with serverIp, serverPort, path
+  // Component references
+  let clientModManagerComponent;
   
   // Create event dispatcher
   const dispatch = createEventDispatcher();
@@ -236,8 +238,7 @@
       setMinecraftServerStatus('unknown');
     }
   }
-  
-  // Check if client mods are synchronized with server
+    // Check if client mods are synchronized with server
   async function checkModSynchronization() {
     if (isDownloadingMods || isDownloadingClient) {
       return;
@@ -248,21 +249,33 @@
       return;
     }
     
+    // If we're already in ready state (e.g., just after successful download), 
+    // don't immediately override it unless there's a clear issue
+    const wasReady = downloadStatus === 'ready';
+    
     downloadStatus = 'checking';
-      try {
-      const managedFiles = get(serverManagedFiles);
+      try {      const managedFiles = get(serverManagedFiles);
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods,
+        allClientMods: serverInfo?.allClientMods || [],
         serverManagedFiles: Array.from(managedFiles)
       });
         if (result.success) {
         modSyncStatus = result;
-        
-        if (result.synchronized) {
+          if (result.synchronized) {
           downloadStatus = 'ready';
         } else {
-          downloadStatus = 'needed';
+          // If we just had a successful download (wasReady), be more conservative
+          // Only change to 'needed' if there are actually missing mods OR removals needed
+          const hasDownloads = result.needsDownload > 0;
+          const hasRemovals = (result.clientModChanges?.removals?.length || 0) > 0;
+          
+          if (wasReady && !hasDownloads && !hasRemovals) {
+            downloadStatus = 'ready'; // Keep ready status if no actions needed
+          } else {
+            downloadStatus = 'needed'; // Show as needed if downloads OR removals required
+          }
         }
         
         if (result.clientModChanges?.removals) {
@@ -313,10 +326,32 @@
         }
       } else {
         clientSyncStatus = 'ready'; // Assume ready if check fails
-      }
-    } catch (err) {
+      }    } catch (err) {
       clientSyncStatus = 'ready';
     }
+  }  // Handle refresh button in dashboard - refresh both server status AND mod information
+  async function handleRefreshFromDashboard() {
+    try {
+      // First check server status
+      await checkServerStatus();
+      
+      // Force a mod synchronization check to detect changes
+      if ($clientState.connectionStatus === 'connected') {
+        await checkModSynchronization();
+          // Also trigger mod manager refresh if we have the component
+        if (clientModManagerComponent?.refreshFromDashboard) {
+          await clientModManagerComponent.refreshFromDashboard();
+        }
+      }
+    } catch (err) {
+      console.error('Error refreshing dashboard:', err);
+    }
+  }
+  
+  // Handle refresh request from mods manager (triggered by dashboard refresh)
+  function refreshMods() {
+    // This will be handled by the ClientModManager component
+    // when it receives the 'refresh-mods' event
   }
   
   // Check authentication status
@@ -562,12 +597,13 @@
           message += parts.join(', ');
           message += ')';
         }
-        
-        successMessage.set(message);
+          successMessage.set(message);
         setTimeout(() => successMessage.set(''), 5000);
         
-        // Re-check mod synchronization after download
-        await checkModSynchronization();
+        // Re-check mod synchronization after download with a delay to allow file I/O to complete
+        setTimeout(async () => {
+          await checkModSynchronization();
+        }, 1500);
       } else {
         downloadStatus = 'needed';
         let failureMsg = 'Failed to download mods';
@@ -1357,12 +1393,21 @@
                   <p>Verifying installed mods...</p>
                 </div>              {:else if downloadStatus === 'needed'}
                 <div class="sync-status needed">
-                  <h3>Mods Need Update</h3>
-                  {#if modSyncStatus}
-                    <p>{modSyncStatus.needsDownload} out of {modSyncStatus.totalRequired} mods need to be downloaded.</p>
+                  <h3>Mods Need Update</h3>                  {#if modSyncStatus}
+                    <!-- Display appropriate message based on what needs to happen -->
+                    {#if modSyncStatus.needsDownload > 0 && modSyncStatus.clientModChanges?.removals?.length > 0}
+                      <p>{modSyncStatus.needsDownload} mod(s) need to be downloaded and {modSyncStatus.clientModChanges.removals.length} mod(s) need to be removed.</p>
+                    {:else if modSyncStatus.needsDownload > 0}
+                      <p>{modSyncStatus.needsDownload} out of {modSyncStatus.totalRequired || modSyncStatus.needsDownload} mods need to be downloaded.</p>
+                    {:else if modSyncStatus.clientModChanges?.removals?.length > 0}
+                      <p>{modSyncStatus.clientModChanges.removals.length} mod(s) need to be removed from your client.</p>
+                    {:else}
+                      <p>Mod synchronization required.</p>
+                    {/if}
                     
                     <!-- New Downloads (Server-managed mods) -->
-                    {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}                      <div class="mod-changes-section">
+                    {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
+                      <div class="mod-changes-section">
                         <h4>📥 New Downloads:</h4>
                         <ul class="mod-list">
                           {#each modSyncStatus.missingMods as modName (modName)}
@@ -1373,7 +1418,8 @@
                     {/if}
 
                     <!-- Client Mod Updates -->
-                    {#if modSyncStatus.clientModChanges?.updates && modSyncStatus.clientModChanges.updates.length > 0}                      <div class="mod-changes-section">
+                    {#if modSyncStatus.clientModChanges?.updates && modSyncStatus.clientModChanges.updates.length > 0}
+                      <div class="mod-changes-section">
                         <h4>🔄 Mod Updates:</h4>
                         <ul class="mod-list">
                           {#each modSyncStatus.clientModChanges.updates as update (update.name)}
@@ -1383,8 +1429,11 @@
                           {/each}
                         </ul>
                       </div>
-                    {/if}                    <!-- Client Mod Removals -->
-                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}                      <div class="mod-changes-section">
+                    {/if}
+
+                    <!-- Client Mod Removals - Show even when no downloads are needed -->
+                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}
+                      <div class="mod-changes-section">
                         <h4>❌ Mods to be Removed:</h4>
                         <ul class="mod-list">
                           {#each modSyncStatus.clientModChanges.removals as removal (removal.name)}
@@ -1394,16 +1443,26 @@
                           {/each}
                         </ul>
                       </div>
-                    {/if}
-
-                    <!-- Legacy display for backwards compatibility -->
+                    {/if}<!-- Legacy display for backwards compatibility -->
                     {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
                       <p class="outdated-mods">Outdated: {modSyncStatus.outdatedMods.join(', ')}</p>
                     {/if}
                   {/if}
-                  <button class="download-button" on:click={onDownloadModsClick}>
-                    📥 Download Required Mods
-                  </button>
+                  
+                  <!-- Show appropriate action button based on what's needed -->
+                  {#if modSyncStatus && modSyncStatus.needsDownload > 0}
+                    <button class="download-button" on:click={onDownloadModsClick}>
+                      📥 Download Required Mods ({modSyncStatus.needsDownload})
+                    </button>
+                  {:else if modSyncStatus && modSyncStatus.clientModChanges?.removals?.length > 0}
+                    <button class="download-button" on:click={onDownloadModsClick}>
+                      🔄 Apply Mod Changes (Remove {modSyncStatus.clientModChanges.removals.length} mod{modSyncStatus.clientModChanges.removals.length > 1 ? 's' : ''})
+                    </button>
+                  {:else}
+                    <button class="download-button" on:click={onDownloadModsClick}>
+                      🔄 Synchronize Mods
+                    </button>
+                  {/if}
                 </div>
               {:else if downloadStatus === 'downloading'}
                 <div class="sync-status downloading">
@@ -1564,27 +1623,43 @@
           {#if lastCheck}
             Last checked: {lastCheck.toLocaleTimeString()}
           {/if}
-          
-          {#if isChecking}
+            {#if isChecking}
             <span class="checking">Checking...</span>
           {:else}
-            <button class="refresh-button" on:click={checkServerStatus}>
+            <button class="refresh-button" on:click={handleRefreshFromDashboard}>
               Refresh
             </button>
           {/if}
         </div>
-      </div>
-    {:else if $clientState.activeTab === 'mods'}
+      </div>    {:else if $clientState.activeTab === 'mods'}
       <div class="mods-container">
-        <ClientModManager {instance} on:mod-sync-status={(e) => {
-          // Update mod sync status when the mod manager reports changes
-          modSyncStatus = e.detail;
-          if (e.detail.synchronized) {
-            downloadStatus = 'ready';
-          } else {
-            downloadStatus = 'needed';
-          }
-        }} />
+        <ClientModManager 
+          bind:this={clientModManagerComponent} 
+          {instance}
+          on:mod-sync-status={(e) => {            // Update mod sync status when the mod manager reports changes
+            // Use the full sync result if available, otherwise use the event detail
+            if (e.detail.fullSyncResult) {
+              modSyncStatus = e.detail.fullSyncResult;
+            } else {
+              modSyncStatus = e.detail;
+            }
+            
+            if (e.detail.synchronized) {
+              downloadStatus = 'ready';
+            } else {
+              // Check if downloads or removals are needed
+              const hasDownloads = e.detail.needsDownload > 0;
+              const hasRemovals = (e.detail.fullSyncResult?.clientModChanges?.removals?.length || 0) > 0;
+              
+              if (hasDownloads || hasRemovals) {
+                downloadStatus = 'needed';
+              } else {
+                downloadStatus = 'needed'; // Default to needed if not synchronized
+              }
+            }
+          }}
+          on:refresh-mods={refreshMods} 
+        />
       </div>
     {:else if $clientState.activeTab === 'settings'}
       <div class="settings-container">

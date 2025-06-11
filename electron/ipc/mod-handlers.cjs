@@ -584,26 +584,22 @@ function createModHandlers(win) {
       } catch (error) {
         throw new Error(`Failed to update mod "${modInfo.name}": ${error.message}`);
       }
-    },    // Disable a client-side mod by moving it to disabled folder
-    'disable-client-mod': async (_event, { modFilePath, clientPath }) => {
+    },    // Disable a client-side mod by adding .disabled extension
+    'disable-client-mod': async (_event, { modFilePath }) => {
       try {
         
         if (!fs.existsSync(modFilePath)) {
           throw new Error('Mod file not found');
         }
         
-        const modsDir = path.join(clientPath, 'mods');
-        const disabledDir = path.join(modsDir, 'disabled');
+        const disabledPath = modFilePath + '.disabled';
         
-        // Create disabled directory if it doesn't exist
-        if (!fs.existsSync(disabledDir)) {
-          fs.mkdirSync(disabledDir, { recursive: true });
+        // Check if already disabled
+        if (fs.existsSync(disabledPath)) {
+          throw new Error('Mod is already disabled');
         }
         
-        const fileName = path.basename(modFilePath);
-        const disabledPath = path.join(disabledDir, fileName);
-        
-        // Move the mod file to the disabled directory
+        // Rename the file with .disabled extension
         fs.renameSync(modFilePath, disabledPath);
         
         return { success: true, disabledPath };
@@ -615,14 +611,11 @@ function createModHandlers(win) {
 
     // Get detailed information about manual mods
     'get-manual-mods-detailed': async (_event, { clientPath, serverManagedFiles }) => {
-      try {
-
-        if (!clientPath || !fs.existsSync(clientPath)) {
+      try {        if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
         }
-
+        
         const modsDir = path.join(clientPath, 'mods');
-        const disabledDir = path.join(modsDir, 'disabled');
 
         if (!fs.existsSync(modsDir)) {
           return { success: true, mods: [] };
@@ -630,8 +623,10 @@ function createModHandlers(win) {
 
         const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
 
-        const enabledFiles = fs.existsSync(modsDir) ? fs.readdirSync(modsDir).filter(f => f.endsWith('.jar')) : [];
-        const disabledFiles = fs.existsSync(disabledDir) ? fs.readdirSync(disabledDir).filter(f => f.endsWith('.jar')) : [];
+        const allFiles = fs.readdirSync(modsDir);
+        const enabledFiles = allFiles.filter(f => f.endsWith('.jar') && !f.endsWith('.disabled'));
+        const disabledFiles = allFiles.filter(f => f.endsWith('.jar.disabled'))
+          .map(f => f.replace('.disabled', '')); // Remove .disabled extension for processing
 
         const mods = [];
 
@@ -673,14 +668,12 @@ function createModHandlers(win) {
               enabled: true
             });
           }
-        }
-
-        // Process disabled mods
+        }        // Process disabled mods
         for (const fileName of disabledFiles) {
           if (serverManagedFilesSet.has(fileName.toLowerCase())) {
             continue;
           }
-          const filePath = path.join(disabledDir, fileName);
+          const filePath = path.join(modsDir, fileName + '.disabled');
           const stats = fs.statSync(filePath);
 
           try {
@@ -723,21 +716,21 @@ function createModHandlers(win) {
     },    // Check manual mods for basic compatibility
     'check-manual-mods': async (_event, { clientPath, minecraftVersion }) => {
       try {
-        
-        if (!clientPath || !fs.existsSync(clientPath)) {
+          if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
         }
         
         // Get detailed mods directly using the same logic
         const modsDir = path.join(clientPath, 'mods');
-        const disabledDir = path.join(modsDir, 'disabled');
         
         if (!fs.existsSync(modsDir)) {
           return { success: true, results: [] };
         }
         
-        const enabledFiles = fs.existsSync(modsDir) ? fs.readdirSync(modsDir).filter(f => f.endsWith('.jar')) : [];
-        const disabledFiles = fs.existsSync(disabledDir) ? fs.readdirSync(disabledDir).filter(f => f.endsWith('.jar')) : [];
+        const allFiles = fs.readdirSync(modsDir);
+        const enabledFiles = allFiles.filter(f => f.endsWith('.jar') && !f.endsWith('.disabled'));
+        const disabledFiles = allFiles.filter(f => f.endsWith('.jar.disabled'))
+          .map(f => f.replace('.disabled', '')); // Remove .disabled extension for processing
         
         const compatibilityResults = [];
         
@@ -782,10 +775,9 @@ function createModHandlers(win) {
             });
           }
         }
-        
-        // Process disabled mods
+          // Process disabled mods
         for (const fileName of disabledFiles) {
-          const filePath = path.join(disabledDir, fileName);
+          const filePath = path.join(modsDir, fileName + '.disabled');
           
           try {
             const metadata = await readModMetadata(filePath);
@@ -843,9 +835,7 @@ function createModHandlers(win) {
         if (!Array.isArray(fileNames) || fileNames.length === 0) {
           throw new Error('No file names provided');
         }
-        
-        const modsDir = path.join(clientPath, 'mods');
-        const disabledDir = path.join(modsDir, 'disabled');
+          const modsDir = path.join(clientPath, 'mods');
         const removedFiles = [];
         const errors = [];
         
@@ -860,8 +850,8 @@ function createModHandlers(win) {
               removedFiles.push({ fileName, location: 'enabled' });
               found = true;
             } else {
-              // Check in disabled mods directory
-              filePath = path.join(disabledDir, fileName);
+              // Check for disabled mod with .disabled extension
+              filePath = path.join(modsDir, fileName + '.disabled');
               if (fs.existsSync(filePath)) {
                 fs.unlinkSync(filePath);
                 removedFiles.push({ fileName, location: 'disabled' });
@@ -896,29 +886,22 @@ function createModHandlers(win) {
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
         }
-        
-        const modsDir = path.join(clientPath, 'mods');
-        const disabledDir = path.join(modsDir, 'disabled');
-        
-        // Ensure disabled directory exists
-        if (!fs.existsSync(disabledDir)) {
-          fs.mkdirSync(disabledDir, { recursive: true });
-        }
+          const modsDir = path.join(clientPath, 'mods');
         
         let sourceFile, targetFile;
         
         if (enable) {
-          // Moving from disabled to enabled
-          sourceFile = path.join(disabledDir, fileName);
+          // Enabling: removing .disabled extension
+          sourceFile = path.join(modsDir, fileName + '.disabled');
           targetFile = path.join(modsDir, fileName);
           
           if (!fs.existsSync(sourceFile)) {
-            throw new Error(`Disabled mod file not found: ${fileName}`);
+            throw new Error(`Disabled mod file not found: ${fileName}.disabled`);
           }
         } else {
-          // Moving from enabled to disabled
+          // Disabling: adding .disabled extension
           sourceFile = path.join(modsDir, fileName);
-          targetFile = path.join(disabledDir, fileName);
+          targetFile = path.join(modsDir, fileName + '.disabled');
           
           if (!fs.existsSync(sourceFile)) {
             throw new Error(`Enabled mod file not found: ${fileName}`);
@@ -961,16 +944,14 @@ function createModHandlers(win) {
         const { pipeline } = require('stream');
         const { promisify } = require('util');
         const pipelineAsync = promisify(pipeline);
-        
-        const modsDir = path.join(clientPath, 'mods');
-        const disabledDir = path.join(modsDir, 'disabled');
+          const modsDir = path.join(clientPath, 'mods');
         
         // Find the current mod file
         let currentFilePath = path.join(modsDir, fileName);
         let isDisabled = false;
         
         if (!fs.existsSync(currentFilePath)) {
-          currentFilePath = path.join(disabledDir, fileName);
+          currentFilePath = path.join(modsDir, fileName + '.disabled');
           isDisabled = true;
           
           if (!fs.existsSync(currentFilePath)) {
@@ -981,8 +962,7 @@ function createModHandlers(win) {
         // Generate new filename with version if provided
         const baseName = fileName.replace(/\.jar$/i, '');
         const newFileName = newVersion ? `${baseName}-${newVersion}.jar` : fileName;
-        const targetDir = isDisabled ? disabledDir : modsDir;
-        const targetPath = path.join(targetDir, newFileName);
+        const targetPath = path.join(modsDir, newFileName + (isDisabled ? '.disabled' : ''));
         
         // Download the new version
         const writer = createWriteStream(targetPath);
@@ -1023,16 +1003,16 @@ function createModHandlers(win) {
         if (!minecraftVersion) {
           // Minecraft version is optional, proceed if not provided
         }
-        
-        const modsDir = path.join(clientPath, 'mods');
-        const disabledDir = path.join(modsDir, 'disabled');
+          const modsDir = path.join(clientPath, 'mods');
         
         if (!fs.existsSync(modsDir)) {
           return { success: true, updates: [], summary: { total: 0, updatesAvailable: 0 } };
         }
         
-        const enabledFiles = fs.existsSync(modsDir) ? fs.readdirSync(modsDir).filter(f => f.endsWith('.jar')) : [];
-        const disabledFiles = fs.existsSync(disabledDir) ? fs.readdirSync(disabledDir).filter(f => f.endsWith('.jar')) : [];
+        const allFiles = fs.readdirSync(modsDir);
+        const enabledFiles = allFiles.filter(f => f.endsWith('.jar') && !f.endsWith('.disabled'));
+        const disabledFiles = allFiles.filter(f => f.endsWith('.jar.disabled'))
+          .map(f => f.replace('.disabled', '')); // Remove .disabled extension for processing
         
         const updates = [];
         // Use the passed serverManagedFiles array
@@ -1087,12 +1067,11 @@ function createModHandlers(win) {
             });
           }
         }
-        
-        // Process disabled mods
+          // Process disabled mods
         for (const fileName of disabledFiles) {
           if (serverManagedFilesSet.has(fileName.toLowerCase())) continue; // Skip server managed
 
-          const filePath = path.join(disabledDir, fileName);
+          const filePath = path.join(modsDir, fileName + '.disabled');
           
           try {
             const metadata = await readModMetadata(filePath);

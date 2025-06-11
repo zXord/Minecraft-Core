@@ -1,5 +1,4 @@
-<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    updateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';
-  import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
+<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    updateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';  import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
   import { slide } from 'svelte/transition';
   import { checkDependencyCompatibility } from '../../../utils/mods/modCompatibility.js';
   import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
@@ -233,13 +232,27 @@
     modToDelete = modName;
     confirmDeleteVisible = true;
   }
-  
-  /**
+    /**
    * Handle mod deletion after confirmation
    */
   async function confirmDeleteMod() {
     if (modToDelete) {
-      await deleteMod(modToDelete, serverPath, true);
+      const wasDisabled = $disabledMods.has(modToDelete);
+      
+      const deleteSuccess = await deleteMod(modToDelete, serverPath, true);
+      
+      // If deletion was successful and the mod was disabled, remove it from the disabled mods store
+      if (deleteSuccess && wasDisabled) {
+        disabledMods.update(mods => {
+          const newMods = new Set(mods);
+          newMods.delete(modToDelete);
+          return newMods;
+        });
+        
+        // Save the updated disabled mods list to persist the change
+        await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+      }
+      
       modToDelete = null;
       confirmDeleteVisible = false;
     }
@@ -509,13 +522,32 @@
     await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
     await loadMods(serverPath);
   }
-  
-  /** Delete all selected disabled mods */
+    /** Delete all selected disabled mods */
   async function deleteSelectedDisabledMods() {
     if (selectedDisabledMods.size === 0) return;
-    for (const modName of selectedDisabledMods) {
-      await deleteMod(modName, serverPath, false);
+    
+    const modsToDelete = Array.from(selectedDisabledMods);
+    let successfullyDeleted = [];
+    
+    for (const modName of modsToDelete) {
+      const deleteSuccess = await deleteMod(modName, serverPath, false);
+      if (deleteSuccess) {
+        successfullyDeleted.push(modName);
+      }
     }
+    
+    // Remove successfully deleted mods from the disabled mods store
+    if (successfullyDeleted.length > 0) {
+      disabledMods.update(mods => {
+        const newMods = new Set(mods);
+        successfullyDeleted.forEach(modName => newMods.delete(modName));
+        return newMods;
+      });
+      
+      // Save the updated disabled mods list to persist the change
+      await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+    }
+    
     selectedDisabledMods = new Set();
     await loadMods(serverPath);
   }
@@ -584,11 +616,10 @@
       selectedMods = new Set();
     }
   }
-  
-  // Bulk toggle all disabled mods selection
+    // Bulk toggle all disabled mods selection
   function toggleSelectAllDisabledMods(event) {
     const all = event.target.checked;
-    const disabledList = Array.from($disabledMods).filter(mod => $installedMods.includes(mod));
+    const disabledList = Array.from($disabledMods);
     if (all) {
       selectedDisabledMods = new Set(disabledList);
     } else {
@@ -1083,19 +1114,17 @@
       </div>
       
       <div class="mods-list">
-        <div class="grid-header">
-          <div class="header-cell select-cell">
+        <div class="grid-header">          <div class="header-cell select-cell">
             <input type="checkbox"
-              checked={selectedDisabledMods.size === Array.from($disabledMods).filter(mod => $installedMods.includes(mod)).length}
+              checked={selectedDisabledMods.size === Array.from($disabledMods).length}
               on:change={toggleSelectAllDisabledMods}
             />
           </div>
           <div class="header-cell">Mod Name</div>
           <div class="header-cell">Current Version</div>
           <div class="header-cell">Available Update</div>
-          <div class="header-cell">Actions</div>        </div>
-        <div class="mods-grid">
-          {#each Array.from($disabledMods).filter(mod => $installedMods.includes(mod)) as mod (mod)}
+          <div class="header-cell">Actions</div>        </div>        <div class="mods-grid">
+          {#each Array.from($disabledMods) as mod (mod)}
             <div class="mod-card disabled">
               <div class="mod-item-header-container">
                 <div class="select-cell">

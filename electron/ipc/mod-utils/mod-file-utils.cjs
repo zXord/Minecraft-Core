@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Disable a mod by moving it to the disabled directory or renaming it
+ * Disable a mod by renaming it with .disabled extension
  * @param {string} modsDir - The mods directory path
  * @param {string} fileName - The mod filename to disable
  * @returns {Promise<boolean>} - Success status
@@ -14,20 +14,15 @@ async function disableMod(modsDir, fileName) {
     
     if (!fs.existsSync(sourcePath)) {
       return false;
-    }
-
-    // Create disabled directory if it doesn't exist
-    const disabledDir = path.join(modsDir, 'disabled');
-    if (!fs.existsSync(disabledDir)) {
-      fs.mkdirSync(disabledDir, { recursive: true });
-    }
-
-    const targetPath = path.join(disabledDir, fileName);
+    }    // Rename the file with .disabled extension
+    const targetPath = path.join(modsDir, fileName + '.disabled');
     
     // Check if target already exists
     if (fs.existsSync(targetPath)) {
       return false;
-    }    // Move the file to disabled directory
+    }
+
+    // Rename the file with .disabled extension
     fs.renameSync(sourcePath, targetPath);
     return true;
   } catch {
@@ -36,15 +31,14 @@ async function disableMod(modsDir, fileName) {
 }
 
 /**
- * Enable a mod by moving it from the disabled directory back to the mods directory
+ * Enable a mod by removing the .disabled extension
  * @param {string} modsDir - The mods directory path
- * @param {string} fileName - The mod filename to enable
+ * @param {string} fileName - The mod filename to enable (without .disabled extension)
  * @returns {Promise<boolean>} - Success status
  */
 async function enableMod(modsDir, fileName) {
   try {
-    const disabledDir = path.join(modsDir, 'disabled');
-    const sourcePath = path.join(disabledDir, fileName);
+    const sourcePath = path.join(modsDir, fileName + '.disabled');
     
     if (!fs.existsSync(sourcePath)) {
       return false;
@@ -55,7 +49,9 @@ async function enableMod(modsDir, fileName) {
     // Check if target already exists
     if (fs.existsSync(targetPath)) {
       return false;
-    }    // Move the file back to mods directory
+    }
+
+    // Remove the .disabled extension
     fs.renameSync(sourcePath, targetPath);
     return true;
   } catch {

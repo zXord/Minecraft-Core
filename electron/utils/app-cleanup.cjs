@@ -11,8 +11,9 @@ function setupAppCleanup(app, win) {
       if (!isQuitting) {
         e.preventDefault();
         
-        // Import server manager here to avoid circular dependencies
+        // Import modules here to avoid circular dependencies
         const { getServerProcess, killMinecraftServer } = require('../services/server-manager.cjs');
+        const { stopMetricsReporting } = require('../services/system-metrics.cjs');
         const serverProcess = getServerProcess();
 
         if (serverProcess) {
@@ -28,6 +29,9 @@ function setupAppCleanup(app, win) {
 
           if (userConfirmed) {
             try {
+              // Stop metrics reporting before closing
+              stopMetricsReporting();
+              
               killMinecraftServer();
               await new Promise(resolve => setTimeout(resolve, 500));
               isQuitting = true;
@@ -39,6 +43,9 @@ function setupAppCleanup(app, win) {
             }
           }
         } else {
+          // Stop metrics reporting even if no server is running
+          stopMetricsReporting();
+          
           isQuitting = true;
           win.close();
         }
@@ -48,12 +55,15 @@ function setupAppCleanup(app, win) {
   
   // Ensure all processes are cleaned up on quit
   app.on('quit', () => {
-    
     try {
-      // Import server manager here to avoid circular dependencies
+      // Import modules here to avoid circular dependencies
       const { getServerProcess, killMinecraftServer } = require('../services/server-manager.cjs');
-      const serverProcess = getServerProcess();
+      const { stopMetricsReporting } = require('../services/system-metrics.cjs');
       
+      // Stop metrics reporting
+      stopMetricsReporting();
+      
+      const serverProcess = getServerProcess();
       if (serverProcess) {
         killMinecraftServer();
       }
@@ -67,9 +77,14 @@ function setupAppCleanup(app, win) {
   signals.forEach(signal => {
     process.on(signal, () => {
       try {
+        // Import modules here to avoid circular dependencies
         const { getServerProcess, killMinecraftServer } = require('../services/server-manager.cjs');
-        const serverProcess = getServerProcess();
+        const { stopMetricsReporting } = require('../services/system-metrics.cjs');
         
+        // Stop metrics reporting
+        stopMetricsReporting();
+        
+        const serverProcess = getServerProcess();
         if (serverProcess) {
           killMinecraftServer();
         }
