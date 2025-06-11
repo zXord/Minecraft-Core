@@ -45,12 +45,11 @@ export async function uploadDroppedMods(files, serverPath) {
         buffer: Array.from(new Uint8Array(arrayBuffer))
       });
       
-      if (success) {
-        results.count++;
+      if (success) {      results.count++;
       } else {
         results.failed.push(file.name);
       }
-    } catch (err) {
+    } catch {
       results.failed.push(file.name);
     }
   }

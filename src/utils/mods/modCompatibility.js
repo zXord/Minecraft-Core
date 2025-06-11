@@ -72,12 +72,12 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
             projectId: projectId,
             source: 'modrinth'
           });
-          
-          if (projectInfo && projectInfo.title) {
+              if (projectInfo && projectInfo.title) {
             name = projectInfo.title;
           }
         }
       } catch {
+        // Ignore errors when fetching project info - fallback to other methods
       }
     }
     
@@ -169,11 +169,11 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
               }
             } else {              // No specific requirement, will install latest
               missingIssue.requiredVersion = latestVersion;
-              missingIssue.latestVersion = latestVersion;
-              missingIssue.versionInfo = `v${latestVersion}`;
+              missingIssue.latestVersion = latestVersion;          missingIssue.versionInfo = `v${latestVersion}`;
             }
           }
         } catch {
+          // Ignore errors when fetching version info - continue without version details
         }
         
         issues.push(missingIssue);
@@ -245,10 +245,10 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 for (const version of sortedVersions) {                if (checkVersionCompatibility(version.versionNumber, versionRequirement)) {
                     compatibleVersion = version.versionNumber;
                     break;
-                  }
-                }
+                  }                }
               }
             } catch {
+              // Ignore errors when fetching version info - continue with version mismatch detection
             }
             
             // Version mismatch - the installed version doesn't meet requirements
@@ -462,11 +462,11 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
                 compatibilityReport.needsUpdate.push({
                   ...mod,
                   compatibilityStatus: 'needs_update',
-                  availableUpdate: updateCheck.latestVersion,
-                  updateUrl: updateCheck.downloadUrl
+                  availableUpdate: updateCheck.latestVersion,                updateUrl: updateCheck.downloadUrl
                 });
                 compatibilityReport.hasUpdatable = true;
               }          } catch {
+              // Ignore errors when checking for mod updates - continue with compatibility analysis
             }
           }
           

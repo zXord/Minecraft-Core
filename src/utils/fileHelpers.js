@@ -65,12 +65,11 @@ export async function filesToPaths(files) {
   const paths = [];
   
   for (const file of files) {
-    try {
-      if (file instanceof File) {
+    try {    if (file instanceof File) {
         const path = await fileToPath(file);
         paths.push(path);
       }
-    } catch (err) {
+    } catch {
       // Continue with other files
     }
   }
