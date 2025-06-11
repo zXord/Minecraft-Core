@@ -552,12 +552,15 @@ class ManagementServer {
       });
     });
   }
-  
-  updateServerPath(newPath) {
+    updateServerPath(newPath) {
     this.serverPath = newPath;
     this.stopVersionWatcher();
-    this.startVersionWatcher();
-    this.checkVersionChange();
+    
+    // Only start version watcher if we have a valid path
+    if (newPath) {
+      this.startVersionWatcher();
+      this.checkVersionChange();
+    }
   }
   
   // Check if Minecraft server is running
@@ -942,20 +945,39 @@ class ManagementServer {
     });
     eventBus.emit(event, data);
   }
-
   startVersionWatcher() {
     if (!this.serverPath) return;
-    this.versionWatcher = fs.watch(this.serverPath, (_, filename) => {
-      if (!filename) return;
-      if (filename.endsWith('.jar') || filename === 'version.json') {
-        this.checkVersionChange();
+    
+    try {
+      // Check if path exists before watching
+      if (!fs.existsSync(this.serverPath)) {
+        return;
       }
-    });
+      
+      this.versionWatcher = fs.watch(this.serverPath, (_, filename) => {
+        if (!filename) return;
+        if (filename.endsWith('.jar') || filename === 'version.json') {
+          this.checkVersionChange();
+        }
+      });
+      
+      // Handle watcher errors (like EPERM when directory is deleted)
+      this.versionWatcher.on('error', (err) => {
+        console.warn('Version watcher error:', err.message);
+        this.stopVersionWatcher();
+      });
+    } catch (err) {
+      console.warn('Failed to start version watcher:', err.message);
+    }
   }
-
   stopVersionWatcher() {
     if (this.versionWatcher) {
-      this.versionWatcher.close();
+      try {
+        this.versionWatcher.close();
+      } catch (err) {
+        // Ignore close errors - watcher might already be closed
+        console.warn('Version watcher close error:', err.message);
+      }
       this.versionWatcher = null;
     }
   }

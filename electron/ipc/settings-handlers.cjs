@@ -224,8 +224,7 @@ function createSettingsHandlers() {
         return { success: true, instances };
       } catch (err) {
         return { success: false, error: err.message };
-      }
-    },
+      }    },
     
     // Delete instance (with optional dir deletion)
     'delete-instance': async (_e, { id, deleteFiles }) => {
@@ -240,6 +239,40 @@ function createSettingsHandlers() {
         
         if (!inst) {
           return { success: false, error: 'Instance not found' };
+        }
+        
+        // CRITICAL: Stop file watchers for server instances before deletion
+        if (inst.type === 'server' && inst.path) {
+          try {
+            // Stop management server watchers if they're watching this path
+            const { getManagementServer } = require('../services/management-server.cjs');
+            const managementServer = getManagementServer();
+            const status = managementServer.getStatus();
+            
+            if (status.isRunning && status.serverPath === inst.path) {
+              // If management server is watching this path, stop the watcher
+              managementServer.stopVersionWatcher();
+              
+              // Update server path to null to prevent further file system operations
+              managementServer.updateServerPath(null);
+            }
+          } catch (err) {
+            // Log but don't fail - continue with deletion
+            console.warn('Failed to cleanup management server watchers:', err.message);
+          }
+          
+          // Also stop any server processes that might be using this directory
+          try {
+            const { getServerProcess, killMinecraftServer } = require('../services/server-manager.cjs');
+            const serverProcess = getServerProcess();
+            if (serverProcess) {
+              killMinecraftServer();
+              // Wait a bit for process cleanup
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          } catch (err) {
+            console.warn('Failed to cleanup server process:', err.message);
+          }
         }
         
         const remaining = instances.filter(i => i.id !== id);
