@@ -83,12 +83,29 @@
     return result;
   }
 
+  // Check if a mod is kept due to dependency
+  function needsAcknowledgment(mod: Mod): boolean {
+    if (!modSyncStatus?.clientModChanges?.removals) return false;
+    
+    return modSyncStatus.clientModChanges.removals.some(removal => 
+      removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'acknowledge_dependency'
+    );
+  }
   // Get removal info for a mod
   function getRemovalInfo(mod: Mod) {
     if (!modSyncStatus?.clientModChanges?.removals) return null;
     
     return modSyncStatus.clientModChanges.removals.find(removal => 
       removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'remove_needed'
+    );
+  }
+
+  // Get dependency acknowledgment info for a mod
+  function getAcknowledgmentInfo(mod: Mod) {
+    if (!modSyncStatus?.clientModChanges?.removals) return null;
+    
+    return modSyncStatus.clientModChanges.removals.find(removal => 
+      removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'acknowledge_dependency'
     );
   }
 
@@ -115,11 +132,16 @@
   // Handle mod deletion
   function handleDelete(mod: Mod): void {
     dispatch('delete', { fileName: mod.fileName });
-  }
-  // Handle mod removal (for server-managed mods no longer required)
+  }  // Handle mod removal (for server-managed mods no longer required)
   function handleRemove(mod: Mod): void {
     console.log('ClientModList handleRemove called for:', mod.fileName);
     dispatch('remove', { fileName: mod.fileName });
+  }
+
+  // Handle dependency acknowledgment
+  function handleAcknowledge(mod: Mod): void {
+    console.log('ClientModList handleAcknowledge called for:', mod.fileName);
+    dispatch('acknowledge', { fileName: mod.fileName });
   }
 
   // Handle download for missing mods
@@ -184,10 +206,17 @@
             {:else}
               <span class="version-tag unknown">Unknown</span>
             {/if}
-          </div>
-            <div class="mod-actions">
+          </div>          <div class="mod-actions">
             {#if type === 'required'}
-              {#if needsRemoval(mod)}
+              {#if needsAcknowledgment(mod)}
+                {@const acknowledgmentInfo = getAcknowledgmentInfo(mod)}
+                <div class="dependency-notification">
+                  <span class="dependency-reason">🔗 {acknowledgmentInfo?.reason || 'Required by client-side mod'}</span>
+                  <button class="action-btn acknowledge-btn" on:click={() => handleAcknowledge(mod)} title="Acknowledge this dependency">
+                    ✓ Acknowledge
+                  </button>
+                </div>
+              {:else if needsRemoval(mod)}
                 {@const removalInfo = getRemovalInfo(mod)}
                 <span class="removal-reason">{removalInfo?.reason || 'No longer required'}</span>
                 <button class="action-btn remove-btn" on:click={() => handleRemove(mod)} title="Remove this mod">
@@ -492,12 +521,36 @@
     background: rgba(245, 158, 11, 0.3);
     border-color: rgba(245, 158, 11, 0.5);
   }
-
   .removal-reason {
     font-size: 0.8rem;
     color: rgba(255, 255, 255, 0.7);
     font-style: italic;
     margin-right: 0.5rem;
+  }
+
+  .dependency-notification {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.3rem;
+  }
+
+  .dependency-reason {
+    font-size: 0.8rem;
+    color: #10b981;
+    font-style: italic;
+    text-align: right;
+  }
+
+  .acknowledge-btn {
+    background: rgba(16, 185, 129, 0.2);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+  
+  .acknowledge-btn:hover {
+    background: rgba(16, 185, 129, 0.3);
+    border-color: rgba(16, 185, 129, 0.5);
   }
 
   .summary {
