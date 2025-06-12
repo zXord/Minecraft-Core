@@ -539,34 +539,19 @@ function createMinecraftLauncherHandlers(win) {
           const allowed = new Set(allowedList.map(m => (typeof m === 'string' ? m : m.fileName)));
             if (fs.existsSync(manifestDir)) {
             const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
-            for (const file of manifests) {
-                const manifestPath = path.join(manifestDir, file);
+            for (const file of manifests) {                const manifestPath = path.join(manifestDir, file);
                 const data = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
                 const fileName = data.fileName;
                 
-                // Check if this mod is actually present in the client directory
-                const modPath = path.join(modsDir, fileName);
-                const modExists = fs.existsSync(modPath) || fs.existsSync(modPath + '.disabled');
-                
                 if (!allowed.has(fileName) && data.source === 'server') {
-                  // If the mod exists in client directory but is no longer server-managed,
-                  // convert it to a manual mod instead of removing it
-                  if (modExists) {
-                    // Update manifest to mark as manual
-                    data.source = 'manual';
-                    data.convertedFromServer = true;
-                    data.convertedAt = new Date().toISOString();
-                    fs.writeFileSync(manifestPath, JSON.stringify(data, null, 2));
-                    console.log(`Converted ${fileName} from server-managed to manual mod`);
-                  } else {
-                    // Only remove if the mod doesn't exist
-                    const jar = path.join(modsDir, fileName);
-                    const disabled = jar + '.disabled';
-                    if (fs.existsSync(jar)) fs.unlinkSync(jar);
-                    if (fs.existsSync(disabled)) fs.unlinkSync(disabled);
-                    fs.unlinkSync(manifestPath);
-                    removed.push(fileName);
-                  }
+                  // Server-managed mod is no longer on server, remove it completely
+                  console.log(`Removing server-managed mod ${fileName} that is no longer on server`);
+                  const jar = path.join(modsDir, fileName);
+                  const disabled = jar + '.disabled';
+                  if (fs.existsSync(jar)) fs.unlinkSync(jar);
+                  if (fs.existsSync(disabled)) fs.unlinkSync(disabled);
+                  fs.unlinkSync(manifestPath);
+                  removed.push(fileName);
                 }
             }
           }
@@ -791,45 +776,30 @@ function createMinecraftLauncherHandlers(win) {
               clientModFiles.forEach(f => actualClientMods.add(f.toLowerCase()));
             }
               for (const file of manifests) {
-                const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
-                if (data.fileName) {
+                const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));                if (data.fileName) {
                   const fileNameLower = data.fileName.toLowerCase();
                   const baseModName = getBaseModName(data.fileName).toLowerCase();
                   
-                  // Check if mod actually exists in client directory
-                  const modExists = actualClientMods.has(fileNameLower);
-                  
-                  // If the mod exists but was previously server-managed and is no longer in server list,
-                  // convert it to manual status right here during the check phase
-                  if (modExists && 
-                      serverManagedFilesSet.has(fileNameLower) && 
+                  // If the mod was previously server-managed and is no longer in server list,
+                  // it should be marked for removal (don't convert to manual)
+                  if (serverManagedFilesSet.has(fileNameLower) && 
                       !currentServerMods.has(fileNameLower) &&
                       data.source === 'server') {
                     
-                    // Convert to manual mod immediately
-                    const manifestPath = path.join(manifestDir, file);
-                    data.source = 'manual';
-                    data.convertedFromServer = true;
-                    data.convertedAt = new Date().toISOString();
-                    fs.writeFileSync(manifestPath, JSON.stringify(data, null, 2));
-                    console.log(`Converted ${data.fileName} from server-managed to manual during check phase`);
-                    
-                    // Don't add to removal list since it's now manual
-                    continue;
+                    console.log(`Server-managed mod ${data.fileName} is no longer on server, will be marked for removal`);
+                    // Continue processing to allow it to be added to removal list
                   }
-                  
-                  // Only consider a mod for removal if:
+                    // Only consider a mod for removal if:
                   // 1. It was previously server-managed (tracked in serverManagedFiles)
                   // 2. AND it's no longer in the current server mod list
                   // 3. AND it's not required by any client-side mods (by mod ID)
                   // 4. AND it's not required by any client-side mods (by base file name)
-                  // 5. AND it doesn't exist in the client directory (truly absent)
+                  // Note: Removed the "!modExists" condition so mods that exist but are no longer on server get removed
                   if (serverManagedFilesSet.has(fileNameLower) && 
                       !currentServerMods.has(fileNameLower) &&
                       !clientSideDependencies.has(fileNameLower) &&
                       !clientSideDependencies.has(baseModName) &&
-                      !clientSideDependencies.has(data.name?.toLowerCase() || '') &&
-                      !modExists) {
+                      !clientSideDependencies.has(data.name?.toLowerCase() || '')) {
                     extraMods.push(data.fileName);
                   }
                 }
