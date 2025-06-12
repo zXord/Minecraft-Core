@@ -186,15 +186,13 @@ export {
   filterMinecraftVersion,
   filterModLoader,
   modCategories,
-
   // Derived stores
   hasUpdates,
   updateCount,
   categorizedMods,
 
   // Helper functions
-  compareVersions,
-  removeServerManagedFiles
+  compareVersions
 };
 
 // Save mod categories to persistent storage
