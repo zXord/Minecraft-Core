@@ -2,11 +2,138 @@
 const { getMinecraftLauncher } = require('../services/minecraft-launcher/index.cjs');
 const utils = require('../services/minecraft-launcher/utils.cjs');
 const fs = require('fs');
+const fsPromises = require('fs').promises;
 const path = require('path');
 const http = require('http');
 const https = require('https');
 const { readModMetadataFromJar } = require('./mod-utils/mod-file-manager.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
+
+// In-memory lock to prevent race conditions during state operations
+let stateLockPromise = Promise.resolve();
+
+/**
+ * Save the expected mod state to a persistent JSON file
+ * Uses async fs operations and includes error handling with UI notifications
+ * @param {string} clientPath - Path to the client directory
+ * @param {Set} expectedMods - Set of expected mod filenames
+ * @param {object} win - Electron window object for error notifications
+ * @returns {Promise<{success: boolean, error?: string}>} Result of the save operation
+ */
+async function saveExpectedModState(clientPath, expectedMods, win = null) {
+  // Serialize access to prevent race conditions
+  await stateLockPromise;
+  
+  let resolver = () => {};
+  stateLockPromise = new Promise(resolve => { resolver = resolve; });
+  
+  try {
+    const stateDir = path.join(clientPath, 'minecraft-core-state');
+    const stateFile = path.join(stateDir, 'expected-mods.json');
+    
+    try {
+      // Use async fs operations to avoid blocking event loop
+      try {
+        await fsPromises.access(stateDir);
+      } catch {
+        await fsPromises.mkdir(stateDir, { recursive: true });
+      }
+      
+      // Re-load current state to merge with any intervening changes
+      let existingState = {};
+      try {
+        const existingData = await fsPromises.readFile(stateFile, 'utf8');
+        existingState = JSON.parse(existingData);
+      } catch {
+        // File doesn't exist or is invalid, start fresh
+      }
+      
+      const state = {
+        ...existingState,
+        expectedMods: Array.from(expectedMods),
+        lastUpdated: new Date().toISOString(),
+        version: 1
+      };
+      
+      await fsPromises.writeFile(stateFile, JSON.stringify(state, null, 2));
+      console.log('Saved expected mod state:', Array.from(expectedMods));
+      
+      resolver();
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to save expected mod state:', error);
+      
+      // Surface error to UI if window reference is available
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('mod-state-persistence-error', {
+          type: 'save',
+          error: error.message,
+          message: 'Failed to save mod state. Removal detection may not persist across restarts.'
+        });
+      }
+      
+      resolver();
+      return { success: false, error: error.message };
+    }
+  } catch (error) {
+    resolver();
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Load the expected mod state from persistent JSON file
+ * Includes schema migration for backward compatibility
+ */
+async function loadExpectedModState(clientPath, win = null) {
+  const stateFile = path.join(clientPath, 'minecraft-core-state', 'expected-mods.json');
+  
+  try {
+    // Use async fs operations
+    try {
+      await fsPromises.access(stateFile);
+    } catch {
+      console.log('No expected mod state file found, starting fresh');
+      return { success: true, expectedMods: new Set() };
+    }
+    
+    const data = await fsPromises.readFile(stateFile, 'utf8');
+    const state = JSON.parse(data);
+    
+    // Handle schema migration
+    let expectedMods;
+    if (!state.version || state.version < 1) {
+      // Migrate from v0 (or no version) to v1
+      console.log('Migrating mod state from legacy format');
+      expectedMods = new Set(Array.isArray(state) ? state : (state.expectedMods || []));
+      
+      // Save migrated format
+      await saveExpectedModState(clientPath, expectedMods, win);
+    } else if (state.version === 1) {
+      expectedMods = new Set(state.expectedMods || []);
+    } else {
+      // Future version - reset to avoid compatibility issues
+      console.warn(`Unknown mod state version ${state.version}, resetting`);
+      expectedMods = new Set();
+    }
+    
+    console.log('Loaded expected mod state:', Array.from(expectedMods));
+    return { success: true, expectedMods };
+  } catch (error) {
+    console.error('Failed to load expected mod state:', error);
+    
+    // Surface error to UI if window reference is available
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('mod-state-persistence-error', {
+        type: 'load',
+        error: error.message,
+        message: 'Failed to load mod state. Some removal detection may be lost.'
+      });
+    }
+    
+    return { success: false, error: error.message, expectedMods: new Set() };
+  }
+}
 
 function checkModCompatibility(modFileName, targetVersion) {
   const versionMatch = modFileName.match(/(\d+\.\d+(?:\.\d+)?)/);
@@ -754,19 +881,49 @@ function createMinecraftLauncherHandlers(win) {
             }
           }
         }        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');        const extraMods = [];
-        
-        // Initialize server managed files if empty but server has mods
+          // Initialize server managed files if empty but server has mods
         let serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
         console.log('Server managed files (initial):', Array.from(serverManagedFilesSet));
-        
-        // If serverManagedFiles is empty but we have server mods, initialize it
-        if (serverManagedFilesSet.size === 0 && (requiredMods.length > 0 || allClientMods.length > 0)) {
+
+        // Load persistent expected mod state
+        const stateResult = await loadExpectedModState(clientPath, win);
+        const expectedModState = stateResult.expectedMods;
+        console.log('Loaded expected mod state:', Array.from(expectedModState));
+
+        // If serverManagedFiles is empty but we have persistent state, use that
+        if (serverManagedFilesSet.size === 0 && expectedModState.size > 0) {
+          serverManagedFilesSet = new Set(expectedModState);
+          console.log('Using persistent expected mod state:', Array.from(serverManagedFilesSet));
+        }
+        // If no persistent state and we have server mods, initialize and save
+        else if (serverManagedFilesSet.size === 0 && (requiredMods.length > 0 || allClientMods.length > 0)) {
           const allServerMods = [
             ...requiredMods.map(m => m.fileName.toLowerCase()),
             ...allClientMods.map(m => m.fileName.toLowerCase())
           ];
           serverManagedFilesSet = new Set(allServerMods);
           console.log('Initialized serverManagedFiles with server mods:', Array.from(serverManagedFilesSet));
+          
+          // Save this as the new expected state
+          await saveExpectedModState(clientPath, serverManagedFilesSet, win);
+        }
+        // If we have both current state and persistent state, merge appropriately
+        else if (serverManagedFilesSet.size > 0 && expectedModState.size > 0) {
+          // Keep removals from expected state, add new mods from current state
+          const currentServerMods = new Set([
+            ...requiredMods.map(m => m.fileName.toLowerCase()),
+            ...allClientMods.map(m => m.fileName.toLowerCase())
+          ]);
+          
+          // Merge: keep expected state + add any new server mods
+          for (const mod of currentServerMods) {
+            serverManagedFilesSet.add(mod);
+          }
+          
+          console.log('Merged server state with expected state:', Array.from(serverManagedFilesSet));
+          
+          // Update persistent state with merged result
+          await saveExpectedModState(clientPath, serverManagedFilesSet, win);
         }
         
         console.log('Server managed files (final):', Array.from(serverManagedFilesSet));
@@ -920,9 +1077,18 @@ function createMinecraftLauncherHandlers(win) {
             )
           )
         );
-        
-        console.log('Backend: Before filtering - serverManagedFiles:', Array.from(serverManagedFilesSet));
+          console.log('Backend: Before filtering - serverManagedFiles:', Array.from(serverManagedFilesSet));
         console.log('Backend: After filtering - updatedServerManagedFiles:', updatedServerManagedFiles);
+
+        // Update persistent state when server legitimately changes
+        try {
+          const expectedModsSet = new Set(updatedServerManagedFiles.map(f => f.toLowerCase()));
+          await saveExpectedModState(clientPath, expectedModsSet, win);
+          console.log('Updated persistent state after server changes:', Array.from(expectedModsSet));
+        } catch (stateError) {
+          console.error('Failed to update persistent state after server changes:', stateError);
+          // Don't fail the check operation just because state update failed
+        }
 
         const synchronized =
           missingMods.length === 0 &&
@@ -1169,6 +1335,26 @@ function createMinecraftLauncherHandlers(win) {
           } catch (error) {
             console.error(`Failed to remove mod ${modFileName}:`, error);
             // Continue with other mods even if one fails
+          }
+        }        // Update persistent state after successful removal
+        if (successfullyRemovedMods.length > 0) {
+          try {
+            const loadResult = await loadExpectedModState(clientPath, win);
+            if (loadResult.success) {
+              const expectedMods = loadResult.expectedMods;
+              
+              // Remove the successfully removed mods from expected state
+              for (const removedMod of successfullyRemovedMods) {
+                expectedMods.delete(removedMod.toLowerCase());
+              }
+              
+              // Save updated state
+              await saveExpectedModState(clientPath, expectedMods, win);
+              console.log('Updated persistent state after mod removal:', Array.from(expectedMods));
+            }
+          } catch (stateError) {
+            console.error('Failed to update persistent state after mod removal:', stateError);
+            // Don't fail the removal operation just because state update failed
           }
         }
 

@@ -1128,12 +1128,20 @@
     // Initialize client functionality
     setupLauncherEvents();
     const cleanupChecks = setupChecks();
-    
-    window.electron.on('client-mod-compatibility-report', (data) => {
+      window.electron.on('client-mod-compatibility-report', (data) => {
       if (data && data.report && data.newMinecraftVersion && data.oldMinecraftVersion) {
         compatibilityReport = data.report;
         showCompatibilityDialog = true; 
       } else {
+      }
+    });
+    
+    // Handle persistent mod state errors
+    window.electron.on('mod-state-persistence-error', (errorData) => {
+      if (errorData && errorData.message) {
+        errorMessage.set(`Mod State Error: ${errorData.message}`);
+        setTimeout(() => errorMessage.set(''), 8000);
+        console.error('Mod state persistence error:', errorData);
       }
     });
     
