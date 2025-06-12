@@ -4,7 +4,8 @@
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import ClientModManager from './ClientModManager.svelte';
   import ClientHeader from './ClientHeader.svelte';
-  import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';  import { errorMessage, successMessage, serverManagedFiles } from '../../stores/modStore.js';
+  import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
+  import { errorMessage, successMessage, serverManagedFiles, removeServerManagedFiles } from '../../stores/modStore.js';
   import { createEventDispatcher } from 'svelte';
   import { openFolder } from '../../utils/folderUtils.js';
   import {
@@ -265,16 +266,7 @@
         
         // Update serverManagedFiles store if any mods were successfully removed
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-          const currentManagedFiles = get(serverManagedFiles);
-          const updatedManagedFiles = new Set(currentManagedFiles);
-          
-          for (const removedMod of result.successfullyRemovedMods) {
-            updatedManagedFiles.delete(removedMod.toLowerCase());
-            updatedManagedFiles.delete(removedMod); // Try both cases
-          }
-          
-          serverManagedFiles.set(updatedManagedFiles);
-          console.log('Updated serverManagedFiles after removal in ClientInterface:', Array.from(updatedManagedFiles));
+          removeServerManagedFiles(result.successfullyRemovedMods);
         }
         
         if (result.synchronized) {
@@ -593,16 +585,7 @@
         
         // Update serverManagedFiles store if any mods were removed
         if (result.removedMods && result.removedMods.length > 0) {
-          const currentManagedFiles = get(serverManagedFiles);
-          const updatedManagedFiles = new Set(currentManagedFiles);
-          
-          for (const removedMod of result.removedMods) {
-            updatedManagedFiles.delete(removedMod.toLowerCase());
-            updatedManagedFiles.delete(removedMod); // Try both cases
-          }
-          
-          serverManagedFiles.set(updatedManagedFiles);
-          console.log('Updated serverManagedFiles after removal in ClientInterface download:', Array.from(updatedManagedFiles));
+          removeServerManagedFiles(result.removedMods);
         }
         
         let processed = result.downloaded + result.skipped;
