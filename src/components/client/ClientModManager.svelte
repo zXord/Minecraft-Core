@@ -88,6 +88,7 @@
   let filterType = 'client';
   let downloadManagerCleanup;  let unsubscribeInstalledInfo;
   let previousPath: string | null = null;
+  let isCheckingModSync = false; // Guard to prevent reactive loops
 
   // Connect to server and get mod information
   onMount(() => {
@@ -97,7 +98,11 @@
       refreshInstalledMods();
     }
     unsubscribeInstalledInfo = installedModInfo.subscribe(() => {
-      checkModSynchronization();
+      // Only check mod synchronization if we're not already in the middle of checking
+      // This prevents reactive loops that could cause the spam of log messages
+      if (!isCheckingModSync) {
+        checkModSynchronization();
+      }
     });
     // Initialize filter stores for client mod search
     if (!get(filterMinecraftVersion)) {
@@ -283,22 +288,38 @@
       isLoadingMods = false;
     }
   }
-
   // Check mod synchronization status
   async function checkModSynchronization() {
-    if (!instance?.path) {
+    if (!instance?.path || isCheckingModSync) {
       return;
-    }    try {
+    }
+
+    isCheckingModSync = true;
+    try {
       const managedFiles = get(serverManagedFiles);
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods,
         allClientMods,
         serverManagedFiles: Array.from(managedFiles)
-      });
-
-      if (result.success) {
-        modSyncStatus = result;        // Emit event to parent about sync status
+      });      if (result.success) {
+        modSyncStatus = result;
+        
+        // Update serverManagedFiles store if any mods were successfully removed
+        if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+          const currentManagedFiles = get(serverManagedFiles);
+          const updatedManagedFiles = new Set(currentManagedFiles);
+          
+          for (const removedMod of result.successfullyRemovedMods) {
+            updatedManagedFiles.delete(removedMod.toLowerCase());
+            updatedManagedFiles.delete(removedMod); // Try both cases
+          }
+          
+          serverManagedFiles.set(updatedManagedFiles);
+          console.log('Updated serverManagedFiles after removal:', Array.from(updatedManagedFiles));
+        }
+        
+        // Emit event to parent about sync status
         dispatch('mod-sync-status', {
           synchronized: result.synchronized,
           needsDownload: result.needsDownload,
@@ -313,9 +334,10 @@
           `${result.error || 'Failed to check mod synchronization.'}`
         );
         setTimeout(() => errorMessage.set(''), 5000);
-      }
-    } catch (err) {      errorMessage.set('Failed to check mod synchronization.');
+      }    } catch (err) {      errorMessage.set('Failed to check mod synchronization.');
       setTimeout(() => errorMessage.set(''), 5000);
+    } finally {
+      isCheckingModSync = false;
     }
   }
 
@@ -343,6 +365,20 @@
       });      if (result.success) {
         successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
         setTimeout(() => successMessage.set(''), 5000);
+        
+        // Update serverManagedFiles store if any mods were removed
+        if (result.removedMods && result.removedMods.length > 0) {
+          const currentManagedFiles = get(serverManagedFiles);
+          const updatedManagedFiles = new Set(currentManagedFiles);
+          
+          for (const removedMod of result.removedMods) {
+            updatedManagedFiles.delete(removedMod.toLowerCase());
+            updatedManagedFiles.delete(removedMod); // Try both cases
+          }
+          
+          serverManagedFiles.set(updatedManagedFiles);
+          console.log('Updated serverManagedFiles after removal in downloadRequiredMods:', Array.from(updatedManagedFiles));
+        }
         
         // Refresh mod sync status with delay to allow file I/O to complete
         setTimeout(async () => {
@@ -385,6 +421,20 @@
         successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
         setTimeout(() => successMessage.set(''), 5000);
         
+        // Update serverManagedFiles store if any mods were removed
+        if (result.removedMods && result.removedMods.length > 0) {
+          const currentManagedFiles = get(serverManagedFiles);
+          const updatedManagedFiles = new Set(currentManagedFiles);
+          
+          for (const removedMod of result.removedMods) {
+            updatedManagedFiles.delete(removedMod.toLowerCase());
+            updatedManagedFiles.delete(removedMod); // Try both cases
+          }
+          
+          serverManagedFiles.set(updatedManagedFiles);
+          console.log('Updated serverManagedFiles after removal in downloadOptionalMods:', Array.from(updatedManagedFiles));
+        }
+        
         // Refresh mod sync status with delay to allow file I/O to complete
         setTimeout(async () => {
           await checkModSynchronization();
@@ -414,11 +464,23 @@
           serverIp: instance.serverIp,
           serverPort: instance.serverPort
         }
-      });
-
-      if (result.success) {
+      });      if (result.success) {
         successMessage.set(`Successfully downloaded ${mod.fileName}`);
         setTimeout(() => successMessage.set(''), 3000);
+        
+        // Update serverManagedFiles store if any mods were removed
+        if (result.removedMods && result.removedMods.length > 0) {
+          const currentManagedFiles = get(serverManagedFiles);
+          const updatedManagedFiles = new Set(currentManagedFiles);
+          
+          for (const removedMod of result.removedMods) {
+            updatedManagedFiles.delete(removedMod.toLowerCase());
+            updatedManagedFiles.delete(removedMod); // Try both cases
+          }
+          
+          serverManagedFiles.set(updatedManagedFiles);
+          console.log('Updated serverManagedFiles after removal in downloadSingleOptionalMod:', Array.from(updatedManagedFiles));
+        }
         
         // Refresh mod sync status with delay to allow file I/O to complete
         setTimeout(async () => {

@@ -1,5 +1,5 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import ClientModManager from './ClientModManager.svelte';
@@ -260,10 +260,24 @@
         requiredMods,
         allClientMods: serverInfo?.allClientMods || [],
         serverManagedFiles: Array.from(managedFiles)
-      });
-        if (result.success) {
+      });      if (result.success) {
         modSyncStatus = result;
-          if (result.synchronized) {
+        
+        // Update serverManagedFiles store if any mods were successfully removed
+        if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+          const currentManagedFiles = get(serverManagedFiles);
+          const updatedManagedFiles = new Set(currentManagedFiles);
+          
+          for (const removedMod of result.successfullyRemovedMods) {
+            updatedManagedFiles.delete(removedMod.toLowerCase());
+            updatedManagedFiles.delete(removedMod); // Try both cases
+          }
+          
+          serverManagedFiles.set(updatedManagedFiles);
+          console.log('Updated serverManagedFiles after removal in ClientInterface:', Array.from(updatedManagedFiles));
+        }
+        
+        if (result.synchronized) {
           downloadStatus = 'ready';
         } else {
           // If we just had a successful download (wasReady), be more conservative
@@ -573,10 +587,23 @@
         }
       });
       
-      
-      if (result.success) {
+        if (result.success) {
         downloadStatus = 'ready';
         downloadProgress = 100;
+        
+        // Update serverManagedFiles store if any mods were removed
+        if (result.removedMods && result.removedMods.length > 0) {
+          const currentManagedFiles = get(serverManagedFiles);
+          const updatedManagedFiles = new Set(currentManagedFiles);
+          
+          for (const removedMod of result.removedMods) {
+            updatedManagedFiles.delete(removedMod.toLowerCase());
+            updatedManagedFiles.delete(removedMod); // Try both cases
+          }
+          
+          serverManagedFiles.set(updatedManagedFiles);
+          console.log('Updated serverManagedFiles after removal in ClientInterface download:', Array.from(updatedManagedFiles));
+        }
         
         let processed = result.downloaded + result.skipped;
         let message = `Successfully processed ${processed} mods`;
@@ -998,8 +1025,7 @@
       window.electron.removeAllListeners(event);
     });
   }
-  
-  // Set up periodic checks
+    // Set up periodic checks
   function setupChecks() {
     // Check connection immediately
     connectToServer();
@@ -1023,6 +1049,14 @@
       }
     }, 60000); // Every 60 seconds (reduced frequency)
 
+    // Set up periodic mod synchronization check
+    const modCheckInterval = setInterval(() => {
+      if ($clientState.connectionStatus === 'connected' && $clientState.activeTab === 'play') {
+        // Only check mods when on the Play tab to avoid conflicts with the Mods tab
+        checkModSynchronization();
+      }
+    }, 30000); // Every 30 seconds when on Play tab
+
     // Set up periodic authentication refresh
     authRefreshInterval = setInterval(() => {
       refreshAuthToken();
@@ -1042,38 +1076,40 @@
         }
       }
     }, 5000); // Every 5 seconds when running
-    
-    // Store interval for cleanup
+      // Store intervals for cleanup
     connectionCheckInterval = connectionCheckInterval;
     statusCheckInterval = statusCheckInterval;
+    authRefreshInterval = authRefreshInterval;
     
-    // Add launcher status interval to cleanup
-    onDestroy(() => {
-      clearInterval(launcherStatusInterval);
-      clearInterval(authRefreshInterval);
-    });
+    // Return cleanup function
+    return () => {
+      if (connectionCheckInterval) clearInterval(connectionCheckInterval);
+      if (statusCheckInterval) clearInterval(statusCheckInterval);
+      if (authRefreshInterval) clearInterval(authRefreshInterval);
+      if (launcherStatusInterval) clearInterval(launcherStatusInterval);
+      if (modCheckInterval) clearInterval(modCheckInterval);
+    };
   }
-  
-  // Clean up on component unmount
-  onDestroy(() => {
-    clearInterval(connectionCheckInterval);
-    clearInterval(statusCheckInterval);
-    clearInterval(authRefreshInterval);
-    cleanupLauncherEvents();
-  });
-  
-  // Debug Java installation function removed - no longer needed
+    // Debug Java installation function removed - no longer needed
   
   onMount(() => {
     // Initialize client functionality
     setupLauncherEvents();
-    setupChecks();    window.electron.on('client-mod-compatibility-report', (data) => {
+    const cleanupChecks = setupChecks();
+    
+    window.electron.on('client-mod-compatibility-report', (data) => {
       if (data && data.report && data.newMinecraftVersion && data.oldMinecraftVersion) {
         compatibilityReport = data.report;
         showCompatibilityDialog = true; 
       } else {
       }
     });
+    
+    // Return cleanup function
+    return () => {
+      if (cleanupChecks) cleanupChecks();
+      cleanupLauncherEvents();
+    };
   });
   
   // Settings functions
