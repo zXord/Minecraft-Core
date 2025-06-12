@@ -191,7 +191,7 @@ export {
   hasUpdates,
   updateCount,
   categorizedMods,
-  
+
   // Helper functions
   compareVersions
 };
@@ -294,4 +294,23 @@ export async function updateModRequired(modId, required) {
   });
   
   await saveModCategories();
-} 
+}
+
+// Remove files from the serverManagedFiles set (case-insensitive)
+export function removeServerManagedFiles(fileNames = []) {
+  if (!Array.isArray(fileNames) || fileNames.length === 0) return;
+
+  serverManagedFiles.update(current => {
+    const updated = new Set();
+    for (const file of current) {
+      const shouldRemove = fileNames.some(rem => rem.toLowerCase() === file.toLowerCase());
+      if (!shouldRemove) {
+        updated.add(file);
+      }
+    }
+    return updated;
+  });
+
+  const updatedSet = get(serverManagedFiles);
+  console.log('removeServerManagedFiles ->', Array.from(updatedSet));
+}
