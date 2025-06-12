@@ -300,6 +300,7 @@ export async function updateModRequired(modId, required) {
 export function removeServerManagedFiles(fileNames = []) {
   if (!Array.isArray(fileNames) || fileNames.length === 0) return;
 
+  const before = Array.from(get(serverManagedFiles));
   serverManagedFiles.update(current => {
     const updated = new Set();
     for (const file of current) {
@@ -311,6 +312,6 @@ export function removeServerManagedFiles(fileNames = []) {
     return updated;
   });
 
-  const updatedSet = get(serverManagedFiles);
-  console.log('removeServerManagedFiles ->', Array.from(updatedSet));
+  const updatedSet = Array.from(get(serverManagedFiles));
+  console.log('removeServerManagedFiles:', { before, removed: fileNames, after: updatedSet });
 }

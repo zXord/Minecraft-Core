@@ -921,7 +921,20 @@ function createMinecraftLauncherHandlers(win) {
           }
         }
         
-        console.log('Successfully removed mods:', successfullyRemovedMods);const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && extraMods.length === 0;
+        console.log('Successfully removed mods:', successfullyRemovedMods);
+
+        const updatedServerManagedFiles = Array.from(
+          new Set(
+            [...serverManagedFilesSet].filter(
+              f => !successfullyRemovedMods.some(r => r.toLowerCase() === f)
+            )
+          )
+        );
+
+        const synchronized =
+          missingMods.length === 0 &&
+          outdatedMods.length === 0 &&
+          extraMods.length === 0;
         
         const actualNeedsDownload = missingMods.length + outdatedMods.length;
         const actualNeedsOptionalDownload = missingOptionalMods.length + outdatedOptionalMods.length;
@@ -940,7 +953,8 @@ function createMinecraftLauncherHandlers(win) {
           needsOptionalDownload: actualNeedsOptionalDownload,
           needsRemoval: extraMods.length,
           presentEnabledMods: presentMods,
-          presentDisabledMods: disabledMods
+          presentDisabledMods: disabledMods,
+          updatedServerManagedFiles
         };
       } catch (error) {
         return { success: false, error: error.message };

@@ -264,8 +264,10 @@
       });      if (result.success) {
         modSyncStatus = result;
         
-        // Update serverManagedFiles store if any mods were successfully removed
-        if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+        if (Array.isArray(result.updatedServerManagedFiles)) {
+          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
+          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
+        } else if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
           removeServerManagedFiles(result.successfullyRemovedMods);
         }
         
@@ -583,8 +585,10 @@
         downloadStatus = 'ready';
         downloadProgress = 100;
         
-        // Update serverManagedFiles store if any mods were removed
-        if (result.removedMods && result.removedMods.length > 0) {
+        if (Array.isArray(result.updatedServerManagedFiles)) {
+          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
+          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
+        } else if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
         
@@ -1034,11 +1038,10 @@
 
     // Set up periodic mod synchronization check
     const modCheckInterval = setInterval(() => {
-      if ($clientState.connectionStatus === 'connected' && $clientState.activeTab === 'play') {
-        // Only check mods when on the Play tab to avoid conflicts with the Mods tab
+      if ($clientState.connectionStatus === 'connected') {
         checkModSynchronization();
       }
-    }, 30000); // Every 30 seconds when on Play tab
+    }, 30000); // Every 30 seconds
 
     // Set up periodic authentication refresh
     authRefreshInterval = setInterval(() => {

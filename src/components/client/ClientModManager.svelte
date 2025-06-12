@@ -306,8 +306,10 @@
       });      if (result.success) {
         modSyncStatus = result;
         
-        // Update serverManagedFiles store if any mods were successfully removed
-        if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+        if (Array.isArray(result.updatedServerManagedFiles)) {
+          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
+          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
+        } else if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
           removeServerManagedFiles(result.successfullyRemovedMods);
         }
         
@@ -358,8 +360,10 @@
         successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
         setTimeout(() => successMessage.set(''), 5000);
         
-        // Update serverManagedFiles store if any mods were removed
-        if (result.removedMods && result.removedMods.length > 0) {
+        if (Array.isArray(result.updatedServerManagedFiles)) {
+          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
+          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
+        } else if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
         
@@ -404,8 +408,10 @@
         successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
         setTimeout(() => successMessage.set(''), 5000);
         
-        // Update serverManagedFiles store if any mods were removed
-        if (result.removedMods && result.removedMods.length > 0) {
+        if (Array.isArray(result.updatedServerManagedFiles)) {
+          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
+          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
+        } else if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
         
@@ -442,8 +448,10 @@
         successMessage.set(`Successfully downloaded ${mod.fileName}`);
         setTimeout(() => successMessage.set(''), 3000);
         
-        // Update serverManagedFiles store if any mods were removed
-        if (result.removedMods && result.removedMods.length > 0) {
+        if (Array.isArray(result.updatedServerManagedFiles)) {
+          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
+          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
+        } else if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
         
