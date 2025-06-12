@@ -49,7 +49,6 @@
     versionNumber?: string;
     projectId?: string;
   }
-
   interface ModSyncStatus {
     synchronized: boolean;
     needsDownload?: number;
@@ -62,6 +61,22 @@
     missingOptionalMods?: string[];
     presentEnabledMods?: string[];
     presentDisabledMods?: string[];
+    clientModChanges?: {
+      updates?: Array<{
+        name: string;
+        fileName: string;
+        currentVersion: string;
+        serverVersion: string;
+        action: string;
+      }>;
+      removals?: Array<{
+        name: string;
+        fileName: string;
+        reason: string;
+        action: string;
+      }>;
+      newDownloads?: string[];
+    };
   }
 
   // Props
@@ -87,9 +102,61 @@
   let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
   let filterType = 'client';
-  let downloadManagerCleanup;  let unsubscribeInstalledInfo;
-  let previousPath: string | null = null;
+  let downloadManagerCleanup;  let unsubscribeInstalledInfo;  let previousPath: string | null = null;
   let isCheckingModSync = false; // Guard to prevent reactive loops
+  let lastCheckModSyncCall = 0; // Track the most recent call
+  // Debug logging for modSyncStatus changes
+  $: {
+    if (modSyncStatus) {
+      console.log('modSyncStatus updated:', {
+        hasClientModChanges: !!modSyncStatus.clientModChanges,
+        hasRemovals: !!modSyncStatus.clientModChanges?.removals,
+        removals: modSyncStatus.clientModChanges?.removals || [],
+        removalsCount: modSyncStatus.clientModChanges?.removals?.length || 0
+      });
+    }
+  }
+
+  // Computed property for required mods display that includes mods needing removal
+  $: displayRequiredMods = (() => {
+    let displayMods = [...requiredMods];
+    
+    console.log('Computing displayRequiredMods:');
+    console.log('  - requiredMods:', requiredMods.map(m => m.fileName));
+    console.log('  - modSyncStatus removals:', modSyncStatus?.clientModChanges?.removals?.map(r => ({ fileName: r.fileName, action: r.action })));
+    
+    // Add mods that need removal to the display list
+    if (modSyncStatus?.clientModChanges?.removals) {
+      const modsNeedingRemoval = modSyncStatus.clientModChanges.removals.filter(r => r.action === 'remove_needed');
+      console.log('  - modsNeedingRemoval:', modsNeedingRemoval.map(r => r.fileName));
+      
+      for (const removal of modsNeedingRemoval) {
+        // Check if this mod is not already in the display list
+        const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === removal.fileName.toLowerCase());
+        console.log(`  - Checking ${removal.fileName}: existsInDisplay = ${existsInDisplay}`);
+        
+        if (!existsInDisplay) {
+          console.log(`  - Adding ${removal.fileName} to display list`);
+          // Create a mod object for the removal and add it to display list
+          displayMods.push({
+            fileName: removal.fileName,
+            name: removal.name || removal.fileName,
+            location: 'client', // It exists on client but needs removal
+            size: 0, // We don't know the size
+            lastModified: new Date().toISOString(),
+            required: false, // It's no longer required, that's why it needs removal
+            checksum: '',
+            downloadUrl: '',
+            projectId: null,
+            versionNumber: null
+          });
+        }
+      }
+    }
+    
+    console.log('  - Final displayMods:', displayMods.map(m => m.fileName));
+    return displayMods;
+  })();
 
   // Connect to server and get mod information
   onMount(() => {
@@ -111,11 +178,15 @@
     }
     if (!get(filterModLoader)) {
       filterModLoader.set(get(loaderType) || 'fabric');
-    }
-    
-    if (instance && instance.serverIp && instance.serverPort) {
-      loadModsFromServer();
-        // Set up periodic mod checking - reduced frequency to prevent flashing
+    }    if (instance && instance.serverIp && instance.serverPort) {
+      // On initial load, do a fresh mod synchronization check instead of just loading server info
+      // This ensures we catch any mods that need removal
+      (async () => {
+        await loadModsFromServer();
+        await checkModSynchronization(); // This will properly detect removal needs
+      })();
+        
+      // Set up periodic mod checking - reduced frequency to prevent flashing
       const interval = setInterval(loadModsFromServer, 5 * 60 * 1000); // Check every 5 minutes instead of 30 seconds
       
       return () => {
@@ -216,44 +287,61 @@
             minecraftVersion.set(serverInfo.minecraftVersion);
           }
           requiredMods = serverInfo.requiredMods || [];
-          allClientMods = serverInfo.allClientMods || [];
-          
-          // Update global store with server-managed mod file names
-          // IMPORTANT: Merge with existing store to preserve previously downloaded server mods
-          // that may have been removed from the server (needed for removal detection)
+          allClientMods = serverInfo.allClientMods || [];          // Update global store with server-managed mod file names
+          // Be careful not to override removal tracking
           const currentServerMods = new Set([
-            ...requiredMods.map(m => m.fileName),
-            ...(allClientMods || []).map(m => m.fileName)
+            ...requiredMods.map(m => m.fileName.toLowerCase()),
+            ...(allClientMods || []).map(m => m.fileName.toLowerCase())
           ]);
           
+          console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
+          console.log('Current server mods (allClientMods):', (allClientMods || []).map(m => m.fileName));
+          console.log('Combined currentServerMods set:', Array.from(currentServerMods));
+
           // Get existing server-managed files from store
           const existingManagedFiles = get(serverManagedFiles) || new Set();
+          console.log('Existing serverManagedFiles before update:', Array.from(existingManagedFiles));
           
-          // Merge current server mods with existing ones to preserve removal tracking
-          const mergedManaged = new Set([
-            ...existingManagedFiles,
-            ...currentServerMods
-          ]);
-          
-          serverManagedFiles.set(mergedManaged);
-          // Refresh installed mod info to enrich with server project IDs
-          await loadInstalledInfo();
-          
-          // Clean up the server managed files store by removing files that are no longer
-          // installed on the client (they may have been manually deleted)
-          const installedInfo = get(installedModInfo) || [];
-          const installedFileNames = new Set(installedInfo.map(mod => mod.fileName));
-          
-          // Only keep server-managed files that are either currently on server OR still installed on client
-          const cleanedManaged = new Set();
-          for (const fileName of mergedManaged) {
-            if (currentServerMods.has(fileName) || installedFileNames.has(fileName)) {
-              cleanedManaged.add(fileName);
+          // Only update the store if it's empty (initial load) or if we're adding new mods
+          // Don't remove mods from the store here - that should only happen through mod sync logic
+          if (existingManagedFiles.size === 0) {
+            console.log('Store empty, populating with current server mods');
+            serverManagedFiles.set(currentServerMods);          } else {
+            // Store has data - only add NEW mods that weren't there before
+            const updatedManagedFiles = new Set(existingManagedFiles);
+            let hasChanges = false;
+            
+            console.log('Checking for new mods to add...');
+            console.log('Current server mods:', Array.from(currentServerMods));
+            console.log('Existing managed files:', Array.from(existingManagedFiles));
+            
+            // Create a case-insensitive set for comparison
+            const existingFilesLowerCase = new Set(
+              Array.from(existingManagedFiles).map(f => f.toLowerCase())
+            );
+            
+            for (const fileName of currentServerMods) {
+              const fileNameLower = fileName.toLowerCase();
+              if (!existingFilesLowerCase.has(fileNameLower)) {
+                updatedManagedFiles.add(fileName);
+                existingFilesLowerCase.add(fileNameLower); // Add to comparison set too
+                hasChanges = true;
+                console.log('Adding new server mod to store:', fileName);
+              } else {
+                console.log('Mod already in store (case-insensitive match):', fileName);
+              }
+            }
+            
+            if (hasChanges) {
+              serverManagedFiles.set(updatedManagedFiles);
+              console.log('Updated serverManagedFiles with new mods:', Array.from(updatedManagedFiles));
             } else {
+              console.log('No new mods to add, keeping existing store');
             }
           }
-          
-          serverManagedFiles.set(cleanedManaged);
+
+          // Refresh installed mod info to enrich with server project IDs
+          await loadInstalledInfo();
           
           // Get full mod list from server
           const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
@@ -288,29 +376,52 @@
       setTimeout(() => errorMessage.set(''), 5000);    } finally {
       isLoadingMods = false;
     }
-  }
-  // Check mod synchronization status
+  }  // Check mod synchronization status
   async function checkModSynchronization() {
     if (!instance?.path || isCheckingModSync) {
       return;
     }
 
+    const currentCallId = Date.now();
+    lastCheckModSyncCall = currentCallId;
     isCheckingModSync = true;
+    
     try {
+      console.log(`[${currentCallId}] Starting checkModSynchronization`);
       const managedFiles = get(serverManagedFiles);
+      
+      console.log(`[${currentCallId}] Calling minecraft-check-mods with:`, {
+        requiredMods: requiredMods.length,
+        allClientMods: allClientMods.length,
+        serverManagedFiles: Array.from(managedFiles).length
+      });
+      
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods,
         allClientMods,
         serverManagedFiles: Array.from(managedFiles)
-      });      if (result.success) {
+      });
+
+      // Only process this result if it's from the most recent call
+      if (currentCallId !== lastCheckModSyncCall) {
+        console.log(`[${currentCallId}] Ignoring outdated response (latest call: ${lastCheckModSyncCall})`);
+        return;
+      }
+
+      if (result.success) {
+        console.log(`[${currentCallId}] Setting modSyncStatus to:`, JSON.stringify(result, null, 2));
         modSyncStatus = result;
         
+        // Always trust the updatedServerManagedFiles from backend as it's already filtered correctly
         if (Array.isArray(result.updatedServerManagedFiles)) {
           serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
-          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
-        } else if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-          removeServerManagedFiles(result.successfullyRemovedMods);
+          console.log('Updated serverManagedFiles from backend:', result.updatedServerManagedFiles);
+          
+          // Log removed mods for debugging
+          if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+            console.log('Successfully removed mods:', result.successfullyRemovedMods);
+          }
         }
         
         // Emit event to parent about sync status
@@ -561,9 +672,37 @@
     } catch (err) {
       errorMessage.set('Error deleting mod: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
+    }  }  // Handle removal of server-managed mods that are no longer required
+  async function handleServerModRemoval(modFileName) {
+    console.log('ClientModManager handleServerModRemoval called for:', modFileName);
+    if (!instance.path) return;
+
+    try {
+      console.log('Calling minecraft-remove-server-managed-mods for:', modFileName);
+      const result = await window.electron.invoke('minecraft-remove-server-managed-mods', {
+        clientPath: instance.path,
+        modsToRemove: [modFileName]
+      });
+
+      console.log('Remove result:', result);
+      if (result.success && result.removed && result.removed.length > 0) {
+        successMessage.set(`Removed server-managed mod: ${modFileName}`);
+        setTimeout(() => successMessage.set(''), 3000);
+        
+        // Remove from the server managed files store
+        removeServerManagedFiles([modFileName]);
+        
+        // Refresh the mod sync status
+        await checkModSynchronization();
+      } else {
+        errorMessage.set(`Failed to remove mod: ${result.error || 'Unknown error'}`);
+        setTimeout(() => errorMessage.set(''), 5000);
+      }
+    } catch (err) {
+      errorMessage.set('Error removing mod: ' + err.message);
+      setTimeout(() => errorMessage.set(''), 5000);
     }
   }
-
   
   // Client mod search functionality
   async function searchClientMods() {
@@ -874,12 +1013,12 @@
             <h3>Required Mods</h3>
             <p class="section-description">
               These mods are required by the server and cannot be disabled.
-            </p>
-          <ClientModList
-            mods={requiredMods}
+            </p>          <ClientModList
+            mods={displayRequiredMods}
             type="required"
             {modSyncStatus}
             on:download={downloadRequiredMods}
+            on:remove={(e) => handleServerModRemoval(e.detail.fileName)}
             on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
           />
           </div>
@@ -898,10 +1037,10 @@
             on:download={downloadOptionalMods}
             on:downloadSingle={(e) => downloadSingleOptionalMod(e.detail.mod)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
-            on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
-          />
-        </div>
-      {/if}          <!-- Client-Side Mods Section -->
+            on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}          />        </div>
+      {/if}
+
+          <!-- Client-Side Mods Section -->
           <div class="mod-section">
             <h3>Client-Side Mods</h3>
           <p class="section-description">
