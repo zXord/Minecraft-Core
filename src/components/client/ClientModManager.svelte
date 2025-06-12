@@ -703,6 +703,32 @@
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
+  // Handle dependency acknowledgment (persist and remove the notification)
+  async function handleDependencyAcknowledgment(modFileName) {
+    console.log('ClientModManager handleDependencyAcknowledgment called for:', modFileName);
+    
+    try {
+      // Call backend to persist the acknowledgment
+      const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
+        clientPath: instance.path,
+        modFileName: modFileName
+      });
+      
+      if (result.success) {
+        successMessage.set(`Acknowledged dependency: ${modFileName}`);
+        setTimeout(() => successMessage.set(''), 2000);
+        
+        // Refresh the mod sync status to clear the acknowledgment notification
+        await checkModSynchronization();
+      } else {
+        throw new Error(result.error || 'Failed to acknowledge dependency');
+      }
+    } catch (error) {
+      console.error('Error acknowledging dependency:', error);
+      errorMessage.set(`Failed to acknowledge dependency: ${error.message}`);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  }
   
   // Client mod search functionality
   async function searchClientMods() {
@@ -1019,6 +1045,7 @@
             {modSyncStatus}
             on:download={downloadRequiredMods}
             on:remove={(e) => handleServerModRemoval(e.detail.fileName)}
+            on:acknowledge={(e) => handleDependencyAcknowledgment(e.detail.fileName)}
             on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
           />
           </div>
