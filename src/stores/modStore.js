@@ -193,7 +193,8 @@ export {
   categorizedMods,
 
   // Helper functions
-  compareVersions
+  compareVersions,
+  removeServerManagedFiles
 };
 
 // Save mod categories to persistent storage
