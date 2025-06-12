@@ -264,11 +264,15 @@
       });      if (result.success) {
         modSyncStatus = result;
         
+        // Always trust the updatedServerManagedFiles from backend as it's already filtered correctly
         if (Array.isArray(result.updatedServerManagedFiles)) {
           serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
-          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
-        } else if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-          removeServerManagedFiles(result.successfullyRemovedMods);
+          console.log('Updated serverManagedFiles from backend:', result.updatedServerManagedFiles);
+          
+          // Log removed mods for debugging
+          if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+            console.log('Successfully removed mods:', result.successfullyRemovedMods);
+          }
         }
         
         if (result.synchronized) {
@@ -536,14 +540,56 @@
       downloadStatus = 'needed'; // Reset status on error
     }
   }
-  
-  // Download required mods
+    // Download required mods
   async function downloadMods() {
     
     // Validate required parameters
     if (!instance?.path) {
       errorMessage.set('No client path configured');
       setTimeout(() => errorMessage.set(''), 5000);
+      return;
+    }
+    
+    // Check if we have mods to remove
+    const modsToRemove = modSyncStatus?.clientModChanges?.removals?.filter(r => r.action === 'remove_needed') || [];
+    
+    // If we only have removals and no downloads needed, handle removals directly
+    if (modsToRemove.length > 0 && (!requiredMods || requiredMods.length === 0 || (modSyncStatus && modSyncStatus.needsDownload === 0))) {
+      // Set removing state
+      isDownloadingMods = true;
+      downloadStatus = 'downloading';
+      
+      try {
+        console.log('Removing mods:', modsToRemove.map(m => m.fileName));
+        const result = await window.electron.invoke('minecraft-remove-server-managed-mods', {
+          clientPath: instance.path,
+          modsToRemove: modsToRemove.map(m => m.fileName)
+        });
+
+        if (result.success && result.removed && result.removed.length > 0) {
+          downloadStatus = 'ready';
+          successMessage.set(`Successfully removed ${result.removed.length} mod${result.removed.length > 1 ? 's' : ''}`);
+          setTimeout(() => successMessage.set(''), 3000);
+          
+          // Remove from the server managed files store
+          removeServerManagedFiles(result.removed);
+          
+          // Refresh the mod sync status
+          setTimeout(async () => {
+            await checkModSynchronization();
+          }, 1500);
+        } else {
+          downloadStatus = 'needed';
+          errorMessage.set(`Failed to remove mods: ${result.error || 'Unknown error'}`);
+          setTimeout(() => errorMessage.set(''), 5000);
+        }
+      } catch (err) {
+        downloadStatus = 'needed';
+        errorMessage.set('Error removing mods: ' + err.message);
+        setTimeout(() => errorMessage.set(''), 5000);
+      } finally {
+        isDownloadingMods = false;
+      }
       return;
     }
     
@@ -1285,8 +1331,7 @@
       
     } catch (error) {
       errorMessage.set('Error disabling mods: ' + error.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
+      setTimeout(() => errorMessage.set(''), 5000);    }
       compatibilityReport = null;
   }
 
@@ -1453,8 +1498,7 @@
                       </div>
                     {/if}
 
-                    <!-- Client Mod Removals - Show even when no downloads are needed -->
-                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}
+                    <!-- Client Mod Removals - Show even when no downloads are needed -->                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}
                       <div class="mod-changes-section">
                         <h4>❌ Mods to be Removed:</h4>
                         <ul class="mod-list">
@@ -1667,14 +1711,18 @@
       <div class="mods-container">
         <ClientModManager 
           bind:this={clientModManagerComponent} 
-          {instance}
-          on:mod-sync-status={(e) => {            // Update mod sync status when the mod manager reports changes
+          {instance}          on:mod-sync-status={async (e) => {
+            // Update mod sync status when the mod manager reports changes
             // Use the full sync result if available, otherwise use the event detail
             if (e.detail.fullSyncResult) {
               modSyncStatus = e.detail.fullSyncResult;
             } else {
               modSyncStatus = e.detail;
             }
+            
+            // IMPORTANT: Refresh server info so Play tab has latest required mods data
+            // This ensures that when server removes mods, the Play tab knows about it
+            await getServerInfo();
             
             if (e.detail.synchronized) {
               downloadStatus = 'ready';
@@ -1994,9 +2042,7 @@
     background-color: rgba(245, 158, 11, 0.1);
     border: 1px solid rgba(245, 158, 11, 0.3);
     color: #fbbf24;
-  }
-
-  .mod-item.mod-removal {
+  }  .mod-item.mod-removal {
     background-color: rgba(239, 68, 68, 0.1);
     border: 1px solid rgba(239, 68, 68, 0.3);
     color: #f87171;

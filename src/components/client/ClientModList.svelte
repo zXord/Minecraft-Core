@@ -9,7 +9,6 @@
     versionNumber?: string;
     projectId?: string;
   }
-
   interface ModSyncStatus {
     synchronized: boolean;
     missingMods?: string[];
@@ -20,6 +19,22 @@
     totalOptionalPresent?: number;
     presentEnabledMods?: string[];
     presentDisabledMods?: string[];
+    clientModChanges?: {
+      updates?: Array<{
+        name: string;
+        fileName: string;
+        currentVersion: string;
+        serverVersion: string;
+        action: string;
+      }>;
+      removals?: Array<{
+        name: string;
+        fileName: string;
+        reason: string;
+        action: string;
+      }>;
+      newDownloads?: string[];
+    };
   }
 
   // Props
@@ -48,8 +63,33 @@
     if (type === 'optional' && modSyncStatus.presentDisabledMods && modSyncStatus.presentDisabledMods.includes(mod.fileName)) {
       return 'disabled';
     }
+      return 'installed';
+  }  // Check if a mod needs to be removed
+  function needsRemoval(mod: Mod): boolean {
+    if (!modSyncStatus?.clientModChanges?.removals) return false;
     
-    return 'installed';
+    const result = modSyncStatus.clientModChanges.removals.some(removal => 
+      removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'remove_needed'
+    );
+    
+    if (mod.fileName.toLowerCase().includes('sodium')) {
+      console.log(`needsRemoval check for ${mod.fileName}:`, {
+        modFileName: mod.fileName,
+        removals: modSyncStatus.clientModChanges.removals.map(r => ({ fileName: r.fileName, action: r.action })),
+        result
+      });
+    }
+    
+    return result;
+  }
+
+  // Get removal info for a mod
+  function getRemovalInfo(mod: Mod) {
+    if (!modSyncStatus?.clientModChanges?.removals) return null;
+    
+    return modSyncStatus.clientModChanges.removals.find(removal => 
+      removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'remove_needed'
+    );
   }
 
   // Format file size
@@ -72,11 +112,16 @@
       enabled: enabled
     });
   }
-
   // Handle mod deletion
   function handleDelete(mod: Mod): void {
     dispatch('delete', { fileName: mod.fileName });
   }
+  // Handle mod removal (for server-managed mods no longer required)
+  function handleRemove(mod: Mod): void {
+    console.log('ClientModList handleRemove called for:', mod.fileName);
+    dispatch('remove', { fileName: mod.fileName });
+  }
+
   // Handle download for missing mods
   function handleDownload(): void {
     dispatch('download');
@@ -119,9 +164,10 @@
               {/if}
             </div>
           </div>
-          
-          <div class="mod-status">
-            {#if getModStatus(mod) === 'installed'}
+            <div class="mod-status">
+            {#if needsRemoval(mod)}
+              <span class="status-badge removal">⚠️ Needs Removal</span>
+            {:else if getModStatus(mod) === 'installed'}
               <span class="status-badge installed">✅ Enabled</span>
             {:else if getModStatus(mod) === 'disabled'}
               <span class="status-badge disabled">⏸️ Disabled</span>
@@ -141,11 +187,19 @@
           </div>
             <div class="mod-actions">
             {#if type === 'required'}
-              <span class="required-label">Required</span>
-              {#if getModStatus(mod) === 'missing'}
-                <button class="download-button" on:click={handleDownload}>
-                  📥 Download
+              {#if needsRemoval(mod)}
+                {@const removalInfo = getRemovalInfo(mod)}
+                <span class="removal-reason">{removalInfo?.reason || 'No longer required'}</span>
+                <button class="action-btn remove-btn" on:click={() => handleRemove(mod)} title="Remove this mod">
+                  🗑️ Remove
                 </button>
+              {:else}
+                <span class="required-label">Required</span>
+                {#if getModStatus(mod) === 'missing'}
+                  <button class="download-button" on:click={handleDownload}>
+                    📥 Download
+                  </button>
+                {/if}
               {/if}
             {:else if type === 'optional'}
               {#if getModStatus(mod) === 'missing'}
@@ -320,10 +374,15 @@
     background-color: rgba(245, 158, 11, 0.2);
     color: #f59e0b;
   }
-
   .status-badge.missing {
     background-color: rgba(239, 68, 68, 0.2);
     color: #ef4444;
+  }
+
+  .status-badge.removal {
+    background-color: rgba(245, 158, 11, 0.2);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.3);
   }
 
   .status-badge.unknown {
@@ -412,7 +471,6 @@
     color: #9ca3af;
     border: 1px solid rgba(156, 163, 175, 0.3);
   }
-
   .delete-btn {
     background: rgba(239, 68, 68, 0.2);
     color: #ef4444;
@@ -422,6 +480,24 @@
   .delete-btn:hover {
     background: rgba(239, 68, 68, 0.3);
     border-color: rgba(239, 68, 68, 0.5);
+  }
+
+  .remove-btn {
+    background: rgba(245, 158, 11, 0.2);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+  }
+  
+  .remove-btn:hover {
+    background: rgba(245, 158, 11, 0.3);
+    border-color: rgba(245, 158, 11, 0.5);
+  }
+
+  .removal-reason {
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.7);
+    font-style: italic;
+    margin-right: 0.5rem;
   }
 
   .summary {

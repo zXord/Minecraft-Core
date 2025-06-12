@@ -30,5 +30,6 @@
    * Use global.d.ts instead of compilerOptions.types
    * to avoid limiting type declarations.
    */
-  "include": ["src/**/*", "electron/**/*"]
+  "include": ["src/**/*", "electron/**/*"],
+  "exclude": ["**/ClientModRemovalList.svelte", "node_modules"]
 }

@@ -312,5 +312,5 @@ export function removeServerManagedFiles(fileNames = []) {
   });
 
   const updatedSet = Array.from(get(serverManagedFiles));
-  console.log('removeServerManagedFiles:', { before, removed: fileNames, after: updatedSet });
+  console.log('removeServerManagedFiles called:', { before, removed: fileNames, after: updatedSet });
 }
