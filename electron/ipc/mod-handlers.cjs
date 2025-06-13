@@ -610,8 +610,6 @@ function createModHandlers(win) {
     },    // Get detailed information about manual mods    // Get detailed information about manual mods
     'get-manual-mods-detailed': async (_event, { clientPath, serverManagedFiles }) => {
       try {
-        console.log('=== get-manual-mods-detailed called ===');
-        console.log('serverManagedFiles parameter:', serverManagedFiles);
         
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
@@ -646,16 +644,12 @@ function createModHandlers(win) {
         for (const fileName of enabledFiles) {
           const fileNameLower = fileName.toLowerCase();
           const isServerManaged = serverManagedFilesSet.has(fileNameLower);
-          const isAcknowledged = acknowledgedDependencies.has(fileNameLower);          console.log(`Processing mod ${fileName}: isServerManaged=${isServerManaged}, isAcknowledged=${isAcknowledged}`);
-          
-          // Only skip if it's still server-managed AND not acknowledged
+          const isAcknowledged = acknowledgedDependencies.has(fileNameLower);
+            // Only skip if it's still server-managed AND not acknowledged
           // Acknowledged mods should appear in Client Downloaded even if server-managed
           if (isServerManaged && !isAcknowledged) {
-            console.log(`  -> Skipping ${fileName} – still server managed`);
             continue;
           }
-          
-          console.log(`  -> Including ${fileName} - not currently server managed`);
           
           const filePath = path.join(modsDir, fileName);
           const stats = fs.statSync(filePath);
@@ -687,23 +681,21 @@ function createModHandlers(win) {
               gameVersions: [],
               size: stats.size,
               lastModified: stats.mtime,
-              enabled: true
-            });
+              enabled: true            });
           }
-        }// Process disabled mods
+        }
+        
+        // Process disabled mods
         for (const fileName of disabledFiles) {
           const fileNameLower = fileName.toLowerCase();
           const isServerManaged = serverManagedFilesSet.has(fileNameLower);
-          const isAcknowledged = acknowledgedDependencies.has(fileNameLower);            console.log(`Processing disabled mod ${fileName}: isServerManaged=${isServerManaged}, isAcknowledged=${isAcknowledged}`);
+          const isAcknowledged = acknowledgedDependencies.has(fileNameLower);
           
           // Only skip if it's still server-managed AND not acknowledged
           // Acknowledged mods should appear in Client Downloaded even if server-managed
           if (isServerManaged && !isAcknowledged) {
-            console.log(`  -> Skipping ${fileName} – still server managed`);
             continue;
           }
-          
-          console.log(`  -> Including ${fileName} - not currently server managed`);
           
           const filePath = path.join(modsDir, fileName + '.disabled');
           const stats = fs.statSync(filePath);
