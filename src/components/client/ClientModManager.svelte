@@ -79,6 +79,26 @@
     };
   }
 
+  // Helper function for scoped serverManagedFiles updates
+  function updateServerManagedFiles(action, mods) {
+    serverManagedFiles.update(currentSet => {
+      const newSet = new Set(currentSet);
+      if (action === 'remove') {
+        mods.forEach(mod => {
+          const modName = typeof mod === 'string' ? mod : mod.fileName || mod.name;
+          newSet.delete(modName.toLowerCase());
+        });
+        console.log('Removed from serverManagedFiles:', mods.map(m => typeof m === 'string' ? m : m.fileName || m.name));
+      } else if (action === 'add') {
+        mods.forEach(mod => {
+          const modName = typeof mod === 'string' ? mod : mod.fileName || mod.name;
+          newSet.add(modName.toLowerCase());
+        });
+        console.log('Added to serverManagedFiles:', mods.map(m => typeof m === 'string' ? m : m.fileName || m.name));
+      }
+      return newSet;
+    });  }
+
   // Props
   export let instance: Instance | null = null; // Client instance
   // Create event dispatcher
@@ -389,8 +409,7 @@
         return;
       }
 
-      if (result.success) {
-        console.log(`[${currentCallId}] Setting modSyncStatus to:`, JSON.stringify(result, null, 2));
+      if (result.success) {        console.log(`[${currentCallId}] Setting modSyncStatus to:`, JSON.stringify(result, null, 2));
         modSyncStatus = result;
         
         // Always trust the updatedServerManagedFiles from backend as it's already filtered correctly
@@ -402,6 +421,9 @@
           if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
             console.log('Successfully removed mods:', result.successfullyRemovedMods);
           }
+        } else if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+          // Use scoped update for individual mod removals
+          updateServerManagedFiles('remove', result.successfullyRemovedMods);
         }
         
         // Emit event to parent about sync status
@@ -410,8 +432,7 @@
           needsDownload: result.needsDownload,
           totalRequired: result.totalRequired,
           totalPresent: result.totalPresent,
-          needsRemoval: result.needsRemoval,
-          clientModChanges: result.clientModChanges,
+          needsRemoval: result.needsRemoval,          clientModChanges: result.clientModChanges,
           fullSyncResult: result // Pass the full result for complete info
         });
       } else {
@@ -419,7 +440,9 @@
           `${result.error || 'Failed to check mod synchronization.'}`
         );
         setTimeout(() => errorMessage.set(''), 5000);
-      }    } catch (err) {      errorMessage.set('Failed to check mod synchronization.');
+      }
+    } catch (err) {
+      errorMessage.set('Failed to check mod synchronization.');
       setTimeout(() => errorMessage.set(''), 5000);
     } finally {
       isCheckingModSync = false;
@@ -451,12 +474,20 @@
         successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
         setTimeout(() => successMessage.set(''), 5000);
         
+        // **FIX**: Immediately update store with downloaded files so remove buttons appear
+        if (result.downloadedFiles && result.downloadedFiles.length > 0) {
+          console.log('Updating serverManagedFiles with downloaded files:', result.downloadedFiles);
+          updateServerManagedFiles('add', result.downloadedFiles);
+        }
+        
         if (Array.isArray(result.updatedServerManagedFiles)) {
           serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
           console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
         } else if (result.removedMods && result.removedMods.length > 0) {
-          removeServerManagedFiles(result.removedMods);
+          updateServerManagedFiles('remove', result.removedMods);
         }
+        
+        console.log("After re-add → serverManagedFiles:", Array.from($serverManagedFiles));
         
         // Refresh mod sync status with delay to allow file I/O to complete
         setTimeout(async () => {
