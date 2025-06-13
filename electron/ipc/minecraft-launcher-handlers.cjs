@@ -1,4 +1,3 @@
-
 const { getMinecraftLauncher } = require('../services/minecraft-launcher/index.cjs');
 const utils = require('../services/minecraft-launcher/utils.cjs');
 const fs = require('fs');
@@ -328,8 +327,38 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
   } catch (error) {
     console.error('Error analyzing client-side dependencies:', error);
   }
+    return dependencies;
+}
+
+/**
+ * Check if a mod filename matches any dependency by extracting various parts of the filename
+ * @param {string} fileName - The mod filename to check
+ * @param {Set} dependencies - Set of dependency names
+ * @returns {boolean} True if the mod is likely needed as a dependency
+ */
+function checkModDependencyByFilename(fileName, dependencies) {
+  const nameLower = fileName.toLowerCase();
   
-  return dependencies;
+  // Extract mod ID patterns (e.g., sodium-fabric-0.5.8+mc1.20.1.jar -> sodium)
+  const patterns = [
+    // Remove common suffixes and version patterns
+    nameLower.replace(/[-_](fabric|forge|quilt).*$/, ''), // sodium-fabric-... -> sodium
+    nameLower.replace(/[-_]\d+.*$/, ''), // mod-1.0.0 -> mod
+    nameLower.replace(/[-_]v?\d+\..*$/, ''), // mod-v1.0 -> mod
+    nameLower.replace(/[-_]mc\d+.*$/, ''), // mod-mc1.20 -> mod
+    nameLower.replace(/\.jar$/, ''), // Remove .jar    // Try extracting just the first part before any delimiter
+    nameLower.split(/[-_.]/)[0]
+  ];
+  
+  // Check each pattern against dependencies
+  for (const pattern of patterns) {
+    if (pattern && pattern.length > 2 && dependencies.has(pattern)) {
+      console.log(`Found dependency match: ${fileName} -> ${pattern}`);
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 function createMinecraftLauncherHandlers(win) {
@@ -952,16 +981,18 @@ function createMinecraftLauncherHandlers(win) {
         };
           // Initialize server managed files if empty but server has mods
         let serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
-        
-        // Load persistent expected mod state
+          // Load persistent expected mod state
         const stateResult = await loadExpectedModState(clientPath, win);
         const expectedModState = stateResult.expectedMods;
         const acknowledgedDependencies = stateResult.acknowledgedDependencies;
 
+        // Store whether we need to bootstrap (save state after diffing)
+        let needsBootstrap = false;
+
         // If serverManagedFiles is empty but we have persistent state, use that
         if (serverManagedFilesSet.size === 0 && expectedModState.size > 0) {
           serverManagedFilesSet = new Set(expectedModState);
-        }        // If no persistent state and we have server mods, initialize and save
+        }        // If no persistent state and we have server mods, use them for comparison but DON'T save yet
         else if (serverManagedFilesSet.size === 0 && (requiredMods.length > 0 || allClientMods.length > 0)) {
           const allServerMods = [
             ...requiredMods.map(m => m.fileName.toLowerCase()),
@@ -969,109 +1000,197 @@ function createMinecraftLauncherHandlers(win) {
           ];
           serverManagedFilesSet = new Set(allServerMods);
           
-          // Save this as the new expected state
-          await saveExpectedModState(clientPath, serverManagedFilesSet, win, acknowledgedDependencies);
+          // Mark that we need to bootstrap (save state after diffing)
+          needsBootstrap = true;
+          console.log('Bootstrap: Will use server mods for comparison but save state after diffing');
         }
-        // If we have both current state and persistent state, merge appropriately
+        // If we have both current and expected state, use expected for comparison
         else if (serverManagedFilesSet.size > 0 && expectedModState.size > 0) {
-          // Keep removals from expected state, add new mods from current state
-          const currentServerMods = new Set([
-            ...requiredMods.map(m => m.fileName.toLowerCase()),
-            ...allClientMods.map(m => m.fileName.toLowerCase())
-          ]);
-          
-          // Merge: keep expected state + add any new server mods
-          for (const mod of currentServerMods) {
-            serverManagedFilesSet.add(mod);
-          }
-          
-          console.log('Merged server state with expected state:', Array.from(serverManagedFilesSet));
-            // Update persistent state with merged result
-          await saveExpectedModState(clientPath, serverManagedFilesSet, win, acknowledgedDependencies);
+          // Use the expected state for comparison to detect removals
+          serverManagedFilesSet = new Set(expectedModState);
         }
         
         console.log('Server managed files (final):', Array.from(serverManagedFilesSet));
 
-          if (fs.existsSync(manifestDir)) {
-            const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));            const currentServerMods = new Set([
-              ...requiredMods.map(m => m.fileName.toLowerCase()),
-              ...allClientMods.map(m => m.fileName.toLowerCase())
-            ]);
-            console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
-            console.log('Current server mods (allClientMods):', allClientMods.map(m => m.fileName));
-            console.log('Combined currentServerMods set:', Array.from(currentServerMods));
+        // Current server mods (what the server currently requires)
+        const currentServerMods = new Set([
+          ...requiredMods.map(m => m.fileName.toLowerCase()),
+          ...allClientMods.map(m => m.fileName.toLowerCase())
+        ]);
+        console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
+        console.log('Current server mods (allClientMods):', allClientMods.map(m => m.fileName));
+        console.log('Combined currentServerMods set:', Array.from(currentServerMods));        // Get client-side dependencies to check if mods should be kept
+        const clientSideDependencies = await getClientSideDependencies(clientPath, serverManagedFiles);
+        console.log('Client-side dependencies found:', Array.from(clientSideDependencies));
+        
+        // Get list of client-side mods for dependency reasoning
+        const clientSideMods = [];
+        if (fs.existsSync(modsDir)) {
+          const modFiles = fs.readdirSync(modsDir).filter(file => 
+            file.toLowerCase().endsWith('.jar') && !file.toLowerCase().endsWith('.jar.disabled')
+          );
+          
+          const serverManagedSet = new Set(serverManagedFiles.map(f => f.toLowerCase()));
+          clientSideMods.push(...modFiles.filter(file => 
+            !serverManagedSet.has(file.toLowerCase())
+          ));
+        }
+
+        // Get all actual mods currently in the mods folder (both enabled and disabled)
+        const allCurrentMods = new Set();
+        if (fs.existsSync(modsDir)) {
+          const enabledMods = fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar'));
+          const disabledModFiles = fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar.disabled'));
+          
+          enabledMods.forEach(f => allCurrentMods.add(f.toLowerCase()));
+          disabledModFiles.forEach(f => allCurrentMods.add(f.replace('.disabled', '').toLowerCase()));
+        }
+        console.log('All current mods in folder:', Array.from(allCurrentMods));
+
+        // Check manifest-tracked mods for removal (existing logic)
+        if (fs.existsSync(manifestDir)) {
+          const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
             
-            const clientSideDependencies = await getClientSideDependencies(clientPath, serverManagedFiles);
-            console.log('Client-side dependencies found:', Array.from(clientSideDependencies));
-            const actualClientMods = new Set();
-            if (fs.existsSync(modsDir)) {
-              const clientModFiles = fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar'));
-              clientModFiles.forEach(f => actualClientMods.add(f.toLowerCase()));
-            }
-            
-            for (const file of manifests) {
-                const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));                if (data.fileName) {
-                  const fileNameLower = data.fileName.toLowerCase();
-                  const baseModName = getBaseModName(data.fileName).toLowerCase();
-                    if (serverManagedFilesSet.has(fileNameLower) && 
-                      !currentServerMods.has(fileNameLower)) {
-                      console.log(`Checking removal for ${data.fileName}:`);
-                    console.log(`  - Is in serverManagedFiles: ${serverManagedFilesSet.has(fileNameLower)}`);
-                    console.log(`  - Is NOT in currentServerMods: ${!currentServerMods.has(fileNameLower)}`);
-                    console.log(`  - fileNameLower: "${fileNameLower}"`);
-                    console.log(`  - baseModName: "${baseModName}"`);
-                    console.log(`  - data.name: "${data.name || 'undefined'}"`);
-                    console.log(`  - clientSideDependencies has fileName: ${clientSideDependencies.has(fileNameLower)}`);
-                    console.log(`  - clientSideDependencies has baseName: ${clientSideDependencies.has(baseModName)}`);
-                    console.log(`  - clientSideDependencies has modName: ${clientSideDependencies.has(data.name?.toLowerCase() || '')}`);
-                    
-                    // For Fabric API, add extra debug checks
-                    if (fileNameLower.includes('fabric') && fileNameLower.includes('api')) {
-                      console.log(`  - FABRIC API DEBUG:`);
-                      console.log(`    - checking "fabric": ${clientSideDependencies.has('fabric')}`);
-                      console.log(`    - checking "api": ${clientSideDependencies.has('api')}`);
-                      console.log(`    - checking "fabric-api": ${clientSideDependencies.has('fabric-api')}`);
-                      console.log(`    - checking "fabricapi": ${clientSideDependencies.has('fabricapi')}`);
-                      console.log(`    - checking "fabric_api": ${clientSideDependencies.has('fabric_api')}`);
-                      console.log(`    - all dependencies: ${Array.from(clientSideDependencies).join(', ')}`);
-                    }
-                    
+          for (const file of manifests) {
+            try {
+              const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));                
+              if (data.fileName) {
+                const fileNameLower = data.fileName.toLowerCase();
+                const baseModName = getBaseModName(data.fileName).toLowerCase();
+                  
+                if (serverManagedFilesSet.has(fileNameLower) && 
+                    !currentServerMods.has(fileNameLower)) {
+                    console.log(`Checking removal for ${data.fileName}:`);
+                  console.log(`  - Is in serverManagedFiles: ${serverManagedFilesSet.has(fileNameLower)}`);
+                  console.log(`  - Is NOT in currentServerMods: ${!currentServerMods.has(fileNameLower)}`);
+                  console.log(`  - fileNameLower: "${fileNameLower}"`);
+                  console.log(`  - baseModName: "${baseModName}"`);
+                  console.log(`  - data.name: "${data.name || 'undefined'}"`);
                     const isNeededByClientMod = clientSideDependencies.has(fileNameLower) ||
-                        clientSideDependencies.has(baseModName) ||
-                        clientSideDependencies.has(data.name?.toLowerCase() || '') ||
-                        // Add specific Fabric API checks
-                        (fileNameLower.includes('fabric') && fileNameLower.includes('api') && (
-                          clientSideDependencies.has('fabric-api') ||
-                          clientSideDependencies.has('fabricapi') ||
-                          clientSideDependencies.has('fabric_api') ||
-                          (clientSideDependencies.has('fabric') && clientSideDependencies.has('api'))
-                        ));
+                      clientSideDependencies.has(baseModName) ||
+                      clientSideDependencies.has(data.name?.toLowerCase() || '') ||
+                      // Add specific Fabric API checks
+                      (fileNameLower.includes('fabric') && fileNameLower.includes('api') && (
+                        clientSideDependencies.has('fabric-api') ||
+                        clientSideDependencies.has('fabricapi') ||
+                        clientSideDependencies.has('fabric_api') ||
+                        (clientSideDependencies.has('fabric') && clientSideDependencies.has('api'))
+                      )) ||
+                      // Check by mod ID from the filename
+                      checkModDependencyByFilename(fileNameLower, clientSideDependencies);
+                  
+                  // Check if this dependency has already been acknowledged
+                  const isAlreadyAcknowledged = acknowledgedDependencies.has(fileNameLower) ||
+                      acknowledgedDependencies.has(baseModName) ||
+                      acknowledgedDependencies.has(data.name?.toLowerCase() || '');
+                  
+                  if (!isNeededByClientMod) {
+                    console.log(`  -> WILL REMOVE: ${data.fileName}`);
+                    extraMods.push(data.fileName);                  } else if (!isAlreadyAcknowledged) {                    console.log(`  -> WILL KEEP: ${data.fileName} (needed by client-side mod) - first time notification`);
                     
-                    // Check if this dependency has already been acknowledged
-                    const isAlreadyAcknowledged = acknowledgedDependencies.has(fileNameLower) ||
-                        acknowledgedDependencies.has(baseModName) ||
-                        acknowledgedDependencies.has(data.name?.toLowerCase() || '');
-                    
-                    if (!isNeededByClientMod) {
-                      console.log(`  -> WILL REMOVE: ${data.fileName}`);
-                      extraMods.push(data.fileName);
-                      console.log(`  -> extraMods array after push:`, extraMods);
-                    } else if (!isAlreadyAcknowledged) {
-                      console.log(`  -> WILL KEEP: ${data.fileName} (needed by client-side mod) - first time notification`);
-                      // Add to client mod changes as a dependency note, not a removal
-                      clientModChanges.removals.push({
-                        name: data.fileName,
-                        fileName: data.fileName,
-                        reason: 'kept as dependency for client-side mod',
-                        action: 'acknowledge_dependency' // New action type for dependencies
-                      });
-                    } else {
-                      console.log(`  -> WILL KEEP: ${data.fileName} (needed by client-side mod) - already acknowledged, no notification`);
-                      // Don't add any notification since user has already acknowledged this dependency
+                    // Create a more specific reason that includes some client mod names
+                    let reason = 'required as dependency by client downloaded mods';
+                    if (clientSideMods.length > 0) {
+                      const modNames = clientSideMods.slice(0, 2).map(mod => mod.replace(/\.jar$/i, ''));
+                      if (clientSideMods.length === 1) {
+                        reason = `required as dependency by ${modNames[0]}`;
+                      } else if (clientSideMods.length === 2) {
+                        reason = `required as dependency by ${modNames.join(' and ')}`;
+                      } else {
+                        reason = `required as dependency by ${modNames.join(', ')} and ${clientSideMods.length - 2} other client mod${clientSideMods.length - 2 > 1 ? 's' : ''}`;
+                      }
                     }
+                    
+                    clientModChanges.removals.push({
+                      name: data.fileName,
+                      fileName: data.fileName,
+                      reason: reason,
+                      action: 'acknowledge_dependency'
+                    });
+                  } else {
+                    console.log(`  -> WILL KEEP: ${data.fileName} (needed by client-side mod) - already acknowledged`);
                   }
                 }
-            }          }
+              }
+            } catch (error) {
+              console.warn(`Failed to parse manifest ${file}:`, error.message);
+            }
+          }
+        }
+
+        // NEW: Check ALL mods in the folder for potential removal, not just manifest-tracked ones
+        // This handles mods that might not have manifests but still need to be removed
+        for (const modFileName of allCurrentMods) {
+          const fileNameLower = modFileName.toLowerCase();
+          const baseModName = getBaseModName(modFileName).toLowerCase();
+          
+          // Skip if this mod is currently required by server
+          if (currentServerMods.has(fileNameLower)) {
+            console.log(`Skipping ${modFileName} - currently required by server`);
+            continue;
+          }
+          
+          // Skip if this mod is not server-managed (e.g., client-only mods)
+          if (!serverManagedFilesSet.has(fileNameLower)) {
+            console.log(`Skipping ${modFileName} - not server-managed`);
+            continue;
+          }
+          
+          // Skip if we already processed this mod through manifests
+          if (extraMods.some(mod => mod.toLowerCase() === fileNameLower) ||
+              clientModChanges.removals.some(removal => removal.fileName.toLowerCase() === fileNameLower)) {
+            console.log(`Skipping ${modFileName} - already processed through manifest`);
+            continue;
+          }
+          
+          console.log(`Checking NON-MANIFEST mod for removal: ${modFileName}`);
+            // Check if this mod is needed by client-side dependencies
+          const isNeededByClientMod = clientSideDependencies.has(fileNameLower) ||
+              clientSideDependencies.has(baseModName) ||
+              // Add specific Fabric API checks
+              (fileNameLower.includes('fabric') && fileNameLower.includes('api') && (
+                clientSideDependencies.has('fabric-api') ||
+                clientSideDependencies.has('fabricapi') ||
+                clientSideDependencies.has('fabric_api') ||
+                (clientSideDependencies.has('fabric') && clientSideDependencies.has('api'))
+              )) ||
+              // Check by mod ID from the filename (e.g., sodium-fabric-0.5.8+mc1.20.1.jar -> sodium)
+              checkModDependencyByFilename(fileNameLower, clientSideDependencies);
+          
+          // Check if this dependency has already been acknowledged
+          const isAlreadyAcknowledged = acknowledgedDependencies.has(fileNameLower) ||
+              acknowledgedDependencies.has(baseModName);
+          
+          console.log(`  - isNeededByClientMod: ${isNeededByClientMod}`);
+          console.log(`  - isAlreadyAcknowledged: ${isAlreadyAcknowledged}`);
+          
+          if (!isNeededByClientMod) {
+            console.log(`  -> WILL REMOVE: ${modFileName} (no manifest)`);
+            extraMods.push(modFileName);          } else if (!isAlreadyAcknowledged) {            console.log(`  -> WILL KEEP: ${modFileName} (needed by client-side mod) - first time notification (no manifest)`);
+            
+            // Create a more specific reason that includes some client mod names
+            let reason = 'required as dependency by client downloaded mods';
+            if (clientSideMods.length > 0) {
+              const modNames = clientSideMods.slice(0, 2).map(mod => mod.replace(/\.jar$/i, ''));
+              if (clientSideMods.length === 1) {
+                reason = `required as dependency by ${modNames[0]}`;
+              } else if (clientSideMods.length === 2) {
+                reason = `required as dependency by ${modNames.join(' and ')}`;
+              } else {
+                reason = `required as dependency by ${modNames.join(', ')} and ${clientSideMods.length - 2} other client mod${clientSideMods.length - 2 > 1 ? 's' : ''}`;
+              }
+            }
+            
+            clientModChanges.removals.push({
+              name: modFileName,
+              fileName: modFileName,
+              reason: reason,
+              action: 'acknowledge_dependency'
+            });
+          } else {
+            console.log(`  -> WILL KEEP: ${modFileName} (needed by client-side mod) - already acknowledged (no manifest)`);
+          }
+        }
         
         const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
         const allPresentMods = [...presentMods, ...disabledMods];
@@ -1143,7 +1262,10 @@ function createMinecraftLauncherHandlers(win) {
           }        }        // Track extra mods that need removal but DON'T automatically delete them
         // Let the user decide when to remove them through the UI
         console.log(`About to process extraMods for removal:`, extraMods);
-        const successfullyRemovedMods = [];        for (const extraMod of extraMods) {
+        console.log(`Total unique mods marked for removal: ${extraMods.length}`);
+        console.log(`Mods marked for removal: ${extraMods.join(', ')}`);
+        const successfullyRemovedMods = [];        
+        for (const extraMod of extraMods) {
           console.log(`Detected extra mod that should be removed: ${extraMod}`);
           
           // Just track the mod for removal - don't actually delete it
@@ -1164,7 +1286,8 @@ function createMinecraftLauncherHandlers(win) {
           // Don't add to successfullyRemovedMods since we didn't actually remove anything
         }
         
-        console.log('Final clientModChanges.removals:', clientModChanges.removals);        console.log('Successfully removed mods:', successfullyRemovedMods);
+        console.log('Final clientModChanges.removals:', clientModChanges.removals);        
+        console.log('Successfully removed mods:', successfullyRemovedMods);
 
         const updatedServerManagedFiles = Array.from(
           new Set(
@@ -1172,25 +1295,89 @@ function createMinecraftLauncherHandlers(win) {
               f => !successfullyRemovedMods.some(r => r.toLowerCase() === f.toLowerCase())
             )
           )
-        );
-          console.log('Backend: Before filtering - serverManagedFiles:', Array.from(serverManagedFilesSet));
-        console.log('Backend: After filtering - updatedServerManagedFiles:', updatedServerManagedFiles);        // Update persistent state when server legitimately changes
+        );        console.log('Backend: Before filtering - serverManagedFiles:', Array.from(serverManagedFilesSet));
+        console.log('Backend: After filtering - updatedServerManagedFiles:', updatedServerManagedFiles);        
+        // ————————————————————————
+        // **NEW**: Clear any acks for mods the server just re-added
+        console.log('=== ACKNOWLEDGMENT CLEARING CHECK ===');
+        console.log('acknowledgedDependencies:', Array.from(acknowledgedDependencies));
+        console.log('currentServerMods:', Array.from(currentServerMods));
+
+        for (const ackModName of Array.from(acknowledgedDependencies)) {
+          const bareAck    = ackModName.toLowerCase().replace(/\.jar$/,'');
+          const hyphens    = bareAck;
+          const underscores = bareAck.replace(/-/g, '_');
+          const candidates = [
+            `${hyphens}.jar`,
+            `${underscores}.jar`,
+            hyphens,
+            underscores
+          ];
+
+          // Check each variant against currentServerMods
+          let matched = null;
+          for (const candidate of candidates) {
+            if (currentServerMods.has(candidate)) {
+              matched = candidate;
+              break;
+            }
+          }
+
+          if (matched) {
+            console.log(`  → CLEARING ack '${ackModName}' (matched server mod: '${matched}')`);
+            acknowledgedDependencies.delete(ackModName);
+          } else {
+            console.log(`  → KEEP ack '${ackModName}' (no match among ${JSON.stringify(candidates)})`);
+          }
+        }
+        console.log('=== END ACKNOWLEDGMENT CLEARING ===');
+        
+        // Update persistent state after all diffing is complete
         try {
-          const expectedModsSet = new Set(updatedServerManagedFiles.map(f => f.toLowerCase()));
-          await saveExpectedModState(clientPath, expectedModsSet, win, acknowledgedDependencies);
-          console.log('Updated persistent state after server changes:', Array.from(expectedModsSet));
+          let stateToSave;
+          
+          if (needsBootstrap) {
+            // First-time bootstrap: save the current server state after diffing
+            console.log('Bootstrap: Saving initial expected state after diffing');
+            stateToSave = new Set(currentServerMods);
+          } else {
+            // Normal update: save the updated state after removals
+            stateToSave = new Set(updatedServerManagedFiles.map(f => f.toLowerCase()));
+          }          
+          // Now save: expectedMods (as before) + pruned ack list
+          await saveExpectedModState(clientPath, stateToSave, win, acknowledgedDependencies);
+          console.log('Updated persistent state:', {
+            bootstrap: needsBootstrap,
+            expectedMods: Array.from(stateToSave),
+            acknowledgedDependencies: Array.from(acknowledgedDependencies)
+          });
         } catch (stateError) {
-          console.error('Failed to update persistent state after server changes:', stateError);
+          console.error('Failed to update persistent state:', stateError);
           // Don't fail the check operation just because state update failed
         }
-
+        // ————————————————————————// Check if there are any acknowledgment notifications pending
+        const hasAcknowledgmentNotifications = clientModChanges.removals.some(removal => 
+          removal.action === 'acknowledge_dependency'
+        );
+        
         const synchronized =
           missingMods.length === 0 &&
           outdatedMods.length === 0 &&
-          extraMods.length === 0;
+          extraMods.length === 0 &&
+          !hasAcknowledgmentNotifications; // Not synchronized if there are pending acknowledgments
         
-        const actualNeedsDownload = missingMods.length + outdatedMods.length;
+        console.log('Synchronization status:', {
+          missingMods: missingMods.length,
+          outdatedMods: outdatedMods.length, 
+          extraMods: extraMods.length,
+          hasAcknowledgmentNotifications,
+          synchronized
+        });
+          const actualNeedsDownload = missingMods.length + outdatedMods.length;
         const actualNeedsOptionalDownload = missingOptionalMods.length + outdatedOptionalMods.length;
+        const needsAcknowledgment = clientModChanges.removals.filter(removal => 
+          removal.action === 'acknowledge_dependency'
+        ).length;
           return {
           success: true,
           synchronized,
@@ -1205,6 +1392,7 @@ function createMinecraftLauncherHandlers(win) {
           needsDownload: synchronized ? 0 : actualNeedsDownload,
           needsOptionalDownload: actualNeedsOptionalDownload,
           needsRemoval: extraMods.length,
+          needsAcknowledgment, // Add count of acknowledgment notifications
           presentEnabledMods: presentMods,
           presentDisabledMods: disabledMods,
           updatedServerManagedFiles
@@ -1492,7 +1680,21 @@ function createMinecraftLauncherHandlers(win) {
         return { success: false, error: error.message };
       }
     },
+
+    'load-expected-mod-state': async (_e, { clientPath }) => {
+      try {
+        const stateResult = await loadExpectedModState(clientPath, win);
+        return {
+          success: stateResult.success,
+          expectedMods: Array.from(stateResult.expectedMods || []),
+          acknowledgedDependencies: Array.from(stateResult.acknowledgedDependencies || []),
+          error: stateResult.error
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
   };
 }
 
-module.exports = { createMinecraftLauncherHandlers };
+module.exports = { createMinecraftLauncherHandlers, loadExpectedModState };

@@ -1,5 +1,4 @@
-<script lang="ts">
-  import { onMount } from 'svelte';
+<script lang="ts">  import { onMount } from 'svelte';
   import { slide } from 'svelte/transition';
   import { get } from 'svelte/store'; // Import get
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
@@ -12,8 +11,7 @@
     authors?: string[];
     description?: string;
     projectId?: string;
-    loaderType?: string;
-    gameVersions?: string[];
+    loaderType?: string;    gameVersions?: string[];
     size: number;
     lastModified: Date;
     enabled: boolean;
@@ -21,7 +19,41 @@
     latestVersion?: string;
     updateUrl?: string;
   }
+
+  interface ModSyncStatus {
+    synchronized: boolean;
+    needsDownload?: number;
+    needsOptionalDownload?: number;
+    totalRequired?: number;
+    totalOptional?: number;
+    totalPresent?: number;
+    totalOptionalPresent?: number;
+    missingMods?: string[];
+    missingOptionalMods?: string[];
+    presentEnabledMods?: string[];
+    presentDisabledMods?: string[];
+    needsAcknowledgment?: number;
+    clientModChanges?: {
+      updates?: Array<{
+        name: string;
+        fileName: string;
+        currentVersion: string;
+        serverVersion: string;
+        action: string;
+      }>;
+      removals?: Array<{
+        name: string;
+        fileName: string;
+        reason: string;
+        action: string;
+      }>;
+      newDownloads?: string[];
+    };
+  }
+
   export let clientPath: string = '';
+  export let refreshTrigger: number = 0; // Prop to trigger refresh when acknowledgments change  
+  export let modSyncStatus: ModSyncStatus | null = null;
   
   let mods: DetailedMod[] = [];
   let loading = true;
@@ -30,13 +62,24 @@
   let checkingUpdates = false;
   let updatingMods: Set<string> = new Set();
   let showRemoveDialog = false;
-  let modToRemove: DetailedMod | null = null;
-  onMount(async () => {
+  let modToRemove: DetailedMod | null = null;  onMount(async () => {
     await loadManualMods();
-  });
-
-  // React to clientPath changes
+  });  // React to clientPath changes
   $: if (clientPath) {
+    loadManualMods();
+  }
+    // React to serverManagedFiles changes - this fixes the duplicate mods issue
+  $: if ($serverManagedFiles) {
+    loadManualMods();
+  }
+  
+  // React to acknowledgment changes - this fixes the transition after acknowledgment
+  $: if (refreshTrigger > 0) {
+    loadManualMods();
+  }
+
+  // React to modSyncStatus changes - catches acknowledgment state changes
+  $: if (modSyncStatus) {
     loadManualMods();
   }
   async function loadManualMods() {
@@ -45,11 +88,12 @@
     }
     
     loading = true;
-    error = '';
-    
-    try {
+    error = '';    try {
       // Pass the set of server managed files to the IPC handler
       const managedFilesSet = get(serverManagedFiles);
+      console.log('ClientManualModList: Loading manual mods with serverManagedFiles:', Array.from(managedFilesSet));
+      console.log('ClientManualModList: modSyncStatus:', modSyncStatus);
+      
       const result = await window.electron.invoke('get-manual-mods-detailed', { 
         clientPath,
         serverManagedFiles: Array.from(managedFilesSet) // Convert Set to Array for IPC
@@ -57,6 +101,10 @@
       
       if (result.success) {
         mods = result.mods;
+        console.log('ClientManualModList: Loaded mods:', mods.map(m => ({
+          fileName: m.fileName,
+          name: m.name
+        })));
       } else {
         error = result.error || 'Failed to load manual mods';
       }
@@ -233,7 +281,7 @@
 
 {#if loading}
   <div class="loading-container">
-    <p>Loading client-side mods...</p>
+    <p>Loading client downloaded mods...</p>
     <!-- You can add a spinner or a more elaborate loading animation here -->
   </div>
 {:else if error}

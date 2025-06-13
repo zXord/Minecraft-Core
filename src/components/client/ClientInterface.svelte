@@ -1013,7 +1013,7 @@
         }, 1000);
       } else {
         errorMessage.set(`Client download failed: ${data.error || 'Unknown error'}`);
-        setTimeout(() => errorMessage.set(''), 8000);
+        setTimeout(() => errorMessage.set(''), 5000);
       }
       
     });
@@ -1343,6 +1343,45 @@
       compatibilityReport = null;
   }
 
+  // Acknowledge all pending dependencies
+  async function onAcknowledgeAllDependencies() {
+    if (!instance?.path || !modSyncStatus?.clientModChanges?.removals) {
+      return;
+    }
+
+    const acknowledgments = modSyncStatus.clientModChanges.removals.filter(r => r.action === 'acknowledge_dependency');
+    if (acknowledgments.length === 0) {
+      return;
+    }
+
+    try {
+      // Acknowledge each dependency
+      for (const acknowledgment of acknowledgments) {
+        const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
+          clientPath: instance.path,
+          modFileName: acknowledgment.fileName
+        });
+
+        if (!result.success) {
+          throw new Error(result.error || `Failed to acknowledge ${acknowledgment.fileName}`);
+        }
+      }
+
+      successMessage.set(`Successfully acknowledged ${acknowledgments.length} dependenc${acknowledgments.length === 1 ? 'y' : 'ies'}`);
+      setTimeout(() => successMessage.set(''), 3000);
+      
+      // Refresh the mod sync status to clear the acknowledgment notifications
+      setTimeout(async () => {
+        await checkModSynchronization();
+      }, 1000);
+      
+    } catch (error) {
+      console.error('Error acknowledging dependencies:', error);
+      errorMessage.set(`Failed to acknowledge dependencies: ${error.message}`);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  }
+
 </script>
 
 <div class="client-container">
@@ -1466,20 +1505,43 @@
                 <div class="sync-status checking">
                   <h3>Checking Mods...</h3>
                   <p>Verifying installed mods...</p>
-                </div>              {:else if downloadStatus === 'needed'}
-                <div class="sync-status needed">
-                  <h3>Mods Need Update</h3>                  {#if modSyncStatus}
-                    <!-- Display appropriate message based on what needs to happen -->
-                    {#if modSyncStatus.needsDownload > 0 && modSyncStatus.clientModChanges?.removals?.length > 0}
-                      <p>{modSyncStatus.needsDownload} mod(s) need to be downloaded and {modSyncStatus.clientModChanges.removals.length} mod(s) need to be removed.</p>
-                    {:else if modSyncStatus.needsDownload > 0}
-                      <p>{modSyncStatus.needsDownload} out of {modSyncStatus.totalRequired || modSyncStatus.needsDownload} mods need to be downloaded.</p>
-                    {:else if modSyncStatus.clientModChanges?.removals?.length > 0}
-                      <p>{modSyncStatus.clientModChanges.removals.length} mod(s) need to be removed from your client.</p>
+                </div>              {:else if downloadStatus === 'needed'}                <div class="sync-status needed">
+                  {#if modSyncStatus}
+                    {@const actualRemovals = modSyncStatus.clientModChanges?.removals?.filter(r => r.action === 'remove_needed') || []}
+                    {@const acknowledgments = modSyncStatus.clientModChanges?.removals?.filter(r => r.action === 'acknowledge_dependency') || []}
+                    
+                    <!-- Dynamic title based on what needs to happen -->
+                    {#if modSyncStatus.needsDownload > 0 || actualRemovals.length > 0}
+                      <h3>Mods Need Update</h3>
+                    {:else if acknowledgments.length > 0}
+                      <h3>Dependency Notifications</h3>
                     {:else}
-                      <p>Mod synchronization required.</p>
+                      <h3>Mod Sync Required</h3>
                     {/if}
                     
+                    <!-- Display appropriate message based on what needs to happen -->
+                    {#if modSyncStatus.needsDownload > 0 && actualRemovals.length > 0 && acknowledgments.length > 0}
+                      <p>{modSyncStatus.needsDownload} mod(s) need to be downloaded, {actualRemovals.length} mod(s) need to be removed, and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
+                    {:else if modSyncStatus.needsDownload > 0 && actualRemovals.length > 0}
+                      <p>{modSyncStatus.needsDownload} mod(s) need to be downloaded and {actualRemovals.length} mod(s) need to be removed.</p>
+                    {:else if modSyncStatus.needsDownload > 0 && acknowledgments.length > 0}
+                      <p>{modSyncStatus.needsDownload} mod(s) need to be downloaded and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
+                    {:else if actualRemovals.length > 0 && acknowledgments.length > 0}
+                      <p>{actualRemovals.length} mod(s) need to be removed and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
+                    {:else if modSyncStatus.needsDownload > 0}
+                      <p>{modSyncStatus.needsDownload} out of {modSyncStatus.totalRequired || modSyncStatus.needsDownload} mods need to be downloaded.</p>
+                    {:else if actualRemovals.length > 0}
+                      <p>{actualRemovals.length} mod(s) need to be removed from your client.</p>
+                    {:else if acknowledgments.length > 0}
+                      <p>{acknowledgments.length} mod(s) are being kept as dependencies and need acknowledgment.</p>
+                    {:else}
+                      <p>Mod synchronization required.</p>
+                    {/if}                  {:else}
+                    <h3>Mods Need Update</h3>
+                    <p>Checking mod status...</p>
+                  {/if}
+                  
+                  {#if modSyncStatus}
                     <!-- New Downloads (Server-managed mods) -->
                     {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
                       <div class="mod-changes-section">
@@ -1504,21 +1566,32 @@
                           {/each}
                         </ul>
                       </div>
-                    {/if}
-
-                    <!-- Client Mod Removals - Show even when no downloads are needed -->                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.length > 0}
+                    {/if}                    <!-- Client Mod Removals - Only show actual removals -->
+                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.filter(r => r.action === 'remove_needed').length > 0}
                       <div class="mod-changes-section">
                         <h4>❌ Mods to be Removed:</h4>
                         <ul class="mod-list">
-                          {#each modSyncStatus.clientModChanges.removals as removal (removal.name)}
+                          {#each modSyncStatus.clientModChanges.removals.filter(r => r.action === 'remove_needed') as removal (removal.name)}
                             <li class="mod-item mod-removal">
-                              {removal.name} → {removal.reason || (removal.action === 'remove' ? 'no longer required' : 'disabled')}
+                              {removal.name} → {removal.reason || 'no longer required'}
                             </li>
                           {/each}
                         </ul>
                       </div>
-                    {/if}<!-- Legacy display for backwards compatibility -->
-                    {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
+                    {/if}
+
+                    <!-- Client Mod Dependency Acknowledgments - Show separately -->
+                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.filter(r => r.action === 'acknowledge_dependency').length > 0}
+                      <div class="mod-changes-section dependency-section">
+                        <h4>🔗 Dependency Notifications:</h4>
+                        <ul class="mod-list">                          {#each modSyncStatus.clientModChanges.removals.filter(r => r.action === 'acknowledge_dependency') as acknowledgment (acknowledgment.name)}
+                            <li class="mod-item mod-dependency">
+                              {acknowledgment.name} → {acknowledgment.reason || 'required as dependency by client downloaded mods'}
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}<!-- Legacy display for backwards compatibility -->                    {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
                       <p class="outdated-mods">Outdated: {modSyncStatus.outdatedMods.join(', ')}</p>
                     {/if}
                   {/if}
@@ -1528,10 +1601,21 @@
                     <button class="download-button" on:click={onDownloadModsClick}>
                       📥 Download Required Mods ({modSyncStatus.needsDownload})
                     </button>
-                  {:else if modSyncStatus && modSyncStatus.clientModChanges?.removals?.length > 0}
-                    <button class="download-button" on:click={onDownloadModsClick}>
-                      🔄 Apply Mod Changes (Remove {modSyncStatus.clientModChanges.removals.length} mod{modSyncStatus.clientModChanges.removals.length > 1 ? 's' : ''})
-                    </button>
+                  {:else if modSyncStatus && modSyncStatus.clientModChanges?.removals}
+                    {@const actualRemovals = modSyncStatus.clientModChanges.removals.filter(r => r.action === 'remove_needed')}
+                    {@const acknowledgments = modSyncStatus.clientModChanges.removals.filter(r => r.action === 'acknowledge_dependency')}
+                    
+                    {#if actualRemovals.length > 0}
+                      <button class="download-button" on:click={onDownloadModsClick}>
+                        🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
+                      </button>
+                    {/if}
+                    
+                    {#if acknowledgments.length > 0}
+                      <button class="acknowledge-button" on:click={onAcknowledgeAllDependencies}>
+                        ✓ Acknowledge Dependencies ({acknowledgments.length})
+                      </button>
+                    {/if}
                   {:else}
                     <button class="download-button" on:click={onDownloadModsClick}>
                       🔄 Synchronize Mods
@@ -2007,7 +2091,7 @@
     background-color: rgba(239, 68, 68, 0.1);
     border: 1px solid #ef4444;
   }
-
+  
   /* Mod changes section styles */
   .mod-changes-section {
     margin: 1rem 0;
@@ -2539,5 +2623,36 @@
   .optional-text strong {
     color: #3b82f6;
     font-weight: 600;
+  }
+
+  /* Dependency Section Styling */
+  .dependency-section {
+    background-color: rgba(34, 197, 94, 0.1);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+
+  .mod-dependency {
+    color: #22c55e;
+  }
+
+  .acknowledge-button {
+    background: linear-gradient(145deg, #22c55e, #16a34a);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 0.8rem 1.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    text-align: center;
+    margin-top: 1rem;
+    width: 100%;
+  }
+
+  .acknowledge-button:hover {
+    background: linear-gradient(145deg, #16a34a, #15803d);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(34, 197, 94, 0.3);
   }
 </style>
