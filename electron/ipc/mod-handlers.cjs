@@ -607,11 +607,13 @@ function createModHandlers(win) {
       } catch (error) {
         throw new Error(`Failed to disable mod: ${error.message}`);
       }
-    },
-
-    // Get detailed information about manual mods
+    },    // Get detailed information about manual mods    // Get detailed information about manual mods
     'get-manual-mods-detailed': async (_event, { clientPath, serverManagedFiles }) => {
-      try {        if (!clientPath || !fs.existsSync(clientPath)) {
+      try {
+        console.log('=== get-manual-mods-detailed called ===');
+        console.log('serverManagedFiles parameter:', serverManagedFiles);
+        
+        if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
         }
         
@@ -622,19 +624,39 @@ function createModHandlers(win) {
         }
 
         const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
+        
+        // Load acknowledged dependencies from the client state
+        let acknowledgedDependencies = new Set();
+        try {
+          const { loadExpectedModState } = require('./minecraft-launcher-handlers.cjs');
+          const stateResult = await loadExpectedModState(clientPath);
+          if (stateResult.success && stateResult.acknowledgedDependencies) {
+            acknowledgedDependencies = stateResult.acknowledgedDependencies;
+          }
+        } catch (error) {
+          console.warn('Failed to load acknowledged dependencies:', error.message);
+        }
 
         const allFiles = fs.readdirSync(modsDir);
         const enabledFiles = allFiles.filter(f => f.endsWith('.jar') && !f.endsWith('.disabled'));
         const disabledFiles = allFiles.filter(f => f.endsWith('.jar.disabled'))
           .map(f => f.replace('.disabled', '')); // Remove .disabled extension for processing
 
-        const mods = [];
-
-        // Process enabled mods
+        const mods = [];        // Process enabled mods
         for (const fileName of enabledFiles) {
-          if (serverManagedFilesSet.has(fileName.toLowerCase())) {
+          const fileNameLower = fileName.toLowerCase();
+          const isServerManaged = serverManagedFilesSet.has(fileNameLower);
+          const isAcknowledged = acknowledgedDependencies.has(fileNameLower);          console.log(`Processing mod ${fileName}: isServerManaged=${isServerManaged}, isAcknowledged=${isAcknowledged}`);
+          
+          // Only skip if it's still server-managed AND not acknowledged
+          // Acknowledged mods should appear in Client Downloaded even if server-managed
+          if (isServerManaged && !isAcknowledged) {
+            console.log(`  -> Skipping ${fileName} – still server managed`);
             continue;
           }
+          
+          console.log(`  -> Including ${fileName} - not currently server managed`);
+          
           const filePath = path.join(modsDir, fileName);
           const stats = fs.statSync(filePath);
 
@@ -668,11 +690,21 @@ function createModHandlers(win) {
               enabled: true
             });
           }
-        }        // Process disabled mods
+        }// Process disabled mods
         for (const fileName of disabledFiles) {
-          if (serverManagedFilesSet.has(fileName.toLowerCase())) {
+          const fileNameLower = fileName.toLowerCase();
+          const isServerManaged = serverManagedFilesSet.has(fileNameLower);
+          const isAcknowledged = acknowledgedDependencies.has(fileNameLower);            console.log(`Processing disabled mod ${fileName}: isServerManaged=${isServerManaged}, isAcknowledged=${isAcknowledged}`);
+          
+          // Only skip if it's still server-managed AND not acknowledged
+          // Acknowledged mods should appear in Client Downloaded even if server-managed
+          if (isServerManaged && !isAcknowledged) {
+            console.log(`  -> Skipping ${fileName} – still server managed`);
             continue;
           }
+          
+          console.log(`  -> Including ${fileName} - not currently server managed`);
+          
           const filePath = path.join(modsDir, fileName + '.disabled');
           const stats = fs.statSync(filePath);
 
@@ -703,8 +735,7 @@ function createModHandlers(win) {
               gameVersions: [],
               size: stats.size,
               lastModified: stats.mtime,
-              enabled: false
-            });
+              enabled: false            });
           }
         }
         
@@ -713,7 +744,7 @@ function createModHandlers(win) {
       } catch (error) {
         return { success: false, error: error.message, mods: [] };
       }
-    },    // Check manual mods for basic compatibility
+    },// Check manual mods for basic compatibility
     'check-manual-mods': async (_event, { clientPath, minecraftVersion }) => {
       try {
           if (!clientPath || !fs.existsSync(clientPath)) {

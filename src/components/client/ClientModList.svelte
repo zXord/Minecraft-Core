@@ -211,7 +211,7 @@
               {#if needsAcknowledgment(mod)}
                 {@const acknowledgmentInfo = getAcknowledgmentInfo(mod)}
                 <div class="dependency-notification">
-                  <span class="dependency-reason">🔗 {acknowledgmentInfo?.reason || 'Required by client-side mod'}</span>
+                  <span class="dependency-reason">🔗 {acknowledgmentInfo?.reason || 'required as dependency by client downloaded mods'}</span>
                   <button class="action-btn acknowledge-btn" on:click={() => handleAcknowledge(mod)} title="Acknowledge this dependency">
                     ✓ Acknowledge
                   </button>

@@ -103,6 +103,7 @@
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
   let filterType = 'client';
   let downloadManagerCleanup;  let unsubscribeInstalledInfo;  let previousPath: string | null = null;
+  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
   let isCheckingModSync = false; // Guard to prevent reactive loops
   let lastCheckModSyncCall = 0; // Track the most recent call
   // Debug logging for modSyncStatus changes
@@ -115,36 +116,37 @@
         removalsCount: modSyncStatus.clientModChanges?.removals?.length || 0
       });
     }
-  }
-
-  // Computed property for required mods display that includes mods needing removal
+  }  // Computed property for required mods display that includes mods needing removal or acknowledgment
   $: displayRequiredMods = (() => {
     let displayMods = [...requiredMods];
     
     console.log('Computing displayRequiredMods:');
     console.log('  - requiredMods:', requiredMods.map(m => m.fileName));
+    console.log('  - serverManagedFiles:', Array.from($serverManagedFiles || []));
     console.log('  - modSyncStatus removals:', modSyncStatus?.clientModChanges?.removals?.map(r => ({ fileName: r.fileName, action: r.action })));
     
-    // Add mods that need removal to the display list
+    // Add mods that need removal or acknowledgment to the display list
     if (modSyncStatus?.clientModChanges?.removals) {
-      const modsNeedingRemoval = modSyncStatus.clientModChanges.removals.filter(r => r.action === 'remove_needed');
-      console.log('  - modsNeedingRemoval:', modsNeedingRemoval.map(r => r.fileName));
+      const modsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => 
+        r.action === 'remove_needed' || r.action === 'acknowledge_dependency'
+      );
+      console.log('  - modsNeedingAction:', modsNeedingAction.map(r => ({ fileName: r.fileName, action: r.action })));
       
-      for (const removal of modsNeedingRemoval) {
+      for (const actionItem of modsNeedingAction) {
         // Check if this mod is not already in the display list
-        const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === removal.fileName.toLowerCase());
-        console.log(`  - Checking ${removal.fileName}: existsInDisplay = ${existsInDisplay}`);
+        const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === actionItem.fileName.toLowerCase());
+        console.log(`  - Checking ${actionItem.fileName} (${actionItem.action}): existsInDisplay = ${existsInDisplay}`);
         
         if (!existsInDisplay) {
-          console.log(`  - Adding ${removal.fileName} to display list`);
-          // Create a mod object for the removal and add it to display list
+          console.log(`  - Adding ${actionItem.fileName} to display list for ${actionItem.action}`);
+          // Create a mod object for the action and add it to display list
           displayMods.push({
-            fileName: removal.fileName,
-            name: removal.name || removal.fileName,
-            location: 'client', // It exists on client but needs removal
+            fileName: actionItem.fileName,
+            name: actionItem.name || actionItem.fileName,
+            location: 'client', // It exists on client
             size: 0, // We don't know the size
             lastModified: new Date().toISOString(),
-            required: false, // It's no longer required, that's why it needs removal
+            required: actionItem.action === 'acknowledge_dependency', // True for acknowledgments, false for removals
             checksum: '',
             downloadUrl: '',
             projectId: null,
@@ -287,8 +289,9 @@
             minecraftVersion.set(serverInfo.minecraftVersion);
           }
           requiredMods = serverInfo.requiredMods || [];
-          allClientMods = serverInfo.allClientMods || [];          // Update global store with server-managed mod file names
-          // Be careful not to override removal tracking
+          allClientMods = serverInfo.allClientMods || [];          // Always rebuild store to exactly: (currentServerMods ∪ acknowledgedDependencies)
+          console.log('Reconciling serverManagedFiles against latest server state + acks...');
+          
           const currentServerMods = new Set([
             ...requiredMods.map(m => m.fileName.toLowerCase()),
             ...(allClientMods || []).map(m => m.fileName.toLowerCase())
@@ -297,48 +300,25 @@
           console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
           console.log('Current server mods (allClientMods):', (allClientMods || []).map(m => m.fileName));
           console.log('Combined currentServerMods set:', Array.from(currentServerMods));
-
-          // Get existing server-managed files from store
-          const existingManagedFiles = get(serverManagedFiles) || new Set();
-          console.log('Existing serverManagedFiles before update:', Array.from(existingManagedFiles));
           
-          // Only update the store if it's empty (initial load) or if we're adding new mods
-          // Don't remove mods from the store here - that should only happen through mod sync logic
-          if (existingManagedFiles.size === 0) {
-            console.log('Store empty, populating with current server mods');
-            serverManagedFiles.set(currentServerMods);          } else {
-            // Store has data - only add NEW mods that weren't there before
-            const updatedManagedFiles = new Set(existingManagedFiles);
-            let hasChanges = false;
-            
-            console.log('Checking for new mods to add...');
-            console.log('Current server mods:', Array.from(currentServerMods));
-            console.log('Existing managed files:', Array.from(existingManagedFiles));
-            
-            // Create a case-insensitive set for comparison
-            const existingFilesLowerCase = new Set(
-              Array.from(existingManagedFiles).map(f => f.toLowerCase())
-            );
-            
-            for (const fileName of currentServerMods) {
-              const fileNameLower = fileName.toLowerCase();
-              if (!existingFilesLowerCase.has(fileNameLower)) {
-                updatedManagedFiles.add(fileName);
-                existingFilesLowerCase.add(fileNameLower); // Add to comparison set too
-                hasChanges = true;
-                console.log('Adding new server mod to store:', fileName);
-              } else {
-                console.log('Mod already in store (case-insensitive match):', fileName);
-              }
+          // Load acknowledged dependencies from persistent state
+          let ackDeps = new Set();
+          try {
+            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
+            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
+              ackDeps = new Set(state.acknowledgedDependencies.map(d => d.toLowerCase()));
             }
-            
-            if (hasChanges) {
-              serverManagedFiles.set(updatedManagedFiles);
-              console.log('Updated serverManagedFiles with new mods:', Array.from(updatedManagedFiles));
-            } else {
-              console.log('No new mods to add, keeping existing store');
-            }
+          } catch (err) {
+            console.warn('Could not load acknowledged dependencies:', err);
           }
+
+          // Union currentServerMods + ackDeps
+          const updated = new Set();
+          currentServerMods.forEach(f => updated.add(f));
+          ackDeps.forEach(f => updated.add(f));
+
+          console.log('→ New serverManagedFiles:', Array.from(updated));
+          serverManagedFiles.set(updated);
 
           // Refresh installed mod info to enrich with server project IDs
           await loadInstalledInfo();
@@ -713,13 +693,15 @@
         clientPath: instance.path,
         modFileName: modFileName
       });
-      
-      if (result.success) {
+        if (result.success) {
         successMessage.set(`Acknowledged dependency: ${modFileName}`);
         setTimeout(() => successMessage.set(''), 2000);
         
-        // Refresh the mod sync status to clear the acknowledgment notification
+        // 1) re-pull the server's mod list (so store no longer thinks it's "required")
+        await loadModsFromServer();
+        // 2) re-sync & rebuild client list
         await checkModSynchronization();
+        manualModsRefreshTrigger = Date.now();
       } else {
         throw new Error(result.error || 'Failed to acknowledge dependency');
       }
@@ -1065,11 +1047,9 @@
             on:downloadSingle={(e) => downloadSingleOptionalMod(e.detail.mod)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
             on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}          />        </div>
-      {/if}
-
-          <!-- Client-Side Mods Section -->
+      {/if}          <!-- Client Downloaded Mods Section -->
           <div class="mod-section">
-            <h3>Client-Side Mods</h3>
+            <h3>Client Downloaded Mods</h3>
           <p class="section-description">
             Mods installed by you (not synced from server).
           </p>
@@ -1078,6 +1058,8 @@
             </p>
           {/if}          <ClientManualModList
             clientPath={instance?.path || ''}
+            refreshTrigger={manualModsRefreshTrigger}
+            modSyncStatus={modSyncStatus}
             on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
             on:install={handleInstallMod}

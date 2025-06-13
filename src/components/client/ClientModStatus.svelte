@@ -1,11 +1,11 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-
   // Types
   interface ModSyncStatus {
     synchronized: boolean;
     needsDownload?: number;
     needsOptionalDownload?: number;
+    needsAcknowledgment?: number;
     totalRequired?: number;
     totalOptional?: number;
     totalPresent?: number;
@@ -48,11 +48,12 @@
         <span class="card-title">Required Mods</span>
       </div>
       <div class="card-content">
-        <div class="mod-count">{requiredModsCount}</div>
-        {#if modSyncStatus && modSyncStatus.totalRequired > 0}
+        <div class="mod-count">{requiredModsCount}</div>        {#if modSyncStatus && modSyncStatus.totalRequired > 0}
           <div class="sync-status">
-            {#if modSyncStatus.synchronized}
+            {#if modSyncStatus.synchronized && (!modSyncStatus.needsAcknowledgment || modSyncStatus.needsAcknowledgment === 0)}
               <span class="status-text success">✅ All synchronized</span>
+            {:else if modSyncStatus.needsAcknowledgment && modSyncStatus.needsAcknowledgment > 0}
+              <span class="status-text info">🔗 {modSyncStatus.needsAcknowledgment} need acknowledgment</span>
             {:else}
               <span class="status-text warning">⚠️ {modSyncStatus.needsDownload} need download</span>
             {/if}
@@ -105,16 +106,23 @@
         {/if}
       </div>    </div>
   </div>
-
   <!-- Overall Status Message -->
   <div class="overall-status">
     {#if modSyncStatus}
-      {#if modSyncStatus.synchronized && (!modSyncStatus.needsOptionalDownload || modSyncStatus.needsOptionalDownload === 0)}
+      {#if modSyncStatus.synchronized && (!modSyncStatus.needsOptionalDownload || modSyncStatus.needsOptionalDownload === 0) && (!modSyncStatus.needsAcknowledgment || modSyncStatus.needsAcknowledgment === 0)}
         <div class="status-message success">
           <span class="status-icon">🎉</span>
           <div class="status-content">
             <h4>All mods are ready!</h4>
             <p>You can start playing immediately. All required mods are synchronized.</p>
+          </div>
+        </div>
+      {:else if modSyncStatus.needsAcknowledgment && modSyncStatus.needsAcknowledgment > 0}
+        <div class="status-message info">
+          <span class="status-icon">🔗</span>
+          <div class="status-content">
+            <h4>Dependency notifications pending</h4>
+            <p>There {modSyncStatus.needsAcknowledgment === 1 ? 'is' : 'are'} {modSyncStatus.needsAcknowledgment} mod{modSyncStatus.needsAcknowledgment > 1 ? 's' : ''} that {modSyncStatus.needsAcknowledgment === 1 ? 'is' : 'are'} being kept due to client-side dependencies. Please acknowledge {modSyncStatus.needsAcknowledgment === 1 ? 'it' : 'them'} in the mod list below.</p>
           </div>
         </div>
       {:else if modSyncStatus.synchronized && modSyncStatus.needsOptionalDownload > 0}
