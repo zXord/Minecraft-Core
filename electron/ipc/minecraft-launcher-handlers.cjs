@@ -1130,10 +1130,8 @@ function createMinecraftLauncherHandlers(win) {
                     clientModChanges.removals.push({
                       name: data.fileName,
                       fileName: data.fileName,
-                      reason: reason,
-                      action: 'acknowledge_dependency'
+                      reason: reason,                      action: 'acknowledge_dependency'
                     });
-                  } else {
                   }
                 }
               }
@@ -1193,11 +1191,10 @@ function createMinecraftLauncherHandlers(win) {
               clientModChanges.removals.push({
               name: modFileName,
               fileName: modFileName,
-              reason: reason,
-              action: 'acknowledge_dependency'
+              reason: reason,              action: 'acknowledge_dependency'
             });
-          } else {
-          }        }
+          }
+        }
         
         // Module analysis for updates
         const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
@@ -1318,11 +1315,9 @@ function createMinecraftLauncherHandlers(win) {
             
             // If current server mod matches an acknowledged mod
             if (candidates.includes(currentMod)) {
-              // Only clear if this mod wasn't in the PERSISTENT expected state
-              // This prevents clearing acknowledgments during normal mod removals
+              // Only clear if this mod wasn't in the PERSISTENT expected state              // This prevents clearing acknowledgments during normal mod removals
               if (!previousExpectedMods.has(currentMod)) {
                 newlyReaddedMods.push({ ack: ackModName, server: currentMod });
-              } else {
               }
             }
           }
@@ -1588,13 +1583,11 @@ function createMinecraftLauncherHandlers(win) {
               file.toLowerCase() === (modFileName + '.disabled').toLowerCase()
             );
             
-            
-            let removed = false;
+              let removed = false;
             if (targetFile) {
               const actualPath = path.join(modsDir, targetFile);
               fs.unlinkSync(actualPath);
               removed = true;
-            } else {
             }
             
             if (removed) {
