@@ -322,16 +322,17 @@
           const currentServerMods = new Set([
             ...requiredMods.map(m => m.fileName.toLowerCase()),
             ...(allClientMods || []).map(m => m.fileName.toLowerCase())
-          ]);
-            console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
+          ]);          console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
           console.log('Current server mods (allClientMods):', (allClientMods || []).map(m => m.fileName));
           console.log('Combined currentServerMods set:', Array.from(currentServerMods));
           
           // Load acknowledged dependencies into local set (so we can filter them out of the UI)
           try {
-            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
-            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-              acknowledgedDeps = new Set(state.acknowledgedDependencies.map(d => d.toLowerCase()));
+            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
+              // Merge with existing acknowledgedDeps instead of overwriting
+              const persistedAcks = new Set(state.acknowledgedDependencies.map((d: string) => d.toLowerCase()));
+              // Keep any local acknowledgments that haven't been persisted yet
+              persistedAcks.forEach((ack: string) => acknowledgedDeps.add(ack));
             }
           } catch (err) {
             console.warn('Could not load acknowledged dependencies:', err);
@@ -717,30 +718,52 @@
   }
   // Handle dependency acknowledgment (persist and remove the notification)
   async function handleDependencyAcknowledgment(modFileName) {
-    console.log('ClientModManager handleDependencyAcknowledgment called for:', modFileName);
+    console.log('[ClientModManager] handleDependencyAcknowledgment called for:', modFileName);
+    const lowerModFileName = modFileName.toLowerCase();
     
     try {
-      // Call backend to persist the acknowledgment
+      // Log state BEFORE backend acknowledgment call and sync
+      console.log('[ClientModManager] State BEFORE acknowledgment sync for:', lowerModFileName);
+      console.log('[ClientModManager]   acknowledgedDeps (before add):', Array.from(acknowledgedDeps));
+      console.log('[ClientModManager]   modSyncStatus.clientModChanges.removals (before sync):', 
+        JSON.stringify(modSyncStatus?.clientModChanges?.removals?.find(r => r.fileName.toLowerCase() === lowerModFileName), null, 2)
+      );
+      console.log('[ClientModManager]   $serverManagedFiles (before sync):', Array.from(get(serverManagedFiles)));
+
       const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
         clientPath: instance.path,
         modFileName: modFileName
-      });      if (result.success) {
+      });
+      if (result.success) {
         successMessage.set(`Acknowledged dependency: ${modFileName}`);
         setTimeout(() => successMessage.set(''), 2000);
         
-        // locally remember that we've acknowledged this one
-        acknowledgedDeps.add(modFileName.toLowerCase());
-        
-        // 1) re-pull the server's mod list (so store no longer thinks it's "required")
-        await loadModsFromServer();
-        // 2) re-sync & rebuild client list
+        if (!acknowledgedDeps.has(lowerModFileName)) {
+          acknowledgedDeps.add(lowerModFileName);
+          acknowledgedDeps = new Set(acknowledgedDeps); 
+        } else {
+          acknowledgedDeps = new Set(acknowledgedDeps);
+        }
+        console.log('[ClientModManager]   acknowledgedDeps (after add, before sync):', Array.from(acknowledgedDeps));
+
         await checkModSynchronization();
-        manualModsRefreshTrigger = Date.now();
+        
+        // Log state AFTER backend acknowledgment call and sync
+        console.log('[ClientModManager] State AFTER acknowledgment sync for:', lowerModFileName);
+        console.log('[ClientModManager]   modSyncStatus.clientModChanges.removals (after sync):', 
+          JSON.stringify(modSyncStatus?.clientModChanges?.removals?.find(r => r.fileName.toLowerCase() === lowerModFileName), null, 2)
+        );
+        console.log('[ClientModManager]   $serverManagedFiles (after sync):', Array.from(get(serverManagedFiles)));
+        console.log('[ClientModManager]   acknowledgedDeps (final):', Array.from(acknowledgedDeps));
+
+        manualModsRefreshTrigger = Date.now(); 
+        
+        console.log('[ClientModManager]   Final modSyncStatus (after ack & sync):', JSON.stringify(modSyncStatus, null, 2));
       } else {
-        throw new Error(result.error || 'Failed to acknowledge dependency');
+        throw new Error(result.error || 'Failed to acknowledge dependency in backend');
       }
     } catch (error) {
-      console.error('Error acknowledging dependency:', error);
+      console.error('[ClientModManager] Error in handleDependencyAcknowledgment:', error);
       errorMessage.set(`Failed to acknowledge dependency: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
     }
