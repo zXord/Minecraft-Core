@@ -97,10 +97,15 @@
       const result = await window.electron.invoke('get-manual-mods-detailed', { 
         clientPath,
         serverManagedFiles: Array.from(managedFilesSet) // Convert Set to Array for IPC
-      });
-      
-      if (result.success) {
-        mods = result.mods;
+      });      if (result.success) {
+        // Filter out server-managed mods entirely
+        // (server-managed mods needing acknowledgment should only appear in required mods section)
+        mods = result.mods.filter(m => {
+          const isServerManaged = managedFilesSet.has(m.fileName.toLowerCase());
+          
+          // Only include non-server-managed mods in client mods list
+          return !isServerManaged;
+        });
         console.log('ClientManualModList: Loaded mods:', mods.map(m => ({
           fileName: m.fileName,
           name: m.name
