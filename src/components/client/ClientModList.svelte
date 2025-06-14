@@ -81,9 +81,7 @@
     }
     
     return result;
-  }
-
-  // Check if a mod is kept due to dependency
+  }  // Check if a mod is kept due to dependency
   function needsAcknowledgment(mod: Mod): boolean {
     if (!modSyncStatus?.clientModChanges?.removals) return false;
     
@@ -98,9 +96,7 @@
     return modSyncStatus.clientModChanges.removals.find(removal => 
       removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'remove_needed'
     );
-  }
-
-  // Get dependency acknowledgment info for a mod
+  }  // Get dependency acknowledgment info for a mod
   function getAcknowledgmentInfo(mod: Mod) {
     if (!modSyncStatus?.clientModChanges?.removals) return null;
     
@@ -185,10 +181,11 @@
                 <span class="mod-location">Location: {mod.location}</span>
               {/if}
             </div>
-          </div>
-            <div class="mod-status">
+          </div>            <div class="mod-status">
             {#if needsRemoval(mod)}
               <span class="status-badge removal">⚠️ Needs Removal</span>
+            {:else if needsAcknowledgment(mod)}
+              <span class="status-badge acknowledgment">🔗 Needs Acknowledgment</span>
             {:else if getModStatus(mod) === 'installed'}
               <span class="status-badge installed">✅ Enabled</span>
             {:else if getModStatus(mod) === 'disabled'}
@@ -407,11 +404,22 @@
     background-color: rgba(239, 68, 68, 0.2);
     color: #ef4444;
   }
-
   .status-badge.removal {
     background-color: rgba(245, 158, 11, 0.2);
     color: #f59e0b;
     border: 1px solid rgba(245, 158, 11, 0.3);
+  }
+
+  .status-badge.acknowledgment {
+    background-color: rgba(16, 185, 129, 0.2);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+
+  .status-badge.acknowledged {
+    background-color: rgba(16, 185, 129, 0.1);
+    color: #059669;
+    border: 1px solid rgba(16, 185, 129, 0.2);
   }
 
   .status-badge.unknown {
@@ -547,10 +555,22 @@
     color: #10b981;
     border: 1px solid rgba(16, 185, 129, 0.3);
   }
-  
-  .acknowledge-btn:hover {
+    .acknowledge-btn:hover {
     background: rgba(16, 185, 129, 0.3);
     border-color: rgba(16, 185, 129, 0.5);
+  }
+
+  .dependency-notification.acknowledged {
+    opacity: 0.8;
+  }
+
+  .acknowledged-label {
+    font-size: 0.75rem;
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.1);
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+    border: 1px solid rgba(16, 185, 129, 0.2);
   }
 
   .summary {

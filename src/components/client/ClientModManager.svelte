@@ -122,10 +122,13 @@
   let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
   let filterType = 'client';
-  let downloadManagerCleanup;  let unsubscribeInstalledInfo;  let previousPath: string | null = null;
-  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
+  let downloadManagerCleanup;  let unsubscribeInstalledInfo;  let previousPath: string | null = null;  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
   let isCheckingModSync = false; // Guard to prevent reactive loops
   let lastCheckModSyncCall = 0; // Track the most recent call
+  
+  // keep track of which fileNames we've acknowledged
+  let acknowledgedDeps: Set<string> = new Set();
+  
   // Debug logging for modSyncStatus changes
   $: {
     if (modSyncStatus) {
@@ -138,17 +141,21 @@
     }
   }  // Computed property for required mods display that includes mods needing removal or acknowledgment
   $: displayRequiredMods = (() => {
-    let displayMods = [...requiredMods];
+    // first, remove any that the user has already acknowledged
+    let displayMods = requiredMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
     
     console.log('Computing displayRequiredMods:');
     console.log('  - requiredMods:', requiredMods.map(m => m.fileName));
+    console.log('  - acknowledgedDeps:', Array.from(acknowledgedDeps));
+    console.log('  - filtered displayMods:', displayMods.map(m => m.fileName));
     console.log('  - serverManagedFiles:', Array.from($serverManagedFiles || []));
     console.log('  - modSyncStatus removals:', modSyncStatus?.clientModChanges?.removals?.map(r => ({ fileName: r.fileName, action: r.action })));
-    
+
     // Add mods that need removal or acknowledgment to the display list
     if (modSyncStatus?.clientModChanges?.removals) {
       const modsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => 
         r.action === 'remove_needed' || r.action === 'acknowledge_dependency'
+        // NOTE: We always ask for fresh acknowledgment, so no 'acknowledged_dependency' state
       );
       console.log('  - modsNeedingAction:', modsNeedingAction.map(r => ({ fileName: r.fileName, action: r.action })));
       
@@ -316,29 +323,23 @@
             ...requiredMods.map(m => m.fileName.toLowerCase()),
             ...(allClientMods || []).map(m => m.fileName.toLowerCase())
           ]);
-          
-          console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
+            console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
           console.log('Current server mods (allClientMods):', (allClientMods || []).map(m => m.fileName));
           console.log('Combined currentServerMods set:', Array.from(currentServerMods));
           
-          // Load acknowledged dependencies from persistent state
-          let ackDeps = new Set();
+          // Load acknowledged dependencies into local set (so we can filter them out of the UI)
           try {
             const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
             if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-              ackDeps = new Set(state.acknowledgedDependencies.map(d => d.toLowerCase()));
+              acknowledgedDeps = new Set(state.acknowledgedDependencies.map(d => d.toLowerCase()));
             }
           } catch (err) {
             console.warn('Could not load acknowledged dependencies:', err);
           }
 
-          // Union currentServerMods + ackDeps
-          const updated = new Set();
-          currentServerMods.forEach(f => updated.add(f));
-          ackDeps.forEach(f => updated.add(f));
-
-          console.log('→ New serverManagedFiles:', Array.from(updated));
-          serverManagedFiles.set(updated);
+          // serverManagedFiles should reflect only *actual* server mods,
+          // not the ones we've acknowledged and chosen to keep locally.
+          serverManagedFiles.set(currentServerMods);
 
           // Refresh installed mod info to enrich with server project IDs
           await loadInstalledInfo();
@@ -723,10 +724,12 @@
       const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
         clientPath: instance.path,
         modFileName: modFileName
-      });
-        if (result.success) {
+      });      if (result.success) {
         successMessage.set(`Acknowledged dependency: ${modFileName}`);
         setTimeout(() => successMessage.set(''), 2000);
+        
+        // locally remember that we've acknowledged this one
+        acknowledgedDeps.add(modFileName.toLowerCase());
         
         // 1) re-pull the server's mod list (so store no longer thinks it's "required")
         await loadModsFromServer();
