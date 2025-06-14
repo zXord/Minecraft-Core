@@ -328,11 +328,12 @@
           
           // Load acknowledged dependencies into local set (so we can filter them out of the UI)
           try {
-            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-              // Merge with existing acknowledgedDeps instead of overwriting
+            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
+            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
+              // Replace local acknowledgments with persisted ones. This ensures
+              // that resets performed in the backend are reflected in the UI.
               const persistedAcks = new Set(state.acknowledgedDependencies.map((d: string) => d.toLowerCase()));
-              // Keep any local acknowledgments that haven't been persisted yet
-              persistedAcks.forEach((ack: string) => acknowledgedDeps.add(ack));
+              acknowledgedDeps = new Set(persistedAcks);
             }
           } catch (err) {
             console.warn('Could not load acknowledged dependencies:', err);
