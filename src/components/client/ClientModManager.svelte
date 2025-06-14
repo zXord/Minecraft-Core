@@ -414,6 +414,20 @@
 
       if (result.success) {        console.log(`[${currentCallId}] Setting modSyncStatus to:`, JSON.stringify(result, null, 2));
         modSyncStatus = result;
+
+        // Refresh acknowledgments from backend in case they were reset
+        try {
+          const state = await window.electron.invoke('load-expected-mod-state', {
+            clientPath: instance.path
+          });
+          if (state.success && Array.isArray(state.acknowledgedDependencies)) {
+            acknowledgedDeps = new Set(
+              state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
+            );
+          }
+        } catch (err) {
+          console.warn('Could not refresh acknowledged dependencies after sync:', err);
+        }
         
         // Always trust the updatedServerManagedFiles from backend as it's already filtered correctly
         if (Array.isArray(result.updatedServerManagedFiles)) {
