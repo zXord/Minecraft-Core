@@ -94,17 +94,26 @@
       console.log('ClientManualModList: Loading manual mods with serverManagedFiles:', Array.from(managedFilesSet));
       console.log('ClientManualModList: modSyncStatus:', modSyncStatus);
       
-      const result = await window.electron.invoke('get-manual-mods-detailed', { 
+      const result = await window.electron.invoke('get-manual-mods-detailed', {
         clientPath,
         serverManagedFiles: Array.from(managedFilesSet) // Convert Set to Array for IPC
-      });      if (result.success) {
+      });
+      if (result.success) {
         // Filter out server-managed mods entirely
         // (server-managed mods needing acknowledgment should only appear in required mods section)
+        const pendingAckSet = new Set(
+          (modSyncStatus?.clientModChanges?.removals || [])
+            .filter(r => r.action === 'acknowledge_dependency')
+            .map(r => r.fileName.toLowerCase())
+        );
+
         mods = result.mods.filter(m => {
-          const isServerManaged = managedFilesSet.has(m.fileName.toLowerCase());
-          
-          // Only include non-server-managed mods in client mods list
-          return !isServerManaged;
+          const lower = m.fileName.toLowerCase();
+          const isServerManaged = managedFilesSet.has(lower);
+          const needsAck = pendingAckSet.has(lower);
+
+          // Only include mods that are not server-managed and not awaiting acknowledgment
+          return !isServerManaged && !needsAck;
         });
         console.log('ClientManualModList: Loaded mods:', mods.map(m => ({
           fileName: m.fileName,
