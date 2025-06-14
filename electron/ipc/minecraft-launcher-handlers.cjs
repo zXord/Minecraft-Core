@@ -1120,22 +1120,20 @@ function createMinecraftLauncherHandlers(win) {
                       acknowledgedDependencies.has(data.name?.toLowerCase() || '');
                   
                   if (!isNeededByClientMod) {
-                    console.log(`  -> WILL REMOVE: ${data.fileName}`);
-                    extraMods.push(data.fileName);                  } else if (!isAlreadyAcknowledged) {                    console.log(`  -> WILL KEEP: ${data.fileName} (needed by client-side mod) - first time notification`);
+                    extraMods.push(data.fileName);
+                  } else if (!isAlreadyAcknowledged) {
                     
                     // Build list of client-side mods excluding the one under test
                     const dependents = buildClientSideModsFor(data.fileName);
                     const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
 
-                    console.log(`Ack for ${data.fileName}: dependents=`, dependents);
-                      clientModChanges.removals.push({
+                    clientModChanges.removals.push({
                       name: data.fileName,
                       fileName: data.fileName,
                       reason: reason,
                       action: 'acknowledge_dependency'
                     });
                   } else {
-                    console.log(`  -> WILL KEEP: ${data.fileName} (needed by client-side mod) - already acknowledged`);
                   }
                 }
               }
@@ -1159,11 +1157,12 @@ function createMinecraftLauncherHandlers(win) {
           }
           
           // Skip if we already processed this mod through manifests
-          if (extraMods.some(mod => mod.toLowerCase() === fileNameLower) ||
-              clientModChanges.removals.some(removal => removal.fileName.toLowerCase() === fileNameLower)) {
+          if (
+            extraMods.some(mod => mod.toLowerCase() === fileNameLower) ||
+            clientModChanges.removals.some(removal => removal.fileName.toLowerCase() === fileNameLower)
+          ) {
             continue;
           }
-            console.log(`Checking NON-MANIFEST mod for removal: ${modFileName}`);
           
           // Check if this mod is needed by client-side dependencies
           const isNeededByClientMod = clientSideDependencies.has(fileNameLower) ||
@@ -1182,19 +1181,15 @@ function createMinecraftLauncherHandlers(win) {
           const isAlreadyAcknowledged = acknowledgedDependencies.has(fileNameLower) ||
               acknowledgedDependencies.has(baseModName);
           
-          console.log(`  - isNeededByClientMod: ${isNeededByClientMod}`);          console.log(`  - isAlreadyAcknowledged: ${isAlreadyAcknowledged}`);
           
           if (!isNeededByClientMod) {
-            console.log(`  -> WILL REMOVE: ${modFileName} (no manifest)`);
             extraMods.push(modFileName);
           } else if (!isAlreadyAcknowledged) {
-            console.log(`  -> WILL KEEP: ${modFileName} (needed by client-side mod) - first time notification (no manifest)`);
             
             // Build list of client-side mods excluding the one under test
             const dependents = buildClientSideModsFor(modFileName);
             const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
 
-            console.log(`Ack for ${modFileName}: dependents=`, dependents);
               clientModChanges.removals.push({
               name: modFileName,
               fileName: modFileName,
@@ -1202,7 +1197,6 @@ function createMinecraftLauncherHandlers(win) {
               action: 'acknowledge_dependency'
             });
           } else {
-            console.log(`  -> WILL KEEP: ${modFileName} (needed by client-side mod) - already acknowledged (no manifest)`);
           }        }
         
         // Module analysis for updates
@@ -1276,11 +1270,8 @@ function createMinecraftLauncherHandlers(win) {
           if (!serverModsWithClientUpdates.has(modFileName)) {
             clientModChanges.newDownloads.push(modFileName);
           }        }        // Track extra mods that need removal but DON'T automatically delete them
-        // Let the user decide when to remove them through the UI        console.log(`Total unique mods marked for removal: ${extraMods.length}`);
-        // console.log(`Mods marked for removal: ${extraMods.join(', ')}`);
         const successfullyRemovedMods = [];        
         for (const extraMod of extraMods) {
-          console.log(`Detected extra mod that should be removed: ${extraMod}`);
           
           // Just track the mod for removal - don't actually delete it
           clientModChanges.removals.push({
@@ -1290,35 +1281,22 @@ function createMinecraftLauncherHandlers(win) {
             action: 'remove_needed' // Changed from 'remove' to indicate it needs removal
           });
           
-          console.log(`Added to clientModChanges.removals:`, {
-            name: extraMod,
-            fileName: extraMod,
-            reason: 'no longer required by server',
-            action: 'remove_needed'
-          });
           
           // Don't add to successfullyRemovedMods since we didn't actually remove anything
         }
         
-        console.log('Final clientModChanges.removals:', clientModChanges.removals);        
-        console.log('Successfully removed mods:', successfullyRemovedMods);
 
-        const updatedServerManagedFiles = Array.from(
-          new Set(
-            [...serverManagedFilesSet].filter(
-              f => !successfullyRemovedMods.some(r => r.toLowerCase() === f.toLowerCase())
+          const updatedServerManagedFiles = Array.from(
+            new Set(
+              [...serverManagedFilesSet].filter(
+                f => !successfullyRemovedMods.some(r => r.toLowerCase() === f.toLowerCase())
+              )
             )
-          )
-        );        console.log('Backend: Before filtering - serverManagedFiles:', Array.from(serverManagedFilesSet));
-        console.log('Backend: After filtering - updatedServerManagedFiles:', updatedServerManagedFiles);
+          );
         
         // ————————————————————————
         // **SCOPED**: Only clear acknowledgments for mods that were actually re-added
         // This should ONLY happen when a mod is actually downloaded/re-added, not during regular checks
-        console.log('=== ACKNOWLEDGMENT CLEARING CHECK ===');
-        console.log('acknowledgedDependencies:', Array.from(acknowledgedDependencies));
-        console.log('currentServerMods:', Array.from(currentServerMods));
-        console.log('serverManagedFilesSet (frontend state):', Array.from(serverManagedFilesSet));
           // Get the persistent state as the source of truth for "previous" state
         const previousExpectedMods = expectedModState; // This is from persistent storage, not frontend
         const newlyReaddedMods = [];
@@ -1343,10 +1321,8 @@ function createMinecraftLauncherHandlers(win) {
               // Only clear if this mod wasn't in the PERSISTENT expected state
               // This prevents clearing acknowledgments during normal mod removals
               if (!previousExpectedMods.has(currentMod)) {
-                console.log(`  → Detected re-added mod: ${currentMod} (was acknowledged as ${ackModName})`);                console.log(`  → previousExpectedMods had: ${Array.from(previousExpectedMods)}`);
                 newlyReaddedMods.push({ ack: ackModName, server: currentMod });
               } else {
-                console.log(`  → NOT clearing ${ackModName}: was in persistent state (${currentMod})`);
               }
             }
           }
@@ -1364,7 +1340,6 @@ function createMinecraftLauncherHandlers(win) {
           
           if (needsBootstrap) {
             // First-time bootstrap: save the current server state after diffing
-            console.log('Bootstrap: Saving initial expected state after diffing');
             stateToSave = new Set(currentServerMods);
           } else {
             // Normal update: save the updated state after removals
@@ -1372,10 +1347,6 @@ function createMinecraftLauncherHandlers(win) {
           }          
           // Now save: expectedMods (as before) + pruned ack list
           await saveExpectedModState(clientPath, stateToSave, win, acknowledgedDependencies);
-          console.log('Updated persistent state:', {
-            bootstrap: needsBootstrap,
-            expectedMods: Array.from(stateToSave),
-            acknowledgedDependencies: Array.from(acknowledgedDependencies)          });
           
           // Basic state validation
           for (const ack of acknowledgedDependencies) {
@@ -1398,17 +1369,9 @@ function createMinecraftLauncherHandlers(win) {
           extraMods.length === 0 &&
           !hasAcknowledgmentNotifications; // Not synchronized if there are pending acknowledgments
         
-        console.log('Synchronization status:', {
-          missingMods: missingMods.length,
-          outdatedMods: outdatedMods.length, 
-          extraMods: extraMods.length,
-          hasAcknowledgmentNotifications,
-          synchronized
-        });
           const actualNeedsDownload = missingMods.length + outdatedMods.length;
         const actualNeedsOptionalDownload = missingOptionalMods.length + outdatedOptionalMods.length;        const needsAcknowledgment = clientModChanges.removals.filter(removal => 
           removal.action === 'acknowledge_dependency'        ).length;
-        // console.log('>>> END minecraft-check-mods\n');
         
         const result = {
           success: true,
@@ -1604,10 +1567,8 @@ function createMinecraftLauncherHandlers(win) {
     
     'minecraft-remove-server-managed-mods': async (_e, { clientPath, modsToRemove = [] }) => {
       try {
-        console.log('>>> START minecraft-remove-server-managed-mods for:', modsToRemove);
         
         if (!clientPath || !Array.isArray(modsToRemove) || modsToRemove.length === 0) {
-          console.log('Invalid parameters for mod removal');
           return { success: false, error: 'Client path and mods to remove are required' };
         }
 
@@ -1618,7 +1579,7 @@ function createMinecraftLauncherHandlers(win) {
         if (!fs.existsSync(modsDir)) {
           return { success: true, removed: [] };
         }        for (const modFileName of modsToRemove) {
-          try {            console.log(`Attempting to remove mod: ${modFileName}`);
+          try {            
             
             // Handle case sensitivity by checking all files in the directory
             const allFiles = fs.readdirSync(modsDir);
@@ -1627,18 +1588,13 @@ function createMinecraftLauncherHandlers(win) {
               file.toLowerCase() === (modFileName + '.disabled').toLowerCase()
             );
             
-            console.log(`All files in mods dir: ${allFiles.join(', ')}`);
-            console.log(`Looking for: ${modFileName} (case-insensitive)`);
-            console.log(`Found matching file: ${targetFile || 'none'}`);
             
             let removed = false;
             if (targetFile) {
               const actualPath = path.join(modsDir, targetFile);
               fs.unlinkSync(actualPath);
-              console.log(`Removed mod file: ${actualPath}`);
               removed = true;
             } else {
-              console.log(`Mod file not found: ${modFileName}`);
             }
             
             if (removed) {
@@ -1646,7 +1602,6 @@ function createMinecraftLauncherHandlers(win) {
               const manifestPath = path.join(manifestDir, modFileName.replace('.jar', '.json'));
               if (fs.existsSync(manifestPath)) {
                 fs.unlinkSync(manifestPath);
-                console.log(`Removed manifest file: ${manifestPath}`);
               }
                 successfullyRemovedMods.push(modFileName);
             }
@@ -1667,32 +1622,30 @@ function createMinecraftLauncherHandlers(win) {
                 expectedMods.delete(removedMod.toLowerCase());
               }
                 // Save updated state WITH preserved acknowledgments
-              await saveExpectedModState(clientPath, expectedMods, win, acknowledgedDependencies);
-              console.log('Updated persistent state after mod removal:', Array.from(expectedMods));              console.log('Preserved acknowledged dependencies:', Array.from(acknowledgedDependencies));
+                await saveExpectedModState(clientPath, expectedMods, win, acknowledgedDependencies);
+              }
+            } catch (stateError) {
+              console.error('Failed to update persistent state after mod removal:', stateError);
+              // Don't fail the removal operation just because state update failed
             }
-          } catch (stateError) {
-            console.error('Failed to update persistent state after mod removal:', stateError);
-            // Don't fail the removal operation just because state update failed
           }
-        }return { 
-          success: true, 
-          removed: successfullyRemovedMods,
-          count: successfullyRemovedMods.length 
-        };      } catch (error) {
-        return { success: false, error: error.message };
+          return {
+            success: true,
+            removed: successfullyRemovedMods,
+            count: successfullyRemovedMods.length
+          };
+        } catch (error) {
+          return { success: false, error: error.message };
       }
     },
     
     'minecraft-acknowledge-dependency': async (_e, { clientPath, modFileName }) => {
       try {
-        console.log('>>> START minecraft-acknowledge-dependency for:', modFileName);
         
         if (!clientPath || !modFileName) {
           return { success: false, error: 'Client path and mod file name are required' };
         }
 
-        console.log('Acknowledging dependency:', modFileName);
-        
         // Load current state
         const stateResult = await loadExpectedModState(clientPath, win);
         if (!stateResult.success) {
@@ -1708,12 +1661,11 @@ function createMinecraftLauncherHandlers(win) {
         acknowledgedDependencies.add(baseModName);
         
         // Save updated state
-        await saveExpectedModState(clientPath, expectedMods, win, acknowledgedDependencies);        console.log('Updated acknowledged dependencies:', Array.from(acknowledgedDependencies));
-        
-        console.log('>>> END minecraft-acknowledge-dependency');
+        await saveExpectedModState(clientPath, expectedMods, win, acknowledgedDependencies);
         return { success: true };
       } catch (error) {
-        console.error('Failed to acknowledge dependency:', error);        return { success: false, error: error.message };
+        console.error('Failed to acknowledge dependency:', error);
+        return { success: false, error: error.message };
       }
     },
     
