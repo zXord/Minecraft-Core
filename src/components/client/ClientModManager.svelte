@@ -328,11 +328,14 @@
           
           // Load acknowledged dependencies into local set (so we can filter them out of the UI)
           try {
-            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-              // Merge with existing acknowledgedDeps instead of overwriting
-              const persistedAcks = new Set(state.acknowledgedDependencies.map((d: string) => d.toLowerCase()));
-              // Keep any local acknowledgments that haven't been persisted yet
-              persistedAcks.forEach((ack: string) => acknowledgedDeps.add(ack));
+            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
+            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
+              // Replace local acknowledgments with persisted ones. This ensures
+              // that resets performed in the backend are reflected in the UI.
+              const persistedAcks: Set<string> = new Set(
+                state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
+              );
+              acknowledgedDeps = new Set<string>(persistedAcks);
             }
           } catch (err) {
             console.warn('Could not load acknowledged dependencies:', err);
@@ -413,6 +416,20 @@
 
       if (result.success) {        console.log(`[${currentCallId}] Setting modSyncStatus to:`, JSON.stringify(result, null, 2));
         modSyncStatus = result;
+
+        // Refresh acknowledgments from backend in case they were reset
+        try {
+          const state = await window.electron.invoke('load-expected-mod-state', {
+            clientPath: instance.path
+          });
+          if (state.success && Array.isArray(state.acknowledgedDependencies)) {
+            acknowledgedDeps = new Set<string>(
+              state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
+            );
+          }
+        } catch (err) {
+          console.warn('Could not refresh acknowledged dependencies after sync:', err);
+        }
         
         // Always trust the updatedServerManagedFiles from backend as it's already filtered correctly
         if (Array.isArray(result.updatedServerManagedFiles)) {

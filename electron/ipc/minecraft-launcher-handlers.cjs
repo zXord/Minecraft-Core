@@ -1052,7 +1052,12 @@ function createMinecraftLauncherHandlers(win) {
         } else if (serverManagedFilesSetForDiff.size === 0 && newServerRequiredModList.size > 0) {
           serverManagedFilesSetForDiff = new Set(newServerRequiredModList);
         } else if (serverManagedFilesSetForDiff.size > 0 && previousServerRequiredModListFromStorage.size > 0) {
-          serverManagedFilesSetForDiff = new Set(previousServerRequiredModListFromStorage);
+          // Merge previous required mods with current server managed set so that
+          // optional mods remain tracked while still detecting removals of old
+          // required mods.
+          previousServerRequiredModListFromStorage.forEach(mod =>
+            serverManagedFilesSetForDiff.add(mod)
+          );
         }
 
 
