@@ -1011,7 +1011,14 @@ function createMinecraftLauncherHandlers(win) {
         let acknowledgedDependencies = stateResult.acknowledgedDependencies;
 
         // Current server *required* mods (what the server currently *requires*)
-        const newServerRequiredModList = new Set(requiredMods.map(m => m.fileName.toLowerCase()));
+        const newServerRequiredModList = new Set(
+          requiredMods.map(m => m.fileName.toLowerCase())
+        );
+
+        // Set of all mods the server currently manages (required + optional)
+        const newServerAllMods = new Set(
+          allClientMods.map(m => m.fileName.toLowerCase())
+        );
         
         // Check if server *required* mod list has changed
         let serverRequiredModsActuallyChanged = false;
@@ -1045,14 +1052,53 @@ function createMinecraftLauncherHandlers(win) {
 
         // serverManagedFilesSet should represent what was *previously* considered server-managed for removal detection.
         // If bootstrapping, it might be the current server list, otherwise, it\'s the stored expected (required) list.
-        let serverManagedFilesSetForDiff = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
+        let serverManagedFilesSetForDiff = new Set(
+          (serverManagedFiles || []).map(f => f.toLowerCase())
+        );
 
-        if (serverManagedFilesSetForDiff.size === 0 && previousServerRequiredModListFromStorage.size > 0) {
-          serverManagedFilesSetForDiff = new Set(previousServerRequiredModListFromStorage);
-        } else if (serverManagedFilesSetForDiff.size === 0 && newServerRequiredModList.size > 0) {
+        if (
+          serverManagedFilesSetForDiff.size === 0 &&
+          previousServerRequiredModListFromStorage.size > 0
+        ) {
+          serverManagedFilesSetForDiff = new Set(
+            previousServerRequiredModListFromStorage
+          );
+        } else if (
+          serverManagedFilesSetForDiff.size === 0 &&
+          newServerRequiredModList.size > 0
+        ) {
           serverManagedFilesSetForDiff = new Set(newServerRequiredModList);
-        } else if (serverManagedFilesSetForDiff.size > 0 && previousServerRequiredModListFromStorage.size > 0) {
-          serverManagedFilesSetForDiff = new Set(previousServerRequiredModListFromStorage);
+        } else if (
+          serverManagedFilesSetForDiff.size > 0 &&
+          previousServerRequiredModListFromStorage.size > 0
+        ) {
+          // Merge previous required mods with current server managed set so that
+          // optional mods remain tracked while still detecting removals of old
+          // required mods.
+          previousServerRequiredModListFromStorage.forEach(mod =>
+            serverManagedFilesSetForDiff.add(mod)
+          );
+        }
+
+        // Reconcile acknowledged dependencies with current server-managed mods.
+        // If a previously acknowledged mod is now back on the server (required
+        // or optional), drop it from the acknowledgment set so the user will be
+        // prompted again if it gets removed in the future. Otherwise, keep it
+        // in serverManagedFilesSetForDiff so removal checks still work.
+        if (acknowledgedDependencies && acknowledgedDependencies.size > 0) {
+          const updatedAcks = new Set();
+          for (const dep of acknowledgedDependencies) {
+            const lower = dep.toLowerCase();
+            if (newServerAllMods.has(lower)) {
+              console.log(
+                `[IPC HANDLER] Clearing acknowledgment for ${dep} - mod present on server`
+              );
+            } else {
+              updatedAcks.add(lower);
+              serverManagedFilesSetForDiff.add(lower);
+            }
+          }
+          acknowledgedDependencies = updatedAcks;
         }
 
 
@@ -1091,8 +1137,17 @@ function createMinecraftLauncherHandlers(win) {
         // This loop iterates over mods that were previously expected (server-managed/required)
         for (const prevModFileName of previousServerRequiredModListFromStorage) {
           const prevModLower = prevModFileName.toLowerCase();
-          if (allCurrentMods.has(prevModLower) && !newServerRequiredModList.has(prevModLower) &&
-              !clientModChanges.removals.some(r => r.fileName.toLowerCase() === prevModLower)) {
+
+          // Skip if the mod is still managed by the server (as optional)
+          if (newServerAllMods.has(prevModLower)) {
+            continue;
+          }
+
+          if (
+            allCurrentMods.has(prevModLower) &&
+            !newServerRequiredModList.has(prevModLower) &&
+            !clientModChanges.removals.some(r => r.fileName.toLowerCase() === prevModLower)
+          ) {
             const baseModName = getBaseModName(prevModFileName).toLowerCase();
             const isNeededByClientMod = clientSideDependencies.has(prevModLower) ||
                                       clientSideDependencies.has(baseModName) ||
