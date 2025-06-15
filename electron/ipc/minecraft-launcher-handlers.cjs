@@ -1011,7 +1011,14 @@ function createMinecraftLauncherHandlers(win) {
         let acknowledgedDependencies = stateResult.acknowledgedDependencies;
 
         // Current server *required* mods (what the server currently *requires*)
-        const newServerRequiredModList = new Set(requiredMods.map(m => m.fileName.toLowerCase()));
+        const newServerRequiredModList = new Set(
+          requiredMods.map(m => m.fileName.toLowerCase())
+        );
+
+        // Set of all mods the server currently manages (required + optional)
+        const newServerAllMods = new Set(
+          allClientMods.map(m => m.fileName.toLowerCase())
+        );
         
         // Check if server *required* mod list has changed
         let serverRequiredModsActuallyChanged = false;
@@ -1096,8 +1103,17 @@ function createMinecraftLauncherHandlers(win) {
         // This loop iterates over mods that were previously expected (server-managed/required)
         for (const prevModFileName of previousServerRequiredModListFromStorage) {
           const prevModLower = prevModFileName.toLowerCase();
-          if (allCurrentMods.has(prevModLower) && !newServerRequiredModList.has(prevModLower) &&
-              !clientModChanges.removals.some(r => r.fileName.toLowerCase() === prevModLower)) {
+
+          // Skip if the mod is still managed by the server (as optional)
+          if (newServerAllMods.has(prevModLower)) {
+            continue;
+          }
+
+          if (
+            allCurrentMods.has(prevModLower) &&
+            !newServerRequiredModList.has(prevModLower) &&
+            !clientModChanges.removals.some(r => r.fileName.toLowerCase() === prevModLower)
+          ) {
             const baseModName = getBaseModName(prevModFileName).toLowerCase();
             const isNeededByClientMod = clientSideDependencies.has(prevModLower) ||
                                       clientSideDependencies.has(baseModName) ||
