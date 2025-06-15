@@ -264,15 +264,9 @@
       });      if (result.success) {
         modSyncStatus = result;
         
-        // Always trust the updatedServerManagedFiles from backend as it's already filtered correctly
-        if (Array.isArray(result.updatedServerManagedFiles)) {
-          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
-          console.log('Updated serverManagedFiles from backend:', result.updatedServerManagedFiles);
-          
-          // Log removed mods for debugging
-          if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-            console.log('Successfully removed mods:', result.successfullyRemovedMods);
-          }
+        // Remove any mods that were deleted on the server
+        if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+          removeServerManagedFiles(result.successfullyRemovedMods);
         }
         
         if (result.synchronized) {
@@ -630,11 +624,15 @@
         if (result.success) {
         downloadStatus = 'ready';
         downloadProgress = 100;
-        
-        if (Array.isArray(result.updatedServerManagedFiles)) {
-          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
-          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
-        } else if (result.removedMods && result.removedMods.length > 0) {
+
+        if (result.downloadedFiles && result.downloadedFiles.length > 0) {
+          serverManagedFiles.update((current) => {
+            const newSet = new Set(current);
+            result.downloadedFiles.forEach((m) => newSet.add(m.toLowerCase()));
+            return newSet;
+          });
+        }
+        if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
         
@@ -1127,6 +1125,24 @@
   onMount(() => {
     // Initialize client functionality
     setupLauncherEvents();
+
+    // Load any persisted mod state so the Play tab reflects accurate
+    // synchronization status before visiting the Mods tab
+    (async () => {
+      try {
+        const state = await window.electron.invoke('load-expected-mod-state', {
+          clientPath: instance.path
+        });
+        if (state.success && Array.isArray(state.expectedMods)) {
+          serverManagedFiles.set(
+            new Set(state.expectedMods.map((m) => m.toLowerCase()))
+          );
+        }
+      } catch (err) {
+        console.warn('Failed to load persisted mod state:', err);
+      }
+    })();
+
     const cleanupChecks = setupChecks();
       window.electron.on('client-mod-compatibility-report', (data) => {
       if (data && data.report && data.newMinecraftVersion && data.oldMinecraftVersion) {
