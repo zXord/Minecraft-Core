@@ -81,7 +81,6 @@
   $: if (modSyncStatus) {
     loadManualMods();
   }
-  
   async function loadManualMods() {
     if (!clientPath) {
       return;
@@ -111,9 +110,7 @@
           (modSyncStatus?.clientModChanges?.removals || [])
             .filter(r => r.action === 'remove_needed')
             .map(r => r.fileName.toLowerCase())
-        );
-
-        mods = result.mods.filter(m => {
+        );        mods = result.mods.filter(m => {
           const lower = m.fileName.toLowerCase();
           const isServerManaged = managedFilesSet.has(lower);
           const needsAck = pendingAckSet.has(lower);
@@ -346,12 +343,14 @@
                 <span class="file-size">{formatFileSize(mod.size)}</span>
                 <span class="file-date">Modified: {formatDate(mod.lastModified)}</span>
               </div>
-            </div>
-            
-            <div class="mod-status">
-              <span class="status-tag {mod.enabled ? 'enabled' : 'disabled'}">
-                {mod.enabled ? 'Enabled' : 'Disabled'}
-              </span>
+            </div>            <div class="mod-status">
+              {#if $serverManagedFiles.has(mod.fileName.toLowerCase())}
+                <span class="status-tag server-mod">Server Mod</span>
+              {:else}
+                <span class="status-tag {mod.enabled ? 'enabled' : 'disabled'}">
+                  {mod.enabled ? 'Enabled' : 'Disabled'}
+                </span>
+              {/if}
               {#if mod.hasUpdate}
                 <span class="update-badge">Update Available</span>
               {/if}
@@ -363,8 +362,7 @@
               {:else}
                 <span class="version-tag unknown">Unknown</span>
               {/if}            </div>
-            
-            <div class="mod-actions">              {#if mod.hasUpdate}
+              <div class="mod-actions">              {#if mod.hasUpdate && !$serverManagedFiles.has(mod.fileName.toLowerCase())}
                 <button 
                   class="action-btn update-btn"
                   on:click|stopPropagation={() => updateMod(mod)}
@@ -374,20 +372,23 @@
                   {updatingMods.has(mod.fileName) ? 'Updating...' : `Update to v${mod.latestVersion}`}
                 </button>
               {/if}
-              <button 
-                class="action-btn toggle-btn" 
-                on:click|stopPropagation={() => toggleMod(mod)}
-                title={mod.enabled ? 'Disable mod' : 'Enable mod'}
-              >
-                {mod.enabled ? 'Disable' : 'Enable'}
-              </button>
-              <button
-                class="action-btn delete-btn"
-                on:click|stopPropagation={() => promptRemove(mod)}
-                title="Remove mod"
-              >
-                Remove
-              </button>
+              {#if !$serverManagedFiles.has(mod.fileName.toLowerCase())}
+                <button 
+                  class="action-btn toggle-btn" 
+                  on:click|stopPropagation={() => toggleMod(mod)}
+                  title={mod.enabled ? 'Disable mod' : 'Enable mod'}
+                >
+                  {mod.enabled ? 'Disable' : 'Enable'}
+                </button>
+                <button
+                  class="action-btn delete-btn"
+                  on:click|stopPropagation={() => promptRemove(mod)}
+                  title="Remove mod"                >
+                  Remove
+                </button>
+              {:else}
+                <span class="server-mod-label">Managed by Server</span>
+              {/if}
             </div>
           </div>
           
@@ -604,11 +605,16 @@
     text-transform: uppercase;
     transition: all 0.3s ease; /* Smooth transition for status changes */
   }
-
   .status-tag.enabled {
     background: rgba(34, 197, 94, 0.2);
     color: #22c55e;
     border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+
+  .status-tag.server-mod {
+    background: rgba(139, 92, 246, 0.2);
+    color: #8b5cf6;
+    border: 1px solid rgba(139, 92, 246, 0.3);
   }
 
   .status-tag.disabled {
@@ -753,7 +759,6 @@
     flex-wrap: wrap;
     gap: 0.25rem;
   }
-
   .version-chip {
     padding: 0.2rem 0.4rem;
     background: rgba(59, 130, 246, 0.2);
@@ -762,5 +767,16 @@
     border-radius: 4px;
     font-size: 0.7rem;
     font-weight: 500;
+  }
+
+  .server-mod-label {
+    padding: 0.4rem 0.8rem;
+    background: rgba(139, 92, 246, 0.2);
+    color: #8b5cf6;
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    font-style: italic;
   }
 </style>

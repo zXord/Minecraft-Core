@@ -804,13 +804,10 @@ function createMinecraftLauncherHandlers(win) {
                 const updatedExpectedMods = new Set([
                   ...stateResult.expectedMods,
                   ...downloadedRequiredMods.map(filename => filename.toLowerCase())
-                ]);
-                await saveExpectedModState(clientPath, updatedExpectedMods, win, stateResult.acknowledgedDependencies);
-                console.log(`[DOWNLOAD] Added ${downloadedRequiredMods.length} required mods to persistent state:`, downloadedRequiredMods);
+                ]);                await saveExpectedModState(clientPath, updatedExpectedMods, win, stateResult.acknowledgedDependencies);
               }
-              
-              if (downloaded.length > downloadedRequiredMods.length) {
-                console.log(`[DOWNLOAD] Downloaded ${downloaded.length - downloadedRequiredMods.length} optional mods (not added to persistent state)`);
+                if (downloaded.length > downloadedRequiredMods.length) {
+                // Optional mods downloaded but not tracked in persistent state
               }
             }
           } catch (stateError) {
@@ -954,8 +951,7 @@ function createMinecraftLauncherHandlers(win) {
         }
         
         const modsDir = path.join(clientPath, 'mods');
-        
-        if (!fs.existsSync(modsDir)) {
+          if (!fs.existsSync(modsDir)) {
           return { 
             success: true, 
             synchronized: false, 
@@ -964,7 +960,9 @@ function createMinecraftLauncherHandlers(win) {
             totalRequired: requiredMods.length,
             totalOptional: allClientMods.filter(m => !m.required).length,
             totalPresent: 0,
-            needsDownload: requiredMods.length
+            needsDownload: requiredMods.length,
+            presentEnabledMods: [],
+            presentDisabledMods: []
           };
         }
         
@@ -1403,6 +1401,8 @@ function createMinecraftLauncherHandlers(win) {
           needsDownload: missingMods.length + outdatedMods.length,
           needsOptionalDownload: missingOptionalMods.length + outdatedOptionalMods.length,          totalRequired: requiredMods.length,
           totalOptional: (allClientMods || []).filter(m => !m.required).length,
+          presentEnabledMods: presentMods, // Actually enabled mods (.jar files)
+          presentDisabledMods: disabledMods, // Actually disabled mods (.jar.disabled files)
           // extraMods: clientModChanges.removals.filter(r => r.action === 'remove_needed').map(r => r.fileName), // Keep this if needed by frontend
           clientModChanges,
           successfullyRemovedMods // Should be empty
