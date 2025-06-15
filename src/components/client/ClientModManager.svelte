@@ -355,9 +355,18 @@
             console.warn('Could not load acknowledged dependencies:', err);
           }
 
-          // serverManagedFiles should reflect only *actual* server mods,
-          // not the ones we've acknowledged and chosen to keep locally.
-          serverManagedFiles.set(currentServerMods);
+          // serverManagedFiles should keep track of any mods that were
+          // previously managed by the server until the user removes or
+          // acknowledges them.  Merge the newly reported server mods with
+          // the existing set instead of overwriting it so we don't lose
+          // history needed for removal detection across refreshes.
+          serverManagedFiles.update(existing => {
+            const combined = new Set(existing);
+            for (const mod of currentServerMods) {
+              combined.add(mod);
+            }
+            return combined;
+          });
 
           // Refresh installed mod info to enrich with server project IDs
           await loadInstalledInfo();
@@ -760,6 +769,9 @@
         console.log('[ClientModManager]   acknowledgedDeps (after add, before sync):', Array.from(acknowledgedDeps));
 
         await checkModSynchronization();
+
+        // Once acknowledged, this mod is no longer server-managed.
+        removeServerManagedFiles([modFileName]);
         
         // Log state AFTER backend acknowledgment call and sync
         console.log('[ClientModManager] State AFTER acknowledgment sync for:', lowerModFileName);
