@@ -205,8 +205,7 @@
     
     isChecking = false;
   }
-  
-  // Get server information including Minecraft version and required mods
+    // Get server information including Minecraft version and required mods
   async function getServerInfo() {
     try {
       const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
@@ -221,12 +220,31 @@
           setMinecraftServerStatus(serverInfo.minecraftServerStatus || 'unknown');
           requiredMods = serverInfo.requiredMods || [];
           
-                  // Track server info changes for UI updates only (no console spam)
-        if (!previousServerInfo || 
-            previousServerInfo.minecraftVersion !== serverInfo.minecraftVersion || 
-            (previousServerInfo.requiredMods?.length || 0) !== requiredMods.length) {
-          previousServerInfo = { minecraftVersion: serverInfo.minecraftVersion, requiredMods };
-        }
+          // **FIX**: Also fetch complete mod list from server to get optional mods info
+          try {
+            const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
+            const modsResponse = await fetch(modsUrl, {
+              method: 'GET',
+              signal: AbortSignal.timeout(5000)
+            });
+            
+            if (modsResponse.ok) {
+              const modsData = await modsResponse.json();
+              if (modsData.success) {
+                // Set serverInfo.allClientMods so the mod sync check knows about optional mods
+                serverInfo.allClientMods = modsData.mods.client || [];
+              }
+            }
+          } catch (modsErr) {
+            console.warn('Failed to fetch complete mod list:', modsErr);
+          }
+          
+          // Track server info changes for UI updates only (no console spam)
+          if (!previousServerInfo || 
+              previousServerInfo.minecraftVersion !== serverInfo.minecraftVersion || 
+              (previousServerInfo.requiredMods?.length || 0) !== requiredMods.length) {
+            previousServerInfo = { minecraftVersion: serverInfo.minecraftVersion, requiredMods };
+          }
           
           // Check mod synchronization status
           await checkModSynchronization();
@@ -1117,8 +1135,15 @@
       if (statusCheckInterval) clearInterval(statusCheckInterval);
       if (authRefreshInterval) clearInterval(authRefreshInterval);
       if (launcherStatusInterval) clearInterval(launcherStatusInterval);
-      if (modCheckInterval) clearInterval(modCheckInterval);
-    };
+      if (modCheckInterval) clearInterval(modCheckInterval);    };
+  }
+  
+  // Reactive statement to refresh mod sync when switching to Play tab
+  $: if ($clientState.activeTab === 'play' && $clientState.connectionStatus === 'connected') {
+    // Small delay to allow any pending operations to complete
+    setTimeout(() => {
+      checkModSynchronization();
+    }, 100);
   }
     // Debug Java installation function removed - no longer needed
   
