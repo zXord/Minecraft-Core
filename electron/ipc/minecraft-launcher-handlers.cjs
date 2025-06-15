@@ -1395,21 +1395,20 @@ function createMinecraftLauncherHandlers(win) {
       // Determine overall sync status
       const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && 
                              !clientModChanges.removals.some(r => r.action === 'remove_needed') && // Ensure no mods need removal
-                             !clientModChanges.removals.some(removal => removal.action === 'acknowledge_dependency');
-          const result = {
+                             !clientModChanges.removals.some(removal => removal.action === 'acknowledge_dependency');          const result = {
           success: true,
           synchronized,
           missingMods: missingMods.concat(outdatedMods),
           missingOptionalMods: missingOptionalMods.concat(outdatedOptionalMods),
           needsDownload: missingMods.length + outdatedMods.length,
-          needsOptionalDownload: missingOptionalMods.length + outdatedOptionalMods.length,
-          totalRequired: requiredMods.length,
+          needsOptionalDownload: missingOptionalMods.length + outdatedOptionalMods.length,          totalRequired: requiredMods.length,
           totalOptional: (allClientMods || []).filter(m => !m.required).length,
           // extraMods: clientModChanges.removals.filter(r => r.action === 'remove_needed').map(r => r.fileName), // Keep this if needed by frontend
           clientModChanges,
           successfullyRemovedMods // Should be empty
         };
-          return result;
+        
+        return result;
       } catch (error) {
         console.error('>>> ERROR in minecraft-check-mods:', error);
         return { success: false, error: error.message };

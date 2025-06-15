@@ -125,20 +125,8 @@
   let downloadManagerCleanup;  let unsubscribeInstalledInfo;  let previousPath: string | null = null;  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
   let isCheckingModSync = false; // Guard to prevent reactive loops
   let lastCheckModSyncCall = 0; // Track the most recent call
-  
-  // keep track of which fileNames we've acknowledged
+    // keep track of which fileNames we've acknowledged
   let acknowledgedDeps: Set<string> = new Set();
-  
-  // Debug logging for modSyncStatus changes
-  $: {
-    if (modSyncStatus) {
-      console.log('modSyncStatus updated:', {
-        hasClientModChanges: !!modSyncStatus.clientModChanges,
-        hasRemovals: !!modSyncStatus.clientModChanges?.removals,
-        removals: modSyncStatus.clientModChanges?.removals || [],
-        removalsCount: modSyncStatus.clientModChanges?.removals?.length || 0      });
-    }
-  }
 
   // Computed property for required mods display that includes mods needing removal or acknowledgment
   $: displayRequiredMods = (() => {
