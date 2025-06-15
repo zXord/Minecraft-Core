@@ -227,12 +227,14 @@
               method: 'GET',
               signal: AbortSignal.timeout(5000)
             });
-            
-            if (modsResponse.ok) {
-              const modsData = await modsResponse.json();
-              if (modsData.success) {
-                // Set serverInfo.allClientMods so the mod sync check knows about optional mods
-                serverInfo.allClientMods = modsData.mods.client || [];
+              if (modsResponse.ok) {
+              const modsData = await modsResponse.json();              if (modsData.success) {
+                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
+                // (ClientModManager sets it with required property, we don't want to overwrite that)
+                if (!serverInfo.allClientMods || serverInfo.allClientMods.length === 0 || 
+                    !serverInfo.allClientMods.some(mod => mod.hasOwnProperty('required'))) {
+                  serverInfo.allClientMods = modsData.mods.client || [];
+                }
               }
             }
           } catch (modsErr) {
@@ -272,8 +274,8 @@
     // don't immediately override it unless there's a clear issue
     const wasReady = downloadStatus === 'ready';
     
-    downloadStatus = 'checking';
-      try {      const managedFiles = get(serverManagedFiles);
+    downloadStatus = 'checking';      try {      const managedFiles = get(serverManagedFiles);
+      
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods,
@@ -537,7 +539,7 @@
     }
   }
   
-  // Download required mods with debug wrapper
+  // Download required mods
   async function onDownloadModsClick() {
     
     // Show immediate loading state
@@ -1136,16 +1138,16 @@
       if (authRefreshInterval) clearInterval(authRefreshInterval);
       if (launcherStatusInterval) clearInterval(launcherStatusInterval);
       if (modCheckInterval) clearInterval(modCheckInterval);    };
-  }
-  
-  // Reactive statement to refresh mod sync when switching to Play tab
-  $: if ($clientState.activeTab === 'play' && $clientState.connectionStatus === 'connected') {
+  }    // Reactive statement to refresh mod sync when switching to Play tab
+  $: if ($clientState.activeTab === 'play' && $clientState.connectionStatus === 'connected' && 
+         serverInfo?.allClientMods && serverInfo.allClientMods.length > 0 &&
+         serverInfo.allClientMods.some(mod => mod.hasOwnProperty('required'))) {
     // Small delay to allow any pending operations to complete
     setTimeout(() => {
       checkModSynchronization();
     }, 100);
   }
-    // Debug Java installation function removed - no longer needed
+    // Debug removed - no longer needed
   
   onMount(() => {
     // Initialize client functionality
@@ -1700,8 +1702,7 @@
                           {modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's are' : ' is'} available for download. 
                           Check the <strong>Mods</strong> tab to download them.
                         </span>
-                      </div>
-                    {:else}
+                      </div>                    {:else}
                       <p>All mods are installed and up to date.</p>
                     {/if}
                   </div>
