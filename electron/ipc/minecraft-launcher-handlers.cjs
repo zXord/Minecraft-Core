@@ -1080,13 +1080,25 @@ function createMinecraftLauncherHandlers(win) {
           );
         }
 
-        // Ensure mods that were previously acknowledged are still considered
-        // for future removal checks, even if the server removed and re-added
-        // them while the client was offline.
+        // Reconcile acknowledged dependencies with current server-managed mods.
+        // If a previously acknowledged mod is now back on the server (required
+        // or optional), drop it from the acknowledgment set so the user will be
+        // prompted again if it gets removed in the future. Otherwise, keep it
+        // in serverManagedFilesSetForDiff so removal checks still work.
         if (acknowledgedDependencies && acknowledgedDependencies.size > 0) {
+          const updatedAcks = new Set();
           for (const dep of acknowledgedDependencies) {
-            serverManagedFilesSetForDiff.add(dep.toLowerCase());
+            const lower = dep.toLowerCase();
+            if (newServerAllMods.has(lower)) {
+              console.log(
+                `[IPC HANDLER] Clearing acknowledgment for ${dep} - mod present on server`
+              );
+            } else {
+              updatedAcks.add(lower);
+              serverManagedFilesSetForDiff.add(lower);
+            }
           }
+          acknowledgedDependencies = updatedAcks;
         }
 
 
