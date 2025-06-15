@@ -86,15 +86,12 @@
     if (!clientPath) {
       return;
     }
-    
-    loading = true;
+      loading = true;
     error = '';
     
     try {
       // Pass the set of server managed files to the IPC handler
       const managedFilesSet = get(serverManagedFiles);
-      console.log('ClientManualModList: Loading manual mods with serverManagedFiles:', Array.from(managedFilesSet));
-      console.log('ClientManualModList: modSyncStatus:', modSyncStatus);
       
       const result = await window.electron.invoke('get-manual-mods-detailed', {
         clientPath,
@@ -128,10 +125,6 @@
           // 3. Not awaiting removal
           return !isServerManaged && !needsAck && !needsRemoval;
         });
-        console.log('ClientManualModList: Loaded mods:', mods.map(m => ({
-          fileName: m.fileName,
-          name: m.name
-        })));
       } else {
         error = result.error || 'Failed to load manual mods';
       }
