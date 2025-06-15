@@ -136,36 +136,27 @@
         hasClientModChanges: !!modSyncStatus.clientModChanges,
         hasRemovals: !!modSyncStatus.clientModChanges?.removals,
         removals: modSyncStatus.clientModChanges?.removals || [],
-        removalsCount: modSyncStatus.clientModChanges?.removals?.length || 0
-      });
+        removalsCount: modSyncStatus.clientModChanges?.removals?.length || 0      });
     }
-  }  // Computed property for required mods display that includes mods needing removal or acknowledgment
+  }
+
+  // Computed property for required mods display that includes mods needing removal or acknowledgment
   $: displayRequiredMods = (() => {
     // first, remove any that the user has already acknowledged
     let displayMods = requiredMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
     
-    console.log('Computing displayRequiredMods:');
-    console.log('  - requiredMods:', requiredMods.map(m => m.fileName));
-    console.log('  - acknowledgedDeps:', Array.from(acknowledgedDeps));
-    console.log('  - filtered displayMods:', displayMods.map(m => m.fileName));
-    console.log('  - serverManagedFiles:', Array.from($serverManagedFiles || []));
-    console.log('  - modSyncStatus removals:', modSyncStatus?.clientModChanges?.removals?.map(r => ({ fileName: r.fileName, action: r.action })));
-
     // Add mods that need removal or acknowledgment to the display list
     if (modSyncStatus?.clientModChanges?.removals) {
       const modsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => 
         r.action === 'remove_needed' || r.action === 'acknowledge_dependency'
         // NOTE: We always ask for fresh acknowledgment, so no 'acknowledged_dependency' state
       );
-      console.log('  - modsNeedingAction:', modsNeedingAction.map(r => ({ fileName: r.fileName, action: r.action })));
       
       for (const actionItem of modsNeedingAction) {
         // Check if this mod is not already in the display list
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === actionItem.fileName.toLowerCase());
-        console.log(`  - Checking ${actionItem.fileName} (${actionItem.action}): existsInDisplay = ${existsInDisplay}`);
         
         if (!existsInDisplay) {
-          console.log(`  - Adding ${actionItem.fileName} to display list for ${actionItem.action}`);
           // Create a mod object for the action and add it to display list
           displayMods.push({
             fileName: actionItem.fileName,
@@ -183,9 +174,9 @@
       }
     }
     
-    console.log('  - Final displayMods:', displayMods.map(m => m.fileName));
-    return displayMods;
-  })();  // Computed property for optional mods that hides acknowledged or removal-pending entries
+    return displayMods;  })();
+
+  // Computed property for optional mods that hides acknowledged or removal-pending entries
   $: displayOptionalMods = (() => {
     let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
 
@@ -193,15 +184,7 @@
       const modsNeedingAction = new Set(
         modSyncStatus.clientModChanges.removals.map(r => r.fileName.toLowerCase())
       );
-      mods = mods.filter(m => !modsNeedingAction.has(m.fileName.toLowerCase()));
-    }
-
-    console.log('displayOptionalMods debug:', {
-      optionalMods: optionalMods.map(m => m.fileName),
-      acknowledgedDeps: Array.from(acknowledgedDeps),
-      filteredMods: mods.map(m => m.fileName),
-      serverManagedFiles: Array.from(get(serverManagedFiles))
-    });
+      mods = mods.filter(m => !modsNeedingAction.has(m.fileName.toLowerCase()));    }
 
     return mods;
   })();
@@ -214,12 +197,10 @@
       const result = await window.electron.invoke('load-expected-mod-state', {
         clientPath: instance.path
       });
-      
-      if (result.success && result.acknowledgedDependencies) {
+        if (result.success && result.acknowledgedDependencies) {
         acknowledgedDeps = new Set(
           result.acknowledgedDependencies.map(dep => dep.toLowerCase())
         );
-        console.log('[ClientModManager] Loaded acknowledged dependencies:', Array.from(acknowledgedDeps));
       }
     } catch (error) {
       console.warn('[ClientModManager] Failed to load acknowledged dependencies:', error);
@@ -359,14 +340,11 @@
           }
           requiredMods = serverInfo.requiredMods || [];
           allClientMods = serverInfo.allClientMods || [];          // Always rebuild store to exactly: (currentServerMods ∪ acknowledgedDependencies)
-          console.log('Reconciling serverManagedFiles against latest server state + acks...');
           
           const currentServerMods = new Set([
             ...requiredMods.map(m => m.fileName.toLowerCase()),
             ...(allClientMods || []).map(m => m.fileName.toLowerCase())
-          ]);          console.log('Current server mods (requiredMods):', requiredMods.map(m => m.fileName));
-          console.log('Current server mods (allClientMods):', (allClientMods || []).map(m => m.fileName));
-          console.log('Combined currentServerMods set:', Array.from(currentServerMods));
+          ]);
           
           // Load acknowledged dependencies into local set (so we can filter them out of the UI)
           try {
@@ -391,13 +369,7 @@
             for (const mod of currentServerMods) {
               combined.add(mod);
             }
-            
-            console.log('Updated serverManagedFiles:', {
-              before: Array.from(existing),
-              currentServerMods: Array.from(currentServerMods),
-              after: Array.from(combined)
-            });
-            
+              
             return combined;
           });
 
@@ -441,36 +413,24 @@
   async function checkModSynchronization() {
     if (!instance?.path || isCheckingModSync) {
       return;
-    }
-
-    const currentCallId = Date.now();
+    }    const currentCallId = Date.now();
     lastCheckModSyncCall = currentCallId;
     isCheckingModSync = true;
     
     try {
-      console.log(`[${currentCallId}] Starting checkModSynchronization`);
       const managedFiles = get(serverManagedFiles);
-      
-      console.log(`[${currentCallId}] Calling minecraft-check-mods with:`, {
-        requiredMods: requiredMods.length,
-        allClientMods: allClientMods.length,
-        serverManagedFiles: Array.from(managedFiles).length
-      });
       
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods,
         allClientMods,
         serverManagedFiles: Array.from(managedFiles)
-      });
-
-      // Only process this result if it's from the most recent call
+      });      // Only process this result if it's from the most recent call
       if (currentCallId !== lastCheckModSyncCall) {
-        console.log(`[${currentCallId}] Ignoring outdated response (latest call: ${lastCheckModSyncCall})`);
         return;
       }
 
-      if (result.success) {        console.log(`[${currentCallId}] Setting modSyncStatus to:`, JSON.stringify(result, null, 2));
+      if (result.success) {
         modSyncStatus = result;
 
         // Refresh acknowledgments from backend in case they were reset

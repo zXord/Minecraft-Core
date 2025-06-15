@@ -66,22 +66,13 @@
       return 'installed';
   }  // Check if a mod needs to be removed
   function needsRemoval(mod: Mod): boolean {
-    if (!modSyncStatus?.clientModChanges?.removals) return false;
-    
+    if (!modSyncStatus?.clientModChanges?.removals) return false;    
     const result = modSyncStatus.clientModChanges.removals.some(removal => 
       removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'remove_needed'
     );
     
-    if (mod.fileName.toLowerCase().includes('sodium')) {
-      console.log(`needsRemoval check for ${mod.fileName}:`, {
-        modFileName: mod.fileName,
-        removals: modSyncStatus.clientModChanges.removals.map(r => ({ fileName: r.fileName, action: r.action })),
-        result
-      });
-    }
-    
     return result;
-  }  // Check if a mod is kept due to dependency
+  }// Check if a mod is kept due to dependency
   function needsAcknowledgment(mod: Mod): boolean {
     if (!modSyncStatus?.clientModChanges?.removals) return false;
     
