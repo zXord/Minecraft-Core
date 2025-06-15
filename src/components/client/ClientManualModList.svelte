@@ -77,18 +77,20 @@
   $: if (refreshTrigger > 0) {
     loadManualMods();
   }
-
   // React to modSyncStatus changes - catches acknowledgment state changes
   $: if (modSyncStatus) {
     loadManualMods();
   }
+  
   async function loadManualMods() {
     if (!clientPath) {
       return;
     }
     
     loading = true;
-    error = '';    try {
+    error = '';
+    
+    try {
       // Pass the set of server managed files to the IPC handler
       const managedFilesSet = get(serverManagedFiles);
       console.log('ClientManualModList: Loading manual mods with serverManagedFiles:', Array.from(managedFilesSet));
@@ -100,10 +102,17 @@
       });
       if (result.success) {
         // Filter out server-managed mods entirely
-        // (server-managed mods needing acknowledgment should only appear in required mods section)
+        // Also filter out mods that are awaiting acknowledgment (they should only appear in required mods section)
         const pendingAckSet = new Set(
           (modSyncStatus?.clientModChanges?.removals || [])
             .filter(r => r.action === 'acknowledge_dependency')
+            .map(r => r.fileName.toLowerCase())
+        );
+
+        // Filter out mods that are pending removal (they should only appear in required mods section with removal action)
+        const pendingRemovalSet = new Set(
+          (modSyncStatus?.clientModChanges?.removals || [])
+            .filter(r => r.action === 'remove_needed')
             .map(r => r.fileName.toLowerCase())
         );
 
@@ -111,9 +120,13 @@
           const lower = m.fileName.toLowerCase();
           const isServerManaged = managedFilesSet.has(lower);
           const needsAck = pendingAckSet.has(lower);
+          const needsRemoval = pendingRemovalSet.has(lower);
 
-          // Only include mods that are not server-managed and not awaiting acknowledgment
-          return !isServerManaged && !needsAck;
+          // Only include mods that are:
+          // 1. Not server-managed
+          // 2. Not awaiting acknowledgment
+          // 3. Not awaiting removal
+          return !isServerManaged && !needsAck && !needsRemoval;
         });
         console.log('ClientManualModList: Loaded mods:', mods.map(m => ({
           fileName: m.fileName,
