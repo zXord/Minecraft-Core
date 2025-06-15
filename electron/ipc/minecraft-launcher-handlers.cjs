@@ -1052,19 +1052,41 @@ function createMinecraftLauncherHandlers(win) {
 
         // serverManagedFilesSet should represent what was *previously* considered server-managed for removal detection.
         // If bootstrapping, it might be the current server list, otherwise, it\'s the stored expected (required) list.
-        let serverManagedFilesSetForDiff = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
+        let serverManagedFilesSetForDiff = new Set(
+          (serverManagedFiles || []).map(f => f.toLowerCase())
+        );
 
-        if (serverManagedFilesSetForDiff.size === 0 && previousServerRequiredModListFromStorage.size > 0) {
-          serverManagedFilesSetForDiff = new Set(previousServerRequiredModListFromStorage);
-        } else if (serverManagedFilesSetForDiff.size === 0 && newServerRequiredModList.size > 0) {
+        if (
+          serverManagedFilesSetForDiff.size === 0 &&
+          previousServerRequiredModListFromStorage.size > 0
+        ) {
+          serverManagedFilesSetForDiff = new Set(
+            previousServerRequiredModListFromStorage
+          );
+        } else if (
+          serverManagedFilesSetForDiff.size === 0 &&
+          newServerRequiredModList.size > 0
+        ) {
           serverManagedFilesSetForDiff = new Set(newServerRequiredModList);
-        } else if (serverManagedFilesSetForDiff.size > 0 && previousServerRequiredModListFromStorage.size > 0) {
+        } else if (
+          serverManagedFilesSetForDiff.size > 0 &&
+          previousServerRequiredModListFromStorage.size > 0
+        ) {
           // Merge previous required mods with current server managed set so that
           // optional mods remain tracked while still detecting removals of old
           // required mods.
           previousServerRequiredModListFromStorage.forEach(mod =>
             serverManagedFilesSetForDiff.add(mod)
           );
+        }
+
+        // Ensure mods that were previously acknowledged are still considered
+        // for future removal checks, even if the server removed and re-added
+        // them while the client was offline.
+        if (acknowledgedDependencies && acknowledgedDependencies.size > 0) {
+          for (const dep of acknowledgedDependencies) {
+            serverManagedFilesSetForDiff.add(dep.toLowerCase());
+          }
         }
 
 
