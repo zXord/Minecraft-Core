@@ -107,7 +107,9 @@ contextBridge.exposeInMainWorld('electron', {
       'minecraft-clear-client',
       'minecraft-get-status',      'toggle-client-mod',      'delete-client-mod',      'minecraft-remove-unmanaged-mods',
       'minecraft-remove-server-managed-mods',
-      'minecraft-acknowledge-dependency',// Manual mod management channels
+      'minecraft-acknowledge-dependency',
+      'load-expected-mod-state',
+      // Manual mod management channels
       'check-manual-mods',
       'remove-manual-mods',
       'get-manual-mods-detailed',
