@@ -332,8 +332,10 @@
             if (state.success && Array.isArray(state.acknowledgedDependencies)) {
               // Replace local acknowledgments with persisted ones. This ensures
               // that resets performed in the backend are reflected in the UI.
-              const persistedAcks = new Set(state.acknowledgedDependencies.map((d: string) => d.toLowerCase()));
-              acknowledgedDeps = new Set(persistedAcks);
+              const persistedAcks: Set<string> = new Set(
+                state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
+              );
+              acknowledgedDeps = new Set<string>(persistedAcks);
             }
           } catch (err) {
             console.warn('Could not load acknowledged dependencies:', err);
@@ -421,7 +423,7 @@
             clientPath: instance.path
           });
           if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-            acknowledgedDeps = new Set(
+            acknowledgedDeps = new Set<string>(
               state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
             );
           }
