@@ -187,6 +187,20 @@
     return displayMods;
   })();
 
+  // Computed property for optional mods that hides acknowledged or removal-pending entries
+  $: displayOptionalMods = (() => {
+    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
+
+    if (modSyncStatus?.clientModChanges?.removals) {
+      const modsNeedingAction = new Set(
+        modSyncStatus.clientModChanges.removals.map(r => r.fileName.toLowerCase())
+      );
+      mods = mods.filter(m => !modsNeedingAction.has(m.fileName.toLowerCase()));
+    }
+
+    return mods;
+  })();
+
   // Connect to server and get mod information
   onMount(() => {
     downloadManagerCleanup = initDownloadManager();
@@ -328,11 +342,14 @@
           
           // Load acknowledged dependencies into local set (so we can filter them out of the UI)
           try {
-            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-              // Merge with existing acknowledgedDeps instead of overwriting
-              const persistedAcks = new Set(state.acknowledgedDependencies.map((d: string) => d.toLowerCase()));
-              // Keep any local acknowledgments that haven't been persisted yet
-              persistedAcks.forEach((ack: string) => acknowledgedDeps.add(ack));
+            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
+            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
+              // Replace local acknowledgments with persisted ones. This ensures
+              // that resets performed in the backend are reflected in the UI.
+              const persistedAcks: Set<string> = new Set(
+                state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
+              );
+              acknowledgedDeps = new Set<string>(persistedAcks);
             }
           } catch (err) {
             console.warn('Could not load acknowledged dependencies:', err);
@@ -413,17 +430,22 @@
 
       if (result.success) {        console.log(`[${currentCallId}] Setting modSyncStatus to:`, JSON.stringify(result, null, 2));
         modSyncStatus = result;
-        
-        // Always trust the updatedServerManagedFiles from backend as it's already filtered correctly
-        if (Array.isArray(result.updatedServerManagedFiles)) {
-          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
-          console.log('Updated serverManagedFiles from backend:', result.updatedServerManagedFiles);
-          
-          // Log removed mods for debugging
-          if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-            console.log('Successfully removed mods:', result.successfullyRemovedMods);
+
+        // Refresh acknowledgments from backend in case they were reset
+        try {
+          const state = await window.electron.invoke('load-expected-mod-state', {
+            clientPath: instance.path
+          });
+          if (state.success && Array.isArray(state.acknowledgedDependencies)) {
+            acknowledgedDeps = new Set<string>(
+              state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
+            );
           }
-        } else if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
+        } catch (err) {
+          console.warn('Could not refresh acknowledged dependencies after sync:', err);
+        }
+        
+        if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
           // Use scoped update for individual mod removals
           updateServerManagedFiles('remove', result.successfullyRemovedMods);
         }
@@ -482,10 +504,7 @@
           updateServerManagedFiles('add', result.downloadedFiles);
         }
         
-        if (Array.isArray(result.updatedServerManagedFiles)) {
-          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
-          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
-        } else if (result.removedMods && result.removedMods.length > 0) {
+        if (result.removedMods && result.removedMods.length > 0) {
           updateServerManagedFiles('remove', result.removedMods);
         }
         
@@ -532,10 +551,7 @@
         successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
         setTimeout(() => successMessage.set(''), 5000);
         
-        if (Array.isArray(result.updatedServerManagedFiles)) {
-          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
-          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
-        } else if (result.removedMods && result.removedMods.length > 0) {
+        if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
         
@@ -572,10 +588,7 @@
         successMessage.set(`Successfully downloaded ${mod.fileName}`);
         setTimeout(() => successMessage.set(''), 3000);
         
-        if (Array.isArray(result.updatedServerManagedFiles)) {
-          serverManagedFiles.set(new Set(result.updatedServerManagedFiles));
-          console.log('Synced serverManagedFiles from backend:', result.updatedServerManagedFiles);
-        } else if (result.removedMods && result.removedMods.length > 0) {
+        if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
         
@@ -1065,7 +1078,7 @@
         <ClientModStatus
           {modSyncStatus}
           requiredModsCount={requiredMods.length}
-          optionalModsCount={optionalMods.length}
+          optionalModsCount={displayOptionalMods.length}
           on:download-required={downloadRequiredMods}
           on:download-optional={downloadOptionalMods}
           on:refresh={refreshMods}
@@ -1090,20 +1103,23 @@
           </div>
 
           <!-- Optional Mods Section -->
-          {#if optionalMods.length > 0}
+          {#if displayOptionalMods.length > 0}
             <div class="mod-section">
               <h3>Optional Mods</h3>
               <p class="section-description">
                 These mods are available but not required. You can enable or disable them before playing.
-              </p>          <ClientModList
-            mods={optionalMods}
+              </p>
+          <ClientModList
+            mods={displayOptionalMods}
             type="optional"
             {modSyncStatus}
             on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
             on:download={downloadOptionalMods}
             on:downloadSingle={(e) => downloadSingleOptionalMod(e.detail.mod)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
-            on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}          />        </div>
+            on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
+          />
+        </div>
       {/if}          <!-- Client Downloaded Mods Section -->
           <div class="mod-section">
             <h3>Client Downloaded Mods</h3>
