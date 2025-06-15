@@ -396,8 +396,7 @@
   <div class="search-results">
     {#if $searchResults.length > 0}
       <div class="mods-grid">        {#each visibleMods as mod (mod.id)}
-          {@const installedInfo = $installedModInfo.find(info => info.projectId === mod.id)}
-          {@const serverManaged = Boolean(serverManagedSet && installedInfo?.fileName && serverManagedSet.has(installedInfo.fileName))}
+          {@const installedInfo = $installedModInfo.find(info => info.projectId === mod.id)}          {@const serverManaged = Boolean(serverManagedSet && installedInfo?.fileName && serverManagedSet.has(installedInfo.fileName.toLowerCase()))}
           <ModCard
             {mod}
             expanded={$expandedModId === mod.id}

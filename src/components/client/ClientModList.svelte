@@ -36,13 +36,32 @@
       newDownloads?: string[];
     };
   }
-
   // Props
   export let mods: Mod[] = [];
   export let type: 'required' | 'optional' = 'required';
   export let modSyncStatus: ModSyncStatus | null = null;
+  export let serverManagedFiles: Set<string> = new Set();
   // Create event dispatcher
-  const dispatch = createEventDispatcher();
+  const dispatch = createEventDispatcher();  // Local state to track mod enabled/disabled status for optimistic updates
+  let localModStates: Record<string, { enabled: boolean }> = {};
+  let optimisticUpdates: Set<string> = new Set(); // Track which mods have pending optimistic updates
+
+  // Initialize local states when mods change
+  $: if (mods && modSyncStatus) {
+    // Initialize local state for each mod based on current sync status
+    // But don't override mods that have pending optimistic updates
+    localModStates = mods.reduce((acc, mod) => {
+      if (optimisticUpdates.has(mod.fileName)) {
+        // Keep the existing optimistic state
+        acc[mod.fileName] = localModStates[mod.fileName] || { enabled: true };
+      } else {
+        // Use the backend state
+        const isDisabled = modSyncStatus.presentDisabledMods?.includes(mod.fileName) || false;
+        acc[mod.fileName] = { enabled: !isDisabled };
+      }
+      return acc;
+    }, {} as Record<string, { enabled: boolean }>);
+  }
 
   // Get mod status from sync status
   function getModStatus(mod: Mod): string {
@@ -57,14 +76,26 @@
     
     if (isMissing) {
       return 'missing';
+    }    // Check if this mod is server-managed (use lowercase for comparison)
+    const isServerManaged = serverManagedFiles.has(mod.fileName.toLowerCase());
+    
+    // Only show "server mod" status for required mods, not optional mods
+    if (isServerManaged && type === 'required') {
+      return 'server mod';
+    }    // For optional mods, check local state first for optimistic updates
+    if (type === 'optional') {
+      const localState = localModStates[mod.fileName];
+      if (localState) {
+        return localState.enabled ? 'installed' : 'disabled';
+      }
+      // Fallback to sync status if local state not available
+      if (modSyncStatus.presentDisabledMods && modSyncStatus.presentDisabledMods.includes(mod.fileName)) {
+        return 'disabled';
+      }
     }
     
-    // For optional mods, also check if they're enabled or disabled
-    if (type === 'optional' && modSyncStatus.presentDisabledMods && modSyncStatus.presentDisabledMods.includes(mod.fileName)) {
-      return 'disabled';
-    }
-      return 'installed';
-  }  // Check if a mod needs to be removed
+    return 'installed';
+  }// Check if a mod needs to be removed
   function needsRemoval(mod: Mod): boolean {
     if (!modSyncStatus?.clientModChanges?.removals) return false;    
     const result = modSyncStatus.clientModChanges.removals.some(removal => 
@@ -104,30 +135,44 @@
     if (bytes === 0) return '0 Bytes';
     
     const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024)).toString(), 10);
-    return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
-  }
-
+    return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];  }
   // Handle mod toggle for optional mods
   function handleToggle(mod: Mod, enabled: boolean): void {
     if (type === 'required') return; // Required mods cannot be toggled
 
+    // Mark this mod as having a pending optimistic update
+    optimisticUpdates.add(mod.fileName);
+    
+    // Optimistic UI update - update the local state immediately
+    if (!localModStates[mod.fileName]) {
+      localModStates[mod.fileName] = { enabled: !enabled };
+    }
+    localModStates[mod.fileName].enabled = enabled;
+    localModStates = localModStates; // Trigger reactivity
+
+    // Dispatch to parent component for backend call
     dispatch('toggle', {
       fileName: mod.fileName,
       enabled: enabled
     });
+    
+    // Clear optimistic update flag after a short delay
+    // This allows the backend state to eventually take over
+    setTimeout(() => {
+      optimisticUpdates.delete(mod.fileName);
+      optimisticUpdates = new Set(optimisticUpdates); // Trigger reactivity
+    }, 2000);
   }
   // Handle mod deletion
   function handleDelete(mod: Mod): void {
     dispatch('delete', { fileName: mod.fileName });
   }  // Handle mod removal (for server-managed mods no longer required)
   function handleRemove(mod: Mod): void {
-    console.log('ClientModList handleRemove called for:', mod.fileName);
     dispatch('remove', { fileName: mod.fileName });
   }
 
   // Handle dependency acknowledgment
   function handleAcknowledge(mod: Mod): void {
-    console.log('ClientModList handleAcknowledge called for:', mod.fileName);
     dispatch('acknowledge', { fileName: mod.fileName });
   }
 
@@ -155,10 +200,9 @@
       <div class="header-cell">Version</div>
       <div class="header-cell">Actions</div>
     </div>
-    
-    <div class="mods-grid">
+      <div class="mods-grid">
       {#each mods as mod (mod.fileName)}
-        <div class="mod-card {type}">
+        <div class="mod-card {type} {getModStatus(mod) === 'disabled' ? 'disabled' : ''}">
           <div class="mod-info">
             <div class="mod-name">{mod.name || mod.fileName}</div>
             <div class="mod-details">
@@ -177,10 +221,12 @@
               <span class="status-badge removal">⚠️ Needs Removal</span>
             {:else if needsAcknowledgment(mod)}
               <span class="status-badge acknowledgment">🔗 Needs Acknowledgment</span>
+            {:else if getModStatus(mod) === 'server mod'}
+              <span class="status-badge server-mod">🔒 Server Mod</span>
             {:else if getModStatus(mod) === 'installed'}
-              <span class="status-badge installed">✅ Enabled</span>
+              <span class="status-badge installed">Enabled</span>
             {:else if getModStatus(mod) === 'disabled'}
-              <span class="status-badge disabled">⏸️ Disabled</span>
+              <span class="status-badge disabled">Disabled</span>
             {:else if getModStatus(mod) === 'missing'}
               <span class="status-badge missing">❌ Missing</span>
             {:else}
@@ -346,6 +392,12 @@
     border-left: 4px solid #3b82f6;
   }
 
+  .mod-card.disabled {
+    opacity: 0.7;
+    background: rgba(139, 69, 19, 0.15);
+    transition: all 0.3s ease; /* Smooth transition when disabling */
+  }
+  
   .mod-info {
     display: flex;
     flex-direction: column;
@@ -381,15 +433,20 @@
     font-weight: 500;
     text-align: center;
   }
-
   .status-badge.installed {
     background-color: rgba(16, 185, 129, 0.2);
     color: #10b981;
   }
 
+  .status-badge.server-mod {
+    background-color: rgba(139, 92, 246, 0.2);
+    color: #8b5cf6;
+    border: 1px solid rgba(139, 92, 246, 0.3);
+  }
   .status-badge.disabled {
-    background-color: rgba(245, 158, 11, 0.2);
-    color: #f59e0b;
+    background-color: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.3);
   }
   .status-badge.missing {
     background-color: rgba(239, 68, 68, 0.2);
