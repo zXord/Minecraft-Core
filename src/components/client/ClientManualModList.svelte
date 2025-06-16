@@ -40,12 +40,12 @@
         currentVersion: string;
         serverVersion: string;
         action: string;
-      }>;
-      removals?: Array<{
+      }>;      removals?: Array<{
         name: string;
         fileName: string;
         reason: string;
         action: string;
+        wasRequired?: boolean;
       }>;
       newDownloads?: string[];
     };
@@ -103,14 +103,14 @@
           (modSyncStatus?.clientModChanges?.removals || [])
             .filter(r => r.action === 'acknowledge_dependency')
             .map(r => r.fileName.toLowerCase())
-        );
-
-        // Filter out mods that are pending removal (they should only appear in required mods section with removal action)
+        );        // Filter out mods that are pending removal from originally required mods
+        // (they should only appear in required mods section with removal action)
+        // But keep mods that were originally optional - they should appear in optional section
         const pendingRemovalSet = new Set(
           (modSyncStatus?.clientModChanges?.removals || [])
-            .filter(r => r.action === 'remove_needed')
+            .filter(r => r.action === 'remove_needed' && r.wasRequired === true)
             .map(r => r.fileName.toLowerCase())
-        );        mods = result.mods.filter(m => {
+        );mods = result.mods.filter(m => {
           const lower = m.fileName.toLowerCase();
           const isServerManaged = managedFilesSet.has(lower);
           const needsAck = pendingAckSet.has(lower);

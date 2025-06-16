@@ -71,12 +71,12 @@
         currentVersion: string;
         serverVersion: string;
         action: string;
-      }>;
-      removals?: Array<{
+      }>;      removals?: Array<{
         name: string;
         fileName: string;
         reason: string;
         action: string;
+        wasRequired?: boolean;
       }>;
       newDownloads?: string[];
     };
@@ -126,25 +126,25 @@
   let isCheckingModSync = false; // Guard to prevent reactive loops
   let lastCheckModSyncCall = 0; // Track the most recent call
     // keep track of which fileNames we've acknowledged
-  let acknowledgedDeps: Set<string> = new Set();
-  // Computed property for required mods display that includes mods needing removal or acknowledgment
+  let acknowledgedDeps: Set<string> = new Set();  // Computed property for required mods display that includes mods needing removal or acknowledgment
   $: displayRequiredMods = (() => {
     // first, remove any that the user has already acknowledged
     let displayMods = requiredMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
     
     // Add mods that need removal or acknowledgment to the display list
     if (modSyncStatus?.clientModChanges?.removals) {
+      console.log('[DEBUG-REQUIRED] All removals:', modSyncStatus.clientModChanges.removals);
       const modsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => {
-        // Only include removals that are actually from required mods
-        // Check if this removal is for a mod that was/is in the required mods list
-        const isActuallyRequiredMod = requiredMods.some(mod => mod.fileName.toLowerCase() === r.fileName.toLowerCase());
-        
-        return (r.action === 'remove_needed' || r.action === 'acknowledge_dependency') && isActuallyRequiredMod;
+        console.log('[DEBUG-REQUIRED] Checking removal:', r.fileName, 'wasRequired:', r.wasRequired);
+        // Include removals for mods that were originally required
+        return (r.action === 'remove_needed' || r.action === 'acknowledge_dependency') && r.wasRequired === true;
       });
-      
+      console.log('[DEBUG-REQUIRED] Filtered required mods needing action:', modsNeedingAction);      
       for (const actionItem of modsNeedingAction) {
+        console.log('[DEBUG-REQUIRED] Processing action item:', actionItem.fileName, 'wasRequired:', actionItem.wasRequired);
         // Check if this mod is not already in the display list
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === actionItem.fileName.toLowerCase());
+        console.log('[DEBUG-REQUIRED] Mod exists in display:', existsInDisplay);
         
         if (!existsInDisplay) {
           // Create a mod object for the action and add it to display list
@@ -167,18 +167,16 @@
     return displayMods;
   })();  // Computed property for optional mods that hides acknowledged or removal-pending entries
   $: displayOptionalMods = (() => {
-    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
-
-    // Add mods that need removal or acknowledgment to the display list (similar to required mods)
+    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));    // Add mods that need removal or acknowledgment to the display list (similar to required mods)
     if (modSyncStatus?.clientModChanges?.removals) {
+      console.log('[DEBUG-OPTIONAL] All removals:', modSyncStatus.clientModChanges.removals);
       const optionalModsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => {
-        // Include removals that aren't already in the required mods section
-        const isInRequiredMods = requiredMods.some(mod => mod.fileName.toLowerCase() === r.fileName.toLowerCase());
-        
-        // For optional mods, we want to show removal prompts regardless of whether the mod is currently in optionalMods
-        // The key is to exclude only those that are handled by the required mods section
-        return !isInRequiredMods && (r.action === 'remove_needed' || r.action === 'acknowledge_dependency');
+        console.log('[DEBUG-OPTIONAL] Checking removal:', r.fileName, 'wasRequired:', r.wasRequired);
+        // Only include removals for mods that were originally optional (not required)
+        // If wasRequired is true, it should stay in the required section
+        return r.wasRequired === false && (r.action === 'remove_needed' || r.action === 'acknowledge_dependency');
       });
+      console.log('[DEBUG-OPTIONAL] Filtered optional mods needing action:', optionalModsNeedingAction);
       
       for (const actionItem of optionalModsNeedingAction) {
         // Check if this mod is already in the mods list (to avoid duplicates)

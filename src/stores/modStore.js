@@ -300,13 +300,16 @@ export function removeServerManagedFiles(fileNames = []) {
   if (!Array.isArray(fileNames) || fileNames.length === 0) return;
 
   serverManagedFiles.update(current => {
-    const updated = new Set();
-    for (const file of current) {
-      const shouldRemove = fileNames.some(rem => rem.toLowerCase() === file.toLowerCase());
-      if (!shouldRemove) {
-        updated.add(file);
+    const updated = new Set(current);
+    fileNames.forEach(fileName => {
+      // Find and remove using case-insensitive comparison
+      for (const existingFile of updated) {
+        if (existingFile.toLowerCase() === fileName.toLowerCase()) {
+          updated.delete(existingFile);
+          break;
+        }
       }
-    }
+    });
     return updated;
   });
 }
