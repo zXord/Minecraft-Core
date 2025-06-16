@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
-  // Types
+  import { createEventDispatcher } from 'svelte';  // Types
   interface ModSyncStatus {
     synchronized: boolean;
     needsDownload?: number;
     needsOptionalDownload?: number;
     needsAcknowledgment?: number;
+    needsRemoval?: number;
     totalRequired?: number;
     totalOptional?: number;
     totalPresent?: number;
@@ -50,7 +50,9 @@
       <div class="card-content">
         <div class="mod-count">{requiredModsCount}</div>        {#if modSyncStatus && modSyncStatus.totalRequired > 0}
           <div class="sync-status">
-            {#if modSyncStatus.synchronized && (!modSyncStatus.needsAcknowledgment || modSyncStatus.needsAcknowledgment === 0)}
+            {#if modSyncStatus.needsRemoval && modSyncStatus.needsRemoval > 0}
+              <span class="status-text warning">🗑️ {modSyncStatus.needsRemoval} need removal</span>
+            {:else if modSyncStatus.synchronized && (!modSyncStatus.needsAcknowledgment || modSyncStatus.needsAcknowledgment === 0)}
               <span class="status-text success">✅ All synchronized</span>
             {:else if modSyncStatus.needsAcknowledgment && modSyncStatus.needsAcknowledgment > 0}
               <span class="status-text info">🔗 {modSyncStatus.needsAcknowledgment} need acknowledgment</span>
