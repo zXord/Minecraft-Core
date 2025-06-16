@@ -51,8 +51,7 @@
     needsRemoval?: boolean;
     removalReason?: string;
     removalAction?: string;
-  }
-  interface ModSyncStatus {
+  }  interface ModSyncStatus {
     synchronized: boolean;
     needsDownload?: number;
     needsOptionalDownload?: number;
@@ -64,6 +63,20 @@
     missingOptionalMods?: string[];
     presentEnabledMods?: string[];
     presentDisabledMods?: string[];
+    // New response structure
+    requiredRemovals?: Array<{
+      fileName: string;
+      reason: string;
+    }>;
+    optionalRemovals?: Array<{
+      fileName: string;
+      reason: string;
+    }>;
+    acknowledgments?: Array<{
+      fileName: string;
+      reason: string;
+    }>;
+    // Legacy structure for backward compatibility (temporary)
     clientModChanges?: {
       updates?: Array<{
         name: string;
@@ -115,95 +128,130 @@
   let requiredMods: ClientMod[] = [];
   let optionalMods: ClientMod[] = [];
   let allClientMods: ClientMod[] = []; // All client mods (required + optional)
-  let modSyncStatus: ModSyncStatus | null = null;
-  let isLoadingMods: boolean = false;
+  let modSyncStatus: ModSyncStatus | null = null;  let isLoadingMods: boolean = false;
   let lastModCheck: Date | null = null;
+  
   // Client mod finding state
   let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
   let filterType = 'client';
-  let downloadManagerCleanup;  let unsubscribeInstalledInfo;  let previousPath: string | null = null;  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
+  let downloadManagerCleanup;
+  let unsubscribeInstalledInfo;
+  let previousPath: string | null = null;
+  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
   let isCheckingModSync = false; // Guard to prevent reactive loops
   let lastCheckModSyncCall = 0; // Track the most recent call
-    // keep track of which fileNames we've acknowledged
-  let acknowledgedDeps: Set<string> = new Set();  // Computed property for required mods display that includes mods needing removal or acknowledgment
+  
+  // keep track of which fileNames we've acknowledged
+  let acknowledgedDeps: Set<string> = new Set();
+
+  // Computed property for required mods display that includes mods needing removal or acknowledgment
   $: displayRequiredMods = (() => {
     // first, remove any that the user has already acknowledged
     let displayMods = requiredMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
     
-    // Add mods that need removal or acknowledgment to the display list
-    if (modSyncStatus?.clientModChanges?.removals) {
-      console.log('[DEBUG-REQUIRED] All removals:', modSyncStatus.clientModChanges.removals);
-      const modsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => {
-        console.log('[DEBUG-REQUIRED] Checking removal:', r.fileName, 'wasRequired:', r.wasRequired);
-        // Include removals for mods that were originally required
-        return (r.action === 'remove_needed' || r.action === 'acknowledge_dependency') && r.wasRequired === true;
-      });
-      console.log('[DEBUG-REQUIRED] Filtered required mods needing action:', modsNeedingAction);      
-      for (const actionItem of modsNeedingAction) {
-        console.log('[DEBUG-REQUIRED] Processing action item:', actionItem.fileName, 'wasRequired:', actionItem.wasRequired);
+    // Add mods that need removal from the new response structure
+    if (modSyncStatus?.requiredRemovals) {
+      console.log('[DEBUG-REQUIRED] Required removals:', modSyncStatus.requiredRemovals);
+      
+      for (const removal of modSyncStatus.requiredRemovals) {
+        console.log('[DEBUG-REQUIRED] Processing required removal:', removal.fileName);
         // Check if this mod is not already in the display list
-        const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === actionItem.fileName.toLowerCase());
+        const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === removal.fileName.toLowerCase());
         console.log('[DEBUG-REQUIRED] Mod exists in display:', existsInDisplay);
         
         if (!existsInDisplay) {
-          // Create a mod object for the action and add it to display list
+          // Create a mod object for the removal and add it to display list
           displayMods.push({
-            fileName: actionItem.fileName,
-            name: actionItem.name || actionItem.fileName,
+            fileName: removal.fileName,
+            name: removal.fileName,
             location: 'client', // It exists on client
             size: 0, // We don't know the size
             lastModified: new Date().toISOString(),
-            required: actionItem.action === 'acknowledge_dependency', // True for acknowledgments, false for removals
+            required: true, // This was a required mod
             checksum: '',
             downloadUrl: '',
             projectId: null,
-            versionNumber: null
+            versionNumber: null,
+            needsRemoval: true,
+            removalReason: removal.reason,
+            removalAction: 'remove_needed'
+          });
+        }
+      }
+    }
+    
+    // Add mods that need acknowledgment from the new response structure
+    if (modSyncStatus?.acknowledgments) {
+      console.log('[DEBUG-REQUIRED] Acknowledgments:', modSyncStatus.acknowledgments);
+      
+      for (const ack of modSyncStatus.acknowledgments) {
+        console.log('[DEBUG-REQUIRED] Processing acknowledgment:', ack.fileName);
+        // Check if this mod is not already in the display list
+        const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === ack.fileName.toLowerCase());
+        
+        if (!existsInDisplay) {
+          // Create a mod object for the acknowledgment and add it to display list
+          displayMods.push({
+            fileName: ack.fileName,
+            name: ack.fileName,
+            location: 'client', // It exists on client
+            size: 0, // We don't know the size
+            lastModified: new Date().toISOString(),
+            required: true, // Marked as required for acknowledgment
+            checksum: '',
+            downloadUrl: '',
+            projectId: null,
+            versionNumber: null,
+            needsRemoval: false,            removalReason: ack.reason,            removalAction: 'acknowledge_dependency'
           });
         }
       }
     }
     
     return displayMods;
-  })();  // Computed property for optional mods that hides acknowledged or removal-pending entries
+  })();
+
+  // Computed property for optional mods that hides acknowledged or removal-pending entries
   $: displayOptionalMods = (() => {
-    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));    // Add mods that need removal or acknowledgment to the display list (similar to required mods)
-    if (modSyncStatus?.clientModChanges?.removals) {
-      console.log('[DEBUG-OPTIONAL] All removals:', modSyncStatus.clientModChanges.removals);
-      const optionalModsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => {
-        console.log('[DEBUG-OPTIONAL] Checking removal:', r.fileName, 'wasRequired:', r.wasRequired);
-        // Only include removals for mods that were originally optional (not required)
-        // If wasRequired is true, it should stay in the required section
-        return r.wasRequired === false && (r.action === 'remove_needed' || r.action === 'acknowledge_dependency');
-      });
-      console.log('[DEBUG-OPTIONAL] Filtered optional mods needing action:', optionalModsNeedingAction);
+    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
+
+    // Add mods that need removal from the new response structure
+    if (modSyncStatus?.optionalRemovals) {
+      console.log('[DEBUG-OPTIONAL] Optional removals:', modSyncStatus.optionalRemovals);
       
-      for (const actionItem of optionalModsNeedingAction) {
-        // Check if this mod is already in the mods list (to avoid duplicates)
-        const existingIndex = mods.findIndex(m => m.fileName.toLowerCase() === actionItem.fileName.toLowerCase());
+      for (const removal of modSyncStatus.optionalRemovals) {
+        console.log('[DEBUG-OPTIONAL] Processing optional removal:', removal.fileName);
+        // Check if this mod is not already in the display list
+        const existingIndex = mods.findIndex(m => m.fileName.toLowerCase() === removal.fileName.toLowerCase());
         
         if (existingIndex >= 0) {
           // Update existing mod to show removal status
           mods[existingIndex] = {
             ...mods[existingIndex],
             needsRemoval: true,
-            removalReason: actionItem.reason,
-            removalAction: actionItem.action
+            removalReason: removal.reason,
+            removalAction: 'remove_needed'
           };
         } else {
-          // Create a new mod object for the action and add it to display list
+          // Create a new mod object for the removal and add it to display list
           mods.push({
-            fileName: actionItem.fileName,
-            name: actionItem.name || actionItem.fileName,
+            fileName: removal.fileName,
+            name: removal.fileName,
             location: 'client', // It exists on client
             size: 0, // We don't know the size
+            lastModified: new Date().toISOString(),
             required: false, // This is an optional mod
+            checksum: '',
+            downloadUrl: '',
+            projectId: null,
             versionNumber: 'Unknown',
             needsRemoval: true,
-            removalReason: actionItem.reason,
-            removalAction: actionItem.action
+            removalReason: removal.reason,
+            removalAction: 'remove_needed'
           });
-        }      }
+        }
+      }
     }
     
     return mods;
@@ -389,14 +437,16 @@
             for (const mod of currentServerMods) {
               combined.add(mod);
             }
-            
-            // Also preserve previously server-managed optional mods that might need removal
+              // Also preserve previously server-managed optional mods that might need removal
             // This is crucial for detecting when optional mods are removed from the server
-            if (modSyncStatus?.clientModChanges?.removals) {
-              for (const removal of modSyncStatus.clientModChanges.removals) {
-                if (removal.action === 'remove_needed') {
-                  combined.add(removal.fileName.toLowerCase());
-                }
+            if (modSyncStatus?.requiredRemovals) {
+              for (const removal of modSyncStatus.requiredRemovals) {
+                combined.add(removal.fileName.toLowerCase());
+              }
+            }
+            if (modSyncStatus?.optionalRemovals) {
+              for (const removal of modSyncStatus.optionalRemovals) {
+                combined.add(removal.fileName.toLowerCase());
               }
             }
               
@@ -479,14 +529,19 @@
           // Use scoped update for individual mod removals
           updateServerManagedFiles('remove', result.successfullyRemovedMods);
         }
-        
-        // Emit event to parent about sync status
+          // Emit event to parent about sync status
         dispatch('mod-sync-status', {
           synchronized: result.synchronized,
           needsDownload: result.needsDownload,
           totalRequired: result.totalRequired,
           totalPresent: result.totalPresent,
-          needsRemoval: result.needsRemoval,          clientModChanges: result.clientModChanges,
+          needsRemoval: result.needsRemoval,
+          // New response structure
+          requiredRemovals: result.requiredRemovals || [],
+          optionalRemovals: result.optionalRemovals || [],
+          acknowledgments: result.acknowledgments || [],
+          // Legacy compatibility (temporary)
+          clientModChanges: result.clientModChanges,
           fullSyncResult: result // Pass the full result for complete info
         });
       } else {
