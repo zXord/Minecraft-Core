@@ -35,6 +35,10 @@
   function refresh(): void {
     dispatch('refresh');
   }
+
+  function acknowledgeAllDependencies(): void {
+    dispatch('acknowledge-all-dependencies');
+  }
 </script>
 
 <div class="mod-status-overview">
@@ -192,9 +196,8 @@
         {#if actualRemovals.length > 0}
           <button class="download-action-button required" on:click={downloadRequired}>
             🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
-          </button>
-        {:else if acknowledgments.length > 0}
-          <button class="download-action-button required" on:click={downloadRequired}>
+          </button>        {:else if acknowledgments.length > 0}
+          <button class="download-action-button required" on:click={acknowledgeAllDependencies}>
             ✓ Acknowledge Dependencies ({acknowledgments.length})
           </button>
         {:else}
@@ -464,4 +467,4 @@
   .refresh-action-button:hover {
     background-color: #4b5563;
   }
-</style> 
+</style>
