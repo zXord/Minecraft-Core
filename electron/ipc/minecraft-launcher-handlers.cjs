@@ -1042,27 +1042,19 @@ function createMinecraftLauncherHandlers(win) {
             // This was incorrectly stored as required, remove it
             needsStateCleanup = true;
           }
-        }
+        }        // Don't do cleanup here - we need the original state for removal detection
+          // Use the ORIGINAL expected mods for the removal detection logic
+        // This ensures we can detect when previously required mods are removed
+        const cleanedPreviousServerRequiredModListFromStorage = previousServerRequiredModListFromStorage;
         
-        // Update persistent state if cleanup is needed
-        if (needsStateCleanup) {
-          try {
-            await saveExpectedModState(clientPath, correctedExpectedMods, win, acknowledgedDependencies);
-          } catch (cleanupError) {
-            console.error('[CLEANUP] Failed to update persistent state during cleanup:', cleanupError);
-          }
-        }
-        
-        // Use the corrected expected mods for the rest of the logic
-        const cleanedPreviousServerRequiredModListFromStorage = correctedExpectedMods;        // Current server *required* mods (what the server currently *requires*)
+        // We'll clean up the state AFTER removal detection is complete// Current server *required* mods (what the server currently *requires*)
         const newServerRequiredModList = new Set(
           requiredMods.map(m => m.fileName.toLowerCase())
-        );
-
-        // Set of all mods the server currently manages (required + optional)
+        );        // Set of all mods the server currently manages (required + optional)
         const newServerAllMods = new Set(
           allClientMods.map(m => m.fileName.toLowerCase())
         );
+        console.log(`[DEBUG-BACKEND] All server mods (required + optional):`, Array.from(newServerAllMods));
           // Check if server *required* mod list has changed
         let serverRequiredModsActuallyChanged = false;
         if (cleanedPreviousServerRequiredModListFromStorage.size !== newServerRequiredModList.size) {
@@ -1082,10 +1074,14 @@ function createMinecraftLauncherHandlers(win) {
                     }
                 }
             }
-        }        
-        if (serverRequiredModsActuallyChanged) {
+        }          if (serverRequiredModsActuallyChanged) {
           acknowledgedDependencies = new Set(); 
         }
+          console.log(`[DEBUG-BACKEND] Server required mods changed:`, serverRequiredModsActuallyChanged);
+        console.log(`[DEBUG-BACKEND] Previous required mods from storage:`, Array.from(cleanedPreviousServerRequiredModListFromStorage));
+        console.log(`[DEBUG-BACKEND] New required mods:`, Array.from(newServerRequiredModList));
+        console.log(`[DEBUG-BACKEND] Original required mods from server:`, requiredMods.map(m => m.fileName));
+        console.log(`[DEBUG-BACKEND] Acknowledged dependencies cleared:`, acknowledgedDependencies.size === 0);
 
         // serverManagedFilesSet should represent what was *previously* considered server-managed for removal detection.
         // If bootstrapping, it might be the current server list, otherwise, it\'s the stored expected (required) list.
@@ -1162,35 +1158,60 @@ function createMinecraftLauncherHandlers(win) {
           // Logic for determining removals and acknowledgments        // This loop iterates over mods that were previously expected (server-managed/required)
         for (const prevModFileName of cleanedPreviousServerRequiredModListFromStorage) {
           const prevModLower = prevModFileName.toLowerCase();
+          console.log(`[DEBUG-BACKEND] Checking prev required mod:`, prevModFileName, 'still on server as any mod:', newServerAllMods.has(prevModLower));
 
           // Skip if the mod is still managed by the server (as optional)
           if (newServerAllMods.has(prevModLower)) {
+            console.log(`[DEBUG-BACKEND] Mod still managed by server as optional:`, prevModFileName);
             continue;
-          }
-
-          // Skip if already acknowledged
+          }          // Skip if already acknowledged          
           const baseModName = getBaseModName(prevModFileName).toLowerCase();
           const isAlreadyAcknowledged = acknowledgedDependencies.has(prevModLower) || acknowledgedDependencies.has(baseModName);
           if (isAlreadyAcknowledged) {
             continue;
-          }// Only process if the mod file actually exists
+          }
+
+          // Debug logging for specific mods
+          if (prevModLower.includes('cloth_config_api') || prevModLower.includes('immediatelyfast')) {
+            console.log(`[DEBUG-BACKEND] REQUIRED-REMOVAL-CHECK Processing:`, prevModFileName);
+            console.log(`[DEBUG-BACKEND] - Mod exists in current mods:`, allCurrentMods.has(prevModLower));
+            console.log(`[DEBUG-BACKEND] - Not in new required list:`, !newServerRequiredModList.has(prevModLower));
+            console.log(`[DEBUG-BACKEND] - Still available on server:`, newServerAllMods.has(prevModLower));
+            console.log(`[DEBUG-BACKEND] - Not already in removals:`, !clientModChanges.removals.some(r => r.fileName.toLowerCase() === prevModLower));
+          }          // Only process if the mod file actually exists
           if (
             allCurrentMods.has(prevModLower) &&
             !newServerRequiredModList.has(prevModLower) &&
-            !clientModChanges.removals.some(r => r.fileName.toLowerCase() === prevModLower)
+            !newServerAllMods.has(prevModLower) // **FIX**: Only remove if NOT available on server at all
+            && !clientModChanges.removals.some(r => r.fileName.toLowerCase() === prevModLower)
           ) {
-            const isNeededByClientMod = clientSideDependencies.has(prevModLower) ||
-                                      clientSideDependencies.has(baseModName) ||
+            console.log(`[DEBUG-BACKEND] Required mod removed from server:`, prevModFileName);
+            const isNeededByClientMod = clientSideDependencies.has(prevModLower) ||                                      clientSideDependencies.has(baseModName) ||
                                       (prevModLower.includes('fabric') && prevModLower.includes('api') && (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api'))) ||
-                                      checkModDependencyByFilename(prevModLower, clientSideDependencies);            if (!isNeededByClientMod) {
-              clientModChanges.removals.push({ name: prevModFileName, fileName: prevModFileName, reason: 'no longer required by server', action: 'remove_needed' });
+                                      checkModDependencyByFilename(prevModLower, clientSideDependencies);
+
+            if (!isNeededByClientMod) {
+              clientModChanges.removals.push({ 
+                name: prevModFileName, 
+                fileName: prevModFileName, 
+                reason: 'no longer required by server', 
+                action: 'remove_needed',
+                wasRequired: true // Mark as originally required mod
+              });
             } else {
               const dependents = buildClientSideModsFor(prevModFileName);
               const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
-              clientModChanges.removals.push({ name: prevModFileName, fileName: prevModFileName, reason: reason, action: 'acknowledge_dependency' });
-            }
+              clientModChanges.removals.push({ 
+                name: prevModFileName, 
+                fileName: prevModFileName, 
+                reason: reason, 
+                action: 'acknowledge_dependency',
+                wasRequired: true // Mark as originally required mod
+              });
+            }          } else if (prevModLower.includes('cloth_config_api') || prevModLower.includes('immediatelyfast')) {
+            console.log(`[DEBUG-BACKEND] REQUIRED-REMOVAL-CHECK Skipping (still available on server):`, prevModFileName);
           }
-        }          // Check manifest-tracked mods (primarily for mods that might not have been in cleanedPreviousServerRequiredModListFromStorage but are managed)
+        }// Check manifest-tracked mods (primarily for mods that might not have been in cleanedPreviousServerRequiredModListFromStorage but are managed)
         if (fs.existsSync(manifestDir)) {
           const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
           for (const file of manifests) {
@@ -1220,26 +1241,48 @@ function createMinecraftLauncherHandlers(win) {
                   
                   if (!isNeededByClientMod) {
                     extraMods.push(data.fileName); // Will be converted to remove_needed later
-                  } else {
-                    const dependents = buildClientSideModsFor(data.fileName);
+                  } else {                    const dependents = buildClientSideModsFor(data.fileName);
                     const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
-                    clientModChanges.removals.push({ name: data.fileName, fileName: data.fileName, reason: reason, action: 'acknowledge_dependency' });
+                    clientModChanges.removals.push({ 
+                      name: data.fileName, 
+                      fileName: data.fileName, 
+                      reason: reason, 
+                      action: 'acknowledge_dependency',
+                      wasRequired: true // This is from manifest, likely required
+                    });
                   }
                 }
               }
             } catch (error) { console.warn(`Failed to parse manifest ${file}:`, error.message); }
           }
         }        // Check ALL mods in the folder for potential removal (if they were part of serverManagedFilesSetForDiff AND were previously required)
+        const currentServerAllMods = new Set((allClientMods || []).map(m => m.fileName.toLowerCase()));
+        
         for (const modFileName of allCurrentMods) {
           const fileNameLower = modFileName.toLowerCase();
           const baseModName = getBaseModName(modFileName).toLowerCase();
           const isAlreadyAcknowledged = acknowledgedDependencies.has(fileNameLower) || acknowledgedDependencies.has(baseModName);
           
+          if (fileNameLower.includes('cloth_config_api') || fileNameLower.includes('immediatelyfast')) {
+            console.log(`[DEBUG-BACKEND] ALL-MODS-CHECK Processing:`, modFileName);
+            console.log(`[DEBUG-BACKEND] - In new required list:`, newServerRequiredModList.has(fileNameLower));
+            console.log(`[DEBUG-BACKEND] - In serverManagedFilesSetForDiff:`, serverManagedFilesSetForDiff.has(fileNameLower));
+            console.log(`[DEBUG-BACKEND] - Was previously required:`, cleanedPreviousServerRequiredModListFromStorage.has(fileNameLower));
+            console.log(`[DEBUG-BACKEND] - Still available on server:`, currentServerAllMods.has(fileNameLower));
+            console.log(`[DEBUG-BACKEND] - Already in removals:`, clientModChanges.removals.some(removal => removal.fileName.toLowerCase() === fileNameLower));
+            console.log(`[DEBUG-BACKEND] - Already in extraMods:`, extraMods.some(mod => mod.toLowerCase() === fileNameLower));
+            console.log(`[DEBUG-BACKEND] - Is acknowledged:`, isAlreadyAcknowledged);
+          }
+          
           if (newServerRequiredModList.has(fileNameLower) || !serverManagedFilesSetForDiff.has(fileNameLower) || 
               !cleanedPreviousServerRequiredModListFromStorage.has(fileNameLower) || // **FIX**: Only process if was previously required
+              currentServerAllMods.has(fileNameLower) || // **FIX**: Skip if still available on server (required or optional)
               clientModChanges.removals.some(removal => removal.fileName.toLowerCase() === fileNameLower) ||
               extraMods.some(mod => mod.toLowerCase() === fileNameLower) ||
               isAlreadyAcknowledged) { // Skip acknowledged mods
+            if (fileNameLower.includes('cloth_config_api') || fileNameLower.includes('immediatelyfast')) {
+              console.log(`[DEBUG-BACKEND] ALL-MODS-CHECK Skipping:`, modFileName);
+            }
             continue;
           }
           
@@ -1247,14 +1290,17 @@ function createMinecraftLauncherHandlers(win) {
 
           if (!isNeededByClientMod) {
             extraMods.push(modFileName);
-          } else {
-            const dependents = buildClientSideModsFor(modFileName);
+          } else {            const dependents = buildClientSideModsFor(modFileName);
             const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
-            clientModChanges.removals.push({ name: modFileName, fileName: modFileName, reason: reason, action: 'acknowledge_dependency' });
+            clientModChanges.removals.push({ 
+              name: modFileName, 
+              fileName: modFileName, 
+              reason: reason, 
+              action: 'acknowledge_dependency',
+              wasRequired: true // This is checking previously required mods
+            });
           }        }        // Check for removed optional mods
         // Now that we store both required and optional mods together, we can properly detect removals
-        const currentRequiredMods = new Set(requiredMods.map(m => m.fileName.toLowerCase()));
-        const currentServerAllMods = new Set((allClientMods || []).map(m => m.fileName.toLowerCase()));
         
         // Find previously stored mods that are no longer on the server
         const previouslyStoredMods = Array.from(stateResult.expectedMods || new Set());
@@ -1262,8 +1308,10 @@ function createMinecraftLauncherHandlers(win) {
         for (const prevModFileName of previouslyStoredMods) {
           const prevModLower = prevModFileName.toLowerCase();
           
-          // Skip if this was a required mod (handled by the main required mod logic above)
-          if (currentRequiredMods.has(prevModLower)) {
+          // Skip if this was a required mod (should be handled by the main required mod logic above)
+          // Check if it was in the PREVIOUS required mods list, not the current one
+          if (cleanedPreviousServerRequiredModListFromStorage.has(prevModLower)) {
+            console.log(`[DEBUG-BACKEND] Skipping mod in optional removal logic because it was previously required:`, prevModFileName);
             continue;
           }
           
@@ -1283,13 +1331,14 @@ function createMinecraftLauncherHandlers(win) {
           if (
             allCurrentMods.has(prevModLower) &&
             !clientModChanges.removals.some(r => r.fileName.toLowerCase() === prevModLower)
-          ) {
-            // This optional mod was removed from the server - mark for removal
+          ) {            // This optional mod was removed from the server - mark for removal
+            console.log(`[DEBUG-BACKEND] OPTIONAL-REMOVAL Adding truly optional mod to removals:`, prevModFileName);
             clientModChanges.removals.push({ 
               name: prevModFileName, 
               fileName: prevModFileName, 
               reason: 'no longer provided by server', 
-              action: 'remove_needed' 
+              action: 'remove_needed',
+              wasRequired: false // Mark as originally optional mod
             });
           }
         }
@@ -1367,17 +1416,32 @@ function createMinecraftLauncherHandlers(win) {
             clientModChanges.newDownloads.push(modFileName);
           }        }        // Track extra mods that need removal but DON'T automatically delete them        
         const successfullyRemovedMods = [];
-        
-        // Convert extraMods to clientModChanges.removals for proper handling
+          // Convert extraMods to clientModChanges.removals for proper handling
         for (const extraMod of extraMods) {
+          const extraModLower = extraMod.toLowerCase();
+          
+          // Debug logging for specific mods
+          if (extraModLower.includes('cloth_config_api') || extraModLower.includes('immediatelyfast')) {
+            console.log(`[DEBUG-BACKEND] EXTRAMODS Processing:`, extraMod);
+            console.log(`[DEBUG-BACKEND] - Still available on server:`, newServerAllMods.has(extraModLower));            console.log(`[DEBUG-BACKEND] - Already acknowledged:`, clientModChanges.removals.some(r => r.fileName.toLowerCase() === extraModLower && r.action === 'acknowledge_dependency'));
+          }
+          
           // Check if already added for acknowledgment, if so, prioritize acknowledgment
-          if (!clientModChanges.removals.some(r => r.fileName.toLowerCase() === extraMod.toLowerCase() && r.action === 'acknowledge_dependency')) {
+          if (!clientModChanges.removals.some(r => r.fileName.toLowerCase() === extraMod.toLowerCase() && r.action === 'acknowledge_dependency') &&
+              !newServerAllMods.has(extraModLower)) { // **FIX**: Skip if still available on server (required or optional)
             clientModChanges.removals.push({
               name: extraMod,
               fileName: extraMod,
               reason: 'no longer required by server',
-              action: 'remove_needed' 
+              action: 'remove_needed',
+              wasRequired: cleanedPreviousServerRequiredModListFromStorage.has(extraModLower) // **FIX**: Set based on whether it was originally required
             });
+            
+            if (extraModLower.includes('cloth_config_api') || extraModLower.includes('immediatelyfast')) {
+              console.log(`[DEBUG-BACKEND] EXTRAMODS Added to removals with wasRequired:`, cleanedPreviousServerRequiredModListFromStorage.has(extraModLower));
+            }
+          } else if (extraModLower.includes('cloth_config_api') || extraModLower.includes('immediatelyfast')) {
+            console.log(`[DEBUG-BACKEND] EXTRAMODS Skipping (still available on server):`, extraMod);
           }
         }
 
@@ -1420,9 +1484,12 @@ function createMinecraftLauncherHandlers(win) {
         }        // Save the new *required* server mod list and current (potentially reset) acknowledgments.
         try {
           // Create a combined set of required AND optional mods to store
+          // Use corrected state if cleanup was needed (to fix legacy incorrect storage)
+          const baseRequiredMods = needsStateCleanup ? correctedExpectedMods : newServerRequiredModList;
+          
           // BUT: don't remove mods that need removal yet - keep them in state until actually removed
           const allServerMods = new Set([
-            ...newServerRequiredModList,
+            ...baseRequiredMods,
             ...(allClientMods || [])
               .filter(mod => !mod.required)
               .map(mod => mod.fileName.toLowerCase())
@@ -1439,9 +1506,14 @@ function createMinecraftLauncherHandlers(win) {
           
           await saveExpectedModState(clientPath, allServerMods, win, acknowledgedDependencies);
         } catch (stateError) {
-          console.error('[IPC HANDLER] Failed to update persistent state:', stateError);
-        }
+          console.error('[IPC HANDLER] Failed to update persistent state:', stateError);        }
         
+        console.log(`[DEBUG-BACKEND] Final clientModChanges:`, JSON.stringify(clientModChanges, null, 2));
+        console.log(`[DEBUG-BACKEND] Removals count:`, clientModChanges.removals.length);
+        for (const removal of clientModChanges.removals) {
+          console.log(`[DEBUG-BACKEND] Removal:`, removal.fileName, 'wasRequired:', removal.wasRequired, 'action:', removal.action);
+        }
+
         // log.info(`[IPC HANDLER] Client mod changes: ${JSON.stringify(clientModChanges, null, 2)}`);
 
       // Determine overall sync status
