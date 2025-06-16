@@ -257,49 +257,99 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
       return !serverManagedSet.has(fileName);
     });
     
-    for (const modFile of clientSideMods) {
+    console.log(`[CLIENT DEPS] All mod files:`, modFiles);
+    console.log(`[CLIENT DEPS] Server managed files:`, Array.from(serverManagedSet));
+    console.log(`[CLIENT DEPS] Client-side mods:`, clientSideMods);
+      for (const modFile of clientSideMods) {
       const modPath = path.join(modsDir, modFile);
-        try {
+      console.log(`[CLIENT DEPS] Analyzing mod: ${modFile}`);
+      
+      try {
         const metadata = await extractDependenciesFromJar(modPath);
+        
+        console.log(`[CLIENT DEPS] Metadata for ${modFile}:`, metadata);
         
         if (metadata) {
           // Handle 'dependencies' field (array format)
           if (metadata.dependencies && Array.isArray(metadata.dependencies)) {
+            console.log(`[CLIENT DEPS] Found dependencies array for ${modFile}:`, metadata.dependencies);
             for (const dep of metadata.dependencies) {              if (typeof dep === 'object' && dep.modid) {
                 dependencies.add(dep.modid.toLowerCase());
+                console.log(`[CLIENT DEPS] Added dependency (object): ${dep.modid.toLowerCase()}`);
               } else if (typeof dep === 'string') {
                 dependencies.add(dep.toLowerCase());
+                console.log(`[CLIENT DEPS] Added dependency (string): ${dep.toLowerCase()}`);
               }
             }
           } else if (metadata.dependencies && typeof metadata.dependencies === 'object') {
             // Handle dependencies as object (key-value pairs)
+            console.log(`[CLIENT DEPS] Found dependencies object for ${modFile}:`, metadata.dependencies);
             for (const depName of Object.keys(metadata.dependencies)) {
               dependencies.add(depName.toLowerCase());
-
+              console.log(`[CLIENT DEPS] Added dependency (object key): ${depName.toLowerCase()}`);
             }
           }
-          
-          // Handle 'depends' field (Fabric mod format)
-          if (metadata.depends && typeof metadata.depends === 'object') {            for (const depName of Object.keys(metadata.depends)) {
+            // Handle 'depends' field (Fabric mod format)
+          if (metadata.depends && typeof metadata.depends === 'object') {            console.log(`[CLIENT DEPS] Found depends object for ${modFile}:`, metadata.depends);
+            for (const depName of Object.keys(metadata.depends)) {
               if (!['minecraft', 'fabricloader', 'java'].includes(depName.toLowerCase())) {
                 dependencies.add(depName.toLowerCase());
+                console.log(`[CLIENT DEPS] Added depends (object key): ${depName.toLowerCase()}`);
               }
             }
           } else if (metadata.depends && Array.isArray(metadata.depends)) {
+            console.log(`[CLIENT DEPS] Found depends array for ${modFile}:`, metadata.depends);
             for (const dep of metadata.depends) {
               if (typeof dep === 'string') {
-                dependencies.add(dep.toLowerCase());              } else if (typeof dep === 'object' && dep.modid) {
+                dependencies.add(dep.toLowerCase());
+                console.log(`[CLIENT DEPS] Added depends (string): ${dep.toLowerCase()}`);
+              } else if (typeof dep === 'object' && dep.modid) {
                 dependencies.add(dep.modid.toLowerCase());
+                console.log(`[CLIENT DEPS] Added depends (object): ${dep.modid.toLowerCase()}`);
+              }
+            }
+          }
+            // Handle 'requires' field
+          if (metadata.requires && Array.isArray(metadata.requires)) {
+            console.log(`[CLIENT DEPS] Found requires array for ${modFile}:`, metadata.requires);
+            for (const dep of metadata.requires) {
+              if (typeof dep === 'string') {
+                dependencies.add(dep.toLowerCase());
+                console.log(`[CLIENT DEPS] Added requires (string): ${dep.toLowerCase()}`);
+              } else if (typeof dep === 'object' && dep.modid) {
+                dependencies.add(dep.modid.toLowerCase());
+                console.log(`[CLIENT DEPS] Added requires (object): ${dep.modid.toLowerCase()}`);
               }
             }
           }
           
-          // Handle 'requires' field
-          if (metadata.requires && Array.isArray(metadata.requires)) {
-            for (const dep of metadata.requires) {
-              if (typeof dep === 'string') {
-                dependencies.add(dep.toLowerCase());              } else if (typeof dep === 'object' && dep.modid) {
-                dependencies.add(dep.modid.toLowerCase());
+          // Handle embedded 'jars' field (bundled dependencies)
+          if (metadata.jars && Array.isArray(metadata.jars)) {
+            console.log(`[CLIENT DEPS] Found embedded jars for ${modFile}:`, metadata.jars);
+            for (const jar of metadata.jars) {
+              if (typeof jar === 'object' && jar.file) {
+                // Extract mod name from embedded jar filename
+                const jarFile = jar.file.split('/').pop(); // Get filename from path
+                const jarName = jarFile.replace(/\.jar$/i, '').toLowerCase();
+                
+                // Try to extract a meaningful mod ID from the jar name
+                const cleanJarName = jarName.replace(/[-_]\d+.*$/, ''); // Remove version
+                const modIdFromJar = cleanJarName.replace(/[-_]/g, ''); // Remove separators
+                
+                dependencies.add(jarName);
+                dependencies.add(cleanJarName);
+                dependencies.add(modIdFromJar);
+                
+                console.log(`[CLIENT DEPS] Added embedded jar dependencies: ${jarName}, ${cleanJarName}, ${modIdFromJar}`);
+                
+                // Special handling for common patterns
+                if (jarName.includes('placeholder') && jarName.includes('api')) {
+                  dependencies.add('placeholder-api');
+                  dependencies.add('placeholderapi');
+                  dependencies.add('text-placeholder-api');
+                  dependencies.add('textplaceholderapi');
+                  console.log(`[CLIENT DEPS] Added placeholder API variants from embedded jar`);
+                }
               }
             }
           }
@@ -347,10 +397,11 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
       'minecraft', 'forge', 'fabric', 'fabric-loader', 'fabricloader',
       'java', 'mcp', 'mappings', 'quilt', 'quilt-loader'
     ]);
-    
-    for (const dep of commonNonModDeps) {      dependencies.delete(dep);
+      for (const dep of commonNonModDeps) {      dependencies.delete(dep);
     }
     
+    console.log(`[CLIENT DEPS] Final dependencies set:`, Array.from(dependencies));
+
   } catch (error) {
     console.error('Error analyzing client-side dependencies:', error);
   }
@@ -366,6 +417,8 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
 function checkModDependencyByFilename(fileName, dependencies) {
   const nameLower = fileName.toLowerCase();
   
+  console.log(`[FILENAME CHECK] Checking ${fileName} against dependencies:`, Array.from(dependencies));
+  
   // Extract mod ID patterns (e.g., sodium-fabric-0.5.8+mc1.20.1.jar -> sodium)
   const patterns = [
     // Remove common suffixes and version patterns
@@ -373,18 +426,30 @@ function checkModDependencyByFilename(fileName, dependencies) {
     nameLower.replace(/[-_]\d+.*$/, ''), // mod-1.0.0 -> mod
     nameLower.replace(/[-_]v?\d+\..*$/, ''), // mod-v1.0 -> mod
     nameLower.replace(/[-_]mc\d+.*$/, ''), // mod-mc1.20 -> mod
-    nameLower.replace(/\.jar$/, ''), // Remove .jar    // Try extracting just the first part before any delimiter
-    nameLower.split(/[-_.]/)[0]
+    nameLower.replace(/\.jar$/, ''), // Remove .jar
+    // Try extracting just the first part before any delimiter
+    nameLower.split(/[-_.]/)[0],
+    // Additional patterns for compound names
+    nameLower.replace(/[-_]/g, ''), // Remove all separators (text_placeholder_api -> textplaceholderapi)
+    nameLower.replace(/[-_]/g, '').replace(/\.jar$/, ''), // Remove separators and .jar
   ];
+  
+  // Add special patterns for common mod name variations
+  if (nameLower.includes('placeholder') && nameLower.includes('api')) {
+    patterns.push('placeholderapi', 'placeholder-api', 'textplaceholderapi', 'text-placeholder-api');
+  }
+  
+  console.log(`[FILENAME CHECK] Extracted patterns for ${fileName}:`, patterns);
   
   // Check each pattern against dependencies
   for (const pattern of patterns) {
     if (pattern && pattern.length > 2 && dependencies.has(pattern)) {
-
+      console.log(`[FILENAME CHECK] Found match: ${pattern} in dependencies`);
       return true;
     }
   }
   
+  console.log(`[FILENAME CHECK] No match found for ${fileName}`);
   return false;
 }
 
@@ -1149,7 +1214,10 @@ function createMinecraftLauncherHandlers(win) {
 
         const clientSideDependencies = await getClientSideDependencies(clientPath, Array.from(serverManagedFilesSetForDiff));
         
-        const buildClientSideModsFor = (excludeFile) => {
+        console.log(`[DEPENDENCY CHECK] Client-side dependencies found:`, Array.from(clientSideDependencies));
+        console.log(`[DEPENDENCY CHECK] Server managed files for diff:`, Array.from(serverManagedFilesSetForDiff));          const buildClientSideModsFor = async (excludeFile) => {
+          const { extractDependenciesFromJar } = require('./mod-utils/mod-analysis-utils.cjs');
+          
           if (!fs.existsSync(modsDir)) return [];
           
           const modFiles = fs.readdirSync(modsDir).filter(file => 
@@ -1157,11 +1225,115 @@ function createMinecraftLauncherHandlers(win) {
           );
           
           const lowerExclude = excludeFile.toLowerCase();
-          // serverManagedFilesSetForDiff is used here to correctly identify client-side mods for reason string
-          return modFiles.filter(f => {
+          const dependentMods = [];
+          
+          // Get client-side mods (exclude server-managed ones)
+          const clientSideMods = modFiles.filter(f => {
             const lf = f.toLowerCase();
             return !serverManagedFilesSetForDiff.has(lf) && lf !== lowerExclude;
           });
+          
+          console.log(`[BUILD DEPENDENTS] Looking for mods that depend on ${excludeFile}`);
+          console.log(`[BUILD DEPENDENTS] Checking client-side mods:`, clientSideMods);
+          
+          // Check each client mod to see if it actually depends on the excluded file
+          for (const modFile of clientSideMods) {
+            const modPath = path.join(modsDir, modFile);
+            
+            try {
+              const metadata = await extractDependenciesFromJar(modPath);
+              const modDependencies = new Set();
+              
+              if (metadata) {
+                // Extract dependencies using the same logic as getClientSideDependencies
+                if (metadata.dependencies && Array.isArray(metadata.dependencies)) {
+                  for (const dep of metadata.dependencies) {
+                    if (typeof dep === 'object' && dep.modid) {
+                      modDependencies.add(dep.modid.toLowerCase());
+                    } else if (typeof dep === 'string') {
+                      modDependencies.add(dep.toLowerCase());
+                    }
+                  }
+                } else if (metadata.dependencies && typeof metadata.dependencies === 'object') {
+                  for (const depName of Object.keys(metadata.dependencies)) {
+                    modDependencies.add(depName.toLowerCase());
+                  }
+                }
+                
+                if (metadata.depends && typeof metadata.depends === 'object') {
+                  for (const depName of Object.keys(metadata.depends)) {
+                    if (!['minecraft', 'fabricloader', 'java'].includes(depName.toLowerCase())) {
+                      modDependencies.add(depName.toLowerCase());
+                    }
+                  }
+                } else if (metadata.depends && Array.isArray(metadata.depends)) {
+                  for (const dep of metadata.depends) {
+                    if (typeof dep === 'string') {
+                      modDependencies.add(dep.toLowerCase());
+                    } else if (typeof dep === 'object' && dep.modid) {
+                      modDependencies.add(dep.modid.toLowerCase());
+                    }
+                  }
+                }
+                
+                if (metadata.requires && Array.isArray(metadata.requires)) {
+                  for (const dep of metadata.requires) {
+                    if (typeof dep === 'string') {
+                      modDependencies.add(dep.toLowerCase());
+                    } else if (typeof dep === 'object' && dep.modid) {
+                      modDependencies.add(dep.modid.toLowerCase());
+                    }
+                  }
+                }
+                
+                // Check embedded jars
+                if (metadata.jars && Array.isArray(metadata.jars)) {
+                  for (const jar of metadata.jars) {
+                    if (typeof jar === 'object' && jar.file) {
+                      const jarFile = jar.file.split('/').pop();
+                      const jarName = jarFile.replace(/\.jar$/i, '').toLowerCase();
+                      const cleanJarName = jarName.replace(/[-_]\d+.*$/, '');
+                      const modIdFromJar = cleanJarName.replace(/[-_]/g, '');
+                      
+                      modDependencies.add(jarName);
+                      modDependencies.add(cleanJarName);
+                      modDependencies.add(modIdFromJar);
+                      
+                      if (jarName.includes('placeholder') && jarName.includes('api')) {
+                        modDependencies.add('placeholder-api');
+                        modDependencies.add('placeholderapi');
+                        modDependencies.add('text-placeholder-api');
+                        modDependencies.add('textplaceholderapi');
+                      }
+                    }
+                  }
+                }
+              }
+              
+              // Check if this mod depends on the excluded file
+              const excludeLower = excludeFile.toLowerCase();
+              const excludeBase = getBaseModName(excludeFile).toLowerCase();
+              
+              const dependsOnExcluded = modDependencies.has(excludeLower) ||
+                                      modDependencies.has(excludeBase) ||
+                                      modDependencies.has(excludeLower.replace(/\.jar$/, '')) ||
+                                      modDependencies.has(excludeBase.replace(/[-_]/g, '')) ||
+                                      checkModDependencyByFilename(excludeFile, modDependencies);
+              
+              console.log(`[BUILD DEPENDENTS] ${modFile} dependencies:`, Array.from(modDependencies));
+              console.log(`[BUILD DEPENDENTS] ${modFile} depends on ${excludeFile}: ${dependsOnExcluded}`);
+              
+              if (dependsOnExcluded) {
+                dependentMods.push(modFile);
+              }
+              
+            } catch (error) {
+              console.warn(`[BUILD DEPENDENTS] Failed to analyze ${modFile}:`, error.message);
+            }
+          }
+          
+          console.log(`[BUILD DEPENDENTS] Final dependents for ${excludeFile}:`, dependentMods);
+          return dependentMods;
         };
 
         const formatReason = (dependents) => {
@@ -1204,34 +1376,50 @@ function createMinecraftLauncherHandlers(win) {
         const requiredRemovals = [];
         const optionalRemovals = [];
         const acknowledgments = [];
-        
-        // Process required removals
+          // Process required removals
         for (const modFileName of removedRequired) {
+          console.log(`[DEPENDENCY CHECK] Processing removed required mod: ${modFileName}`);
+          
           const modLower = modFileName.toLowerCase();
           const baseModName = getBaseModName(modFileName).toLowerCase();
+          
+          console.log(`[DEPENDENCY CHECK] Mod lower: ${modLower}, Base name: ${baseModName}`);
           
           // Skip if already acknowledged
           const isAlreadyAcknowledged = acknowledgedDependencies.has(modLower) || acknowledgedDependencies.has(baseModName);
           if (isAlreadyAcknowledged) {
+            console.log(`[DEPENDENCY CHECK] ${modFileName} already acknowledged, skipping`);
             continue;
           }
           
           // Check if needed by client-side mods
-          const isNeededByClientMod = clientSideDependencies.has(modLower) ||
-                                    clientSideDependencies.has(baseModName) ||
-                                    (modLower.includes('fabric') && modLower.includes('api') && 
-                                     (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api'))) ||
-                                    checkModDependencyByFilename(modLower, clientSideDependencies);
+          const hasModLower = clientSideDependencies.has(modLower);
+          const hasBaseModName = clientSideDependencies.has(baseModName);
+          const hasFabricApiCheck = (modLower.includes('fabric') && modLower.includes('api') && 
+                                   (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api')));
+          const hasFilenameCheck = checkModDependencyByFilename(modLower, clientSideDependencies);
+          
+          console.log(`[DEPENDENCY CHECK] Dependency checks for ${modFileName}:`);
+          console.log(`  - hasModLower (${modLower}): ${hasModLower}`);
+          console.log(`  - hasBaseModName (${baseModName}): ${hasBaseModName}`);
+          console.log(`  - hasFabricApiCheck: ${hasFabricApiCheck}`);
+          console.log(`  - hasFilenameCheck: ${hasFilenameCheck}`);
+          
+          const isNeededByClientMod = hasModLower || hasBaseModName || hasFabricApiCheck || hasFilenameCheck;
+          
+          console.log(`[DEPENDENCY CHECK] ${modFileName} is needed by client mod: ${isNeededByClientMod}`);
           
           if (!isNeededByClientMod) {
             // Can be removed safely
+            console.log(`[DEPENDENCY CHECK] ${modFileName} can be removed safely`);
             requiredRemovals.push({
               fileName: modFileName,
               reason: 'no longer required by server'
-            });
-          } else {
+            });          } else {
             // Need acknowledgment due to client dependencies
-            const dependents = buildClientSideModsFor(modFileName);
+            console.log(`[DEPENDENCY CHECK] ${modFileName} needs acknowledgment due to client dependencies`);
+            const dependents = await buildClientSideModsFor(modFileName);
+            console.log(`[DEPENDENCY CHECK] Dependents for ${modFileName}:`, dependents);
             const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
             acknowledgments.push({
               fileName: modFileName,
