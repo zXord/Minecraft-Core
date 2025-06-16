@@ -149,16 +149,15 @@
   $: displayRequiredMods = (() => {
     // first, remove any that the user has already acknowledged
     let displayMods = requiredMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
-    
-    // Add mods that need removal from the new response structure
+      // Add mods that need removal from the new response structure
     if (modSyncStatus?.requiredRemovals) {
-      console.log('[DEBUG-REQUIRED] Required removals:', modSyncStatus.requiredRemovals);
+      // console.log('[DEBUG-REQUIRED] Required removals:', modSyncStatus.requiredRemovals);
       
       for (const removal of modSyncStatus.requiredRemovals) {
-        console.log('[DEBUG-REQUIRED] Processing required removal:', removal.fileName);
+        // console.log('[DEBUG-REQUIRED] Processing required removal:', removal.fileName);
         // Check if this mod is not already in the display list
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === removal.fileName.toLowerCase());
-        console.log('[DEBUG-REQUIRED] Mod exists in display:', existsInDisplay);
+        // console.log('[DEBUG-REQUIRED] Mod exists in display:', existsInDisplay);
         
         if (!existsInDisplay) {
           // Create a mod object for the removal and add it to display list
@@ -180,13 +179,12 @@
         }
       }
     }
-    
-    // Add mods that need acknowledgment from the new response structure
+      // Add mods that need acknowledgment from the new response structure
     if (modSyncStatus?.acknowledgments) {
-      console.log('[DEBUG-REQUIRED] Acknowledgments:', modSyncStatus.acknowledgments);
+      // console.log('[DEBUG-REQUIRED] Acknowledgments:', modSyncStatus.acknowledgments);
       
       for (const ack of modSyncStatus.acknowledgments) {
-        console.log('[DEBUG-REQUIRED] Processing acknowledgment:', ack.fileName);
+        // console.log('[DEBUG-REQUIRED] Processing acknowledgment:', ack.fileName);
         // Check if this mod is not already in the display list
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === ack.fileName.toLowerCase());
         
@@ -214,14 +212,12 @@
 
   // Computed property for optional mods that hides acknowledged or removal-pending entries
   $: displayOptionalMods = (() => {
-    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
-
-    // Add mods that need removal from the new response structure
+    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));    // Add mods that need removal from the new response structure
     if (modSyncStatus?.optionalRemovals) {
-      console.log('[DEBUG-OPTIONAL] Optional removals:', modSyncStatus.optionalRemovals);
+      // console.log('[DEBUG-OPTIONAL] Optional removals:', modSyncStatus.optionalRemovals);
       
       for (const removal of modSyncStatus.optionalRemovals) {
-        console.log('[DEBUG-OPTIONAL] Processing optional removal:', removal.fileName);
+        // console.log('[DEBUG-OPTIONAL] Processing optional removal:', removal.fileName);
         // Check if this mod is not already in the display list
         const existingIndex = mods.findIndex(m => m.fileName.toLowerCase() === removal.fileName.toLowerCase());
         
@@ -1129,11 +1125,30 @@
     <div class="mod-actions">
       <button class="refresh-button" on:click={refreshMods} disabled={isLoadingMods}>
         {isLoadingMods ? '⏳ Loading...' : '🔄 Refresh'}
-      </button>
-      {#if modSyncStatus && !modSyncStatus.synchronized}
-        <button class="download-button" on:click={downloadRequiredMods}>
-          📥 Download Required Mods ({modSyncStatus.needsDownload})
-        </button>
+      </button>      {#if modSyncStatus && !modSyncStatus.synchronized}
+        <!-- Use same logic as Play tab for consistent button text -->
+        {#if modSyncStatus.needsDownload > 0}
+          <button class="download-button" on:click={downloadRequiredMods}>
+            📥 Download Required Mods ({modSyncStatus.needsDownload})
+          </button>
+        {:else}
+          {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
+          {@const acknowledgments = modSyncStatus.acknowledgments || []}
+          
+          {#if actualRemovals.length > 0}
+            <button class="download-button" on:click={downloadRequiredMods}>
+              🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
+            </button>
+          {:else if acknowledgments.length > 0}
+            <button class="download-button" on:click={downloadRequiredMods}>
+              ✓ Acknowledge Dependencies ({acknowledgments.length})
+            </button>
+          {:else}
+            <button class="download-button" on:click={downloadRequiredMods}>
+              🔄 Synchronize Mods
+            </button>
+          {/if}
+        {/if}
       {/if}
     </div>
   </div>

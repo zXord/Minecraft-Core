@@ -1079,13 +1079,11 @@ function createMinecraftLauncherHandlers(win) {
                     }
                 }
             }
-        }
-
-        // Log mod check summary
-        console.log(`[IPC HANDLER] Mod check - Required: ${newServerRequiredModList.size}`);
+        }        // Log mod check summary (essential)
+        // console.log(`[IPC HANDLER] Mod check - Required: ${newServerRequiredModList.size}`);
         
         if (serverRequiredModsActuallyChanged) {
-          console.log('[IPC HANDLER] Server required mods changed - clearing acknowledged dependencies');
+          // console.log('[IPC HANDLER] Server required mods changed - clearing acknowledged dependencies');
           acknowledgedDependencies = new Set(); 
         }
 
@@ -1184,8 +1182,7 @@ function createMinecraftLauncherHandlers(win) {
           const fLower = f.toLowerCase();
           return !currOptional.has(fLower) && allCurrentMods.has(fLower);
         });        
-        
-        console.log(`[IPC HANDLER] Removal detection - Required: ${removedRequired.length}, Optional: ${removedOptional.length}`);
+        // console.log(`[IPC HANDLER] Removal detection - Required: ${removedRequired.length}, Optional: ${removedOptional.length}`);
         
         // Initialize response arrays
         const requiredRemovals = [];
@@ -1243,7 +1240,7 @@ function createMinecraftLauncherHandlers(win) {
             fileName: modFileName,
             reason: 'no longer provided by server'
           });
-        }        console.log(`[IPC HANDLER] Response arrays - Required: ${requiredRemovals.length}, Optional: ${optionalRemovals.length}, Acknowledgments: ${acknowledgments.length}`);
+        }        // console.log(`[IPC HANDLER] Response arrays - Required: ${requiredRemovals.length}, Optional: ${optionalRemovals.length}, Acknowledgments: ${acknowledgments.length}`);
         // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====
         
         // Module analysis for updates
@@ -1363,9 +1360,8 @@ function createMinecraftLauncherHandlers(win) {
           }
           
           // Update the sets for this check
-          acknowledgedDependencies = cleanedAcknowledged;
-          
-          console.log(`[IPC HANDLER] Cleaned up ${modsToRemoveFromState.length} required and ${optionalModsToRemoveFromState.length} optional mods from state (no longer on disk)`);
+          acknowledgedDependencies = cleanedAcknowledged;          
+          // console.log(`[IPC HANDLER] Cleaned up ${modsToRemoveFromState.length} required and ${optionalModsToRemoveFromState.length} optional mods from state (no longer on disk)`);
         }// Save the current state with simplified tracking
         try {
           // The key insight: we need to persist mods that are flagged for removal
@@ -1401,21 +1397,19 @@ function createMinecraftLauncherHandlers(win) {
             if (!removedModsToExclude.has(ack.fileName.toLowerCase())) {
               requiredToSave.add(ack.fileName);
             }
-          }
-          
+          }          
+          // await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
           await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
-          console.log(`[IPC HANDLER] State saved - Required: ${requiredToSave.size}, Optional: ${optionalToSave.size}, Acknowledged: ${acknowledgedDependencies.size}`);
-          console.log(`[IPC HANDLER] Included ${requiredRemovals.length} required and ${optionalRemovals.length} optional removals in saved state`);
+          // console.log(`[IPC HANDLER] State saved - Required: ${requiredToSave.size}, Optional: ${optionalToSave.size}, Acknowledged: ${acknowledgedDependencies.size}`);
+          // console.log(`[IPC HANDLER] Included ${requiredRemovals.length} required and ${optionalRemovals.length} optional removals in saved state`);
         } catch (stateError) {
           console.error('[IPC HANDLER] Failed to update persistent state:', stateError);
         }// log.info(`[IPC HANDLER] Removal arrays: Required=${requiredRemovals.length}, Optional=${optionalRemovals.length}, Acknowledgments=${acknowledgments.length}`);      // Determine overall sync status
       const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && 
                              requiredRemovals.length === 0 && // No required mods need removal
                              optionalRemovals.length === 0 && // No optional mods need removal
-                             acknowledgments.length === 0;    // No acknowledgments needed
-
-        // Final response summary
-        console.log(`[IPC HANDLER] Mod sync result - Synchronized: ${synchronized}, Removals: ${requiredRemovals.length + optionalRemovals.length}, Acknowledgments: ${acknowledgments.length}`);
+                             acknowledgments.length === 0;    // No acknowledgments needed        // Final response summary (keep this one for debugging if needed)
+        // console.log(`[IPC HANDLER] Mod sync result - Synchronized: ${synchronized}, Removals: ${requiredRemovals.length + optionalRemovals.length}, Acknowledgments: ${acknowledgments.length}`);
 
         const result = {
           success: true,
