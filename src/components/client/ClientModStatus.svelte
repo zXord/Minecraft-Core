@@ -134,23 +134,40 @@
             <h4>Required mods ready!</h4>
             <p>You can start playing now. There {modSyncStatus.needsOptionalDownload === 1 ? 'is' : 'are'} {modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's' : ''} available for download if you want {modSyncStatus.needsOptionalDownload === 1 ? 'it' : 'them'}.</p>
           </div>
-        </div>
-      {:else if modSyncStatus.needsDownload > 0}
+        </div>      {:else if modSyncStatus.needsDownload > 0}
         <div class="status-message warning">
           <span class="status-icon">⚠️</span>
           <div class="status-content">
             <h4>Action required</h4>
             <p>You need to download {modSyncStatus.needsDownload} required mod{modSyncStatus.needsDownload > 1 ? 's' : ''} before you can play.</p>
           </div>
-        </div>
-      {:else}
-        <div class="status-message info">
-          <span class="status-icon">🔄</span>
-          <div class="status-content">
-            <h4>Checking mod status...</h4>
-            <p>Please wait while we verify your mod installation.</p>
+        </div>      {:else}
+        {@const actualRemovals = [...((modSyncStatus as any).requiredRemovals || []), ...((modSyncStatus as any).optionalRemovals || [])]}
+        {@const acknowledgments = (modSyncStatus as any).acknowledgments || []}
+        
+        {#if actualRemovals.length > 0 || acknowledgments.length > 0}
+          <div class="status-message warning">
+            <span class="status-icon">🔄</span>
+            <div class="status-content">
+              <h4>Mod changes needed</h4>
+              {#if actualRemovals.length > 0 && acknowledgments.length > 0}
+                <p>You need to remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''} and acknowledge {acknowledgments.length} dependenc{acknowledgments.length > 1 ? 'ies' : 'y'}.</p>
+              {:else if actualRemovals.length > 0}
+                <p>You need to remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''} that {actualRemovals.length > 1 ? 'are' : 'is'} no longer required by the server.</p>
+              {:else if acknowledgments.length > 0}
+                <p>You need to acknowledge {acknowledgments.length} mod{acknowledgments.length > 1 ? 's' : ''} that {acknowledgments.length > 1 ? 'are' : 'is'} being kept as dependencies.</p>
+              {/if}
+            </div>
           </div>
-        </div>
+        {:else}
+          <div class="status-message info">
+            <span class="status-icon">🔄</span>
+            <div class="status-content">
+              <h4>Checking mod status...</h4>
+              <p>Please wait while we verify your mod installation.</p>
+            </div>
+          </div>
+        {/if}
       {/if}
     {:else}
       <div class="status-message info">
@@ -161,13 +178,31 @@
         </div>
       </div>
     {/if}
-  </div>
-  <!-- Action Buttons -->
+  </div>  <!-- Action Buttons -->
   <div class="action-buttons">
     {#if modSyncStatus && !modSyncStatus.synchronized}
-      <button class="download-action-button required" on:click={downloadRequired}>
-        📥 Download Required Mods ({modSyncStatus.needsDownload})
-      </button>
+      <!-- Use same logic as Play tab for consistent button text -->
+      {#if modSyncStatus.needsDownload > 0}
+        <button class="download-action-button required" on:click={downloadRequired}>
+          📥 Download Required Mods ({modSyncStatus.needsDownload})
+        </button>      {:else}
+        {@const actualRemovals = [...((modSyncStatus as any).requiredRemovals || []), ...((modSyncStatus as any).optionalRemovals || [])]}
+        {@const acknowledgments = (modSyncStatus as any).acknowledgments || []}
+        
+        {#if actualRemovals.length > 0}
+          <button class="download-action-button required" on:click={downloadRequired}>
+            🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
+          </button>
+        {:else if acknowledgments.length > 0}
+          <button class="download-action-button required" on:click={downloadRequired}>
+            ✓ Acknowledge Dependencies ({acknowledgments.length})
+          </button>
+        {:else}
+          <button class="download-action-button required" on:click={downloadRequired}>
+            🔄 Synchronize Mods
+          </button>
+        {/if}
+      {/if}
     {/if}
     
     {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
