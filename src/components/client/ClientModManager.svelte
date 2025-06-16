@@ -48,6 +48,9 @@
     name?: string;
     versionNumber?: string;
     projectId?: string;
+    needsRemoval?: boolean;
+    removalReason?: string;
+    removalAction?: string;
   }
   interface ModSyncStatus {
     synchronized: boolean;
@@ -124,7 +127,6 @@
   let lastCheckModSyncCall = 0; // Track the most recent call
     // keep track of which fileNames we've acknowledged
   let acknowledgedDeps: Set<string> = new Set();
-
   // Computed property for required mods display that includes mods needing removal or acknowledgment
   $: displayRequiredMods = (() => {
     // first, remove any that the user has already acknowledged
@@ -132,10 +134,13 @@
     
     // Add mods that need removal or acknowledgment to the display list
     if (modSyncStatus?.clientModChanges?.removals) {
-      const modsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => 
-        r.action === 'remove_needed' || r.action === 'acknowledge_dependency'
-        // NOTE: We always ask for fresh acknowledgment, so no 'acknowledged_dependency' state
-      );
+      const modsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => {
+        // Only include removals that are actually from required mods
+        // Check if this removal is for a mod that was/is in the required mods list
+        const isActuallyRequiredMod = requiredMods.some(mod => mod.fileName.toLowerCase() === r.fileName.toLowerCase());
+        
+        return (r.action === 'remove_needed' || r.action === 'acknowledge_dependency') && isActuallyRequiredMod;
+      });
       
       for (const actionItem of modsNeedingAction) {
         // Check if this mod is not already in the display list
@@ -159,18 +164,50 @@
       }
     }
     
-    return displayMods;  })();
-
-  // Computed property for optional mods that hides acknowledged or removal-pending entries
+    return displayMods;
+  })();  // Computed property for optional mods that hides acknowledged or removal-pending entries
   $: displayOptionalMods = (() => {
     let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
 
+    // Add mods that need removal or acknowledgment to the display list (similar to required mods)
     if (modSyncStatus?.clientModChanges?.removals) {
-      const modsNeedingAction = new Set(
-        modSyncStatus.clientModChanges.removals.map(r => r.fileName.toLowerCase())
-      );
-      mods = mods.filter(m => !modsNeedingAction.has(m.fileName.toLowerCase()));    }
-
+      const optionalModsNeedingAction = modSyncStatus.clientModChanges.removals.filter(r => {
+        // Include removals that aren't already in the required mods section
+        const isInRequiredMods = requiredMods.some(mod => mod.fileName.toLowerCase() === r.fileName.toLowerCase());
+        
+        // For optional mods, we want to show removal prompts regardless of whether the mod is currently in optionalMods
+        // The key is to exclude only those that are handled by the required mods section
+        return !isInRequiredMods && (r.action === 'remove_needed' || r.action === 'acknowledge_dependency');
+      });
+      
+      for (const actionItem of optionalModsNeedingAction) {
+        // Check if this mod is already in the mods list (to avoid duplicates)
+        const existingIndex = mods.findIndex(m => m.fileName.toLowerCase() === actionItem.fileName.toLowerCase());
+        
+        if (existingIndex >= 0) {
+          // Update existing mod to show removal status
+          mods[existingIndex] = {
+            ...mods[existingIndex],
+            needsRemoval: true,
+            removalReason: actionItem.reason,
+            removalAction: actionItem.action
+          };
+        } else {
+          // Create a new mod object for the action and add it to display list
+          mods.push({
+            fileName: actionItem.fileName,
+            name: actionItem.name || actionItem.fileName,
+            location: 'client', // It exists on client
+            size: 0, // We don't know the size
+            required: false, // This is an optional mod
+            versionNumber: 'Unknown',
+            needsRemoval: true,
+            removalReason: actionItem.reason,
+            removalAction: actionItem.action
+          });
+        }      }
+    }
+    
     return mods;
   })();
 
@@ -353,6 +390,16 @@
             // Add all current server mods
             for (const mod of currentServerMods) {
               combined.add(mod);
+            }
+            
+            // Also preserve previously server-managed optional mods that might need removal
+            // This is crucial for detecting when optional mods are removed from the server
+            if (modSyncStatus?.clientModChanges?.removals) {
+              for (const removal of modSyncStatus.clientModChanges.removals) {
+                if (removal.action === 'remove_needed') {
+                  combined.add(removal.fileName.toLowerCase());
+                }
+              }
             }
               
             return combined;

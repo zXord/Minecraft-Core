@@ -572,9 +572,7 @@
       // Set removing state
       isDownloadingMods = true;
       downloadStatus = 'downloading';
-      
-      try {
-        console.log('Removing mods:', modsToRemove.map(m => m.fileName));
+        try {
         const result = await window.electron.invoke('minecraft-remove-server-managed-mods', {
           clientPath: instance.path,
           modsToRemove: modsToRemove.map(m => m.fileName)
@@ -630,11 +628,10 @@
     // Set downloading status to show immediate feedback
     downloadStatus = 'downloading';
     
-    try {
-      const result = await window.electron.invoke('minecraft-download-mods', {
+    try {      const result = await window.electron.invoke('minecraft-download-mods', {
         clientPath: instance.path,
         requiredMods,
-        allClientMods: serverInfo?.allClientMods || [],
+        allClientMods: (serverInfo?.allClientMods && serverInfo.allClientMods.length > 0) ? serverInfo.allClientMods : requiredMods,
         serverInfo: {
           serverIp: instance.serverIp,
           serverPort: instance.serverPort

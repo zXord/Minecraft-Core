@@ -1,5 +1,4 @@
-<script lang="ts">  import { createEventDispatcher } from 'svelte';
-  // Types
+<script lang="ts">  import { createEventDispatcher } from 'svelte';  // Types
   interface Mod {
     fileName: string;
     size?: number;
@@ -8,6 +7,9 @@
     name?: string;
     versionNumber?: string;
     projectId?: string;
+    needsRemoval?: boolean;
+    removalReason?: string;
+    removalAction?: string;
   }
   interface ModSyncStatus {
     synchronized: boolean;
@@ -44,9 +46,7 @@
   // Create event dispatcher
   const dispatch = createEventDispatcher();  // Local state to track mod enabled/disabled status for optimistic updates
   let localModStates: Record<string, { enabled: boolean }> = {};
-  let optimisticUpdates: Set<string> = new Set(); // Track which mods have pending optimistic updates
-
-  // Initialize local states when mods change
+  let optimisticUpdates: Set<string> = new Set(); // Track which mods have pending optimistic updates  // Initialize local states when mods change
   $: if (mods && modSyncStatus) {
     // Initialize local state for each mod based on current sync status
     // But don't override mods that have pending optimistic updates
@@ -95,8 +95,11 @@
     }
     
     return 'installed';
-  }// Check if a mod needs to be removed
+  }  // Check if a mod needs to be removed
   function needsRemoval(mod: Mod): boolean {
+    // Check if the mod object itself has the needsRemoval property
+    if (mod.needsRemoval) return true;
+    
     if (!modSyncStatus?.clientModChanges?.removals) return false;    
     const result = modSyncStatus.clientModChanges.removals.some(removal => 
       removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'remove_needed'
