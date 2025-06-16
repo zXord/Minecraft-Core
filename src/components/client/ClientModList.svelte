@@ -16,11 +16,24 @@
     missingMods?: string[];
     missingOptionalMods?: string[];
     totalRequired?: number;
-    totalOptional?: number;
-    totalPresent?: number;
+    totalOptional?: number;    totalPresent?: number;
     totalOptionalPresent?: number;
     presentEnabledMods?: string[];
     presentDisabledMods?: string[];
+    // New response structure
+    requiredRemovals?: Array<{
+      fileName: string;
+      reason: string;
+    }>;
+    optionalRemovals?: Array<{
+      fileName: string;
+      reason: string;
+    }>;
+    acknowledgments?: Array<{
+      fileName: string;
+      reason: string;
+    }>;
+    // Legacy structure (temporary)
     clientModChanges?: {
       updates?: Array<{
         name: string;
@@ -100,33 +113,55 @@
     // Check if the mod object itself has the needsRemoval property
     if (mod.needsRemoval) return true;
     
-    if (!modSyncStatus?.clientModChanges?.removals) return false;    
-    const result = modSyncStatus.clientModChanges.removals.some(removal => 
-      removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'remove_needed'
-    );
+    // Check in the new response structure
+    if (type === 'required' && modSyncStatus?.requiredRemovals) {
+      return modSyncStatus.requiredRemovals.some(removal => 
+        removal.fileName.toLowerCase() === mod.fileName.toLowerCase()
+      );
+    }
     
-    return result;
-  }// Check if a mod is kept due to dependency
+    if (type === 'optional' && modSyncStatus?.optionalRemovals) {
+      return modSyncStatus.optionalRemovals.some(removal => 
+        removal.fileName.toLowerCase() === mod.fileName.toLowerCase()
+      );
+    }
+    
+    return false;
+  }
+
+  // Check if a mod is kept due to dependency
   function needsAcknowledgment(mod: Mod): boolean {
-    if (!modSyncStatus?.clientModChanges?.removals) return false;
+    if (!modSyncStatus?.acknowledgments) return false;
     
-    return modSyncStatus.clientModChanges.removals.some(removal => 
-      removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'acknowledge_dependency'
+    return modSyncStatus.acknowledgments.some(ack => 
+      ack.fileName.toLowerCase() === mod.fileName.toLowerCase()
     );
   }
+
   // Get removal info for a mod
   function getRemovalInfo(mod: Mod) {
-    if (!modSyncStatus?.clientModChanges?.removals) return null;
+    // Check in the new response structure
+    if (type === 'required' && modSyncStatus?.requiredRemovals) {
+      return modSyncStatus.requiredRemovals.find(removal => 
+        removal.fileName.toLowerCase() === mod.fileName.toLowerCase()
+      );
+    }
     
-    return modSyncStatus.clientModChanges.removals.find(removal => 
-      removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'remove_needed'
-    );
-  }  // Get dependency acknowledgment info for a mod
+    if (type === 'optional' && modSyncStatus?.optionalRemovals) {
+      return modSyncStatus.optionalRemovals.find(removal => 
+        removal.fileName.toLowerCase() === mod.fileName.toLowerCase()
+      );
+    }
+    
+    return null;
+  }
+
+  // Get dependency acknowledgment info for a mod
   function getAcknowledgmentInfo(mod: Mod) {
-    if (!modSyncStatus?.clientModChanges?.removals) return null;
+    if (!modSyncStatus?.acknowledgments) return null;
     
-    return modSyncStatus.clientModChanges.removals.find(removal => 
-      removal.fileName.toLowerCase() === mod.fileName.toLowerCase() && removal.action === 'acknowledge_dependency'
+    return modSyncStatus.acknowledgments.find(ack => 
+      ack.fileName.toLowerCase() === mod.fileName.toLowerCase()
     );
   }
 

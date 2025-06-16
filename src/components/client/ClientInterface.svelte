@@ -286,25 +286,24 @@
         
         // Remove any mods that were deleted on the server
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-          removeServerManagedFiles(result.successfullyRemovedMods);
-        }
+          removeServerManagedFiles(result.successfullyRemovedMods);        }
         
         if (result.synchronized) {
           downloadStatus = 'ready';
-        } else {
-          // If we just had a successful download (wasReady), be more conservative
+        } else {          // If we just had a successful download (wasReady), be more conservative
           // Only change to 'needed' if there are actually missing mods OR removals needed
           const hasDownloads = result.needsDownload > 0;
-          const hasRemovals = (result.clientModChanges?.removals?.length || 0) > 0;
+          const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0) + (result.acknowledgments?.length || 0)) > 0;
           
           if (wasReady && !hasDownloads && !hasRemovals) {
             downloadStatus = 'ready'; // Keep ready status if no actions needed
           } else {
             downloadStatus = 'needed'; // Show as needed if downloads OR removals required
           }
-        }
-        
-        if (result.clientModChanges?.removals) {
+          
+          if (hasRemovals) {
+            // Handle any removal-specific logic here if needed
+          }
         }
       } else {
         downloadStatus = 'ready'; // Assume ready if check fails
@@ -563,9 +562,8 @@
       setTimeout(() => errorMessage.set(''), 5000);
       return;
     }
-    
-    // Check if we have mods to remove
-    const modsToRemove = modSyncStatus?.clientModChanges?.removals?.filter(r => r.action === 'remove_needed') || [];
+      // Check if we have mods to remove
+    const modsToRemove = [...(modSyncStatus?.requiredRemovals || []), ...(modSyncStatus?.optionalRemovals || [])];
     
     // If we only have removals and no downloads needed, handle removals directly
     if (modsToRemove.length > 0 && (!requiredMods || requiredMods.length === 0 || (modSyncStatus && modSyncStatus.needsDownload === 0))) {
@@ -1382,14 +1380,13 @@
       setTimeout(() => errorMessage.set(''), 5000);    }
       compatibilityReport = null;
   }
-
   // Acknowledge all pending dependencies
   async function onAcknowledgeAllDependencies() {
-    if (!instance?.path || !modSyncStatus?.clientModChanges?.removals) {
+    if (!instance?.path || !modSyncStatus?.acknowledgments) {
       return;
     }
 
-    const acknowledgments = modSyncStatus.clientModChanges.removals.filter(r => r.action === 'acknowledge_dependency');
+    const acknowledgments = modSyncStatus.acknowledgments || [];
     if (acknowledgments.length === 0) {
       return;
     }
@@ -1546,9 +1543,9 @@
                   <h3>Checking Mods...</h3>
                   <p>Verifying installed mods...</p>
                 </div>              {:else if downloadStatus === 'needed'}                <div class="sync-status needed">
-                  {#if modSyncStatus}
-                    {@const actualRemovals = modSyncStatus.clientModChanges?.removals?.filter(r => r.action === 'remove_needed') || []}
-                    {@const acknowledgments = modSyncStatus.clientModChanges?.removals?.filter(r => r.action === 'acknowledge_dependency') || []}
+                  {#if modSyncStatus}                    <!-- Use new response structure -->
+                    {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
+                    {@const acknowledgments = modSyncStatus.acknowledgments || []}
                     
                     <!-- Dynamic title based on what needs to happen -->
                     {#if modSyncStatus.needsDownload > 0 || actualRemovals.length > 0}
@@ -1606,27 +1603,26 @@
                           {/each}
                         </ul>
                       </div>
-                    {/if}                    <!-- Client Mod Removals - Only show actual removals -->
-                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.filter(r => r.action === 'remove_needed').length > 0}
+                    {/if}                    <!-- Client Mod Removals - Use new response structure -->
+                    {#if (modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0)}
                       <div class="mod-changes-section">
                         <h4>❌ Mods to be Removed:</h4>
                         <ul class="mod-list">
-                          {#each modSyncStatus.clientModChanges.removals.filter(r => r.action === 'remove_needed') as removal (removal.name)}
+                          {#each [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])] as removal (removal.fileName)}
                             <li class="mod-item mod-removal">
-                              {removal.name} → {removal.reason || 'no longer required'}
+                              {removal.fileName} → {removal.reason || 'no longer required'}
                             </li>
                           {/each}
                         </ul>
                       </div>
-                    {/if}
-
-                    <!-- Client Mod Dependency Acknowledgments - Show separately -->
-                    {#if modSyncStatus.clientModChanges?.removals && modSyncStatus.clientModChanges.removals.filter(r => r.action === 'acknowledge_dependency').length > 0}
+                    {/if}                    <!-- Client Mod Dependency Acknowledgments - Use new response structure -->
+                    {#if modSyncStatus.acknowledgments && modSyncStatus.acknowledgments.length > 0}
                       <div class="mod-changes-section dependency-section">
                         <h4>🔗 Dependency Notifications:</h4>
-                        <ul class="mod-list">                          {#each modSyncStatus.clientModChanges.removals.filter(r => r.action === 'acknowledge_dependency') as acknowledgment (acknowledgment.name)}
+                        <ul class="mod-list">
+                          {#each modSyncStatus.acknowledgments as acknowledgment (acknowledgment.fileName)}
                             <li class="mod-item mod-dependency">
-                              {acknowledgment.name} → {acknowledgment.reason || 'required as dependency by client downloaded mods'}
+                              {acknowledgment.fileName} → {acknowledgment.reason || 'required as dependency by client downloaded mods'}
                             </li>
                           {/each}
                         </ul>
@@ -1635,15 +1631,14 @@
                       <p class="outdated-mods">Outdated: {modSyncStatus.outdatedMods.join(', ')}</p>
                     {/if}
                   {/if}
-                  
-                  <!-- Show appropriate action button based on what's needed -->
+                    <!-- Show appropriate action button based on what's needed -->
                   {#if modSyncStatus && modSyncStatus.needsDownload > 0}
                     <button class="download-button" on:click={onDownloadModsClick}>
                       📥 Download Required Mods ({modSyncStatus.needsDownload})
                     </button>
-                  {:else if modSyncStatus && modSyncStatus.clientModChanges?.removals}
-                    {@const actualRemovals = modSyncStatus.clientModChanges.removals.filter(r => r.action === 'remove_needed')}
-                    {@const acknowledgments = modSyncStatus.clientModChanges.removals.filter(r => r.action === 'acknowledge_dependency')}
+                  {:else if modSyncStatus && ((modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0) || (modSyncStatus.acknowledgments && modSyncStatus.acknowledgments.length > 0))}
+                    {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
+                    {@const acknowledgments = modSyncStatus.acknowledgments || []}
                     
                     {#if actualRemovals.length > 0}
                       <button class="download-button" on:click={onDownloadModsClick}>
@@ -1856,11 +1851,10 @@
             await getServerInfo();
             
             if (e.detail.synchronized) {
-              downloadStatus = 'ready';
-            } else {
+              downloadStatus = 'ready';            } else {
               // Check if downloads or removals are needed
               const hasDownloads = e.detail.needsDownload > 0;
-              const hasRemovals = (e.detail.fullSyncResult?.clientModChanges?.removals?.length || 0) > 0;
+              const hasRemovals = ((e.detail.fullSyncResult?.requiredRemovals?.length || 0) + (e.detail.fullSyncResult?.optionalRemovals?.length || 0) + (e.detail.fullSyncResult?.acknowledgments?.length || 0)) > 0;
               
               if (hasDownloads || hasRemovals) {
                 downloadStatus = 'needed';
