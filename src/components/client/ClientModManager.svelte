@@ -120,9 +120,11 @@
   async function handleRefreshFromParent() {
     await refreshMods();
   }
-
   // Export the refresh function so parent can call it
-  export { handleRefreshFromParent as refreshFromDashboard };// State
+  export { handleRefreshFromParent as refreshFromDashboard };
+  
+  // Export the acknowledgment function so parent can call it
+  export { acknowledgeAllDependencies };// State
   let connectionStatus: string = 'disconnected';
   let serverMods: ClientMod[] = [];
   let requiredMods: ClientMod[] = [];
@@ -251,6 +253,13 @@
     }
     
     return mods;
+  })();  // Computed property to filter out already acknowledged mods from acknowledgments
+  $: pendingAcknowledgments = (() => {
+    if (!modSyncStatus?.acknowledgments) return [];
+    
+    return modSyncStatus.acknowledgments.filter(ack => 
+      !acknowledgedDeps.has(ack.fileName.toLowerCase())
+    );
   })();
 
   // Function to load acknowledged dependencies from persistent storage
@@ -524,18 +533,17 @@
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
           // Use scoped update for individual mod removals
           updateServerManagedFiles('remove', result.successfullyRemovedMods);
-        }
-          // Emit event to parent about sync status
+        }          // Emit event to parent about sync status
         dispatch('mod-sync-status', {
           synchronized: result.synchronized,
           needsDownload: result.needsDownload,
           totalRequired: result.totalRequired,
           totalPresent: result.totalPresent,
           needsRemoval: result.needsRemoval,
-          // New response structure
+          // New response structure - use filtered acknowledgments
           requiredRemovals: result.requiredRemovals || [],
           optionalRemovals: result.optionalRemovals || [],
-          acknowledgments: result.acknowledgments || [],
+          acknowledgments: pendingAcknowledgments, // Use filtered acknowledgments instead of raw
           // Legacy compatibility (temporary)
           clientModChanges: result.clientModChanges,
           fullSyncResult: result // Pass the full result for complete info
@@ -613,8 +621,7 @@
       return;
     }
 
-    try {
-      // Acknowledge each dependency
+    try {      // Acknowledge each dependency
       for (const acknowledgment of acknowledgments) {
         const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
           clientPath: instance.path,
@@ -624,21 +631,26 @@
         if (result.success) {
           // Add to local acknowledged set to immediately update UI
           acknowledgedDeps.add(acknowledgment.fileName.toLowerCase());
+          
+          // Remove from server-managed files like the individual acknowledgment does
+          removeServerManagedFiles([acknowledgment.fileName]);
+        } else {
+          throw new Error(result.error || `Failed to acknowledge ${acknowledgment.fileName}`);
         }
-      }
-
-      // Trigger reactivity update
+      }      // Trigger reactivity update
       acknowledgedDeps = new Set(acknowledgedDeps);
 
       // Show success message
       successMessage.set(`Successfully acknowledged ${acknowledgments.length} dependenc${acknowledgments.length > 1 ? 'ies' : 'y'}`);
       setTimeout(() => successMessage.set(''), 5000);
 
-      // Refresh mod sync status to update the UI
+      // Gentle refresh - only check sync status after a brief delay to avoid flickering
+      // The UI should already be updated via the local acknowledgedDeps state
       setTimeout(async () => {
         await checkModSynchronization();
-        await refreshInstalledMods();
-      }, 500);
+        // Skip refreshInstalledMods() as it's not needed for acknowledgments
+        // await refreshInstalledMods();
+      }, 300);
 
     } catch (err) {
       errorMessage.set('Error acknowledging dependencies: ' + err.message);
@@ -875,18 +887,18 @@
           acknowledgedDeps = new Set(acknowledgedDeps); 
         } else {
           acknowledgedDeps = new Set(acknowledgedDeps);
-        }
-
-        // Remove from server-managed files BEFORE sync check to prevent duplication
+        }        // Remove from server-managed files BEFORE sync check to prevent duplication
         removeServerManagedFiles([modFileName]);
 
-        // Refresh mod sync status
-        await checkModSynchronization();
-
-        // Refresh installed mod info to update UI state
-        await refreshInstalledMods();
+        // Gentle refresh to avoid flickering - the UI should already be updated via acknowledgedDeps
+        setTimeout(async () => {
+          await checkModSynchronization();
+          // Skip refreshInstalledMods() to reduce flickering
+          // await refreshInstalledMods();
+        }, 200);
         
-        manualModsRefreshTrigger = Date.now();
+        // Only update manual mods trigger if needed
+        // manualModsRefreshTrigger = Date.now();
       } else {        throw new Error(result.error || 'Failed to acknowledge dependency in backend');
       }
     } catch (error) {
@@ -1175,10 +1187,9 @@
         {#if modSyncStatus.needsDownload > 0}
           <button class="download-button" on:click={downloadRequiredMods}>
             📥 Download Required Mods ({modSyncStatus.needsDownload})
-          </button>
-        {:else}
+          </button>        {:else}
           {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
-          {@const acknowledgments = modSyncStatus.acknowledgments || []}
+          {@const acknowledgments = pendingAcknowledgments || []}
           
           {#if actualRemovals.length > 0}
             <button class="download-button" on:click={downloadRequiredMods}>
@@ -1233,6 +1244,7 @@
           {modSyncStatus}
           requiredModsCount={requiredMods.length}
           optionalModsCount={displayOptionalMods.length}
+          {pendingAcknowledgments}
           on:download-required={downloadRequiredMods}
           on:download-optional={downloadOptionalMods}
           on:refresh={refreshMods}
