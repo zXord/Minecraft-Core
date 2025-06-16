@@ -68,10 +68,13 @@
   // Settings
   let deleteFiles = false;
   let showDeleteConfirmation = false;
-    // Track download states more precisely
+  // Track download states more precisely
   let isDownloadingClient = false;
   let isDownloadingMods = false;
   let isCheckingSync = false;
+  
+  // Acknowledged dependencies tracking (for Play tab acknowledgment filtering)
+  let acknowledgedDeps = new Set();
   
   // Memory/RAM settings
   let maxMemory = 2; // Default 2GB (in GB instead of MB)
@@ -86,6 +89,34 @@
   let showCompatibilityDialog = false;
   let compatibilityReport = null;  // Download progress tracking
   
+  // Computed property to filter out already acknowledged mods from acknowledgments
+  $: filteredAcknowledgments = (() => {
+    if (!modSyncStatus?.acknowledgments) return [];
+    
+    return modSyncStatus.acknowledgments.filter(ack => 
+      !acknowledgedDeps.has(ack.fileName.toLowerCase())
+    );
+  })();
+
+  // Function to load acknowledged dependencies from persistent storage
+  async function loadAcknowledgedDependencies() {
+    if (!instance?.path) return;
+    
+    try {
+      const result = await window.electron.invoke('load-expected-mod-state', {
+        clientPath: instance.path
+      });
+      
+      if (result.success && result.acknowledgedDependencies) {
+        acknowledgedDeps = new Set(
+          result.acknowledgedDependencies.map(dep => dep.toLowerCase())
+        );
+      }
+    } catch (error) {
+      console.warn('[ClientInterface] Failed to load acknowledged dependencies:', error);
+    }
+  }
+
   // Connect to the Management Server (port 8080)
   async function connectToServer() {
     if (!instance || !instance.serverIp || !instance.serverPort) {
@@ -284,6 +315,9 @@
       });      if (result.success) {
         modSyncStatus = result;
         
+        // Refresh acknowledged dependencies to ensure UI filtering is up to date
+        await loadAcknowledgedDependencies();
+        
         // Remove any mods that were deleted on the server
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
           removeServerManagedFiles(result.successfullyRemovedMods);        }
@@ -293,7 +327,7 @@
         } else {          // If we just had a successful download (wasReady), be more conservative
           // Only change to 'needed' if there are actually missing mods OR removals needed
           const hasDownloads = result.needsDownload > 0;
-          const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0) + (result.acknowledgments?.length || 0)) > 0;
+          const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0) + (filteredAcknowledgments?.length || 0)) > 0;
           
           if (wasReady && !hasDownloads && !hasRemovals) {
             downloadStatus = 'ready'; // Keep ready status if no actions needed
@@ -1146,9 +1180,7 @@
   
   onMount(() => {
     // Initialize client functionality
-    setupLauncherEvents();
-
-    // Load any persisted mod state so the Play tab reflects accurate
+    setupLauncherEvents();    // Load any persisted mod state so the Play tab reflects accurate
     // synchronization status before visiting the Mods tab
     (async () => {
       try {
@@ -1160,6 +1192,9 @@
             new Set(state.expectedMods.map((m) => m.toLowerCase()))
           );
         }
+        
+        // Load acknowledged dependencies for Play tab filtering
+        await loadAcknowledgedDependencies();
       } catch (err) {
         console.warn('Failed to load persisted mod state:', err);
       }
@@ -1258,7 +1293,7 @@
 
       // Determine overall status
       if (clientSyncStatus !== 'ready') {
-        downloadStatus = 'needs-client';      } else if (downloadStatus === 'ready') {
+        downloadStatus = 'needs-client';      } else if (downloadStatus === 'ready' && modSyncStatus?.synchronized) {
         downloadStatus = 'ready';
       } else if (downloadStatus === 'needed') {
         downloadStatus = 'needs-mods';
@@ -1379,14 +1414,13 @@
       errorMessage.set('Error disabling mods: ' + error.message);
       setTimeout(() => errorMessage.set(''), 5000);    }
       compatibilityReport = null;
-  }
-  // Acknowledge all pending dependencies
+  }  // Acknowledge all pending dependencies
   async function onAcknowledgeAllDependencies() {
-    if (!instance?.path || !modSyncStatus?.acknowledgments) {
+    if (!instance?.path) {
       return;
     }
 
-    const acknowledgments = modSyncStatus.acknowledgments || [];
+    const acknowledgments = filteredAcknowledgments || [];
     if (acknowledgments.length === 0) {
       return;
     }
@@ -1399,24 +1433,35 @@
           modFileName: acknowledgment.fileName
         });
 
-        if (!result.success) {
+        if (result.success) {
+          // Add to local acknowledged set to immediately update UI
+          acknowledgedDeps.add(acknowledgment.fileName.toLowerCase());
+        } else {
           throw new Error(result.error || `Failed to acknowledge ${acknowledgment.fileName}`);
         }
       }
+      
+      // Trigger reactivity update
+      acknowledgedDeps = new Set(acknowledgedDeps);
 
       successMessage.set(`Successfully acknowledged ${acknowledgments.length} dependenc${acknowledgments.length === 1 ? 'y' : 'ies'}`);
       setTimeout(() => successMessage.set(''), 3000);
       
-      // Refresh the mod sync status to clear the acknowledgment notifications
+      // Refresh the mod sync status to update the UI
       setTimeout(async () => {
         await checkModSynchronization();
-      }, 1000);
+      }, 300);
       
     } catch (error) {
       console.error('Error acknowledging dependencies:', error);
       errorMessage.set(`Failed to acknowledge dependencies: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
     }
+  }
+
+  // Reactive statement to reload acknowledged dependencies when instance changes
+  $: if (instance?.path) {
+    loadAcknowledgedDependencies();
   }
 
 </script>
@@ -1543,9 +1588,9 @@
                   <h3>Checking Mods...</h3>
                   <p>Verifying installed mods...</p>
                 </div>              {:else if downloadStatus === 'needed'}                <div class="sync-status needed">
-                  {#if modSyncStatus}                    <!-- Use new response structure -->
+                  {#if modSyncStatus}                    <!-- Use new response structure with filtered acknowledgments -->
                     {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
-                    {@const acknowledgments = modSyncStatus.acknowledgments || []}
+                    {@const acknowledgments = filteredAcknowledgments || []}
                     
                     <!-- Dynamic title based on what needs to happen -->
                     {#if modSyncStatus.needsDownload > 0 || actualRemovals.length > 0}
@@ -1615,12 +1660,12 @@
                           {/each}
                         </ul>
                       </div>
-                    {/if}                    <!-- Client Mod Dependency Acknowledgments - Use new response structure -->
-                    {#if modSyncStatus.acknowledgments && modSyncStatus.acknowledgments.length > 0}
+                    {/if}                    <!-- Client Mod Dependency Acknowledgments - Use filtered acknowledgments -->
+                    {#if filteredAcknowledgments && filteredAcknowledgments.length > 0}
                       <div class="mod-changes-section dependency-section">
                         <h4>🔗 Dependency Notifications:</h4>
                         <ul class="mod-list">
-                          {#each modSyncStatus.acknowledgments as acknowledgment (acknowledgment.fileName)}
+                          {#each filteredAcknowledgments as acknowledgment (acknowledgment.fileName)}
                             <li class="mod-item mod-dependency">
                               {acknowledgment.fileName} → {acknowledgment.reason || 'required as dependency by client downloaded mods'}
                             </li>
@@ -1635,10 +1680,9 @@
                   {#if modSyncStatus && modSyncStatus.needsDownload > 0}
                     <button class="download-button" on:click={onDownloadModsClick}>
                       📥 Download Required Mods ({modSyncStatus.needsDownload})
-                    </button>
-                  {:else if modSyncStatus && ((modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0) || (modSyncStatus.acknowledgments && modSyncStatus.acknowledgments.length > 0))}
+                    </button>                  {:else if modSyncStatus && ((modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0) || (filteredAcknowledgments && filteredAcknowledgments.length > 0))}
                     {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
-                    {@const acknowledgments = modSyncStatus.acknowledgments || []}
+                    {@const acknowledgments = filteredAcknowledgments || []}
                     
                     {#if actualRemovals.length > 0}
                       <button class="download-button" on:click={onDownloadModsClick}>

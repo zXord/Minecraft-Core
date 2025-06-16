@@ -1081,10 +1081,26 @@ function createMinecraftLauncherHandlers(win) {
             }
         }        // Log mod check summary (essential)
         // console.log(`[IPC HANDLER] Mod check - Required: ${newServerRequiredModList.size}`);
-        
-        if (serverRequiredModsActuallyChanged) {
-          // console.log('[IPC HANDLER] Server required mods changed - clearing acknowledged dependencies');
-          acknowledgedDependencies = new Set(); 
+          if (serverRequiredModsActuallyChanged) {
+          // Instead of clearing all acknowledgments, only clear those for mods that are now back on the server as required
+          // This prevents acknowledged dependencies from being re-prompted when server state changes
+          console.log('[IPC HANDLER] Server required mods changed - selectively clearing acknowledgments for mods now required by server');
+          
+          const updatedAcks = new Set();
+          for (const ack of acknowledgedDependencies) {
+            const ackLower = ack.toLowerCase();
+            const baseAckName = getBaseModName(ack).toLowerCase();
+            
+            // Only clear acknowledgment if this mod is now back on the server as required
+            const isNowRequiredByServer = newServerRequiredModList.has(ackLower) || newServerRequiredModList.has(baseAckName);
+            
+            if (!isNowRequiredByServer) {
+              // Keep this acknowledgment - the mod is still not required by server
+              updatedAcks.add(ack);
+            }
+          }
+          
+          acknowledgedDependencies = updatedAcks;
         }
 
         // serverManagedFilesSet should represent what was *previously* considered server-managed for removal detection.

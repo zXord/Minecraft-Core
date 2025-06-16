@@ -15,11 +15,11 @@
     presentEnabledMods?: string[];
     presentDisabledMods?: string[];
   }
-
   // Props
   export let modSyncStatus: ModSyncStatus | null = null;
   export let requiredModsCount: number = 0;
   export let optionalModsCount: number = 0;
+  export let pendingAcknowledgments: any[] = [];
 
   // Create event dispatcher
   const dispatch = createEventDispatcher();
@@ -147,7 +147,7 @@
           </div>
         </div>      {:else}
         {@const actualRemovals = [...((modSyncStatus as any).requiredRemovals || []), ...((modSyncStatus as any).optionalRemovals || [])]}
-        {@const acknowledgments = (modSyncStatus as any).acknowledgments || []}
+        {@const acknowledgments = pendingAcknowledgments || []}
         
         {#if actualRemovals.length > 0 || acknowledgments.length > 0}
           <div class="status-message warning">
@@ -191,7 +191,7 @@
           📥 Download Required Mods ({modSyncStatus.needsDownload})
         </button>      {:else}
         {@const actualRemovals = [...((modSyncStatus as any).requiredRemovals || []), ...((modSyncStatus as any).optionalRemovals || [])]}
-        {@const acknowledgments = (modSyncStatus as any).acknowledgments || []}
+        {@const acknowledgments = pendingAcknowledgments || []}
         
         {#if actualRemovals.length > 0}
           <button class="download-action-button required" on:click={downloadRequired}>
