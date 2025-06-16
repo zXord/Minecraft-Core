@@ -182,13 +182,13 @@
       // Add mods that need acknowledgment from the new response structure
     if (modSyncStatus?.acknowledgments) {
       // console.log('[DEBUG-REQUIRED] Acknowledgments:', modSyncStatus.acknowledgments);
-      
-      for (const ack of modSyncStatus.acknowledgments) {
+        for (const ack of modSyncStatus.acknowledgments) {
         // console.log('[DEBUG-REQUIRED] Processing acknowledgment:', ack.fileName);
-        // Check if this mod is not already in the display list
+        // Check if this mod is not already in the display list and not already acknowledged
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === ack.fileName.toLowerCase());
+        const isAlreadyAcknowledged = acknowledgedDeps.has(ack.fileName.toLowerCase());
         
-        if (!existsInDisplay) {
+        if (!existsInDisplay && !isAlreadyAcknowledged) {
           // Create a mod object for the acknowledgment and add it to display list
           displayMods.push({
             fileName: ack.fileName,
@@ -602,6 +602,49 @@
     }
   }
 
+  // Acknowledge all pending dependencies
+  async function acknowledgeAllDependencies() {
+    if (!instance?.path || !modSyncStatus?.acknowledgments) {
+      return;
+    }
+
+    const acknowledgments = modSyncStatus.acknowledgments || [];
+    if (acknowledgments.length === 0) {
+      return;
+    }
+
+    try {
+      // Acknowledge each dependency
+      for (const acknowledgment of acknowledgments) {
+        const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
+          clientPath: instance.path,
+          modFileName: acknowledgment.fileName
+        });
+
+        if (result.success) {
+          // Add to local acknowledged set to immediately update UI
+          acknowledgedDeps.add(acknowledgment.fileName.toLowerCase());
+        }
+      }
+
+      // Trigger reactivity update
+      acknowledgedDeps = new Set(acknowledgedDeps);
+
+      // Show success message
+      successMessage.set(`Successfully acknowledged ${acknowledgments.length} dependenc${acknowledgments.length > 1 ? 'ies' : 'y'}`);
+      setTimeout(() => successMessage.set(''), 5000);
+
+      // Refresh mod sync status to update the UI
+      setTimeout(async () => {
+        await checkModSynchronization();
+        await refreshInstalledMods();
+      }, 500);
+
+    } catch (err) {
+      errorMessage.set('Error acknowledging dependencies: ' + err.message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  }
   // Download optional mods
   async function downloadOptionalMods() {
     if (!instance.path || !allClientMods.length) {
@@ -613,7 +656,9 @@
     
     if (!optionalMods.length) {
       return;
-    }    try {
+    }
+
+    try {
       const result = await window.electron.invoke('minecraft-download-mods', {
         clientPath: instance.path,
         requiredMods: [], // No required mods when downloading optional mods
@@ -1138,9 +1183,8 @@
           {#if actualRemovals.length > 0}
             <button class="download-button" on:click={downloadRequiredMods}>
               🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
-            </button>
-          {:else if acknowledgments.length > 0}
-            <button class="download-button" on:click={downloadRequiredMods}>
+            </button>          {:else if acknowledgments.length > 0}
+            <button class="download-button" on:click={acknowledgeAllDependencies}>
               ✓ Acknowledge Dependencies ({acknowledgments.length})
             </button>
           {:else}
@@ -1185,14 +1229,14 @@
           <h3>🔄 Loading Mods...</h3>
           <p>Fetching mod information from server...</p>
         </div>
-      {:else}        <!-- Mod Status Overview -->
-        <ClientModStatus
+      {:else}        <!-- Mod Status Overview -->        <ClientModStatus
           {modSyncStatus}
           requiredModsCount={requiredMods.length}
           optionalModsCount={displayOptionalMods.length}
           on:download-required={downloadRequiredMods}
           on:download-optional={downloadOptionalMods}
           on:refresh={refreshMods}
+          on:acknowledge-all-dependencies={acknowledgeAllDependencies}
         />
 
         <!-- Mod Lists -->
