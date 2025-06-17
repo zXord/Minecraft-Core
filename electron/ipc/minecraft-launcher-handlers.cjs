@@ -1113,13 +1113,14 @@ function createMinecraftLauncherHandlers(win) {
                         break;
                     }
                 }
-            }
-        }        // Log mod check summary (essential)
+            }        }
+        
+        // Log mod check summary (essential)
         // console.log(`[IPC HANDLER] Mod check - Required: ${newServerRequiredModList.size}`);
-          if (serverRequiredModsActuallyChanged) {
+        
+        if (serverRequiredModsActuallyChanged) {
           // Instead of clearing all acknowledgments, only clear those for mods that are now back on the server as required
           // This prevents acknowledged dependencies from being re-prompted when server state changes
-          console.log('[IPC HANDLER] Server required mods changed - selectively clearing acknowledgments for mods now required by server');
           
           const updatedAcks = new Set();
           for (const ack of acknowledgedDependencies) {
@@ -1136,13 +1137,13 @@ function createMinecraftLauncherHandlers(win) {
           }
           
           acknowledgedDependencies = updatedAcks;
-        }
-
-        // serverManagedFilesSet should represent what was *previously* considered server-managed for removal detection.
-        // If bootstrapping, it might be the current server list, otherwise, it\'s the stored expected (required) list.
+        }        // serverManagedFilesSet should represent what was *previously* considered server-managed for removal detection.
+        // If bootstrapping, it might be the current server list, otherwise, it's the stored expected (required) list.
         let serverManagedFilesSetForDiff = new Set(
           (serverManagedFiles || []).map(f => f.toLowerCase())
-        );if (
+        );
+        
+        if (
           serverManagedFilesSetForDiff.size === 0 &&
           cleanedPreviousServerRequiredModListFromStorage.size > 0
         ) {
@@ -1199,9 +1200,7 @@ function createMinecraftLauncherHandlers(win) {
             const lf = f.toLowerCase();
             return !serverManagedFilesSetForDiff.has(lf) && lf !== lowerExclude;
           });
-          
-          console.log(`[BUILD DEPENDENTS] Looking for mods that depend on ${excludeFile}`);
-          console.log(`[BUILD DEPENDENTS] Checking client-side mods:`, clientSideMods);
+  
           
           // Check each client mod to see if it actually depends on the excluded file
           for (const modFile of clientSideMods) {
@@ -1286,20 +1285,18 @@ function createMinecraftLauncherHandlers(win) {
                                       modDependencies.has(excludeLower.replace(/\.jar$/, '')) ||
                                       modDependencies.has(excludeBase.replace(/[-_]/g, '')) ||
                                       checkModDependencyByFilename(excludeFile, modDependencies);
-              
-              console.log(`[BUILD DEPENDENTS] ${modFile} dependencies:`, Array.from(modDependencies));
-              console.log(`[BUILD DEPENDENTS] ${modFile} depends on ${excludeFile}: ${dependsOnExcluded}`);
+  
               
               if (dependsOnExcluded) {
                 dependentMods.push(modFile);
               }
               
             } catch (error) {
-              console.warn(`[BUILD DEPENDENTS] Failed to analyze ${modFile}:`, error.message);
+              console.warn(`Failed to analyze ${modFile}:`, error.message);
             }
           }
           
-          console.log(`[BUILD DEPENDENTS] Final dependents for ${excludeFile}:`, dependentMods);
+
           return dependentMods;
         };
 
@@ -1310,10 +1307,12 @@ function createMinecraftLauncherHandlers(win) {
           if (names.length === 2) return `required as dependency by ${names[0]} and ${names[1]}`;
           return `required as dependency by ${names[0]}, ${names[1]} and ${names.length-2} other mod${names.length-2 > 1 ? 's' : ''}`;
         };
-          const allCurrentMods = new Set();
-        if (fs.existsSync(modsDir)) {
+          const allCurrentMods = new Set();        if (fs.existsSync(modsDir)) {
           fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar')).forEach(f => allCurrentMods.add(f.toLowerCase()));
-          fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar.disabled')).forEach(f => allCurrentMods.add(f.replace('.disabled', '').toLowerCase()));        }        // Logic for determining removals and acknowledgments
+          fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar.disabled')).forEach(f => allCurrentMods.add(f.replace('.disabled', '').toLowerCase()));
+        }
+        
+        // Logic for determining removals and acknowledgments
         // ===== NEW SIMPLIFIED REMOVAL DETECTION LOGIC =====
         
         // Build current server mod sets
@@ -1342,20 +1341,15 @@ function createMinecraftLauncherHandlers(win) {
         // Initialize response arrays
         const requiredRemovals = [];
         const optionalRemovals = [];
-        const acknowledgments = [];
-          // Process required removals
+        const acknowledgments = [];        // Process required removals
         for (const modFileName of removedRequired) {
-          console.log(`[DEPENDENCY CHECK] Processing removed required mod: ${modFileName}`);
-          
           const modLower = modFileName.toLowerCase();
           const baseModName = getBaseModName(modFileName).toLowerCase();
-          
-          console.log(`[DEPENDENCY CHECK] Mod lower: ${modLower}, Base name: ${baseModName}`);
           
           // Skip if already acknowledged
           const isAlreadyAcknowledged = acknowledgedDependencies.has(modLower) || acknowledgedDependencies.has(baseModName);
           if (isAlreadyAcknowledged) {
-            console.log(`[DEPENDENCY CHECK] ${modFileName} already acknowledged, skipping`);
+
             continue;
           }
           
@@ -1363,30 +1357,18 @@ function createMinecraftLauncherHandlers(win) {
           const hasModLower = clientSideDependencies.has(modLower);
           const hasBaseModName = clientSideDependencies.has(baseModName);
           const hasFabricApiCheck = (modLower.includes('fabric') && modLower.includes('api') && 
-                                   (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api')));
-          const hasFilenameCheck = checkModDependencyByFilename(modLower, clientSideDependencies);
-          
-          console.log(`[DEPENDENCY CHECK] Dependency checks for ${modFileName}:`);
-          console.log(`  - hasModLower (${modLower}): ${hasModLower}`);
-          console.log(`  - hasBaseModName (${baseModName}): ${hasBaseModName}`);
-          console.log(`  - hasFabricApiCheck: ${hasFabricApiCheck}`);
-          console.log(`  - hasFilenameCheck: ${hasFilenameCheck}`);
+                                   (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api')));          const hasFilenameCheck = checkModDependencyByFilename(modLower, clientSideDependencies);
           
           const isNeededByClientMod = hasModLower || hasBaseModName || hasFabricApiCheck || hasFilenameCheck;
           
-          console.log(`[DEPENDENCY CHECK] ${modFileName} is needed by client mod: ${isNeededByClientMod}`);
-          
           if (!isNeededByClientMod) {
             // Can be removed safely
-            console.log(`[DEPENDENCY CHECK] ${modFileName} can be removed safely`);
             requiredRemovals.push({
               fileName: modFileName,
               reason: 'no longer required by server'
             });          } else {
             // Need acknowledgment due to client dependencies
-            console.log(`[DEPENDENCY CHECK] ${modFileName} needs acknowledgment due to client dependencies`);
             const dependents = await buildClientSideModsFor(modFileName);
-            console.log(`[DEPENDENCY CHECK] Dependents for ${modFileName}:`, dependents);
             const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
             acknowledgments.push({
               fileName: modFileName,
@@ -1410,8 +1392,8 @@ function createMinecraftLauncherHandlers(win) {
           optionalRemovals.push({
             fileName: modFileName,
             reason: 'no longer provided by server'
-          });
-        }        // console.log(`[IPC HANDLER] Response arrays - Required: ${requiredRemovals.length}, Optional: ${optionalRemovals.length}, Acknowledgments: ${acknowledgments.length}`);
+          });        }
+        
         // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====
         
         // Module analysis for updates
