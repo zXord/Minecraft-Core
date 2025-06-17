@@ -424,6 +424,11 @@
                       {/each}
                     </div>
                   </div>
+                {/if}                {#if 'error' in mod && mod.error}
+                  <div class="detail-item error-detail">
+                    <div class="detail-label">⚠️ Update Check Error:</div>
+                    <span class="error-text">{mod.error}</span>
+                  </div>
                 {/if}
               </div>
             </div>
@@ -778,5 +783,20 @@
     font-size: 0.75rem;
     font-weight: 500;
     font-style: italic;
+  }
+
+  .error-detail {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    border-radius: 6px;
+    padding: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .error-text {
+    color: #ef4444;
+    font-size: 0.8rem;
+    font-weight: 500;
+    line-height: 1.4;
   }
 </style>

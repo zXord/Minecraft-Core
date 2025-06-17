@@ -333,8 +333,22 @@ async function getModrinthDownloadUrl(projectId, version, loader) {
 async function getModrinthProjectInfo(projectId) {
   await rateLimit();
   const response = await fetch(`${MODRINTH_API}/project/${projectId}`);
-
+  
   if (!response.ok) {
+    // Add specific diagnostics for 404 errors
+    if (response.status === 404) {
+      console.warn(`🔍 Mod Project Diagnostic: Project ID "${projectId}" not found (404)`);
+      console.warn(`   This could mean:`);
+      console.warn(`   - The mod was removed from Modrinth`);
+      console.warn(`   - The project ID is incorrect or outdated`);
+      console.warn(`   - The mod might have been renamed or transferred`);
+      console.warn(`   💡 User action: Try searching for this mod manually and re-installing it`);
+      console.warn(`   🔗 Search URL: https://modrinth.com/mods?q=${encodeURIComponent(projectId)}`);
+      
+      // Return a user-friendly error message
+      throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
+    }
+    
     throw new Error(`Modrinth API error: ${response.status}`);
   }
 
@@ -397,45 +411,98 @@ async function resolveModrinthDependencies(dependencies) {
  * @param {boolean} loadLatestOnly - Whether to only load the latest version
  * @returns {Promise<Array>} Array of version objects
  */
-async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnly = false) {
-  // Check cache first
+async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnly = false) {  // Check cache first
   const cacheKey = `${projectId}:${loader || ''}:${gameVersion || ''}`;
   if (versionCache.has(cacheKey)) {
-      
-      // If we only need the latest version, filter from cache
-      if (loadLatestOnly) {
-        const cachedVersions = versionCache.get(cacheKey);
-        const latestStable = cachedVersions.find(v => v.isStable);
-        if (latestStable) {
-          return [latestStable];
-        }
-        return [cachedVersions[0]];
+    
+    // If we only need the latest version, filter from cache
+    if (loadLatestOnly) {
+      const cachedVersions = versionCache.get(cacheKey);
+      const latestStable = cachedVersions.find(v => v.isStable);
+      if (latestStable) {
+        return [latestStable];
       }
-      
-      return versionCache.get(cacheKey);
+      return [cachedVersions[0]];
     }
     
-    // Apply rate limiting before API request
-    await rateLimit();
-    
-    const response = await fetch(`${MODRINTH_API}/project/${projectId}/version`);
-    
-    if (!response.ok) {
+    return versionCache.get(cacheKey);
+  }
+  
+  // Apply rate limiting before API request
+  await rateLimit();
+
+  
+  // Add timeout to prevent hanging
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+  
+  let versions;
+  try {
+    const response = await fetch(`${MODRINTH_API}/project/${projectId}/version`, {
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+      if (!response.ok) {
+      // Add specific diagnostics for 404 errors
+      if (response.status === 404) {
+        console.warn(`🔍 Mod API Diagnostic: Project ID "${projectId}" not found (404)`);
+        console.warn(`   This could mean:`);
+        console.warn(`   - The mod was removed from Modrinth`);
+        console.warn(`   - The project ID is incorrect or outdated`);
+        console.warn(`   - The mod might have been renamed or transferred`);
+        console.warn(`   💡 User action: Try searching for this mod manually and re-installing it`);
+        console.warn(`   🔗 Search URL: https://modrinth.com/mods?q=${encodeURIComponent(projectId)}`);
+        
+        // Return a user-friendly error message
+        throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
+      }
+      
       throw new Error(`Modrinth API error: ${response.status}`);
     }
     
-    const versions = await response.json();
-    
-    // Filter versions that match our requirements
-    let compatibleVersions = versions;
-    
-    if (loader) {
-      compatibleVersions = compatibleVersions.filter(v => v.loaders.includes(loader));
+    versions = await response.json();
+
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+
+      throw new Error(`API timeout for ${projectId}`);
     }
+    throw error;
+  }
+  
+  // Filter versions that match our requirements
+  let compatibleVersions = versions;
+  if (loader) {
+    compatibleVersions = compatibleVersions.filter(v => v.loaders.includes(loader));
+  }  if (gameVersion) {
+    // For debugging: let's see what versions are available before filtering
+    console.log(`🔍 API: Sample of available versions before filtering:`, 
+      versions.slice(0, 5).map(v => ({
+        version: v.version_number,
+        gameVersions: v.game_versions,
+        datePublished: v.date_published
+      }))
+    );
     
-    if (gameVersion) {
-      compatibleVersions = compatibleVersions.filter(v => v.game_versions.includes(gameVersion));
+    // Strict game version matching - only exact matches for the current version
+    compatibleVersions = compatibleVersions.filter(v => {
+      return v.game_versions.includes(gameVersion);
+    });
+    
+    console.log(`🔍 API: Filtered to ${compatibleVersions.length} compatible versions for ${gameVersion} (from ${versions.length} total)`);
+    
+    // Show what versions we kept
+    if (compatibleVersions.length > 0) {
+      console.log(`🔍 API: Compatible versions:`, 
+        compatibleVersions.slice(0, 3).map(v => ({
+          version: v.version_number,
+          gameVersions: v.game_versions,
+          datePublished: v.date_published
+        }))
+      );
     }
+  }
     
     // Map to a more user-friendly format
     let mappedVersions = compatibleVersions.map(v => ({
@@ -457,41 +524,38 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
       const dateB = new Date(b.datePublished).getTime();
       return dateB - dateA;
     });
-    
-    // Cache the results
-    versionCache.set(cacheKey, mappedVersions);
-      // If we only need the latest version, select the best one for the target game version
-    if (loadLatestOnly && mappedVersions.length > 0) {
-      // When a specific game version is requested, prioritize versions with narrower compatibility
-      if (gameVersion) {
-        // Sort versions by compatibility specificity and date
-        const sortedBySpecificity = [...mappedVersions].sort((a, b) => {
-          // First priority: prefer stable versions
-          const aStable = a.isStable;
-          const bStable = b.isStable;
-          if (aStable !== bStable) {
-            return bStable - aStable; // true (1) - false (0) = 1, so stable comes first
-          }
-          
-          // Second priority: prefer versions with fewer supported game versions (more specific)
-          const aVersionCount = a.gameVersions.length;
-          const bVersionCount = b.gameVersions.length;
-          if (aVersionCount !== bVersionCount) {
-            return aVersionCount - bVersionCount; // fewer versions = more specific
-          }
-          
-          // Third priority: prefer versions that list the target version first (primary target)
-          const aTargetIndex = a.gameVersions.indexOf(gameVersion);
-          const bTargetIndex = b.gameVersions.indexOf(gameVersion);
-          if (aTargetIndex !== bTargetIndex) {
-            return aTargetIndex - bTargetIndex; // lower index = earlier in list = primary target
-          }
-          
-          // Final priority: newer versions
-          const dateA = new Date(a.datePublished).getTime();
-          const dateB = new Date(b.datePublished).getTime();
-          return dateB - dateA;
-        });
+      // Cache the results
+  versionCache.set(cacheKey, mappedVersions);
+  
+  // If we only need the latest version, select the best one for the target game version
+  if (loadLatestOnly && mappedVersions.length > 0) {
+    // When a specific game version is requested, prioritize versions with narrower compatibility
+    if (gameVersion) {
+      // Sort versions by compatibility specificity and date
+      const sortedBySpecificity = [...mappedVersions].sort((a, b) => {        // First priority: prefer stable versions
+        const aStable = a.isStable;
+        const bStable = b.isStable;
+        if (aStable !== bStable) {
+          return bStable - aStable; // true (1) - false (0) = 1, so stable comes first
+        }
+        
+        // Second priority: prefer newer versions by date
+        const dateA = new Date(a.datePublished).getTime();
+        const dateB = new Date(b.datePublished).getTime();
+        if (dateA !== dateB) {
+          return dateB - dateA; // newer versions first
+        }
+        
+        // Third priority: prefer versions with fewer supported game versions (more specific)
+        const aVersionCount = a.gameVersions.length;
+        const bVersionCount = b.gameVersions.length;
+        if (aVersionCount !== bVersionCount) {
+          return aVersionCount - bVersionCount; // fewer versions = more specific
+        }
+          // Final priority: prefer versions that list the target version first (primary target)
+        const aTargetIndex = a.gameVersions.indexOf(gameVersion);
+        const bTargetIndex = b.gameVersions.indexOf(gameVersion);        return aTargetIndex - bTargetIndex; // lower index = earlier in list = primary target
+      });
         
         return [sortedBySpecificity[0]];
       } else {
@@ -538,15 +602,40 @@ async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader)
  * @returns {Promise<Object>} Version info object
  */
 async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
-  const versions = await getModrinthVersions(projectId, loader, gameVersion, true);
-
-  if (!versions || versions.length === 0) {
-    throw new Error('No matching versions found');
+  console.log(`🔍 API: Getting latest version for project "${projectId}" (MC: ${gameVersion}, Loader: ${loader})`);
+  try {
+    // Get ALL compatible versions, not just the latest one, so we can find newer versions
+    const versions = await getModrinthVersions(projectId, loader, gameVersion, false);
+    console.log(`📦 API: Found ${versions?.length || 0} versions for "${projectId}"`);
+    if (!versions || versions.length === 0) {
+      console.log(`❌ API: No versions found for "${projectId}"`);
+      // No versions found, treat as no update available
+      return null;
+    }
+    
+    // Find the newest version (versions are already sorted by date, newest first)
+    const latestVersion = versions[0];
+    console.log(`🔍 API: Latest version ID for "${projectId}": ${latestVersion.id} (${latestVersion.versionNumber})`);
+    
+    try {
+      const latestVersionInfo = await getModrinthVersionInfo(projectId, latestVersion.id, gameVersion, loader);
+      console.log(`✅ API: Latest version for "${projectId}": ${latestVersionInfo?.version_number}`);
+      return latestVersionInfo;
+    } catch (err) {
+      console.log(`⚠️  API: Error getting version info for "${projectId}":`, err.message);
+      // Skip on not found or no matching versions
+      if (err.message.includes('Mod not found on Modrinth') || err.message.includes('No matching versions found')) {
+        return null;
+      }
+      throw err;
+    }
+  } catch (err) {
+    console.log(`❌ API: Error getting versions for "${projectId}":`, err.message);
+    if (err.message.includes('Mod not found on Modrinth') || err.message.includes('No matching versions found')) {
+      return null;
+    }
+    throw err;
   }
-
-  const latestVersionInfo = await getModrinthVersionInfo(projectId, versions[0].id, gameVersion, loader);
-  
-  return latestVersionInfo;
 }
 
 /**

@@ -11,6 +11,50 @@ const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { downloadWithProgress } = require('../services/download-manager.cjs'); // Corrected import
 const { disableMod } = require('./mod-utils/mod-file-utils.cjs'); // Removed unused enableMod
 
+// Utility function for semantic version comparison - matches server-side logic
+function compareVersions(versionA, versionB) {
+  if (!versionA || !versionB) return 0;
+  if (versionA === versionB) return 0;
+  
+  // Convert to arrays of version components
+  const partsA = versionA.split(/[.-]/).map(part => {
+    const num = parseInt(part, 10);
+    return isNaN(num) ? part : num;
+  });
+  
+  const partsB = versionB.split(/[.-]/).map(part => {
+    const num = parseInt(part, 10);
+    return isNaN(num) ? part : num;
+  });
+  
+  // Compare each part
+  const minLength = Math.min(partsA.length, partsB.length);
+  
+  for (let i = 0; i < minLength; i++) {
+    const a = partsA[i];
+    const b = partsB[i];
+    
+    // If both are numbers, compare numerically
+    if (typeof a === 'number' && typeof b === 'number') {
+      if (a !== b) return a - b;
+    } 
+    // If both are strings, compare alphabetically
+    else if (typeof a === 'string' && typeof b === 'string') {
+      if (a !== b) return a.localeCompare(b);
+    }
+    // Numbers are considered greater than strings for this purpose
+    else if (typeof a === 'number') {
+      return 1;
+    } else {
+      return -1;
+    }
+  }
+  
+  // If we get here, one version might be a prefix of the other
+  // The longer one is considered newer (e.g., 1.0.1 > 1.0)
+  return partsA.length - partsB.length;
+}
+
 // fs/promises, axios, createWriteStream, pipeline, promisify, pipelineAsync are now mainly used within the services.
 // If any handler directly needs them (e.g. a simple file op not covered by services), they can be re-added or operations moved.
 
@@ -157,7 +201,9 @@ function createModHandlers(win) {
       } catch (err) {
         throw new Error(`Failed to get disabled mods: ${err.message}`);
       }
-    },    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
+    },
+
+    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
       if (!serverPath || !fs.existsSync(serverPath)) {
         throw new Error('Invalid server path');
       }
@@ -222,7 +268,9 @@ function createModHandlers(win) {
       }
 
       return results;
-    },    'install-mod': async (_event, serverPath, modDetails) => {
+    },
+
+    'install-mod': async (_event, serverPath, modDetails) => {
       // Pass 'win' object for progress reporting
       return await modInstallService.installModToServer(win, serverPath, modDetails);
     },
@@ -234,12 +282,14 @@ function createModHandlers(win) {
         throw new Error(`Failed to add mod: ${err.message}`);
       }
     },
-      'delete-mod': async (_event, serverPath, modName) => {
+
+    'delete-mod': async (_event, serverPath, modName) => {
       try {
         return await modFileManager.deleteMod(serverPath, modName);
       } catch (err) {
         throw new Error(`Failed to delete mod: ${err.message}`);
-      }    },
+      }
+    },
 
     // Update a mod to a new version
     'update-mod': async (_event, { serverPath, projectId, targetVersion, fileName }) => {
@@ -421,7 +471,9 @@ function createModHandlers(win) {
       } catch (err) {
         throw new Error(`Failed to move mod file: ${err.message}`);
       }
-    },    'install-client-mod': async (_event, modData) => {
+    },
+
+    'install-client-mod': async (_event, modData) => {
       // Pass 'win' object for progress reporting, if the service function is adapted for it
       // The service function currently doesn't take 'win', but it could be added
       // or a callback mechanism implemented. For now, passing win as per general plan.
@@ -534,7 +586,9 @@ function createModHandlers(win) {
       } catch (error) {
         throw new Error(`Failed to check client mod compatibility: ${error.message}`);
       }
-    },    // Update a client-side mod to a newer version
+    },
+
+    // Update a client-side mod to a newer version
     'update-client-mod': async (_event, { modInfo, clientPath }) => {
       try {
         
@@ -584,7 +638,9 @@ function createModHandlers(win) {
       } catch (error) {
         throw new Error(`Failed to update mod "${modInfo.name}": ${error.message}`);
       }
-    },    // Disable a client-side mod by adding .disabled extension
+    },
+
+    // Disable a client-side mod by adding .disabled extension
     'disable-client-mod': async (_event, { modFilePath }) => {
       try {
         
@@ -607,7 +663,9 @@ function createModHandlers(win) {
       } catch (error) {
         throw new Error(`Failed to disable mod: ${error.message}`);
       }
-    },    // Get detailed information about manual mods    // Get detailed information about manual mods
+    },
+
+    // Get detailed information about manual mods
     'get-manual-mods-detailed': async (_event, { clientPath, serverManagedFiles }) => {
       try {
         
@@ -639,7 +697,8 @@ function createModHandlers(win) {
         const disabledFiles = allFiles.filter(f => f.endsWith('.jar.disabled'))
           .map(f => f.replace('.disabled', '')); // Remove .disabled extension for processing
 
-        const mods = [];        // Process enabled mods
+        const mods = [];
+        // Process enabled mods
         for (const fileName of enabledFiles) {
           const fileNameLower = fileName.toLowerCase();
           const isServerManaged = serverManagedFilesSet.has(fileNameLower);
@@ -668,7 +727,7 @@ function createModHandlers(win) {
               lastModified: stats.mtime,
               enabled: true
             });
-          } catch { // Changed from catch (metadataError)
+          } catch {
             mods.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -680,7 +739,8 @@ function createModHandlers(win) {
               gameVersions: [],
               size: stats.size,
               lastModified: stats.mtime,
-              enabled: true            });
+              enabled: true
+            });
           }
         }
         
@@ -701,6 +761,13 @@ function createModHandlers(win) {
 
           try {
             const metadata = await readModMetadata(filePath);
+            console.log(`🔍 DEBUG: Disabled mod metadata for "${fileName}":`, {
+              projectId: metadata?.projectId,
+              id: metadata?.id,
+              name: metadata?.name,
+              version: metadata?.version
+            });
+            
             mods.push({
               fileName,
               name: metadata?.name || fileName.replace(/\.jar$/i, ''),
@@ -714,7 +781,8 @@ function createModHandlers(win) {
               lastModified: stats.mtime,
               enabled: false
             });
-          } catch { // Changed from catch (metadataError)
+          } catch (error) {
+            console.error(`Failed to read metadata for disabled mod ${fileName}:`, error.message);
             mods.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -726,7 +794,8 @@ function createModHandlers(win) {
               gameVersions: [],
               size: stats.size,
               lastModified: stats.mtime,
-              enabled: false            });
+              enabled: false
+            });
           }
         }
         
@@ -735,7 +804,9 @@ function createModHandlers(win) {
       } catch (error) {
         return { success: false, error: error.message, mods: [] };
       }
-    },// Check manual mods for basic compatibility
+    },
+
+    // Check manual mods for basic compatibility
     'check-manual-mods': async (_event, { clientPath, minecraftVersion }) => {
       try {
           if (!clientPath || !fs.existsSync(clientPath)) {
@@ -787,7 +858,7 @@ function createModHandlers(win) {
               reason,
               enabled: true
             });
-          } catch { // Changed from catch (metadataError)
+          } catch {
             compatibilityResults.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -828,7 +899,7 @@ function createModHandlers(win) {
               reason,
               enabled: false
             });
-          } catch { // Changed from catch (metadataError)
+          } catch {
             compatibilityResults.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -1015,8 +1086,11 @@ function createModHandlers(win) {
       } catch (error) {
         return { success: false, error: error.message };
       }
-    },    // Check for updates for manual mods
-    'check-manual-mod-updates': async (_event, { clientPath, minecraftVersion, serverManagedFiles }) => {      try {
+    },
+
+    // Check for updates for manual mods
+    'check-manual-mod-updates': async (_event, { clientPath, minecraftVersion, serverManagedFiles }) => {
+      try {
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
         }
@@ -1030,89 +1104,159 @@ function createModHandlers(win) {
         const allFiles = fs.readdirSync(modsDir);
         const enabledFiles = allFiles.filter(f => f.endsWith('.jar') && !f.endsWith('.disabled'));
         const disabledFiles = allFiles.filter(f => f.endsWith('.jar.disabled'))
-          .map(f => f.replace('.disabled', '')); // Remove .disabled extension for processing
+          .map(f => f.replace('.disabled', ''));
         
         const updates = [];
-        // Use the passed serverManagedFiles array
         const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
-        
-        // Process enabled mods
+        // Known problematic project IDs to skip
+        const badIds = ['forgeconfigapiport','xaerominimap'];
+          // Process enabled mods
         for (const fileName of enabledFiles) {
-          if (serverManagedFilesSet.has(fileName.toLowerCase())) {
-            continue; // Skip server managed
-          }
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) continue;
 
           const filePath = path.join(modsDir, fileName);
-            try {
-            const metadata = await readModMetadata(filePath);
+          let metadata, currentVersion = 'Unknown';
+          try {
+            metadata = await readModMetadata(filePath);
+            currentVersion = metadata?.version || 'Unknown';
             
-            if (metadata && metadata.projectId) {
+            console.log(`🔍 DEBUG: Checking mod "${fileName}":`, {
+              projectId: metadata?.projectId,
+              currentVersion: metadata?.version,
+              loaderType: metadata?.loaderType,
+              name: metadata?.name
+            });
+            
+            // Skip known invalid project IDs
+            if (metadata?.projectId && badIds.includes(metadata.projectId)) {
+              console.log(`⚠️  Skipping known bad project ID: ${metadata.projectId}`);
+              updates.push({ fileName, hasUpdate: false, currentVersion, reason: 'Skipped invalid project ID' });
+              continue;
+            }            if (metadata && metadata.projectId) {
               const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
-              const latestInfo = await modApiService.getLatestModrinthVersionInfo(metadata.projectId, minecraftVersion, loader);
+              console.log(`🔍 Getting ALL versions for "${metadata.projectId}" (MC: ${minecraftVersion}, Loader: ${loader})`);
               
-              if (latestInfo && compareVersions(latestInfo.version_number, metadata.version) > 0) {
-                updates.push({
-                  fileName,
-                  hasUpdate: true,
-                  currentVersion: metadata.version,
-                  latestVersion: latestInfo.version_number,
-                  updateUrl: latestInfo.files?.[0]?.url || null,
-                  changelogUrl: latestInfo.changelog_url || null                });
-              } else {
-                updates.push({
-                  fileName,
-                  hasUpdate: false,
-                  currentVersion: metadata.version,
-                  latestVersion: metadata.version
+              // Use the same approach as server-side: get all versions, then find the best one
+              const allVersions = await modApiService.getModrinthVersions(metadata.projectId, loader, minecraftVersion, false);
+              console.log(`📦 Found ${allVersions?.length || 0} total versions for "${metadata.projectId}"`);
+              
+              if (allVersions && allVersions.length > 0) {
+                // Find stable versions first
+                const stableVersions = allVersions.filter(v => v.isStable !== false);
+                const versionsToCheck = stableVersions.length > 0 ? stableVersions : allVersions;
+                
+                // Sort by date (newest first) - same logic as server-side
+                const sortedVersions = [...versionsToCheck].sort((a, b) => {
+                  const dateA = new Date(a.datePublished).getTime();
+                  const dateB = new Date(b.datePublished).getTime();
+                  return dateB - dateA;
                 });
+                  const latestVersion = sortedVersions[0];
+                console.log(`🔍 Latest version for "${metadata.projectId}": ${latestVersion.versionNumber} (current: ${metadata.version})`);
+                
+                // Use EXACT same comparison logic as server-side checkForUpdate function
+                if (latestVersion && latestVersion.versionNumber !== metadata.version) {
+                  // Check if the latest version is actually newer using semantic versioning
+                  const versionComparison = compareVersions(latestVersion.versionNumber, metadata.version);
+                  console.log(`🔍 Version comparison: ${latestVersion.versionNumber} vs ${metadata.version} = ${versionComparison}`);
+                  
+                  if (versionComparison > 0) {
+                  // Get the actual version info for download URL
+                  const latestVersionInfo = await modApiService.getModrinthVersionInfo(metadata.projectId, latestVersion.id, minecraftVersion, loader);
+                  
+                  updates.push({
+                    fileName,
+                    hasUpdate: true,
+                    currentVersion,
+                    latestVersion: latestVersion.versionNumber,                    updateUrl: latestVersionInfo?.files?.[0]?.url || null,
+                    changelogUrl: latestVersionInfo?.changelog_url || null
+                  });
+                  } else {
+                    updates.push({ fileName, hasUpdate: false, currentVersion, latestVersion: latestVersion.versionNumber });
+                  }
+                } else {
+                  updates.push({ fileName, hasUpdate: false, currentVersion, latestVersion: latestVersion.versionNumber });
+                }
+              } else {
+                updates.push({ fileName, hasUpdate: false, currentVersion, reason: 'No compatible versions found' });
               }
             } else {
-              // No project ID, can't check for updates
-              updates.push({
-                fileName,
-                hasUpdate: false,
-                currentVersion: metadata?.version || 'Unknown',
-                reason: 'No project ID available'
-              });
+              updates.push({ fileName, hasUpdate: false, currentVersion, reason: 'No project ID available' });
             }
           } catch (modError) {
-            updates.push({
-              fileName,
-              hasUpdate: false,
-              currentVersion: 'Unknown',
-              error: modError.message
-            });
-          }        }
+            // Treat missing Modrinth project (404) as no update
+            if (modError.message.includes('Mod not found on Modrinth')) {
+              updates.push({ fileName, hasUpdate: false, currentVersion, latestVersion: currentVersion, reason: 'Dependency missing, update skipped' });
+            } else {
+              updates.push({ fileName, hasUpdate: false, currentVersion, error: modError.message });
+            }
+          }
+        }
         
         // Process disabled mods
         for (const fileName of disabledFiles) {
-          if (serverManagedFilesSet.has(fileName.toLowerCase())) {
-            continue; // Skip server managed
-          }
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) continue;
 
           const filePath = path.join(modsDir, fileName + '.disabled');
-            try {
-            const metadata = await readModMetadata(filePath);
-            
-            if (metadata && metadata.projectId) {
+          let metadata;
+          let currentVersion = 'Unknown';
+          try {
+            metadata = await readModMetadata(filePath);
+            currentVersion = metadata?.version || 'Unknown';
+            // Skip known invalid project IDs
+            if (metadata?.projectId && badIds.includes(metadata.projectId)) {
+              updates.push({ fileName, hasUpdate: false, currentVersion, reason: 'Skipped invalid project ID' });
+              continue;
+            }            if (metadata && metadata.projectId) {
               const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
-              const latestInfo = await modApiService.getLatestModrinthVersionInfo(metadata.projectId, minecraftVersion, loader);
+              console.log(`🔍 Getting ALL versions for disabled mod "${metadata.projectId}" (MC: ${minecraftVersion}, Loader: ${loader})`);
               
-              if (latestInfo && compareVersions(latestInfo.version_number, metadata.version) > 0) {
-                updates.push({
-                  fileName,
-                  hasUpdate: true,
-                  currentVersion: metadata.version,
-                  latestVersion: latestInfo.version_number,
-                  updateUrl: latestInfo.files?.[0]?.url || null,
-                  changelogUrl: latestInfo.changelog_url || null
+              // Use the same approach as server-side: get all versions, then find the best one
+              const allVersions = await modApiService.getModrinthVersions(metadata.projectId, loader, minecraftVersion, false);
+              console.log(`📦 Found ${allVersions?.length || 0} total versions for disabled mod "${metadata.projectId}"`);
+              
+              if (allVersions && allVersions.length > 0) {
+                // Find stable versions first
+                const stableVersions = allVersions.filter(v => v.isStable !== false);
+                const versionsToCheck = stableVersions.length > 0 ? stableVersions : allVersions;
+                
+                // Sort by date (newest first) - same logic as server-side
+                const sortedVersions = [...versionsToCheck].sort((a, b) => {
+                  const dateA = new Date(a.datePublished).getTime();
+                  const dateB = new Date(b.datePublished).getTime();
+                  return dateB - dateA;
                 });
+                
+                const latestVersion = sortedVersions[0];
+                console.log(`🔍 Latest version for disabled mod "${metadata.projectId}": ${latestVersion.versionNumber} (current: ${metadata.version})`);
+                
+                // Use semantic version comparison - same as server-side
+                if (latestVersion && compareVersions(latestVersion.versionNumber, metadata.version) > 0) {
+                  // Get the actual version info for download URL
+                  const latestVersionInfo = await modApiService.getModrinthVersionInfo(metadata.projectId, latestVersion.id, minecraftVersion, loader);
+                  
+                  updates.push({
+                    fileName,
+                    hasUpdate: true,
+                    currentVersion: metadata.version,
+                    latestVersion: latestVersion.versionNumber,
+                    updateUrl: latestVersionInfo?.files?.[0]?.url || null,
+                    changelogUrl: latestVersionInfo?.changelog_url || null
+                  });
+                } else {
+                  updates.push({
+                    fileName,
+                    hasUpdate: false,
+                    currentVersion: metadata.version,
+                    latestVersion: latestVersion.versionNumber
+                  });
+                }
               } else {
                 updates.push({
                   fileName,
                   hasUpdate: false,
                   currentVersion: metadata.version,
-                  latestVersion: metadata.version
+                  reason: 'No compatible versions found'
                 });
               }
             } else {
@@ -1120,18 +1264,29 @@ function createModHandlers(win) {
               updates.push({
                 fileName,
                 hasUpdate: false,
-                currentVersion: metadata?.version || 'Unknown',
+                currentVersion, // Use currentVersion instead of metadata
                 reason: 'No project ID available'
               });
+            }          } catch (modError) {
+            // Treat missing Modrinth project (404) as no update
+            if (modError.message.includes('Mod not found on Modrinth')) {
+              updates.push({
+                fileName,
+                hasUpdate: false,
+                currentVersion: metadata?.version || 'Unknown',
+                latestVersion: metadata?.version || 'Unknown',
+                reason: 'Dependency missing, update skipped'
+              });
+            } else {
+              updates.push({
+                fileName,
+                hasUpdate: false,
+                currentVersion: 'Unknown',
+                error: modError.message
+              });
             }
-          } catch (modError) {
-            updates.push({
-              fileName,
-              hasUpdate: false,
-              currentVersion: 'Unknown',
-              error: modError.message
-            });
-          }        }
+          }
+        }
         
         const updatesAvailable = updates.filter(u => u.hasUpdate).length;
         
@@ -1333,46 +1488,6 @@ function checkModCompatibilityFromFilename(filename, minecraftVersion) {
   }
   
   return { isCompatible: false, confidence: 'medium' };
-}
-
-/**
- * Compare two version strings using semantic versioning
- * @param {string} versionA - First version to compare  
- * @param {string} versionB - Second version to compare
- * @returns {number} - Negative if A < B, positive if A > B, 0 if equal
- */
-function compareVersions(versionA, versionB) {
-  if (!versionA || !versionB) {
-    return 0;
-  }
-  
-  // Clean versions by removing 'v' prefix if present
-  const cleanA = versionA.replace(/^v/, '');
-  const cleanB = versionB.replace(/^v/, '');
-  
-  // Split by '.' and then by '+' or '-' to handle build metadata
-  const partsA = cleanA.split(/[.\-+]/).map(p => {
-    const num = parseInt(p, 10);
-    return isNaN(num) ? 0 : num;
-  });
-  
-  const partsB = cleanB.split(/[.\-+]/).map(p => {
-    const num = parseInt(p, 10);
-    return isNaN(num) ? 0 : num;
-  });
-  
-  const length = Math.max(partsA.length, partsB.length);
-  
-  for (let i = 0; i < length; i++) {
-    const a = i < partsA.length ? partsA[i] : 0;
-    const b = i < partsB.length ? partsB[i] : 0;
-    
-    if (a !== b) {
-      return a - b;
-    }
-  }
-  
-  return 0;
 }
 
 module.exports = { createModHandlers };
