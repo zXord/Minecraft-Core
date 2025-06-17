@@ -395,8 +395,6 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
 function checkModDependencyByFilename(fileName, dependencies) {
   const nameLower = fileName.toLowerCase();
   
-  console.log(`[FILENAME CHECK] Checking ${fileName} against dependencies:`, Array.from(dependencies));
-  
   // Extract mod ID patterns (e.g., sodium-fabric-0.5.8+mc1.20.1.jar -> sodium)
   const patterns = [
     // Remove common suffixes and version patterns
@@ -414,20 +412,14 @@ function checkModDependencyByFilename(fileName, dependencies) {
   
   // Add special patterns for common mod name variations
   if (nameLower.includes('placeholder') && nameLower.includes('api')) {
-    patterns.push('placeholderapi', 'placeholder-api', 'textplaceholderapi', 'text-placeholder-api');
-  }
-  
-  console.log(`[FILENAME CHECK] Extracted patterns for ${fileName}:`, patterns);
+    patterns.push('placeholderapi', 'placeholder-api', 'textplaceholderapi', 'text-placeholder-api');  }
   
   // Check each pattern against dependencies
   for (const pattern of patterns) {
     if (pattern && pattern.length > 2 && dependencies.has(pattern)) {
-      console.log(`[FILENAME CHECK] Found match: ${pattern} in dependencies`);
       return true;
-    }
-  }
+    }  }
   
-  console.log(`[FILENAME CHECK] No match found for ${fileName}`);
   return false;
 }
 
