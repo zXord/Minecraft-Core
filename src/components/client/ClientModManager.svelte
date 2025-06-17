@@ -1059,10 +1059,11 @@
   // Handle mod installation with dependency checks
   async function handleInstallMod(event) {
     const { mod, versionId } = event.detail;
-    const ver = versionId || mod.selectedVersionId;
-
-    // Refresh installed mod info so dependency checks see all current mods
+    const ver = versionId || mod.selectedVersionId;    // Refresh installed mod info so dependency checks see all current mods
     await loadInstalledInfo();
+    
+    // Get fresh installed mod info for accurate dependency checking
+    const freshInstalledInfo = get(installedModInfo);
 
     let modForInstall;
     if (mod.fileName && mod.projectId && !mod.id) {
@@ -1098,9 +1099,8 @@
             source: modForInstall.source,
             loader: get(loaderType),
             gameVersion: get(minecraftVersion)
-          });
-          if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
-            compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, modForInstall.id);
+          });          if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
+            compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, modForInstall.id, freshInstalledInfo);
           }
         }
       } catch (compatErr) {

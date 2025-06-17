@@ -561,38 +561,79 @@ class ManagementServer {
       this.startVersionWatcher();
       this.checkVersionChange();
     }
-  }
-  
-  // Check if Minecraft server is running
+  }  // Check if Minecraft server is running
   async checkMinecraftServerStatus() {
     try {
-      // Check if there's a running server process
-      // This is a simple check - in production you might want to check specific process names or PIDs
+      // First check if we have an active server process through the server manager
+      const serverManager = require('./server-manager.cjs');
+      const serverState = serverManager.getServerState();
+      
+      if (serverState.isRunning && serverState.serverProcess) {
+        try {
+          // Verify the process is actually still alive
+          process.kill(serverState.serverProcess.pid, 0); // Signal 0 just tests if process exists
+          return 'running';
+        } catch {
+          // Process doesn't exist anymore
+          return 'stopped';
+        }
+      }
+      
+      // Fallback: Check for java processes that might be Minecraft servers
       const { exec } = require('child_process');
       const util = require('util');
       const execAsync = util.promisify(exec);
       
       // On Windows, check for java processes running from the server directory
-      if (process.platform === 'win32') {
-        try {
-          const { stdout } = await execAsync(`tasklist /FI "IMAGENAME eq java.exe" /FO CSV`);
+      if (process.platform === 'win32') {        try {
+          // More specific check - look for java processes with minecraft-related command lines
+          const { stdout } = await execAsync(`wmic process where "name='java.exe'" get ProcessId,CommandLine /format:csv`, { timeout: 5000 });
           const lines = stdout.split('\n');
           
-          // Look for java processes (basic check)
-          const javaProcesses = lines.filter(line => line.includes('java.exe'));
-          
-          if (javaProcesses.length > 0) {
+          // Look for processes that contain minecraft server indicators
+          const minecraftProcesses = lines.filter(line => {
+            if (!line.includes('java.exe')) return false;
+            
+            // More specific checks - only consider it a Minecraft server if it has these specific indicators
+            const hasMinecraftServerIndicators = (
+              line.includes('fabric-server-launch.jar') ||
+              line.includes('minecraft_server.jar') ||
+              line.includes('minecraft-core-server') ||
+              (line.includes('server.jar') && (line.includes('minecraft') || line.includes('fabric'))) ||
+              line.includes('forge-server') ||
+              line.includes('spigot') ||
+              line.includes('paper') ||
+              line.includes('bukkit')
+            );
+            
+            // Exclude common development/IDE processes
+            const isNotDevProcess = !(
+              line.includes('vs code') ||
+              line.includes('vscode') ||
+              line.includes('idea') ||
+              line.includes('eclipse') ||
+              line.includes('netbeans') ||
+              line.includes('gradle') ||
+              line.includes('maven') ||
+              line.includes('intellij') ||
+              line.includes('--add-opens=java.base') || // Common IDE/development JVM args
+              line.includes('jdtls') ||
+              line.includes('language-server')
+            );
+            
+            return hasMinecraftServerIndicators && isNotDevProcess;
+          });          
+          if (minecraftProcesses.length > 0) {
             return 'running';
           } else {
             return 'stopped';
           }
         } catch {
-          return 'unknown';
-        }
+          return 'unknown';        }
       } else {
         // On Linux/Mac, use ps to check for java processes
         try {
-          const { stdout } = await execAsync('ps aux | grep java | grep -v grep');
+          const { stdout } = await execAsync('ps aux | grep java | grep -E "(fabric-server|minecraft|server\\.jar)" | grep -v grep', { timeout: 5000 });
           if (stdout.trim()) {
             return 'running';
           } else {

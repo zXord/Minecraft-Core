@@ -544,7 +544,9 @@ async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
     throw new Error('No matching versions found');
   }
 
-  return await getModrinthVersionInfo(projectId, versions[0].id, gameVersion, loader);
+  const latestVersionInfo = await getModrinthVersionInfo(projectId, versions[0].id, gameVersion, loader);
+  
+  return latestVersionInfo;
 }
 
 /**
