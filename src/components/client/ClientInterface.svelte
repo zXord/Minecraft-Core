@@ -235,8 +235,7 @@
     }
     
     isChecking = false;
-  }
-    // Get server information including Minecraft version and required mods
+  }  // Get server information including Minecraft version and required mods
   async function getServerInfo() {
     try {
       const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;

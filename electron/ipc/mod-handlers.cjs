@@ -622,14 +622,13 @@ function createModHandlers(win) {
         }
 
         const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
-        
-        // Load acknowledged dependencies from the client state
+          // Load acknowledged dependencies from the client state
         let acknowledgedDependencies = new Set();
         try {
           const { loadExpectedModState } = require('./minecraft-launcher-handlers.cjs');
           const stateResult = await loadExpectedModState(clientPath);
-          if (stateResult.success && stateResult.acknowledgedDependencies) {
-            acknowledgedDependencies = stateResult.acknowledgedDependencies;
+          if (stateResult.success && stateResult.acknowledgedDeps) {
+            acknowledgedDependencies = stateResult.acknowledgedDeps;
           }
         } catch (error) {
           console.warn('Failed to load acknowledged dependencies:', error.message);
@@ -1017,16 +1016,12 @@ function createModHandlers(win) {
         return { success: false, error: error.message };
       }
     },    // Check for updates for manual mods
-    'check-manual-mod-updates': async (_event, { clientPath, minecraftVersion, serverManagedFiles }) => {
-      try {
-
+    'check-manual-mod-updates': async (_event, { clientPath, minecraftVersion, serverManagedFiles }) => {      try {
         if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
         }
-        if (!minecraftVersion) {
-          // Minecraft version is optional, proceed if not provided
-        }
-          const modsDir = path.join(clientPath, 'mods');
+        
+        const modsDir = path.join(clientPath, 'mods');
         
         if (!fs.existsSync(modsDir)) {
           return { success: true, updates: [], summary: { total: 0, updatesAvailable: 0 } };
@@ -1040,30 +1035,29 @@ function createModHandlers(win) {
         const updates = [];
         // Use the passed serverManagedFiles array
         const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
-
+        
         // Process enabled mods
         for (const fileName of enabledFiles) {
-          if (serverManagedFilesSet.has(fileName.toLowerCase())) continue; // Skip server managed
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) {
+            continue; // Skip server managed
+          }
 
           const filePath = path.join(modsDir, fileName);
-          
-          try {
+            try {
             const metadata = await readModMetadata(filePath);
             
             if (metadata && metadata.projectId) {
-              
               const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
               const latestInfo = await modApiService.getLatestModrinthVersionInfo(metadata.projectId, minecraftVersion, loader);
               
-              if (latestInfo && latestInfo.version_number !== metadata.version) {
+              if (latestInfo && compareVersions(latestInfo.version_number, metadata.version) > 0) {
                 updates.push({
                   fileName,
                   hasUpdate: true,
                   currentVersion: metadata.version,
                   latestVersion: latestInfo.version_number,
                   updateUrl: latestInfo.files?.[0]?.url || null,
-                  changelogUrl: latestInfo.changelog_url || null
-                });
+                  changelogUrl: latestInfo.changelog_url || null                });
               } else {
                 updates.push({
                   fileName,
@@ -1088,23 +1082,23 @@ function createModHandlers(win) {
               currentVersion: 'Unknown',
               error: modError.message
             });
-          }
-        }
-          // Process disabled mods
+          }        }
+        
+        // Process disabled mods
         for (const fileName of disabledFiles) {
-          if (serverManagedFilesSet.has(fileName.toLowerCase())) continue; // Skip server managed
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) {
+            continue; // Skip server managed
+          }
 
           const filePath = path.join(modsDir, fileName + '.disabled');
-          
-          try {
+            try {
             const metadata = await readModMetadata(filePath);
             
             if (metadata && metadata.projectId) {
-              
               const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
               const latestInfo = await modApiService.getLatestModrinthVersionInfo(metadata.projectId, minecraftVersion, loader);
               
-              if (latestInfo && latestInfo.version_number !== metadata.version) {
+              if (latestInfo && compareVersions(latestInfo.version_number, metadata.version) > 0) {
                 updates.push({
                   fileName,
                   hasUpdate: true,
@@ -1137,8 +1131,7 @@ function createModHandlers(win) {
               currentVersion: 'Unknown',
               error: modError.message
             });
-          }
-        }
+          }        }
         
         const updatesAvailable = updates.filter(u => u.hasUpdate).length;
         
@@ -1276,8 +1269,7 @@ function createModHandlers(win) {
 async function readModMetadata(filePath) {
   try {
     const result = await modAnalysisUtils.extractDependenciesFromJar(filePath);
-    return result;
-  } catch { // Changed from catch (error)
+    return result;  } catch {
     return null;
   }
 }
@@ -1341,6 +1333,46 @@ function checkModCompatibilityFromFilename(filename, minecraftVersion) {
   }
   
   return { isCompatible: false, confidence: 'medium' };
+}
+
+/**
+ * Compare two version strings using semantic versioning
+ * @param {string} versionA - First version to compare  
+ * @param {string} versionB - Second version to compare
+ * @returns {number} - Negative if A < B, positive if A > B, 0 if equal
+ */
+function compareVersions(versionA, versionB) {
+  if (!versionA || !versionB) {
+    return 0;
+  }
+  
+  // Clean versions by removing 'v' prefix if present
+  const cleanA = versionA.replace(/^v/, '');
+  const cleanB = versionB.replace(/^v/, '');
+  
+  // Split by '.' and then by '+' or '-' to handle build metadata
+  const partsA = cleanA.split(/[.\-+]/).map(p => {
+    const num = parseInt(p, 10);
+    return isNaN(num) ? 0 : num;
+  });
+  
+  const partsB = cleanB.split(/[.\-+]/).map(p => {
+    const num = parseInt(p, 10);
+    return isNaN(num) ? 0 : num;
+  });
+  
+  const length = Math.max(partsA.length, partsB.length);
+  
+  for (let i = 0; i < length; i++) {
+    const a = i < partsA.length ? partsA[i] : 0;
+    const b = i < partsB.length ? partsB[i] : 0;
+    
+    if (a !== b) {
+      return a - b;
+    }
+  }
+  
+  return 0;
 }
 
 module.exports = { createModHandlers };

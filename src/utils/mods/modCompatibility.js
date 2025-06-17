@@ -11,18 +11,18 @@ import { safeInvoke } from '../ipcUtils.js';
  * @param {string} mainModId - Main mod ID to avoid self-dependencies
  * @returns {Promise<Array>} - Array of compatibility issues
  */
-export async function checkDependencyCompatibility(dependencies, mainModId = null) {
+export async function checkDependencyCompatibility(dependencies, mainModId = null, freshInstalledInfo = null) {
   const issues = [];
   
   // Skip if no dependencies
   if (!dependencies || dependencies.length === 0) {
     return issues;
   }
-  
-  const installedInfo = get(installedModInfo);
+  // Use fresh installed info if provided, otherwise get from store
+  let installedInfo = freshInstalledInfo || get(installedModInfo);
   const updates = get(modsWithUpdates);
   const disabled = get(disabledMods); // Get the set of disabled mods
-  const installedIds = new Set(installedInfo.map(info => info.projectId));
+  const installedIds = new Set(installedInfo.map(info => info.projectId).filter(Boolean));
   
   // First deduplicate dependencies by project ID to avoid showing the same dependency multiple times
   const uniqueDependencies = [];
@@ -44,9 +44,7 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
     
     seenProjectIds.add(projectId);
     uniqueDependencies.push(dep);
-  }
-  
-  
+  }  
   // Process each unique dependency
   for (const dep of uniqueDependencies) {
     // Handle both project_id (from API) and projectId (from our normalized format)
@@ -58,8 +56,7 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
     
     // If no name, try to get it from the API
     if (!name && projectId) {
-      try {
-        // First try to get mod info which has more details
+      try {        // First try to get mod info which has more details
         const modInfo = await safeInvoke('get-mod-info', {
           modId: projectId,
           source: 'modrinth'
@@ -67,12 +64,14 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
         
         if (modInfo && modInfo.title) {
           name = modInfo.title;
-        } else {          // Fallback to project info
+        } else {
+          // Fallback to project info
           const projectInfo = await safeInvoke('get-project-info', {
             projectId: projectId,
             source: 'modrinth'
           });
-              if (projectInfo && projectInfo.title) {
+          
+          if (projectInfo && projectInfo.title) {
             name = projectInfo.title;
           }
         }
@@ -166,10 +165,10 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 }
               } else {
                 missingIssue.versionInfo = `Requirement: ${requirement}`;
-              }
-            } else {              // No specific requirement, will install latest
-              missingIssue.requiredVersion = latestVersion;
-              missingIssue.latestVersion = latestVersion;          missingIssue.versionInfo = `v${latestVersion}`;
+              }            } else {
+              // No specific requirement, will install latest              missingIssue.requiredVersion = latestVersion;
+              missingIssue.latestVersion = latestVersion;
+              missingIssue.versionInfo = `v${latestVersion}`;
             }
           }
         } catch {
@@ -215,9 +214,9 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 });
                 
                 if (projectInfo && projectInfo.title) {
-                  displayName = projectInfo.title;
-                } else {
-                  // If we still don't have a name, use a more descriptive fallback                displayName = `Installed Mod (needs update)`;
+                  displayName = projectInfo.title;                } else {
+                  // If we still don't have a name, use a more descriptive fallback
+                  displayName = `Installed Mod (needs update)`;
                 }
               } catch {
                 displayName = `Installed Mod (needs update)`;
@@ -240,12 +239,13 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                   const dateB = b.datePublished ? new Date(b.datePublished).getTime() : 0;
                   return dateB - dateA;
                 });
-                
-                // Find most recent compatible version
-                for (const version of sortedVersions) {                if (checkVersionCompatibility(version.versionNumber, versionRequirement)) {
+                  // Find most recent compatible version
+                for (const version of sortedVersions) {
+                  if (checkVersionCompatibility(version.versionNumber, versionRequirement)) {
                     compatibleVersion = version.versionNumber;
                     break;
-                  }                }
+                  }
+                }
               }
             } catch {
               // Ignore errors when fetching version info - continue with version mismatch detection
@@ -427,12 +427,10 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
   }
   
   for (const mod of clientMods) {
-    try {
-      // Skip if mod is disabled
+    try {      // Skip if mod is disabled
       if (mod.disabled) {
         continue;
       }
-      
       
       // Check if mod has version requirements
       if (mod.gameVersions && mod.gameVersions.length > 0) {
@@ -458,14 +456,15 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
               });
               
               if (updateCheck && updateCheck.hasUpdate && updateCheck.latestVersion) {
-                hasUpdate = true;
-                compatibilityReport.needsUpdate.push({
+                hasUpdate = true;                compatibilityReport.needsUpdate.push({
                   ...mod,
                   compatibilityStatus: 'needs_update',
-                  availableUpdate: updateCheck.latestVersion,                updateUrl: updateCheck.downloadUrl
+                  availableUpdate: updateCheck.latestVersion,
+                  updateUrl: updateCheck.downloadUrl
                 });
                 compatibilityReport.hasUpdatable = true;
-              }          } catch {
+              }
+            } catch {
               // Ignore errors when checking for mod updates - continue with compatibility analysis
             }
           }
@@ -502,10 +501,8 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
         ...mod,
         compatibilityStatus: 'unknown',
         reason: `Error checking compatibility: ${error.message}`
-      });
-    }
+      });    }
   }
-  
   
   return compatibilityReport;
 }
