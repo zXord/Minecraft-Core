@@ -257,75 +257,56 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
       return !serverManagedSet.has(fileName);
     });
     
-    console.log(`[CLIENT DEPS] All mod files:`, modFiles);
-    console.log(`[CLIENT DEPS] Server managed files:`, Array.from(serverManagedSet));
-    console.log(`[CLIENT DEPS] Client-side mods:`, clientSideMods);
       for (const modFile of clientSideMods) {
       const modPath = path.join(modsDir, modFile);
-      console.log(`[CLIENT DEPS] Analyzing mod: ${modFile}`);
       
       try {
         const metadata = await extractDependenciesFromJar(modPath);
         
-        console.log(`[CLIENT DEPS] Metadata for ${modFile}:`, metadata);
         
         if (metadata) {
           // Handle 'dependencies' field (array format)
           if (metadata.dependencies && Array.isArray(metadata.dependencies)) {
-            console.log(`[CLIENT DEPS] Found dependencies array for ${modFile}:`, metadata.dependencies);
             for (const dep of metadata.dependencies) {              if (typeof dep === 'object' && dep.modid) {
                 dependencies.add(dep.modid.toLowerCase());
-                console.log(`[CLIENT DEPS] Added dependency (object): ${dep.modid.toLowerCase()}`);
               } else if (typeof dep === 'string') {
                 dependencies.add(dep.toLowerCase());
-                console.log(`[CLIENT DEPS] Added dependency (string): ${dep.toLowerCase()}`);
               }
             }
           } else if (metadata.dependencies && typeof metadata.dependencies === 'object') {
             // Handle dependencies as object (key-value pairs)
-            console.log(`[CLIENT DEPS] Found dependencies object for ${modFile}:`, metadata.dependencies);
             for (const depName of Object.keys(metadata.dependencies)) {
               dependencies.add(depName.toLowerCase());
-              console.log(`[CLIENT DEPS] Added dependency (object key): ${depName.toLowerCase()}`);
             }
-          }
-            // Handle 'depends' field (Fabric mod format)
-          if (metadata.depends && typeof metadata.depends === 'object') {            console.log(`[CLIENT DEPS] Found depends object for ${modFile}:`, metadata.depends);
+          }          // Handle 'depends' field (Fabric mod format)
+          if (metadata.depends && typeof metadata.depends === 'object') {
             for (const depName of Object.keys(metadata.depends)) {
               if (!['minecraft', 'fabricloader', 'java'].includes(depName.toLowerCase())) {
                 dependencies.add(depName.toLowerCase());
-                console.log(`[CLIENT DEPS] Added depends (object key): ${depName.toLowerCase()}`);
               }
             }
           } else if (metadata.depends && Array.isArray(metadata.depends)) {
-            console.log(`[CLIENT DEPS] Found depends array for ${modFile}:`, metadata.depends);
             for (const dep of metadata.depends) {
               if (typeof dep === 'string') {
                 dependencies.add(dep.toLowerCase());
-                console.log(`[CLIENT DEPS] Added depends (string): ${dep.toLowerCase()}`);
               } else if (typeof dep === 'object' && dep.modid) {
                 dependencies.add(dep.modid.toLowerCase());
-                console.log(`[CLIENT DEPS] Added depends (object): ${dep.modid.toLowerCase()}`);
               }
             }
           }
             // Handle 'requires' field
           if (metadata.requires && Array.isArray(metadata.requires)) {
-            console.log(`[CLIENT DEPS] Found requires array for ${modFile}:`, metadata.requires);
             for (const dep of metadata.requires) {
               if (typeof dep === 'string') {
                 dependencies.add(dep.toLowerCase());
-                console.log(`[CLIENT DEPS] Added requires (string): ${dep.toLowerCase()}`);
               } else if (typeof dep === 'object' && dep.modid) {
                 dependencies.add(dep.modid.toLowerCase());
-                console.log(`[CLIENT DEPS] Added requires (object): ${dep.modid.toLowerCase()}`);
               }
             }
           }
           
           // Handle embedded 'jars' field (bundled dependencies)
           if (metadata.jars && Array.isArray(metadata.jars)) {
-            console.log(`[CLIENT DEPS] Found embedded jars for ${modFile}:`, metadata.jars);
             for (const jar of metadata.jars) {
               if (typeof jar === 'object' && jar.file) {
                 // Extract mod name from embedded jar filename
@@ -340,7 +321,6 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
                 dependencies.add(cleanJarName);
                 dependencies.add(modIdFromJar);
                 
-                console.log(`[CLIENT DEPS] Added embedded jar dependencies: ${jarName}, ${cleanJarName}, ${modIdFromJar}`);
                 
                 // Special handling for common patterns
                 if (jarName.includes('placeholder') && jarName.includes('api')) {
@@ -348,7 +328,6 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
                   dependencies.add('placeholderapi');
                   dependencies.add('text-placeholder-api');
                   dependencies.add('textplaceholderapi');
-                  console.log(`[CLIENT DEPS] Added placeholder API variants from embedded jar`);
                 }
               }
             }
@@ -400,7 +379,6 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
       for (const dep of commonNonModDeps) {      dependencies.delete(dep);
     }
     
-    console.log(`[CLIENT DEPS] Final dependencies set:`, Array.from(dependencies));
 
   } catch (error) {
     console.error('Error analyzing client-side dependencies:', error);
@@ -1210,12 +1188,9 @@ function createMinecraftLauncherHandlers(win) {
               serverManagedFilesSetForDiff.add(lower);
             }
           }          acknowledgedDependencies = updatedAcks;
-        }
-
-        const clientSideDependencies = await getClientSideDependencies(clientPath, Array.from(serverManagedFilesSetForDiff));
+        }        const clientSideDependencies = await getClientSideDependencies(clientPath, Array.from(serverManagedFilesSetForDiff));
         
-        console.log(`[DEPENDENCY CHECK] Client-side dependencies found:`, Array.from(clientSideDependencies));
-        console.log(`[DEPENDENCY CHECK] Server managed files for diff:`, Array.from(serverManagedFilesSetForDiff));          const buildClientSideModsFor = async (excludeFile) => {
+        const buildClientSideModsFor = async (excludeFile) => {
           const { extractDependenciesFromJar } = require('./mod-utils/mod-analysis-utils.cjs');
           
           if (!fs.existsSync(modsDir)) return [];
