@@ -1462,11 +1462,10 @@ function createMinecraftLauncherHandlers(win) {
           optionalRemovals.push({
             fileName: modFileName,
             reason: 'no longer provided by server'
-          });        }
-        
+          });        }        
         // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====
           // Module analysis for updates - Track which mods need updates vs new downloads
-        const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
+        // Use the already imported modAnalysisUtils from the top of the file
         const allPresentMods = [...presentMods, ...disabledMods];
         const allServerManagedFiles = new Set([
             ...(serverManagedFiles || []).map(f => f.toLowerCase()),

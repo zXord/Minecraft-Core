@@ -138,10 +138,10 @@
   // Export the acknowledgment function so parent can call it
   export { acknowledgeAllDependencies };// State
   let connectionStatus: string = 'disconnected';
-  let serverMods: ClientMod[] = [];
-  let requiredMods: ClientMod[] = [];
+  let serverMods: ClientMod[] = [];  let requiredMods: ClientMod[] = [];
   let optionalMods: ClientMod[] = [];
-  let allClientMods: ClientMod[] = []; // All client mods (required + optional)
+  let allClientMods: ClientMod[] = [];
+  let installedModsInfo: any[] = []; // Store actual installed mod info with current versions// All client mods (required + optional)
   let modSyncStatus: ModSyncStatus | null = null;  let isLoadingMods: boolean = false;
   let lastModCheck: Date | null = null;
   
@@ -158,11 +158,29 @@
   
   // keep track of which fileNames we've acknowledged
   let acknowledgedDeps: Set<string> = new Set();
-
   // Computed property for required mods display that includes mods needing removal or acknowledgment
   $: displayRequiredMods = (() => {
     // first, remove any that the user has already acknowledged
     let displayMods = requiredMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
+    
+    // FIX: Replace server target versions with actual current versions from installed mods
+    displayMods = displayMods.map(serverMod => {
+      // Find the actual installed version of this mod
+      const installedMod = installedModsInfo.find(installed => 
+        installed.fileName === serverMod.fileName
+      );
+      
+      if (installedMod && installedMod.versionNumber) {
+        // Use the actual current version, not the server target version
+        return {
+          ...serverMod,
+          versionNumber: installedMod.versionNumber,
+          name: installedMod.name || serverMod.name, // Also use the clean name if available
+        };
+      }
+      
+      return serverMod; // Keep original if no installed version found
+    });
       // Add mods that need removal from the new response structure
     if (modSyncStatus?.requiredRemovals) {
       
@@ -218,10 +236,28 @@
     
     return displayMods;
   })();
-
   // Computed property for optional mods that hides acknowledged or removal-pending entries
   $: displayOptionalMods = (() => {
-    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));    // Add mods that need removal from the new response structure
+    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
+    
+    // FIX: Replace server target versions with actual current versions from installed mods
+    mods = mods.map(serverMod => {
+      // Find the actual installed version of this mod
+      const installedMod = installedModsInfo.find(installed => 
+        installed.fileName === serverMod.fileName
+      );
+      
+      if (installedMod && installedMod.versionNumber) {
+        // Use the actual current version, not the server target version
+        return {
+          ...serverMod,
+          versionNumber: installedMod.versionNumber,
+          name: installedMod.name || serverMod.name, // Also use the clean name if available
+        };
+      }
+      
+      return serverMod; // Keep original if no installed version found
+    });// Add mods that need removal from the new response structure
     if (modSyncStatus?.optionalRemovals) {
       
       for (const removal of modSyncStatus.optionalRemovals) {
@@ -342,12 +378,14 @@
         minecraftVersionOptions = [$minecraftVersion, ...minecraftVersionOptions.filter(v => v !== $minecraftVersion)];
       }
     }  }
-
   async function loadInstalledInfo() {
     try {
       const info = await window.electron.invoke('get-client-installed-mod-info', instance.path);
       
       if (Array.isArray(info)) {
+        // Store the actual installed mod info for version comparison
+        installedModsInfo = info;
+        
         // Enrich installed mod info with project IDs from server-provided mod lists
         const enrichedInfo = info.map(mod => {
           // If mod already has projectId, return as-is
