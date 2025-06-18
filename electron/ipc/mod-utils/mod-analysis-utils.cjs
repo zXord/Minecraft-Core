@@ -13,11 +13,8 @@ async function extractDependenciesFromJar(jarPath) {
   
   // Return cached result if available
   if (metadataCache.has(cacheKey)) {
-    console.log(`[CACHE] Using cached metadata for ${path.basename(jarPath)}`);
     return metadataCache.get(cacheKey);
   }
-  
-  console.log(`[EXTRACT] Processing metadata for ${path.basename(jarPath)}`);
   
   let result = null;
   

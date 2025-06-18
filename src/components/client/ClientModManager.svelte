@@ -1212,23 +1212,46 @@
       console.error('Failed to get server path:', error);
     }
     return null;
-  }
-  // Update an individual server-managed mod
+  }  // Update an individual server-managed mod
   async function updateServerMod(event) {
     const { fileName, name, currentVersion, newVersion, mod } = event.detail;
     
     try {
-      // Determine if this is a required or optional mod
+      // Find the target mod with the new version from available mod data
+      let targetMod = null;
+      
+      // Check required mods first
+      if (requiredMods && requiredMods.length > 0) {        targetMod = requiredMods.find(m => m.fileName === fileName);
+      }
+      
+      // Check optional mods if not found in required
+      if (!targetMod && optionalMods && optionalMods.length > 0) {
+        targetMod = optionalMods.find(m => m.fileName === fileName);
+      }
+      
+      // Check allClientMods if still not found
+      if (!targetMod && allClientMods && allClientMods.length > 0) {
+        targetMod = allClientMods.find(m => m.fileName === fileName);
+      }
+      
+      if (!targetMod) {
+        throw new Error(`Target mod ${fileName} not found in mod data`);
+      }
+      
+      if (!targetMod.downloadUrl) {
+        throw new Error(`Target mod ${fileName} has no download URL`);
+      }
+        // Determine if this is a required or optional mod
       const isRequired = mod.required !== false; // Default to required if not specified
       
-      // Create the mod list arrays
-      const requiredMods = isRequired ? [fileName] : [];
-      const optionalMods = isRequired ? [] : allClientMods.filter(m => m.fileName === fileName);
-      
+      // Create the mod list arrays with full target mod data
+      const modRequiredMods = isRequired ? [targetMod] : [];
+      const modOptionalMods = isRequired ? [] : [targetMod];
+
       const result = await safeInvoke('minecraft-download-mods', {
         clientPath: instance?.path,
-        requiredMods,
-        optionalMods,
+        requiredMods: modRequiredMods,
+        optionalMods: modOptionalMods,
         allClientMods,
         serverInfo: {
           serverIp: instance?.serverIp,
@@ -1237,9 +1260,23 @@
       });
 
       if (result?.success) {
-        successMessage.set(`Successfully updated ${name} from v${currentVersion} to v${newVersion}`);        // Refresh mod lists
-        await refreshInstalledMods();
-        await refreshMods();
+        successMessage.set(`Successfully updated ${name} from v${currentVersion} to v${newVersion}`);
+        
+        // Update the installedModsInfo directly to reflect the new version without rescanning
+        const modIndex = installedModsInfo.findIndex(mod => mod.fileName === fileName);
+        if (modIndex !== -1) {
+          installedModsInfo[modIndex] = {
+            ...installedModsInfo[modIndex],
+            versionNumber: newVersion,
+            version: newVersion
+          };
+          installedModsInfo = [...installedModsInfo]; // Trigger reactivity
+        }
+        
+        // Gentle sync check after a delay, no full refresh
+        setTimeout(async () => {
+          await checkModSynchronization();
+        }, 500);
       } else {
         errorMessage.set(`Failed to update ${name}: ${result?.error || 'Unknown error'}`);
       }

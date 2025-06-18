@@ -581,15 +581,19 @@ function createMinecraftLauncherHandlers(win) {
       } catch (error) {
         return { success: false, error: error.message };
       }
-    },
-      'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [] }) => {      try {
+    },    'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [] }) => {
+      try {
         if (!clientPath) {
           return { success: false, error: 'Invalid client path' };
         }
         
         // Combine required and optional mods for downloading
         const allModsToDownload = [...(requiredMods || []), ...(optionalMods || [])];
-        const requiredModFileNames = new Set((requiredMods || []).map(mod => mod.fileName.toLowerCase()));
+        
+        const requiredModFileNames = new Set((requiredMods || []).map(mod => {
+          const fileName = mod.fileName.toLowerCase();
+          return fileName;
+        }));
         
         if (allModsToDownload.length === 0) {
           return { success: true, downloaded: 0, failures: [], message: 'No mods to download' };
