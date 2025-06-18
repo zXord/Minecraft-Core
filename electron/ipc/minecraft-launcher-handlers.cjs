@@ -1016,33 +1016,69 @@ function createMinecraftLauncherHandlers(win) {
         const disabledMods = fs
           .readdirSync(modsDir)
           .filter(file => file.toLowerCase().endsWith('.jar.disabled'))
-          .map(file => file.replace('.disabled', ''));
-        
-        const missingMods = [];
+          .map(file => file.replace('.disabled', ''));        const missingMods = [];
         const outdatedMods = [];
         const missingOptionalMods = [];
         const outdatedOptionalMods = [];
-        
-        for (const requiredMod of requiredMods) {
+          for (const requiredMod of requiredMods) {
           const modPath = path.join(modsDir, requiredMod.fileName);
           const isPresent =
             presentMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase()) ||
             disabledMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase());
           
           if (!isPresent) {
-            missingMods.push(requiredMod.fileName);
-          } else if (requiredMod.checksum) {
-            const actualModPath = presentMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase())
-              ? modPath
-              : modPath + '.disabled';
+            missingMods.push(requiredMod.fileName);          } else if (requiredMod.checksum) {
+            // Find the actual filename on disk (case-insensitive)
+            const actualFileName = presentMods.find(f => f.toLowerCase() === requiredMod.fileName.toLowerCase()) ||
+                                   disabledMods.find(f => f.toLowerCase() === requiredMod.fileName.toLowerCase());
+            
+            const actualModPath = actualFileName 
+              ? path.join(modsDir, actualFileName + (disabledMods.includes(actualFileName) ? '.disabled' : ''))
+              : (presentMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase())
+                ? modPath
+                : modPath + '.disabled');
+            
             const existingChecksum = utils.calculateFileChecksum(actualModPath);
             if (existingChecksum !== requiredMod.checksum) {
-              outdatedMods.push(requiredMod.fileName);
+              // Extract mod name from JAR for better display              // Extract mod name and version with fallback methods
+              let modName = requiredMod.fileName.replace(/\.jar$/i, '');
+              let currentVersion = 'Unknown';
+              
+              // Try JAR metadata extraction first
+              try {
+                if (fs.existsSync(actualModPath)) {
+                  const metadata = await modAnalysisUtils.extractDependenciesFromJar(actualModPath);
+                  if (metadata?.name) {
+                    modName = metadata.name;
+                  }
+                  if (metadata?.version) {
+                    currentVersion = metadata.version;
+                  }
+                }
+              } catch {
+                // JAR extraction failed
+              }
+              
+              // If version still unknown, try extracting from actual filename
+              if (currentVersion === 'Unknown' && actualFileName) {
+                const versionFromActual = extractVersionFromFilename(actualFileName);
+                if (versionFromActual) {
+                  currentVersion = versionFromActual;
+                }
+              }
+              
+              const newVersion = extractVersionFromFilename(requiredMod.fileName) || requiredMod.versionNumber || 'New Version';
+              
+              outdatedMods.push({
+                fileName: requiredMod.fileName,
+                name: modName,
+                currentVersion,
+                newVersion
+              });
             }
           }
         }
-        
-        if (Array.isArray(allClientMods) && allClientMods.length > 0) {
+          if (Array.isArray(allClientMods) && allClientMods.length > 0) {
           const optionalMods = allClientMods.filter(mod => !mod.required);
           
           for (const optionalMod of optionalMods) {
@@ -1052,16 +1088,56 @@ function createMinecraftLauncherHandlers(win) {
               disabledMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase());
             
             if (!isPresent) {
-              missingOptionalMods.push(optionalMod.fileName);
-            } else if (optionalMod.checksum) {
-              const actualModPath = presentMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase())
-                ? modPath
-                : modPath + '.disabled';
+              missingOptionalMods.push(optionalMod.fileName);            } else if (optionalMod.checksum) {
+              // Find the actual filename on disk (case-insensitive)
+              const actualFileName = presentMods.find(f => f.toLowerCase() === optionalMod.fileName.toLowerCase()) ||
+                                     disabledMods.find(f => f.toLowerCase() === optionalMod.fileName.toLowerCase());
+              
+              const actualModPath = actualFileName 
+                ? path.join(modsDir, actualFileName + (disabledMods.includes(actualFileName) ? '.disabled' : ''))
+                : (presentMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase())
+                  ? modPath
+                  : modPath + '.disabled');
+              
               const existingChecksum = utils.calculateFileChecksum(actualModPath);
-              if (existingChecksum !== optionalMod.checksum) {
-                outdatedOptionalMods.push(optionalMod.fileName);
+              if (existingChecksum !== optionalMod.checksum) {                // Extract mod name and version with fallback methods
+                let modName = optionalMod.fileName.replace(/\.jar$/i, '');
+                let currentVersion = 'Unknown';
+                
+                // Try JAR metadata extraction first
+                try {
+                  if (fs.existsSync(actualModPath)) {
+                    const metadata = await modAnalysisUtils.extractDependenciesFromJar(actualModPath);
+                    if (metadata?.name) {
+                      modName = metadata.name;
+                    }
+                    if (metadata?.version) {
+                      currentVersion = metadata.version;
+                    }
+                  }
+                } catch {
+                  // JAR extraction failed
+                }
+                
+                // If version still unknown, try extracting from actual filename
+                if (currentVersion === 'Unknown' && actualFileName) {
+                  const versionFromActual = extractVersionFromFilename(actualFileName);
+                  if (versionFromActual) {
+                    currentVersion = versionFromActual;
+                  }
+                }
+                
+                const newVersion = extractVersionFromFilename(optionalMod.fileName) || optionalMod.versionNumber || 'New Version';
+                
+                outdatedOptionalMods.push({
+                  fileName: optionalMod.fileName,
+                  name: modName,
+                  currentVersion,
+                  newVersion
+                });
               }
-            }          }
+            }
+          }
         }
           // Removed unused variables: manifestDir, extraMods, needsStateCleanup
         const clientModChanges = {
@@ -1395,8 +1471,7 @@ function createMinecraftLauncherHandlers(win) {
           });        }
         
         // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====
-        
-        // Module analysis for updates
+          // Module analysis for updates - Track which mods need updates vs new downloads
         const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
         const allPresentMods = [...presentMods, ...disabledMods];
         const allServerManagedFiles = new Set([
@@ -1404,6 +1479,9 @@ function createMinecraftLauncherHandlers(win) {
             ...requiredMods.map(rm => rm.fileName.toLowerCase()),
             ...(allClientMods || []).filter(m => m.required).map(m => m.fileName.toLowerCase())
           ]);
+        
+        // Track mods that need updates (have newer versions available)
+        const modsNeedingUpdates = new Map(); // modFileName -> { currentVersion, newVersion, serverMod }
         
         for (const modFileName of allPresentMods) {
             const modFileNameLower = modFileName.toLowerCase();
@@ -1430,16 +1508,25 @@ function createMinecraftLauncherHandlers(win) {
               if (clientBase && serverBase && clientBase === serverBase) return true;
               if (clientModMetadata.name && serverBase === getBaseModName(clientModMetadata.name.toLowerCase().replace(/\s+/g, '_'))) return true;
               
-              return false;            }) : null;
+              return false;
+            }) : null;
 
             if (exactServerMatch || similarServerMatch) {
               const matchedServerMod = exactServerMatch || similarServerMatch;
-              const serverVersion = extractVersionFromFilename(matchedServerMod.fileName) || 'Server Version';
+              const serverVersion = extractVersionFromFilename(matchedServerMod.fileName) || matchedServerMod.versionNumber || 'Server Version';
+              const currentVersion = clientModMetadata.version || 'Unknown';
               
-              clientModChanges.push({
+              // Store update info for this mod
+              modsNeedingUpdates.set(modFileName, {
+                currentVersion,
+                newVersion: serverVersion,
+                serverMod: matchedServerMod
+              });
+              
+              clientModChanges.updates.push({
                 fileName: modFileName,
                 name: clientModMetadata.name || modFileName,
-                currentVersion: clientModMetadata.version || 'Unknown',
+                currentVersion: currentVersion,
                 serverVersion: serverVersion,
                 action: 'update'
               });
@@ -1557,7 +1644,7 @@ function createMinecraftLauncherHandlers(win) {
           // console.log(`[IPC HANDLER] Included ${requiredRemovals.length} required and ${optionalRemovals.length} optional removals in saved state`);
         } catch (stateError) {
           console.error('[IPC HANDLER] Failed to update persistent state:', stateError);
-        }// log.info(`[IPC HANDLER] Removal arrays: Required=${requiredRemovals.length}, Optional=${optionalRemovals.length}, Acknowledgments=${acknowledgments.length}`);      // Determine overall sync status
+        }// log.info(`[IPC HANDLER] Removal arrays: Required=${requiredRemovals.length}, Optional=${optionalRemovals.length}, Acknowledgments=${acknowledgments.length}`);        // Determine overall sync status
       const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && 
                              requiredRemovals.length === 0 && // No required mods need removal
                              optionalRemovals.length === 0 && // No optional mods need removal
@@ -1567,8 +1654,13 @@ function createMinecraftLauncherHandlers(win) {
         const result = {
           success: true,
           synchronized,
-          missingMods: missingMods.concat(outdatedMods),
-          missingOptionalMods: missingOptionalMods.concat(outdatedOptionalMods),
+          // Separate missing vs outdated for better UI feedback
+          missingMods: missingMods, // Truly missing mods (new downloads)
+          outdatedMods: outdatedMods, // Mods that need updates
+          missingOptionalMods: missingOptionalMods, // Missing optional mods (new downloads)
+          outdatedOptionalMods: outdatedOptionalMods, // Optional mods that need updates          // Combined for backwards compatibility
+          allMissingMods: missingMods.concat(outdatedMods.map(m => m.fileName || m)),
+          allMissingOptionalMods: missingOptionalMods.concat(outdatedOptionalMods.map(m => m.fileName || m)),
           needsDownload: missingMods.length + outdatedMods.length,
           needsOptionalDownload: missingOptionalMods.length + outdatedOptionalMods.length,
           needsRemoval: requiredRemovals.length + optionalRemovals.length,
@@ -1576,6 +1668,13 @@ function createMinecraftLauncherHandlers(win) {
           totalOptional: (allClientMods || []).filter(m => !m.required).length,
           presentEnabledMods: presentMods, // Actually enabled mods (.jar files)
           presentDisabledMods: disabledMods, // Actually disabled mods (.jar.disabled files)
+          // Update information for mods that need version updates
+          modsNeedingUpdates: Array.from(modsNeedingUpdates.entries()).map(([fileName, info]) => ({
+            fileName,
+            currentVersion: info.currentVersion,
+            newVersion: info.newVersion,
+            serverMod: info.serverMod
+          })),
           // New response structure
           requiredRemovals,
           optionalRemovals,
@@ -1907,5 +2006,7 @@ function createMinecraftLauncherHandlers(win) {
     },
   };
 }
+
+
 
 module.exports = { createMinecraftLauncherHandlers, loadExpectedModState };

@@ -6,6 +6,9 @@ const { pipeline } = require('stream');
 const { promisify } = require('util');
 const pipelineAsync = promisify(pipeline);
 
+// Import JAR analysis utility
+const { extractDependenciesFromJar } = require('./mod-analysis-utils.cjs');
+
 // Placeholder for API service functions - these will be imported later
 // For now, we might have to define minimal stubs or expect them to be passed if complex
 const {
@@ -150,25 +153,47 @@ async function installModToServer(win, serverPath, modDetails) {
           win.webContents.send('download-progress', { id: downloadId, name: modDetails.name, progress: progress * 100, size: progressEvent.total, downloaded: progressEvent.loaded, speed: speed, completed: false, error: null });
         }
       }
-    });
+    });    await pipelineAsync(response.data, writer); // Use pipelineAsync
 
-    await pipelineAsync(response.data, writer); // Use pipelineAsync
+    // Extract mod metadata to get the clean filename
+    let finalFileName = fileName;
+    let finalTargetPath = targetPath;
+    
+    try {
+      const metadata = await extractDependenciesFromJar(targetPath);
+      if (metadata && metadata.name) {
+        // Use the clean name from JAR metadata
+        const cleanBase = metadata.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        const cleanFileName = /\.jar$/i.test(cleanBase) ? cleanBase : `${cleanBase}.jar`;
+        
+        // Only rename if it's different and not an update (to preserve original filenames for updates)
+        if (cleanFileName !== fileName && !modDetails.forceReinstall) {
+          finalFileName = cleanFileName;
+          const newTargetPath = path.join(path.dirname(targetPath), finalFileName);
+          await fs.rename(targetPath, newTargetPath);
+          finalTargetPath = newTargetPath;
+          destinationPath = newTargetPath;
+        }
+      }
+    } catch {
+      // If JAR analysis fails, continue with original filename
+    }
 
     if (currentModLocation === 'both') {
-      const otherTargetPath = (destinationPath === path.join(modsDir, fileName)) ? path.join(clientModsDir, fileName) : path.join(modsDir, fileName);
-      await fs.copyFile(targetPath, otherTargetPath);
+      const otherTargetPath = (destinationPath === path.join(modsDir, finalFileName)) ? path.join(clientModsDir, finalFileName) : path.join(modsDir, finalFileName);
+      await fs.copyFile(finalTargetPath, otherTargetPath);
     }
 
     if (win && win.webContents) {
       win.webContents.send('download-progress', { id: downloadId, name: modDetails.name, progress: 100, speed: 0, completed: true, completedTime: Date.now(), error: null });
-    }
-
-    if (modDetails.source === 'modrinth' && versionInfoToSave) {
+    }    if (modDetails.source === 'modrinth' && versionInfoToSave) {
       try {
         const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
         const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
         const manifest = {
-          projectId: modDetails.id, name: modDetails.name, fileName: fileName, // Use the sanitized filename
+          projectId: modDetails.id, 
+          name: modDetails.name, 
+          fileName: finalFileName, // Use the final filename (clean or original)
           versionId: versionInfoToSave.id || modDetails.selectedVersionId,
           versionNumber: versionInfoToSave.version_number || versionInfoToSave.name || 'unknown',
           source: modDetails.source
@@ -176,17 +201,18 @@ async function installModToServer(win, serverPath, modDetails) {
 
         if (currentModLocation === 'client-only') {
           await fs.mkdir(clientManifestDir, { recursive: true });
-          const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
+          const clientManifestPath = path.join(clientManifestDir, `${finalFileName}.json`);
           await fs.writeFile(clientManifestPath, JSON.stringify(manifest, null, 2));
         } else if (currentModLocation === 'both') {
           await fs.mkdir(serverManifestDir, { recursive: true });
           await fs.mkdir(clientManifestDir, { recursive: true });
-          const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
-          const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
+          const serverManifestPath = path.join(serverManifestDir, `${finalFileName}.json`);
+          const clientManifestPath = path.join(clientManifestDir, `${finalFileName}.json`);
           await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));
           await fs.writeFile(clientManifestPath, JSON.stringify(manifest, null, 2));
-        } else { // server-only or new install default          await fs.mkdir(serverManifestDir, { recursive: true });
-          const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
+        } else { // server-only or new install default
+          await fs.mkdir(serverManifestDir, { recursive: true });
+          const serverManifestPath = path.join(serverManifestDir, `${finalFileName}.json`);
           await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));
         }
       } catch {

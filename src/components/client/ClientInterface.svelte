@@ -320,12 +320,11 @@
         // Remove any mods that were deleted on the server
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
           removeServerManagedFiles(result.successfullyRemovedMods);        }
-        
-        if (result.synchronized) {
+          if (result.synchronized) {
           downloadStatus = 'ready';
         } else {          // If we just had a successful download (wasReady), be more conservative
           // Only change to 'needed' if there are actually missing mods OR removals needed
-          const hasDownloads = result.needsDownload > 0;
+          const hasDownloads = ((result.missingMods?.length || 0) + (result.outdatedMods?.length || 0) + (result.missingOptionalMods?.length || 0) + (result.outdatedOptionalMods?.length || 0)) > 0;
           const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0) + (filteredAcknowledgments?.length || 0)) > 0;
           
           if (wasReady && !hasDownloads && !hasRemovals) {
@@ -597,9 +596,9 @@
     }
       // Check if we have mods to remove
     const modsToRemove = [...(modSyncStatus?.requiredRemovals || []), ...(modSyncStatus?.optionalRemovals || [])];
-    
-    // If we only have removals and no downloads needed, handle removals directly
-    if (modsToRemove.length > 0 && (!requiredMods || requiredMods.length === 0 || (modSyncStatus && modSyncStatus.needsDownload === 0))) {
+      // If we only have removals and no downloads needed, handle removals directly
+    const totalDownloadsNeeded = ((modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0));
+    if (modsToRemove.length > 0 && (!requiredMods || requiredMods.length === 0 || totalDownloadsNeeded === 0)) {
       // Set removing state
       isDownloadingMods = true;
       downloadStatus = 'downloading';
@@ -1068,9 +1067,9 @@
       errorMessage.set('Client download failed: ' + data.error);
       setTimeout(() => errorMessage.set(''), 5000);
     });
-    
-    // Client mod compatibility events
+      // Client mod compatibility events
     window.electron.on('client-mod-compatibility-report', (report) => {
+      console.log('[DEBUG] Received compatibility report:', report);
       compatibilityReport = report;
       
       // Show dialog if there are compatibility issues
@@ -1310,8 +1309,8 @@
     showCompatibilityDialog = false;
     compatibilityReport = null;
   }
-  
-  async function handleCompatibilityDialogUpdateMods() {
+    async function handleCompatibilityDialogUpdateMods() {
+    console.log('[DEBUG] Update mods called with report:', compatibilityReport);
     if (!compatibilityReport || !compatibilityReport.needsUpdate || compatibilityReport.needsUpdate.length === 0) {
       errorMessage.set('No mods available for update');
       setTimeout(() => errorMessage.set(''), 3000);
@@ -1590,43 +1589,70 @@
                   {#if modSyncStatus}                    <!-- Use new response structure with filtered acknowledgments -->
                     {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
                     {@const acknowledgments = filteredAcknowledgments || []}
-                    
-                    <!-- Dynamic title based on what needs to happen -->
-                    {#if modSyncStatus.needsDownload > 0 || actualRemovals.length > 0}
+                      <!-- Dynamic title based on what needs to happen -->
+                    {@const totalDownloadsNeeded = (modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0)}
+                    {#if totalDownloadsNeeded > 0 || actualRemovals.length > 0}
                       <h3>Mods Need Update</h3>
                     {:else if acknowledgments.length > 0}
                       <h3>Dependency Notifications</h3>
                     {:else}
-                      <h3>Mod Sync Required</h3>
-                    {/if}
-                    
+                      <h3>Mod Sync Required</h3>                    {/if}
+
                     <!-- Display appropriate message based on what needs to happen -->
-                    {#if modSyncStatus.needsDownload > 0 && actualRemovals.length > 0 && acknowledgments.length > 0}
-                      <p>{modSyncStatus.needsDownload} mod(s) need to be downloaded, {actualRemovals.length} mod(s) need to be removed, and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
-                    {:else if modSyncStatus.needsDownload > 0 && actualRemovals.length > 0}
-                      <p>{modSyncStatus.needsDownload} mod(s) need to be downloaded and {actualRemovals.length} mod(s) need to be removed.</p>
-                    {:else if modSyncStatus.needsDownload > 0 && acknowledgments.length > 0}
-                      <p>{modSyncStatus.needsDownload} mod(s) need to be downloaded and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
+                    {@const totalUpdatesNeeded = (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0)}
+                    {@const totalNewDownloads = (modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0)}
+                    
+                    {#if totalDownloadsNeeded > 0 && actualRemovals.length > 0 && acknowledgments.length > 0}
+                      <p>{totalDownloadsNeeded} mod(s) need attention ({totalUpdatesNeeded} updates, {totalNewDownloads} new), {actualRemovals.length} mod(s) need to be removed, and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
+                    {:else if totalDownloadsNeeded > 0 && actualRemovals.length > 0}
+                      <p>{totalDownloadsNeeded} mod(s) need attention ({totalUpdatesNeeded} updates, {totalNewDownloads} new) and {actualRemovals.length} mod(s) need to be removed.</p>
+                    {:else if totalDownloadsNeeded > 0 && acknowledgments.length > 0}
+                      <p>{totalDownloadsNeeded} mod(s) need attention ({totalUpdatesNeeded} updates, {totalNewDownloads} new) and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
                     {:else if actualRemovals.length > 0 && acknowledgments.length > 0}
                       <p>{actualRemovals.length} mod(s) need to be removed and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
-                    {:else if modSyncStatus.needsDownload > 0}
-                      <p>{modSyncStatus.needsDownload} out of {modSyncStatus.totalRequired || modSyncStatus.needsDownload} mods need to be downloaded.</p>
+                    {:else if totalDownloadsNeeded > 0}
+                      <p>{totalDownloadsNeeded} mod(s) need attention: {totalUpdatesNeeded} updates and {totalNewDownloads} new downloads.</p>
                     {:else if actualRemovals.length > 0}
                       <p>{actualRemovals.length} mod(s) need to be removed from your client.</p>
                     {:else if acknowledgments.length > 0}
                       <p>{acknowledgments.length} mod(s) are being kept as dependencies and need acknowledgment.</p>
                     {:else}
                       <p>Mod synchronization required.</p>
-                    {/if}                  {:else}
+                    {/if}{:else}
                     <h3>Mods Need Update</h3>
                     <p>Checking mod status...</p>
                   {/if}
-                  
-                  {#if modSyncStatus}
-                    <!-- New Downloads (Server-managed mods) -->
+                    {#if modSyncStatus}
+                    <!-- Required Mod Updates -->
+                    {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
+                      <div class="mod-changes-section">
+                        <h4>� Required Mod Updates:</h4>
+                        <ul class="mod-list">                          {#each modSyncStatus.outdatedMods as update, index (update.name || update.fileName || `req-update-${index}`)}
+                            <li class="mod-item mod-update">
+                              {update.name || update.fileName || 'Unknown Mod'} v{update.currentVersion} → v{update.newVersion}
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+
+                    <!-- Optional Mod Updates -->
+                    {#if modSyncStatus.outdatedOptionalMods && modSyncStatus.outdatedOptionalMods.length > 0}
+                      <div class="mod-changes-section">
+                        <h4>🔄 Optional Mod Updates:</h4>
+                        <ul class="mod-list">                          {#each modSyncStatus.outdatedOptionalMods as update, index (update.name || update.fileName || `opt-update-${index}`)}
+                            <li class="mod-item mod-update optional">
+                              {update.name || update.fileName || 'Unknown Mod'} v{update.currentVersion} → v{update.newVersion}
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+
+                    <!-- New Required Downloads -->
                     {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
                       <div class="mod-changes-section">
-                        <h4>📥 New Downloads:</h4>
+                        <h4>📥 New Required Downloads:</h4>
                         <ul class="mod-list">
                           {#each modSyncStatus.missingMods as modName (modName)}
                             <li class="mod-item new-download">{modName}</li>
@@ -1635,19 +1661,17 @@
                       </div>
                     {/if}
 
-                    <!-- Client Mod Updates -->
-                    {#if modSyncStatus.clientModChanges?.updates && modSyncStatus.clientModChanges.updates.length > 0}
+                    <!-- New Optional Downloads -->
+                    {#if modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0}
                       <div class="mod-changes-section">
-                        <h4>🔄 Mod Updates:</h4>
+                        <h4>📥 New Optional Downloads:</h4>
                         <ul class="mod-list">
-                          {#each modSyncStatus.clientModChanges.updates as update (update.name)}
-                            <li class="mod-item mod-update">
-                              {update.name} v{update.currentVersion} → {update.serverVersion}
-                            </li>
+                          {#each modSyncStatus.missingOptionalMods as modName (modName)}
+                            <li class="mod-item new-download optional">{modName}</li>
                           {/each}
                         </ul>
                       </div>
-                    {/if}                    <!-- Client Mod Removals - Use new response structure -->
+                    {/if}<!-- Client Mod Removals - Use new response structure -->
                     {#if (modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0)}
                       <div class="mod-changes-section">
                         <h4>❌ Mods to be Removed:</h4>
@@ -1670,34 +1694,35 @@
                             </li>
                           {/each}
                         </ul>
-                      </div>
-                    {/if}<!-- Legacy display for backwards compatibility -->                    {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
-                      <p class="outdated-mods">Outdated: {modSyncStatus.outdatedMods.join(', ')}</p>
-                    {/if}
-                  {/if}
-                    <!-- Show appropriate action button based on what's needed -->
-                  {#if modSyncStatus && modSyncStatus.needsDownload > 0}
-                    <button class="download-button" on:click={onDownloadModsClick}>
-                      📥 Download Required Mods ({modSyncStatus.needsDownload})
-                    </button>                  {:else if modSyncStatus && ((modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0) || (filteredAcknowledgments && filteredAcknowledgments.length > 0))}
-                    {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
-                    {@const acknowledgments = filteredAcknowledgments || []}
-                    
-                    {#if actualRemovals.length > 0}
+                      </div>                    {/if}                  {/if}
+
+                  <!-- Show appropriate action button based on what's needed -->
+                  {#if modSyncStatus}
+                    {@const totalDownloadsNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.missingOptionalMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
+                    {#if totalDownloadsNeeded > 0}
                       <button class="download-button" on:click={onDownloadModsClick}>
-                        🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
+                        📥 Download & Update Mods ({totalDownloadsNeeded})
+                      </button>
+                    {:else if ((modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0) || (filteredAcknowledgments && filteredAcknowledgments.length > 0))}
+                      {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
+                      {@const acknowledgments = filteredAcknowledgments || []}
+                      
+                      {#if actualRemovals.length > 0}
+                        <button class="download-button" on:click={onDownloadModsClick}>
+                          🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
+                        </button>
+                      {/if}
+                      
+                      {#if acknowledgments.length > 0}
+                        <button class="acknowledge-button" on:click={onAcknowledgeAllDependencies}>
+                          ✓ Acknowledge Dependencies ({acknowledgments.length})
+                        </button>
+                      {/if}
+                    {:else}
+                      <button class="download-button" on:click={onDownloadModsClick}>
+                        🔄 Synchronize Mods
                       </button>
                     {/if}
-                    
-                    {#if acknowledgments.length > 0}
-                      <button class="acknowledge-button" on:click={onAcknowledgeAllDependencies}>
-                        ✓ Acknowledge Dependencies ({acknowledgments.length})
-                      </button>
-                    {/if}
-                  {:else}
-                    <button class="download-button" on:click={onDownloadModsClick}>
-                      🔄 Synchronize Mods
-                    </button>
                   {/if}
                 </div>
               {:else if downloadStatus === 'downloading'}
@@ -1726,18 +1751,23 @@
                   <div class="sync-status error">
                     <h3>Mod Check Failed</h3>
                     <p>Unable to verify mod status. Please refresh and try again.</p>
-                  </div>                {:else if downloadStatus === 'ready'}
-                  <div class="sync-status ready">
+                  </div>                {:else if downloadStatus === 'ready'}                  <div class="sync-status ready">
                     <h3>✅ All Required Mods Ready</h3>
-                    {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
-                      <p>All required mods are installed and up to date.</p>
-                      <div class="optional-mods-notice">
-                        <span class="optional-icon">ℹ️</span>
-                        <span class="optional-text">
-                          {modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's are' : ' is'} available for download. 
-                          Check the <strong>Mods</strong> tab to download them.
-                        </span>
-                      </div>                    {:else}
+                    {#if modSyncStatus}
+                      {@const optionalAvailable = (modSyncStatus.missingOptionalMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
+                      {#if optionalAvailable > 0}
+                        <p>All required mods are installed and up to date.</p>
+                        <div class="optional-mods-notice">
+                          <span class="optional-icon">ℹ️</span>
+                          <span class="optional-text">
+                            {optionalAvailable} optional mod{optionalAvailable > 1 ? 's are' : ' is'} available for download. 
+                            Check the <strong>Mods</strong> tab to download them.
+                          </span>
+                        </div>
+                      {:else}
+                        <p>All mods are installed and up to date.</p>
+                      {/if}
+                    {:else}
                       <p>All mods are installed and up to date.</p>
                     {/if}
                   </div>
@@ -1896,7 +1926,7 @@
             if (e.detail.synchronized) {
               downloadStatus = 'ready';            } else {
               // Check if downloads or removals are needed
-              const hasDownloads = e.detail.needsDownload > 0;
+              const hasDownloads = ((e.detail.missingMods?.length || 0) + (e.detail.outdatedMods?.length || 0) + (e.detail.missingOptionalMods?.length || 0) + (e.detail.outdatedOptionalMods?.length || 0)) > 0;
               const hasRemovals = ((e.detail.fullSyncResult?.requiredRemovals?.length || 0) + (e.detail.fullSyncResult?.optionalRemovals?.length || 0) + (e.detail.fullSyncResult?.acknowledgments?.length || 0)) > 0;
               
               if (hasDownloads || hasRemovals) {
@@ -2205,12 +2235,23 @@
     border: 1px solid rgba(59, 130, 246, 0.3);
     color: #60a5fa;
   }
-
   .mod-item.mod-update {
     background-color: rgba(245, 158, 11, 0.1);
     border: 1px solid rgba(245, 158, 11, 0.3);
     color: #fbbf24;
-  }  .mod-item.mod-removal {
+  }
+
+  .mod-item.optional {
+    opacity: 0.8;
+    border-style: dashed;
+  }
+
+  .mod-item.optional::after {
+    content: " (Optional)";
+    font-size: 0.7rem;
+    color: #9ca3af;
+    margin-left: 0.5rem;
+  }.mod-item.mod-removal {
     background-color: rgba(239, 68, 68, 0.1);
     border: 1px solid rgba(239, 68, 68, 0.3);
     color: #f87171;

@@ -5,12 +5,16 @@ const axios = require('axios');
 const AdmZip = require('adm-zip');
 
 async function extractDependenciesFromJar(jarPath) {
+  console.log(`[DEBUG] Extracting metadata from: ${jarPath}`);
   try {
     try {
       await fs.access(jarPath);
     } catch {
+      console.log(`[DEBUG] File does not exist: ${jarPath}`);
       throw new Error(`Mod file does not exist: ${jarPath}`);
-    }    try {
+    }
+
+    try {
       const zip = new AdmZip(jarPath);
       const zipEntries = zip.getEntries();
 
@@ -21,14 +25,18 @@ async function extractDependenciesFromJar(jarPath) {
       );
 
       if (fabricEntry) {
-        const content = fabricEntry.getData().toString('utf8');        try {
+        const content = fabricEntry.getData().toString('utf8');
+        console.log(`[DEBUG] Found fabric.mod.json in ${path.basename(jarPath)}`);
+        try {
           const metadata = JSON.parse(content);
+          console.log(`[DEBUG] Parsed metadata - name: ${metadata.name}, version: ${metadata.version}, id: ${metadata.id}`);
           metadata.loaderType = metadata.loaderType || 'fabric';
           metadata.projectId = metadata.projectId || metadata.id;
           metadata.authors = metadata.authors || (metadata.author ? [metadata.author] : (metadata.contributors ? Object.keys(metadata.contributors) : []));
           metadata.name = metadata.name || metadata.id;
           return metadata;
-        } catch {
+        } catch (parseError) {
+          console.log(`[DEBUG] Failed to parse fabric.mod.json: ${parseError.message}`);
           return null;
         }
       }
