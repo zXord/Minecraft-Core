@@ -542,21 +542,17 @@ function createModHandlers(win) {
     'check-client-mod-compatibility': async (_event, options) => {
       try {
         const { newMinecraftVersion, clientPath } = options;
-        
-        if (!clientPath || !fs.existsSync(clientPath)) {
+          if (!clientPath || !fs.existsSync(clientPath)) {
           throw new Error('Invalid client path provided');
         }
-          // Get client mod info with versions already extracted (no JAR re-reading!)
-        const clientModInfo = await modFileManager.getClientInstalledModInfo(clientPath);
         
-        console.log('🔍 [COMPATIBILITY CHECK] Client mod info from file manager:', clientModInfo);
+        // Get client mod info with versions already extracted (no JAR re-reading!)
+        const clientModInfo = await modFileManager.getClientInstalledModInfo(clientPath);
         
         // Check compatibility for each mod
         const compatibilityResults = [];
-          for (const modInfo of clientModInfo) {
+        for (const modInfo of clientModInfo) {
           try {
-            console.log('🔍 [COMPATIBILITY CHECK] Processing mod:', modInfo);
-            
             let compatibilityStatus = 'unknown';
             let reason = '';
             let availableUpdate = null;
@@ -568,8 +564,6 @@ function createModHandlers(win) {
               projectId: modInfo.projectId,
               fileName: modInfo.fileName
             };
-            
-            console.log('🔍 [COMPATIBILITY CHECK] Metadata for', modInfo.fileName, ':', metadata);
             
             // For now, we'll use filename-based checking since we don't have gameVersions
             // in the basic mod metadata. This is much more efficient than JAR extraction.
