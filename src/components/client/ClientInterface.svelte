@@ -319,18 +319,27 @@
         
         // Remove any mods that were deleted on the server
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-          removeServerManagedFiles(result.successfullyRemovedMods);        }
-          if (result.synchronized) {
-          downloadStatus = 'ready';
-        } else {          // If we just had a successful download (wasReady), be more conservative
+          removeServerManagedFiles(result.successfullyRemovedMods);        }        if (result.synchronized) {          // Backend considers it "synchronized" based on required mods only
+          // But we should also check if optional mods need updates (exclude new optional downloads)
+          const hasRequiredUpdates = ((result.missingMods?.length || 0) + (result.outdatedMods?.length || 0)) > 0;
+          const hasOptionalUpdates = (result.outdatedOptionalMods?.length || 0) > 0;
+          
+          if (hasRequiredUpdates || hasOptionalUpdates) {
+            downloadStatus = 'needed'; // Show as needed if ANY existing mods need updates
+          } else {
+            downloadStatus = 'ready'; // Only truly ready if no existing mods need attention
+          }
+        } else {
+          // If we just had a successful download (wasReady), be more conservative
           // Only change to 'needed' if there are actually missing mods OR removals needed
-          const hasDownloads = ((result.missingMods?.length || 0) + (result.outdatedMods?.length || 0) + (result.missingOptionalMods?.length || 0) + (result.outdatedOptionalMods?.length || 0)) > 0;
+          const hasRequiredUpdates = ((result.missingMods?.length || 0) + (result.outdatedMods?.length || 0)) > 0;
+          const hasOptionalUpdates = (result.outdatedOptionalMods?.length || 0) > 0;
           const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0) + (filteredAcknowledgments?.length || 0)) > 0;
           
-          if (wasReady && !hasDownloads && !hasRemovals) {
+          if (wasReady && !hasRequiredUpdates && !hasOptionalUpdates && !hasRemovals) {
             downloadStatus = 'ready'; // Keep ready status if no actions needed
           } else {
-            downloadStatus = 'needed'; // Show as needed if downloads OR removals required
+            downloadStatus = 'needed'; // Show as needed if updates OR removals required
           }
           
           if (hasRemovals) {
@@ -656,12 +665,59 @@
     currentDownloadFile = '';    fileProgress = 0;
     
     // Set downloading status to show immediate feedback
-    downloadStatus = 'downloading';
-    
-    try {      const result = await window.electron.invoke('minecraft-download-mods', {
+    downloadStatus = 'downloading';    try {
+      // Prepare mods for bulk update - get full mod data with download URLs
+      const modsNeedingUpdates = [];
+      const optionalModsNeedingUpdates = [];
+      
+      // Helper function to find full mod data by filename
+      const findFullModData = (fileName) => {
+        // Search in requiredMods first
+        let fullMod = requiredMods?.find(m => m.fileName === fileName);
+        if (fullMod) return fullMod;
+        
+        // Search in serverInfo.allClientMods
+        fullMod = serverInfo?.allClientMods?.find(m => m.fileName === fileName);
+        return fullMod;
+      };
+      
+      // Add outdated required mods (with full data)
+      if (modSyncStatus?.outdatedMods) {
+        for (const outdatedMod of modSyncStatus.outdatedMods) {
+          const fullModData = findFullModData(outdatedMod.fileName);
+          if (fullModData && fullModData.downloadUrl) {
+            modsNeedingUpdates.push(fullModData);
+          }
+        }
+      }
+      
+      // Add missing required mods (these should already have full data)
+      if (modSyncStatus?.missingMods) {
+        for (const missingMod of modSyncStatus.missingMods) {
+          const fullModData = findFullModData(missingMod.fileName || missingMod);
+          if (fullModData && fullModData.downloadUrl) {
+            modsNeedingUpdates.push(fullModData);
+          }
+        }
+      }
+      
+      // Add outdated optional mods (with full data)
+      if (modSyncStatus?.outdatedOptionalMods) {
+        for (const outdatedOptionalMod of modSyncStatus.outdatedOptionalMods) {
+          const fullModData = findFullModData(outdatedOptionalMod.fileName);
+          if (fullModData && fullModData.downloadUrl) {
+            optionalModsNeedingUpdates.push(fullModData);
+          }
+        }
+      }
+      
+      // Note: We don't include missingOptionalMods because those are new optional mods, not updates
+      
+      const result = await window.electron.invoke('minecraft-download-mods', {
         clientPath: instance.path,
-        requiredMods,
-        allClientMods: (serverInfo?.allClientMods && serverInfo.allClientMods.length > 0) ? serverInfo.allClientMods : requiredMods,
+        requiredMods: modsNeedingUpdates,
+        optionalMods: optionalModsNeedingUpdates,
+        allClientMods: (serverInfo?.allClientMods && serverInfo.allClientMods.length > 0) ? serverInfo.allClientMods : [...modsNeedingUpdates, ...optionalModsNeedingUpdates],
         serverInfo: {
           serverIp: instance.serverIp,
           serverPort: instance.serverPort
@@ -1662,9 +1718,11 @@
                     {/if}
 
                     <!-- New Optional Downloads -->
-                    {#if modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0}
-                      <div class="mod-changes-section">
+                    {#if modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0}                      <div class="mod-changes-section">
                         <h4>📥 New Optional Downloads:</h4>
+                        <p class="clarification-note">
+                          <em>Note: New optional mods must be downloaded individually from the Mods tab. They are not included in bulk updates.</em>
+                        </p>
                         <ul class="mod-list">
                           {#each modSyncStatus.missingOptionalMods as modName (modName)}
                             <li class="mod-item new-download optional">{modName}</li>
@@ -1694,14 +1752,11 @@
                             </li>
                           {/each}
                         </ul>
-                      </div>                    {/if}                  {/if}
-
-                  <!-- Show appropriate action button based on what's needed -->
-                  {#if modSyncStatus}
-                    {@const totalDownloadsNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.missingOptionalMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
-                    {#if totalDownloadsNeeded > 0}
+                      </div>                    {/if}                  {/if}                  <!-- Show appropriate action button based on what's needed -->                  {#if modSyncStatus}
+                    {@const totalUpdatesNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
+                    {#if totalUpdatesNeeded > 0}
                       <button class="download-button" on:click={onDownloadModsClick}>
-                        📥 Download & Update Mods ({totalDownloadsNeeded})
+                        📥 Download & Update Mods ({totalUpdatesNeeded})
                       </button>
                     {:else if ((modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0) || (filteredAcknowledgments && filteredAcknowledgments.length > 0))}
                       {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
@@ -2206,12 +2261,21 @@
     border-radius: 0.5rem;
     border-left: 3px solid #3b82f6;
   }
-
   .mod-changes-section h4 {
     margin: 0 0 0.5rem 0;
     font-size: 0.9rem;
     font-weight: 600;
     color: #e2e8f0;
+  }
+
+  .clarification-note {
+    margin: 0 0 0.75rem 0;
+    padding: 0.5rem;
+    font-size: 0.75rem;
+    background-color: rgba(168, 85, 247, 0.1);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    border-radius: 0.25rem;
+    color: #c4b5fd;
   }
 
   .mod-list {
