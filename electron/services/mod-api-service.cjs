@@ -28,6 +28,13 @@ async function rateLimit() {
 const versionCache = new Map();
 
 /**
+ * Clear the version cache - useful when checking compatibility for different versions
+ */
+function clearVersionCache() {
+  versionCache.clear();
+}
+
+/**
  * Helper function to convert our sort options to Modrinth API format
  * @param {string} sortBy - Sort option
  * @returns {string} - Converted sort option
@@ -476,32 +483,10 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
   if (loader) {
     compatibleVersions = compatibleVersions.filter(v => v.loaders.includes(loader));
   }  if (gameVersion) {
-    // For debugging: let's see what versions are available before filtering
-    console.log(`🔍 API: Sample of available versions before filtering:`, 
-      versions.slice(0, 5).map(v => ({
-        version: v.version_number,
-        gameVersions: v.game_versions,
-        datePublished: v.date_published
-      }))
-    );
-    
     // Strict game version matching - only exact matches for the current version
     compatibleVersions = compatibleVersions.filter(v => {
       return v.game_versions.includes(gameVersion);
     });
-    
-    console.log(`🔍 API: Filtered to ${compatibleVersions.length} compatible versions for ${gameVersion} (from ${versions.length} total)`);
-    
-    // Show what versions we kept
-    if (compatibleVersions.length > 0) {
-      console.log(`🔍 API: Compatible versions:`, 
-        compatibleVersions.slice(0, 3).map(v => ({
-          version: v.version_number,
-          gameVersions: v.game_versions,
-          datePublished: v.date_published
-        }))
-      );
-    }
   }
     
     // Map to a more user-friendly format
@@ -602,27 +587,21 @@ async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader)
  * @returns {Promise<Object>} Version info object
  */
 async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
-  console.log(`🔍 API: Getting latest version for project "${projectId}" (MC: ${gameVersion}, Loader: ${loader})`);
   try {
     // Get ALL compatible versions, not just the latest one, so we can find newer versions
     const versions = await getModrinthVersions(projectId, loader, gameVersion, false);
-    console.log(`📦 API: Found ${versions?.length || 0} versions for "${projectId}"`);
     if (!versions || versions.length === 0) {
-      console.log(`❌ API: No versions found for "${projectId}"`);
       // No versions found, treat as no update available
       return null;
     }
     
     // Find the newest version (versions are already sorted by date, newest first)
     const latestVersion = versions[0];
-    console.log(`🔍 API: Latest version ID for "${projectId}": ${latestVersion.id} (${latestVersion.versionNumber})`);
     
     try {
       const latestVersionInfo = await getModrinthVersionInfo(projectId, latestVersion.id, gameVersion, loader);
-      console.log(`✅ API: Latest version for "${projectId}": ${latestVersionInfo?.version_number}`);
       return latestVersionInfo;
     } catch (err) {
-      console.log(`⚠️  API: Error getting version info for "${projectId}":`, err.message);
       // Skip on not found or no matching versions
       if (err.message.includes('Mod not found on Modrinth') || err.message.includes('No matching versions found')) {
         return null;
@@ -630,7 +609,6 @@ async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
       throw err;
     }
   } catch (err) {
-    console.log(`❌ API: Error getting versions for "${projectId}":`, err.message);
     if (err.message.includes('Mod not found on Modrinth') || err.message.includes('No matching versions found')) {
       return null;
     }
@@ -696,6 +674,7 @@ async function getCurseForgeDownloadUrl() {
 
 module.exports = {
   rateLimit,
+  clearVersionCache,
   convertSortToModrinthFormat,
   getModrinthPopular,
   searchModrinthMods,

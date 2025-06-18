@@ -153,13 +153,10 @@
     let displayMods = requiredMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
       // Add mods that need removal from the new response structure
     if (modSyncStatus?.requiredRemovals) {
-      // console.log('[DEBUG-REQUIRED] Required removals:', modSyncStatus.requiredRemovals);
       
       for (const removal of modSyncStatus.requiredRemovals) {
-        // console.log('[DEBUG-REQUIRED] Processing required removal:', removal.fileName);
         // Check if this mod is not already in the display list
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === removal.fileName.toLowerCase());
-        // console.log('[DEBUG-REQUIRED] Mod exists in display:', existsInDisplay);
         
         if (!existsInDisplay) {
           // Create a mod object for the removal and add it to display list
@@ -183,9 +180,7 @@
     }
       // Add mods that need acknowledgment from the new response structure
     if (modSyncStatus?.acknowledgments) {
-      // console.log('[DEBUG-REQUIRED] Acknowledgments:', modSyncStatus.acknowledgments);
         for (const ack of modSyncStatus.acknowledgments) {
-        // console.log('[DEBUG-REQUIRED] Processing acknowledgment:', ack.fileName);
         // Check if this mod is not already in the display list and not already acknowledged
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === ack.fileName.toLowerCase());
         const isAlreadyAcknowledged = acknowledgedDeps.has(ack.fileName.toLowerCase());
@@ -216,10 +211,8 @@
   $: displayOptionalMods = (() => {
     let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));    // Add mods that need removal from the new response structure
     if (modSyncStatus?.optionalRemovals) {
-      // console.log('[DEBUG-OPTIONAL] Optional removals:', modSyncStatus.optionalRemovals);
       
       for (const removal of modSyncStatus.optionalRemovals) {
-        // console.log('[DEBUG-OPTIONAL] Processing optional removal:', removal.fileName);
         // Check if this mod is not already in the display list
         const existingIndex = mods.findIndex(m => m.fileName.toLowerCase() === removal.fileName.toLowerCase());
         
@@ -276,7 +269,6 @@
         );
       }
     } catch (error) {
-      console.warn('[ClientModManager] Failed to load acknowledged dependencies:', error);
     }
   }
 
@@ -431,7 +423,6 @@
               acknowledgedDeps = new Set<string>(persistedAcks);
             }
           } catch (err) {
-            console.warn('Could not load acknowledged dependencies:', err);
           }          // serverManagedFiles should keep track of any mods that were
           // previously managed by the server until the user removes or
           // acknowledges them. Track all server mods but respect explicit removals.
@@ -527,7 +518,6 @@
             );
           }
         } catch (err) {
-          console.warn('Could not refresh acknowledged dependencies after sync:', err);
         }
         
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
@@ -1158,7 +1148,6 @@
     optionalMods = optionalMods.filter(m => m.fileName.toLowerCase() !== lowerModFileName);
     allClientMods = allClientMods.filter(m => m.fileName.toLowerCase() !== lowerModFileName);
     
-    console.log('Force cleaned up mod:', modFileName);
   }
 
   // ...existing code...

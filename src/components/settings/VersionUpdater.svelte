@@ -144,9 +144,9 @@
           } catch (error) {
           }
         }
-        
-        // Check dependencies for compatibility issues
-        if (mod.dependencies && mod.dependencies.length > 0) {
+          // Check dependencies for compatibility issues only if the mod is already compatible
+        // Don't override the backend's compatibility decision
+        if (mod.compatible && mod.dependencies && mod.dependencies.length > 0) {
           const issues = await checkDependencyCompatibility(mod.dependencies, mod.projectId);
           if (issues.length > 0) {
             incompatible = true;
@@ -334,15 +334,26 @@
             {/each}
           </ul>
         </div>
-      {/if}
-
-      <!-- Compatible Mods (without updates) -->
+      {/if}      <!-- Compatible Mods (without updates) -->
       {#if compatibleMods.length > modsWithUpdates.length}
         <div class="compat-results success">
           <h4>✅ Compatible Mods ({compatibleMods.length - modsWithUpdates.length})</h4>
           <div class="mod-summary">
             {compatibleMods.length - modsWithUpdates.length} mod{compatibleMods.length - modsWithUpdates.length === 1 ? '' : 's'} will continue to work without changes
           </div>
+          <ul class="compatible-mods-list">
+            {#each compatibleMods as mod (mod.name)}
+              {#if !mod.updateAvailable}
+                <li class="compatible-mod-item">
+                  <span class="mod-name">{mod.name}</span>
+                  {#if mod.currentVersion}
+                    <span class="mod-version">v{mod.currentVersion}</span>
+                  {/if}
+                  <span class="compatible-status">✅ Compatible</span>
+                </li>
+              {/if}
+            {/each}
+          </ul>
         </div>
       {/if}
 
@@ -637,13 +648,12 @@
     list-style: none;
     padding: 0;
     margin: 0;
-  }
-  .mod-updates-list, .incompatible-mods-list {
+  }  .mod-updates-list, .incompatible-mods-list, .compatible-mods-list {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
   }
-  .mod-update-item, .incompatible-mod-item {
+  .mod-update-item, .incompatible-mod-item, .compatible-mod-item {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -673,6 +683,11 @@
     color: #ff8a65;
     font-size: 0.85rem;
     font-style: italic;
+  }
+  .compatible-status {
+    color: #4caf50;
+    font-size: 0.85rem;
+    font-weight: 500;
   }
   .compatibility-summary {
     margin-top: 1rem;
