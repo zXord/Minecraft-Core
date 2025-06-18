@@ -79,79 +79,8 @@ function isApiGeneratedName(fileName) {
   return apiPatterns.some(pattern => pattern.test(baseName));
 }
 
-/**
- * Clean up mod filenames by extracting clean names from JAR metadata
- * @param {string} modsDir - The mods directory path
- * @param {function} extractMetadata - Function to extract JAR metadata
- * @returns {Promise<{success: boolean, renamed: string[], errors: string[]}>}
- */
-async function cleanupModFilenames(modsDir, extractMetadata) {
-  const renamed = [];
-  const errors = [];
-  
-  try {
-    if (!fs.existsSync(modsDir)) {
-      return { success: true, renamed, errors };
-    }
-    
-    const files = fs.readdirSync(modsDir).filter(file => 
-      file.endsWith('.jar') && isApiGeneratedName(file)
-    );
-    
-    for (const fileName of files) {
-      try {
-        const filePath = path.join(modsDir, fileName);
-        const metadata = await extractMetadata(filePath);
-        
-        if (metadata && metadata.name) {
-          // Generate clean filename
-          const cleanBase = metadata.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-          const cleanFileName = /\.jar$/i.test(cleanBase) ? cleanBase : `${cleanBase}.jar`;
-          
-          // Only rename if the clean name is different and doesn't already exist
-          if (cleanFileName !== fileName) {
-            const cleanFilePath = path.join(modsDir, cleanFileName);
-            
-            if (!fs.existsSync(cleanFilePath)) {
-              fs.renameSync(filePath, cleanFilePath);
-              renamed.push(`${fileName} → ${cleanFileName}`);
-              
-              // Also rename any associated manifest files
-              const manifestsDir = path.join(path.dirname(modsDir), 'minecraft-core-manifests');
-              const oldManifestPath = path.join(manifestsDir, `${fileName}.json`);
-              const newManifestPath = path.join(manifestsDir, `${cleanFileName}.json`);
-              
-              if (fs.existsSync(oldManifestPath)) {
-                try {
-                  // Update manifest content to reflect new filename
-                  const manifestContent = fs.readFileSync(oldManifestPath, 'utf8');
-                  const manifest = JSON.parse(manifestContent);
-                  manifest.fileName = cleanFileName;
-                  fs.writeFileSync(newManifestPath, JSON.stringify(manifest, null, 2));
-                  fs.unlinkSync(oldManifestPath);
-                } catch {
-                  // If manifest update fails, just move it
-                  fs.renameSync(oldManifestPath, newManifestPath);
-                }
-              }
-            }
-          }
-        }
-      } catch (error) {
-        errors.push(`Failed to process ${fileName}: ${error.message}`);
-      }
-    }
-    
-    return { success: true, renamed, errors };
-  } catch (error) {
-    errors.push(`Failed to cleanup mod filenames: ${error.message}`);
-    return { success: false, renamed, errors };
-  }
-}
-
 module.exports = {
   disableMod,
   enableMod,
-  isApiGeneratedName,
-  cleanupModFilenames
+  isApiGeneratedName
 };

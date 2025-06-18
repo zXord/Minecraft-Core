@@ -1456,55 +1456,7 @@ function createModHandlers(win) {
         return { success: true, disabledCount };
       } catch (error) {        return { success: false, error: error.message };
       }
-    },
-
-    // Clean up mod filenames to use clean names from JAR metadata
-    'cleanup-mod-filenames': async (_event, { serverPath }) => {
-      try {
-        if (!serverPath) {
-          return { success: false, error: 'Server path not provided' };
-        }
-
-        const { cleanupModFilenames } = require('./mod-utils/mod-file-utils.cjs');
-        
-        // Clean up both server and client mods
-        const serverModsDir = path.join(serverPath, 'mods');
-        const clientModsDir = path.join(serverPath, 'client', 'mods');
-        
-        const results = [];
-        
-        // Clean up server mods
-        if (fs.existsSync(serverModsDir)) {
-          const serverResult = await cleanupModFilenames(serverModsDir, modAnalysisUtils.extractDependenciesFromJar);
-          if (serverResult.renamed.length > 0) {
-            results.push(`Server mods: ${serverResult.renamed.join(', ')}`);
-          }
-          if (serverResult.errors.length > 0) {
-            results.push(`Server errors: ${serverResult.errors.join(', ')}`);
-          }
-        }
-        
-        // Clean up client mods
-        if (fs.existsSync(clientModsDir)) {
-          const clientResult = await cleanupModFilenames(clientModsDir, modAnalysisUtils.extractDependenciesFromJar);
-          if (clientResult.renamed.length > 0) {
-            results.push(`Client mods: ${clientResult.renamed.join(', ')}`);
-          }
-          if (clientResult.errors.length > 0) {
-            results.push(`Client errors: ${clientResult.errors.join(', ')}`);
-          }
-        }
-        
-        return { 
-          success: true, 
-          message: results.length > 0 ? results.join(' | ') : 'No mods needed cleanup'
-        };
-      } catch (error) {
-        return { success: false, error: error.message };
-      }
-    },
-
-    // Enhance mod data with clean names extracted from JAR files
+    },    // Enhance mod data with clean names extracted from JAR files
     'enhance-mod-names': async (_event, { clientPath, mods }) => {
       try {
         if (!mods || !Array.isArray(mods)) {

@@ -1158,61 +1158,10 @@
       setTimeout(() => errorMessage.set(''), 5000);
       installingModIds.update(ids => {
         ids.delete(modForInstall.id);
-        return ids;
-      });
+        return ids;      });
     }
   }
-  // Clean up mod filenames to use clean names from JAR metadata
-  async function cleanupModFilenames() {
-    if (!instance?.serverIp || !instance?.serverPort) {
-      errorMessage.set('Server connection information not available');
-      setTimeout(() => errorMessage.set(''), 5000);
-      return;
-    }
-
-    try {
-      // First get the server path from the management server
-      const serverPath = await getServerPath();
-      if (!serverPath) {
-        errorMessage.set('Could not determine server path');
-        setTimeout(() => errorMessage.set(''), 5000);
-        return;
-      }
-
-      const result = await window.electron.invoke('cleanup-mod-filenames', {
-        serverPath: serverPath
-      });
-
-      if (result.success) {
-        successMessage.set(result.message || 'Mod filenames cleaned up successfully');
-        setTimeout(() => successMessage.set(''), 5000);
-        
-        // Refresh the mod lists to show updated names
-        await refreshMods();
-      } else {
-        errorMessage.set(result.error || 'Failed to cleanup mod filenames');
-        setTimeout(() => errorMessage.set(''), 5000);
-      }
-    } catch (error) {
-      console.error('Error cleaning up mod filenames:', error);
-      errorMessage.set('Error cleaning up mod filenames: ' + error.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
-  }
-
-  // Helper function to get server path from management server
-  async function getServerPath() {
-    try {
-      const response = await fetch(`http://${instance.serverIp}:${instance.serverPort}/api/test`);
-      if (response.ok) {
-        const data = await response.json();
-        return data.serverPath;
-      }
-    } catch (error) {
-      console.error('Failed to get server path:', error);
-    }
-    return null;
-  }  // Update an individual server-managed mod
+  // Update an individual server-managed mod
   async function updateServerMod(event) {
     const { fileName, name, currentVersion, newVersion, mod } = event.detail;
     
@@ -1307,9 +1256,7 @@
         {isLoadingMods ? '⏳ Loading...' : '🔄 Refresh'}
       </button>
       
-      <button class="cleanup-button" on:click={cleanupModFilenames} disabled={isLoadingMods}>
-        🧹 Clean Filenames
-      </button>{#if modSyncStatus && !modSyncStatus.synchronized}
+      {#if modSyncStatus && !modSyncStatus.synchronized}
         <!-- Use same logic as Play tab for consistent button text -->
         {#if modSyncStatus.needsDownload > 0}
           <button class="download-button" on:click={downloadRequiredMods}>
@@ -1507,7 +1454,7 @@
     gap: 1rem;
     flex-wrap: wrap;
   }
-  .refresh-button, .download-button, .retry-button, .cleanup-button {
+  .refresh-button, .download-button, .retry-button {
     padding: 0.5rem 1rem;
     border: none;
     border-radius: 6px;
@@ -1529,21 +1476,6 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-
-  .cleanup-button {
-    background-color: #059669;
-    color: white;
-  }
-
-  .cleanup-button:hover:not(:disabled) {
-    background-color: #047857;
-  }
-
-  .cleanup-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   .download-button {
     background-color: #3b82f6;
     color: white;
