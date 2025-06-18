@@ -1,5 +1,6 @@
 // Mod management IPC handlers
 const fs = require('fs');
+const fsPromises = require('fs').promises;
 const path = require('path'); // Added path import
 const { dialog, app } = require('electron'); // For dialogs & app paths
 
@@ -1051,10 +1052,9 @@ function createModHandlers(win) {
             throw new Error(`Mod file not found: ${fileName}`);
           }
         }
-        
-        // Generate new filename with version if provided
-        const baseName = fileName.replace(/\.jar$/i, '');
-        const newFileName = newVersion ? `${baseName}-${newVersion}.jar` : fileName;
+          // **FIX**: Keep the original filename instead of appending version
+        // This maintains consistency with the original installation naming
+        const newFileName = fileName; // Keep the same filename
         const targetPath = path.join(modsDir, newFileName + (isDisabled ? '.disabled' : ''));
         
         // Download the new version
@@ -1068,10 +1068,25 @@ function createModHandlers(win) {
             'User-Agent': 'MinecraftModManager/1.0'
           }
         });
+          await pipelineAsync(response.data, writer);
         
-        await pipelineAsync(response.data, writer);
+        // **FIX**: Update the manifest file with new version information
+        try {
+          const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
+          if (fs.existsSync(manifestPath)) {
+            const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
+            const manifest = JSON.parse(manifestContent);
+            // Update the version in the manifest
+            manifest.versionNumber = newVersion;
+            manifest.updatedAt = new Date().toISOString();
+            await fsPromises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+            console.log(`📋 Updated manifest for ${fileName} with new version: ${newVersion}`);
+          }
+        } catch (manifestError) {
+          console.warn(`⚠️ Could not update manifest for ${fileName}:`, manifestError.message);
+        }
         
-        // Remove old file if name changed
+        // Remove old file if it's different (shouldn't be different now, but keeping for safety)
         if (currentFilePath !== targetPath && fs.existsSync(currentFilePath)) {
           fs.unlinkSync(currentFilePath);
         }
@@ -1105,12 +1120,11 @@ function createModHandlers(win) {
         const enabledFiles = allFiles.filter(f => f.endsWith('.jar') && !f.endsWith('.disabled'));
         const disabledFiles = allFiles.filter(f => f.endsWith('.jar.disabled'))
           .map(f => f.replace('.disabled', ''));
-        
-        const updates = [];
+          const updates = [];
         const serverManagedFilesSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
-        // Known problematic project IDs to skip
-        const badIds = ['forgeconfigapiport','xaerominimap'];
-          // Process enabled mods
+        // Known problematic project IDs to skip - REMOVED to allow proper update checking
+        // const badIds = ['forgeconfigapiport','xaerominimap'];
+        const badIds = []; // Empty array to allow all mods to be checked// Process enabled mods
         for (const fileName of enabledFiles) {
           if (serverManagedFilesSet.has(fileName.toLowerCase())) continue;
 
@@ -1118,11 +1132,34 @@ function createModHandlers(win) {
           let metadata, currentVersion = 'Unknown';
           try {
             metadata = await readModMetadata(filePath);
-            currentVersion = metadata?.version || 'Unknown';
-            
+            currentVersion = metadata?.version || 'Unknown';            // **FIX**: Try to get version from manifest file if available for better accuracy
+            if (metadata && metadata.projectId) {
+              const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
+              console.log(`🔍 Checking manifest for ${fileName} at: ${manifestPath}`);
+              try {
+                const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
+                const manifest = JSON.parse(manifestContent);
+                console.log(`📋 Manifest content for ${fileName}:`, { projectId: manifest.projectId, versionNumber: manifest.versionNumber, metadataProjectId: metadata.projectId });
+                
+                // **FIX**: Use manifest data if available, regardless of project ID mismatch
+                // The manifest has the correct Modrinth project ID and version
+                if (manifest.projectId && manifest.versionNumber) {
+                  // Override metadata with manifest data for accurate version checking
+                  metadata.projectId = manifest.projectId;
+                  currentVersion = manifest.versionNumber;
+                  console.log(`🔧 Using manifest data for ${fileName}: projectId=${manifest.projectId}, version=${currentVersion} (JAR version was: ${metadata?.version})`);
+                } else {
+                  console.log(`⚠️ Manifest missing projectId or versionNumber: projectId=${manifest.projectId}, versionNumber=${manifest.versionNumber}`);
+                }
+              } catch (manifestError) {
+                // Manifest doesn't exist or is corrupted, use JAR metadata version
+                console.log(`📦 No manifest found for ${fileName} (${manifestError.message}), using JAR metadata version: ${currentVersion}`);
+              }
+            }
             console.log(`🔍 DEBUG: Checking mod "${fileName}":`, {
               projectId: metadata?.projectId,
-              currentVersion: metadata?.version,
+              currentVersion: currentVersion,
+              jarVersion: metadata?.version,
               loaderType: metadata?.loaderType,
               name: metadata?.name
             });
@@ -1153,12 +1190,11 @@ function createModHandlers(win) {
                 });
                   const latestVersion = sortedVersions[0];
                 console.log(`🔍 Latest version for "${metadata.projectId}": ${latestVersion.versionNumber} (current: ${metadata.version})`);
-                
-                // Use EXACT same comparison logic as server-side checkForUpdate function
-                if (latestVersion && latestVersion.versionNumber !== metadata.version) {
+                  // Use EXACT same comparison logic as server-side checkForUpdate function
+                if (latestVersion && latestVersion.versionNumber !== currentVersion) {
                   // Check if the latest version is actually newer using semantic versioning
-                  const versionComparison = compareVersions(latestVersion.versionNumber, metadata.version);
-                  console.log(`🔍 Version comparison: ${latestVersion.versionNumber} vs ${metadata.version} = ${versionComparison}`);
+                  const versionComparison = compareVersions(latestVersion.versionNumber, currentVersion);
+                  console.log(`🔍 Version comparison: ${latestVersion.versionNumber} vs ${currentVersion} = ${versionComparison}`);
                   
                   if (versionComparison > 0) {
                   // Get the actual version info for download URL
@@ -1195,14 +1231,35 @@ function createModHandlers(win) {
         
         // Process disabled mods
         for (const fileName of disabledFiles) {
-          if (serverManagedFilesSet.has(fileName.toLowerCase())) continue;
-
-          const filePath = path.join(modsDir, fileName + '.disabled');
+          if (serverManagedFilesSet.has(fileName.toLowerCase())) continue;          const filePath = path.join(modsDir, fileName + '.disabled');
           let metadata;
           let currentVersion = 'Unknown';
           try {
             metadata = await readModMetadata(filePath);
-            currentVersion = metadata?.version || 'Unknown';
+            currentVersion = metadata?.version || 'Unknown';            // **FIX**: Try to get version from manifest file if available for better accuracy
+            if (metadata && metadata.projectId) {
+              const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
+              console.log(`🔍 Checking manifest for disabled ${fileName} at: ${manifestPath}`);
+              try {
+                const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
+                const manifest = JSON.parse(manifestContent);
+                console.log(`📋 Manifest content for disabled ${fileName}:`, { projectId: manifest.projectId, versionNumber: manifest.versionNumber, metadataProjectId: metadata.projectId });
+                
+                // **FIX**: Use manifest data if available, regardless of project ID mismatch
+                // The manifest has the correct Modrinth project ID and version
+                if (manifest.projectId && manifest.versionNumber) {
+                  // Override metadata with manifest data for accurate version checking
+                  metadata.projectId = manifest.projectId;
+                  currentVersion = manifest.versionNumber;
+                  console.log(`🔧 Using manifest data for disabled ${fileName}: projectId=${manifest.projectId}, version=${currentVersion} (JAR version was: ${metadata?.version})`);
+                } else {
+                  console.log(`⚠️ Manifest missing projectId or versionNumber for disabled ${fileName}: projectId=${manifest.projectId}, versionNumber=${manifest.versionNumber}`);
+                }
+              } catch (manifestError) {
+                // Manifest doesn't exist or is corrupted, use JAR metadata version
+                console.log(`📦 No manifest found for disabled ${fileName} (${manifestError.message}), using JAR metadata version: ${currentVersion}`);
+              }
+            }
             // Skip known invalid project IDs
             if (metadata?.projectId && badIds.includes(metadata.projectId)) {
               updates.push({ fileName, hasUpdate: false, currentVersion, reason: 'Skipped invalid project ID' });
@@ -1226,12 +1283,11 @@ function createModHandlers(win) {
                   const dateB = new Date(b.datePublished).getTime();
                   return dateB - dateA;
                 });
-                
-                const latestVersion = sortedVersions[0];
-                console.log(`🔍 Latest version for disabled mod "${metadata.projectId}": ${latestVersion.versionNumber} (current: ${metadata.version})`);
+                  const latestVersion = sortedVersions[0];
+                console.log(`🔍 Latest version for disabled mod "${metadata.projectId}": ${latestVersion.versionNumber} (current: ${currentVersion})`);
                 
                 // Use semantic version comparison - same as server-side
-                if (latestVersion && compareVersions(latestVersion.versionNumber, metadata.version) > 0) {
+                if (latestVersion && compareVersions(latestVersion.versionNumber, currentVersion) > 0) {
                   // Get the actual version info for download URL
                   const latestVersionInfo = await modApiService.getModrinthVersionInfo(metadata.projectId, latestVersion.id, minecraftVersion, loader);
                   

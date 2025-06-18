@@ -238,16 +238,16 @@ async function installModToClient(win, modData) {
       } catch {
         versionInfo = null;
       }
-    }
-
-    // If no suitable version info found, pick the best compatible version automatically
+    }    // If no suitable version info found, pick the best compatible version automatically
     if (!versionInfo) {
       const versions = await getModrinthVersions(modData.id, loader, mcVersion, true);
       if (!versions || versions.length === 0) {
         throw new Error('No compatible versions found for this mod');
       }
-      versionToInstall = versions[0];
-      versionInfo = await getModrinthVersionInfo(modData.id, versionToInstall.id);
+      // **FIX**: Ensure we get the complete version info, not just the summary
+      const bestVersion = versions[0];
+      versionToInstall = { id: bestVersion.id, versionNumber: bestVersion.versionNumber };
+      versionInfo = await getModrinthVersionInfo(modData.id, bestVersion.id);
     }
 
     if (!versionInfo.files || versionInfo.files.length === 0) throw new Error('No files found for this mod version');
