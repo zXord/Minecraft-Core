@@ -6,6 +6,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { readModMetadataFromJar } = require('./mod-utils/mod-file-manager.cjs');
+const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 
 // In-memory lock to prevent race conditions during state operations
@@ -219,8 +220,6 @@ function extractVersionFromFilename(fileName) {
  * Analyzes client-side (manual) mods to find their dependencies
  */
 async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
-  const { extractDependenciesFromJar } = require('./mod-utils/mod-analysis-utils.cjs');
-  
   const dependencies = new Set();
   
   try {
@@ -257,11 +256,10 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
       return !serverManagedSet.has(fileName);
     });
     
-      for (const modFile of clientSideMods) {
-      const modPath = path.join(modsDir, modFile);
+      for (const modFile of clientSideMods) {      const modPath = path.join(modsDir, modFile);
       
       try {
-        const metadata = await extractDependenciesFromJar(modPath);
+        const metadata = await modAnalysisUtils.extractDependenciesFromJar(modPath);
         
         
         if (metadata) {
@@ -1258,10 +1256,7 @@ function createMinecraftLauncherHandlers(win) {
             }
           }          acknowledgedDependencies = updatedAcks;
         }        const clientSideDependencies = await getClientSideDependencies(clientPath, Array.from(serverManagedFilesSetForDiff));
-        
-        const buildClientSideModsFor = async (excludeFile) => {
-          const { extractDependenciesFromJar } = require('./mod-utils/mod-analysis-utils.cjs');
-          
+          const buildClientSideModsFor = async (excludeFile) => {
           if (!fs.existsSync(modsDir)) return [];
           
           const modFiles = fs.readdirSync(modsDir).filter(file => 
@@ -1281,9 +1276,8 @@ function createMinecraftLauncherHandlers(win) {
           // Check each client mod to see if it actually depends on the excluded file
           for (const modFile of clientSideMods) {
             const modPath = path.join(modsDir, modFile);
-            
-            try {
-              const metadata = await extractDependenciesFromJar(modPath);
+              try {
+              const metadata = await modAnalysisUtils.extractDependenciesFromJar(modPath);
               const modDependencies = new Set();
               
               if (metadata) {

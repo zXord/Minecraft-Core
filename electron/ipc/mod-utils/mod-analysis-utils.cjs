@@ -4,14 +4,30 @@ const os = require('os');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
 
+// Simple global cache to prevent infinite loops
+const metadataCache = new Map();
+const cacheTimeout = 60000; // 1 minute cache
+
 async function extractDependenciesFromJar(jarPath) {
-  console.log(`[DEBUG] Extracting metadata from: ${jarPath}`);
+  const cacheKey = `${jarPath}-${Date.now() - (Date.now() % cacheTimeout)}`;
+  
+  // Return cached result if available
+  if (metadataCache.has(cacheKey)) {
+    console.log(`[CACHE] Using cached metadata for ${path.basename(jarPath)}`);
+    return metadataCache.get(cacheKey);
+  }
+  
+  console.log(`[EXTRACT] Processing metadata for ${path.basename(jarPath)}`);
+  
+  let result = null;
+  
   try {
     try {
       await fs.access(jarPath);
     } catch {
-      console.log(`[DEBUG] File does not exist: ${jarPath}`);
-      throw new Error(`Mod file does not exist: ${jarPath}`);
+      result = null;
+      metadataCache.set(cacheKey, result);
+      return result;
     }
 
     try {
@@ -26,18 +42,19 @@ async function extractDependenciesFromJar(jarPath) {
 
       if (fabricEntry) {
         const content = fabricEntry.getData().toString('utf8');
-        console.log(`[DEBUG] Found fabric.mod.json in ${path.basename(jarPath)}`);
         try {
           const metadata = JSON.parse(content);
-          console.log(`[DEBUG] Parsed metadata - name: ${metadata.name}, version: ${metadata.version}, id: ${metadata.id}`);
           metadata.loaderType = metadata.loaderType || 'fabric';
           metadata.projectId = metadata.projectId || metadata.id;
           metadata.authors = metadata.authors || (metadata.author ? [metadata.author] : (metadata.contributors ? Object.keys(metadata.contributors) : []));
           metadata.name = metadata.name || metadata.id;
-          return metadata;
-        } catch (parseError) {
-          console.log(`[DEBUG] Failed to parse fabric.mod.json: ${parseError.message}`);
-          return null;
+          result = metadata;
+          metadataCache.set(cacheKey, result);
+          return result;
+        } catch {
+          result = null;
+          metadataCache.set(cacheKey, result);
+          return result;
         }
       }
 
@@ -45,7 +62,9 @@ async function extractDependenciesFromJar(jarPath) {
       const forgeEntry = zipEntries.find(entry =>
         entry.entryName === 'META-INF/mods.toml' ||
         entry.entryName.endsWith('/META-INF/mods.toml')
-      );      if (forgeEntry) {
+      );
+
+      if (forgeEntry) {
         const content = forgeEntry.getData().toString('utf8');
         try {
           const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
@@ -56,72 +75,82 @@ async function extractDependenciesFromJar(jarPath) {
           let currentDescription = [];
 
           lines.forEach(line => {
-            const trimmedLine = line.trim();
-
-            if (inDescription) {
-              if (trimmedLine.endsWith("'''")) {
-                currentDescription.push(trimmedLine.slice(0, -3));
-                if (currentModTable) currentModTable.description = currentDescription.join('\n').trim();
-                inDescription = false;
-                currentDescription = [];
-              } else {
-                currentDescription.push(trimmedLine);
+            line = line.trim();
+            
+            if (line === '[[mods]]') {
+              if (Object.keys(currentModTable).length > 0) {
+                Object.assign(metadata, currentModTable);
+                currentModTable = {};
+              }
+              inModsArray = true;
+              inDescription = false;
+              return;
+            }
+            
+            if (inModsArray && line.startsWith('[') && line !== '[[mods]]') {
+              inModsArray = false;
+              return;
+            }
+            
+            if (line.startsWith('description="""') || line === 'description="""') {
+              inDescription = true;
+              currentDescription = [];
+              if (line.length > 15) {
+                currentDescription.push(line.substring(15));
               }
               return;
             }
-
-            if (trimmedLine.startsWith('modLoader')) metadata.modLoader = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
-            if (trimmedLine.startsWith('loaderVersion')) metadata.loaderVersion = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
-            if (trimmedLine.startsWith('license')) metadata.license = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
-            if (trimmedLine.startsWith('issueTrackerURL')) metadata.issueTrackerURL = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
-
-            if (trimmedLine === '[[mods]]') {
-              inModsArray = true;
-              if (!currentModTable) {
-                currentModTable = {};
-              }
-            }
-
-            if (inModsArray && currentModTable) {
-              if (trimmedLine.startsWith('modId')) currentModTable.id = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
-              if (trimmedLine.startsWith('version')) currentModTable.version = trimmedLine.split('=')[1]?.trim().replace(/"/g, '') || '${file.jarVersion}';
-              if (trimmedLine.startsWith('displayName')) currentModTable.name = trimmedLine.split('=')[1]?.trim().replace(/"/g, '');
-              if (trimmedLine.startsWith('authors')) currentModTable.authors = (trimmedLine.split('=')[1]?.trim().replace(/"/g, '') || '').split(',').map(a => a.trim()).filter(a => a);
-              if (trimmedLine.startsWith('description')) {
-                let desc = trimmedLine.substring(trimmedLine.indexOf('=') + 1).trim();
-                if (desc.startsWith("'''")) {
-                  if (desc.endsWith("'''") && desc.length > 5) {
-                     currentModTable.description = desc.slice(3, -3).trim();
-                  } else {
-                    inDescription = true;
-                    currentDescription.push(desc.slice(3));
-                  }
-                } else if (desc.startsWith('"') && desc.endsWith('"')) {
-                  currentModTable.description = desc.slice(1, -1).trim();
+            
+            if (inDescription) {
+              if (line.endsWith('"""') && line !== '"""') {
+                currentDescription.push(line.substring(0, line.length - 3));
+                if (inModsArray) {
+                  currentModTable.description = currentDescription.join('\n');
                 } else {
-                    currentModTable.description = desc;
+                  metadata.description = currentDescription.join('\n');
                 }
+                inDescription = false;
+                return;
+              } else if (line === '"""') {
+                if (inModsArray) {
+                  currentModTable.description = currentDescription.join('\n');
+                } else {
+                  metadata.description = currentDescription.join('\n');
+                }
+                inDescription = false;
+                return;
+              } else {
+                currentDescription.push(line);
+                return;
               }
             }
-            if (inModsArray && (trimmedLine.startsWith('[') && !trimmedLine.startsWith('[[dependencies')) && trimmedLine !== '[[mods]]') {
-                inModsArray = false;
+            
+            const match = line.match(/^(\w+)\s*=\s*"([^"]*)"$/);
+            if (match) {
+              const [, key, value] = match;
+              if (inModsArray) {
+                currentModTable[key] = value;
+              } else {
+                metadata[key] = value;
+              }
             }
           });
           
-          if (currentModTable) {
-            metadata.id = metadata.id || currentModTable.id;
-            metadata.version = metadata.version || currentModTable.version;
-            metadata.name = metadata.name || currentModTable.name || metadata.id;
-            if (currentModTable.authors && currentModTable.authors.length > 0) {
-                 metadata.authors = currentModTable.authors;
-            }
-            metadata.description = metadata.description || currentModTable.description;
+          if (Object.keys(currentModTable).length > 0) {
+            Object.assign(metadata, currentModTable);
           }
-          metadata.projectId = metadata.projectId || metadata.id;
-
-          return metadata;
+          
+          metadata.name = metadata.displayName || metadata.modId || 'Unknown';
+          metadata.version = metadata.version || 'Unknown';
+          metadata.projectId = metadata.modId || metadata.name;
+          
+          result = metadata;
+          metadataCache.set(cacheKey, result);
+          return result;
         } catch {
-          return null;
+          result = null;
+          metadataCache.set(cacheKey, result);
+          return result;
         }
       }
 
@@ -135,7 +164,7 @@ async function extractDependenciesFromJar(jarPath) {
         const content = quiltEntry.getData().toString('utf8');
         try {
           const quiltJson = JSON.parse(content);
-          const qmd = quiltJson.quilt_loader || quiltJson; // quilt_loader is primary, fallback to root
+          const qmd = quiltJson.quilt_loader || quiltJson;
           
           const metadata = {
             loaderType: 'quilt',
@@ -144,43 +173,53 @@ async function extractDependenciesFromJar(jarPath) {
             name: (qmd.metadata && qmd.metadata.name) || qmd.id,
             description: (qmd.metadata && qmd.metadata.description) || '',
             authors: [],
-            projectId: qmd.id // Quilt uses 'id' as the project identifier
+            projectId: qmd.id
           };
 
           if (qmd.metadata && qmd.metadata.contributors) {
             metadata.authors = Object.keys(qmd.metadata.contributors);
-          } else if (quiltJson.contributors) { // Fallback for older formats
+          } else if (quiltJson.contributors) {
              metadata.authors = Object.keys(quiltJson.contributors);
-          }          return metadata;
+          }
+
+          result = metadata;
+          metadataCache.set(cacheKey, result);
+          return result;
         } catch {
-          return null;
+          result = null;
+          metadataCache.set(cacheKey, result);
+          return result;
         }
       }
       
-      return null;
+      result = null;
+      metadataCache.set(cacheKey, result);
+      return result;
     } catch {
-      return null;
+      result = null;
+      metadataCache.set(cacheKey, result);
+      return result;
     }
-  } catch {
-    return null;
+  } catch (error) {
+    console.error(`[ERROR] Failed to extract dependencies from ${jarPath}:`, error.message);
+    result = null;
+    metadataCache.set(cacheKey, result);
+    return result;
   }
 }
 
-async function analyzeModFromUrl(url, modId) {
+async function fetchModInfoFromUrl(url) {
   try {
-    if (!url) throw new Error('URL is required for mod analysis');
-    
-    const tempDir = path.join(os.tmpdir(), 'minecraft-core-temp-analysis');
-    await fs.mkdir(tempDir, { recursive: true });
-    const tempFile = path.join(tempDir, `temp-analysis-${modId || Date.now()}.jar`);
+    const tempFile = path.join(os.tmpdir(), `mod-${Date.now()}.jar`);
     
     try {
       const response = await axios({
         url: url,
         method: 'GET',
-        responseType: 'arraybuffer' // Changed to arraybuffer for direct writing
+        responseType: 'arraybuffer'
       });
-        await fs.writeFile(tempFile, response.data);
+        
+      await fs.writeFile(tempFile, response.data);
       
       const dependencies = await extractDependenciesFromJar(tempFile);
       try {
@@ -197,13 +236,40 @@ async function analyzeModFromUrl(url, modId) {
         // Ignore cleanup errors
       }
       throw err;
-    }
-  } catch {
+    }  } catch {
     return [];
+  }
+}
+
+async function analyzeModFromUrl(url, modId) {
+  try {
+    // Use fetchModInfoFromUrl to get the metadata
+    const metadata = await fetchModInfoFromUrl(url);
+    
+    if (!metadata) {
+      return { success: false, error: 'Could not extract metadata from mod file' };
+    }
+    
+    // Return the analysis result
+    return {
+      success: true,
+      metadata: {
+        ...metadata,
+        providedModId: modId, // Include the provided mod ID for reference
+        analysisTimestamp: Date.now()
+      }
+    };
+  } catch (error) {
+    console.error(`[ERROR] Failed to analyze mod from URL ${url}:`, error.message);
+    return { 
+      success: false, 
+      error: error.message || 'Failed to analyze mod from URL' 
+    };
   }
 }
 
 module.exports = {
   extractDependenciesFromJar,
+  fetchModInfoFromUrl,
   analyzeModFromUrl
 };
