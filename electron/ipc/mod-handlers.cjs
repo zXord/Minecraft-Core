@@ -202,15 +202,16 @@ function createModHandlers(win) {
       } catch (err) {
         throw new Error(`Failed to get disabled mods: ${err.message}`);
       }
-    },
-
-    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
+    },    'check-mod-compatibility': async (_event, { serverPath, mcVersion, fabricVersion }) => {
       if (!serverPath || !fs.existsSync(serverPath)) {
         throw new Error('Invalid server path');
       }
       if (!mcVersion || !fabricVersion) {
         throw new Error('Version information missing');
       }
+
+      // Clear version cache to ensure fresh API calls for the new target version
+      modApiService.clearVersionCache();
 
       const installed = await modFileManager.getInstalledModInfo(serverPath);
       const results = [];
@@ -231,32 +232,52 @@ function createModHandlers(win) {
             dependencies: [] 
           });
           continue;
-        }
-
-        try {
-          const versions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
-          const best = versions && versions[0];
-
-          if (!best) {
-            results.push({ 
-              projectId, 
-              fileName, 
-              name, 
-              currentVersion, 
-              compatible: false 
-            });
-          } else {
+        }        try {          // Get ALL versions to check if the current version supports the target MC version
+          const allVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
+          
+          // Check if the current installed version is compatible with the target MC version
+          const currentVersionCompatible = allVersions && allVersions.some(v => {
+            const versionMatches = v.versionNumber === currentVersion;
+            const supportsTargetMC = v.gameVersions && v.gameVersions.includes(mcVersion);
+            
+            return versionMatches && supportsTargetMC;
+          });// Also get the latest version for update checking
+          const latestVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
+          const latest = latestVersions && latestVersions[0];          if (currentVersionCompatible) {
+            // Current version is compatible
             results.push({
               projectId,
               fileName,
               name,
               currentVersion,
-              latestVersion: best.version_number,
+              latestVersion: latest ? latest.versionNumber : currentVersion,
               compatible: true,
-              dependencies: best.dependencies || []
+              dependencies: latest ? (latest.dependencies || []) : []
             });
-          }
-        } catch (err) {
+          } else if (latest) {
+            // Current version not compatible, but updates are available for target version
+            results.push({
+              projectId,
+              fileName,
+              name,
+              currentVersion,
+              latestVersion: latest.versionNumber,
+              compatible: true, // Mark as compatible since updates are available
+              hasUpdate: true, // Flag to indicate this mod needs updating
+              dependencies: latest.dependencies || []
+            });
+          } else {
+            // No compatible version found at all
+            results.push({
+              projectId,
+              fileName,
+              name,
+              currentVersion,
+              latestVersion: currentVersion,
+              compatible: false,
+              dependencies: []
+            });
+          }} catch (err) {
           results.push({ 
             projectId, 
             fileName, 
@@ -689,8 +710,8 @@ function createModHandlers(win) {
           if (stateResult.success && stateResult.acknowledgedDeps) {
             acknowledgedDependencies = stateResult.acknowledgedDeps;
           }
-        } catch (error) {
-          console.warn('Failed to load acknowledged dependencies:', error.message);
+        } catch {
+          // Failed to load acknowledged dependencies, continue without them
         }
 
         const allFiles = fs.readdirSync(modsDir);
@@ -762,12 +783,6 @@ function createModHandlers(win) {
 
           try {
             const metadata = await readModMetadata(filePath);
-            console.log(`🔍 DEBUG: Disabled mod metadata for "${fileName}":`, {
-              projectId: metadata?.projectId,
-              id: metadata?.id,
-              name: metadata?.name,
-              version: metadata?.version
-            });
             
             mods.push({
               fileName,
@@ -782,8 +797,7 @@ function createModHandlers(win) {
               lastModified: stats.mtime,
               enabled: false
             });
-          } catch (error) {
-            console.error(`Failed to read metadata for disabled mod ${fileName}:`, error.message);
+          } catch {
             mods.push({
               fileName,
               name: fileName.replace(/\.jar$/i, ''),
@@ -1069,8 +1083,7 @@ function createModHandlers(win) {
           }
         });
           await pipelineAsync(response.data, writer);
-        
-        // **FIX**: Update the manifest file with new version information
+          // **FIX**: Update the manifest file with new version information
         try {
           const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
           if (fs.existsSync(manifestPath)) {
@@ -1080,10 +1093,8 @@ function createModHandlers(win) {
             manifest.versionNumber = newVersion;
             manifest.updatedAt = new Date().toISOString();
             await fsPromises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
-            console.log(`📋 Updated manifest for ${fileName} with new version: ${newVersion}`);
-          }
-        } catch (manifestError) {
-          console.warn(`⚠️ Could not update manifest for ${fileName}:`, manifestError.message);
+          }        } catch {
+          // Ignore manifest update errors
         }
         
         // Remove old file if it's different (shouldn't be different now, but keeping for safety)
@@ -1135,11 +1146,9 @@ function createModHandlers(win) {
             currentVersion = metadata?.version || 'Unknown';            // **FIX**: Try to get version from manifest file if available for better accuracy
             if (metadata && metadata.projectId) {
               const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
-              console.log(`🔍 Checking manifest for ${fileName} at: ${manifestPath}`);
               try {
                 const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
                 const manifest = JSON.parse(manifestContent);
-                console.log(`📋 Manifest content for ${fileName}:`, { projectId: manifest.projectId, versionNumber: manifest.versionNumber, metadataProjectId: metadata.projectId });
                 
                 // **FIX**: Use manifest data if available, regardless of project ID mismatch
                 // The manifest has the correct Modrinth project ID and version
@@ -1147,35 +1156,19 @@ function createModHandlers(win) {
                   // Override metadata with manifest data for accurate version checking
                   metadata.projectId = manifest.projectId;
                   currentVersion = manifest.versionNumber;
-                  console.log(`🔧 Using manifest data for ${fileName}: projectId=${manifest.projectId}, version=${currentVersion} (JAR version was: ${metadata?.version})`);
-                } else {
-                  console.log(`⚠️ Manifest missing projectId or versionNumber: projectId=${manifest.projectId}, versionNumber=${manifest.versionNumber}`);
-                }
-              } catch (manifestError) {
+                }              } catch {
                 // Manifest doesn't exist or is corrupted, use JAR metadata version
-                console.log(`📦 No manifest found for ${fileName} (${manifestError.message}), using JAR metadata version: ${currentVersion}`);
               }
-            }
-            console.log(`🔍 DEBUG: Checking mod "${fileName}":`, {
-              projectId: metadata?.projectId,
-              currentVersion: currentVersion,
-              jarVersion: metadata?.version,
-              loaderType: metadata?.loaderType,
-              name: metadata?.name
-            });
-            
+            }            
             // Skip known invalid project IDs
             if (metadata?.projectId && badIds.includes(metadata.projectId)) {
-              console.log(`⚠️  Skipping known bad project ID: ${metadata.projectId}`);
               updates.push({ fileName, hasUpdate: false, currentVersion, reason: 'Skipped invalid project ID' });
               continue;
             }            if (metadata && metadata.projectId) {
               const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
-              console.log(`🔍 Getting ALL versions for "${metadata.projectId}" (MC: ${minecraftVersion}, Loader: ${loader})`);
               
               // Use the same approach as server-side: get all versions, then find the best one
               const allVersions = await modApiService.getModrinthVersions(metadata.projectId, loader, minecraftVersion, false);
-              console.log(`📦 Found ${allVersions?.length || 0} total versions for "${metadata.projectId}"`);
               
               if (allVersions && allVersions.length > 0) {
                 // Find stable versions first
@@ -1187,14 +1180,12 @@ function createModHandlers(win) {
                   const dateA = new Date(a.datePublished).getTime();
                   const dateB = new Date(b.datePublished).getTime();
                   return dateB - dateA;
-                });
-                  const latestVersion = sortedVersions[0];
-                console.log(`🔍 Latest version for "${metadata.projectId}": ${latestVersion.versionNumber} (current: ${metadata.version})`);
-                  // Use EXACT same comparison logic as server-side checkForUpdate function
+                });                  const latestVersion = sortedVersions[0];
+                
+                // Use EXACT same comparison logic as server-side checkForUpdate function
                 if (latestVersion && latestVersion.versionNumber !== currentVersion) {
                   // Check if the latest version is actually newer using semantic versioning
                   const versionComparison = compareVersions(latestVersion.versionNumber, currentVersion);
-                  console.log(`🔍 Version comparison: ${latestVersion.versionNumber} vs ${currentVersion} = ${versionComparison}`);
                   
                   if (versionComparison > 0) {
                   // Get the actual version info for download URL
@@ -1239,11 +1230,9 @@ function createModHandlers(win) {
             currentVersion = metadata?.version || 'Unknown';            // **FIX**: Try to get version from manifest file if available for better accuracy
             if (metadata && metadata.projectId) {
               const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
-              console.log(`🔍 Checking manifest for disabled ${fileName} at: ${manifestPath}`);
               try {
                 const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
                 const manifest = JSON.parse(manifestContent);
-                console.log(`📋 Manifest content for disabled ${fileName}:`, { projectId: manifest.projectId, versionNumber: manifest.versionNumber, metadataProjectId: metadata.projectId });
                 
                 // **FIX**: Use manifest data if available, regardless of project ID mismatch
                 // The manifest has the correct Modrinth project ID and version
@@ -1251,13 +1240,9 @@ function createModHandlers(win) {
                   // Override metadata with manifest data for accurate version checking
                   metadata.projectId = manifest.projectId;
                   currentVersion = manifest.versionNumber;
-                  console.log(`🔧 Using manifest data for disabled ${fileName}: projectId=${manifest.projectId}, version=${currentVersion} (JAR version was: ${metadata?.version})`);
-                } else {
-                  console.log(`⚠️ Manifest missing projectId or versionNumber for disabled ${fileName}: projectId=${manifest.projectId}, versionNumber=${manifest.versionNumber}`);
                 }
-              } catch (manifestError) {
+              } catch {
                 // Manifest doesn't exist or is corrupted, use JAR metadata version
-                console.log(`📦 No manifest found for disabled ${fileName} (${manifestError.message}), using JAR metadata version: ${currentVersion}`);
               }
             }
             // Skip known invalid project IDs
@@ -1266,11 +1251,9 @@ function createModHandlers(win) {
               continue;
             }            if (metadata && metadata.projectId) {
               const loader = metadata.loaderType === 'fabric' ? 'fabric' : (metadata.loaderType === 'forge' ? 'forge' : (metadata.loaderType === 'quilt' ? 'quilt' : 'fabric'));
-              console.log(`🔍 Getting ALL versions for disabled mod "${metadata.projectId}" (MC: ${minecraftVersion}, Loader: ${loader})`);
               
               // Use the same approach as server-side: get all versions, then find the best one
               const allVersions = await modApiService.getModrinthVersions(metadata.projectId, loader, minecraftVersion, false);
-              console.log(`📦 Found ${allVersions?.length || 0} total versions for disabled mod "${metadata.projectId}"`);
               
               if (allVersions && allVersions.length > 0) {
                 // Find stable versions first
@@ -1282,9 +1265,7 @@ function createModHandlers(win) {
                   const dateA = new Date(a.datePublished).getTime();
                   const dateB = new Date(b.datePublished).getTime();
                   return dateB - dateA;
-                });
-                  const latestVersion = sortedVersions[0];
-                console.log(`🔍 Latest version for disabled mod "${metadata.projectId}": ${latestVersion.versionNumber} (current: ${currentVersion})`);
+                });                const latestVersion = sortedVersions[0];
                 
                 // Use semantic version comparison - same as server-side
                 if (latestVersion && compareVersions(latestVersion.versionNumber, currentVersion) > 0) {

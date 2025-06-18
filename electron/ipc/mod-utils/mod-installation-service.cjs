@@ -31,15 +31,20 @@ async function installModToServer(win, serverPath, modDetails) {
   await fs.mkdir(modsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true });
 
-  // Sanitize the name but avoid appending an extra .jar if it's already present
+  // Sanitize the name but avoid appending an extra .jar if it's already present  // Sanitize the name but avoid appending an extra .jar if it's already present
   const sanitizedBase = modDetails.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-  const fileName = /\.jar$/i.test(sanitizedBase)
+  let fileName = /\.jar$/i.test(sanitizedBase)
     ? sanitizedBase
     : `${sanitizedBase}.jar`;
   
+  // For updates (forceReinstall), preserve the original filename
+  if (modDetails.forceReinstall && modDetails.oldFileName) {
+    fileName = modDetails.oldFileName;
+  }
+  
   let currentModLocation = null;
   let destinationPath = path.join(modsDir, fileName); // Default to server
-    if (modDetails.forceReinstall) {
+  if (modDetails.forceReinstall) {
     
     // Use old filename for location detection if provided (for updates)
     const checkFileName = modDetails.oldFileName || fileName;
@@ -51,12 +56,48 @@ async function installModToServer(win, serverPath, modDetails) {
     if (clientExists && serverExists) {
       currentModLocation = 'both';
       destinationPath = path.join(modsDir, fileName); // Install new version to server
+      
+      // Clean up old files before installing new ones
+      try {
+        await fs.unlink(serverModPath);
+        await fs.unlink(clientModPath);
+        
+        // Also clean up manifests if they exist
+        const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
+        const clientManifestDir = path.join(serverPath, 'client', 'minecraft-core-manifests');
+        const oldManifestPath = `${checkFileName}.json`;
+        await fs.unlink(path.join(serverManifestDir, oldManifestPath)).catch(() => {});
+        await fs.unlink(path.join(clientManifestDir, oldManifestPath)).catch(() => {});      } catch {
+        // Log cleanup errors but don't fail the installation
+      }
     } else if (clientExists && !serverExists) {
       currentModLocation = 'client-only';
       destinationPath = path.join(clientModsDir, fileName); // Install new version to client
+      
+      // Clean up old client file
+      try {
+        await fs.unlink(clientModPath);
+        
+        // Also clean up client manifest if it exists
+        const clientManifestDir = path.join(serverPath, 'client', 'minecraft-core-manifests');
+        const oldManifestPath = `${checkFileName}.json`;
+        await fs.unlink(path.join(clientManifestDir, oldManifestPath)).catch(() => {});      } catch {
+        // Ignore cleanup errors
+      }
     } else if (serverExists && !clientExists) {
       currentModLocation = 'server-only';
       destinationPath = path.join(modsDir, fileName); // Install new version to server
+      
+      // Clean up old server file
+      try {
+        await fs.unlink(serverModPath);
+        
+        // Also clean up server manifest if it exists
+        const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
+        const oldManifestPath = `${checkFileName}.json`;
+        await fs.unlink(path.join(serverManifestDir, oldManifestPath)).catch(() => {});      } catch {
+        // Ignore cleanup errors
+      }
     }
     
   }
