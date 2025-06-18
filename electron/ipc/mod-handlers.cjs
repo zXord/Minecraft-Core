@@ -59,6 +59,40 @@ function compareVersions(versionA, versionB) {
 // fs/promises, axios, createWriteStream, pipeline, promisify, pipelineAsync are now mainly used within the services.
 // If any handler directly needs them (e.g. a simple file op not covered by services), they can be re-added or operations moved.
 
+// Helper function to extract version from filename
+function extractVersionFromFilename(filename) {
+  if (!filename) return null;
+  
+  // Remove .jar extension and .disabled if present
+  const cleanName = filename.replace(/\.jar(\.disabled)?$/i, '');
+    // Common version patterns
+  const patterns = [
+    // Pattern: modname-1.2.3
+    /[-_](\d+\.\d+\.\d+[\w.-]*)/,
+    // Pattern: modname-v1.2.3  
+    /[-_]v(\d+\.\d+\.\d+[\w.-]*)/,
+    // Pattern: modname_1.2.3
+    /[_](\d+\.\d+\.\d+[\w.-]*)/,
+    // Pattern: modname 1.2.3
+    /\s+(\d+\.\d+\.\d+[\w.-]*)/,
+    // Pattern: [1.21.4] or (1.21.4) - for MC version specific
+    /[[(](\d+\.\d+\.\d+[\w.-]*?)[)\]]/,
+    // Pattern: mc1.21.4-0.6.13-fabric
+    /mc\d+\.\d+\.\d+[^\d]*(\d+\.\d+[.\d]*[\w-]*)/,
+    // Pattern: for 1.21.4 - version at end
+    /(\d+\.\d+[.\d]*[\w-]*)$/
+  ];
+  
+  for (const pattern of patterns) {
+    const match = cleanName.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+  
+  return null;
+}
+
 /**
  * Create mod management IPC handlers
  * 
@@ -216,11 +250,22 @@ function createModHandlers(win) {
       const installed = await modFileManager.getInstalledModInfo(serverPath);
       const results = [];
 
-      for (const mod of installed) {
-        const projectId = mod.projectId;
+      for (const mod of installed) {        const projectId = mod.projectId;
         const fileName = mod.fileName;
         const name = mod.name || mod.title || fileName;
-        const currentVersion = mod.versionNumber || mod.version || null;
+        let currentVersion = mod.versionNumber || mod.version || null;
+        
+        console.log(`[DEBUG] Processing mod: ${fileName}`);
+        console.log(`[DEBUG] - name: ${name}`);
+        console.log(`[DEBUG] - projectId: ${projectId}`);
+        console.log(`[DEBUG] - currentVersion from mod: ${currentVersion}`);
+        console.log(`[DEBUG] - mod object keys:`, Object.keys(mod));
+        
+        // If no version found, try to extract from filename as fallback
+        if (!currentVersion || currentVersion === 'Unknown') {
+          currentVersion = extractVersionFromFilename(fileName) || 'Unknown';
+          console.log(`[DEBUG] - currentVersion after filename extraction: ${currentVersion}`);
+        }
 
         if (!projectId) {
           results.push({ 
@@ -1446,6 +1491,106 @@ function createModHandlers(win) {
           return { success: disabledCount > 0, disabledCount, error: `Some mods failed to disable. Errors: ${errors.join('; ')}` };
         }
         return { success: true, disabledCount };
+      } catch (error) {        return { success: false, error: error.message };
+      }
+    },
+
+    // Clean up mod filenames to use clean names from JAR metadata
+    'cleanup-mod-filenames': async (_event, { serverPath }) => {
+      try {
+        if (!serverPath) {
+          return { success: false, error: 'Server path not provided' };
+        }
+
+        const { cleanupModFilenames } = require('./mod-utils/mod-file-utils.cjs');
+        
+        // Clean up both server and client mods
+        const serverModsDir = path.join(serverPath, 'mods');
+        const clientModsDir = path.join(serverPath, 'client', 'mods');
+        
+        const results = [];
+        
+        // Clean up server mods
+        if (fs.existsSync(serverModsDir)) {
+          const serverResult = await cleanupModFilenames(serverModsDir, modAnalysisUtils.extractDependenciesFromJar);
+          if (serverResult.renamed.length > 0) {
+            results.push(`Server mods: ${serverResult.renamed.join(', ')}`);
+          }
+          if (serverResult.errors.length > 0) {
+            results.push(`Server errors: ${serverResult.errors.join(', ')}`);
+          }
+        }
+        
+        // Clean up client mods
+        if (fs.existsSync(clientModsDir)) {
+          const clientResult = await cleanupModFilenames(clientModsDir, modAnalysisUtils.extractDependenciesFromJar);
+          if (clientResult.renamed.length > 0) {
+            results.push(`Client mods: ${clientResult.renamed.join(', ')}`);
+          }
+          if (clientResult.errors.length > 0) {
+            results.push(`Client errors: ${clientResult.errors.join(', ')}`);
+          }
+        }
+        
+        return { 
+          success: true, 
+          message: results.length > 0 ? results.join(' | ') : 'No mods needed cleanup'
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Enhance mod data with clean names extracted from JAR files
+    'enhance-mod-names': async (_event, { clientPath, mods }) => {
+      try {
+        if (!mods || !Array.isArray(mods)) {
+          return { success: false, error: 'Invalid mods data' };
+        }
+
+        const modsDir = path.join(clientPath, 'mods');
+        if (!fs.existsSync(modsDir)) {
+          return { success: false, error: 'Mods directory not found' };
+        }
+
+        const enhancedMods = [];
+
+        for (const mod of mods) {
+          const enhancedMod = { ...mod };
+          
+          try {
+            // Try to find the actual JAR file on disk
+            const possiblePaths = [
+              path.join(modsDir, mod.fileName),
+              path.join(modsDir, mod.fileName + '.disabled')
+            ];
+            
+            let actualPath = null;
+            for (const possiblePath of possiblePaths) {
+              if (fs.existsSync(possiblePath)) {
+                actualPath = possiblePath;
+                break;
+              }
+            }
+            
+            if (actualPath) {
+              // Extract metadata from the JAR file
+              const metadata = await modAnalysisUtils.extractDependenciesFromJar(actualPath);
+              if (metadata?.name) {
+                enhancedMod.cleanName = metadata.name;
+                enhancedMod.displayName = metadata.name;
+              }
+              if (metadata?.version) {
+                enhancedMod.cleanVersion = metadata.version;
+              }
+            }          } catch {
+            // If extraction fails, keep original mod data
+          }
+          
+          enhancedMods.push(enhancedMod);
+        }
+
+        return { success: true, enhancedMods };
       } catch (error) {
         return { success: false, error: error.message };
       }

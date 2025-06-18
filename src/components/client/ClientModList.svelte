@@ -10,13 +10,24 @@
     needsRemoval?: boolean;
     removalReason?: string;
     removalAction?: string;
-  }
-  interface ModSyncStatus {
+  }  interface ModSyncStatus {
     synchronized: boolean;
     missingMods?: string[];
     missingOptionalMods?: string[];
+    outdatedMods?: Array<{
+      fileName: string;
+      name: string;
+      currentVersion: string;
+      newVersion: string;
+    }>;
+    outdatedOptionalMods?: Array<{
+      fileName: string;
+      name: string;
+      currentVersion: string;
+      newVersion: string;
+    }>;
     totalRequired?: number;
-    totalOptional?: number;    totalPresent?: number;
+    totalOptional?: number;totalPresent?: number;
     totalOptionalPresent?: number;
     presentEnabledMods?: string[];
     presentDisabledMods?: string[];
@@ -224,6 +235,60 @@
     dispatch('downloadSingle', { mod });
   }
 
+  // Check if a mod needs an update
+  function needsUpdate(mod: Mod): boolean {
+    if (!modSyncStatus) return false;
+    
+    // Check if this mod is in the outdated lists
+    if (type === 'required' && modSyncStatus.outdatedMods) {
+      return modSyncStatus.outdatedMods.some(update => 
+        update.fileName?.toLowerCase() === mod.fileName.toLowerCase()
+      );
+    }
+    
+    if (type === 'optional' && modSyncStatus.outdatedOptionalMods) {
+      return modSyncStatus.outdatedOptionalMods.some(update => 
+        update.fileName?.toLowerCase() === mod.fileName.toLowerCase()
+      );
+    }
+    
+    return false;
+  }
+
+  // Get update information for a mod
+  function getUpdateInfo(mod: Mod) {
+    if (!modSyncStatus) return null;
+    
+    // Check if this mod is in the outdated lists
+    if (type === 'required' && modSyncStatus.outdatedMods) {
+      return modSyncStatus.outdatedMods.find(update => 
+        update.fileName?.toLowerCase() === mod.fileName.toLowerCase()
+      );
+    }
+    
+    if (type === 'optional' && modSyncStatus.outdatedOptionalMods) {
+      return modSyncStatus.outdatedOptionalMods.find(update => 
+        update.fileName?.toLowerCase() === mod.fileName.toLowerCase()
+      );
+    }
+    
+    return null;
+  }
+
+  // Handle individual mod update
+  function handleUpdate(mod: Mod): void {
+    const updateInfo = getUpdateInfo(mod);
+    if (!updateInfo) return;
+    
+    dispatch('updateMod', {
+      fileName: updateInfo.fileName,
+      name: updateInfo.name,
+      currentVersion: updateInfo.currentVersion,
+      newVersion: updateInfo.newVersion,
+      mod: mod
+    });
+  }
+
 
 </script>
 
@@ -293,20 +358,34 @@
                 <span class="removal-reason">{removalInfo?.reason || 'No longer required'}</span>
                 <button class="action-btn remove-btn" on:click={() => handleRemove(mod)} title="Remove this mod">
                   🗑️ Remove
-                </button>
-              {:else}
+                </button>              {:else}
                 <span class="required-label">Required</span>
                 {#if getModStatus(mod) === 'missing'}
                   <button class="download-button" on:click={handleDownload}>
                     📥 Download
                   </button>
+                {:else if needsUpdate(mod)}
+                  {@const updateInfo = getUpdateInfo(mod)}
+                  <button class="action-btn update-btn" on:click={() => handleUpdate(mod)} title="Update to version {updateInfo?.newVersion}">
+                    🔄 Update
+                  </button>
+                  <div class="update-info">
+                    v{updateInfo?.currentVersion} → v{updateInfo?.newVersion}
+                  </div>
                 {/if}
-              {/if}
-            {:else if type === 'optional'}
+              {/if}            {:else if type === 'optional'}
               {#if getModStatus(mod) === 'missing'}
                 <button class="download-button" on:click={() => handleDownloadSingle(mod)}>
                   📥 Download
                 </button>
+              {:else if needsUpdate(mod)}
+                {@const updateInfo = getUpdateInfo(mod)}
+                <button class="action-btn update-btn" on:click={() => handleUpdate(mod)} title="Update to version {updateInfo?.newVersion}">
+                  🔄 Update
+                </button>
+                <div class="update-info">
+                  v{updateInfo?.currentVersion} → v{updateInfo?.newVersion}
+                </div>
               {:else}
                 <button 
                   class="action-btn toggle-btn"
@@ -692,5 +771,24 @@
 
   .download-all-button.optional:hover {
     background-color: #2563eb;
+  }
+
+  .update-btn {
+    background: rgba(34, 197, 94, 0.2);
+    color: #22c55e;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    font-size: 0.7rem;
+  }
+
+  .update-btn:hover {
+    background: rgba(34, 197, 94, 0.3);
+    border-color: rgba(34, 197, 94, 0.5);
+  }
+
+  .update-info {
+    font-size: 0.65rem;
+    color: #22c55e;
+    margin-top: 0.2rem;
+    font-weight: 500;
   }
 </style>

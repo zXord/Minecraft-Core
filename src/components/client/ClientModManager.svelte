@@ -61,6 +61,18 @@
     totalOptionalPresent?: number;
     missingMods?: string[];
     missingOptionalMods?: string[];
+    outdatedMods?: Array<{
+      fileName: string;
+      name: string;
+      currentVersion: string;
+      newVersion: string;
+    }>;
+    outdatedOptionalMods?: Array<{
+      fileName: string;
+      name: string;
+      currentVersion: string;
+      newVersion: string;
+    }>;
     presentEnabledMods?: string[];
     presentDisabledMods?: string[];
     // New response structure
@@ -842,9 +854,8 @@
           successMessage.set(`Mod removal completed: ${modFileName}`);
         }
         setTimeout(() => successMessage.set(''), 3000);
-        
-        // Force cleanup the mod from all tracking
-        forceCleanupRemovedMod(modFileName);
+          // Force cleanup the mod from all tracking
+        // forceCleanupRemovedMod(modFileName); // TODO: Implement this function
         
         // Refresh mod sync status to clear removal flags
         await checkModSynchronization();
@@ -975,23 +986,7 @@
         ids.delete(mod.id);
         return ids;
       });
-    }
-  }
-
-  // Update an already installed mod to a specific version
-  async function updateInstalledMod(modName, projectId, versionId) {
-    if (!projectId || !versionId) return;
-
-    const baseName = modName.replace(/\.jar$/i, '');
-    const mod = {
-      id: projectId,
-      name: baseName,
-      title: baseName,
-      forceReinstall: true
-    };
-
-    await installClientMod(mod, versionId);
-    }
+    }  }
 
   // Wrapper used by installWithDependencies for client installs
   async function clientInstallFn(mod, path) {
@@ -1129,28 +1124,93 @@
       });
     }
   }
-
-  // Force cleanup of a removed mod from all tracking
-  function forceCleanupRemovedMod(modFileName) {
-    const lowerModFileName = modFileName.toLowerCase();
-    
-    // Remove from server managed files
-    removeServerManagedFiles([modFileName]);
-    
-    // Remove from acknowledged dependencies
-    if (acknowledgedDeps.has(lowerModFileName)) {
-      acknowledgedDeps.delete(lowerModFileName);
-      acknowledgedDeps = new Set(acknowledgedDeps);
+  // Clean up mod filenames to use clean names from JAR metadata
+  async function cleanupModFilenames() {
+    if (!instance?.serverIp || !instance?.serverPort) {
+      errorMessage.set('Server connection information not available');
+      setTimeout(() => errorMessage.set(''), 5000);
+      return;
     }
-    
-    // Remove from any mod lists
-    requiredMods = requiredMods.filter(m => m.fileName.toLowerCase() !== lowerModFileName);
-    optionalMods = optionalMods.filter(m => m.fileName.toLowerCase() !== lowerModFileName);
-    allClientMods = allClientMods.filter(m => m.fileName.toLowerCase() !== lowerModFileName);
-    
+
+    try {
+      // First get the server path from the management server
+      const serverPath = await getServerPath();
+      if (!serverPath) {
+        errorMessage.set('Could not determine server path');
+        setTimeout(() => errorMessage.set(''), 5000);
+        return;
+      }
+
+      const result = await window.electron.invoke('cleanup-mod-filenames', {
+        serverPath: serverPath
+      });
+
+      if (result.success) {
+        successMessage.set(result.message || 'Mod filenames cleaned up successfully');
+        setTimeout(() => successMessage.set(''), 5000);
+        
+        // Refresh the mod lists to show updated names
+        await refreshMods();
+      } else {
+        errorMessage.set(result.error || 'Failed to cleanup mod filenames');
+        setTimeout(() => errorMessage.set(''), 5000);
+      }
+    } catch (error) {
+      console.error('Error cleaning up mod filenames:', error);
+      errorMessage.set('Error cleaning up mod filenames: ' + error.message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
   }
 
-  // ...existing code...
+  // Helper function to get server path from management server
+  async function getServerPath() {
+    try {
+      const response = await fetch(`http://${instance.serverIp}:${instance.serverPort}/api/test`);
+      if (response.ok) {
+        const data = await response.json();
+        return data.serverPath;
+      }
+    } catch (error) {
+      console.error('Failed to get server path:', error);
+    }
+    return null;
+  }
+  // Update an individual server-managed mod
+  async function updateServerMod(event) {
+    const { fileName, name, currentVersion, newVersion, mod } = event.detail;
+    
+    try {
+      // Determine if this is a required or optional mod
+      const isRequired = mod.required !== false; // Default to required if not specified
+      
+      // Create the mod list arrays
+      const requiredMods = isRequired ? [fileName] : [];
+      const optionalMods = isRequired ? [] : allClientMods.filter(m => m.fileName === fileName);
+      
+      const result = await safeInvoke('minecraft-download-mods', {
+        clientPath: instance?.path,
+        requiredMods,
+        optionalMods,
+        allClientMods,
+        serverInfo: {
+          serverIp: instance?.serverIp,
+          serverPort: instance?.serverPort
+        }
+      });
+
+      if (result?.success) {
+        successMessage.set(`Successfully updated ${name} from v${currentVersion} to v${newVersion}`);        // Refresh mod lists
+        await refreshInstalledMods();
+        await refreshMods();
+      } else {
+        errorMessage.set(`Failed to update ${name}: ${result?.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      errorMessage.set(`Error updating ${name}: ${error.message}`);
+    }
+  }
+
+  // Enhance mod data with clean names from JAR files  // ...existing code...
 </script>
 
 <div class="client-mod-manager">
@@ -1167,11 +1227,14 @@
       {#if lastModCheck}
         <span class="last-check">Last updated: {lastModCheck.toLocaleTimeString()}</span>
       {/if}
-    </div>
-    <div class="mod-actions">
+    </div>    <div class="mod-actions">
       <button class="refresh-button" on:click={refreshMods} disabled={isLoadingMods}>
         {isLoadingMods ? '⏳ Loading...' : '🔄 Refresh'}
-      </button>      {#if modSyncStatus && !modSyncStatus.synchronized}
+      </button>
+      
+      <button class="cleanup-button" on:click={cleanupModFilenames} disabled={isLoadingMods}>
+        🧹 Clean Filenames
+      </button>{#if modSyncStatus && !modSyncStatus.synchronized}
         <!-- Use same logic as Play tab for consistent button text -->
         {#if modSyncStatus.needsDownload > 0}
           <button class="download-button" on:click={downloadRequiredMods}>
@@ -1255,7 +1318,7 @@
             on:download={downloadRequiredMods}
             on:remove={(e) => handleServerModRemoval(e.detail.fileName)}
             on:acknowledge={(e) => handleDependencyAcknowledgment(e.detail.fileName)}
-            on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
+            on:updateMod={updateServerMod}
           />
           </div>
 
@@ -1274,7 +1337,7 @@
             on:download={downloadOptionalMods}
             on:downloadSingle={(e) => downloadSingleOptionalMod(e.detail.mod)}
             on:delete={(e) => handleModDelete(e.detail.fileName)}
-            on:updateMod={(e) => updateInstalledMod(e.detail.modName, e.detail.projectId, e.detail.versionId)}
+            on:updateMod={updateServerMod}
           />
         </div>
       {/if}          <!-- Client Downloaded Mods Section -->
@@ -1369,8 +1432,7 @@
     gap: 1rem;
     flex-wrap: wrap;
   }
-
-  .refresh-button, .download-button, .retry-button {
+  .refresh-button, .download-button, .retry-button, .cleanup-button {
     padding: 0.5rem 1rem;
     border: none;
     border-radius: 6px;
@@ -1389,6 +1451,20 @@
   }
 
   .refresh-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .cleanup-button {
+    background-color: #059669;
+    color: white;
+  }
+
+  .cleanup-button:hover:not(:disabled) {
+    background-color: #047857;
+  }
+
+  .cleanup-button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
