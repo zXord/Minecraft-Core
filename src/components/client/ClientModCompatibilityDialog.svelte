@@ -26,11 +26,19 @@
     show = false;
     dispatch('disable-incompatible', { modsToDisable: compatibilityReport?.incompatible || [] });
   }
-  
-  $: incompatibleCount = compatibilityReport?.incompatible?.length || 0;
+    $: incompatibleCount = compatibilityReport?.incompatible?.length || 0;
   $: needsUpdateCount = compatibilityReport?.needsUpdate?.length || 0;
   $: unknownCount = compatibilityReport?.unknown?.length || 0;
   $: totalIssues = incompatibleCount + needsUpdateCount + unknownCount;
+  
+  // Debug logging to trace the data
+  $: if (compatibilityReport) {
+    console.log('🔍 [COMPATIBILITY DIALOG] Full report:', compatibilityReport);
+    console.log('🔍 [COMPATIBILITY DIALOG] Compatible mods:', compatibilityReport.compatible);
+    console.log('🔍 [COMPATIBILITY DIALOG] Incompatible mods:', compatibilityReport.incompatible);
+    console.log('🔍 [COMPATIBILITY DIALOG] Needs update mods:', compatibilityReport.needsUpdate);
+    console.log('🔍 [COMPATIBILITY DIALOG] Unknown mods:', compatibilityReport.unknown);
+  }
 </script>
 
 {#if show && compatibilityReport}
