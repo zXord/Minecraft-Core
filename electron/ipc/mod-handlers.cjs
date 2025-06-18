@@ -255,16 +255,9 @@ function createModHandlers(win) {
         const name = mod.name || mod.title || fileName;
         let currentVersion = mod.versionNumber || mod.version || null;
         
-        console.log(`[DEBUG] Processing mod: ${fileName}`);
-        console.log(`[DEBUG] - name: ${name}`);
-        console.log(`[DEBUG] - projectId: ${projectId}`);
-        console.log(`[DEBUG] - currentVersion from mod: ${currentVersion}`);
-        console.log(`[DEBUG] - mod object keys:`, Object.keys(mod));
-        
         // If no version found, try to extract from filename as fallback
         if (!currentVersion || currentVersion === 'Unknown') {
           currentVersion = extractVersionFromFilename(fileName) || 'Unknown';
-          console.log(`[DEBUG] - currentVersion after filename extraction: ${currentVersion}`);
         }
 
         if (!projectId) {
@@ -545,9 +538,7 @@ function createModHandlers(win) {
       // The service function currently doesn't take 'win', but it could be added
       // or a callback mechanism implemented. For now, passing win as per general plan.
       return await modInstallService.installModToClient(win, modData);
-    },
-
-    // Check client-side mod compatibility with new Minecraft version
+    },    // Check client-side mod compatibility with new Minecraft version
     'check-client-mod-compatibility': async (_event, options) => {
       try {
         const { newMinecraftVersion, clientPath } = options;
@@ -556,69 +547,42 @@ function createModHandlers(win) {
           throw new Error('Invalid client path provided');
         }
         
-        // Get list of client-side mods (manual mods)
-        const clientMods = await getClientSideMods(clientPath);
+        // Get client mod info with versions already extracted (no JAR re-reading!)
+        const clientModInfo = await modFileManager.getClientInstalledModInfo(clientPath);
         
         // Check compatibility for each mod
         const compatibilityResults = [];
         
-        for (const mod of clientMods) {
+        for (const modInfo of clientModInfo) {
           try {
             let compatibilityStatus = 'unknown';
             let reason = '';
             let availableUpdate = null;
             
-            // Try to get mod metadata for better compatibility checking
-            const modPath = path.join(clientPath, 'mods', mod.fileName);
-            const metadata = await readModMetadata(modPath);
+            // Use the mod information we already have (no JAR extraction needed!)
+            const metadata = {
+              name: modInfo.name,
+              version: modInfo.versionNumber,
+              projectId: modInfo.projectId,
+              fileName: modInfo.fileName
+            };
             
-            if (metadata && metadata.gameVersions) {
-              // Check if mod supports the new Minecraft version
-              const isCompatible = metadata.gameVersions.includes(newMinecraftVersion);
-              
-              if (isCompatible) {
-                compatibilityStatus = 'compatible';
-              } else {
-                compatibilityStatus = 'incompatible';
-                reason = `Does not support Minecraft ${newMinecraftVersion}. Supported versions: ${metadata.gameVersions.join(', ')}`;
-                
-                // Try to find available updates
-                // Commenting out checkModUpdate call and related logic as the function is not found in mod-api-service
-                /*
-                if (metadata.projectId) {
-                  try {
-                    const updateInfo = await modApiService.checkModUpdate(metadata.projectId, {
-                      currentVersion: metadata.version,
-                      gameVersion: newMinecraftVersion,
-                      source: metadata.source || 'modrinth'
-                    });
-                    
-                    if (updateInfo && updateInfo.hasUpdate) {
-                      compatibilityStatus = 'needs_update';
-                      availableUpdate = updateInfo;
-                      reason = `Update available for Minecraft ${newMinecraftVersion}`;
-                    }
-                  } catch (updateError) {
-                    // Log or handle update check error if necessary
-                  }
-                }
-                */
-              }
+            // For now, we'll use filename-based checking since we don't have gameVersions
+            // in the basic mod metadata. This is much more efficient than JAR extraction.
+            const filenameCheck = checkModCompatibilityFromFilename(modInfo.fileName, newMinecraftVersion);
+            
+            if (filenameCheck.isCompatible) {
+              compatibilityStatus = 'compatible';
+              reason = 'Compatibility determined from filename';
             } else {
-              // Fallback to filename-based checking
-              const filenameCheck = checkModCompatibilityFromFilename(mod.fileName, newMinecraftVersion);
-              if (filenameCheck.isCompatible) {
-                compatibilityStatus = 'compatible';
-                reason = 'Compatibility determined from filename';
-              } else {
-                compatibilityStatus = 'unknown';
-                reason = 'Unable to determine compatibility - manual verification recommended';
-              }
+              compatibilityStatus = 'unknown';
+              reason = 'Unable to determine compatibility - manual verification recommended';
             }
             
             compatibilityResults.push({
-              fileName: mod.fileName,
-              name: metadata?.name || mod.fileName,
+              fileName: modInfo.fileName,
+              name: modInfo.name || modInfo.fileName,
+              version: modInfo.versionNumber || 'Unknown',
               compatibilityStatus,
               reason,
               availableUpdate,
@@ -627,8 +591,9 @@ function createModHandlers(win) {
             
           } catch (modError) {
             compatibilityResults.push({
-              fileName: mod.fileName,
-              name: mod.fileName,
+              fileName: modInfo.fileName || 'Unknown',
+              name: modInfo.name || modInfo.fileName || 'Unknown',
+              version: 'Unknown',
               compatibilityStatus: 'error',
               reason: `Error checking compatibility: ${modError.message}`
             });
@@ -1592,8 +1557,7 @@ function createModHandlers(win) {
 
         return { success: true, enhancedMods };
       } catch (error) {
-        return { success: false, error: error.message };
-      }
+        return { success: false, error: error.message };      }
     }
   };
 }
@@ -1609,38 +1573,6 @@ async function readModMetadata(filePath) {
     return result;  } catch {
     return null;
   }
-}
-
-/**
- * Get list of client-side mods (manual mods)
- * @param {string} clientPath - Path to the client directory
- * @returns {Promise<Array>} - Array of client-side mods
- */
-async function getClientSideMods(clientPath) {
-  const modsDir = path.join(clientPath, 'mods');
-  
-  if (!fs.existsSync(modsDir)) {
-    return [];
-  }
-  
-  const files = fs.readdirSync(modsDir);
-  const jarFiles = files.filter(file => file.endsWith('.jar'));
-  
-  // Filter to get only manual/client-side mods
-  // We can identify these by checking if they're in the manual mods list or not in server mods
-  const clientMods = [];
-  
-  for (const fileName of jarFiles) {
-    // For now, treat all mods as potential client-side mods
-    // In a more sophisticated implementation, we could check against server mod lists
-    clientMods.push({
-      fileName,
-      filePath: path.join(modsDir, fileName),
-      lastModified: fs.statSync(path.join(modsDir, fileName)).mtime
-    });
-  }
-  
-  return clientMods;
 }
 
 /**
