@@ -186,16 +186,28 @@ async function installModToServer(win, serverPath, modDetails) {
 
     if (win && win.webContents) {
       win.webContents.send('download-progress', { id: downloadId, name: modDetails.name, progress: 100, speed: 0, completed: true, completedTime: Date.now(), error: null });
-    }    if (modDetails.source === 'modrinth' && versionInfoToSave) {
+    }    // Save manifest file for tracking mod information
+    if (modDetails.source === 'modrinth') {
       try {
         const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
         const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        
+        // If we don't have version info, try to get it as a fallback
+        if (!versionInfoToSave && modDetails.selectedVersionId) {
+          try {
+            versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId);
+          } catch (err) {
+            console.warn(`Could not fetch version info for ${modDetails.id}: ${err.message}`);
+          }
+        }
+        
+        // Create manifest with available information
         const manifest = {
           projectId: modDetails.id, 
           name: modDetails.name, 
           fileName: finalFileName, // Use the final filename (clean or original)
-          versionId: versionInfoToSave.id || modDetails.selectedVersionId,
-          versionNumber: versionInfoToSave.version_number || versionInfoToSave.name || 'unknown',
+          versionId: (versionInfoToSave && versionInfoToSave.id) || modDetails.selectedVersionId || 'unknown',
+          versionNumber: (versionInfoToSave && (versionInfoToSave.version_number || versionInfoToSave.name)) || modDetails.version || 'unknown',
           source: modDetails.source
         };
 

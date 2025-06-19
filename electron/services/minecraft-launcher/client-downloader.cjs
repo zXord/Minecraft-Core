@@ -539,10 +539,9 @@ class ClientDownloader {
         
         response.on('data', (chunk) => {
           downloadedBytes += chunk.length;
-          
-          // Call progress callback if provided (but not too frequently)
+            // Call progress callback if provided (but not too frequently)
           if (progressCallback && totalBytes > 0) {
-            const progress = (downloadedBytes / totalBytes) * 100;
+            const progress = Math.round((downloadedBytes / totalBytes) * 100 * 100) / 100; // Round to 2 decimal places
             const now = Date.now();
             if (now - lastProgressUpdate > 500) { // Update every 500ms
               progressCallback(progress);

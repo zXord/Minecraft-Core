@@ -40,13 +40,12 @@ function handleDownloadProgress(progress) {
   if (!progress || !progress.id) {
     return;
   }
-  
-  // Ensure progress properties are valid
+    // Ensure progress properties are valid
   const validatedProgress = {
     ...progress,
     progress: typeof progress.progress === 'number' ? 
-              // Convert from 0-1 to 0-100 if needed and ensure it's a valid number
-              (progress.progress <= 1 ? progress.progress * 100 : progress.progress) || 0 : 0,
+              // Convert from 0-1 to 0-100 if needed and ensure it's a valid number, then round to 2 decimal places
+              Math.round((progress.progress <= 1 ? progress.progress * 100 : progress.progress) * 100) / 100 || 0 : 0,
     size: typeof progress.size === 'number' && !isNaN(progress.size) ? progress.size : 0,
     speed: typeof progress.speed === 'number' && !isNaN(progress.speed) ? progress.speed : 0
   };
