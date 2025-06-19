@@ -29,6 +29,34 @@
   import { checkModDependencies, showDependencyModal, installWithDependencies } from '../../utils/mods/modDependencyHelper.js';
   import { checkDependencyCompatibility } from '../../utils/mods/modCompatibility.js';
   import { safeInvoke } from '../../utils/ipcUtils.js';
+  import {
+    connectionStatus,
+    serverMods,
+    requiredMods,
+    optionalMods,
+    allClientMods,
+    installedModsInfo,
+    modSyncStatus,
+    isLoadingMods,
+    lastModCheck,
+    acknowledgedDeps,
+    updateServerManagedFiles
+  } from '../../stores/clientModManager.js';
+  import {
+    loadInstalledInfo,
+    loadModsFromServer,
+    checkModSynchronization,
+    refreshInstalledMods,
+    downloadRequiredMods,
+    acknowledgeAllDependencies,
+    downloadOptionalMods,
+    downloadSingleOptionalMod,
+    handleModToggle,
+    handleModDelete,
+    handleServerModRemoval,
+    handleDependencyAcknowledgment,
+    updateServerMod
+  } from '../../utils/clientMods.js';
 
   // Types
   interface Instance {
@@ -107,22 +135,7 @@
     };
   }
 
-  // Helper function for scoped serverManagedFiles updates
-  function updateServerManagedFiles(action, mods) {
-    serverManagedFiles.update(currentSet => {      const newSet = new Set(currentSet);
-      if (action === 'remove') {
-        mods.forEach(mod => {
-          const modName = typeof mod === 'string' ? mod : mod.fileName || mod.name;
-          newSet.delete(modName.toLowerCase());
-        });
-      } else if (action === 'add') {
-        mods.forEach(mod => {
-          const modName = typeof mod === 'string' ? mod : mod.fileName || mod.name;
-          newSet.add(modName.toLowerCase());
-        });
-      }
-      return newSet;
-    });}
+  // State and helpers moved to dedicated store
 
   // Props
   export let instance: Instance | null = null; // Client instance
@@ -136,14 +149,8 @@
   export { handleRefreshFromParent as refreshFromDashboard };
   
   // Export the acknowledgment function so parent can call it
-  export { acknowledgeAllDependencies };// State
-  let connectionStatus: string = 'disconnected';
-  let serverMods: ClientMod[] = [];  let requiredMods: ClientMod[] = [];
-  let optionalMods: ClientMod[] = [];
-  let allClientMods: ClientMod[] = [];
-  let installedModsInfo: any[] = []; // Store actual installed mod info with current versions// All client mods (required + optional)
-  let modSyncStatus: ModSyncStatus | null = null;  let isLoadingMods: boolean = false;
-  let lastModCheck: Date | null = null;
+  export { acknowledgeAllDependencies };
+  // Core state now provided by clientModManager store
   
   // Client mod finding state
   let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
@@ -156,14 +163,13 @@
   let isCheckingModSync = false; // Guard to prevent reactive loops
   let lastCheckModSyncCall = 0; // Track the most recent call
   
-  // keep track of which fileNames we've acknowledged
-  let acknowledgedDeps: Set<string> = new Set();  // Computed property for required mods display - show all except those that can be safely removed
+  // keep track of which fileNames we've acknowledged is managed by store
   $: displayRequiredMods = (() => {
     // Don't filter by acknowledgedDeps here - that's handled in the acknowledgment button logic
     // Only filter out mods that are marked for safe removal
-    let displayMods = requiredMods.filter(m => {
+    let displayMods = $requiredMods.filter(m => {
       // Check if this mod is marked for removal (can be safely removed)
-      const isMarkedForRemoval = modSyncStatus?.requiredRemovals?.some(removal => 
+      const isMarkedForRemoval = $modSyncStatus?.requiredRemovals?.some(removal =>
         removal.fileName.toLowerCase() === m.fileName.toLowerCase()
       );
       
@@ -174,7 +180,7 @@
     // FIX: Replace server target versions with actual current versions from installed mods
     displayMods = displayMods.map(serverMod => {
       // Find the actual installed version of this mod
-      const installedMod = installedModsInfo.find(installed => 
+      const installedMod = $installedModsInfo.find(installed =>
         installed.fileName === serverMod.fileName
       );
       
@@ -190,9 +196,9 @@
       return serverMod; // Keep original if no installed version found
     });
       // Add mods that need removal from the new response structure
-    if (modSyncStatus?.requiredRemovals) {
-      
-      for (const removal of modSyncStatus.requiredRemovals) {
+    if ($modSyncStatus?.requiredRemovals) {
+
+      for (const removal of $modSyncStatus.requiredRemovals) {
         // Check if this mod is not already in the display list
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === removal.fileName.toLowerCase());
         
@@ -217,11 +223,11 @@
       }
     }
       // Add mods that need acknowledgment from the new response structure
-    if (modSyncStatus?.acknowledgments) {
-        for (const ack of modSyncStatus.acknowledgments) {
+    if ($modSyncStatus?.acknowledgments) {
+        for (const ack of $modSyncStatus.acknowledgments) {
         // Check if this mod is not already in the display list and not already acknowledged
         const existsInDisplay = displayMods.some(mod => mod.fileName.toLowerCase() === ack.fileName.toLowerCase());
-        const isAlreadyAcknowledged = acknowledgedDeps.has(ack.fileName.toLowerCase());
+        const isAlreadyAcknowledged = $acknowledgedDeps.has(ack.fileName.toLowerCase());
         
         if (!existsInDisplay && !isAlreadyAcknowledged) {
           // Create a mod object for the acknowledgment and add it to display list
@@ -247,9 +253,9 @@
   $: displayOptionalMods = (() => {
     // Don't filter by acknowledgedDeps here - that's handled in the acknowledgment button logic
     // Only filter out mods that are marked for safe removal
-    let mods = optionalMods.filter(m => {
+    let mods = $optionalMods.filter(m => {
       // Check if this mod is marked for removal (can be safely removed)
-      const isMarkedForRemoval = modSyncStatus?.optionalRemovals?.some(removal => 
+      const isMarkedForRemoval = $modSyncStatus?.optionalRemovals?.some(removal =>
         removal.fileName.toLowerCase() === m.fileName.toLowerCase()
       );
       
@@ -260,7 +266,7 @@
     // FIX: Replace server target versions with actual current versions from installed mods
     mods = mods.map(serverMod => {
       // Find the actual installed version of this mod
-      const installedMod = installedModsInfo.find(installed => 
+      const installedMod = $installedModsInfo.find(installed =>
         installed.fileName === serverMod.fileName
       );
       
@@ -275,9 +281,9 @@
       
       return serverMod; // Keep original if no installed version found
     });// Add mods that need removal from the new response structure
-    if (modSyncStatus?.optionalRemovals) {
-      
-      for (const removal of modSyncStatus.optionalRemovals) {
+    if ($modSyncStatus?.optionalRemovals) {
+
+      for (const removal of $modSyncStatus.optionalRemovals) {
         // Check if this mod is not already in the display list
         const existingIndex = mods.findIndex(m => m.fileName.toLowerCase() === removal.fileName.toLowerCase());
         
@@ -313,10 +319,10 @@
     return mods;
   })();  // Computed property to filter out already acknowledged mods from acknowledgments
   $: pendingAcknowledgments = (() => {
-    if (!modSyncStatus?.acknowledgments) return [];
-    
-    return modSyncStatus.acknowledgments.filter(ack => 
-      !acknowledgedDeps.has(ack.fileName.toLowerCase())
+    if (!$modSyncStatus?.acknowledgments) return [];
+
+    return $modSyncStatus.acknowledgments.filter(ack =>
+      !$acknowledgedDeps.has(ack.fileName.toLowerCase())
     );
   })();
 
@@ -329,8 +335,8 @@
         clientPath: instance.path
       });
         if (result.success && result.acknowledgedDependencies) {
-        acknowledgedDeps = new Set(
-          result.acknowledgedDependencies.map(dep => dep.toLowerCase())
+        acknowledgedDeps.set(
+          new Set(result.acknowledgedDependencies.map(dep => dep.toLowerCase()))
         );
       }
     } catch (error) {
@@ -395,411 +401,11 @@
         minecraftVersionOptions = [$minecraftVersion, ...minecraftVersionOptions.filter(v => v !== $minecraftVersion)];
       }
     }  }
-  async function loadInstalledInfo() {
-    try {
-      const info = await window.electron.invoke('get-client-installed-mod-info', instance.path);
-      
-      if (Array.isArray(info)) {
-        // Store the actual installed mod info for version comparison
-        installedModsInfo = info;
-        
-        // Enrich installed mod info with project IDs from server-provided mod lists
-        const enrichedInfo = info.map(mod => {
-          // If mod already has projectId, return as-is
-          if (mod.projectId) {
-            return mod;
-          }
-          
-          // Try to find matching project ID from server mod lists
-          const serverMod = [...requiredMods, ...(allClientMods || [])].find(serverMod => {
-            // Match by filename (most reliable for server-downloaded mods)
-            return serverMod.fileName === mod.fileName;
-          });
-          
-          if (serverMod && serverMod.projectId) {
-            return {
-              ...mod,
-              projectId: serverMod.projectId
-            };
-          }
-          
-          return mod;
-        });
-        
-        const projectIds = new Set(enrichedInfo.map(i => i.projectId).filter(Boolean));        installedModIds.set(projectIds);
-        installedModInfo.set(enrichedInfo);
-      } else {
-      }
-    } catch (err) {
-    }
-  }// Load mods from the management server
-  async function loadModsFromServer() {
-    if (!instance || !instance.serverIp || !instance.serverPort) {
-      serverManagedFiles.set(new Set());
-      return;
-    }
-
-    isLoadingMods = true;
-    
-    try {
-      // Check connection to management server
-      const testUrl = `http://${instance.serverIp}:${instance.serverPort}/api/test`;
-      const testResponse = await fetch(testUrl, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000)
-      });
-
-      if (!testResponse.ok) {
-        connectionStatus = 'disconnected';
-        serverManagedFiles.set(new Set());
-        return;
-      }
-
-      connectionStatus = 'connected';
-
-      // Get server info which includes required mods
-      const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
-      const serverInfoResponse = await fetch(serverInfoUrl, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000)
-      });
-
-      if (serverInfoResponse.ok) {
-        const serverInfo = await serverInfoResponse.json();
-        if (serverInfo.success) {
-          if (serverInfo.minecraftVersion) {
-            minecraftVersion.set(serverInfo.minecraftVersion);
-          }
-          requiredMods = serverInfo.requiredMods || [];
-          allClientMods = serverInfo.allClientMods || [];          // Always rebuild store to exactly: (currentServerMods ∪ acknowledgedDependencies)
-          
-          const currentServerMods = new Set([
-            ...requiredMods.map(m => m.fileName.toLowerCase()),
-            ...(allClientMods || []).map(m => m.fileName.toLowerCase())
-          ]);
-          
-          // Load acknowledged dependencies into local set (so we can filter them out of the UI)
-          try {
-            const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
-            if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-              // Replace local acknowledgments with persisted ones. This ensures
-              // that resets performed in the backend are reflected in the UI.
-              const persistedAcks: Set<string> = new Set(
-                state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
-              );
-              acknowledgedDeps = new Set<string>(persistedAcks);
-            }
-          } catch (err) {
-          }          // serverManagedFiles should keep track of any mods that were
-          // previously managed by the server until the user removes or
-          // acknowledges them. Track all server mods but respect explicit removals.
-          serverManagedFiles.update(existing => {
-            const combined = new Set(existing);
-            
-            // Add all current server mods
-            for (const mod of currentServerMods) {
-              combined.add(mod);
-            }
-              // Also preserve previously server-managed optional mods that might need removal
-            // This is crucial for detecting when optional mods are removed from the server
-            if (modSyncStatus?.requiredRemovals) {
-              for (const removal of modSyncStatus.requiredRemovals) {
-                combined.add(removal.fileName.toLowerCase());
-              }
-            }
-            if (modSyncStatus?.optionalRemovals) {
-              for (const removal of modSyncStatus.optionalRemovals) {
-                combined.add(removal.fileName.toLowerCase());
-              }
-            }
-              
-            return combined;
-          });
-
-          // Refresh installed mod info to enrich with server project IDs
-          await loadInstalledInfo();
-          
-          // Get full mod list from server
-          const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
-          const modsResponse = await fetch(modsUrl, {
-            method: 'GET',
-            signal: AbortSignal.timeout(5000)
-          });          if (modsResponse.ok) {
-            const modsData = await modsResponse.json();
-            if (modsData.success) {              serverMods = modsData.mods.server || [];
-              
-              // Separate required and optional mods based on server configuration
-              // Required mods are those specified by the server
-              // Use allClientMods (which has version info) instead of server response for optional mods
-              optionalMods = allClientMods.filter(mod => 
-                !requiredMods.some(reqMod => reqMod.fileName === mod.fileName)
-              );
-            }
-          }
-
-          // Check mod synchronization status if we have a client path
-          if (instance.path) {
-            await checkModSynchronization();
-          }
-        }
-      }
-
-      lastModCheck = new Date();
-    } catch (err) {
-      connectionStatus = 'disconnected';
-      serverManagedFiles.set(new Set());
-      errorMessage.set('Failed to connect to server: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);    } finally {
-      isLoadingMods = false;
-    }
-  }  // Check mod synchronization status
-  async function checkModSynchronization() {
-    if (!instance?.path || isCheckingModSync) {
-      return;
-    }    const currentCallId = Date.now();
-    lastCheckModSyncCall = currentCallId;
-    isCheckingModSync = true;
-    
-    try {
-      const managedFiles = get(serverManagedFiles);
-      
-      const result = await window.electron.invoke('minecraft-check-mods', {
-        clientPath: instance.path,
-        requiredMods,
-        allClientMods,
-        serverManagedFiles: Array.from(managedFiles)
-      });      // Only process this result if it's from the most recent call
-      if (currentCallId !== lastCheckModSyncCall) {
-        return;
-      }      if (result.success) {
-        modSyncStatus = result;
-
-        // Refresh acknowledgments from backend in case they were reset
-        try {
-          const state = await window.electron.invoke('load-expected-mod-state', {
-            clientPath: instance.path
-          });
-          if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-            acknowledgedDeps = new Set<string>(
-              state.acknowledgedDependencies.map((d: string) => d.toLowerCase())
-            );
-          }
-        } catch (err) {
-        }
-        
-        if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-          // Use scoped update for individual mod removals
-          updateServerManagedFiles('remove', result.successfullyRemovedMods);
-        }          // Emit event to parent about sync status
-        dispatch('mod-sync-status', {
-          synchronized: result.synchronized,
-          needsDownload: result.needsDownload,
-          totalRequired: result.totalRequired,
-          totalPresent: result.totalPresent,
-          needsRemoval: result.needsRemoval,
-          // New response structure - use filtered acknowledgments
-          requiredRemovals: result.requiredRemovals || [],
-          optionalRemovals: result.optionalRemovals || [],
-          acknowledgments: pendingAcknowledgments, // Use filtered acknowledgments instead of raw
-          // Legacy compatibility (temporary)
-          clientModChanges: result.clientModChanges,
-          fullSyncResult: result // Pass the full result for complete info
-        });
-      } else {
-        errorMessage.set(
-          `${result.error || 'Failed to check mod synchronization.'}`
-        );
-        setTimeout(() => errorMessage.set(''), 5000);
-      }
-    } catch (err) {
-      errorMessage.set('Failed to check mod synchronization.');
-      setTimeout(() => errorMessage.set(''), 5000);
-    } finally {
-      isCheckingModSync = false;
-    }
-  }
 
   // Reload installed mod info and update synchronization status
-  async function refreshInstalledMods() {
-    if (!instance?.path) return;
-    await loadInstalledInfo();    await checkModSynchronization();
-  }
-
-  // Download required mods
-  async function downloadRequiredMods() {
-    if (!instance.path || !requiredMods.length) {
-      return;
-    }
-
-    try {
-      const result = await window.electron.invoke('minecraft-download-mods', {
-        clientPath: instance.path,
-        requiredMods,
-        allClientMods,
-        serverInfo: {
-          serverIp: instance.serverIp,
-          serverPort: instance.serverPort
-        }
-      });      if (result.success) {
-        successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
-        setTimeout(() => successMessage.set(''), 5000);
-          // **FIX**: Immediately update store with downloaded files so remove buttons appear
-        if (result.downloadedFiles && result.downloadedFiles.length > 0) {
-          updateServerManagedFiles('add', result.downloadedFiles);
-        }
-        
-        if (result.removedMods && result.removedMods.length > 0) {
-          updateServerManagedFiles('remove', result.removedMods);
-        }
-        
-        // Refresh mod sync status with delay to allow file I/O to complete
-        setTimeout(async () => {
-          await checkModSynchronization();
-          await refreshInstalledMods();
-        }, 1500);
-      } else {
-        errorMessage.set(`Failed to download mods: ${result.error || 'Unknown error'}`);
-        setTimeout(() => errorMessage.set(''), 5000);
-      }
-    } catch (err) {
-      errorMessage.set('Error downloading mods: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
-  }
-
-  // Acknowledge all pending dependencies
-  async function acknowledgeAllDependencies() {
-    if (!instance?.path || !modSyncStatus?.acknowledgments) {
-      return;
-    }
-
-    const acknowledgments = modSyncStatus.acknowledgments || [];
-    if (acknowledgments.length === 0) {
-      return;
-    }
-
-    try {      // Acknowledge each dependency
-      for (const acknowledgment of acknowledgments) {
-        const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
-          clientPath: instance.path,
-          modFileName: acknowledgment.fileName
-        });
-
-        if (result.success) {
-          // Add to local acknowledged set to immediately update UI
-          acknowledgedDeps.add(acknowledgment.fileName.toLowerCase());
-          
-          // Remove from server-managed files like the individual acknowledgment does
-          removeServerManagedFiles([acknowledgment.fileName]);
-        } else {
-          throw new Error(result.error || `Failed to acknowledge ${acknowledgment.fileName}`);
-        }
-      }      // Trigger reactivity update
-      acknowledgedDeps = new Set(acknowledgedDeps);
-
-      // Show success message
-      successMessage.set(`Successfully acknowledged ${acknowledgments.length} dependenc${acknowledgments.length > 1 ? 'ies' : 'y'}`);
-      setTimeout(() => successMessage.set(''), 5000);
-
-      // Gentle refresh - only check sync status after a brief delay to avoid flickering
-      // The UI should already be updated via the local acknowledgedDeps state
-      setTimeout(async () => {
-        await checkModSynchronization();
-        // Skip refreshInstalledMods() as it's not needed for acknowledgments
-        // await refreshInstalledMods();
-      }, 300);
-
-    } catch (err) {
-      errorMessage.set('Error acknowledging dependencies: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
-  }
-  // Download optional mods
-  async function downloadOptionalMods() {
-    if (!instance.path || !allClientMods.length) {
-      return;
-    }
-
-    // Get only the optional mods that are missing
-    const optionalMods = allClientMods.filter(mod => !mod.required);
-    
-    if (!optionalMods.length) {
-      return;
-    }
-
-    try {
-      const result = await window.electron.invoke('minecraft-download-mods', {
-        clientPath: instance.path,
-        requiredMods: [], // No required mods when downloading optional mods
-        optionalMods: optionalMods, // Pass optional mods separately
-        allClientMods,
-        serverInfo: {
-          serverIp: instance.serverIp,
-          serverPort: instance.serverPort
-        }
-      });if (result.success) {
-        successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
-        setTimeout(() => successMessage.set(''), 5000);
-        
-        if (result.removedMods && result.removedMods.length > 0) {
-          removeServerManagedFiles(result.removedMods);
-        }
-        
-        // Refresh mod sync status with delay to allow file I/O to complete
-        setTimeout(async () => {
-          await checkModSynchronization();
-          await refreshInstalledMods();
-        }, 1500);
-      } else {
-        errorMessage.set(`Failed to download optional mods: ${result.error || 'Unknown error'}`);
-        setTimeout(() => errorMessage.set(''), 5000);
-      }    } catch (err) {
-      errorMessage.set('Error downloading optional mods: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
-  }
-
-  // Download single optional mod
-  async function downloadSingleOptionalMod(mod) {
-    if (!instance.path) {
-      return;
-    }    try {
-      const result = await window.electron.invoke('minecraft-download-mods', {
-        clientPath: instance.path,
-        requiredMods: mod.required ? [mod] : [], // Only pass as required if it's actually required
-        optionalMods: mod.required ? [] : [mod], // Pass as optional if it's an optional mod
-        allClientMods,
-        serverInfo: {
-          serverIp: instance.serverIp,
-          serverPort: instance.serverPort
-        }
-      });if (result.success) {
-        successMessage.set(`Successfully downloaded ${mod.fileName}`);
-        setTimeout(() => successMessage.set(''), 3000);
-        
-        if (result.removedMods && result.removedMods.length > 0) {
-          removeServerManagedFiles(result.removedMods);
-        }
-        
-        // Refresh mod sync status with delay to allow file I/O to complete
-        setTimeout(async () => {
-          await checkModSynchronization();
-          await refreshInstalledMods();
-        }, 1500);
-      } else {
-        errorMessage.set(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`);
-        setTimeout(() => errorMessage.set(''), 5000);
-      }
-    } catch (err) {
-      errorMessage.set(`Error downloading ${mod.fileName}: ${err.message}`);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
-  }
-
-  // Refresh mods from server
   async function refreshMods() {
-    await loadModsFromServer();
-    await refreshInstalledMods();
+    await loadModsFromServer(instance);
+    await refreshInstalledMods(instance);
     successMessage.set('Mod list refreshed');
     setTimeout(() => successMessage.set(''), 3000);
   }
@@ -825,143 +431,10 @@
         errorMessage.set(`Failed to process files: ${error.message || 'Unknown error'}`);
       }
     }  }
-  // Handle mod enable/disable for optional mods
-  async function handleModToggle(modFileName, enabled) {
-    if (!instance.path) return;
-
-    try {
-      // For now, we'll just handle this locally
-      // In the future, this could sync with server preferences
-      const result = await window.electron.invoke('toggle-client-mod', {
-        clientPath: instance.path,
-        modFileName,
-        enabled
-      });      if (result.success) {
-        successMessage.set(`Mod ${enabled ? 'enabled' : 'disabled'}: ${modFileName}`);
-        setTimeout(() => successMessage.set(''), 3000);
-        
-        // No refresh needed - optimistic UI has already updated
-        // Backend state will sync on next mod list refresh
-      } else {
-        errorMessage.set(`Failed to ${enabled ? 'enable' : 'disable'} mod: ${result.error}`);
-        setTimeout(() => errorMessage.set(''), 5000);
-        
-        // Force a full refresh on error to revert any optimistic updates
-        await loadInstalledInfo();
-        await checkModSynchronization();
-      }
-    } catch (err) {
-      errorMessage.set('Error toggling mod: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-      
-      // Force a full refresh on error to revert any optimistic updates
-      await loadInstalledInfo();
-      await checkModSynchronization();
-    }
-  }
+  // Handle mod enable/disable for optional mods handled via utility
   // Delete a mod from the client
-  async function handleModDelete(modFileName) {
-    if (!instance.path) return;
-
-    try {
-      const result = await window.electron.invoke('delete-client-mod', {
-        clientPath: instance.path,
-        modFileName
-      });
-
-      if (result.success) {
-        successMessage.set(`Deleted mod: ${modFileName}`);
-        setTimeout(() => successMessage.set(''), 3000);
-        installedModInfo.update(info => {
-          const updated = info.filter(m => m.fileName !== modFileName);
-          const removed = info.find(m => m.fileName === modFileName);
-          if (removed && removed.projectId) {
-            installedModIds.update(ids => {
-              ids.delete(removed.projectId);
-              return new Set(ids);
-            });
-          }
-          return updated;
-        });
-        // Use lighter-weight sync check instead of full refresh
-        checkModSynchronization();
-      } else {
-        errorMessage.set(`Failed to delete mod: ${result.error}`);
-        setTimeout(() => errorMessage.set(''), 5000);
-      }
-    } catch (err) {
-      errorMessage.set('Error deleting mod: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }  }  // Handle removal of server-managed mods that are no longer required
-  async function handleServerModRemoval(modFileName) {
-    if (!instance.path) return;
-
-    try {
-      const result = await window.electron.invoke('minecraft-remove-server-managed-mods', {
-        clientPath: instance.path,
-        modsToRemove: [modFileName]
-      });
-
-      if (result.success) {
-        if (result.removed && result.removed.length > 0) {
-          successMessage.set(`Removed server-managed mod: ${modFileName}`);
-        } else {
-          successMessage.set(`Mod removal completed: ${modFileName}`);
-        }
-        setTimeout(() => successMessage.set(''), 3000);
-          // Force cleanup the mod from all tracking
-        // forceCleanupRemovedMod(modFileName); // TODO: Implement this function
-        
-        // Refresh mod sync status to clear removal flags
-        await checkModSynchronization();
-        
-        // Then refresh installed mod info
-        await refreshInstalledMods();
-      } else {
-        errorMessage.set(`Failed to remove mod: ${result.error || 'Unknown error'}`);
-        setTimeout(() => errorMessage.set(''), 5000);
-      }
-    } catch (err) {
-      errorMessage.set('Error removing mod: ' + err.message);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
-  }  // Handle dependency acknowledgment (persist and remove the notification)
-  async function handleDependencyAcknowledgment(modFileName) {
-    const lowerModFileName = modFileName.toLowerCase();
-    
-    try {
-      const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
-        clientPath: instance.path,
-        modFileName: modFileName
-      });
-      if (result.success) {
-        successMessage.set(`Acknowledged dependency: ${modFileName}`);
-        setTimeout(() => successMessage.set(''), 2000);
-        
-        if (!acknowledgedDeps.has(lowerModFileName)) {
-          acknowledgedDeps.add(lowerModFileName);
-          acknowledgedDeps = new Set(acknowledgedDeps); 
-        } else {
-          acknowledgedDeps = new Set(acknowledgedDeps);
-        }        // Remove from server-managed files BEFORE sync check to prevent duplication
-        removeServerManagedFiles([modFileName]);
-
-        // Gentle refresh to avoid flickering - the UI should already be updated via acknowledgedDeps
-        setTimeout(async () => {
-          await checkModSynchronization();
-          // Skip refreshInstalledMods() to reduce flickering
-          // await refreshInstalledMods();
-        }, 200);
-        
-        // Only update manual mods trigger if needed
-        // manualModsRefreshTrigger = Date.now();
-      } else {        throw new Error(result.error || 'Failed to acknowledge dependency in backend');
-      }
-    } catch (error) {
-      errorMessage.set(`Failed to acknowledge dependency: ${error.message}`);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
-  }
+  // Mod deletion and server removal handled via utilities
+  // Dependency acknowledgment handled via utility
   
   // Client mod search functionality
   async function searchClientMods() {
@@ -1179,77 +652,7 @@
     }
   }
   // Update an individual server-managed mod
-  async function updateServerMod(event) {
-    const { fileName, name, currentVersion, newVersion, mod } = event.detail;
-    
-    try {
-      // Find the target mod with the new version from available mod data
-      let targetMod = null;
-      
-      // Check required mods first
-      if (requiredMods && requiredMods.length > 0) {        targetMod = requiredMods.find(m => m.fileName === fileName);
-      }
-      
-      // Check optional mods if not found in required
-      if (!targetMod && optionalMods && optionalMods.length > 0) {
-        targetMod = optionalMods.find(m => m.fileName === fileName);
-      }
-      
-      // Check allClientMods if still not found
-      if (!targetMod && allClientMods && allClientMods.length > 0) {
-        targetMod = allClientMods.find(m => m.fileName === fileName);
-      }
-      
-      if (!targetMod) {
-        throw new Error(`Target mod ${fileName} not found in mod data`);
-      }
-      
-      if (!targetMod.downloadUrl) {
-        throw new Error(`Target mod ${fileName} has no download URL`);
-      }
-        // Determine if this is a required or optional mod
-      const isRequired = mod.required !== false; // Default to required if not specified
-      
-      // Create the mod list arrays with full target mod data
-      const modRequiredMods = isRequired ? [targetMod] : [];
-      const modOptionalMods = isRequired ? [] : [targetMod];
-
-      const result = await safeInvoke('minecraft-download-mods', {
-        clientPath: instance?.path,
-        requiredMods: modRequiredMods,
-        optionalMods: modOptionalMods,
-        allClientMods,
-        serverInfo: {
-          serverIp: instance?.serverIp,
-          serverPort: instance?.serverPort
-        }
-      });
-
-      if (result?.success) {
-        successMessage.set(`Successfully updated ${name} from v${currentVersion} to v${newVersion}`);
-        
-        // Update the installedModsInfo directly to reflect the new version without rescanning
-        const modIndex = installedModsInfo.findIndex(mod => mod.fileName === fileName);
-        if (modIndex !== -1) {
-          installedModsInfo[modIndex] = {
-            ...installedModsInfo[modIndex],
-            versionNumber: newVersion,
-            version: newVersion
-          };
-          installedModsInfo = [...installedModsInfo]; // Trigger reactivity
-        }
-        
-        // Gentle sync check after a delay, no full refresh
-        setTimeout(async () => {
-          await checkModSynchronization();
-        }, 500);
-      } else {
-        errorMessage.set(`Failed to update ${name}: ${result?.error || 'Unknown error'}`);
-      }
-    } catch (error) {
-      errorMessage.set(`Error updating ${name}: ${error.message}`);
-    }
-  }
+  // Update server-managed mods handled via utility
 
   // Enhance mod data with clean names from JAR files  // ...existing code...
 </script>
@@ -1260,17 +663,17 @@
   <div class="mod-manager-header">
     <h2>Client Mods</h2>
     <div class="connection-status">
-      {#if connectionStatus === 'connected'}
+      {#if $connectionStatus === 'connected'}
         <span class="status connected">✅ Connected to Server</span>
       {:else}
         <span class="status disconnected">❌ Disconnected from Server</span>
       {/if}
-      {#if lastModCheck}
-        <span class="last-check">Last updated: {lastModCheck.toLocaleTimeString()}</span>
+      {#if $lastModCheck}
+        <span class="last-check">Last updated: {$lastModCheck.toLocaleTimeString()}</span>
       {/if}
     </div>    <div class="mod-actions">
-      <button class="refresh-button" on:click={refreshMods} disabled={isLoadingMods}>
-        {isLoadingMods ? '⏳ Loading...' : '🔄 Refresh'}
+      <button class="refresh-button" on:click={refreshMods} disabled={$isLoadingMods}>
+        {$isLoadingMods ? '⏳ Loading...' : '🔄 Refresh'}
       </button>
       
       {#if modSyncStatus && !modSyncStatus.synchronized}
@@ -1318,7 +721,7 @@
   <div class="mod-content">
     {#if activeTab === 'installed-mods'}
       <!-- Original server mod synchronization content -->
-      {#if connectionStatus === 'disconnected'}
+      {#if $connectionStatus === 'disconnected'}
         <div class="connection-error">
           <h3>⚠️ Cannot Connect to Server</h3>
           <p>Make sure the management server is running and accessible.</p>
@@ -1326,14 +729,14 @@
             🔄 Retry Connection
           </button>
         </div>
-      {:else if isLoadingMods && !serverMods.length}
+      {:else if $isLoadingMods && !$serverMods.length}
         <div class="loading">
           <h3>🔄 Loading Mods...</h3>
           <p>Fetching mod information from server...</p>
         </div>
       {:else}        <!-- Mod Status Overview -->        <ClientModStatus
           {modSyncStatus}
-          requiredModsCount={requiredMods.length}
+          requiredModsCount={$requiredMods.length}
           optionalModsCount={displayOptionalMods.length}
           {pendingAcknowledgments}
           on:download-required={downloadRequiredMods}
