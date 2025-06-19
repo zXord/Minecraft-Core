@@ -974,11 +974,14 @@ function createMinecraftLauncherHandlers(win) {
       try {
         if (!clientPath || !requiredMods || !Array.isArray(requiredMods)) {
           return { success: false, error: 'Invalid parameters' };
-        }
-        
-        // Guard against incomplete server data - if serverManagedFiles has content but requiredMods is empty,
+        }        // Guard against incomplete server data - if serverManagedFiles has content but requiredMods is empty,
         // it likely means the server data isn't fully loaded yet
-        if (serverManagedFiles.length > 0 && requiredMods.length === 0 && allClientMods.length === 0) {
+        // BUT: Only apply this guard if we also don't have a proper persistent state from storage.
+        // If we have persistent state, then empty server data might mean mods were actually deleted.
+        const earlyStateResult = await loadExpectedModState(clientPath, win);
+        const hasPersistedState = earlyStateResult.success && (earlyStateResult.requiredMods.size > 0 || earlyStateResult.optionalMods.size > 0);
+        
+        if (serverManagedFiles.length > 0 && requiredMods.length === 0 && allClientMods.length === 0 && !hasPersistedState) {
           return { 
             success: true, 
             synchronized: true, 
@@ -1450,8 +1453,7 @@ function createMinecraftLauncherHandlers(win) {
             });
           }
         }
-        
-        // Process optional removals
+          // Process optional removals
         for (const modFileName of removedOptional) {
           const modLower = modFileName.toLowerCase();
           const baseModName = getBaseModName(modFileName).toLowerCase();
@@ -1462,11 +1464,30 @@ function createMinecraftLauncherHandlers(win) {
             continue;
           }
           
-          // Optional mods are usually just removed (no dependency check needed typically)
-          optionalRemovals.push({
-            fileName: modFileName,
-            reason: 'no longer provided by server'
-          });        }        
+          // Check if needed by client-side mods (same logic as required mods)
+          const hasModLower = clientSideDependencies.has(modLower);
+          const hasBaseModName = clientSideDependencies.has(baseModName);
+          const hasFabricApiCheck = (modLower.includes('fabric') && modLower.includes('api') && 
+                                   (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api')));          const hasFilenameCheck = checkModDependencyByFilename(modLower, clientSideDependencies);
+          
+          const isNeededByClientMod = hasModLower || hasBaseModName || hasFabricApiCheck || hasFilenameCheck;
+          
+          if (!isNeededByClientMod) {
+            // Can be removed safely
+            optionalRemovals.push({
+              fileName: modFileName,
+              reason: 'no longer provided by server'
+            });
+          } else {
+            // Need acknowledgment due to client dependencies (even for optional mods)
+            const dependents = await buildClientSideModsFor(modFileName);
+            const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
+            acknowledgments.push({
+              fileName: modFileName,
+              reason: reason
+            });
+          }
+        }
         // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====
           // Module analysis for updates - Track which mods need updates vs new downloads
         // Use the already imported modAnalysisUtils from the top of the file
