@@ -602,13 +602,13 @@
         {$isLoadingMods ? '⏳ Loading...' : '🔄 Refresh'}
       </button>
       
-      {#if modSyncStatus && !modSyncStatus.synchronized}
+      {#if $modSyncStatus && !$modSyncStatus.synchronized}
         <!-- Use same logic as Play tab for consistent button text -->
-        {#if modSyncStatus.needsDownload > 0}
+        {#if $modSyncStatus.needsDownload > 0}
           <button class="download-button" on:click={() => downloadRequiredMods(instance)}>
-            📥 Download Required Mods ({modSyncStatus.needsDownload})
+            📥 Download Required Mods ({$modSyncStatus.needsDownload})
           </button>        {:else}
-          {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
+          {@const actualRemovals = [...($modSyncStatus.requiredRemovals || []), ...($modSyncStatus.optionalRemovals || [])]}
           {@const acknowledgments = pendingAcknowledgments || []}
           
           {#if actualRemovals.length > 0}
