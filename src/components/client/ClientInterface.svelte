@@ -7,12 +7,14 @@
   import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
   import { errorMessage, successMessage, serverManagedFiles, removeServerManagedFiles } from '../../stores/modStore.js';
   import { createEventDispatcher } from 'svelte';
-  import { openFolder } from '../../utils/folderUtils.js';
-  import {
+  import { openFolder } from '../../utils/folderUtils.js';  import {
     clientState,
     setConnectionStatus,
     setManagementServerStatus,
-    setMinecraftServerStatus
+    setMinecraftServerStatus,
+    setMinecraftVersion,
+    setClientModVersionUpdates,
+    clearVersionChangeDetected
   } from '../../stores/clientStore.js';
   
   // Props
@@ -23,12 +25,17 @@
     id: '',
     name: '',
     type: 'client'
-  }; // Client instance with serverIp, serverPort, path
-  // Component references
+  }; // Client instance with serverIp, serverPort, path  // Component references
   let clientModManagerComponent;
   
   // Create event dispatcher
   const dispatch = createEventDispatcher();
+  
+  // Reactive statement to check client mod compatibility when version changes
+  $: if ($clientState.versionChangeDetected && $clientState.activeTab === 'play') {
+    checkClientModVersionCompatibility();
+    clearVersionChangeDetected();
+  }
   
   // Client state management handled by store
   let downloadStatus = 'ready';               // ready, downloading, completed, failed
@@ -244,11 +251,13 @@
         signal: AbortSignal.timeout(5000)
       });
       
-      if (response.ok) {
-        serverInfo = await response.json();
+      if (response.ok) {        serverInfo = await response.json();
         if (serverInfo.success) {
           setMinecraftServerStatus(serverInfo.minecraftServerStatus || 'unknown');
           requiredMods = serverInfo.requiredMods || [];
+          
+          // Track Minecraft version changes for client mod compatibility
+          setMinecraftVersion(serverInfo.minecraftVersion);
           
           // **FIX**: Also fetch complete mod list from server to get optional mods info
           try {
@@ -286,10 +295,132 @@
         }
       }
     } catch (err) {
-      setMinecraftServerStatus('unknown');
+      setMinecraftServerStatus('unknown');    }
+  }
+    
+  // Check client downloaded mods for compatibility with new Minecraft version
+  async function checkClientModVersionCompatibility() {
+    if (!instance.path || !serverInfo?.minecraftVersion) {
+      return;
+    }
+    
+    try {
+      const result = await window.electron.invoke('get-client-installed-mod-info', instance.path);
+      
+      if (!result || result.length === 0) {
+        // No client mods installed
+        setClientModVersionUpdates(null);
+        return;
+      }
+      
+      const updates = [];
+      const disables = [];
+      const compatible = [];
+      
+      for (const mod of result) {
+        if (!mod.projectId) {
+          // No project ID, can't check for updates - assume compatible
+          compatible.push({
+            name: mod.name || mod.fileName,
+            fileName: mod.fileName,
+            currentVersion: mod.versionNumber || 'Unknown',
+            status: 'compatible',
+            reason: 'No project ID - manual verification recommended'
+          });
+          continue;
+        }
+        
+        try {
+          // Check for mod versions compatible with the new MC version
+          const versions = await window.electron.invoke('get-mod-versions', {
+            modId: mod.projectId,
+            source: 'modrinth'
+          });
+          
+          if (versions && versions.length > 0) {
+            // Filter versions compatible with target MC version
+            const compatibleVersions = versions.filter(v => 
+              v.gameVersions && v.gameVersions.includes(serverInfo.minecraftVersion) &&
+              v.loaders && v.loaders.includes('fabric')
+            );
+            
+            if (compatibleVersions.length > 0) {
+              // Sort by date to get the latest
+              compatibleVersions.sort((a, b) => new Date(b.datePublished).getTime() - new Date(a.datePublished).getTime());
+              const latestVersion = compatibleVersions[0];
+              
+              // Check if this is actually an update or same version
+              if (latestVersion.versionNumber !== mod.versionNumber) {
+                updates.push({
+                  name: mod.name || mod.fileName,
+                  fileName: mod.fileName,
+                  currentVersion: mod.versionNumber || 'Unknown',
+                  newVersion: latestVersion.versionNumber,
+                  projectId: mod.projectId,
+                  versionId: latestVersion.id,
+                  status: 'update_available'
+                });
+              } else {
+                // Same version, already compatible
+                compatible.push({
+                  name: mod.name || mod.fileName,
+                  fileName: mod.fileName,
+                  currentVersion: mod.versionNumber || 'Unknown',
+                  status: 'compatible'
+                });
+              }
+            } else {
+              // No compatible versions found
+              disables.push({
+                name: mod.name || mod.fileName,
+                fileName: mod.fileName,
+                currentVersion: mod.versionNumber || 'Unknown',
+                status: 'incompatible',
+                reason: `No compatible version found for Minecraft ${serverInfo.minecraftVersion}`
+              });
+            }
+          } else {
+            // No versions found at all
+            disables.push({
+              name: mod.name || mod.fileName,
+              fileName: mod.fileName,
+              currentVersion: mod.versionNumber || 'Unknown',
+              status: 'incompatible',
+              reason: 'No version information available'
+            });
+          }
+        } catch (error) {
+          console.warn(`Failed to check compatibility for mod ${mod.name}:`, error);
+          // If we can't check versions, assume compatible
+          compatible.push({
+            name: mod.name || mod.fileName,
+            fileName: mod.fileName,
+            currentVersion: mod.versionNumber || 'Unknown',
+            status: 'compatible',
+            reason: 'Could not verify compatibility - manual check recommended'
+          });
+        }
+      }
+      
+      const versionUpdates = {
+        minecraftVersion: serverInfo.minecraftVersion,
+        updates: updates,
+        disables: disables,
+        compatible: compatible,
+        hasUpdates: updates.length > 0,
+        hasDisables: disables.length > 0,
+        hasChanges: updates.length > 0 || disables.length > 0
+      };
+      
+      setClientModVersionUpdates(versionUpdates);
+      
+    } catch (error) {
+      console.error('Failed to check client mod version compatibility:', error);
+      setClientModVersionUpdates(null);
     }
   }
-    // Check if client mods are synchronized with server
+    
+  // Check if client mods are synchronized with server
   async function checkModSynchronization() {
     if (isDownloadingMods || isDownloadingClient) {
       return;
@@ -1340,174 +1471,90 @@
       }
 
     } catch (error) {
-      downloadStatus = 'error';
-    } finally {
+      downloadStatus = 'error';    } finally {
       isCheckingSync = false;
     }
   }
-  
-  // Handle compatibility dialog events
+
+  // Reactive statement to check client mod compatibility when version changes
+  $: if ($clientState.versionChangeDetected && $clientState.activeTab === 'play') {
+    checkClientModVersionCompatibility();
+    clearVersionChangeDetected();
+  }
+
+  // Handle acknowledging all dependencies at once
+  async function onAcknowledgeAllDependencies() {
+    if (!modSyncStatus?.acknowledgments) return;
+    
+    try {
+      for (const ack of modSyncStatus.acknowledgments) {
+        await window.electron.invoke('acknowledge-dependency', {
+          clientPath: instance.path,
+          fileName: ack.fileName,
+          reason: ack.reason
+        });
+      }
+      
+      // Refresh after acknowledging all
+      await checkModSynchronization();
+      await loadAcknowledgedDependencies();
+      successMessage.set('All dependencies acknowledged successfully');
+    } catch (error) {
+      console.error('Failed to acknowledge all dependencies:', error);
+      errorMessage.set('Failed to acknowledge dependencies: ' + error.message);
+    }
+  }
+
+  // Handle compatibility dialog actions
   function handleCompatibilityDialogContinue() {
     showCompatibilityDialog = false;
     compatibilityReport = null;
   }
-    async function handleCompatibilityDialogUpdateMods() {
-    console.log('[DEBUG] Update mods called with report:', compatibilityReport);
-    if (!compatibilityReport || !compatibilityReport.needsUpdate || compatibilityReport.needsUpdate.length === 0) {
-      errorMessage.set('No mods available for update');
-      setTimeout(() => errorMessage.set(''), 3000);
-      return;
-    }
-    
-    showCompatibilityDialog = false;
+
+  async function handleCompatibilityDialogUpdateMods() {
+    if (!compatibilityReport?.needsUpdate) return;
     
     try {
-      
-      // Update each mod that has an available update
-      const updatePromises = compatibilityReport.needsUpdate.map(async (mod) => {
-        if (mod.availableUpdate && mod.availableUpdate.projectId && mod.availableUpdate.version) {
-          try {
-            const result = await window.electron.invoke('update-client-mod', {
-              clientPath: instance.path,
-              fileName: mod.fileName,
-              projectId: mod.availableUpdate.projectId,
-              targetVersion: mod.availableUpdate.version
-            });
-            
-            if (result.success) {
-              return { success: true, mod: mod.fileName };
-            } else {
-              return { success: false, mod: mod.fileName, error: result.error };
-            }
-          } catch (error) {
-            return { success: false, mod: mod.fileName, error: error.message };
-          }
-        }
-        return { success: false, mod: mod.fileName, error: 'No update information available' };
-      });
-      
-      const results = await Promise.all(updatePromises);
-      const successful = results.filter(r => r.success);
-      const failed = results.filter(r => !r.success);
-      
-      if (successful.length > 0) {
-        successMessage.set(`Successfully updated ${successful.length} mod${successful.length > 1 ? 's' : ''}`);
-        setTimeout(() => successMessage.set(''), 5000);
+      for (const mod of compatibilityReport.needsUpdate) {
+        await window.electron.invoke('install-client-mod', {
+          id: mod.projectId,
+          name: mod.name,
+          selectedVersionId: mod.versionId,
+          clientPath: instance.path,
+          forceReinstall: true
+        });
       }
       
-      if (failed.length > 0) {
-        errorMessage.set(`Failed to update ${failed.length} mod${failed.length > 1 ? 's' : ''}: ${failed.map(f => f.mod).join(', ')}`);
-        setTimeout(() => errorMessage.set(''), 8000);
-      }
-      
+      showCompatibilityDialog = false;
+      await checkModSynchronization();
+      successMessage.set('Client mods updated successfully');
     } catch (error) {
-      errorMessage.set('Error updating mods: ' + error.message);
-      setTimeout(() => errorMessage.set(''), 5000);
+      console.error('Failed to update client mods:', error);
+      errorMessage.set('Failed to update client mods: ' + error.message);
     }
-    
-    compatibilityReport = null;
   }
 
   async function handleCompatibilityDialogDisableIncompatible() {
-    if (!compatibilityReport || !compatibilityReport.incompatible || compatibilityReport.incompatible.length === 0) {
-      errorMessage.set('No incompatible mods to disable');
-      setTimeout(() => errorMessage.set(''), 3000);
-      return;
-    }
-    
-    showCompatibilityDialog = false;
+    if (!compatibilityReport?.incompatible) return;
     
     try {
-      
-      const disablePromises = compatibilityReport.incompatible.map(async (mod) => {
-        try {
-          const result = await window.electron.invoke('disable-client-mod', {
-            clientPath: instance.path,
-            fileName: mod.fileName
-          });
-          
-          if (result.success) {
-            return { success: true, mod: mod.fileName };
-          } else {
-            return { success: false, mod: mod.fileName, error: result.error };
-          }
-        } catch (error) {
-          return { success: false, mod: mod.fileName, error: error.message };
-        }
-      });
-      
-      const results = await Promise.all(disablePromises);
-      const successful = results.filter(r => r.success);
-      const failed = results.filter(r => !r.success);
-      
-      if (successful.length > 0) {
-        successMessage.set(`Successfully disabled ${successful.length} incompatible mod${successful.length > 1 ? 's' : ''}`);
-        setTimeout(() => successMessage.set(''), 5000);
-      }
-      
-      if (failed.length > 0) {
-        errorMessage.set(`Failed to disable ${failed.length} mod${failed.length > 1 ? 's' : ''}: ${failed.map(f => f.mod).join(', ')}`);
-        setTimeout(() => errorMessage.set(''), 8000);
-      }
-      
-    } catch (error) {
-      errorMessage.set('Error disabling mods: ' + error.message);
-      setTimeout(() => errorMessage.set(''), 5000);    }
-      compatibilityReport = null;
-  }  // Acknowledge all pending dependencies
-  async function onAcknowledgeAllDependencies() {
-    if (!instance?.path) {
-      return;
-    }
-
-    const acknowledgments = filteredAcknowledgments || [];
-    if (acknowledgments.length === 0) {
-      return;
-    }
-
-    try {      // Acknowledge each dependency
-      for (const acknowledgment of acknowledgments) {
-        const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
+      for (const mod of compatibilityReport.incompatible) {
+        await window.electron.invoke('disable-client-mod', {
           clientPath: instance.path,
-          modFileName: acknowledgment.fileName
+          fileName: mod.fileName
         });
-
-        if (result.success) {
-          // Add to local acknowledged set to immediately update UI
-          acknowledgedDeps.add(acknowledgment.fileName.toLowerCase());
-          
-          // If mod was removed from server tracking, remove it from serverManagedFiles
-          if (result.removedFromServerTracking) {
-            removeServerManagedFiles([acknowledgment.fileName]);
-          }
-        } else {
-          throw new Error(result.error || `Failed to acknowledge ${acknowledgment.fileName}`);
-        }
       }
       
-      // Trigger reactivity update
-      acknowledgedDeps = new Set(acknowledgedDeps);
-
-      successMessage.set(`Successfully acknowledged ${acknowledgments.length} dependenc${acknowledgments.length === 1 ? 'y' : 'ies'}`);
-      setTimeout(() => successMessage.set(''), 3000);
-      
-      // Refresh the mod sync status to update the UI
-      setTimeout(async () => {
-        await checkModSynchronization();
-      }, 300);
-      
+      showCompatibilityDialog = false;
+      await checkModSynchronization();
+      successMessage.set('Incompatible client mods disabled successfully');
     } catch (error) {
-      console.error('Error acknowledging dependencies:', error);
-      errorMessage.set(`Failed to acknowledge dependencies: ${error.message}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      console.error('Failed to disable incompatible mods:', error);
+      errorMessage.set('Failed to disable incompatible mods: ' + error.message);
     }
   }
 
-  // Reactive statement to reload acknowledged dependencies when instance changes
-  $: if (instance?.path) {
-    loadAcknowledgedDependencies();
-  }
-
+  // ...existing code...
 </script>
 
 <div class="client-container">
