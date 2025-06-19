@@ -401,6 +401,10 @@ async function getModrinthDownloadUrl(projectId, version, loader) {
  * @returns {Promise<Object>} Project info
  */
 async function getModrinthProjectInfo(projectId) {
+  if (!projectId) {
+    throw new Error('Project ID is required');
+  }
+
   await rateLimit();
   
   return await retryWithBackoff(async () => {
@@ -412,22 +416,8 @@ async function getModrinthProjectInfo(projectId) {
         signal: controller.signal
       });
       clearTimeout(timeoutId);
-      
+
       if (!response.ok) {
-        // Add specific diagnostics for 404 errors
-        if (response.status === 404) {
-          console.warn(`🔍 Mod Project Diagnostic: Project ID "${projectId}" not found (404)`);
-          console.warn(`   This could mean:`);
-          console.warn(`   - The mod was removed from Modrinth`);
-          console.warn(`   - The project ID is incorrect or outdated`);
-          console.warn(`   - The mod might have been renamed or transferred`);
-          console.warn(`   💡 User action: Try searching for this mod manually and re-installing it`);
-          console.warn(`   🔗 Search URL: https://modrinth.com/mods?q=${encodeURIComponent(projectId)}`);
-          
-          // Return a user-friendly error message
-          throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
-        }
-        
         throw new Error(`Modrinth API error: ${response.status}`);
       }
 

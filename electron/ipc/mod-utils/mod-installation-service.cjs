@@ -200,11 +200,10 @@ async function installModToServer(win, serverPath, modDetails) {
             console.warn(`Could not fetch version info for ${modDetails.id}: ${err.message}`);
           }
         }
-        
-        // Create manifest with available information
+          // Create manifest with available information
         const manifest = {
           projectId: modDetails.id, 
-          name: modDetails.name, 
+          name: modDetails.name, // This should now be the display name from project info
           fileName: finalFileName, // Use the final filename (clean or original)
           versionId: (versionInfoToSave && versionInfoToSave.id) || modDetails.selectedVersionId || 'unknown',
           versionNumber: (versionInfoToSave && (versionInfoToSave.version_number || versionInfoToSave.name)) || modDetails.version || 'unknown',

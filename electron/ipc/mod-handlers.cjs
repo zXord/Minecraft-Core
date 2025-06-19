@@ -363,9 +363,7 @@ function createModHandlers(win) {
       } catch (err) {
         throw new Error(`Failed to delete mod: ${err.message}`);
       }
-    },
-
-    // Update a mod to a new version
+    },    // Update a mod to a new version
     'update-mod': async (_event, { serverPath, projectId, targetVersion, fileName }) => {
       try {
           // Step 1: Get the new version details
@@ -377,11 +375,14 @@ function createModHandlers(win) {
 
         const completeVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionInfo.id);
 
-        // Step 2: Install the new version (installation service will handle cleanup)
+        // Step 2: Get the project info to get the proper display name
+        const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
+
+        // Step 3: Install the new version (installation service will handle cleanup)
         const modDetails = {
           id: projectId,
           selectedVersionId: targetVersionInfo.id, // Use selectedVersionId instead of versionId
-          name: completeVersionInfo.name || targetVersionInfo.name || projectId,
+          name: projectInfo.title || completeVersionInfo.name || targetVersionInfo.name || projectId, // Use project title (display name) first
           fileName: completeVersionInfo.files[0]?.filename,
           downloadUrl: completeVersionInfo.files[0]?.url,
           version: targetVersion,
