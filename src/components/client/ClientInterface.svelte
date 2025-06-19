@@ -998,11 +998,12 @@
     window.electron.on('launcher-download-progress', (data) => {
       downloadProgress = Math.round((data.downloaded / data.total) * 100);
       currentDownloadFile = data.current || '';
-      
-      // Handle file-level progress if available
+        // Handle file-level progress if available
       if (data.fileProgress !== undefined) {
-        fileProgress = data.fileProgress;
-      }      if (data.downloadedBytes && data.totalSize) {
+        fileProgress = Math.round(data.fileProgress);
+      }
+      
+      if (data.downloadedBytes && data.totalSize) {
         // Calculate download speed (rough estimate)
         const mbps = (data.downloadedBytes / (1024 * 1024)).toFixed(1);
         downloadSpeed = `${mbps} MB downloaded`;
@@ -1605,9 +1606,8 @@
                   <h3>Downloading Minecraft Client</h3>
                   <div class="launch-progress">
                     <p>{clientDownloadProgress.type}: {clientDownloadProgress.task}</p>
-                    {#if clientDownloadProgress.total > 0}
-                      <div class="progress-bar">
-                        <div class="progress-fill" style="width: {(clientDownloadProgress.current / clientDownloadProgress.total) * 100}%"></div>
+                    {#if clientDownloadProgress.total > 0}                      <div class="progress-bar">
+                        <div class="progress-fill" style="width: {Math.round((clientDownloadProgress.current / clientDownloadProgress.total) * 100)}%"></div>
                       </div>
                       {#if clientDownloadProgress.type === 'Downloading' && clientDownloadProgress.totalMB}
                         <p class="progress-text">{clientDownloadProgress.current || 0} MB / {clientDownloadProgress.total} MB</p>
@@ -1888,9 +1888,8 @@
                     <h3>🚀 Launching Minecraft...</h3>
                     <div class="launch-progress">
                       <p>{launchProgress.type}: {launchProgress.task}</p>
-                      {#if launchProgress.total > 0}
-                        <div class="progress-bar">
-                          <div class="progress-fill" style="width: {(launchProgress.current / launchProgress.total) * 100}%"></div>
+                      {#if launchProgress.total > 0}                        <div class="progress-bar">
+                          <div class="progress-fill" style="width: {Math.round((launchProgress.current / launchProgress.total) * 100)}%"></div>
                         </div>
                       {/if}
                     </div>

@@ -37,22 +37,21 @@
   }
   onMount(() => {
     fetchMinecraftVersions();
-    
-    // Set up progress listeners
+      // Set up progress listeners
     window.electron.on('minecraft-server-progress', (data) => {
-      updateProgress = data.percent || 0;
+      updateProgress = Math.round(data.percent || 0);
       updateStatus = data.speed || '';
       currentTask = 'Downloading Minecraft server...';
     });
     
     window.electron.on('fabric-install-progress', (data) => {
-      updateProgress = data.percent || 0;
+      updateProgress = Math.round(data.percent || 0);
       updateStatus = data.speed || '';
       currentTask = 'Installing Fabric loader...';
     });
       window.electron.on('download-progress', (data) => {
       if (data.id && data.id.startsWith('mod-')) {
-        updateProgress = data.progress || 0;
+        updateProgress = Math.round(data.progress || 0);
         updateStatus = data.speed ? `${(data.speed / 1024 / 1024).toFixed(2)} MB/s` : '';
         currentTask = `Updating ${data.name || 'mod'}...`;
       }

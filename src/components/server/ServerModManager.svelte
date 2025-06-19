@@ -543,8 +543,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       }
     }
   }
-  
-  // Handle tab switching
+    // Handle tab switching
   function switchTab(tabName) {
     if (activeTab === tabName) return;
     
@@ -561,6 +560,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     }
     // If switching to search tab, refresh search results and check for updates
     else if (tabName === 'search') {
+      // Clear any stale update counts when switching away from installed tab
+      modsWithUpdates.set(new Map());
+      
       // Always check for updates when switching to search tab to ensure update buttons are shown
       checkForUpdates(serverPath).then(() => {
         // Only search if no results yet or explicitly requested

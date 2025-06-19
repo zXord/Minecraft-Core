@@ -173,9 +173,7 @@ function createModHandlers(win) {
       } catch (error) {
         throw new Error(`Failed to search mods: ${error.message}`);
       }
-    },
-
-    'get-mod-versions': async (_event, { modId, loader, mcVersion, source, loadLatestOnly }) => {
+    },    'get-mod-versions': async (_event, { modId, loader, mcVersion, source, loadLatestOnly }) => {
       try {
         if (source === 'modrinth') {
           return await modApiService.getModrinthVersions(modId, loader, mcVersion, loadLatestOnly);
@@ -184,11 +182,18 @@ function createModHandlers(win) {
           throw new Error('Only Modrinth version fetching is currently fully supported via modApiService.');
         }
       } catch (err) {
+        // Provide more specific error messages for different types of failures
+        if (err.message && err.message.includes('timeout')) {
+          throw new Error(`Network timeout while fetching mod versions for ${modId}. Please check your internet connection and try again.`);
+        } else if (err.message && err.message.includes('not found')) {
+          throw new Error(`Mod not found: ${err.message}`);
+        } else if (err.message && err.message.includes('API')) {
+          throw new Error(`Modrinth API error: ${err.message}`);
+        }
         throw new Error(`Failed to get mod versions: ${err.message}`);
       }
     },
-    
-    'get-version-info': async (_event, { modId, versionId, source, gameVersion, loader }) => {
+      'get-version-info': async (_event, { modId, versionId, source, gameVersion, loader }) => {
       try {
         if (source === 'modrinth') {
           return await modApiService.getModrinthVersionInfo(modId, versionId, gameVersion, loader);
@@ -201,6 +206,15 @@ function createModHandlers(win) {
           // Not an error, version likely not found
         } else {
           // Log other errors if needed
+        }
+        
+        // Provide more specific error messages for different types of failures
+        if (err.message && err.message.includes('timeout')) {
+          throw new Error(`Network timeout while fetching version info for ${modId}. Please check your internet connection and try again.`);
+        } else if (err.message && err.message.includes('not found')) {
+          throw new Error(`Version not found: ${err.message}`);
+        } else if (err.message && err.message.includes('API')) {
+          throw new Error(`Modrinth API error: ${err.message}`);
         }
         throw new Error(`Failed to get version info: ${err.message}`);
       }

@@ -335,15 +335,18 @@
       errorMessage.set(`Failed to check for updates: ${error.message}`);
     }
   }
-  
-  /**
+    /**
    * Check compatibility of all installed mods
    * This will scan all installed mods for missing dependencies
    */
   async function checkAllModsCompatibility() {
     try {
-      // Only check enabled mods
-      const modsWithInfo = $installedModInfo.filter(mod => mod.projectId && !$disabledMods.has(mod.fileName));
+      // Only check enabled mods with valid project information
+      const modsWithInfo = $installedModInfo.filter(mod => 
+        mod.projectId && 
+        mod.fileName && 
+        !$disabledMods.has(mod.fileName)
+      );
       
       if (modsWithInfo.length === 0) {
         successMessage.set('No mods with project information found');
@@ -360,6 +363,11 @@
       // For each mod, check dependencies using the helper
       for (const mod of modsWithInfo) {
         try {
+          // Validate mod has required properties before checking dependencies
+          if (!mod.projectId || !mod.fileName) {
+            continue;
+          }
+          
           // Use unified dependency check to gather all types of dependencies
           const deps = await checkModDependencies({
             id: mod.projectId,
@@ -380,6 +388,8 @@
             }
           }
         } catch (error) {
+          // Log the specific mod that caused the error for debugging
+          console.warn(`Error checking compatibility for mod ${mod.fileName || mod.name || 'unknown'}:`, error);
         }
       }
       

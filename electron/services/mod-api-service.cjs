@@ -28,6 +28,43 @@ async function rateLimit() {
 const versionCache = new Map();
 
 /**
+ * Retry function with exponential backoff for API calls
+ * @param {Function} fn - The function to retry
+ * @param {number} maxRetries - Maximum number of retries
+ * @param {number} baseDelay - Base delay in milliseconds
+ * @returns {Promise<any>} - Result of the function
+ */
+async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
+  let lastError;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      
+      // Don't retry on 404 errors (mod not found)
+      if (error.message && error.message.includes('404')) {
+        throw error;
+      }
+      
+      // Don't retry on final attempt
+      if (attempt === maxRetries) {
+        break;
+      }
+      
+      // Calculate delay with exponential backoff
+      const delay = baseDelay * Math.pow(2, attempt);
+      console.warn(`🔄 API request failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${error.message}`);
+      
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError;
+}
+
+/**
  * Clear the version cache - useful when checking compatibility for different versions
  */
 function clearVersionCache() {
@@ -105,20 +142,33 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
   
   // Add sorting parameter in multiple formats to ensure compatibility
   url.searchParams.append('index', modrinthSortBy);  // For newer API versions
-  
-  // Execute request
-  
-  const response = await fetch(url.toString(), {
-    headers: {
-      'User-Agent': 'minecraft-core/1.0.0'
+    // Execute request with retry logic
+  const data = await retryWithBackoff(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    
+    try {
+      const response = await fetch(url.toString(), {
+        headers: {
+          'User-Agent': 'minecraft-core/1.0.0'
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`Modrinth API error: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error(`API timeout during popular mods fetch - network may be slow or API unavailable`);
+      }
+      throw error;
     }
   });
-
-  if (!response.ok) {
-    throw new Error(`Modrinth API error: ${response.status}`);
-  }
-
-  const data = await response.json();
 
   const mods = data.hits.map(mod => ({
       id: mod.project_id,
@@ -189,20 +239,33 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   
   // Add sorting parameter in multiple formats to ensure compatibility
   url.searchParams.append('index', modrinthSortBy);  // For newer API versions
-  
-  // Execute request
-  
-  const response = await fetch(url.toString(), {
-    headers: {
-      'User-Agent': 'minecraft-core/1.0.0'
+    // Execute request with retry logic
+  const data = await retryWithBackoff(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    
+    try {
+      const response = await fetch(url.toString(), {
+        headers: {
+          'User-Agent': 'minecraft-core/1.0.0'
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`Modrinth API error (${response.status}): ${response.statusText}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error(`API timeout during mod search - network may be slow or API unavailable`);
+      }
+      throw error;
     }
   });
-
-  if (!response.ok) {
-    throw new Error(`Modrinth API error (${response.status}): ${response.statusText}`);
-  }
-
-  const data = await response.json();
 
   const mods = data.hits.map(project => ({
       id: project.project_id,
@@ -339,27 +402,44 @@ async function getModrinthDownloadUrl(projectId, version, loader) {
  */
 async function getModrinthProjectInfo(projectId) {
   await rateLimit();
-  const response = await fetch(`${MODRINTH_API}/project/${projectId}`);
   
-  if (!response.ok) {
-    // Add specific diagnostics for 404 errors
-    if (response.status === 404) {
-      console.warn(`🔍 Mod Project Diagnostic: Project ID "${projectId}" not found (404)`);
-      console.warn(`   This could mean:`);
-      console.warn(`   - The mod was removed from Modrinth`);
-      console.warn(`   - The project ID is incorrect or outdated`);
-      console.warn(`   - The mod might have been renamed or transferred`);
-      console.warn(`   💡 User action: Try searching for this mod manually and re-installing it`);
-      console.warn(`   🔗 Search URL: https://modrinth.com/mods?q=${encodeURIComponent(projectId)}`);
-      
-      // Return a user-friendly error message
-      throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
-    }
+  return await retryWithBackoff(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
     
-    throw new Error(`Modrinth API error: ${response.status}`);
-  }
+    try {
+      const response = await fetch(`${MODRINTH_API}/project/${projectId}`, {
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        // Add specific diagnostics for 404 errors
+        if (response.status === 404) {
+          console.warn(`🔍 Mod Project Diagnostic: Project ID "${projectId}" not found (404)`);
+          console.warn(`   This could mean:`);
+          console.warn(`   - The mod was removed from Modrinth`);
+          console.warn(`   - The project ID is incorrect or outdated`);
+          console.warn(`   - The mod might have been renamed or transferred`);
+          console.warn(`   💡 User action: Try searching for this mod manually and re-installing it`);
+          console.warn(`   🔗 Search URL: https://modrinth.com/mods?q=${encodeURIComponent(projectId)}`);
+          
+          // Return a user-friendly error message
+          throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
+        }
+        
+        throw new Error(`Modrinth API error: ${response.status}`);
+      }
 
-  return await response.json();
+      return await response.json();
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error(`API timeout for project ${projectId} - network may be slow or API unavailable`);
+      }
+      throw error;
+    }
+  });
 }
 
 /**
@@ -434,49 +514,49 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     
     return versionCache.get(cacheKey);
   }
-  
-  // Apply rate limiting before API request
+    // Apply rate limiting before API request
   await rateLimit();
 
-  
-  // Add timeout to prevent hanging
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-  
-  let versions;
-  try {
-    const response = await fetch(`${MODRINTH_API}/project/${projectId}/version`, {
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
+  // Wrap the API call in retry logic
+  const versions = await retryWithBackoff(async () => {
+    // Add timeout to prevent hanging
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // Increased to 15 second timeout
+    
+    try {
+      const response = await fetch(`${MODRINTH_API}/project/${projectId}/version`, {
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
       if (!response.ok) {
-      // Add specific diagnostics for 404 errors
-      if (response.status === 404) {
-        console.warn(`🔍 Mod API Diagnostic: Project ID "${projectId}" not found (404)`);
-        console.warn(`   This could mean:`);
-        console.warn(`   - The mod was removed from Modrinth`);
-        console.warn(`   - The project ID is incorrect or outdated`);
-        console.warn(`   - The mod might have been renamed or transferred`);
-        console.warn(`   💡 User action: Try searching for this mod manually and re-installing it`);
-        console.warn(`   🔗 Search URL: https://modrinth.com/mods?q=${encodeURIComponent(projectId)}`);
+        // Add specific diagnostics for 404 errors
+        if (response.status === 404) {
+          console.warn(`🔍 Mod API Diagnostic: Project ID "${projectId}" not found (404)`);
+          console.warn(`   This could mean:`);
+          console.warn(`   - The mod was removed from Modrinth`);
+          console.warn(`   - The project ID is incorrect or outdated`);
+          console.warn(`   - The mod might have been renamed or transferred`);
+          console.warn(`   💡 User action: Try searching for this mod manually and re-installing it`);
+          console.warn(`   🔗 Search URL: https://modrinth.com/mods?q=${encodeURIComponent(projectId)}`);
+          
+          // Return a user-friendly error message
+          throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
+        }
         
-        // Return a user-friendly error message
-        throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
+        throw new Error(`Modrinth API error: ${response.status}`);
       }
       
-      throw new Error(`Modrinth API error: ${response.status}`);
-    }
-    
-    versions = await response.json();
+      return await response.json();
 
-  } catch (error) {
-    clearTimeout(timeoutId);
-    if (error.name === 'AbortError') {
-
-      throw new Error(`API timeout for ${projectId}`);
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error(`API timeout for ${projectId} - network may be slow or API unavailable`);
+      }
+      throw error;
     }
-    throw error;
-  }
+  });
   
   // Filter versions that match our requirements
   let compatibleVersions = versions;
@@ -569,13 +649,30 @@ async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader)
   }
 
   await rateLimit();
-  const response = await fetch(`${MODRINTH_API}/version/${versionId}`);
+  
+  return await retryWithBackoff(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    
+    try {
+      const response = await fetch(`${MODRINTH_API}/version/${versionId}`, {
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
 
-  if (!response.ok) {
-    throw new Error(`Modrinth API error: ${response.status}`);
-  }
+      if (!response.ok) {
+        throw new Error(`Modrinth API error: ${response.status}`);
+      }
 
-  return await response.json();
+      return await response.json();
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error(`API timeout for version ${versionId} - network may be slow or API unavailable`);
+      }
+      throw error;
+    }
+  });
 }
 
 /**
