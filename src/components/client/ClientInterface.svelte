@@ -1488,7 +1488,7 @@
     
     try {
       for (const ack of modSyncStatus.acknowledgments) {
-        await window.electron.invoke('acknowledge-dependency', {
+        await window.electron.invoke('minecraft-acknowledge-dependency', {
           clientPath: instance.path,
           fileName: ack.fileName,
           reason: ack.reason
