@@ -1485,7 +1485,7 @@
   // Handle acknowledging all dependencies at once
   async function onAcknowledgeAllDependencies() {
     if (!modSyncStatus?.acknowledgments) return;
-    
+
     try {
       for (const ack of modSyncStatus.acknowledgments) {
         await window.electron.invoke('minecraft-acknowledge-dependency', {
@@ -1493,8 +1493,14 @@
           fileName: ack.fileName,
           reason: ack.reason
         });
+        // Update local acknowledged set and remove from server-managed files
+        acknowledgedDeps = new Set([
+          ...acknowledgedDeps,
+          ack.fileName.toLowerCase()
+        ]);
+        removeServerManagedFiles([ack.fileName]);
       }
-      
+
       // Refresh after acknowledging all
       await checkModSynchronization();
       await loadAcknowledgedDependencies();
