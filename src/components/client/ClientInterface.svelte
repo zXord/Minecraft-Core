@@ -314,16 +314,6 @@
       });      if (result.success) {
         modSyncStatus = result;
         
-        console.log('[ClientInterface] Mod sync result:', {
-          synchronized: result.synchronized,
-          requiredRemovals: result.requiredRemovals?.length || 0,
-          optionalRemovals: result.optionalRemovals?.length || 0,
-          acknowledgments: result.acknowledgments?.length || 0,
-          missingMods: result.missingMods?.length || 0,
-          outdatedMods: result.outdatedMods?.length || 0,
-          outdatedOptionalMods: result.outdatedOptionalMods?.length || 0
-        });
-        
         // Refresh acknowledged dependencies to ensure UI filtering is up to date
         await loadAcknowledgedDependencies();
         
@@ -335,21 +325,11 @@
         const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0)) > 0;
         const hasAcknowledgments = (result.acknowledgments?.length || 0) > 0;
         
-        console.log('[ClientInterface] Status check:', {
-          hasRequiredUpdates,
-          hasOptionalUpdates, 
-          hasRemovals,
-          hasAcknowledgments,
-          synchronized: result.synchronized
-        });
-        
         // Only show "ready" status if truly synchronized AND no actions needed
         if (result.synchronized && !hasRequiredUpdates && !hasOptionalUpdates && !hasRemovals && !hasAcknowledgments) {
           downloadStatus = 'ready'; // Only truly ready if no mods need attention
-          console.log('[ClientInterface] Setting downloadStatus to READY');
         } else {
           downloadStatus = 'needed'; // Show as needed if ANY mod actions are required
-          console.log('[ClientInterface] Setting downloadStatus to NEEDED');
         }
       } else {
         downloadStatus = 'ready'; // Assume ready if check fails
@@ -1484,8 +1464,7 @@
       return;
     }
 
-    try {
-      // Acknowledge each dependency
+    try {      // Acknowledge each dependency
       for (const acknowledgment of acknowledgments) {
         const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
           clientPath: instance.path,
@@ -1495,6 +1474,11 @@
         if (result.success) {
           // Add to local acknowledged set to immediately update UI
           acknowledgedDeps.add(acknowledgment.fileName.toLowerCase());
+          
+          // If mod was removed from server tracking, remove it from serverManagedFiles
+          if (result.removedFromServerTracking) {
+            removeServerManagedFiles([acknowledgment.fileName]);
+          }
         } else {
           throw new Error(result.error || `Failed to acknowledge ${acknowledgment.fileName}`);
         }
