@@ -1246,23 +1246,36 @@ function createMinecraftLauncherHandlers(win) {
             serverManagedFilesSetForDiff.add(mod)
           );
         }        // Reconcile acknowledged dependencies with current server-managed mods.
-        // Only clear acknowledgments if a mod is back on the server as REQUIRED
-        // Keep acknowledgments for optional mods so they don't re-appear in UI
+        // Clear acknowledgments for mods that are now managed by the server (required OR optional)
+        // This allows them to show acknowledgment buttons again if they're later deleted
         if (acknowledgedDependencies && acknowledgedDependencies.size > 0) {
           const updatedAcks = new Set();
+          
+          // Get current optional mods from allClientMods
+          const currentOptionalMods = new Set(
+            (allClientMods || []).filter(m => !m.required).map(m => m.fileName.toLowerCase())
+          );
+          
           for (const dep of acknowledgedDependencies) {
             const lower = dep.toLowerCase();
-            // Only clear acknowledgment if mod is now REQUIRED by server
-            // Keep acknowledgment if it's optional to prevent UI duplication
-            if (newServerRequiredModList.has(lower)) {
-              // Clear acknowledgment - mod is now required
+            const baseDepName = getBaseModName(dep).toLowerCase();
+            
+            // Check if this mod is now managed by the server (required OR optional)
+            const isNowRequiredByServer = newServerRequiredModList.has(lower) || newServerRequiredModList.has(baseDepName);
+            const isNowOptionalByServer = currentOptionalMods.has(lower) || currentOptionalMods.has(baseDepName);
+            const isNowManagedByServer = isNowRequiredByServer || isNowOptionalByServer;
+            
+            if (isNowManagedByServer) {
+              // Clear acknowledgment - mod is now managed by server (required or optional)
+              // This allows it to show acknowledgment button again if deleted from server
             } else {
+              // Keep this acknowledgment - mod is still client-only
               updatedAcks.add(lower);
               // Keep acknowledged mods in serverManagedFilesSetForDiff for tracking
               serverManagedFilesSetForDiff.add(lower);
             }
           }          acknowledgedDependencies = updatedAcks;
-        }        const clientSideDependencies = await getClientSideDependencies(clientPath, Array.from(serverManagedFilesSetForDiff));
+        }const clientSideDependencies = await getClientSideDependencies(clientPath, Array.from(serverManagedFilesSetForDiff));
           const buildClientSideModsFor = async (excludeFile) => {
           if (!fs.existsSync(modsDir)) return [];
           
@@ -1401,8 +1414,7 @@ function createMinecraftLauncherHandlers(win) {
         
         // Get previous state
         const prevRequired = stateResult.requiredMods;
-        const prevOptional = stateResult.optionalMods;
-          // Phase 1: Detect required mod removals
+        const prevOptional = stateResult.optionalMods;        // Phase 1: Detect required mod removals
         const removedRequired = Array.from(prevRequired).filter(f => {
           const fLower = f.toLowerCase();
           return !currRequired.has(fLower) && allCurrentMods.has(fLower);
@@ -1413,7 +1425,6 @@ function createMinecraftLauncherHandlers(win) {
           const fLower = f.toLowerCase();
           return !currOptional.has(fLower) && allCurrentMods.has(fLower);
         });        
-        // console.log(`[IPC HANDLER] Removal detection - Required: ${removedRequired.length}, Optional: ${removedOptional.length}`);
         
         // Initialize response arrays
         const requiredRemovals = [];
@@ -1423,10 +1434,88 @@ function createMinecraftLauncherHandlers(win) {
           const modLower = modFileName.toLowerCase();
           const baseModName = getBaseModName(modFileName).toLowerCase();
           
+          // Skip if this mod is now optional - it should only appear in optional section
+          const isNowOptional = currOptional.has(modLower);
+          if (isNowOptional) {
+            continue; // Let the optional section handle this mod
+          }
+          
+          // Check if needed by client-side mods
+          const hasModLower = clientSideDependencies.has(modLower);
+          const hasBaseModName = clientSideDependencies.has(baseModName);
+          const hasFabricApiCheck = (modLower.includes('fabric') && modLower.includes('api') && 
+                                   (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api')));          const hasFilenameCheck = checkModDependencyByFilename(modLower, clientSideDependencies);
+          
+          const isNeededByClientMod = hasModLower || hasBaseModName || hasFabricApiCheck || hasFilenameCheck;
+          
+          // Check if already acknowledged
+          const isAlreadyAcknowledged = acknowledgedDependencies.has(modLower) || acknowledgedDependencies.has(baseModName);
+          
+          if (!isNeededByClientMod) {
+            // Can be removed safely
+            requiredRemovals.push({
+              fileName: modFileName,
+              reason: 'no longer required by server'
+            });          } else if (isAlreadyAcknowledged) {
+            // Still needed but already acknowledged - just keep it tracked, no acknowledgment needed
+          } else {
+            // Need acknowledgment due to client dependencies
+            const dependents = await buildClientSideModsFor(modFileName);
+            const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
+            acknowledgments.push({
+              fileName: modFileName,
+              reason: reason
+            });
+          }
+        }        // Process optional removals
+        for (const modFileName of removedOptional) {
+          const modLower = modFileName.toLowerCase();
+          const baseModName = getBaseModName(modFileName).toLowerCase();
+          
+          // Check if needed by client-side mods (same logic as required mods)
+          const hasModLower = clientSideDependencies.has(modLower);
+          const hasBaseModName = clientSideDependencies.has(baseModName);
+          const hasFabricApiCheck = (modLower.includes('fabric') && modLower.includes('api') && 
+                                   (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api')));          const hasFilenameCheck = checkModDependencyByFilename(modLower, clientSideDependencies);
+          
+          const isNeededByClientMod = hasModLower || hasBaseModName || hasFabricApiCheck || hasFilenameCheck;
+          
+          // Check if already acknowledged
+          const isAlreadyAcknowledged = acknowledgedDependencies.has(modLower) || acknowledgedDependencies.has(baseModName);
+          
+          if (!isNeededByClientMod) {
+            // Can be removed safely
+            optionalRemovals.push({
+              fileName: modFileName,
+              reason: 'no longer provided by server'
+            });
+          } else if (isAlreadyAcknowledged) {
+            // Still needed but already acknowledged - just keep it tracked, no acknowledgment needed
+            // The mod should still appear in the UI but without the acknowledgment button
+          } else {
+            // Need acknowledgment due to client dependencies (even for optional mods)
+            const dependents = await buildClientSideModsFor(modFileName);
+            const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
+            acknowledgments.push({
+              fileName: modFileName,
+              reason: reason
+            });
+          }
+        }
+        
+        // Additional check: Handle mods that were previously required but are now optional
+        // These should also be checked for acknowledgment in the optional section
+        for (const modFileName of removedRequired) {
+          const modLower = modFileName.toLowerCase();
+          const baseModName = getBaseModName(modFileName).toLowerCase();
+          
+          // Only process if this mod is now optional and wasn't already processed above
+          const isNowOptional = currOptional.has(modLower);
+          if (!isNowOptional) continue;
+          
           // Skip if already acknowledged
           const isAlreadyAcknowledged = acknowledgedDependencies.has(modLower) || acknowledgedDependencies.has(baseModName);
           if (isAlreadyAcknowledged) {
-
             continue;
           }
           
@@ -1438,12 +1527,7 @@ function createMinecraftLauncherHandlers(win) {
           
           const isNeededByClientMod = hasModLower || hasBaseModName || hasFabricApiCheck || hasFilenameCheck;
           
-          if (!isNeededByClientMod) {
-            // Can be removed safely
-            requiredRemovals.push({
-              fileName: modFileName,
-              reason: 'no longer required by server'
-            });          } else {
+          if (isNeededByClientMod) {
             // Need acknowledgment due to client dependencies
             const dependents = await buildClientSideModsFor(modFileName);
             const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
@@ -1451,43 +1535,7 @@ function createMinecraftLauncherHandlers(win) {
               fileName: modFileName,
               reason: reason
             });
-          }
-        }
-          // Process optional removals
-        for (const modFileName of removedOptional) {
-          const modLower = modFileName.toLowerCase();
-          const baseModName = getBaseModName(modFileName).toLowerCase();
-          
-          // Skip if already acknowledged
-          const isAlreadyAcknowledged = acknowledgedDependencies.has(modLower) || acknowledgedDependencies.has(baseModName);
-          if (isAlreadyAcknowledged) {
-            continue;
-          }
-          
-          // Check if needed by client-side mods (same logic as required mods)
-          const hasModLower = clientSideDependencies.has(modLower);
-          const hasBaseModName = clientSideDependencies.has(baseModName);
-          const hasFabricApiCheck = (modLower.includes('fabric') && modLower.includes('api') && 
-                                   (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api')));          const hasFilenameCheck = checkModDependencyByFilename(modLower, clientSideDependencies);
-          
-          const isNeededByClientMod = hasModLower || hasBaseModName || hasFabricApiCheck || hasFilenameCheck;
-          
-          if (!isNeededByClientMod) {
-            // Can be removed safely
-            optionalRemovals.push({
-              fileName: modFileName,
-              reason: 'no longer provided by server'
-            });
-          } else {
-            // Need acknowledgment due to client dependencies (even for optional mods)
-            const dependents = await buildClientSideModsFor(modFileName);
-            const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
-            acknowledgments.push({
-              fileName: modFileName,
-              reason: reason
-            });
-          }
-        }
+          }        }
         // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====
           // Module analysis for updates - Track which mods need updates vs new downloads
         // Use the already imported modAnalysisUtils from the top of the file
@@ -1647,18 +1695,81 @@ function createMinecraftLauncherHandlers(win) {
           for (const removal of optionalRemovals) {
             if (!removedModsToExclude.has(removal.fileName.toLowerCase())) {
               optionalToSave.add(removal.fileName);
+            }          }          for (const ack of acknowledgments) {
+            // Save acknowledgments in the correct category
+            if (!removedModsToExclude.has(ack.fileName.toLowerCase())) {
+              const ackLower = ack.fileName.toLowerCase();
+              
+              // Check if this mod is currently in the server's required or optional list
+              const isCurrentlyRequired = currRequired.has(ackLower);
+              const isCurrentlyOptional = currOptional.has(ackLower);
+              
+              if (isCurrentlyRequired) {
+                requiredToSave.add(ack.fileName);
+              } else if (isCurrentlyOptional) {
+                optionalToSave.add(ack.fileName);
+              } else {
+                // Mod is not currently provided by server, but needs acknowledgment
+                // Determine where it came from by checking previous state
+                const wasRequired = prevRequired.has(ackLower);
+                const wasOptional = prevOptional.has(ackLower);
+                
+                if (wasRequired) {
+                  // It was previously required, save as required for acknowledgment
+                  requiredToSave.add(ack.fileName);
+                } else if (wasOptional) {
+                  // It was previously optional, save as optional for acknowledgment
+                  optionalToSave.add(ack.fileName);
+                } else {
+                  // Fallback: save as required (conservative approach)
+                  requiredToSave.add(ack.fileName);
+                }
+              }
             }
           }
-          for (const ack of acknowledgments) {
-            // Acknowledgments are typically required mods, but could be optional
-            // We'll add them to required for consistency
-            if (!removedModsToExclude.has(ack.fileName.toLowerCase())) {
-              requiredToSave.add(ack.fileName);
+          
+          // IMPORTANT: Also save acknowledged mods that are still needed (but don't need new acknowledgment)
+          // This ensures they remain visible in the UI even though they don't have acknowledgment buttons
+          for (const removedMod of [...removedRequired, ...removedOptional]) {
+            const modLower = removedMod.toLowerCase();
+            const baseModName = getBaseModName(removedMod).toLowerCase();
+            
+            // Check if this mod is already being saved via acknowledgments
+            const alreadyBeingSaved = 
+              Array.from(requiredToSave).some(m => m.toLowerCase() === modLower) ||
+              Array.from(optionalToSave).some(m => m.toLowerCase() === modLower);
+              
+            if (alreadyBeingSaved) continue;
+            
+            // Check if it's acknowledged and still needed
+            const isAlreadyAcknowledged = acknowledgedDependencies.has(modLower) || acknowledgedDependencies.has(baseModName);
+            
+            if (isAlreadyAcknowledged) {
+              // Check if still needed by client dependencies
+              const hasModLower = clientSideDependencies.has(modLower);
+              const hasBaseModName = clientSideDependencies.has(baseModName);
+              const hasFabricApiCheck = (modLower.includes('fabric') && modLower.includes('api') && 
+                                       (clientSideDependencies.has('fabric-api') || clientSideDependencies.has('fabricapi') || clientSideDependencies.has('fabric_api')));
+              const hasFilenameCheck = checkModDependencyByFilename(modLower, clientSideDependencies);
+              
+              const isStillNeeded = hasModLower || hasBaseModName || hasFabricApiCheck || hasFilenameCheck;
+              
+              if (isStillNeeded) {
+                // Determine correct category based on previous state
+                const wasRequired = prevRequired.has(modLower);
+                const wasOptional = prevOptional.has(modLower);
+                  if (wasRequired) {
+                  requiredToSave.add(removedMod);
+                } else if (wasOptional) {
+                  optionalToSave.add(removedMod);
+                }
+              }
             }
-          }          
-          // await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
+          }          // await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
           await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
           // console.log(`[IPC HANDLER] State saved - Required: ${requiredToSave.size}, Optional: ${optionalToSave.size}, Acknowledged: ${acknowledgedDependencies.size}`);
+          // console.log(`[IPC HANDLER] Required to save:`, Array.from(requiredToSave));
+          // console.log(`[IPC HANDLER] Optional to save:`, Array.from(optionalToSave));
           // console.log(`[IPC HANDLER] Included ${requiredRemovals.length} required and ${optionalRemovals.length} optional removals in saved state`);
         } catch (stateError) {
           console.error('[IPC HANDLER] Failed to update persistent state:', stateError);
@@ -1981,17 +2092,32 @@ function createMinecraftLauncherHandlers(win) {
         if (!stateResult.success) {
           return { success: false, error: 'Failed to load mod state' };
         }
-          const requiredMods = stateResult.requiredMods;
+          const requiredMods = new Set(stateResult.requiredMods);
+        const optionalMods = new Set(stateResult.optionalMods);
         const acknowledgedDeps = stateResult.acknowledgedDeps || new Set();
         
         // Add the mod to acknowledged dependencies
         const baseModName = getBaseModName(modFileName).toLowerCase();
-        acknowledgedDeps.add(modFileName.toLowerCase());
+        const modLower = modFileName.toLowerCase();
+        acknowledgedDeps.add(modLower);
         acknowledgedDeps.add(baseModName);
         
-        // Save updated state
-        await saveExpectedModState(clientPath, requiredMods, stateResult.optionalMods, win, acknowledgedDeps);
-        return { success: true };
+        // IMPORTANT: Remove the mod from server tracking so it becomes a client-only mod
+        requiredMods.delete(modFileName);
+        requiredMods.delete(modLower);
+        requiredMods.delete(baseModName);
+        
+        optionalMods.delete(modFileName);
+        optionalMods.delete(modLower);
+        optionalMods.delete(baseModName);
+        
+        // Save updated state (mod is now acknowledged and removed from server tracking)
+        await saveExpectedModState(clientPath, requiredMods, optionalMods, win, acknowledgedDeps);
+        
+        return { 
+          success: true,
+          removedFromServerTracking: true // Signal that mod is now client-only
+        };
       } catch (error) {
         console.error('Failed to acknowledge dependency:', error);
         return { success: false, error: error.message };

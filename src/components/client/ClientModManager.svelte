@@ -157,11 +157,19 @@
   let lastCheckModSyncCall = 0; // Track the most recent call
   
   // keep track of which fileNames we've acknowledged
-  let acknowledgedDeps: Set<string> = new Set();
-  // Computed property for required mods display that includes mods needing removal or acknowledgment
+  let acknowledgedDeps: Set<string> = new Set();  // Computed property for required mods display - show all except those that can be safely removed
   $: displayRequiredMods = (() => {
-    // first, remove any that the user has already acknowledged
-    let displayMods = requiredMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
+    // Don't filter by acknowledgedDeps here - that's handled in the acknowledgment button logic
+    // Only filter out mods that are marked for safe removal
+    let displayMods = requiredMods.filter(m => {
+      // Check if this mod is marked for removal (can be safely removed)
+      const isMarkedForRemoval = modSyncStatus?.requiredRemovals?.some(removal => 
+        removal.fileName.toLowerCase() === m.fileName.toLowerCase()
+      );
+      
+      // Show the mod unless it's marked for safe removal
+      return !isMarkedForRemoval;
+    });
     
     // FIX: Replace server target versions with actual current versions from installed mods
     displayMods = displayMods.map(serverMod => {
@@ -235,10 +243,19 @@
     }
     
     return displayMods;
-  })();
-  // Computed property for optional mods that hides acknowledged or removal-pending entries
+  })();  // Computed property for optional mods - show all except those that can be safely removed
   $: displayOptionalMods = (() => {
-    let mods = optionalMods.filter(m => !acknowledgedDeps.has(m.fileName.toLowerCase()));
+    // Don't filter by acknowledgedDeps here - that's handled in the acknowledgment button logic
+    // Only filter out mods that are marked for safe removal
+    let mods = optionalMods.filter(m => {
+      // Check if this mod is marked for removal (can be safely removed)
+      const isMarkedForRemoval = modSyncStatus?.optionalRemovals?.some(removal => 
+        removal.fileName.toLowerCase() === m.fileName.toLowerCase()
+      );
+      
+      // Show the mod unless it's marked for safe removal
+      return !isMarkedForRemoval;
+    });
     
     // FIX: Replace server target versions with actual current versions from installed mods
     mods = mods.map(serverMod => {
