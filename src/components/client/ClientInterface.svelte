@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
-  import ClientModManager from './ClientModManager.svelte';
   import ClientHeader from './ClientHeader.svelte';
   import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
   import PlayTab from "./PlayTab.svelte";

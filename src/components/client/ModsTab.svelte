@@ -1,4 +1,5 @@
 <script>
+  import ClientModManager from './ClientModManager.svelte';
   export let instance;
   export let clientModManagerComponent;
   export let modSyncStatus;
