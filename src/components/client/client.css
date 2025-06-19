@@ -1,0 +1,710 @@
+  .client-container {
+    width: 100%;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }  
+  .client-main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 400px;
+  }
+  
+  .client-status {
+    text-align: center;
+    background-color: #2d3748;
+    border-radius: 8px;
+    padding: 2rem;
+    width: 100%;
+    max-width: 600px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    margin-bottom: 2rem;
+  }
+  
+  /* Auth section styles */
+  .auth-section {
+    padding: 2rem;
+  }
+  
+  .auth-button, .re-auth-button {
+    background-color: #0078d4;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    cursor: pointer;
+    margin: 1rem 0;
+    transition: background-color 0.2s;
+  }
+  
+  .auth-button:hover, .re-auth-button:hover {
+    background-color: #106ebe;
+  }
+  
+  /* Game info styles */
+  .game-info {
+    padding: 1rem;
+  }
+  
+  .player-info {
+    margin: 1rem 0;
+    padding: 0.5rem 1rem;
+    background-color: #374151;
+    border-radius: 0.5rem;
+  }
+  
+  .player-label {
+    color: #9ca3af;
+    margin-right: 0.5rem;
+  }
+  
+  .player-name {
+    color: #10b981;
+    font-weight: bold;
+  }
+  
+  .server-info-display {
+    margin: 1rem 0;
+    padding: 1rem;
+    background-color: #1f2937;
+    border-radius: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  
+  .info-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  .info-label {
+    color: #9ca3af;
+    font-size: 0.9rem;
+  }
+  
+  .info-value {
+    color: white;
+    font-weight: 500;
+  }
+  
+  /* Sync status styles */
+  .sync-status {
+    margin: 1.5rem 0;
+    padding: 1rem;
+    border-radius: 0.5rem;
+  }
+  
+  .sync-status.checking {
+    background-color: rgba(245, 158, 11, 0.1);
+    border: 1px solid #f59e0b;
+  }
+  
+  .sync-status.needed {
+    background-color: rgba(239, 68, 68, 0.1);
+    border: 1px solid #ef4444;
+  }
+  
+  .sync-status.downloading {
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid #3b82f6;
+  }
+
+  .sync-status.ready {
+    background-color: rgba(16, 185, 129, 0.1);
+    border: 1px solid #10b981;
+  }
+
+  .sync-status.error {
+    background-color: rgba(239, 68, 68, 0.1);
+    border: 1px solid #ef4444;
+  }
+  
+  /* Mod changes section styles */
+  .mod-changes-section {
+    margin: 1rem 0;
+    padding: 0.75rem;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 0.5rem;
+    border-left: 3px solid #3b82f6;
+  }
+  .mod-changes-section h4 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #e2e8f0;
+  }
+
+  .clarification-note {
+    margin: 0 0 0.75rem 0;
+    padding: 0.5rem;
+    font-size: 0.75rem;
+    background-color: rgba(168, 85, 247, 0.1);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    border-radius: 0.25rem;
+    color: #c4b5fd;
+  }
+
+  .mod-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .mod-item {
+    padding: 0.5rem 0.75rem;
+    margin: 0.25rem 0;
+    border-radius: 0.25rem;
+    font-size: 0.8rem;
+    font-family: monospace;
+    display: flex;
+    align-items: center;
+  }
+
+  .mod-item.new-download {
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: #60a5fa;
+  }
+  .mod-item.mod-update {
+    background-color: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #fbbf24;
+  }
+
+  .mod-item.optional {
+    opacity: 0.8;
+    border-style: dashed;
+  }
+
+  .mod-item.optional::after {
+    content: " (Optional)";
+    font-size: 0.7rem;
+    color: #9ca3af;
+    margin-left: 0.5rem;
+  }.mod-item.mod-removal {
+    background-color: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #f87171;
+  }
+  
+  .download-button {
+    background-color: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    margin-top: 1rem;
+  }
+  
+  .download-button:hover {
+    background-color: #2563eb;
+  }
+    /* Progress bar styles */
+  .progress-bar {
+    width: 100%;
+    height: 0.75rem;
+    background-color: #1f2937;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    margin: 0.5rem 0;
+  }
+  
+  .progress-fill {
+    height: 100%;
+    background-color: #3b82f6;
+    transition: width 0.3s ease;
+  }
+  
+  .progress-text {
+    font-size: 0.8rem;
+    color: #e2e8f0;
+    margin: 0.25rem 0;
+  }
+  
+  .current-file {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    font-family: monospace;
+    margin: 0.25rem 0;
+  }
+  
+  .current-file-section {
+    margin-top: 1rem;
+    padding: 0.5rem;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 0.25rem;
+  }
+  
+  .file-progress-bar {
+    width: 100%;
+    height: 0.5rem;
+    background-color: #1f2937;
+    border-radius: 0.25rem;
+    overflow: hidden;
+    margin: 0.25rem 0;
+  }
+  
+  .file-progress-fill {
+    height: 100%;
+    background-color: #10b981;
+    transition: width 0.3s ease;
+  }
+  
+  .file-progress-text {
+    font-size: 0.7rem;
+    color: #e2e8f0;
+    margin: 0.25rem 0;
+  }
+  
+  .download-speed {
+    font-size: 0.7rem;
+    color: #3b82f6;
+    margin: 0.25rem 0;
+   }
+  
+  /* Launch controls */
+  .launch-controls {
+    margin-top: 2rem;
+  }
+  
+  .play-button {
+    background-color: #10b981;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 1rem 2rem;
+    font-size: 1.25rem;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.2s;
+    width: 100%;
+    max-width: 300px;
+    margin: 1rem auto;
+    display: block;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  
+  .play-button:hover:not(.disabled) {
+    background-color: #059669;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  }
+  
+  .play-button.disabled {
+    background-color: #4b5563;
+    cursor: not-allowed;
+    color: #9ca3af;
+  }
+  
+  .stop-button, .retry-button {
+    background-color: #ef4444;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    margin-top: 1rem;
+  }
+  
+  .stop-button:hover, .retry-button:hover {
+    background-color: #dc2626;
+  }
+  
+  .retry-button {
+    background-color: #3b82f6;
+  }
+  
+  .retry-button:hover {
+    background-color: #2563eb;
+  }
+  
+  .server-status-message {
+    color: #ef4444;
+    font-size: 0.875rem;
+    margin-top: 0.5rem;
+  }
+  
+  /* Launch status styles */
+  .launching-status, .running-status, .error-status {
+    padding: 1rem;
+    border-radius: 0.5rem;
+    margin: 1rem 0;
+  }
+  
+  .launching-status {
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid #3b82f6;
+  }
+  
+  .running-status {
+    background-color: rgba(16, 185, 129, 0.1);
+    border: 1px solid #10b981;
+  }
+  
+  .error-status {
+    background-color: rgba(239, 68, 68, 0.1);
+    border: 1px solid #ef4444;
+  }
+  
+  .launch-progress p {
+    font-size: 0.9rem;
+    margin: 0.5rem 0;
+  }
+  
+  .last-check {
+    color: #9ca3af;
+    font-size: 0.875rem;
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+  }
+  
+  .checking {
+    color: #f59e0b;
+    font-style: italic;
+  }
+  
+  .refresh-button {
+    background-color: #4b5563;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  
+  .refresh-button:hover {
+    background-color: #6b7280;
+  }  
+  .settings-container {
+    width: 100%;
+    max-width: 600px;
+    margin: 2rem auto;
+  }
+  
+  .settings-section {
+    background: rgba(30, 41, 59, 0.5);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  
+  .settings-section h2 {
+    margin-top: 0;
+    margin-bottom: 1.5rem;
+    color: white;
+    font-size: 1.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding-bottom: 0.5rem;
+    text-align: left;
+  }
+  
+  .settings-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 2rem;
+  }
+  
+  .settings-info .info-item {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+  }
+  
+  .settings-info .info-label {
+    width: 150px;
+    color: #9ca3af;
+    font-size: 0.9rem;
+  }
+  
+  .settings-info .info-value {
+    color: white;
+    font-weight: 500;
+  }
+
+  .folder-button {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: #3b82f6;
+    font-size: 1rem;
+    margin-left: 0.5rem;
+  }
+  
+  .auth-management {
+    margin-bottom: 2rem;
+    padding: 1rem;
+    background-color: rgba(59, 130, 246, 0.1);
+    border-radius: 0.5rem;
+    border: 1px solid #3b82f6;
+  }
+  
+  .auth-management h3 {
+    margin-top: 0;
+    text-align: left;
+    color: #3b82f6;
+  }
+  
+  .auth-status-text {
+    text-align: left;
+    margin-bottom: 1rem;
+  }
+  
+  .danger-zone {
+    margin-top: 2rem;
+    padding: 1rem;
+    border: 1px solid #ff5555;
+    border-radius: 6px;
+    background: rgba(255, 0, 0, 0.1);
+  }
+  
+  .danger-zone h3 {
+    color: #ff5555;
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    text-align: left;
+  }
+  
+  .warning-text {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.9rem;
+    margin-bottom: 1rem;
+    text-align: left;
+  }
+  
+  .delete-options {
+    margin-bottom: 1rem;
+  }
+  
+  .delete-files-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    user-select: none;
+    cursor: pointer;
+  }
+  
+  .delete-info {
+    margin-top: 0.25rem;
+    font-size: 0.8rem;
+    color: #ff9800;
+    margin-left: 1.5rem;
+    text-align: left;
+  }
+  
+  .delete-instance-button {
+    background: rgba(255, 0, 0, 0.2);
+    border: 1px solid rgba(255, 0, 0, 0.3);
+    border-radius: 4px;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all 0.2s ease;
+    color: #ff5555;
+  }
+  
+  .delete-instance-button:hover {
+    background: rgba(255, 0, 0, 0.3);
+  }
+  
+  /* Connection status display */
+  .connection-status-display {
+    padding: 2rem;
+  }
+  
+  .auth-status-text {
+    text-align: left;
+    margin-bottom: 1rem;
+  }
+  
+  .client-management {
+    margin-bottom: 2rem;
+    padding: 1rem;
+    background-color: rgba(16, 185, 129, 0.1);
+    border-radius: 0.5rem;
+    border: 1px solid #10b981;
+  }
+  
+  .client-management h3 {
+    margin-top: 0;
+    text-align: left;
+    color: #10b981;
+  }
+  
+  .client-status-text {
+    text-align: left;
+    margin-bottom: 0.5rem;
+    color: #e2e8f0;
+    font-size: 0.9rem;
+  }
+  
+  .client-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin: 1rem 0;
+    flex-wrap: wrap;
+  }
+  
+  .check-client-button, .redownload-client-button {
+    background-color: #10b981;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+  
+  .check-client-button:hover {
+    background-color: #059669;
+  }
+  
+  .redownload-client-button {
+    background-color: #f59e0b;
+  }
+  
+  .redownload-client-button:hover {
+    background-color: #d97706;
+  }
+  
+  .client-info-text {    text-align: left;
+    font-size: 0.8rem;
+    color: #9ca3af;
+    margin-top: 0.5rem;
+  }
+  
+  /* Memory Settings */
+  .memory-settings {
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid #3b82f6;
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  
+  .memory-settings h3 {
+    margin-top: 0;
+    margin-bottom: 1rem;
+    color: #3b82f6;
+    text-align: left;
+  }
+  
+  .memory-setting {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  
+  .memory-setting label {
+    color: #e2e8f0;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+  
+  .memory-setting input[type="number"] {
+    background: rgba(30, 41, 59, 0.8);
+    border: 1px solid #374151;
+    border-radius: 4px;
+    padding: 0.75rem;
+    color: white;
+    font-size: 1rem;
+    width: 200px;
+    transition: border-color 0.2s;
+  }
+  
+  .memory-setting input[type="number"]:focus {
+    outline: none;
+    border-color: #3b82f6;
+  }
+  
+  .memory-setting input[type="number"]:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  
+  .memory-info {
+    color: #9ca3af;
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+  }
+  .memory-disabled-note {
+    color: #f59e0b;
+    font-size: 0.8rem;
+    margin-top: 0.5rem;
+    text-align: left;
+  }
+
+  /* Optional Mods Notice */
+  .optional-mods-notice {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 6px;
+  }
+
+  .optional-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+    color: #3b82f6;
+  }
+
+  .optional-text {
+    font-size: 0.9rem;
+    color: #e2e8f0;
+    line-height: 1.4;
+  }
+
+  .optional-text strong {
+    color: #3b82f6;
+    font-weight: 600;
+  }
+
+  /* Dependency Section Styling */
+  .dependency-section {
+    background-color: rgba(34, 197, 94, 0.1);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+
+  .mod-dependency {
+    color: #22c55e;
+  }
+
+  .acknowledge-button {
+    background: linear-gradient(145deg, #22c55e, #16a34a);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 0.8rem 1.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    text-align: center;
+    margin-top: 1rem;
+    width: 100%;
+  }
+
+  .acknowledge-button:hover {
+    background: linear-gradient(145deg, #16a34a, #15803d);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(34, 197, 94, 0.3);
+  }
