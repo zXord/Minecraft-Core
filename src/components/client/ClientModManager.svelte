@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { createEventDispatcher } from 'svelte';  import { 
+  import {
     errorMessage, 
     successMessage,
     searchKeyword,
@@ -13,8 +13,7 @@
     filterModLoader,
     serverManagedFiles,
     modToInstall,
-    currentDependencies,
-    removeServerManagedFiles
+    currentDependencies
   } from '../../stores/modStore.js';
   import { searchMods } from '../../utils/mods/modAPI.js';
   import { installedModIds, installedModInfo } from '../../stores/modStore.js';
@@ -34,13 +33,11 @@
     serverMods,
     requiredMods,
     optionalMods,
-    allClientMods,
     installedModsInfo,
     modSyncStatus,
     isLoadingMods,
     lastModCheck,
-    acknowledgedDeps,
-    updateServerManagedFiles
+    acknowledgedDeps
   } from '../../stores/clientModManager.js';
   import {
     loadInstalledInfo,
@@ -65,82 +62,12 @@
     path?: string;
     clientId?: string;
     clientName?: string;
-  }  interface ClientMod {
-    fileName: string;
-    size?: number;
-    lastModified?: string;
-    location: string;
-    required?: boolean;
-    checksum?: string;
-    downloadUrl?: string;
-    name?: string;
-    versionNumber?: string;
-    projectId?: string;
-    needsRemoval?: boolean;
-    removalReason?: string;
-    removalAction?: string;
-  }  interface ModSyncStatus {
-    synchronized: boolean;
-    needsDownload?: number;
-    needsOptionalDownload?: number;
-    totalRequired?: number;
-    totalOptional?: number;
-    totalPresent?: number;
-    totalOptionalPresent?: number;
-    missingMods?: string[];
-    missingOptionalMods?: string[];
-    outdatedMods?: Array<{
-      fileName: string;
-      name: string;
-      currentVersion: string;
-      newVersion: string;
-    }>;
-    outdatedOptionalMods?: Array<{
-      fileName: string;
-      name: string;
-      currentVersion: string;
-      newVersion: string;
-    }>;
-    presentEnabledMods?: string[];
-    presentDisabledMods?: string[];
-    // New response structure
-    requiredRemovals?: Array<{
-      fileName: string;
-      reason: string;
-    }>;
-    optionalRemovals?: Array<{
-      fileName: string;
-      reason: string;
-    }>;
-    acknowledgments?: Array<{
-      fileName: string;
-      reason: string;
-    }>;
-    // Legacy structure for backward compatibility (temporary)
-    clientModChanges?: {
-      updates?: Array<{
-        name: string;
-        fileName: string;
-        currentVersion: string;
-        serverVersion: string;
-        action: string;
-      }>;      removals?: Array<{
-        name: string;
-        fileName: string;
-        reason: string;
-        action: string;
-        wasRequired?: boolean;
-      }>;
-      newDownloads?: string[];
-    };
   }
 
   // State and helpers moved to dedicated store
 
   // Props
   export let instance: Instance | null = null; // Client instance
-  // Create event dispatcher
-  const dispatch = createEventDispatcher();
   // Listen for refresh events from parent
   async function handleRefreshFromParent() {
     await refreshMods();
@@ -161,7 +88,6 @@
   let previousPath: string | null = null;
   let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
   let isCheckingModSync = false; // Guard to prevent reactive loops
-  let lastCheckModSyncCall = 0; // Track the most recent call
   
   // keep track of which fileNames we've acknowledged is managed by store
   $: displayRequiredMods = (() => {
@@ -348,7 +274,7 @@
     downloadManagerCleanup = initDownloadManager();
     if (instance?.path) {
       // Populate local mod status even if not connected to a server
-      refreshInstalledMods();
+      refreshInstalledMods(instance);
       
       // Load acknowledged dependencies from persistent storage
       loadAcknowledgedDependencies();
@@ -357,7 +283,7 @@
       // Only check mod synchronization if we're not already in the middle of checking
       // This prevents reactive loops that could cause the spam of log messages
       if (!isCheckingModSync) {
-        checkModSynchronization();
+        checkModSynchronization(instance);
       }
     });
     // Initialize filter stores for client mod search
@@ -370,12 +296,12 @@
       // On initial load, do a fresh mod synchronization check instead of just loading server info
       // This ensures we catch any mods that need removal
       (async () => {
-        await loadModsFromServer();
-        await checkModSynchronization(); // This will properly detect removal needs
+        await loadModsFromServer(instance);
+        await checkModSynchronization(instance); // This will properly detect removal needs
       })();
         
       // Set up periodic mod checking - reduced frequency to prevent flashing
-      const interval = setInterval(loadModsFromServer, 5 * 60 * 1000); // Check every 5 minutes instead of 30 seconds
+      const interval = setInterval(() => loadModsFromServer(instance), 5 * 60 * 1000); // Check every 5 minutes instead of 30 seconds
       
       return () => {
         clearInterval(interval);
@@ -390,7 +316,7 @@
   });  // Refresh installed mods when the instance path changes
   $: if (instance?.path && instance.path !== previousPath) {
     previousPath = instance.path;
-    refreshInstalledMods();
+    refreshInstalledMods(instance);
   }
 
   // Keep filters in sync with the selected Minecraft version
@@ -418,12 +344,12 @@
       try {
         successMessage.set(`Processing ${files.length} files...`);
 
-        const result = await uploadDroppedMods(files, instance?.path);
+          const result = await uploadDroppedMods(files, instance?.path);
 
-        if (result.success) {
-          successMessage.set(`Successfully added ${result.count} mods`);
+          if (result.success) {
+            successMessage.set(`Successfully added ${result.count} mods`);
 
-          await refreshInstalledMods();
+            await refreshInstalledMods(instance);
         } else {
           errorMessage.set(`Failed to add mods: ${result.failed.join(', ')}`);
         }
@@ -502,7 +428,7 @@
           ];
         });
 
-        await refreshInstalledMods();
+          await refreshInstalledMods(instance);
       } else {
         throw new Error(result?.error || 'Installation failed');
       }
@@ -528,11 +454,11 @@
   function switchTab(tab) {
     activeTab = tab;
     if (tab === 'installed-mods') {
-      refreshInstalledMods();
+      refreshInstalledMods(instance);
     }
     if (tab === 'find-mods') {
       // Refresh installed mod info when switching to find-mods tab
-      loadInstalledInfo();
+        loadInstalledInfo(instance);
       if (get(searchResults).length === 0 && get(searchKeyword)) {
         searchClientMods();
       }
@@ -573,7 +499,7 @@
   async function handleInstallMod(event) {
     const { mod, versionId } = event.detail;
     const ver = versionId || mod.selectedVersionId;    // Refresh installed mod info so dependency checks see all current mods
-    await loadInstalledInfo();
+    await loadInstalledInfo(instance);
     
     // Get fresh installed mod info for accurate dependency checking
     const freshInstalledInfo = get(installedModInfo);
@@ -679,21 +605,21 @@
       {#if modSyncStatus && !modSyncStatus.synchronized}
         <!-- Use same logic as Play tab for consistent button text -->
         {#if modSyncStatus.needsDownload > 0}
-          <button class="download-button" on:click={downloadRequiredMods}>
+          <button class="download-button" on:click={() => downloadRequiredMods(instance)}>
             📥 Download Required Mods ({modSyncStatus.needsDownload})
           </button>        {:else}
           {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
           {@const acknowledgments = pendingAcknowledgments || []}
           
           {#if actualRemovals.length > 0}
-            <button class="download-button" on:click={downloadRequiredMods}>
+            <button class="download-button" on:click={() => downloadRequiredMods(instance)}>
               🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
             </button>          {:else if acknowledgments.length > 0}
-            <button class="download-button" on:click={acknowledgeAllDependencies}>
+            <button class="download-button" on:click={() => acknowledgeAllDependencies(instance)}>
               ✓ Acknowledge Dependencies ({acknowledgments.length})
             </button>
           {:else}
-            <button class="download-button" on:click={downloadRequiredMods}>
+            <button class="download-button" on:click={() => downloadRequiredMods(instance)}>
               🔄 Synchronize Mods
             </button>
           {/if}
@@ -725,24 +651,26 @@
         <div class="connection-error">
           <h3>⚠️ Cannot Connect to Server</h3>
           <p>Make sure the management server is running and accessible.</p>
-          <button class="retry-button" on:click={loadModsFromServer}>
-            🔄 Retry Connection
-          </button>
+            <button class="retry-button" on:click={() => loadModsFromServer(instance)}>
+              🔄 Retry Connection
+            </button>
         </div>
       {:else if $isLoadingMods && !$serverMods.length}
         <div class="loading">
           <h3>🔄 Loading Mods...</h3>
           <p>Fetching mod information from server...</p>
         </div>
-      {:else}        <!-- Mod Status Overview -->        <ClientModStatus
-          {modSyncStatus}
+      {:else}
+        <!-- Mod Status Overview -->
+        <ClientModStatus
+          modSyncStatus={$modSyncStatus}
           requiredModsCount={$requiredMods.length}
           optionalModsCount={displayOptionalMods.length}
           {pendingAcknowledgments}
-          on:download-required={downloadRequiredMods}
-          on:download-optional={downloadOptionalMods}
+          on:download-required={() => downloadRequiredMods(instance)}
+          on:download-optional={() => downloadOptionalMods(instance)}
           on:refresh={refreshMods}
-          on:acknowledge-all-dependencies={acknowledgeAllDependencies}
+          on:acknowledge-all-dependencies={() => acknowledgeAllDependencies(instance)}
         />
 
         <!-- Mod Lists -->
@@ -755,12 +683,12 @@
             </p>          <ClientModList
             mods={displayRequiredMods}
             type="required"
-            {modSyncStatus}
+modSyncStatus={$modSyncStatus}
             serverManagedFiles={$serverManagedFiles}
-            on:download={downloadRequiredMods}
-            on:remove={(e) => handleServerModRemoval(e.detail.fileName)}
-            on:acknowledge={(e) => handleDependencyAcknowledgment(e.detail.fileName)}
-            on:updateMod={updateServerMod}
+            on:download={() => downloadRequiredMods(instance)}
+            on:remove={(e) => handleServerModRemoval(instance, e.detail.fileName)}
+            on:acknowledge={(e) => handleDependencyAcknowledgment(instance, e.detail.fileName)}
+            on:updateMod={(e) => updateServerMod(instance, e)}
           />
           </div>
 
@@ -773,13 +701,13 @@
               </p>          <ClientModList
             mods={displayOptionalMods}
             type="optional"
-            {modSyncStatus}
+modSyncStatus={$modSyncStatus}
             serverManagedFiles={$serverManagedFiles}
-            on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
-            on:download={downloadOptionalMods}
-            on:downloadSingle={(e) => downloadSingleOptionalMod(e.detail.mod)}
-            on:delete={(e) => handleModDelete(e.detail.fileName)}
-            on:updateMod={updateServerMod}
+            on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
+            on:download={() => downloadOptionalMods(instance)}
+            on:downloadSingle={(e) => downloadSingleOptionalMod(instance, e.detail.mod)}
+            on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
+            on:updateMod={(e) => updateServerMod(instance, e)}
           />
         </div>
       {/if}          <!-- Client Downloaded Mods Section -->
@@ -791,12 +719,13 @@
           {#if $errorMessage}            <p class="error-message">
               {$errorMessage} Ensure your client path contains a <code>mods</code> directory.
             </p>
-          {/if}          <ClientManualModList
+          {/if}
+          <ClientManualModList
             clientPath={instance?.path || ''}
             refreshTrigger={manualModsRefreshTrigger}
-            modSyncStatus={modSyncStatus}
-            on:toggle={(e) => handleModToggle(e.detail.fileName, e.detail.enabled)}
-            on:delete={(e) => handleModDelete(e.detail.fileName)}
+            modSyncStatus={$modSyncStatus}
+            on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
+            on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
             on:install={handleInstallMod}
           />
           </div>
