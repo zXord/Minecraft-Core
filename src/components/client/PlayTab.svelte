@@ -1,4 +1,5 @@
 <script>
+  import { clientState } from '../../stores/clientStore.js';
   export let instance;
   export let authStatus;
   export let authenticateWithMicrosoft;
