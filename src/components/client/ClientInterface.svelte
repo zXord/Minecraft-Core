@@ -1565,7 +1565,6 @@
   <div class="client-content">
     {#if $clientState.activeTab === 'play'}
       <PlayTab
-        {instance}
         {authStatus}
         {authenticateWithMicrosoft}
         {checkAuthentication}
