@@ -374,7 +374,21 @@
                   </div>
                 {/if}
               {/if}            {:else if type === 'optional'}
-              {#if getModStatus(mod) === 'missing'}
+              {#if needsAcknowledgment(mod)}
+                {@const acknowledgmentInfo = getAcknowledgmentInfo(mod)}
+                <div class="dependency-notification">
+                  <span class="dependency-reason">🔗 {acknowledgmentInfo?.reason || 'required as dependency by client downloaded mods'}</span>
+                  <button class="action-btn acknowledge-btn" on:click={() => handleAcknowledge(mod)} title="Acknowledge this dependency">
+                    ✓ Acknowledge
+                  </button>
+                </div>
+              {:else if needsRemoval(mod)}
+                {@const removalInfo = getRemovalInfo(mod)}
+                <span class="removal-reason">{removalInfo?.reason || 'No longer provided by server'}</span>
+                <button class="action-btn remove-btn" on:click={() => handleRemove(mod)} title="Remove this mod">
+                  🗑️ Remove
+                </button>
+              {:else if getModStatus(mod) === 'missing'}
                 <button class="download-button" on:click={() => handleDownloadSingle(mod)}>
                   📥 Download
                 </button>
@@ -398,11 +412,11 @@
                     Enable
                   {/if}
                 </button>
-              {/if}
-              {#if getModStatus(mod) !== 'missing'}
-                <button class="action-btn delete-btn" on:click={() => handleDelete(mod)} title="Remove mod">
-                  Remove
-                </button>
+                {#if getModStatus(mod) !== 'missing'}
+                  <button class="action-btn delete-btn" on:click={() => handleDelete(mod)} title="Remove mod">
+                    Remove
+                  </button>
+                {/if}
               {/if}
             {/if}
           </div>

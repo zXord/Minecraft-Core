@@ -294,17 +294,17 @@
     if (isDownloadingMods || isDownloadingClient) {
       return;
     }
-    
-    if (!instance.path || !requiredMods || requiredMods.length === 0) {
+      if (!instance.path) {
       downloadStatus = 'ready';
       return;
     }
     
-    // If we're already in ready state (e.g., just after successful download), 
+    // Always check mod sync status, even if requiredMods is empty
+    // (to detect removal/acknowledgment scenarios)
+      // If we're already in ready state (e.g., just after successful download), 
     // don't immediately override it unless there's a clear issue
-    const wasReady = downloadStatus === 'ready';
     
-    downloadStatus = 'checking';      try {      const managedFiles = get(serverManagedFiles);
+    downloadStatus = 'checking';try {      const managedFiles = get(serverManagedFiles);
       
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
@@ -314,37 +314,42 @@
       });      if (result.success) {
         modSyncStatus = result;
         
+        console.log('[ClientInterface] Mod sync result:', {
+          synchronized: result.synchronized,
+          requiredRemovals: result.requiredRemovals?.length || 0,
+          optionalRemovals: result.optionalRemovals?.length || 0,
+          acknowledgments: result.acknowledgments?.length || 0,
+          missingMods: result.missingMods?.length || 0,
+          outdatedMods: result.outdatedMods?.length || 0,
+          outdatedOptionalMods: result.outdatedOptionalMods?.length || 0
+        });
+        
         // Refresh acknowledged dependencies to ensure UI filtering is up to date
         await loadAcknowledgedDependencies();
         
         // Remove any mods that were deleted on the server
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
-          removeServerManagedFiles(result.successfullyRemovedMods);        }        if (result.synchronized) {          // Backend considers it "synchronized" based on required mods only
-          // But we should also check if optional mods need updates (exclude new optional downloads)
-          const hasRequiredUpdates = ((result.missingMods?.length || 0) + (result.outdatedMods?.length || 0)) > 0;
-          const hasOptionalUpdates = (result.outdatedOptionalMods?.length || 0) > 0;
-          
-          if (hasRequiredUpdates || hasOptionalUpdates) {
-            downloadStatus = 'needed'; // Show as needed if ANY existing mods need updates
-          } else {
-            downloadStatus = 'ready'; // Only truly ready if no existing mods need attention
-          }
+          removeServerManagedFiles(result.successfullyRemovedMods);        }        // Check if there are any mod changes that need attention
+        const hasRequiredUpdates = ((result.missingMods?.length || 0) + (result.outdatedMods?.length || 0)) > 0;
+        const hasOptionalUpdates = (result.outdatedOptionalMods?.length || 0) > 0;
+        const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0)) > 0;
+        const hasAcknowledgments = (result.acknowledgments?.length || 0) > 0;
+        
+        console.log('[ClientInterface] Status check:', {
+          hasRequiredUpdates,
+          hasOptionalUpdates, 
+          hasRemovals,
+          hasAcknowledgments,
+          synchronized: result.synchronized
+        });
+        
+        // Only show "ready" status if truly synchronized AND no actions needed
+        if (result.synchronized && !hasRequiredUpdates && !hasOptionalUpdates && !hasRemovals && !hasAcknowledgments) {
+          downloadStatus = 'ready'; // Only truly ready if no mods need attention
+          console.log('[ClientInterface] Setting downloadStatus to READY');
         } else {
-          // If we just had a successful download (wasReady), be more conservative
-          // Only change to 'needed' if there are actually missing mods OR removals needed
-          const hasRequiredUpdates = ((result.missingMods?.length || 0) + (result.outdatedMods?.length || 0)) > 0;
-          const hasOptionalUpdates = (result.outdatedOptionalMods?.length || 0) > 0;
-          const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0) + (filteredAcknowledgments?.length || 0)) > 0;
-          
-          if (wasReady && !hasRequiredUpdates && !hasOptionalUpdates && !hasRemovals) {
-            downloadStatus = 'ready'; // Keep ready status if no actions needed
-          } else {
-            downloadStatus = 'needed'; // Show as needed if updates OR removals required
-          }
-          
-          if (hasRemovals) {
-            // Handle any removal-specific logic here if needed
-          }
+          downloadStatus = 'needed'; // Show as needed if ANY mod actions are required
+          console.log('[ClientInterface] Setting downloadStatus to NEEDED');
         }
       } else {
         downloadStatus = 'ready'; // Assume ready if check fails
