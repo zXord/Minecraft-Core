@@ -5,7 +5,13 @@
   import ClientModManager from './ClientModManager.svelte';
   import ClientHeader from './ClientHeader.svelte';
   import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
-  import { errorMessage, successMessage, serverManagedFiles, removeServerManagedFiles } from '../../stores/modStore.js';
+import {
+  errorMessage,
+  successMessage,
+  serverManagedFiles,
+  removeServerManagedFiles
+} from '../../stores/modStore.js';
+import { acknowledgedDeps } from '../../stores/clientModManager.js';
   import { createEventDispatcher } from 'svelte';
   import { openFolder } from '../../utils/folderUtils.js';  import {
     clientState,
@@ -80,8 +86,7 @@
   let isDownloadingMods = false;
   let isCheckingSync = false;
   
-  // Acknowledged dependencies tracking (for Play tab acknowledgment filtering)
-  let acknowledgedDeps = new Set();
+  // Acknowledged dependencies tracking comes from the shared store
   
   // Memory/RAM settings
   let maxMemory = 2; // Default 2GB (in GB instead of MB)
@@ -99,9 +104,9 @@
   // Computed property to filter out already acknowledged mods from acknowledgments
   $: filteredAcknowledgments = (() => {
     if (!modSyncStatus?.acknowledgments) return [];
-    
-    return modSyncStatus.acknowledgments.filter(ack => 
-      !acknowledgedDeps.has(ack.fileName.toLowerCase())
+
+    return modSyncStatus.acknowledgments.filter(ack =>
+      !$acknowledgedDeps.has(ack.fileName.toLowerCase())
     );
   })();
 
@@ -115,8 +120,8 @@
       });
       
       if (result.success && result.acknowledgedDependencies) {
-        acknowledgedDeps = new Set(
-          result.acknowledgedDependencies.map(dep => dep.toLowerCase())
+        acknowledgedDeps.set(
+          new Set(result.acknowledgedDependencies.map(dep => dep.toLowerCase()))
         );
       }
     } catch (error) {
@@ -435,14 +440,24 @@
       // If we're already in ready state (e.g., just after successful download), 
     // don't immediately override it unless there's a clear issue
     
-    downloadStatus = 'checking';try {      const managedFiles = get(serverManagedFiles);
-      
+    downloadStatus = 'checking';
+    try {
+      const managedFiles = get(serverManagedFiles);
+
+      const filteredRequired = requiredMods.filter(
+        m => !$acknowledgedDeps.has(m.fileName.toLowerCase())
+      );
+      const filteredAll = (serverInfo?.allClientMods || []).filter(
+        m => !$acknowledgedDeps.has(m.fileName.toLowerCase())
+      );
+
       const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
-        requiredMods,
-        allClientMods: serverInfo?.allClientMods || [],
+        requiredMods: filteredRequired,
+        allClientMods: filteredAll,
         serverManagedFiles: Array.from(managedFiles)
-      });      if (result.success) {
+      });
+      if (result.success) {
         modSyncStatus = result;
         
         // Refresh acknowledged dependencies to ensure UI filtering is up to date
@@ -1495,11 +1510,12 @@
           fileName: ack.fileName,
           reason: ack.reason
         });
-        // Update local acknowledged set and remove from server-managed files
-        acknowledgedDeps = new Set([
-          ...acknowledgedDeps,
-          ack.fileName.toLowerCase()
-        ]);
+        // Update shared acknowledged set and remove from server-managed files
+        acknowledgedDeps.update(set => {
+          const updated = new Set(set);
+          updated.add(ack.fileName.toLowerCase());
+          return updated;
+        });
         removeServerManagedFiles([ack.fileName]);
       }
 
