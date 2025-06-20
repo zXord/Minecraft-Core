@@ -118,7 +118,13 @@ function createClientModHandlers(win) {
         const content = await fs.promises.readFile(oldManifestPath, 'utf8');
         manifest = JSON.parse(content);
       } catch {
-        manifest = { projectId: modInfo.projectId, name: modInfo.name };
+        manifest = {
+          projectId: modInfo.projectId,
+          name: modInfo.name,
+          fileName: newFileName,
+          versionNumber: modInfo.newVersion || modInfo.version || '',
+          updatedAt: new Date().toISOString()
+        };
       }
       manifest.fileName = newFileName;
       if (modInfo.newVersion) {
@@ -191,7 +197,13 @@ function createClientModHandlers(win) {
             const content = await fs.promises.readFile(oldManifestPath, 'utf8');
             manifest = JSON.parse(content);
           } catch {
-            manifest = { projectId: modToUpdate.projectId, name: modToUpdate.name };
+            manifest = {
+              projectId: modToUpdate.projectId,
+              name: modToUpdate.name,
+              fileName: newFileName,
+              versionNumber: (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) || '',
+              updatedAt: new Date().toISOString()
+            };
           }
           manifest.fileName = newFileName;
           if (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) {
