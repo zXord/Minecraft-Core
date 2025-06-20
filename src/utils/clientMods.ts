@@ -82,11 +82,16 @@ export async function loadModsFromServer(instance: Instance) {
           ...serverInfo.requiredMods.map((m: any) => m.fileName.toLowerCase()),
           ...(serverInfo.allClientMods || []).map((m: any) => m.fileName.toLowerCase())
         ]);
-        try {
-        const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
+        try {        const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
         if (state.success && Array.isArray(state.acknowledgedDeps)) {
-          const persisted: Set<string> = new Set<string>(state.acknowledgedDeps.map((d: string) => d.toLowerCase()));
-          acknowledgedDeps.set(persisted);
+          // Merge with existing acknowledged deps instead of overwriting
+          acknowledgedDeps.update(currentSet => {
+            const newSet = new Set(currentSet);
+            state.acknowledgedDeps.forEach((dep: string) => {
+              newSet.add(dep.toLowerCase());
+            });
+            return newSet;
+          });
         }
         } catch {
           // ignore
@@ -142,9 +147,15 @@ export async function checkModSynchronization(instance: Instance) {
     if (result.success) {
       modSyncStatus.set(result);
       try {
-        const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
-        if (state.success && Array.isArray(state.acknowledgedDeps)) {
-          acknowledgedDeps.set(new Set<string>(state.acknowledgedDeps.map((d: string) => d.toLowerCase())));
+        const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });        if (state.success && Array.isArray(state.acknowledgedDeps)) {
+          // Merge with existing acknowledged deps instead of overwriting
+          acknowledgedDeps.update(currentSet => {
+            const newSet = new Set(currentSet);
+            state.acknowledgedDeps.forEach((dep: string) => {
+              newSet.add(dep.toLowerCase());
+            });
+            return newSet;
+          });
         }
       } catch {}
       if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {

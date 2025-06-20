@@ -245,11 +245,11 @@
     return mods;
   })();  // Computed property to filter out already acknowledged mods from acknowledgments
   $: pendingAcknowledgments = (() => {
-    if (!$modSyncStatus?.acknowledgments) return [];
-
-    return $modSyncStatus.acknowledgments.filter(ack =>
+    if (!$modSyncStatus?.acknowledgments) return [];    const filtered = $modSyncStatus.acknowledgments.filter(ack =>
       !$acknowledgedDeps.has(ack.fileName.toLowerCase())
     );
+    
+    return filtered;
   })();
 
   // Function to load acknowledged dependencies from persistent storage
@@ -261,9 +261,14 @@
         clientPath: instance.path
       });
       if (result.success && result.acknowledgedDeps) {
-        acknowledgedDeps.set(
-          new Set(result.acknowledgedDeps.map(dep => dep.toLowerCase()))
-        );
+        // Merge with existing acknowledged deps instead of overwriting
+        acknowledgedDeps.update(currentSet => {
+          const newSet = new Set(currentSet);
+          result.acknowledgedDeps.forEach(dep => {
+            newSet.add(dep.toLowerCase());
+          });
+          return newSet;
+        });
       }
     } catch (error) {
     }

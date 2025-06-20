@@ -1,15 +1,14 @@
 <script>
-  import ClientModManager from './ClientModManager.svelte';
-  export let instance;
+  import ClientModManager from './ClientModManager.svelte';  export let instance;
   export let clientModManagerComponent;
   export let modSyncStatus;
   export let downloadStatus;
   export let getServerInfo;
   export let refreshMods;
+  export let filteredAcknowledgments;
 </script>
 
-<div class="mods-container">
-  <ClientModManager
+<div class="mods-container">  <ClientModManager
     bind:this={clientModManagerComponent}
     {instance}
     on:mod-sync-status={async (e) => {
@@ -22,14 +21,15 @@
       await getServerInfo();
 
       if (e.detail.synchronized) {
-        downloadStatus = 'ready';
-      } else {
+        downloadStatus = 'ready';      } else {
         const hasDownloads = ((e.detail.missingMods?.length || 0) + (e.detail.outdatedMods?.length || 0) + (e.detail.missingOptionalMods?.length || 0) + (e.detail.outdatedOptionalMods?.length || 0)) > 0;
-        const hasRemovals = ((e.detail.fullSyncResult?.requiredRemovals?.length || 0) + (e.detail.fullSyncResult?.optionalRemovals?.length || 0) + (e.detail.fullSyncResult?.acknowledgments?.length || 0)) > 0;
-        if (hasDownloads || hasRemovals) {
+        const hasRemovals = ((e.detail.fullSyncResult?.requiredRemovals?.length || 0) + (e.detail.fullSyncResult?.optionalRemovals?.length || 0)) > 0;
+        const hasUnacknowledgedDeps = filteredAcknowledgments?.length > 0;
+        
+        if (hasDownloads || hasRemovals || hasUnacknowledgedDeps) {
           downloadStatus = 'needed';
         } else {
-          downloadStatus = 'needed';
+          downloadStatus = 'ready';
         }
       }
     }}
