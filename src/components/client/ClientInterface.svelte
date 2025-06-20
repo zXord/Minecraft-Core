@@ -119,9 +119,9 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
         clientPath: instance.path
       });
       
-      if (result.success && result.acknowledgedDependencies) {
+      if (result.success && result.acknowledgedDeps) {
         acknowledgedDeps.set(
-          new Set(result.acknowledgedDependencies.map(dep => dep.toLowerCase()))
+          new Set(result.acknowledgedDeps.map(dep => dep.toLowerCase()))
         );
       }
     } catch (error) {
