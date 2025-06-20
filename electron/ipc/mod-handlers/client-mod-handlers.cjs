@@ -224,7 +224,7 @@ function createClientModHandlers(win) {
               enhancedMod.cleanVersion = metadata.version;
             }
           }
-        } catch (err) {
+        } catch {
           // ignore errors extracting metadata
         }
         enhancedMods.push(enhancedMod);
