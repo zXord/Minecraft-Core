@@ -4,13 +4,16 @@
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import ClientHeader from './ClientHeader.svelte';
   import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
+  import PlayTab from './PlayTab.svelte';
+  import ModsTab from './ModsTab.svelte';
+  import SettingsTab from './SettingsTab.svelte';
 import {
   errorMessage,
   successMessage,
   serverManagedFiles,
   removeServerManagedFiles
 } from '../../stores/modStore.js';
-import { acknowledgedDeps } from '../../stores/clientModManager.js';
+import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../stores/clientModManager';
   import { createEventDispatcher } from 'svelte';
   import { openFolder } from '../../utils/folderUtils.js';  import {
     clientState,
@@ -61,6 +64,10 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
   let serverInfo = null;
   let requiredMods = [];
   let modSyncStatus = null;
+  // Sync local modSyncStatus with the shared store
+  $: if (modSyncStatus !== null) {
+    modSyncStatusStore.set(modSyncStatus);
+  }
   
   // Authentication information
   let authData = null;
@@ -99,15 +106,15 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
   // Client mod compatibility dialog state
   let showCompatibilityDialog = false;
   let compatibilityReport = null;  // Download progress tracking
-  
-  // Computed property to filter out already acknowledged mods from acknowledgments
+    // Computed property to filter out already acknowledged mods from acknowledgments  $: filteredAcknowledgments = (() => {  // Computed property to filter out already acknowledged mods from acknowledgments
   $: filteredAcknowledgments = (() => {
     if (!modSyncStatus?.acknowledgments) return [];
 
-    return modSyncStatus.acknowledgments.filter(ack =>
+    const filtered = modSyncStatus.acknowledgments.filter(ack =>
       !$acknowledgedDeps.has(ack.fileName.toLowerCase())
     );
-  })();
+    
+    return filtered;  })();
 
   // Function to load acknowledged dependencies from persistent storage
   async function loadAcknowledgedDependencies() {
@@ -119,9 +126,14 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
       });
       
       if (result.success && result.acknowledgedDeps) {
-        acknowledgedDeps.set(
-          new Set(result.acknowledgedDeps.map(dep => dep.toLowerCase()))
-        );
+        // Merge with existing acknowledged deps instead of overwriting
+        acknowledgedDeps.update(currentSet => {
+          const newSet = new Set(currentSet);
+          result.acknowledgedDeps.forEach(dep => {
+            newSet.add(dep.toLowerCase());
+          });
+          return newSet;
+        });
       }
     } catch (error) {
       console.warn('[ClientInterface] Failed to load acknowledged dependencies:', error);
@@ -271,35 +283,55 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
               signal: AbortSignal.timeout(5000)
             });
               if (modsResponse.ok) {
-              const modsData = await modsResponse.json();              if (modsData.success) {
-                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
+              const modsData = await modsResponse.json();              if (modsData.success) {                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
                 // (ClientModManager sets it with required property, we don't want to overwrite that)
                 if (!serverInfo.allClientMods || serverInfo.allClientMods.length === 0 || 
                     !serverInfo.allClientMods.some(mod => mod.hasOwnProperty('required'))) {
-                  serverInfo.allClientMods = modsData.mods.client || [];
+                  
+                  const serverClientMods = modsData.mods.client || [];
+                  
+                  // Add any previously acknowledged mods that might not be in server's list anymore
+                  const acknowledgedModNames = Array.from($acknowledgedDeps);
+                  const mergedClientMods = [...serverClientMods];
+                  
+                  // For each acknowledged mod, ensure it's in the client mods list
+                  for (const acknowledgedMod of acknowledgedModNames) {
+                    const exists = mergedClientMods.some(mod => 
+                      (mod.fileName || mod.name || '').toLowerCase() === acknowledgedMod.toLowerCase()
+                    );
+                    if (!exists) {
+                      // Add the acknowledged mod as a client-downloaded mod
+                      mergedClientMods.push({
+                        fileName: acknowledgedMod,
+                        name: acknowledgedMod.replace('.jar', ''),
+                        required: false, // It's no longer required by server
+                        clientDownloaded: true // Mark as client downloaded
+                      });
+                    }
+                  }
+                    serverInfo.allClientMods = mergedClientMods;
                 }
               }
             }
           } catch (modsErr) {
             console.warn('Failed to fetch complete mod list:', modsErr);
           }
-          
-          // Track server info changes for UI updates only (no console spam)
-          if (!previousServerInfo || 
-              previousServerInfo.minecraftVersion !== serverInfo.minecraftVersion || 
-              (previousServerInfo.requiredMods?.length || 0) !== requiredMods.length) {
-            previousServerInfo = { minecraftVersion: serverInfo.minecraftVersion, requiredMods };
-          }
-          
-          // Check mod synchronization status
-          await checkModSynchronization();
-          
-          // Check client synchronization status
-          await checkClientSynchronization();
+            
+            // Track server info changes for UI updates only (no console spam)
+            if (!previousServerInfo || 
+                previousServerInfo.minecraftVersion !== serverInfo.minecraftVersion || 
+                (previousServerInfo.requiredMods?.length || 0) !== requiredMods.length) {
+              previousServerInfo = { minecraftVersion: serverInfo.minecraftVersion, requiredMods };
+            }            // Check mod synchronization status
+            await checkModSynchronization();
+            
+            // Check client synchronization status
+            await checkClientSynchronization();
         }
       }
     } catch (err) {
-      setMinecraftServerStatus('unknown');    }
+      setMinecraftServerStatus('unknown');
+    }
   }
     
   // Check client downloaded mods for compatibility with new Minecraft version
@@ -441,16 +473,13 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
     
     downloadStatus = 'checking';
     try {
-      const managedFiles = get(serverManagedFiles);
-
-      const filteredRequired = requiredMods.filter(
+      const managedFiles = get(serverManagedFiles);      const filteredRequired = requiredMods.filter(
         m => !$acknowledgedDeps.has(m.fileName.toLowerCase())
       );
-      const filteredAll = (serverInfo?.allClientMods || []).filter(
-        m => !$acknowledgedDeps.has(m.fileName.toLowerCase())
-      );
-
-      const result = await window.electron.invoke('minecraft-check-mods', {
+      // Don't filter acknowledged deps from allClientMods - they should remain visible
+      // for potential re-acknowledgment when removed from server requirements
+      const filteredAll = serverInfo?.allClientMods || [];
+        const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods: filteredRequired,
         allClientMods: filteredAll,
@@ -467,12 +496,23 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
           removeServerManagedFiles(result.successfullyRemovedMods);        }        // Check if there are any mod changes that need attention
         const hasRequiredUpdates = ((result.missingMods?.length || 0) + (result.outdatedMods?.length || 0)) > 0;
         const hasOptionalUpdates = (result.outdatedOptionalMods?.length || 0) > 0;
-        const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0)) > 0;
-        const hasAcknowledgments = (result.acknowledgments?.length || 0) > 0;
+        const hasRemovals = ((result.requiredRemovals?.length || 0) + (result.optionalRemovals?.length || 0)) > 0;        // Use filtered acknowledgments instead of raw acknowledgments
+        const hasUnacknowledgedDeps = filteredAcknowledgments.length > 0;
         
-        // Only show "ready" status if truly synchronized AND no actions needed
-        if (result.synchronized && !hasRequiredUpdates && !hasOptionalUpdates && !hasRemovals && !hasAcknowledgments) {
-          downloadStatus = 'ready'; // Only truly ready if no mods need attention
+        // Check if we have any actual work to do
+        const hasAnyWork = hasRequiredUpdates || hasOptionalUpdates || hasRemovals || hasUnacknowledgedDeps;
+        
+        // Update modSyncStatus to reflect filtered acknowledgments and corrected sync state
+        modSyncStatus = {
+          ...result,
+          acknowledgments: filteredAcknowledgments, // Use filtered acknowledgments
+          synchronized: !hasAnyWork // Override synchronized based on actual work needed
+        };
+        
+        // Only show "ready" status if no actual work is needed
+        // (Don't rely solely on result.synchronized as it might not account for resolved acknowledgments)
+        if (!hasAnyWork) {
+          downloadStatus = 'ready'; // No mods need attention
         } else {
           downloadStatus = 'needed'; // Show as needed if ANY mod actions are required
         }
@@ -1258,7 +1298,6 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
     });
       // Client mod compatibility events
     window.electron.on('client-mod-compatibility-report', (report) => {
-      console.log('[DEBUG] Received compatibility report:', report);
       compatibilityReport = report;
       
       // Show dialog if there are compatibility issues
@@ -1497,7 +1536,6 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
     checkClientModVersionCompatibility();
     clearVersionChangeDetected();
   }
-
   // Handle acknowledging all dependencies at once
   async function onAcknowledgeAllDependencies() {
     if (!modSyncStatus?.acknowledgments) return;
@@ -1520,10 +1558,11 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
 
       // Refresh after acknowledging all
       await checkModSynchronization();
+      // Reload acknowledged deps to merge any backend updates
       await loadAcknowledgedDependencies();
+
       successMessage.set('All dependencies acknowledged successfully');
     } catch (error) {
-      console.error('Failed to acknowledge all dependencies:', error);
       errorMessage.set('Failed to acknowledge dependencies: ' + error.message);
     }
   }
@@ -1616,14 +1655,14 @@ import { acknowledgedDeps } from '../../stores/clientModManager.js';
         {lastCheck}
         {isChecking}
       />
-    {:else if $clientState.activeTab === 'mods'}
-      <ModsTab
+    {:else if $clientState.activeTab === 'mods'}      <ModsTab
         {instance}
         bind:clientModManagerComponent
         {modSyncStatus}
         {downloadStatus}
         {getServerInfo}
         {refreshMods}
+        {filteredAcknowledgments}
       />
     {:else if $clientState.activeTab === 'settings'}
       <SettingsTab
