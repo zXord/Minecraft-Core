@@ -126,10 +126,17 @@ export async function checkModSynchronization(instance: Instance) {
   if (!instance?.path) return;
   try {
     const managedFiles = get(serverManagedFiles);
+    const ackSet = get(acknowledgedDeps);
+    const filteredRequired = get(requiredMods).filter(
+      m => !ackSet.has(m.fileName.toLowerCase())
+    );
+    const filteredAll = get(allClientMods).filter(
+      m => !ackSet.has(m.fileName.toLowerCase())
+    );
     const result = await window.electron.invoke('minecraft-check-mods', {
       clientPath: instance.path,
-      requiredMods: get(requiredMods),
-      allClientMods: get(allClientMods),
+      requiredMods: filteredRequired,
+      allClientMods: filteredAll,
       serverManagedFiles: Array.from(managedFiles)
     });
     if (result.success) {
