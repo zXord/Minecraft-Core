@@ -725,7 +725,13 @@ function createManualModHandlers() {
               const content = await fsPromises.readFile(oldManifestPath, 'utf8');
               manifest = JSON.parse(content);
             } catch {
-              manifest = { projectId: modToUpdate.projectId, name: modToUpdate.name };
+              manifest = {
+                projectId: modToUpdate.projectId,
+                name: modToUpdate.name,
+                fileName: newFileName,
+                versionNumber: (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) || '',
+                updatedAt: new Date().toISOString()
+              };
             }
             manifest.fileName = newFileName;
             if (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) {
