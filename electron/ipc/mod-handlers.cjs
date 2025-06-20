@@ -1,5 +1,3 @@
-const fs = require('fs');
-const path = require('path');
 const { dialog, app } = require('electron');
 const modFileManager = require('./mod-utils/mod-file-manager.cjs');
 const { createServerModHandlers } = require('./mod-handlers/server-mod-handlers.cjs');
@@ -53,10 +51,10 @@ function createModHandlers(win) {
 
   return {
     ...generalHandlers,
-    ...createModInfoHandlers(win),
+    ...createModInfoHandlers(),
     ...createServerModHandlers(win),
     ...createClientModHandlers(win),
-    ...createManualModHandlers(win),
+    ...createManualModHandlers(),
   };
 }
 

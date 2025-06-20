@@ -1,14 +1,9 @@
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
-const axios = require('axios');
-const { createWriteStream } = require('fs');
-const { pipeline } = require('stream');
-const { promisify } = require('util');
 const modApiService = require('../../services/mod-api-service.cjs');
 const modAnalysisUtils = require('../mod-utils/mod-analysis-utils.cjs');
 const { downloadWithProgress } = require('../../services/download-manager.cjs');
-const modFileManager = require('../mod-utils/mod-file-manager.cjs');
 const { disableMod } = require('../mod-utils/mod-file-utils.cjs');
 const {
   readModMetadata,
@@ -37,7 +32,7 @@ function createManualModHandlers() {
           // Load acknowledged dependencies from the client state
         let acknowledgedDependencies = new Set();
         try {
-          const { loadExpectedModState } = require('./minecraft-launcher-handlers.cjs');
+          const { loadExpectedModState } = require('../minecraft-launcher-handlers.cjs');
           const stateResult = await loadExpectedModState(clientPath);
           if (stateResult.success && stateResult.acknowledgedDeps) {
             acknowledgedDependencies = stateResult.acknowledgedDeps;

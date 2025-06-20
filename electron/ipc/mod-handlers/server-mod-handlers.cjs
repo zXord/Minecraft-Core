@@ -1,14 +1,9 @@
 const fs = require('fs');
-const fsPromises = require('fs').promises;
-const path = require('path');
 const modApiService = require('../../services/mod-api-service.cjs');
 const modFileManager = require('../mod-utils/mod-file-manager.cjs');
 const modInstallService = require('../mod-utils/mod-installation-service.cjs');
-const { downloadWithProgress } = require('../../services/download-manager.cjs');
-const { disableMod } = require('../mod-utils/mod-file-utils.cjs');
 const {
-  extractVersionFromFilename,
-  compareVersions
+  extractVersionFromFilename
 } = require('./mod-handler-utils.cjs');
 
 function createServerModHandlers(win) {

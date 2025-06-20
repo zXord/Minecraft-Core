@@ -4,12 +4,8 @@ const modInstallService = require('../mod-utils/mod-installation-service.cjs');
 const { disableMod } = require('../mod-utils/mod-file-utils.cjs');
 const { downloadWithProgress } = require('../../services/download-manager.cjs');
 const modFileManager = require('../mod-utils/mod-file-manager.cjs');
-const modApiService = require('../../services/mod-api-service.cjs');
-const {
-  readModMetadata,
-  checkModCompatibilityFromFilename,
-  compareVersions
-} = require('./mod-handler-utils.cjs');
+const modAnalysisUtils = require('../mod-utils/mod-analysis-utils.cjs');
+const { checkModCompatibilityFromFilename } = require('./mod-handler-utils.cjs');
 
 function createClientModHandlers(win) {
   return {
@@ -228,7 +224,9 @@ function createClientModHandlers(win) {
               enhancedMod.cleanVersion = metadata.version;
             }
           }
-        } catch {}
+        } catch (err) {
+          // ignore errors extracting metadata
+        }
         enhancedMods.push(enhancedMod);
       }
       return { success: true, enhancedMods };

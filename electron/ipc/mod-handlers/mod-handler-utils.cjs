@@ -1,7 +1,4 @@
 // Utility functions shared across mod handlers
-const fs = require('fs');
-const fsPromises = require('fs').promises;
-const path = require('path');
 const modAnalysisUtils = require('../mod-utils/mod-analysis-utils.cjs');
 
 function compareVersions(versionA, versionB) {
