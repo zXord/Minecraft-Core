@@ -13,6 +13,10 @@ function createClientModHandlers(win) {
       return await modInstallService.installModToClient(win, modData);
     },
 
+    'get-client-installed-mod-info': async (_e, clientPath) => {
+      return await modFileManager.getClientInstalledModInfo(clientPath);
+    },
+
     'check-client-mod-compatibility': async (_e, options) => {
       const { newMinecraftVersion, clientPath } = options;
       if (!clientPath || !fs.existsSync(clientPath)) {
