@@ -8,6 +8,14 @@ const AdmZip = require('adm-zip');
 const metadataCache = new Map();
 const cacheTimeout = 60000; // 1 minute cache
 
+function invalidateMetadataCache(jarPath) {
+  for (const key of Array.from(metadataCache.keys())) {
+    if (key.startsWith(`${jarPath}-`)) {
+      metadataCache.delete(key);
+    }
+  }
+}
+
 async function extractDependenciesFromJar(jarPath) {
   const cacheKey = `${jarPath}-${Date.now() - (Date.now() % cacheTimeout)}`;
   
@@ -268,5 +276,6 @@ async function analyzeModFromUrl(url, modId) {
 module.exports = {
   extractDependenciesFromJar,
   fetchModInfoFromUrl,
-  analyzeModFromUrl
+  analyzeModFromUrl,
+  invalidateMetadataCache
 };

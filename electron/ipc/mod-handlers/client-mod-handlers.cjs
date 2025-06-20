@@ -97,13 +97,43 @@ function createClientModHandlers(win) {
         timeout: 60000
       });
       await pipelineAsync(response.data, writer);
+
+      const oldFileName = modInfo.currentFilePath
+        ? path.basename(modInfo.currentFilePath)
+        : fileName;
+      const newFileName = path.basename(targetPath);
+
       if (modInfo.currentFilePath && fs.existsSync(modInfo.currentFilePath)) {
-        const oldFileName = path.basename(modInfo.currentFilePath);
-        const newFileName = path.basename(targetPath);
         if (oldFileName !== newFileName) {
           await fs.promises.unlink(modInfo.currentFilePath);
         }
       }
+
+      const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+      await fs.promises.mkdir(manifestDir, { recursive: true });
+      const oldManifestPath = path.join(manifestDir, `${oldFileName}.json`);
+      const newManifestPath = path.join(manifestDir, `${newFileName}.json`);
+      let manifest = {};
+      try {
+        const content = await fs.promises.readFile(oldManifestPath, 'utf8');
+        manifest = JSON.parse(content);
+      } catch {
+        manifest = { projectId: modInfo.projectId, name: modInfo.name };
+      }
+      manifest.fileName = newFileName;
+      if (modInfo.newVersion) {
+        manifest.versionNumber = modInfo.newVersion;
+      } else if (modInfo.version) {
+        manifest.versionNumber = modInfo.version;
+      }
+      manifest.updatedAt = new Date().toISOString();
+      await fs.promises.writeFile(newManifestPath, JSON.stringify(manifest, null, 2));
+      if (oldManifestPath !== newManifestPath) {
+        await fs.promises.unlink(oldManifestPath).catch(() => {});
+      }
+
+      modAnalysisUtils.invalidateMetadataCache(targetPath);
+
       return { success: true, filePath: targetPath };
     },
 
@@ -151,6 +181,30 @@ function createClientModHandlers(win) {
             await disableMod(modsDir, oldFileName);
           }
           await downloadWithProgress(fileToDownload.url, modsDir, newFileName);
+
+          const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+          await fs.promises.mkdir(manifestDir, { recursive: true });
+          const oldManifestPath = path.join(manifestDir, `${oldFileName}.json`);
+          const newManifestPath = path.join(manifestDir, `${newFileName}.json`);
+          let manifest = {};
+          try {
+            const content = await fs.promises.readFile(oldManifestPath, 'utf8');
+            manifest = JSON.parse(content);
+          } catch {
+            manifest = { projectId: modToUpdate.projectId, name: modToUpdate.name };
+          }
+          manifest.fileName = newFileName;
+          if (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) {
+            manifest.versionNumber = modToUpdate.newVersionDetails.versionNumber;
+          }
+          manifest.updatedAt = new Date().toISOString();
+          await fs.promises.writeFile(newManifestPath, JSON.stringify(manifest, null, 2));
+          if (oldManifestPath !== newManifestPath) {
+            await fs.promises.unlink(oldManifestPath).catch(() => {});
+          }
+
+          modAnalysisUtils.invalidateMetadataCache(path.join(modsDir, newFileName));
+
           updatedCount++;
         } catch (error) {
           errors.push(`${modToUpdate.name || modToUpdate.fileName}: ${error.message}`);
