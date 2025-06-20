@@ -83,11 +83,11 @@ export async function loadModsFromServer(instance: Instance) {
           ...(serverInfo.allClientMods || []).map((m: any) => m.fileName.toLowerCase())
         ]);
         try {
-          const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
-          if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-            const persisted: Set<string> = new Set<string>(state.acknowledgedDependencies.map((d: string) => d.toLowerCase()));
-            acknowledgedDeps.set(persisted);
-          }
+        const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
+        if (state.success && Array.isArray(state.acknowledgedDeps)) {
+          const persisted: Set<string> = new Set<string>(state.acknowledgedDeps.map((d: string) => d.toLowerCase()));
+          acknowledgedDeps.set(persisted);
+        }
         } catch {
           // ignore
         }
@@ -143,8 +143,8 @@ export async function checkModSynchronization(instance: Instance) {
       modSyncStatus.set(result);
       try {
         const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
-        if (state.success && Array.isArray(state.acknowledgedDependencies)) {
-          acknowledgedDeps.set(new Set<string>(state.acknowledgedDependencies.map((d: string) => d.toLowerCase())));
+        if (state.success && Array.isArray(state.acknowledgedDeps)) {
+          acknowledgedDeps.set(new Set<string>(state.acknowledgedDeps.map((d: string) => d.toLowerCase())));
         }
       } catch {}
       if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
