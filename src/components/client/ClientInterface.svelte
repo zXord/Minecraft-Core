@@ -855,7 +855,9 @@
           removeServerManagedFiles(result.removedMods);
         }
         
-        let processed = result.downloaded + result.skipped;
+        const downloadedCount = Number(result.downloaded) || 0;
+        const skippedCount = Number(result.skipped) || 0;
+        let processed = downloadedCount + skippedCount;
         let message = `Successfully processed ${processed} mods`;
         if (result.downloaded > 0) {
           message += ` (${result.downloaded} downloaded`;
