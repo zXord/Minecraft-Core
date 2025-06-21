@@ -65,9 +65,9 @@
   }
 
   // State and helpers moved to dedicated store
-
   // Props
   export let instance: Instance | null = null; // Client instance
+  export let clientModVersionUpdates = null; // Client mod version updates from server
   // Listen for refresh events from parent
   async function handleRefreshFromParent() {
     await refreshMods();
@@ -724,11 +724,11 @@ modSyncStatus={$modSyncStatus}
           {#if $errorMessage}            <p class="error-message">
               {$errorMessage} Ensure your client path contains a <code>mods</code> directory.
             </p>
-          {/if}
-          <ClientManualModList
+          {/if}          <ClientManualModList
             clientPath={instance?.path || ''}
             refreshTrigger={manualModsRefreshTrigger}
             modSyncStatus={$modSyncStatus}
+            {clientModVersionUpdates}
             on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
             on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
             on:install={handleInstallMod}

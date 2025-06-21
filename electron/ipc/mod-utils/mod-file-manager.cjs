@@ -57,10 +57,15 @@ async function readModMetadataFromJar(jarPath) {
     );    if (fabric) {
       try {
         const data = JSON.parse(fabric.getData().toString('utf8'));
+        console.log(`[DEBUG] fabric.mod.json for ${jarPath}:`, JSON.stringify(data, null, 2));
         return {
           name: data.name || data.id,
           versionNumber: data.version || data.version_number,
-          projectId: data.id
+          projectId: data.id,
+          // Include Minecraft compatibility info from dependencies
+          depends: data.depends,
+          fabricVersion: data.depends?.fabric,
+          minecraftVersion: data.depends?.minecraft
         };
       } catch {
         // Ignore fabric parsing errors

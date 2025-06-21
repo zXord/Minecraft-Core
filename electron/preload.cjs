@@ -114,8 +114,9 @@ contextBridge.exposeInMainWorld('electron', {
       'remove-manual-mods',
       'get-manual-mods-detailed',
       'check-manual-mod-updates',
-      'toggle-manual-mod',
-      'update-manual-mod',
+      'toggle-manual-mod',      'update-manual-mod',
+      'download-client-mod-version-updates',
+      'clear-client-mod-cache',
       // Application lifecycle
       'app-close-response',
       // Management server events
