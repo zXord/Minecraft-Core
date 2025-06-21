@@ -29,5 +29,6 @@ dist-ssr
 *.flag
 *-debug.json
 termination-record.json
-watchdog.log
-app-watchdog.log
+
+# Personal planning and documentation
+personal/
