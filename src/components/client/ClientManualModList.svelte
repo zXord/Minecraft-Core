@@ -50,10 +50,10 @@
       newDownloads?: string[];
     };
   }
-
   export let clientPath: string = '';
   export let refreshTrigger: number = 0; // Prop to trigger refresh when acknowledgments change  
   export let modSyncStatus: ModSyncStatus | null = null;
+  export let clientModVersionUpdates = null; // Client mod version updates from server compatibility check
   
   let mods: DetailedMod[] = [];
   let loading = true;
@@ -294,6 +294,15 @@
       minute: '2-digit'
     }).format(date);
   }
+
+  // Helper function to get client mod version update info for a mod
+  function getClientModVersionUpdate(mod: DetailedMod) {
+    if (!clientModVersionUpdates?.updates) return null;
+    
+    return clientModVersionUpdates.updates.find(update => 
+      update.fileName.toLowerCase() === mod.fileName.toLowerCase()
+    );
+  }
 </script>
 
 {#if loading}
@@ -354,22 +363,35 @@
               {#if mod.hasUpdate}
                 <span class="update-badge">Update Available</span>
               {/if}
-            </div>
-            
-            <div class="mod-version">
-              {#if mod.version}
+            </div>              <div class="mod-version">
+              {#if getClientModVersionUpdate(mod)}
+                {@const updateInfo = getClientModVersionUpdate(mod)}
+                <span class="version-tag current">v{mod.version || 'Unknown'}</span>
+                <span class="version-arrow">→</span>
+                <span class="version-tag update">v{updateInfo.newVersion}</span>
+              {:else if mod.version}
                 <span class="version-tag">v{mod.version}</span>
               {:else}
                 <span class="version-tag unknown">Unknown</span>
               {/if}            </div>
-              <div class="mod-actions">              {#if mod.hasUpdate && !$serverManagedFiles.has(mod.fileName.toLowerCase())}
+            
+            <div class="mod-actions">              <!-- Show client mod version update button if available -->
+              {#if getClientModVersionUpdate(mod) && !$serverManagedFiles.has(mod.fileName.toLowerCase())}
+                <button 
+                  class="action-btn client-update-btn"
+                  on:click|stopPropagation={() => {}}
+                  title="Update for Minecraft {clientModVersionUpdates.minecraftVersion} compatibility"
+                >
+                  Update
+                </button>
+              {:else if mod.hasUpdate && !$serverManagedFiles.has(mod.fileName.toLowerCase())}
                 <button 
                   class="action-btn update-btn"
                   on:click|stopPropagation={() => updateMod(mod)}
                   disabled={updatingMods.has(mod.fileName)}
                   title="Update to v{mod.latestVersion}"
                 >
-                  {updatingMods.has(mod.fileName) ? 'Updating...' : `Update to v${mod.latestVersion}`}
+                  {updatingMods.has(mod.fileName) ? 'Updating...' : 'Update'}
                 </button>
               {/if}
               {#if !$serverManagedFiles.has(mod.fileName.toLowerCase())}
@@ -798,5 +820,34 @@
     font-size: 0.8rem;
     font-weight: 500;
     line-height: 1.4;
+  }
+  /* Client mod version update styles */
+  .version-arrow {
+    color: rgba(255, 255, 255, 0.6);
+    font-weight: bold;
+    margin: 0 0.25rem;
+  }
+
+  .version-tag.current {
+    background: rgba(107, 114, 128, 0.2);
+    color: #9ca3af;
+    border: 1px solid rgba(107, 114, 128, 0.3);
+  }
+
+  .version-tag.update {
+    background: rgba(34, 197, 94, 0.2);
+    color: #22c55e;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+
+  .client-update-btn {
+    background: rgba(34, 197, 94, 0.2);
+    color: #22c55e;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+
+  .client-update-btn:hover {
+    background: rgba(34, 197, 94, 0.3);
+    border-color: rgba(34, 197, 94, 0.5);
   }
 </style>

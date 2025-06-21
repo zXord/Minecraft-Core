@@ -26,9 +26,9 @@
   export let currentDownloadFile;
   export let fileProgress;
   export let clientDownloadProgress;
-  export let handleRefreshFromDashboard;
-  export let lastCheck;
+  export let handleRefreshFromDashboard;  export let lastCheck;
   export let isChecking;
+
 </script>
 
       <div class="client-main">
@@ -151,7 +151,7 @@
                     {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
                     {@const acknowledgments = filteredAcknowledgments || []}
                       <!-- Dynamic title based on what needs to happen -->
-                    {@const totalDownloadsNeeded = (modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0)}
+                    {@const totalDownloadsNeeded = (modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0) + (modSyncStatus?.clientModUpdates?.length || 0)}
                     {#if totalDownloadsNeeded > 0 || actualRemovals.length > 0}
                       <h3>Mods Need Update</h3>
                     {:else if acknowledgments.length > 0}
@@ -160,7 +160,7 @@
                       <h3>Mod Sync Required</h3>                    {/if}
 
                     <!-- Display appropriate message based on what needs to happen -->
-                    {@const totalUpdatesNeeded = (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0)}
+                    {@const totalUpdatesNeeded = (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0) + (modSyncStatus?.clientModUpdates?.length || 0)}
                     {@const totalNewDownloads = (modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0)}
                     
                     {#if totalDownloadsNeeded > 0 && actualRemovals.length > 0 && acknowledgments.length > 0}
@@ -187,23 +187,59 @@
                     <!-- Required Mod Updates -->
                     {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
                       <div class="mod-changes-section">
-                        <h4>� Required Mod Updates:</h4>
-                        <ul class="mod-list">                          {#each modSyncStatus.outdatedMods as update, index (update.name || update.fileName || `req-update-${index}`)}
+                        <h4>� Required Mod Updates:</h4>                        <ul class="mod-list">                          {#each modSyncStatus.outdatedMods as update, index (update.name || update.fileName || `req-update-${index}`)}
                             <li class="mod-item mod-update">
-                              {update.name || update.fileName || 'Unknown Mod'} v{update.currentVersion} → v{update.newVersion}
+                              <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
+                              <span class="version-change">
+                                <span class="current-version">v{update.currentVersion}</span>
+                                <span class="version-arrow">→</span>
+                                <span class="new-version">v{update.newVersion}</span>
+                              </span>
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}                    <!-- Optional Mod Updates -->
+                    {#if modSyncStatus.outdatedOptionalMods && modSyncStatus.outdatedOptionalMods.length > 0}
+                      <div class="mod-changes-section">
+                        <h4>🔄 Optional Mod Updates:</h4>                        <ul class="mod-list">                          {#each modSyncStatus.outdatedOptionalMods as update, index (update.name || update.fileName || `opt-update-${index}`)}
+                            <li class="mod-item mod-update optional">
+                              <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
+                              <span class="version-change">
+                                <span class="current-version">v{update.currentVersion}</span>
+                                <span class="version-arrow">→</span>
+                                <span class="new-version">v{update.newVersion}</span>
+                              </span>
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}                    <!-- Client Downloaded Mod Updates -->
+                    {#if modSyncStatus.clientModUpdates && modSyncStatus.clientModUpdates.length > 0}
+                      <div class="mod-changes-section">
+                        <h4>📱 Client Downloaded Mod Updates:</h4>                        <ul class="mod-list">
+                          {#each modSyncStatus.clientModUpdates as update, index (update.name || update.fileName || `client-update-${index}`)}
+                            <li class="mod-item mod-update client-mod">
+                              <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
+                              <span class="version-change">
+                                <span class="current-version">v{update.currentVersion}</span>
+                                <span class="version-arrow">→</span>
+                                <span class="new-version">v{update.newVersion}</span>
+                              </span>
                             </li>
                           {/each}
                         </ul>
                       </div>
                     {/if}
-
-                    <!-- Optional Mod Updates -->
-                    {#if modSyncStatus.outdatedOptionalMods && modSyncStatus.outdatedOptionalMods.length > 0}
+                    
+                    <!-- Client Mod Compatibility Issues -->
+                    {#if modSyncStatus.clientModDisables && modSyncStatus.clientModDisables.length > 0}
                       <div class="mod-changes-section">
-                        <h4>🔄 Optional Mod Updates:</h4>
-                        <ul class="mod-list">                          {#each modSyncStatus.outdatedOptionalMods as update, index (update.name || update.fileName || `opt-update-${index}`)}
-                            <li class="mod-item mod-update optional">
-                              {update.name || update.fileName || 'Unknown Mod'} v{update.currentVersion} → v{update.newVersion}
+                        <h4>⚠️ Client Mod Compatibility Issues:</h4>
+                        <ul class="mod-list">
+                          {#each modSyncStatus.clientModDisables as disable, index (disable.name || disable.fileName || `client-disable-${index}`)}
+                            <li class="mod-item mod-disable client-mod">
+                              {disable.name || disable.fileName || 'Unknown Mod'} v{disable.currentVersion} - {disable.reason}
                             </li>
                           {/each}
                         </ul>
@@ -258,7 +294,7 @@
                           {/each}
                         </ul>
                       </div>                    {/if}                  {/if}                  <!-- Show appropriate action button based on what's needed -->                  {#if modSyncStatus}
-                    {@const totalUpdatesNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
+                    {@const totalUpdatesNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0) + (modSyncStatus.clientModUpdates?.length || 0)}
                     {#if totalUpdatesNeeded > 0}
                       <button class="download-button" on:click={onDownloadModsClick}>
                         📥 Download & Update Mods ({totalUpdatesNeeded})
@@ -329,8 +365,7 @@
                       {/if}
                     {:else}
                       <p>All mods are installed and up to date.</p>
-                    {/if}
-                  </div>
+                    {/if}                  </div>
                 {/if}
               
               <!-- Memory Settings -->
@@ -471,5 +506,52 @@
   .client-main {
     display: flex;
     flex-direction: column;
+  }
+  
+  /* Client mod styling */  .mod-item.client-mod {
+    border-left: 3px solid #a855f7;
+    background: rgba(168, 85, 247, 0.1);
+  }
+  
+  .mod-item.mod-disable {
+    border-left: 3px solid #f59e0b;
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  /* Mod name and version styling for better distinction */
+  .mod-name {
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.95);
+    margin-right: 0.75rem;
+  }
+
+  .version-change {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+  }
+
+  .current-version {
+    color: rgba(255, 255, 255, 0.7);
+    background: rgba(107, 114, 128, 0.2);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+
+  .version-arrow {
+    color: rgba(255, 255, 255, 0.5);
+    font-weight: bold;
+  }
+
+  .new-version {
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.15);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-weight: 600;
   }
 </style>

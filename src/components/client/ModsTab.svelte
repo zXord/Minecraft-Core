@@ -6,11 +6,13 @@
   export let getServerInfo;
   export let refreshMods;
   export let filteredAcknowledgments;
+  export let clientModVersionUpdates = null;
 </script>
 
 <div class="mods-container">  <ClientModManager
     bind:this={clientModManagerComponent}
     {instance}
+    {clientModVersionUpdates}
     on:mod-sync-status={async (e) => {
       if (e.detail.fullSyncResult) {
         modSyncStatus = e.detail.fullSyncResult;

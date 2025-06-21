@@ -11,6 +11,7 @@ const { createPlayerHandlers, initializePlayerIpMap } = require('./ipc/player-ha
 const { createInstallHandlers } = require('./ipc/install-handlers.cjs');
 const { createSettingsHandlers } = require('./ipc/settings-handlers.cjs');
 const { createModHandlers } = require('./ipc/mod-handlers.cjs');
+const { createClientModHandlers } = require('./ipc/mod-handlers/client-mod-handlers.cjs');
 const { createConfigHandlers } = require('./ipc/config-handlers.cjs');
 const { createServerPropertiesHandlers } = require('./ipc/server-properties-handlers.cjs');
 const { createBackupHandlers, loadBackupManager } = require('./ipc/backup-handlers.cjs');
@@ -39,6 +40,7 @@ function setupIpcHandlers(win) {
   registeredHandlers.clear();    // Get all handler modules
     const fileHandlers = createFileHandlers(win);
     const modHandlers = createModHandlers(win);
+    const clientModHandlers = createClientModHandlers(win);
     const serverPropertiesHandlers = createServerPropertiesHandlers();
     const installHandlers = createInstallHandlers(win);
     const configHandlers = createConfigHandlers();
@@ -50,12 +52,12 @@ function setupIpcHandlers(win) {
     const minecraftLauncherHandlers = createMinecraftLauncherHandlers(win);
     
     // Initialize backup manager
-    loadBackupManager();
-      // Loop through each handler object and register the handlers
+    loadBackupManager();    // Loop through each handler object and register the handlers
     [
       backupHandlers,
       fileHandlers,
       modHandlers,
+      clientModHandlers,
       serverPropertiesHandlers,
       installHandlers,
       configHandlers,
@@ -63,7 +65,8 @@ function setupIpcHandlers(win) {
       serverHandlers,
       settingsHandlers,
       managementServerHandlers,
-      minecraftLauncherHandlers    ].forEach((handlers) => {
+      minecraftLauncherHandlers
+    ].forEach((handlers) => {
       if (!handlers) {
         return;
       }

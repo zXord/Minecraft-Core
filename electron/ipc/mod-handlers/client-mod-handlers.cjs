@@ -296,10 +296,161 @@ function createClientModHandlers(win) {
           }
         } catch {
           // ignore errors extracting metadata
-        }
-        enhancedMods.push(enhancedMod);
+        }        enhancedMods.push(enhancedMod);
       }
       return { success: true, enhancedMods };
+    },
+
+    'download-client-mod-version-updates': async (_e, { clientPath, updates, minecraftVersion }) => {
+      try {
+        if (!clientPath || !updates || !Array.isArray(updates)) {
+          throw new Error('Invalid parameters provided');
+        }
+
+        if (!fs.existsSync(clientPath)) {
+          throw new Error('Client path does not exist');
+        }
+
+        const modsDir = path.join(clientPath, 'mods');
+        await fs.promises.mkdir(modsDir, { recursive: true });
+
+        let updatedCount = 0;
+        let errors = [];
+
+        // Process each update
+        for (const update of updates) {
+          try {
+            if (!update.downloadUrl) {
+              errors.push(`${update.name}: No download URL available`);
+              continue;
+            }
+
+            // Find current mod file
+            const currentModPath = path.join(modsDir, update.fileName);
+            
+            // Download new version
+            const response = await require('axios')({
+              url: update.downloadUrl,
+              method: 'GET',
+              responseType: 'stream',
+              timeout: 60000
+            });
+
+            // Create temporary file for download
+            const tempPath = currentModPath + '.tmp';
+            const writer = fs.createWriteStream(tempPath);
+              await new Promise((resolve, reject) => {
+              response.data.pipe(writer);
+              writer.on('finish', () => resolve());
+              writer.on('error', reject);
+            });
+
+            // Replace old file with new one
+            if (fs.existsSync(currentModPath)) {
+              await fs.promises.unlink(currentModPath);
+            }
+            await fs.promises.rename(tempPath, currentModPath);
+
+            // Update manifest
+            const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+            await fs.promises.mkdir(manifestDir, { recursive: true });
+            const manifestPath = path.join(manifestDir, `${update.fileName}.json`);
+            
+            let manifest = {};
+            try {
+              const content = await fs.promises.readFile(manifestPath, 'utf8');
+              manifest = JSON.parse(content);            } catch {
+              // Create new manifest if it doesn't exist
+              manifest = {
+                projectId: update.projectId,
+                name: update.name,
+                fileName: update.fileName,
+                versionNumber: update.newVersion,
+                updatedAt: new Date().toISOString(),
+                minecraftVersion: minecraftVersion
+              };
+            }            // Update manifest with new version info but preserve important Modrinth metadata
+            manifest.versionNumber = update.newVersion;
+            manifest.updatedAt = new Date().toISOString();
+            manifest.minecraftVersion = minecraftVersion;
+            // Ensure we preserve the Modrinth projectId for API compatibility
+            manifest.projectId = update.projectId;
+            manifest.name = update.name;
+            
+            await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+            // Invalidate metadata cache
+            modAnalysisUtils.invalidateMetadataCache(currentModPath);
+            
+            updatedCount++;
+            
+            // Emit progress if window is available
+            if (win && win.webContents) {
+              win.webContents.send('launcher-download-progress', {
+                downloaded: updatedCount,
+                total: updates.length,
+                current: update.name,
+                status: 'downloading'
+              });
+            }
+
+          } catch (modError) {
+            errors.push(`${update.name}: ${modError.message}`);
+          }
+        }
+
+        // Send completion event
+        if (win && win.webContents) {
+          win.webContents.send('launcher-download-complete', {
+            success: updatedCount > 0,
+            updated: updatedCount,
+            errors: errors.length
+          });
+        }
+
+        return {
+          success: true,
+          updated: updatedCount,
+          errors: errors.length > 0 ? errors : undefined,
+          message: `Successfully updated ${updatedCount} mod${updatedCount !== 1 ? 's' : ''} for Minecraft ${minecraftVersion}`
+        };
+
+      } catch (error) {
+        return {
+          success: false,          error: error.message
+        };
+      }
+    },
+
+    'clear-client-mod-cache': async (_e, { clientPath, fileName }) => {
+      try {
+        if (!clientPath || !fileName) {
+          throw new Error('Client path and file name are required');
+        }
+
+        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        const manifestPath = path.join(manifestDir, `${fileName}.json`);
+        
+        // Delete the manifest file to force re-reading from jar
+        if (fs.existsSync(manifestPath)) {
+          await fs.promises.unlink(manifestPath);
+          console.log(`Cleared manifest cache for ${fileName}`);
+        }
+
+        // Also invalidate any other caches
+        const modPath = path.join(clientPath, 'mods', fileName);
+        if (modAnalysisUtils && modAnalysisUtils.invalidateMetadataCache) {
+          modAnalysisUtils.invalidateMetadataCache(modPath);
+        }
+
+        return { success: true };
+      } catch (error) {
+        console.error('Error clearing client mod cache:', error);
+        return {
+          success: false,
+          error: error.message
+        };
+      }
     }
   };
 }

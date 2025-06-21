@@ -176,18 +176,12 @@
     border: 1px solid rgba(245, 158, 11, 0.3);
     color: #fbbf24;
   }
-
   .mod-item.optional {
     opacity: 0.8;
     border-style: dashed;
   }
 
-  .mod-item.optional::after {
-    content: " (Optional)";
-    font-size: 0.7rem;
-    color: #9ca3af;
-    margin-left: 0.5rem;
-  }.mod-item.mod-removal {
+  .mod-item.mod-removal {
     background-color: rgba(239, 68, 68, 0.1);
     border: 1px solid rgba(239, 68, 68, 0.3);
     color: #f87171;
