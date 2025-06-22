@@ -7,6 +7,7 @@ const { EventEmitter } = require('events');
 const { JavaManager } = require('./java-manager.cjs');
 const { XMCLAuthHandler } = require('./xmcl-auth-handler.cjs');
 const { ClientDownloader } = require('./client-downloader.cjs');
+const XMCLClientDownloader = require('./xmcl-client-downloader.cjs');
 const { ProperMinecraftLauncher } = require('./proper-launcher.cjs');
 
 // Console hiding removed - fixing the root cause instead (using javaw.exe)
@@ -30,12 +31,19 @@ class MinecraftLauncher extends EventEmitter {
   constructor() {
     super();
     this.isLaunching = false;
-    this.client = null;
-    // this.authData = null; // Moved to AuthHandler    this.clientPath = null;
+    this.client = null;    // this.authData = null; // Moved to AuthHandler
+    this.clientPath = null;
     this.javaManager = new JavaManager(); // Initialize without client path initially
     this.authHandler = new XMCLAuthHandler(this); // Use new XMCL auth handler
-    // ClientDownloader will now import utils directly
-    this.clientDownloader = new ClientDownloader(this.javaManager, this);
+    
+    // Hybrid approach: Use both downloaders during migration
+    this.legacyClientDownloader = new ClientDownloader(this.javaManager, this);
+    this.xmclClientDownloader = new XMCLClientDownloader(this.javaManager, this);    // Flag to switch between downloaders (can be controlled via settings)
+    this.useXMCLDownloader = false; // Disable XMCL, use legacy
+    
+    // Set the active downloader based on flag
+    this.clientDownloader = this.useXMCLDownloader ? 
+      this.xmclClientDownloader : this.legacyClientDownloader;
     
     // Add proper launcher for fixing LogUtils issues
     this.properLauncher = new ProperMinecraftLauncher();
@@ -176,30 +184,29 @@ class MinecraftLauncher extends EventEmitter {
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
     return this.clientDownloader.downloadMinecraftClientSimple(clientPath, minecraftVersion, options);
   }
-  
-  // Manual download method for when automated downloads fail
+    // Manual download method for when automated downloads fail
   async downloadMinecraftManually(clientPath, minecraftVersion) {
-    return this.clientDownloader.downloadMinecraftManually(clientPath, minecraftVersion);
+    return this.legacyClientDownloader.downloadMinecraftManually(clientPath, minecraftVersion);
   }
   
   // Helper method to download JSON with retry logic
   async downloadJson(url, maxRetries = 3) {
-    return this.clientDownloader.downloadJson(url, maxRetries);
+    return this.legacyClientDownloader.downloadJson(url, maxRetries);
   }
   
   // Single JSON download attempt
   async _downloadJsonSingle(url) {
-    return this.clientDownloader._downloadJsonSingle(url);
+    return this.legacyClientDownloader._downloadJsonSingle(url);
   }
   
   // Helper method to download file with retry logic
   async downloadFile(url, filePath, maxRetries = 3) {
-    return this.clientDownloader.downloadFile(url, filePath, maxRetries);
+    return this.legacyClientDownloader.downloadFile(url, filePath, maxRetries);
   }
   
   // Single download attempt
   async _downloadFileSingle(url, filePath) {
-    return this.clientDownloader._downloadFileSingle(url, filePath);
+    return this.legacyClientDownloader._downloadFileSingle(url, filePath);
   }
     // Launch Minecraft client
   async launchMinecraft(options) {
@@ -743,27 +750,27 @@ class MinecraftLauncher extends EventEmitter {
   
   // Clear Minecraft client files for re-download
   async clearMinecraftClient(clientPath, minecraftVersion) {
-    return this.clientDownloader.clearMinecraftClient(clientPath, minecraftVersion);
+    return this.legacyClientDownloader.clearMinecraftClient(clientPath, minecraftVersion);
   }
 
   // Force clear just assets directory - useful when assets are corrupted
   async clearAssets(clientPath) {
-    return this.clientDownloader.clearAssets(clientPath);
+    return this.legacyClientDownloader.clearAssets(clientPath);
   }
   
   // Install Fabric loader for the client
   async installFabricLoader(clientPath, minecraftVersion, fabricVersion = 'latest') {
-    return this.clientDownloader.installFabricLoader(clientPath, minecraftVersion, fabricVersion);
+    return this.legacyClientDownloader.installFabricLoader(clientPath, minecraftVersion, fabricVersion);
   }
 
   // Fix Fabric profile to include asset index for MCLC compatibility
   async fixFabricAssetIndex(clientPath, fabricProfileName, vanillaVersion) {
-    return this.clientDownloader.fixFabricAssetIndex(clientPath, fabricProfileName, vanillaVersion);
+    return this.legacyClientDownloader.fixFabricAssetIndex(clientPath, fabricProfileName, vanillaVersion);
   }
 
   // Add server to Minecraft's server list
   async addServerToList(clientPath, serverInfo) {
-    return this.clientDownloader.addServerToList(clientPath, serverInfo);
+    return this.legacyClientDownloader.addServerToList(clientPath, serverInfo);
   }
 
   // Inject vanilla downloads.client and merge vanilla libraries into Fabric profile
@@ -1114,6 +1121,27 @@ class MinecraftLauncher extends EventEmitter {
         message: `Failed to launch with proper launcher: ${error.message}`
       };
     }
+  }
+
+  /**
+   * Enable XMCL downloader for testing
+   * This can be called to switch to the new @xmcl/installer implementation
+   */
+  enableXMCLDownloader(enable = true) {
+    this.useXMCLDownloader = enable;
+    this.clientDownloader = this.useXMCLDownloader ? 
+      this.xmclClientDownloader : this.legacyClientDownloader;
+    console.log(`🔄 Switched to ${enable ? 'XMCL' : 'Legacy'} client downloader`);
+  }
+
+  /**
+   * Get current downloader status
+   */
+  getDownloaderStatus() {
+    return {
+      usingXMCL: this.useXMCLDownloader,
+      currentDownloader: this.useXMCLDownloader ? 'XMCL' : 'Legacy'
+    };
   }
 }
 
