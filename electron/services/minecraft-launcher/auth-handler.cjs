@@ -21,17 +21,23 @@ class AuthHandler {
       
       // Generate the Minecraft login token
       const token = await xboxManager.getMinecraft();
-      
-      if (token && token.profile) {
-        this.authData = {
+        if (token && token.profile) {
+        // Keep UUID with dashes for proper Minecraft authentication
+        const formattedUuid = token.profile.id.includes('-') ? 
+          token.profile.id : 
+          `${token.profile.id.substring(0,8)}-${token.profile.id.substring(8,12)}-${token.profile.id.substring(12,16)}-${token.profile.id.substring(16,20)}-${token.profile.id.substring(20)}`;        this.authData = {
           access_token: token.mcToken,
           client_token: uuidv4(),
-          uuid: token.profile.id.replace(/-/g, ''),
+          uuid: formattedUuid, // Use proper UUID format with dashes
           name: token.profile.name,
           user_properties: {},
           meta: xboxManager, // Store the whole MSMC token object for refresh
+          // Store timing data for automatic re-authentication
+          expires_at: new Date(Date.now() + (1000 * 60 * 60 * 24)).toISOString(), // 24 hours from now
           savedAt: new Date().toISOString()
         };
+        
+        console.log('AUTH SUCCESS: Authenticated as', token.profile.name, 'UUID:', formattedUuid);
         
         this.emitter.emit('auth-success', { username: token.profile.name, uuid: token.profile.id });
         
@@ -161,10 +167,21 @@ class AuthHandler {
       const now = new Date();
       const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
       
-      
-      // If token is very fresh (less than 30 minutes), just use it
+        // If token is very fresh (less than 30 minutes), just use it
       if (hoursSinceSaved < 0.5) {
         return { success: true, refreshed: false };
+      }      // If token is too old (>24 hours), clear it and require fresh authentication
+      if (hoursSinceSaved > 24) {
+        console.log('Token is too old (', hoursSinceSaved.toFixed(1), 'hours). Clearing expired token and requiring fresh authentication.');
+        
+        // Clear the expired authentication data
+        this.authData = null;
+        
+        return { 
+          success: false, 
+          error: `Token expired (${hoursSinceSaved.toFixed(1)} hours old). Please authenticate again.`,
+          requiresAuth: true 
+        };
       }
       
       // If we have MSMC meta data, try to refresh
@@ -182,21 +199,26 @@ class AuthHandler {
           } else if (typeof this.authData.meta.launch === 'function') {
             // Alternative refresh method
             refreshedToken = await this.authData.meta.getMinecraft();
-          }
-
-          if (refreshedToken && refreshedToken.profile) {
+          }          if (refreshedToken && refreshedToken.profile) {
             // Update our stored auth data with fresh token
             const originalClientToken = this.authData.client_token;
+            
+            // Keep UUID with dashes for proper Minecraft authentication
+            const formattedUuid = refreshedToken.profile.id.includes('-') ? 
+              refreshedToken.profile.id : 
+              `${refreshedToken.profile.id.substring(0,8)}-${refreshedToken.profile.id.substring(8,12)}-${refreshedToken.profile.id.substring(12,16)}-${refreshedToken.profile.id.substring(16,20)}-${refreshedToken.profile.id.substring(20)}`;
             
             this.authData = {
               access_token: refreshedToken.mcToken,
               client_token: originalClientToken, // Keep original, don't set to null
-              uuid: refreshedToken.profile.id.replace(/-/g, ''), // Ensure no dashes
+              uuid: formattedUuid, // Use proper UUID format with dashes
               name: refreshedToken.profile.name,
               user_properties: this.authData.user_properties || {}, // Preserve user properties
               meta: this.authData.meta, // Keep the meta object
               savedAt: new Date().toISOString()
             };
+            
+            console.log('AUTH REFRESH SUCCESS: Token refreshed for', refreshedToken.profile.name, 'UUID:', formattedUuid);
             
             return { success: true, refreshed: true };
           } else {
