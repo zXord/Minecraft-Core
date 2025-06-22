@@ -786,15 +786,13 @@ class ManagementServer {
       return [];
     }
   }
-
   // Get all client mods (both required and optional)
   async getAllClientMods() {
     if (!this.serverPath) {
       return [];
     }
     
-    try {
-      const clientModsDir = path.join(this.serverPath, 'client', 'mods');
+    try {      const clientModsDir = path.join(this.serverPath, 'client', 'mods');
       const serverModsDir = path.join(this.serverPath, 'mods');
 
       // Load saved mod categories to check requirement status
@@ -913,12 +911,12 @@ class ManagementServer {
                 name: name
               });
             }
-          }
-        }
+          }        }
       }
       
       return allClientMods;
-    } catch {
+    } catch (error) {
+      console.error('❌ [ERROR] getAllClientMods failed:', error);
       return [];
     }
   }
