@@ -28,6 +28,7 @@ import {
   modSource,
   resultsPerPage,
   filterModLoader,
+  disabledMods,
   installingModIds,
   modCategories
 } from '../../stores/modStore.js';
@@ -547,10 +548,10 @@ export async function checkForUpdates(serverPath) {
       isCheckingUpdates.set(false);
       return updatesMap;
     }
-    
-    // Skip update check if no mods have project IDs
+      // Skip update check if no mods have project IDs
     const modsInfo = get(installedModInfo);
-    const modsWithProjectIds = modsInfo.filter(m => m.projectId);
+    const disabledModsSet = get(disabledMods);
+    const modsWithProjectIds = modsInfo.filter(m => m.projectId && !disabledModsSet.has(m.fileName));
     
     if (modsWithProjectIds.length === 0) {
       modsWithUpdates.set(new Map());
