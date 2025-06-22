@@ -480,13 +480,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             serverModFileNames.add(mod.fileName.toLowerCase());
           }
         });
-      }
-        const clientOnlyMods = result.filter(mod => {
+      }      const clientOnlyMods = result.filter(mod => {
         const fileName = mod.fileName.toLowerCase();
         const isServerManaged = managedFiles.has(fileName) || serverModFileNames.has(fileName);
-        // Also filter out disabled mods from update checks
-        const isEnabled = !mod.isDisabled;
-        return !isServerManaged && isEnabled;
+        return !isServerManaged;
       });
         if (clientOnlyMods.length === 0) {
         // No client-only mods to update
