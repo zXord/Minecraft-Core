@@ -5,7 +5,7 @@ const path = require('path');
 const AdmZip = require('adm-zip');
 const { EventEmitter } = require('events');
 const { JavaManager } = require('./java-manager.cjs');
-const { AuthHandler } = require('./auth-handler.cjs');
+const { XMCLAuthHandler } = require('./xmcl-auth-handler.cjs');
 const { ClientDownloader } = require('./client-downloader.cjs');
 const { ProperMinecraftLauncher } = require('./proper-launcher.cjs');
 
@@ -31,12 +31,11 @@ class MinecraftLauncher extends EventEmitter {
     super();
     this.isLaunching = false;
     this.client = null;
-    // this.authData = null; // Moved to AuthHandler
-    this.clientPath = null;
+    // this.authData = null; // Moved to AuthHandler    this.clientPath = null;
     this.javaManager = new JavaManager(); // Initialize without client path initially
-    this.authHandler = new AuthHandler(this); // Instantiate AuthHandler
+    this.authHandler = new XMCLAuthHandler(this); // Use new XMCL auth handler
     // ClientDownloader will now import utils directly
-    this.clientDownloader = new ClientDownloader(this.javaManager, this); 
+    this.clientDownloader = new ClientDownloader(this.javaManager, this);
     
     // Add proper launcher for fixing LogUtils issues
     this.properLauncher = new ProperMinecraftLauncher();

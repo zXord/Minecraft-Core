@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@xmcl/installer": "^6.1.0",
+    "@xmcl/user": "^4.2.0",
     "adm-zip": "^0.5.16",
     "archiver": "^7.0.0",
     "axios": "^1.6.2",
