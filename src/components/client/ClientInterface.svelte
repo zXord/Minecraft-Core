@@ -16,13 +16,26 @@ import {
 import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../stores/clientModManager';
   import { createEventDispatcher } from 'svelte';
   import { openFolder } from '../../utils/folderUtils.js';
-
   // Minecraft version compatibility checker
   function checkMinecraftVersionCompatibility(modVersion, targetVersion) {
     if (!modVersion || !targetVersion) return false;
     
     // Exact match
     if (modVersion === targetVersion) return true;
+    
+    // Handle range format like ">=1.21.2 <=1.21.3" (from multi-version arrays)
+    if (modVersion.includes('>=') && modVersion.includes('<=')) {
+      const rangeParts = modVersion.split(' ');
+      const minPart = rangeParts.find(p => p.startsWith('>='));
+      const maxPart = rangeParts.find(p => p.startsWith('<='));
+      
+      if (minPart && maxPart) {
+        const minVersion = minPart.substring(2).trim();
+        const maxVersion = maxPart.substring(2).trim();
+        return compareVersions(targetVersion, minVersion) >= 0 && 
+               compareVersions(targetVersion, maxVersion) <= 0;
+      }
+    }
     
     // Handle version ranges like "1.21.x" or "1.21.*"
     if (modVersion.includes('.x') || modVersion.includes('.*')) {
@@ -108,10 +121,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let clientModManagerComponent;
   
   // Create event dispatcher
-  const dispatch = createEventDispatcher();
-  // Reactive statement to check client mod compatibility when version changes
+  const dispatch = createEventDispatcher();  // Reactive statement to check client mod compatibility when version changes
   $: if ($clientState.versionChangeDetected && $clientState.activeTab === 'play') {
-    checkClientModVersionCompatibility();
+    checkClientModVersionCompatibility(true); // Skip throttling for version changes
     clearVersionChangeDetected();
   }
   
@@ -132,12 +144,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Server information
   let serverInfo = null;
-  let requiredMods = [];
-  let modSyncStatus = null;
+  let requiredMods = [];  let modSyncStatus = null;
   // Sync local modSyncStatus with the shared store
   $: if (modSyncStatus !== null) {
     modSyncStatusStore.set(modSyncStatus);
   }
+  
+  // Cache for mod versions to prevent excessive API calls
+  let modVersionsCache = new Map();
+  let cacheTimestamp = 0;
+  const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
   
   // Authentication information
   let authData = null;
@@ -172,9 +188,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Console spam reduction variables
   let previousServerInfo = null;
   let lastSyncKey = null;
-  
-  // Client mod version check throttling
+    // Client mod version check throttling
   let lastVersionCheckTime = 0;
+  let isVersionCheckRunning = false; // Prevent concurrent version checks
   const VERSION_CHECK_COOLDOWN = 5000; // 5 second cooldown between checks
   // Client mod compatibility dialog state
   let showCompatibilityDialog = false;
@@ -409,38 +425,45 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     } catch (err) {
       setMinecraftServerStatus('unknown');
     }
-  }  // Check client downloaded mods for compatibility with new Minecraft version
+  }
+  // Check client downloaded mods for compatibility with new Minecraft version
   async function checkClientModVersionCompatibility(skipThrottle = false) {
-    console.log('checkClientModVersionCompatibility called - instance.path:', instance.path, 'serverInfo.minecraftVersion:', serverInfo?.minecraftVersion);
-    
     if (!instance.path || !serverInfo?.minecraftVersion) {
-      console.log('Skipping client mod version check - missing path or version');
       return;
     }
-      // Throttle version checks to prevent excessive calls (unless skipThrottle is true)
-    if (!skipThrottle) {
-      const now = Date.now();
-      if (now - lastVersionCheckTime < VERSION_CHECK_COOLDOWN) {
-        console.log('Skipping client mod version check - too soon since last check');
-        return;
-      }
-      lastVersionCheckTime = now;
-    } else {
-      // Update timestamp even when skipping throttle to maintain proper timing
-      lastVersionCheckTime = Date.now();
+
+    // Prevent concurrent execution
+    if (isVersionCheckRunning) {
+      return;
     }
     
-    try {
+    isVersionCheckRunning = true;
+    
+    try {      // Throttle version checks to prevent excessive calls (unless skipThrottle is true)
+      if (!skipThrottle) {        const now = Date.now();
+        if (now - lastVersionCheckTime < VERSION_CHECK_COOLDOWN) {
+          isVersionCheckRunning = false;
+          return;
+        }
+        lastVersionCheckTime = now;
+      } else {
+        // Update timestamp even when skipping throttle to maintain proper timing
+        lastVersionCheckTime = Date.now();
+      }
+      // Clear cache if it's too old
+      const now = Date.now();
+      if (now - cacheTimestamp > CACHE_DURATION) {
+        modVersionsCache.clear();
+        cacheTimestamp = now;
+      }
       const result = await window.electron.invoke('get-client-installed-mod-info', instance.path);
-      
-      if (!result || result.length === 0) {
+        if (!result || result.length === 0) {
         // No client mods installed
         setClientModVersionUpdates(null);
+        isVersionCheckRunning = false;
         return;
       }      // Filter out server-managed mods to avoid duplicates
       const managedFiles = get(serverManagedFiles);
-      console.log('Server managed files:', Array.from(managedFiles));
-      console.log('All client mods found:', result.map(m => ({ fileName: m.fileName, name: m.name })));
       
       // Also check against server's required mods and allClientMods as additional filter
       const serverModFileNames = new Set();
@@ -459,19 +482,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         });
       }
       
-      console.log('Server mod file names:', Array.from(serverModFileNames));
-      
       const clientOnlyMods = result.filter(mod => {
         const fileName = mod.fileName.toLowerCase();
         const isServerManaged = managedFiles.has(fileName) || serverModFileNames.has(fileName);
         return !isServerManaged;
       });
-      
-      console.log('Client-only mods after filtering:', clientOnlyMods.map(m => ({ fileName: m.fileName, name: m.name })));
-      
-      if (clientOnlyMods.length === 0) {
+        if (clientOnlyMods.length === 0) {
         // No client-only mods to update
         setClientModVersionUpdates(null);
+        isVersionCheckRunning = false;
         return;
       }
       
@@ -491,13 +510,20 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           });
           continue;
         }
-        
-        try {
-          // Check for mod versions compatible with the new MC version
-          const versions = await window.electron.invoke('get-mod-versions', {
-            modId: mod.projectId,
-            source: 'modrinth'
-          });
+          try {          // Check for mod versions compatible with the new MC version (with caching)
+          let versions;
+          if (modVersionsCache.has(mod.projectId)) {
+            versions = modVersionsCache.get(mod.projectId);
+          } else {
+            versions = await window.electron.invoke('get-mod-versions', {
+              modId: mod.projectId,
+              source: 'modrinth'
+            });
+            // Cache the result
+            if (versions && versions.length > 0) {
+              modVersionsCache.set(mod.projectId, versions);
+            }
+          }
           
           if (versions && versions.length > 0) {
             // Filter versions compatible with target MC version
@@ -515,8 +541,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               if (mod.minecraftVersion) {
                 currentVersionSupportsTarget = checkMinecraftVersionCompatibility(mod.minecraftVersion, serverInfo.minecraftVersion);
               }
-              
-              // Fallback to Modrinth API data if backend metadata unavailable
+                // Fallback to Modrinth API data if backend metadata unavailable
               if (!currentVersionSupportsTarget && !mod.minecraftVersion) {
                 const currentVersionInList = versions.find(v => v.versionNumber === mod.versionNumber);
                 currentVersionSupportsTarget = currentVersionInList && 
@@ -524,15 +549,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
                   currentVersionInList.gameVersions.includes(serverInfo.minecraftVersion);
               }
 
-              console.log(`Checking ${mod.name}:`, {
-                currentVersion: mod.versionNumber,
-                backendMinecraftVersion: mod.minecraftVersion,
-                targetMC: serverInfo.minecraftVersion,
-                supports: currentVersionSupportsTarget,
-                usingBackendData: !!mod.minecraftVersion,
-                totalCompatibleVersions: compatibleVersions.length
-              });              // ONLY suggest updates if current version is NOT compatible with target MC version
-              // (Don't suggest updates just because there's a newer version - that's for Mods tab only)
+              // Check for updates in two scenarios:
+              // 1. Current version is NOT compatible with target MC version (incompatible -> needs update)
+              // 2. Current version IS compatible but there's a newer version specifically for target MC (upgrade available)
               if (!currentVersionSupportsTarget) {                
                 // First try to find the same version number that supports the target MC version
                 const sameVersionCompatible = compatibleVersions.find(v => v.versionNumber === mod.versionNumber);
@@ -548,10 +567,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
                     versionId: sameVersionCompatible.id,
                     status: 'update_available',
                     reason: `Current version not compatible with Minecraft ${serverInfo.minecraftVersion}`
-                  });
-                } else {
+                  });                } else {
                   // No same version found, check if there's a different compatible version
                   if (latestVersion.versionNumber !== mod.versionNumber) {
+                    // Always suggest the latest compatible version for incompatible mods
+                    // (we don't need to check dates here since the current version is incompatible)
                     updates.push({
                       name: mod.name || mod.fileName,
                       fileName: mod.fileName,
@@ -572,16 +592,154 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
                       status: 'incompatible',
                       reason: `No compatible version found for Minecraft ${serverInfo.minecraftVersion}`
                     });
+                  }                }              } else {
+                // Current version IS compatible - check if there's a newer or more specific version for target MC
+                
+                // Check if there's a version specifically built for the target MC version
+                // even if it has the same version number
+                const targetMCSpecificVersion = compatibleVersions.find(v => 
+                  v.gameVersions && v.gameVersions.length === 1 && v.gameVersions[0] === serverInfo.minecraftVersion
+                );
+                
+                if (targetMCSpecificVersion && targetMCSpecificVersion.versionNumber === mod.versionNumber) {
+                  // There's a version with same number but specifically for target MC - check if it's different from current
+                  const currentVersionInList = versions.find(v => v.versionNumber === mod.versionNumber);
+                  // Also check if the mod's backend minecraft version supports the target (indicating it's already compatible)
+                  const modSupportsTargetMC = mod.minecraftVersion && checkMinecraftVersionCompatibility(mod.minecraftVersion, serverInfo.minecraftVersion);
+                  const modIsTargetMCSpecific = mod.minecraftVersion === serverInfo.minecraftVersion || 
+                    (mod.minecraftVersion && mod.minecraftVersion.includes(serverInfo.minecraftVersion));
+                  
+                  // Enhanced check: If mod already supports target MC properly OR if the current version is already the target-specific version
+                  const isCurrentVersionAlreadyTargetSpecific = currentVersionInList && 
+                    (currentVersionInList.id === targetMCSpecificVersion.id || 
+                     (currentVersionInList.gameVersions && currentVersionInList.gameVersions.includes(serverInfo.minecraftVersion)));
+                    if (modSupportsTargetMC || modIsTargetMCSpecific || isCurrentVersionAlreadyTargetSpecific) {
+                    compatible.push({
+                      name: mod.name || mod.fileName,
+                      fileName: mod.fileName,
+                      currentVersion: mod.versionNumber || 'Unknown',
+                      status: 'compatible'
+                    });
+                  } else if (currentVersionInList && targetMCSpecificVersion.id !== currentVersionInList.id) {
+                    updates.push({
+                      name: mod.name || mod.fileName,
+                      fileName: mod.fileName,
+                      currentVersion: mod.versionNumber || 'Unknown',
+                      newVersion: targetMCSpecificVersion.versionNumber,
+                      projectId: mod.projectId,
+                      versionId: targetMCSpecificVersion.id,
+                      status: 'update_available',                      reason: `Version optimized for Minecraft ${serverInfo.minecraftVersion}`
+                    });
+                  } else {
+                    compatible.push({
+                      name: mod.name || mod.fileName,
+                      fileName: mod.fileName,
+                      currentVersion: mod.versionNumber || 'Unknown',
+                      status: 'compatible'
+                    });
                   }
+                } else if (latestVersion.versionNumber !== mod.versionNumber) {
+                  // Different version number - check if there's a genuinely newer version available
+                  const currentVersionInList = versions.find(v => v.versionNumber === mod.versionNumber);
+                  
+                  if (!currentVersionInList) {                    // Current version not found in API - try to find equivalent version with different format
+                    // Handle cases like "0.14.6+mc1.21.3" vs "mc1.21.3-0.14.6-fabric"
+                    
+                    const equivalentVersion = versions.find(v => {
+                      // Extract version numbers from both strings for comparison
+                      const currentVersionNums = mod.versionNumber.match(/\d+\.\d+\.\d+/g) || [];
+                      const currentMcVersion = mod.versionNumber.match(/(?:mc)?1\.21\.\d+/g) || [];
+                      
+                      const apiVersionNums = v.versionNumber.match(/\d+\.\d+\.\d+/g) || [];
+                      const apiMcVersion = v.versionNumber.match(/(?:mc)?1\.21\.\d+/g) || [];
+                      
+                      // Check if they contain the same version numbers and MC version
+                      const sameVersionNum = currentVersionNums.length > 0 && apiVersionNums.length > 0 && 
+                        currentVersionNums.some(cv => apiVersionNums.some(av => cv === av));
+                      const sameMcVersion = currentMcVersion.length > 0 && apiMcVersion.length > 0 &&
+                        currentMcVersion.some(cv => apiMcVersion.some(av => cv.replace(/^mc/, '') === av.replace(/^mc/, '')));
+                      
+                      return sameVersionNum && sameMcVersion;
+                    });
+                      if (equivalentVersion) {
+                      // Check if this equivalent version is the latest
+                      if (equivalentVersion.id === latestVersion.id) {
+                        compatible.push({
+                          name: mod.name || mod.fileName,
+                          fileName: mod.fileName,
+                          currentVersion: mod.versionNumber || 'Unknown',
+                          status: 'compatible'
+                        });
+                      } else {
+                        // Compare dates
+                        const latestVersionDate = new Date(latestVersion.datePublished);
+                        const currentVersionDate = new Date(equivalentVersion.datePublished);
+                        
+                        if (latestVersionDate > currentVersionDate) {
+                          updates.push({
+                            name: mod.name || mod.fileName,
+                            fileName: mod.fileName,
+                            currentVersion: mod.versionNumber || 'Unknown',
+                            newVersion: latestVersion.versionNumber,
+                            projectId: mod.projectId,
+                            versionId: latestVersion.id,
+                            status: 'update_available',
+                            reason: `Newer version available for Minecraft ${serverInfo.minecraftVersion}`
+                          });
+                        } else {
+                          compatible.push({
+                            name: mod.name || mod.fileName,
+                            fileName: mod.fileName,
+                            currentVersion: mod.versionNumber || 'Unknown',
+                            status: 'compatible'
+                          });
+                        }
+                      }                    } else {
+                      // Current version not found in API - suggest latest compatible version
+                      updates.push({
+                        name: mod.name || mod.fileName,
+                        fileName: mod.fileName,
+                        currentVersion: mod.versionNumber || 'Unknown',
+                        newVersion: latestVersion.versionNumber,
+                        projectId: mod.projectId,
+                        versionId: latestVersion.id,
+                        status: 'update_available',
+                        reason: `Newer version available for Minecraft ${serverInfo.minecraftVersion}`
+                      });
+                    }                  } else {
+                    // Compare dates to determine if it's actually newer
+                    const latestVersionDate = new Date(latestVersion.datePublished);
+                    const currentVersionDate = new Date(currentVersionInList.datePublished);
+                    
+                    if (latestVersionDate > currentVersionDate) {
+                      updates.push({
+                        name: mod.name || mod.fileName,
+                        fileName: mod.fileName,
+                        currentVersion: mod.versionNumber || 'Unknown',
+                        newVersion: latestVersion.versionNumber,
+                        projectId: mod.projectId,
+                        versionId: latestVersion.id,
+                        status: 'update_available',
+                        reason: `Newer version available for Minecraft ${serverInfo.minecraftVersion}`
+                      });
+                    } else {
+                      // Current version is newer or same date - mark as compatible
+                      compatible.push({
+                        name: mod.name || mod.fileName,
+                        fileName: mod.fileName,
+                        currentVersion: mod.versionNumber || 'Unknown',
+                        status: 'compatible'
+                      });
+                    }
+                  }} else {
+                  // Same version number and no target-specific version found
+                  compatible.push({
+                    name: mod.name || mod.fileName,
+                    fileName: mod.fileName,
+                    currentVersion: mod.versionNumber || 'Unknown',
+                    status: 'compatible'
+                  });
                 }
-              } else {
-                // Current version is already compatible and up to date
-                compatible.push({
-                  name: mod.name || mod.fileName,
-                  fileName: mod.fileName,
-                  currentVersion: mod.versionNumber || 'Unknown',
-                  status: 'compatible'
-                });
               }
             } else {
               // No compatible versions found
@@ -613,9 +771,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             status: 'compatible',
             reason: 'Could not verify compatibility - manual check recommended'
           });
-        }
-      }
-      
+        }      }
+        
       const versionUpdates = {
         minecraftVersion: serverInfo.minecraftVersion,
         updates: updates,
@@ -623,39 +780,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         compatible: compatible,
         hasUpdates: updates.length > 0,
         hasDisables: disables.length > 0,
-        hasChanges: updates.length > 0 || disables.length > 0      };
-        // Debug logging to help understand client mod compatibility checking
-      console.log('Client Mod Version Check Results:', {
-        targetMinecraftVersion: serverInfo.minecraftVersion,
-        totalClientMods: clientOnlyMods.length,
-        updates: updates.length,
-        disables: disables.length,
-        compatible: compatible.length,
-        detailedResults: {
-          updates: updates.map(u => ({
-            name: u.name,
-            currentVersion: u.currentVersion,
-            newVersion: u.newVersion,
-            reason: u.reason
-          })),
-          disables: disables.map(d => ({
-            name: d.name,
-            currentVersion: d.currentVersion,
-            reason: d.reason
-          })),
-          compatible: compatible.map(c => ({
-            name: c.name,
-            currentVersion: c.currentVersion,
-            reason: c.reason
-          }))
-        }
-      });
-      
+        hasChanges: updates.length > 0 || disables.length > 0
+      };
+        
       setClientModVersionUpdates(versionUpdates);
       
     } catch (error) {
       console.error('Failed to check client mod version compatibility:', error);
       setClientModVersionUpdates(null);
+    } finally {
+      isVersionCheckRunning = false;
     }
   }
       // Check if client mods are synchronized with server
@@ -1183,10 +1317,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       if (clientMods.length > 0 || clientOptionalMods.length > 0) {
         const allClientUpdates = [...clientMods, ...clientOptionalMods];        // Fetch download URLs for client mod updates
         const clientUpdatesWithUrls = await Promise.all(allClientUpdates.map(async (update) => {
-          try {
-            console.log('Processing client mod update:', update);
-            console.log(`Fetching download URL for ${update.name} version ${update.versionId}`);
-            if (!update.versionId) {
+          try {            if (!update.versionId) {
               console.warn(`No version ID for client mod update: ${update.name}`, update);
               return null;
             }
@@ -1198,22 +1329,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               return null;
             }
             
-            const versionData = await versionResponse.json();            console.log(`Version data for ${update.name}:`, {
-              versionNumber: versionData.version_number,
-              gameVersions: versionData.game_versions,
-              gameVersionsArray: JSON.stringify(versionData.game_versions),
-              id: versionData.id,
-              files: versionData.files?.length
-            });
+            const versionData = await versionResponse.json();
             
             const primaryFile = versionData.files?.find(f => f.primary) || versionData.files?.[0];
-            
-            if (!primaryFile || !primaryFile.url) {
+              if (!primaryFile || !primaryFile.url) {
               console.warn(`No download URL found for ${update.name}`);
               return null;
             }
-            
-            console.log(`Download URL found for ${update.name}: ${primaryFile.url}`);
             
             return {
               ...update,
@@ -1238,24 +1360,18 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             // Clear client version updates after successful download
             setClientModVersionUpdates(null);
             // Also clear from localStorage to prevent race conditions
-            localStorage.removeItem('clientModVersionUpdates');
-              // Force clear mod metadata cache for updated mods
-            console.log('Clearing mod metadata cache for updated client mods...');
+            localStorage.removeItem('clientModVersionUpdates');            // Force clear mod metadata cache for updated mods
             for (const update of validClientUpdates) {
               try {
                 await window.electron.invoke('clear-client-mod-cache', {
                   clientPath: instance.path,
                   fileName: update.fileName
                 });
-                  // Also force refresh the client mod info to bypass any caching
-                await window.electron.invoke('get-client-installed-mod-info', instance.path);
-                
-                // Debug: Check what metadata is actually being read from the file
-                setTimeout(async () => {
+
+                // Also force refresh the client mod info to bypass any caching
+                await window.electron.invoke('get-client-installed-mod-info', instance.path);                setTimeout(async () => {
                   try {
-                    const clientModInfo = await window.electron.invoke('get-client-installed-mod-info', instance.path);
-                    const updatedMod = clientModInfo.find(mod => mod.fileName === update.fileName);
-                    console.log(`Post-download metadata for ${update.fileName}:`, updatedMod);
+                    await window.electron.invoke('get-client-installed-mod-info', instance.path);
                   } catch (error) {
                     console.warn(`Failed to check post-download metadata for ${update.fileName}:`, error);
                   }
@@ -1272,10 +1388,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         }
       }      // Handle client mod disables (incompatible mods)
       if (modSyncStatus?.clientModDisables && modSyncStatus.clientModDisables.length > 0) {
-        console.log('Disabling incompatible client mods:', modSyncStatus.clientModDisables);
-        
         for (const modToDisable of modSyncStatus.clientModDisables) {
-          try {            console.log('Attempting to disable mod:', modToDisable);
+          try {
             const disableResult = await window.electron.invoke('toggle-client-mod', {
               clientPath: instance.path,
               modFileName: modToDisable.fileName,
@@ -1284,7 +1398,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             
             if (disableResult.success) {
               totalResults.disabled = (totalResults.disabled || 0) + 1;
-              console.log(`Successfully disabled ${modToDisable.name}`);
             } else {
               console.warn(`Failed to disable ${modToDisable.name}:`, disableResult.error);
             }
@@ -1347,16 +1460,20 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           // Clear any cached client mod version updates to prevent stale data
           setClientModVersionUpdates(null);
           localStorage.removeItem('clientModVersionUpdates');
-          
-          // Force a complete refresh of mod detection
-          console.log('Triggering mod sync refresh after download...');
+            // Force a complete refresh of mod detection
           await checkModSynchronization();
-          
-          // Also refresh client mod version compatibility after a bit more delay
+
+          // Wait a bit and force refresh client mod data before compatibility check
           setTimeout(async () => {
-            console.log('Triggering client mod version refresh after download...');
+            // Force fresh client mod info load before checking compatibility
+            try {
+              // Force fresh reload of all client mod info (cache already cleared above)
+              await window.electron.invoke('get-client-installed-mod-info', instance.path);
+            } catch (error) {
+              console.warn('Failed to refresh client mod info:', error);
+            }
             await checkClientModVersionCompatibility(true);
-          }, 1000);
+          }, 1000); // Reduced delay since cache is already cleared above
         }, 3000);
       } else {
         downloadStatus = 'needed';
@@ -1488,9 +1605,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
-  
-  // Launch Minecraft client
-  async function launchMinecraft() {
+    // Launch Minecraft client
+  async function launchMinecraft(showDebugTerminal = false) {
     if (authStatus !== 'authenticated') {
       errorMessage.set('Please authenticate with Microsoft first');
       setTimeout(() => errorMessage.set(''), 5000);
@@ -1521,8 +1637,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     try {
       const minecraftPort = serverInfo?.minecraftPort || '25565';
-      
-      const result = await window.electron.invoke('minecraft-launch', {
+        const result = await window.electron.invoke('minecraft-launch', {
         clientPath: instance.path,
         minecraftVersion: serverInfo?.minecraftVersion || '1.20.1',
         serverIp: instance.serverIp,
@@ -1531,7 +1646,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientName: instance.clientName,
         requiredMods,
         serverInfo,
-        maxMemory: Math.round(maxMemory * 1024) // Convert GB to MB for launcher
+        maxMemory: Math.round(maxMemory * 1024), // Convert GB to MB for launcher
+        showDebugTerminal // Add debug terminal setting
       });
       
       if (result.success) {
@@ -1826,9 +1942,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   onMount(() => {
     // Debug functions for testing - add to window object
-    window['clearClientState'] = clearPersistedClientState;
-    window['forceClientModCheck'] = () => {
-      console.log('Forcing client mod version check...');
+    window['clearClientState'] = clearPersistedClientState;    window['forceClientModCheck'] = () => {
       checkClientModVersionCompatibility();
     };
     
@@ -1870,19 +1984,17 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         errorMessage.set(`Mod State Error: ${errorData.message}`);
         setTimeout(() => errorMessage.set(''), 8000);
         console.error('Mod state persistence error:', errorData);      }
-    });      // Initial client mod version check (run after server state loads)
+    });    // Initial client mod version check (run after server state loads)
     const checkForClientUpdates = () => {
-      if (instance?.path && serverInfo?.minecraftVersion) {
-        console.log('Running initial client mod version check...');
-        checkClientModVersionCompatibility(true); // Skip throttling for initial check
+      if (instance?.path && serverInfo?.minecraftVersion) {        checkClientModVersionCompatibility(true); // Skip throttling for initial check
       } else {
-        // Retry in 500ms if server info isn't ready yet
-        setTimeout(checkForClientUpdates, 500);
+        // Retry in 200ms if server info isn't ready yet
+        setTimeout(checkForClientUpdates, 200);
       }
     };
     
-    // Start checking immediately, then retry until server info is available
-    setTimeout(checkForClientUpdates, 100);
+    // Start checking immediately
+    checkForClientUpdates();
     
     // Return cleanup function
     return () => {

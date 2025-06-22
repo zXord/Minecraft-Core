@@ -52,23 +52,47 @@ async function readModMetadataFromJar(jarPath) {
   try {
     const zip = new AdmZip(jarPath);
     const entries = zip.getEntries();
+    
     const fabric = entries.find(e =>
       e.entryName === 'fabric.mod.json' || e.entryName.endsWith('/fabric.mod.json')
-    );    if (fabric) {
-      try {
-        const data = JSON.parse(fabric.getData().toString('utf8'));
-        console.log(`[DEBUG] fabric.mod.json for ${jarPath}:`, JSON.stringify(data, null, 2));
-        return {
+    );
+
+    if (fabric) {
+      try {        const data = JSON.parse(fabric.getData().toString('utf8'));
+        
+        // Extract Minecraft version from dependencies - handle various formats
+        let minecraftVer = null;
+        if (data.depends?.minecraft) {
+          if (Array.isArray(data.depends.minecraft)) {
+            // Handle array format: ["1.21.2", "1.21.3"] or ["1.21.x"]
+            if (data.depends.minecraft.length === 1) {
+              // Single element array: ["1.21.x"] -> use as-is
+              minecraftVer = data.depends.minecraft[0];
+            } else {
+              // Multiple versions: ["1.21.2", "1.21.3"] -> create range pattern
+              const versions = data.depends.minecraft.sort();
+              const minVersion = versions[0];
+              const maxVersion = versions[versions.length - 1];
+              // Create a range that includes all specified versions
+              minecraftVer = `>=${minVersion} <=${maxVersion}`;
+            }
+          } else if (typeof data.depends.minecraft === 'string') {
+            // Handle string format: "1.21.x" or ">=1.21.4-rc.3"
+            minecraftVer = data.depends.minecraft;
+          }        }
+        
+        const result = {
           name: data.name || data.id,
           versionNumber: data.version || data.version_number,
           projectId: data.id,
           // Include Minecraft compatibility info from dependencies
           depends: data.depends,
           fabricVersion: data.depends?.fabric,
-          minecraftVersion: data.depends?.minecraft
+          minecraftVersion: minecraftVer
         };
-      } catch {
-        // Ignore fabric parsing errors
+        
+        return result;      } catch {
+        // Failed to parse fabric.mod.json
       }
     }
     const quilt = entries.find(e =>
@@ -231,7 +255,56 @@ async function getInstalledModInfo(serverPath) {
           // Ignore manifest parsing errors
         }
       }
-        if (manifest) {        if (!manifest.projectId || !manifest.versionNumber) {
+        if (manifest) {
+        // Always try to extract metadata to get fresh minecraftVersion info
+        try {
+          // Check multiple possible locations for the jar file
+          const possibleJarPaths = [
+            path.join(modsDir, modFile), // Server enabled
+            path.join(modsDir, modFile + '.disabled'), // Server disabled
+            path.join(clientModsDir, modFile), // Client enabled
+            path.join(clientModsDir, modFile + '.disabled') // Client disabled
+          ];
+          
+          let jarPath = null;
+          for (const possiblePath of possibleJarPaths) {
+            try {
+              await fs.access(possiblePath);
+              jarPath = possiblePath;
+              break; // Found the file, stop looking
+            } catch {
+              // File doesn't exist at this location, try next
+            }
+          }          if (jarPath) {
+            const meta = await readModMetadataFromJar(jarPath);
+            
+            // Preserve manifest projectId if it exists and looks like a Modrinth ID
+            const shouldPreserveManifestProjectId = manifest.projectId && 
+              (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
+              /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
+            
+            // Store the original manifest projectId before merging
+            const originalProjectId = manifest.projectId;
+            
+            manifest = {
+              ...meta, 
+              ...manifest, 
+              // Always preserve proper Modrinth project ID if it exists in manifest
+              projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
+              versionNumber: manifest.versionNumber || meta.versionNumber, 
+              name: manifest.name || meta.name,
+              // Always use fresh extracted Minecraft version compatibility info
+              minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
+              depends: meta.depends || manifest.depends,
+              fabricVersion: meta.fabricVersion || manifest.fabricVersion
+            };
+          }
+        } catch {
+          // Failed to extract metadata
+        }
+        
+        // Only do the old fallback extraction if manifest is still missing critical info
+        if (!manifest.projectId || !manifest.versionNumber) {
           try {
             // Check multiple possible locations for the jar file
             const possibleJarPaths = [
@@ -250,10 +323,9 @@ async function getInstalledModInfo(serverPath) {
               } catch {
                 // File doesn't exist at this location, try next
               }
-            }
-            
-            if (jarPath) {
+            }            if (jarPath) {
               const meta = await readModMetadataFromJar(jarPath);
+              
               // Preserve manifest projectId if it exists and looks like a Modrinth ID
               const shouldPreserveManifestProjectId = manifest.projectId && 
                 (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
@@ -261,16 +333,21 @@ async function getInstalledModInfo(serverPath) {
               
               // Store the original manifest projectId before merging
               const originalProjectId = manifest.projectId;
-                manifest = { 
+              
+              manifest = {
                 ...meta, 
                 ...manifest, 
                 // Always preserve proper Modrinth project ID if it exists in manifest
                 projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
                 versionNumber: manifest.versionNumber || meta.versionNumber, 
-                name: manifest.name || meta.name 
-              };            }
+                name: manifest.name || meta.name,
+                // Preserve extracted Minecraft version compatibility info
+                minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
+                depends: meta.depends || manifest.depends,
+                fabricVersion: meta.fabricVersion || manifest.fabricVersion              };
+            }
           } catch {
-            // Ignore metadata extraction errors
+            // Failed to extract metadata
           }
         }
         // Ensure fileName property is always set
@@ -314,6 +391,52 @@ async function getClientInstalledModInfo(clientPath) {
     let manifest = null;    try {
       const content = await fs.readFile(manifestPath, 'utf8');
       manifest = JSON.parse(content);
+      
+      if (manifest) {
+        // Always try to extract metadata to get fresh minecraftVersion info
+        try {
+          const jarBase = path.join(modsDir, file);
+          const jarPath = await fs
+            .access(jarBase)
+            .then(() => jarBase)
+            .catch(async () => {
+              const disabledPath = jarBase + '.disabled';
+              try {
+                await fs.access(disabledPath);
+                return disabledPath;
+              } catch {
+                return null;
+              }            });
+
+          if (jarPath) {
+            const meta = await readModMetadataFromJar(jarPath);
+            
+            // Preserve manifest projectId if it exists and looks like a Modrinth ID
+            const shouldPreserveManifestProjectId = manifest.projectId && 
+              (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
+              /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
+            
+            // Store the original manifest projectId before merging
+            const originalProjectId = manifest.projectId;
+            
+            manifest = {
+              ...meta, 
+              ...manifest, 
+              // Always preserve proper Modrinth project ID if it exists in manifest
+              projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
+              versionNumber: manifest.versionNumber || meta.versionNumber,              name: manifest.name || meta.name,
+              // Always use fresh extracted Minecraft version compatibility info
+              minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
+              depends: meta.depends || manifest.depends,
+              fabricVersion: meta.fabricVersion || manifest.fabricVersion
+            };
+          }
+        } catch {
+          // Failed to extract client metadata
+        }
+      }
+      
+      // Only do the old fallback extraction if manifest is still missing critical info
       if (!manifest.projectId || !manifest.versionNumber) {
         try {
           const jarBase = path.join(modsDir, file);
@@ -328,23 +451,29 @@ async function getClientInstalledModInfo(clientPath) {
               } catch {
                 return null;
               }
-            });          if (jarPath) {
+            });            if (jarPath) {
             const meta = await readModMetadataFromJar(jarPath);
+            
             // Preserve manifest projectId if it exists and looks like a Modrinth ID
             const shouldPreserveManifestProjectId = manifest.projectId && 
               (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
               /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
-            
-            // Store the original manifest projectId before merging
+              // Store the original manifest projectId before merging
             const originalProjectId = manifest.projectId;
-              manifest = { 
+            
+            manifest = { 
               ...meta, 
-              ...manifest, 
+              ...manifest,
               // Always preserve proper Modrinth project ID if it exists in manifest
               projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
               versionNumber: manifest.versionNumber || meta.versionNumber, 
-              name: manifest.name || meta.name 
-            };          }
+              name: manifest.name || meta.name,
+              // Preserve extracted Minecraft version compatibility info
+              minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
+              depends: meta.depends || manifest.depends,
+              fabricVersion: meta.fabricVersion || manifest.fabricVersion
+            };
+          }
         } catch {
           // Ignore metadata extraction errors
         }      }
