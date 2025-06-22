@@ -202,8 +202,7 @@ class MinecraftLauncher extends EventEmitter {
   async _downloadFileSingle(url, filePath) {
     return this.clientDownloader._downloadFileSingle(url, filePath);
   }
-  
-  // Launch Minecraft client
+    // Launch Minecraft client
   async launchMinecraft(options) {
     const {
       clientPath,
@@ -212,7 +211,8 @@ class MinecraftLauncher extends EventEmitter {
       serverPort,
       requiredMods = [],
       serverInfo = null,
-      maxMemory = null // Accept memory setting from client
+      maxMemory = null, // Accept memory setting from client
+      showDebugTerminal = false
     } = options;
     
     
@@ -237,11 +237,10 @@ class MinecraftLauncher extends EventEmitter {
             actualFabricVersion = loaders[0].version;
           } catch {
             actualFabricVersion = '0.16.14';
-          }
-        }
+          }        }
         launchVersion = `fabric-loader-${actualFabricVersion}-${minecraftVersion}`;
+      }
 
-      
       // Get Java path
       const requiredJavaVersion = require('./utils.cjs').getRequiredJavaVersion(minecraftVersion);
       const javaResult = await this.javaManager.ensureJava(requiredJavaVersion);
@@ -302,9 +301,7 @@ class MinecraftLauncher extends EventEmitter {
       
       // Process libraries with deduplication
       const libraryMap = new Map();
-      
-      
-      for (const lib of launchJson.libraries) {
+        for (const lib of launchJson.libraries) {
         if (!lib.name) continue;
         
         // Handle regular libraries (downloads.artifact)
@@ -325,9 +322,7 @@ class MinecraftLauncher extends EventEmitter {
               libraryMap.set(normalizedName, { name: lib.name, path: libPath, priority });
             }
           }
-        }
-        
-        // Handle native libraries (downloads.classifiers) - CRITICAL for LWJGL natives
+        }        // Handle native libraries (downloads.classifiers) - CRITICAL for LWJGL natives
         if (lib.downloads?.classifiers) {
           const platform = process.platform === 'win32' ? 'windows' : 
                          process.platform === 'darwin' ? 'osx' : 'linux';
@@ -348,32 +343,90 @@ class MinecraftLauncher extends EventEmitter {
             }
           }
         }
+          // Handle native libraries as separate entries (modern Minecraft format)
+        if (lib.downloads?.artifact && lib.name.includes(':natives-')) {
+          const platform = process.platform === 'win32' ? 'windows' : 
+                         process.platform === 'darwin' ? 'macos' : 'linux';
+          
+          // Check if this native library matches our platform
+          if (lib.name.includes(`natives-${platform}`)) {
+            const nativeLibPath = path.join(clientPath, 'libraries', lib.downloads.artifact.path);
+            
+            if (fs.existsSync(nativeLibPath)) {
+              libraryMap.set(lib.name, {
+                name: lib.name,
+                path: nativeLibPath,
+                priority: 100
+              });
+            }
+          }
+        }
       }
-      
-      // Add deduplicated libraries to classpath
+        // Add deduplicated libraries to classpath
       for (const [, libInfo] of libraryMap) {
         classpath.push(libInfo.path);
       }
       
-      
-      // Setup authentication
+      // Setup authentication - Check and refresh token before launch
       if (!this.authHandler.authData) {
         throw new Error('No authentication data available. Please authenticate first.');
       }
       
+      const refreshResult = await this.checkAndRefreshAuth();
+      if (refreshResult.success && refreshResult.refreshed) {
+        console.log('✅ Token refreshed successfully - proceeding with launch');
+        // Save the refreshed token immediately
+        await this.saveAuthData(clientPath).catch(() => {});
+      } else if (!refreshResult.success) {
+        if (refreshResult.requiresAuth) {
+          // Clear expired token and require fresh authentication
+          throw new Error('Authentication expired. Please authenticate again through the Settings page.');
+        } else {
+          throw new Error(`Authentication failed: ${refreshResult.error}`);
+        }
+      } else {
+        console.log('✅ Token still valid - proceeding with launch');
+      }
+      
       const authData = this.authHandler.authData;
+      
+      // Verify we still have valid auth data after refresh check
+      if (!authData) {
+        throw new Error('Authentication data missing after refresh check. Please authenticate again.');
+      }
+      
+      // DEBUG: Log authentication details for troubleshooting invalid session issues
+      console.log('Authentication Debug Info:');
+      console.log('- Player Name:', authData.name);
+      console.log('- UUID Format:', authData.uuid);
+      console.log('- UUID Length:', authData.uuid ? authData.uuid.length : 'null');
+      console.log('- Access Token Length:', authData.access_token ? authData.access_token.length : 'null');
+      console.log('- Auth Saved At:', authData.savedAt);
+      console.log('- Hours Since Auth:', authData.savedAt ? ((new Date().getTime() - new Date(authData.savedAt).getTime()) / (1000 * 60 * 60)).toFixed(2) : 'unknown');
+      
+      // Try both UUID formats to see which one works
+      const uuidWithDashes = authData.uuid.includes('-') ? 
+        authData.uuid : // Already has dashes, use as-is
+        authData.uuid.length === 32 ? 
+          `${authData.uuid.substring(0,8)}-${authData.uuid.substring(8,12)}-${authData.uuid.substring(12,16)}-${authData.uuid.substring(16,20)}-${authData.uuid.substring(20)}` :
+          authData.uuid;
+      
+      console.log('- UUID With Dashes:', uuidWithDashes);
+      console.log('- UUID Without Dashes:', authData.uuid.replace(/-/g, ''));
+      
+      // Use the dashed UUID format as Minecraft expects it
+      const minecraftUuid = uuidWithDashes;
       
       // Build launch arguments
       const gameArgs = [];
-      
-      // Process game arguments from profile
+        // Process game arguments from profile
       if (launchJson.arguments?.game) {
         for (const arg of launchJson.arguments.game) {
           if (typeof arg === 'string') {
             let processedArg = arg
               .replace(/\$\{auth_playerName\}/g, authData.name)
               .replace(/\$\{auth_player_name\}/g, authData.name)
-              .replace(/\$\{auth_uuid\}/g, authData.uuid)
+              .replace(/\$\{auth_uuid\}/g, minecraftUuid) // Use properly formatted UUID
               .replace(/\$\{auth_accessToken\}/g, authData.access_token)
               .replace(/\$\{auth_access_token\}/g, authData.access_token)
               .replace(/\$\{auth_userType\}/g, 'msa')
@@ -427,13 +480,11 @@ class MinecraftLauncher extends EventEmitter {
       // Ensure natives directory exists and extract natives if needed
       if (!fs.existsSync(nativesDir)) {
         fs.mkdirSync(nativesDir, { recursive: true });
-      }
-      
-      // Extract native libraries from JARs
-      
+      }      // Extract native libraries from JARs
       for (const [, libInfo] of libraryMap) {
         // Look for native JAR files (containing DLL/SO files)
-        if (libInfo.name.includes('-natives-') && libInfo.path.endsWith('.jar')) {
+        // Support both old format (:natives-) and new format (separate native entries)
+        if ((libInfo.name.includes(':natives-') || libInfo.name.includes(':natives-')) && libInfo.path.endsWith('.jar')) {
           try {
             const zip = new AdmZip(libInfo.path);
             const entries = zip.getEntries();
@@ -447,21 +498,17 @@ class MinecraftLauncher extends EventEmitter {
               }
             }
           } catch (extractError) {
-            console.error(extractError);
+            console.error(`❌ Failed to extract from ${libInfo.name}:`, extractError);
           }
         }
       }
-      
-      // Add native library system properties - MULTIPLE WAYS for maximum compatibility
+        // Add native library system properties - MULTIPLE WAYS for maximum compatibility
       jvmArgs.push(
         `-Djava.library.path=${nativesDir}`,
         `-Dorg.lwjgl.librarypath=${nativesDir}`,
         `-Djna.tmpdir=${nativesDir}`,
         `-Dorg.lwjgl.system.SharedLibraryExtractPath=${nativesDir}`,
-        `-Dio.netty.native.workdir=${nativesDir}`,
-        // CRITICAL WORKAROUND: Add LWJGL debug flags and manual extraction
-        `-Dorg.lwjgl.util.Debug=true`,
-        `-Dorg.lwjgl.util.DebugLoader=true`
+        `-Dio.netty.native.workdir=${nativesDir}`
       );
       
       // Add classpath
@@ -487,17 +534,29 @@ class MinecraftLauncher extends EventEmitter {
         ...gameArgs
       ];
       
-      
-      // Launch Minecraft
+        // Launch Minecraft
       const { spawn } = require('child_process');
       
-      this.isLaunching = true;
+      this.isLaunching = true;      // Configure stdio based on debug terminal setting      // Launch Minecraft with the configured arguments
+      try {
+        // If debug terminal is enabled, show the console window
+        const spawnOptions = {
+          cwd: clientPath,
+          detached: false
+        };
       
-      const child = spawn(javaPath, allArgs, {
-        cwd: clientPath,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: false
-      });
+      if (showDebugTerminal) {
+        spawnOptions.stdio = 'inherit';
+      } else {
+        spawnOptions.stdio = ['ignore', 'pipe', 'pipe'];
+      }
+      
+      // On Windows, add windowsHide option based on debug setting
+      if (process.platform === 'win32') {
+        spawnOptions.windowsHide = !showDebugTerminal;
+      }
+      
+      const child = spawn(javaPath, allArgs, spawnOptions);
       
       this.client = { child };
       
@@ -517,11 +576,9 @@ class MinecraftLauncher extends EventEmitter {
       
       // Wait a moment to see if launch fails immediately
       await new Promise(resolve => setTimeout(resolve, 3000));
-      
-      if (child.killed || child.exitCode !== null) {
+        if (child.killed || child.exitCode !== null) {
         throw new Error(`Minecraft failed to start. Exit code: ${child.exitCode}`);
       }
-      
       
       return {
         success: true,
@@ -531,15 +588,23 @@ class MinecraftLauncher extends EventEmitter {
         vanillaVersion: minecraftVersion,
         needsFabric: needsFabric
       };
-    }
     } catch (error) {
       this.isLaunching = false;
       this.client = null;
       
       return {
         success: false,
-        error: error.message,
-        message: `Failed to launch Minecraft: ${error.message}`
+        error: error.message,        message: `Failed to launch Minecraft: ${error.message}`
+      };
+    }
+    } catch (mainError) {
+      this.isLaunching = false;
+      this.client = null;
+      
+      return {
+        success: false,
+        error: mainError.message,
+        message: `Failed to launch Minecraft: ${mainError.message}`
       };
     }
   }
@@ -1046,13 +1111,11 @@ class MinecraftLauncher extends EventEmitter {
       
     } catch (error) {
       return {
-        success: false,
-        error: error.message,
+        success: false,        error: error.message,
         message: `Failed to launch with proper launcher: ${error.message}`
       };
     }
   }
-
 }
 
 // Singleton instance
@@ -1070,4 +1133,4 @@ function getMinecraftLauncher() {
 module.exports = {
   MinecraftLauncher,
   getMinecraftLauncher
-}; 
+};
