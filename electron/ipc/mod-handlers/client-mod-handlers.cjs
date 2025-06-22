@@ -301,16 +301,6 @@ function createClientModHandlers(win) {
       return { success: true, enhancedMods };
     },    'download-client-mod-version-updates': async (_e, { clientPath, updates, minecraftVersion }) => {
       try {
-        console.log('🔄 Backend: Starting client mod version updates download');
-        console.log(`📍 Client path: ${clientPath}`);
-        console.log(`📦 Updates to process: ${updates.length}`);
-        console.log('📋 Update details:', updates.map(u => ({
-          name: u.name,
-          fileName: u.fileName,
-          hasDownloadUrl: !!u.downloadUrl,
-          downloadUrl: u.downloadUrl ? u.downloadUrl.substring(0, 50) + '...' : 'MISSING'
-        })));
-        
         if (!clientPath || !updates || !Array.isArray(updates)) {
           throw new Error('Invalid parameters provided');
         }
@@ -328,73 +318,65 @@ function createClientModHandlers(win) {
         // Process each update
         for (const update of updates) {
           try {
-            console.log(`🔄 Processing update for: ${update.name}`);
-            
             if (!update.downloadUrl) {
               const error = `${update.name}: No download URL available`;
-              console.error(`❌ ${error}`);
               errors.push(error);
               continue;
-            }
-
-            // Find current mod file
-            const currentModPath = path.join(modsDir, update.fileName);
-            console.log(`📁 Current mod path: ${currentModPath}`);
-            console.log(`🌐 Download URL: ${update.downloadUrl}`);
+            }            // Find current mod file (old filename) and use original filename pattern
+            const oldFileName = update.oldFileName || update.fileName; // Fallback for compatibility
+            // Use the original mod filename instead of the Modrinth API filename to maintain consistency
+            const newFileName = oldFileName; // Keep the original filename pattern instead of using API filename
+            
+            const currentModPath = path.join(modsDir, oldFileName);
+            const newModPath = path.join(modsDir, newFileName);
             // Download new version
             const response = await require('axios')({
               url: update.downloadUrl,
               method: 'GET',
               responseType: 'stream',
               timeout: 60000
-            });
-
-            // Create temporary file for download
-            const tempPath = currentModPath + '.tmp';
+            });            // Create temporary file for download (use new filename)
+            const tempPath = newModPath + '.tmp';
             const writer = fs.createWriteStream(tempPath);
               await new Promise((resolve, reject) => {
               response.data.pipe(writer);
               writer.on('finish', () => resolve());
               writer.on('error', reject);
-            });
-
-            // Replace old file with new one
+            });            // Remove old file if it exists before downloading new version
             if (fs.existsSync(currentModPath)) {
               await fs.promises.unlink(currentModPath);
             }
-            await fs.promises.rename(tempPath, currentModPath);
-
-            // Update manifest
+            
+            // Move new file to final location
+            await fs.promises.rename(tempPath, newModPath);            // Update manifest for the same filename
             const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
             await fs.promises.mkdir(manifestDir, { recursive: true });
-            const manifestPath = path.join(manifestDir, `${update.fileName}.json`);
+            const manifestPath = path.join(manifestDir, `${newFileName}.json`);
             
             let manifest = {};
             try {
               const content = await fs.promises.readFile(manifestPath, 'utf8');
-              manifest = JSON.parse(content);            } catch {
-              // Create new manifest if it doesn't exist
+              manifest = JSON.parse(content);            } catch {              // Create new manifest if it doesn't exist
               manifest = {
                 projectId: update.projectId,
                 name: update.name,
-                fileName: update.fileName,
+                fileName: newFileName, // Use new filename
                 versionNumber: update.newVersion,
                 updatedAt: new Date().toISOString(),
                 minecraftVersion: minecraftVersion
               };
-            }            // Update manifest with new version info but preserve important Modrinth metadata
+            }            // Update manifest with new version info but preserve filename consistency
             manifest.versionNumber = update.newVersion;
             manifest.updatedAt = new Date().toISOString();
             manifest.minecraftVersion = minecraftVersion;
+            manifest.fileName = newFileName; // Keep consistent with original filename
             // Ensure we preserve the Modrinth projectId for API compatibility
             manifest.projectId = update.projectId;
             manifest.name = update.name;
             
-            await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2));            // Invalidate metadata cache
+            await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2));            // Invalidate metadata cache for the updated file
             modAnalysisUtils.invalidateMetadataCache(currentModPath);
-            
-            updatedCount++;
-            console.log(`✅ Successfully updated ${update.name} to version ${update.newVersion}`);
+              updatedCount++;
             
             // Emit progress if window is available
             if (win && win.webContents) {
@@ -406,14 +388,8 @@ function createClientModHandlers(win) {
               });
             }          } catch (modError) {
             const error = `${update.name}: ${modError.message}`;
-            console.error(`❌ Failed to update ${update.name}:`, modError);
             errors.push(error);
           }
-        }
-
-        console.log(`📊 Client mod update results: ${updatedCount} successful, ${errors.length} failed`);
-        if (errors.length > 0) {
-          console.error('❌ Update errors:', errors);
         }
 
         // Send completion event
@@ -423,18 +399,14 @@ function createClientModHandlers(win) {
             updated: updatedCount,
             errors: errors.length
           });
-        }
-
-        const result = {
+        }        const result = {
           success: true,
           updated: updatedCount,
           errors: errors.length > 0 ? errors : undefined,
           message: `Successfully updated ${updatedCount} mod${updatedCount !== 1 ? 's' : ''} for Minecraft ${minecraftVersion}`
         };
         
-        console.log('📋 Final backend result:', result);
         return result;      } catch (error) {
-        console.error('❌ Backend error in client mod version updates:', error);
         return {
           success: false,          error: error.message
         };
@@ -449,11 +421,9 @@ function createClientModHandlers(win) {
 
         const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
         const manifestPath = path.join(manifestDir, `${fileName}.json`);
-        
-        // Delete the manifest file to force re-reading from jar
+          // Delete the manifest file to force re-reading from jar
         if (fs.existsSync(manifestPath)) {
           await fs.promises.unlink(manifestPath);
-          console.log(`Cleared manifest cache for ${fileName}`);
         }
 
         // Also invalidate any other caches
