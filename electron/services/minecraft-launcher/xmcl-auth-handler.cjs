@@ -217,7 +217,7 @@ class XMCLAuthHandler {
         }
       }
 
-      console.log('📂 Loaded authentication data for:', savedAuthData.name);
+      // console.log('📂 Loaded authentication data for:', savedAuthData.name);
 
       return { 
         success: true, 
@@ -254,7 +254,7 @@ class XMCLAuthHandler {
       const now = new Date();
       const minutesSinceRefresh = (now.getTime() - lastRefreshDate.getTime()) / (1000 * 60);
 
-      console.log(`🔍 Token check: ${minutesSinceRefresh.toFixed(1)} minutes since last refresh`);
+      // console.log(`🔍 Token check: ${minutesSinceRefresh.toFixed(1)} minutes since last refresh`);
 
       // If token was refreshed very recently (less than 5 minutes), use it
       if (minutesSinceRefresh < 5) {
@@ -262,7 +262,7 @@ class XMCLAuthHandler {
         return { success: true, refreshed: false };
       }      // If we have refresh capability, try to refresh the token
       if (this.authData.msmc_meta || (this.authData.xmcl_tokens && this.authData.xmcl_tokens.microsoft)) {
-        console.log('🔄 Attempting token refresh...');
+        // console.log('🔄 Attempting token refresh...');
         
         // Start refresh (store promise to prevent concurrent refreshes)
         this.refreshPromise = this.performTokenRefresh();
@@ -294,13 +294,13 @@ class XMCLAuthHandler {
       return { success: true, refreshed: false };
 
     } catch (error) {
-      console.error('❌ Error during auth check:', error.message);      // On error, if token isn't too old, try to use it anyway
+      // console.error('❌ Error during auth check:', error.message);      // On error, if token isn't too old, try to use it anyway
       const savedDate = new Date(this.authData.savedAt || 0);
       const now = new Date();
       const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
       
       if (hoursSinceSaved < 6) {
-        console.log('⚠️ Using cached token despite refresh error');
+        // console.log('⚠️ Using cached token despite refresh error');
         return { success: true, refreshed: false, error: error.message };
       }
 
@@ -312,7 +312,7 @@ class XMCLAuthHandler {
    */
   async performTokenRefresh() {
     try {
-      console.log('🔄 Refreshing authentication token...');
+      // console.log('🔄 Refreshing authentication token...');
 
       // Use MSMC to refresh the Microsoft token first
       const msmc_meta = this.authData.msmc_meta;
@@ -400,7 +400,7 @@ class XMCLAuthHandler {
       return { success: true, refreshed: true };
 
     } catch (error) {
-      console.error('❌ Token refresh failed:', error.message);
+      // console.error('❌ Token refresh failed:', error.message);
       
       // Handle specific error cases
       if (error.message.includes('invalid_grant') || error.message.includes('expired')) {

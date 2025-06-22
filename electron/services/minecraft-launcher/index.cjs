@@ -39,7 +39,7 @@ class MinecraftLauncher extends EventEmitter {
     // Hybrid approach: Use both downloaders during migration
     this.legacyClientDownloader = new ClientDownloader(this.javaManager, this);
     this.xmclClientDownloader = new XMCLClientDownloader(this.javaManager, this);    // Flag to switch between downloaders (can be controlled via settings)
-    this.useXMCLDownloader = false; // Disable XMCL, use legacy
+    this.useXMCLDownloader = true; // Disable XMCL, use legacy
     
     // Set the active downloader based on flag
     this.clientDownloader = this.useXMCLDownloader ? 

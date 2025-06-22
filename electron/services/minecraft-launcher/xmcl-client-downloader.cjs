@@ -215,9 +215,7 @@ class XMCLClientDownloader {
         const verificationResult = await this.verifyInstallation(clientPath, finalVersion);
         if (!verificationResult.success) {
           throw new Error(`Installation verification failed: ${verificationResult.error}`);
-        }
-
-        // Step 6: Success!
+        }        // Step 6: Success!
         this.emitter.emit('client-download-progress', {
           type: 'Complete',
           task: `✅ Minecraft ${minecraftVersion} installation completed successfully`,
@@ -225,19 +223,35 @@ class XMCLClientDownloader {
           current: 100
         });
 
+        // Step 7: Automatic cleanup of old versions
+        this.emitter.emit('client-download-progress', {
+          type: 'Cleanup',
+          task: '🗑️ Cleaning up old versions...',
+          total: 100,
+          current: 100
+        });
+
+        const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, needsFabric ? resolvedFabricVersion : null);
+        if (cleanupResult.success) {
+          console.log(`✅ Cleanup completed: ${cleanupResult.message}`);
+        } else {
+          console.warn(`⚠️ Cleanup warning: ${cleanupResult.error}`);
+        }
+
         this.emitter.emit('client-download-complete', {
           success: true,
           version: finalVersion,
           minecraftVersion: minecraftVersion,
           fabricVersion: needsFabric ? resolvedFabricVersion : null,
-          path: clientPath
+          path: clientPath,          cleanup: cleanupResult
         });
 
         return {
           success: true,
           version: finalVersion,
           minecraftVersion: minecraftVersion,
-          fabricVersion: needsFabric ? resolvedFabricVersion : null
+          fabricVersion: needsFabric ? resolvedFabricVersion : null,
+          cleanup: cleanupResult
         };
 
       } catch (error) {
@@ -341,6 +355,82 @@ class XMCLClientDownloader {
         reason: `Check failed: ${error.message}`
       };
     }
+  }
+
+  /**
+   * Clean up old Minecraft versions after successful download
+   */
+  async cleanupOldVersions(clientPath, currentVersion, currentFabricVersion = null) {
+    try {
+      const versionsDir = path.join(clientPath, 'versions');
+      if (!fs.existsSync(versionsDir)) {
+        return { success: true, message: 'No versions directory to clean up' };
+      }
+
+      const versionDirs = fs.readdirSync(versionsDir, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => dirent.name);
+
+      let cleanedVersions = [];
+      let protectedVersions = [];
+
+      for (const versionDir of versionDirs) {
+        const shouldKeep = this.shouldKeepVersion(versionDir, currentVersion, currentFabricVersion);
+        
+        if (shouldKeep.keep) {
+          protectedVersions.push(versionDir);
+          continue;
+        }
+
+        // Remove old version directory
+        const versionPath = path.join(versionsDir, versionDir);
+        try {
+          fs.rmSync(versionPath, { recursive: true, force: true });
+          cleanedVersions.push(versionDir);
+          console.log(`🗑️ Cleaned up old version: ${versionDir}`);
+        } catch (error) {
+          console.error(`❌ Failed to remove ${versionDir}:`, error.message);
+        }
+      }
+
+      this.emitter.emit('client-download-progress', {
+        type: 'Cleanup',
+        task: `🗑️ Cleaned up ${cleanedVersions.length} old versions`,
+        total: 100,
+        current: 100
+      });
+
+      return {
+        success: true,
+        message: `Cleaned up ${cleanedVersions.length} old versions`,
+        cleanedVersions,
+        protectedVersions
+      };
+
+    } catch (error) {
+      console.error('❌ Cleanup failed:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+  /**
+   * Determine if a version should be kept or cleaned up
+   */
+  shouldKeepVersion(versionDir, currentVersion, currentFabricVersion) {
+    // Only keep the current vanilla version
+    if (versionDir === currentVersion) {
+      return { keep: true, reason: 'Current vanilla version' };
+    }
+
+    // Only keep the current Fabric version
+    if (currentFabricVersion && versionDir === currentFabricVersion) {
+      return { keep: true, reason: 'Current Fabric version' };
+    }
+
+    // Remove everything else - no exceptions
+    return { keep: false, reason: 'Old version - cleaning up' };
   }
 }
 
