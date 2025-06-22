@@ -1,11 +1,9 @@
-<script>
-  import { onMount } from 'svelte';
+<script>  import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { serverState } from '../../stores/serverState.js';
   import { settingsStore, updateVersions } from '../../stores/settingsStore.js';
   import { safeInvoke } from '../../utils/ipcUtils.js';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
-  import { checkDependencyCompatibility } from '../../utils/mods/modCompatibility.js';
   import { fetchAllFabricVersions } from '../../utils/versionUtils.js';
 
   export let serverPath = '';
@@ -141,16 +139,10 @@
               }
             }
           } catch (error) {
-          }
-        }
-          // Check dependencies for compatibility issues only if the mod is already compatible
-        // Don't override the backend's compatibility decision
-        if (mod.compatible && mod.dependencies && mod.dependencies.length > 0) {
-          const issues = await checkDependencyCompatibility(mod.dependencies, mod.projectId);
-          if (issues.length > 0) {
-            incompatible = true;
-          }
-        }
+          }        }
+        
+        // Note: We trust the backend compatibility decision and don't override it
+        // The backend already considers dependencies in its compatibility logic
         
         if (incompatible) {
           incompatibleMods.push(modInfo);

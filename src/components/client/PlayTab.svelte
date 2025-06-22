@@ -28,6 +28,24 @@
   export let clientDownloadProgress;
   export let handleRefreshFromDashboard;  export let lastCheck;
   export let isChecking;
+  // Debug terminal toggle setting
+  let showDebugTerminal = false;
+  
+  // Load debug terminal setting from localStorage
+  if (typeof window !== 'undefined') {
+    const saved = localStorage.getItem('minecraft-debug-terminal');
+    showDebugTerminal = saved === 'true';
+  }
+  
+  // Reactive statement to save debug terminal setting when changed
+  $: if (typeof window !== 'undefined') {
+    localStorage.setItem('minecraft-debug-terminal', showDebugTerminal.toString());
+  }
+  
+  // Modified launch function that passes debug terminal setting
+  function launchMinecraftWithDebug() {
+    launchMinecraft(showDebugTerminal);
+  }
 
 </script>
 
@@ -400,12 +418,18 @@
                   <p class="memory-disabled-note">Memory settings cannot be changed while Minecraft is launching or running.</p>
                 {/if}
               </div>
-              
-              <!-- Launch controls -->
-              <div class="launch-controls">
+                <!-- Launch controls -->
+              <div class="launch-controls">                <!-- Debug terminal toggle -->
+                <div class="debug-toggle">
+                  <label class="debug-checkbox">
+                    <input type="checkbox" bind:checked={showDebugTerminal} />
+                    🐛 Show Debug Terminal (for troubleshooting launch issues)
+                  </label>
+                </div>
+                
                 {#if launchStatus === 'ready'}
                   {#if $clientState.minecraftServerStatus === 'running' && clientSyncStatus === 'ready' && downloadStatus === 'ready'}
-                    <button class="play-button" on:click={launchMinecraft}>
+                    <button class="play-button" on:click={launchMinecraftWithDebug}>
                       🎮 PLAY MINECRAFT
                     </button>
                   {:else}
@@ -551,7 +575,36 @@
     background: rgba(16, 185, 129, 0.15);
     padding: 0.15rem 0.4rem;
     border-radius: 4px;
-    font-size: 0.85rem;
-    font-weight: 600;
+    font-size: 0.85rem;    font-weight: 600;
+  }
+  /* Debug terminal toggle */
+  .debug-toggle {
+    margin-bottom: 1rem;
+    padding: 0.75rem;
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 8px;
+  }
+
+  .debug-checkbox {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: #e5e7eb;
+    user-select: none;
+    gap: 0.5rem;
+  }
+
+  .debug-checkbox input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: #3b82f6;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .debug-checkbox:hover {
+    color: #f3f4f6;
   }
 </style>

@@ -22,26 +22,115 @@ function createServerModHandlers(win) {
 
     'get-disabled-mods': async (_e, serverPath) => {
       return await modFileManager.getDisabledMods(serverPath);
-    },
-
-    'check-mod-compatibility': async (_e, { serverPath, mcVersion, fabricVersion }) => {
+    },    'check-mod-compatibility': async (_e, { serverPath, mcVersion, fabricVersion }) => {
       if (!serverPath || !fs.existsSync(serverPath)) {
         throw new Error('Invalid server path');
       }
       if (!mcVersion || !fabricVersion) {
         throw new Error('Version information missing');
+      }      // Helper function for version compatibility checking
+      function checkMinecraftVersionCompatibility(modVersion, targetVersion) {
+        if (!modVersion || !targetVersion) return false;
+        
+        // Exact match
+        if (modVersion === targetVersion) return true;
+        
+        // Handle arrays (like ["1.21.x"])
+        if (Array.isArray(modVersion)) {
+          return modVersion.some(v => checkMinecraftVersionCompatibility(v, targetVersion));
+        }
+        
+        // Handle range format like ">=1.21.2 <=1.21.3" (from multi-version arrays)
+        if (modVersion.includes('>=') && modVersion.includes('<=')) {
+          const rangeParts = modVersion.split(' ');
+          const minPart = rangeParts.find(p => p.startsWith('>='));
+          const maxPart = rangeParts.find(p => p.startsWith('<='));
+          
+          if (minPart && maxPart) {
+            const minVersion = minPart.substring(2).trim();
+            const maxVersion = maxPart.substring(2).trim();
+            return compareVersions(targetVersion, minVersion) >= 0 && 
+                   compareVersions(targetVersion, maxVersion) <= 0;
+          }
+        }
+        
+        // Handle version ranges like "1.21.x" or "1.21.*"
+        if (modVersion.includes('.x') || modVersion.includes('.*')) {
+          const baseVersion = modVersion.replace(/\.[x*].*$/, '');
+          return targetVersion.startsWith(baseVersion + '.');
+        }
+        
+        // Handle ">=" comparisons like ">=1.21.4-rc.3"
+        if (modVersion.startsWith('>=')) {
+          const minVersion = modVersion.substring(2).trim();
+          return compareVersions(targetVersion, minVersion) >= 0;
+        }
+        
+        // Handle ">" comparisons
+        if (modVersion.startsWith('>')) {
+          const minVersion = modVersion.substring(1).trim();
+          return compareVersions(targetVersion, minVersion) > 0;
+        }
+        
+        // Handle "<=" comparisons
+        if (modVersion.startsWith('<=')) {
+          const maxVersion = modVersion.substring(2).trim();
+          return compareVersions(targetVersion, maxVersion) <= 0;
+        }
+        
+        // Handle "<" comparisons
+        if (modVersion.startsWith('<')) {
+          const maxVersion = modVersion.substring(1).trim();
+          return compareVersions(targetVersion, maxVersion) < 0;
+        }
+        
+        // Handle "~" (approximately equal) like "~1.21.4"
+        if (modVersion.startsWith('~')) {
+          const baseVersion = modVersion.substring(1).trim();
+          const [baseMajor, baseMinor] = baseVersion.split('.');
+          const [targetMajor, targetMinor] = targetVersion.split('.');
+          return baseMajor === targetMajor && baseMinor === targetMinor;
+        }
+        
+        return false;
       }
+      
+      // Simple version comparison function
+      function compareVersions(version1, version2) {
+        // Remove any suffixes like "-rc.3", "-alpha", etc. for comparison
+        const clean1 = version1.split('-')[0];
+        const clean2 = version2.split('-')[0];
+        
+        const parts1 = clean1.split('.').map(Number);
+        const parts2 = clean2.split('.').map(Number);
+        
+        const maxLength = Math.max(parts1.length, parts2.length);
+        
+        for (let i = 0; i < maxLength; i++) {
+          const part1 = parts1[i] || 0;
+          const part2 = parts2[i] || 0;
+          
+          if (part1 > part2) return 1;
+          if (part1 < part2) return -1;
+        }
+        
+        return 0;
+      }
+
       modApiService.clearVersionCache();
       const installed = await modFileManager.getInstalledModInfo(serverPath);
       const results = [];
+      
       for (const mod of installed) {
         const projectId = mod.projectId;
         const fileName = mod.fileName;
         const name = mod.name || mod.title || fileName;
         let currentVersion = mod.versionNumber || mod.version || null;
+        
         if (!currentVersion || currentVersion === 'Unknown') {
           currentVersion = extractVersionFromFilename(fileName) || 'Unknown';
         }
+        
         if (!projectId) {
           results.push({
             projectId: null,
@@ -53,15 +142,27 @@ function createServerModHandlers(win) {
           });
           continue;
         }
-        try {
-          const allVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
-          const currentVersionCompatible = allVersions && allVersions.some(v => {
-            const versionMatches = v.versionNumber === currentVersion;
-            const supportsTargetMC = v.gameVersions && v.gameVersions.includes(mcVersion);
-            return versionMatches && supportsTargetMC;
-          });
+        
+        try {          // NEW: Check backend-extracted metadata first (most reliable)
+          let currentVersionCompatible = false;
+          
+          if (mod.minecraftVersion) {
+            currentVersionCompatible = checkMinecraftVersionCompatibility(mod.minecraftVersion, mcVersion);
+          }
+          
+          // Fallback to Modrinth API if backend metadata unavailable
+          if (!currentVersionCompatible && !mod.minecraftVersion) {
+            const allVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
+            currentVersionCompatible = allVersions && allVersions.some(v => {
+              const versionMatches = v.versionNumber === currentVersion;
+              const supportsTargetMC = v.gameVersions && v.gameVersions.includes(mcVersion);
+              return versionMatches && supportsTargetMC;
+            });
+          }
+          
           const latestVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
           const latest = latestVersions && latestVersions[0];
+          
           if (currentVersionCompatible) {
             results.push({
               projectId,
@@ -73,16 +174,33 @@ function createServerModHandlers(win) {
               dependencies: latest ? (latest.dependencies || []) : []
             });
           } else if (latest) {
-            results.push({
-              projectId,
-              fileName,
-              name,
-              currentVersion,
-              latestVersion: latest.versionNumber,
-              compatible: true,
-              hasUpdate: true,
-              dependencies: latest.dependencies || []
-            });
+            // Check if the LATEST version would be compatible with target MC version
+            const latestVersionCompatible = latest.gameVersions && latest.gameVersions.includes(mcVersion);
+            
+            if (latestVersionCompatible) {
+              // Latest version IS compatible - show as update available
+              results.push({
+                projectId,
+                fileName,
+                name,
+                currentVersion,
+                latestVersion: latest.versionNumber,
+                compatible: true,
+                hasUpdate: true,
+                dependencies: latest.dependencies || []
+              });
+            } else {
+              // Latest version is ALSO incompatible - show as incompatible
+              results.push({
+                projectId,
+                fileName,
+                name,
+                currentVersion,
+                latestVersion: latest.versionNumber,
+                compatible: false,
+                dependencies: []
+              });
+            }
           } else {
             results.push({
               projectId,

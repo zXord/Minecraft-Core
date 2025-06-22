@@ -885,8 +885,7 @@ function createMinecraftLauncherHandlers(win) {
     },
     
     'minecraft-launch': async (_e, options) => {
-      try {
-        const {
+      try {        const {
           clientPath,
           minecraftVersion,
           serverIp,
@@ -896,7 +895,8 @@ function createMinecraftLauncherHandlers(win) {
           requiredMods = [],
           serverInfo = null,
           maxMemory = null,
-          useProperLauncher = true
+          useProperLauncher = true,
+          showDebugTerminal = false
         } = options;
 
         await ensureServersDat(
@@ -924,15 +924,15 @@ function createMinecraftLauncherHandlers(win) {
             return properResult;
           }
         }
-        
-        const result = await launcher.launchMinecraft({
+          const result = await launcher.launchMinecraft({
           clientPath,
           minecraftVersion,
           serverIp,
           serverPort: parseInt(serverPort),
           requiredMods,
           serverInfo,
-          maxMemory
+          maxMemory,
+          showDebugTerminal
         });
         return result;
       } catch (error) {
