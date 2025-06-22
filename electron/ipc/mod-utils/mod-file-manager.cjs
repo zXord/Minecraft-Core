@@ -376,16 +376,13 @@ async function getClientInstalledModInfo(clientPath) {
   await fs.mkdir(manifestDir, { recursive: true });
 
   const files = await fs.readdir(modsDir).catch(() => []);
-  
   const modFiles = files
     .filter(f =>
       f.toLowerCase().endsWith('.jar') || f.toLowerCase().endsWith('.jar.disabled')
     )
     .map(f => f.replace('.disabled', ''));
 
-  const uniqueModFiles = Array.from(new Set(modFiles));
-
-  const modInfo = [];
+  const uniqueModFiles = Array.from(new Set(modFiles));  const modInfo = [];
   for (const file of uniqueModFiles) {
     const manifestPath = path.join(manifestDir, `${file}.json`);
     let manifest = null;    try {
@@ -476,8 +473,7 @@ async function getClientInstalledModInfo(clientPath) {
           }
         } catch {
           // Ignore metadata extraction errors
-        }      }
-      // Ensure fileName property is always set
+        }      }      // Ensure fileName property is always set
       if (manifest) {
         manifest.fileName = file;
         modInfo.push(manifest);
@@ -504,9 +500,7 @@ async function getClientInstalledModInfo(clientPath) {
         });      let meta = {};
       if (jarPath) {
         meta = await readModMetadataFromJar(jarPath);
-      }
-
-      const modData = { fileName: file, ...meta };
+      }      const modData = { fileName: file, ...meta };
       modInfo.push(modData);
     }
   }
