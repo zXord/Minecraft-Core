@@ -419,13 +419,15 @@
   
   /**
    * Update all mods at once
-   */
-  async function updateAllMods() {
-    // Get all mods with updates
+   */  async function updateAllMods() {
+    // Get all mods with updates (excluding disabled mods)
     const modsWithUpdatesList = [];
     for (const [modName, updateInfo] of $modsWithUpdates.entries()) {
       // Skip entries that start with "project:" as they're duplicates
       if (modName.startsWith('project:')) continue;
+      
+      // Skip disabled mods
+      if ($disabledMods.has(modName)) continue;
       
       const modInfo = $installedModInfo.find(m => m.fileName === modName);
       if (modInfo && modInfo.projectId) {
@@ -973,9 +975,8 @@
                 {:else}
                   <span class="up-to-date">Up to date</span>
                 {/if}
-              </div>
-                <div class="mod-actions">
-                {#if $modsWithUpdates.has(mod)}
+              </div>                <div class="mod-actions">
+                {#if $modsWithUpdates.has(mod) && !$disabledMods.has(mod)}
                   <button class="update-button" on:click={() => updateModToLatest(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
                     {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Update
                   </button>
