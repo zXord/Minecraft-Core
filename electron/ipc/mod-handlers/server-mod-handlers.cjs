@@ -115,13 +115,16 @@ function createServerModHandlers(win) {
         }
         
         return 0;
-      }
-
-      modApiService.clearVersionCache();
+      }      modApiService.clearVersionCache();
       const installed = await modFileManager.getInstalledModInfo(serverPath);
+      const disabledMods = await modFileManager.getDisabledMods(serverPath);
+      const disabledModsSet = new Set(disabledMods);
+      
+      // Filter out disabled mods - only check compatibility for enabled mods
+      const enabledMods = installed.filter(mod => !disabledModsSet.has(mod.fileName));
       const results = [];
       
-      for (const mod of installed) {
+      for (const mod of enabledMods) {
         const projectId = mod.projectId;
         const fileName = mod.fileName;
         const name = mod.name || mod.title || fileName;
