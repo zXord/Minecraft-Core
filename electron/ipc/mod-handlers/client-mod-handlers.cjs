@@ -299,10 +299,18 @@ function createClientModHandlers(win) {
         }        enhancedMods.push(enhancedMod);
       }
       return { success: true, enhancedMods };
-    },
-
-    'download-client-mod-version-updates': async (_e, { clientPath, updates, minecraftVersion }) => {
+    },    'download-client-mod-version-updates': async (_e, { clientPath, updates, minecraftVersion }) => {
       try {
+        console.log('🔄 Backend: Starting client mod version updates download');
+        console.log(`📍 Client path: ${clientPath}`);
+        console.log(`📦 Updates to process: ${updates.length}`);
+        console.log('📋 Update details:', updates.map(u => ({
+          name: u.name,
+          fileName: u.fileName,
+          hasDownloadUrl: !!u.downloadUrl,
+          downloadUrl: u.downloadUrl ? u.downloadUrl.substring(0, 50) + '...' : 'MISSING'
+        })));
+        
         if (!clientPath || !updates || !Array.isArray(updates)) {
           throw new Error('Invalid parameters provided');
         }
@@ -320,14 +328,19 @@ function createClientModHandlers(win) {
         // Process each update
         for (const update of updates) {
           try {
+            console.log(`🔄 Processing update for: ${update.name}`);
+            
             if (!update.downloadUrl) {
-              errors.push(`${update.name}: No download URL available`);
+              const error = `${update.name}: No download URL available`;
+              console.error(`❌ ${error}`);
+              errors.push(error);
               continue;
             }
 
             // Find current mod file
             const currentModPath = path.join(modsDir, update.fileName);
-            
+            console.log(`📁 Current mod path: ${currentModPath}`);
+            console.log(`🌐 Download URL: ${update.downloadUrl}`);
             // Download new version
             const response = await require('axios')({
               url: update.downloadUrl,
@@ -377,12 +390,11 @@ function createClientModHandlers(win) {
             manifest.projectId = update.projectId;
             manifest.name = update.name;
             
-            await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
-
-            // Invalidate metadata cache
+            await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2));            // Invalidate metadata cache
             modAnalysisUtils.invalidateMetadataCache(currentModPath);
             
             updatedCount++;
+            console.log(`✅ Successfully updated ${update.name} to version ${update.newVersion}`);
             
             // Emit progress if window is available
             if (win && win.webContents) {
@@ -392,11 +404,16 @@ function createClientModHandlers(win) {
                 current: update.name,
                 status: 'downloading'
               });
-            }
-
-          } catch (modError) {
-            errors.push(`${update.name}: ${modError.message}`);
+            }          } catch (modError) {
+            const error = `${update.name}: ${modError.message}`;
+            console.error(`❌ Failed to update ${update.name}:`, modError);
+            errors.push(error);
           }
+        }
+
+        console.log(`📊 Client mod update results: ${updatedCount} successful, ${errors.length} failed`);
+        if (errors.length > 0) {
+          console.error('❌ Update errors:', errors);
         }
 
         // Send completion event
@@ -408,14 +425,16 @@ function createClientModHandlers(win) {
           });
         }
 
-        return {
+        const result = {
           success: true,
           updated: updatedCount,
           errors: errors.length > 0 ? errors : undefined,
           message: `Successfully updated ${updatedCount} mod${updatedCount !== 1 ? 's' : ''} for Minecraft ${minecraftVersion}`
         };
-
-      } catch (error) {
+        
+        console.log('📋 Final backend result:', result);
+        return result;      } catch (error) {
+        console.error('❌ Backend error in client mod version updates:', error);
         return {
           success: false,          error: error.message
         };

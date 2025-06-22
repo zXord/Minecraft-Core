@@ -772,8 +772,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             reason: 'Could not verify compatibility - manual check recommended'
           });
         }      }
-        
-      const versionUpdates = {
+          const versionUpdates = {
         minecraftVersion: serverInfo.minecraftVersion,
         updates: updates,
         disables: disables,
@@ -782,6 +781,19 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         hasDisables: disables.length > 0,
         hasChanges: updates.length > 0 || disables.length > 0
       };
+      
+      // Debug logging for version updates
+      if (updates.length > 0) {
+        console.log('📋 Client mod updates detected:', updates.map(u => ({
+          name: u.name,
+          fileName: u.fileName,
+          currentVersion: u.currentVersion,
+          newVersion: u.newVersion,
+          versionId: u.versionId,
+          projectId: u.projectId,
+          reason: u.reason
+        })));
+      }
         
       setClientModVersionUpdates(versionUpdates);
       
@@ -1316,39 +1328,58 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         // Handle client mod downloads (need to fetch download URLs first)
       if (clientMods.length > 0 || clientOptionalMods.length > 0) {
         const allClientUpdates = [...clientMods, ...clientOptionalMods];        // Fetch download URLs for client mod updates
+        console.log('🔄 Starting download URL fetch for client updates:', allClientUpdates.map(u => ({ name: u.name, versionId: u.versionId })));
+        
         const clientUpdatesWithUrls = await Promise.all(allClientUpdates.map(async (update) => {
-          try {            if (!update.versionId) {
-              console.warn(`No version ID for client mod update: ${update.name}`, update);
+          try {
+            if (!update.versionId) {
+              console.error(`❌ No version ID for client mod update: ${update.name}`, update);
+              errorMessage.set(`No version ID found for ${update.name}. Cannot download update.`);
               return null;
             }
+            
+            console.log(`🔍 Fetching download URL for ${update.name} (versionId: ${update.versionId})`);
             
             // Fetch version details from Modrinth API to get download URL
             const versionResponse = await fetch(`https://api.modrinth.com/v2/version/${update.versionId}`);
             if (!versionResponse.ok) {
-              console.warn(`Failed to fetch version details for ${update.name}: ${versionResponse.status}`);
+              const errorText = await versionResponse.text();
+              console.error(`❌ Failed to fetch version details for ${update.name}: ${versionResponse.status} ${versionResponse.statusText}`, errorText);
+              errorMessage.set(`API Error: Failed to fetch version details for ${update.name} (${versionResponse.status})`);
               return null;
             }
             
             const versionData = await versionResponse.json();
+            console.log(`📥 Version data for ${update.name}:`, {
+              id: versionData.id,
+              versionNumber: versionData.version_number,
+              files: versionData.files?.map(f => ({ filename: f.filename, url: f.url, primary: f.primary }))
+            });
             
             const primaryFile = versionData.files?.find(f => f.primary) || versionData.files?.[0];
-              if (!primaryFile || !primaryFile.url) {
-              console.warn(`No download URL found for ${update.name}`);
+            if (!primaryFile || !primaryFile.url) {
+              console.error(`❌ No download URL found for ${update.name}. Files:`, versionData.files);
+              errorMessage.set(`No download file found for ${update.name}. Version may be invalid.`);
               return null;
             }
             
+            console.log(`✅ Found download URL for ${update.name}: ${primaryFile.url}`);
+            
             return {
               ...update,
-              downloadUrl: primaryFile.url
+              downloadUrl: primaryFile.url,
+              fileName: primaryFile.filename // Also include the actual filename from API
             };
           } catch (error) {
-            console.error(`Error fetching download URL for ${update.name}:`, error);
+            console.error(`❌ Error fetching download URL for ${update.name}:`, error);
+            errorMessage.set(`Network error fetching download info for ${update.name}: ${error.message}`);
             return null;
           }
         }));
-        
-        // Filter out any failed URL fetches
+          // Filter out any failed URL fetches
         const validClientUpdates = clientUpdatesWithUrls.filter(update => update && update.downloadUrl);
+        
+        console.log(`📊 Client mod update summary: ${allClientUpdates.length} total, ${validClientUpdates.length} with valid URLs`);
         
         if (validClientUpdates.length > 0) {
           const clientResult = await window.electron.invoke('download-client-mod-version-updates', {
@@ -1384,7 +1415,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             totalResults.success = false;
             totalResults.error = (totalResults.error ? totalResults.error + '; ' : '') + clientResult.error;
           }        } else {
-          console.warn('No valid client mod updates with download URLs found');
+          console.warn('❌ No valid client mod updates with download URLs found');
+          if (allClientUpdates.length > 0) {
+            const failedUpdates = allClientUpdates.filter((_, index) => !clientUpdatesWithUrls[index] || !clientUpdatesWithUrls[index].downloadUrl);
+            const failureReasons = failedUpdates.map(update => `${update.name}: Missing download URL`).join(', ');
+            console.error('❌ Failed to process client updates:', failureReasons);
+            errorMessage.set(`Failed to download ${failedUpdates.length} client mod update${failedUpdates.length !== 1 ? 's' : ''}: ${failureReasons}`);
+            setTimeout(() => errorMessage.set(''), 15000);
+          }
         }
       }      // Handle client mod disables (incompatible mods)
       if (modSyncStatus?.clientModDisables && modSyncStatus.clientModDisables.length > 0) {
