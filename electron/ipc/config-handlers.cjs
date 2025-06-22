@@ -66,18 +66,16 @@ function createConfigHandlers() {
             // Continue with empty config
           }
         }
-        
-        // Update with new values
+          // Update with new values
         const updatedConfig = { ...config, ...updates };
         
         // Write back to file
         fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 2));
-
+        
         // Perform server version cleanup if versions changed
         const versionChanged = updates.version && updates.version !== previousConfig.version;
         const fabricChanged = updates.fabric && updates.fabric !== previousConfig.fabric;
-          if (versionChanged || fabricChanged) {
-          console.log('🧹 Server version changed, cleaning up old server files...');
+        if (versionChanged || fabricChanged) {
           await cleanupOldServerVersions(serverPath, previousConfig);
         }
         
@@ -97,8 +95,7 @@ function createConfigHandlers() {
 async function cleanupOldServerVersions(serverPath, oldConfig) {
   try {
     const filesToCleanup = [];
-    
-    // Files that typically contain version information and should be cleaned up
+      // Files that typically contain version information and should be cleaned up
     const serverFiles = fs.readdirSync(serverPath);
     
     // Clean up old version-specific files
@@ -107,49 +104,99 @@ async function cleanupOldServerVersions(serverPath, oldConfig) {
       const stat = fs.lstatSync(filePath);
       
       if (stat.isFile()) {
-        // Clean up old server JARs with version numbers
-        if (file.includes('minecraft_server') && file.endsWith('.jar')) {
-          // Check if this file contains the old version
-          if (oldConfig.version && file.includes(oldConfig.version)) {
+        // Clean up old server JARs with various naming patterns
+        if (file.endsWith('.jar')) {
+          // Patterns: minecraft_server.1.21.1.jar, server.jar (but check dates), fabric-server-*.jar, etc.
+          if (file.includes('minecraft_server') || file.includes('fabric-server') || file.includes('server-launch')) {
+            // Check if this file contains the old version or is older than expected
+            if (oldConfig.version && (file.includes(oldConfig.version) || file.includes(oldConfig.version.replace('.', '_')))) {
+              filesToCleanup.push({ file, reason: `Old Minecraft server JAR (${oldConfig.version})` });
+            }
+          }
+          
+          // Clean up old fabric installer JARs
+          if (file.includes('fabric-installer') || file.includes('fabric-loader')) {
+            if (oldConfig.fabric && (file.includes(oldConfig.fabric) || file.includes(oldConfig.fabric.replace('.', '_')))) {
+              filesToCleanup.push({ file, reason: `Old Fabric installer (${oldConfig.fabric})` });
+            }
+          }
+        }
+          // Clean up version-specific downloaded files
+        if (file.startsWith('minecraft_server.') && file.endsWith('.jar')) {
+          const versionMatch = file.match(/minecraft_server\.(.+)\.jar/);
+          if (versionMatch && oldConfig.version && versionMatch[1] === oldConfig.version) {
             filesToCleanup.push({ file, reason: `Old Minecraft server JAR (${oldConfig.version})` });
           }
         }
         
-        // Clean up old fabric installer versions
-        if (file.includes('fabric-installer') && file.endsWith('.jar')) {
-          // Check if this is an old fabric installer version
-          if (oldConfig.fabric && file.includes(oldConfig.fabric)) {
-            filesToCleanup.push({ file, reason: `Old Fabric installer (${oldConfig.fabric})` });
+        // Clean up server JAR files with version in name (various patterns)
+        if (file.endsWith('.jar') && oldConfig.version) {
+          // Pattern: server-1.21.3.jar, fabric-server-mc.1.21.3-loader.0.16.9-launcher.1.0.2.jar, etc.
+          if (file.includes(oldConfig.version.replace(/\./g, '\\.')) || 
+              file.includes(oldConfig.version.replace(/\./g, '-')) ||
+              file.includes(`mc.${oldConfig.version}`) ||
+              file.includes(`mc${oldConfig.version}`)) {
+            filesToCleanup.push({ file, reason: `Old server JAR with version (${oldConfig.version})` });
           }
         }
         
-        // Clean up libraries directory if it exists (Fabric libraries)
-        if (file === 'libraries' && stat.isDirectory()) {
-          // Fabric creates version-specific library structures
-          // We could clean this up but it's safer to leave it for manual cleanup
-          console.log('📁 Note: Libraries directory detected - manual cleanup may be needed for old Fabric libraries');
+        // Clean up Fabric launcher JARs
+        if (file.includes('fabric-server-launch') && file.endsWith('.jar')) {
+          filesToCleanup.push({ file, reason: `Old Fabric server launcher JAR` });
         }
         
         // Clean up old server backups that might have version info
         if (file.startsWith('server_backup_') && (file.includes(oldConfig.version) || file.includes(oldConfig.fabric))) {
           filesToCleanup.push({ file, reason: `Old version backup` });
         }
-      }
-    }
+        
+        // Clean up old logs that might be version-specific
+        if (file.startsWith('latest.log') || file.startsWith('debug.log')) {
+          // Skip - these are current logs
+        } else if (file.endsWith('.log') && stat.mtime < new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)) {
+          // Old log files (older than 7 days)
+          filesToCleanup.push({ file, reason: 'Old log file' });
+        }      } else if (stat.isDirectory()) {
+        // Clean up libraries directory if it exists (Fabric libraries)
+        if (file === 'libraries') {
+          // Fabric creates version-specific library structures
+          // We could clean this up but it's safer to leave it for manual cleanup
+        }
+          // Clean up version-specific directories
+        if (file === 'versions' && oldConfig.version) {
+          const versionDir = path.join(serverPath, file);
+          try {
+            const versionDirContents = fs.readdirSync(versionDir);
+            for (const versionFile of versionDirContents) {
+              if (versionFile === oldConfig.version || versionFile.includes(oldConfig.version)) {
+                // Mark the entire version subdirectory for deletion
+                filesToCleanup.push({ 
+                  file: path.join(file, versionFile), 
+                  reason: `Old version directory (${oldConfig.version})`,
+                  isDirectory: true
+                });
+              }
+            }
+          } catch {
+            // Ignore directory read errors
+          }
+        }
+      }    }
     
-    // Delete identified files
-    let deletedCount = 0;
-    for (const { file, reason } of filesToCleanup) {
+    // Delete identified files and directories
+    for (const { file, isDirectory } of filesToCleanup) {
       try {
         const filePath = path.join(serverPath, file);
-        fs.unlinkSync(filePath);
-        console.log(`✅ Deleted: ${file} (${reason})`);
-        deletedCount++;
+        if (isDirectory) {
+          // Delete directory recursively
+          fs.rmSync(filePath, { recursive: true, force: true });
+        } else {
+          // Delete file
+          fs.unlinkSync(filePath);
+        }
       } catch (error) {
         console.warn(`⚠️ Failed to delete ${file}: ${error.message}`);
-      }
-    }
-      console.log(`🧹 Server cleanup completed: ${deletedCount} old version files deleted`);
+      }    }
     
   } catch (error) {
     console.error('❌ Error during server version cleanup:', error);
