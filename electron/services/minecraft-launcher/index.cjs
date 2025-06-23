@@ -36,10 +36,10 @@ class MinecraftLauncher extends EventEmitter {
     this.javaManager = new JavaManager(); // Initialize without client path initially
     this.authHandler = new XMCLAuthHandler(this); // Use new XMCL auth handler
     
-    // Hybrid approach: Use both downloaders during migration
+    // Hybrid approach: Use XMCL downloader with legacy fallback during migration
     this.legacyClientDownloader = new ClientDownloader(this.javaManager, this);
     this.xmclClientDownloader = new XMCLClientDownloader(this.javaManager, this, this.legacyClientDownloader);
-    this.useXMCLDownloader = true; // Disable XMCL, use legacy
+    this.useXMCLDownloader = true; // Using XMCL downloader (modern, efficient)
     
     // Set the active downloader based on flag
     this.clientDownloader = this.useXMCLDownloader ? 
@@ -96,7 +96,7 @@ class MinecraftLauncher extends EventEmitter {
   // Debug Java installation - Enhanced version
   // REMOVED: debugJavaInstallation method is no longer needed
   
-  // Check Java installation
+  // Check Java installation 
   async checkJavaInstallation() {
     try {
       const { exec } = require('child_process');
@@ -745,18 +745,20 @@ class MinecraftLauncher extends EventEmitter {
   
   // Check if Minecraft client files are present and up to date
   async checkMinecraftClient(clientPath, requiredVersion, options = {}) {
-    // Always use the legacy downloader for client checking because it has proper Fabric validation
-    return this.legacyClientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
+    // Use the active downloader (now XMCL has this method too)
+    return this.clientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
   }
   
   // Clear Minecraft client files for re-download
   async clearMinecraftClient(clientPath, minecraftVersion) {
-    return this.legacyClientDownloader.clearMinecraftClient(clientPath, minecraftVersion);
+    // Use the active downloader (XMCL now has this method)
+    return this.clientDownloader.clearMinecraftClient(clientPath, minecraftVersion);
   }
 
   // Force clear just assets directory - useful when assets are corrupted
   async clearAssets(clientPath) {
-    return this.legacyClientDownloader.clearAssets(clientPath);
+    // Use the active downloader (XMCL now has this method)
+    return this.clientDownloader.clearAssets(clientPath);
   }
   
   // Install Fabric loader for the client
