@@ -13,6 +13,7 @@ const downloads = writable({});
 const installingModIds = writable(new Set());
 const modWarnings = writable(new Map());
 const disabledMods = writable(new Set()); // Store for disabled mods
+const disabledModUpdates = writable(new Map()); // Store for disabled mods with available updates
 // Names of mods that are managed by the server (required or optional)
 const serverManagedFiles = writable(new Set());
 
@@ -112,15 +113,20 @@ const hasUpdates = derived(
   }
 );
 
-// Derived store for the number of mods with updates
-const updateCount = derived(modsWithUpdates, $modsWithUpdates => {
-  const projects = new Set();
-  for (const key of $modsWithUpdates.keys()) {
-    if (key.startsWith('project:')) {
-      projects.add(key.slice('project:'.length));
+// Derived store to count mods with updates (excluding disabled mods unless they have compatible updates)
+const updateCount = derived([modsWithUpdates, disabledModUpdates], ([$updates, $disabledUpdates]) => {
+  // Count regular enabled mod updates
+  let count = 0;
+  for (const [modName] of $updates.entries()) {
+    if (!modName.startsWith('project:')) {
+      count++;
     }
   }
-  return projects.size;
+  
+  // Add disabled mods with compatible updates
+  count += $disabledUpdates.size;
+  
+  return count;
 });
 
 // Derived store for installed mods with categories
@@ -160,6 +166,7 @@ export {
   installingModIds,
   modWarnings,
   disabledMods,
+  disabledModUpdates,
   serverManagedFiles,
   isLoading,
   isSearching,
