@@ -1191,9 +1191,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         isDownloadingMods = false;      }
       return;
     }
-      console.log('🔄 CONTINUING: Past removal-only branch');
-    console.log('📋 ANALYSIS: requiredMods length:', requiredMods?.length || 0);
-    console.log('📋 ANALYSIS: clientModUpdates length:', modSyncStatus?.clientModUpdates?.length || 0);
+
     
     // Check if we have any work to do (server mods OR client mod updates)
     const hasServerMods = requiredMods && requiredMods.length > 0;

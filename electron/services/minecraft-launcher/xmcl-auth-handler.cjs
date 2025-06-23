@@ -49,6 +49,7 @@ class XMCLAuthHandler {
       
       console.log('✅ Microsoft OAuth successful, proceeding with Xbox authentication...');
         // Use @xmcl/user to authenticate with Xbox Live
+      // REVERTED: Use the original working API flow with better error handling
       const xboxLiveToken = await this.authenticator.authenticateXboxLive(xboxManager.msToken.access_token);
       
       if (!xboxLiveToken) {
@@ -65,7 +66,8 @@ class XMCLAuthHandler {
       }
       
       console.log('✅ Xbox Live authorization successful');
-        // Get the Minecraft access token - FIXED: Correct parameter order (uhs, xstsToken)
+      
+      // Get the Minecraft access token - Use correct parameter order (uhs, xstsToken)
       const minecraftProfile = await this.authenticator.loginMinecraftWithXBox(
         xboxProfile.DisplayClaims.xui[0].uhs, 
         xboxProfile.Token
@@ -248,21 +250,26 @@ class XMCLAuthHandler {
         this.refreshPromise = null;
         return { success: false, error: error.message };
       }
-    }    try {
+    }
+
+    try {
       // Check token age
       const lastRefreshDate = new Date(this.authData.lastRefresh || this.authData.savedAt || 0);
       const now = new Date();
       const minutesSinceRefresh = (now.getTime() - lastRefreshDate.getTime()) / (1000 * 60);
+      const hoursSinceRefresh = minutesSinceRefresh / 60;
 
       // console.log(`🔍 Token check: ${minutesSinceRefresh.toFixed(1)} minutes since last refresh`);
 
-      // If token was refreshed very recently (less than 5 minutes), use it
-      if (minutesSinceRefresh < 5) {
-        console.log('✅ Token is fresh, no refresh needed');
+      // Be much more lenient - if token is less than 48 hours old, just use it
+      if (hoursSinceRefresh < 48) {
+        console.log(`✅ Token is acceptable for use (${hoursSinceRefresh.toFixed(1)} hours old, no refresh needed)`);
         return { success: true, refreshed: false };
-      }      // If we have refresh capability, try to refresh the token
+      }
+
+      // Only try to refresh if token is very old (over 48 hours) and we have refresh capability
       if (this.authData.msmc_meta || (this.authData.xmcl_tokens && this.authData.xmcl_tokens.microsoft)) {
-        // console.log('🔄 Attempting token refresh...');
+        console.log('🔄 Token is very old, attempting refresh...');
         
         // Start refresh (store promise to prevent concurrent refreshes)
         this.refreshPromise = this.performTokenRefresh();
@@ -273,14 +280,18 @@ class XMCLAuthHandler {
           return result;
         } catch (error) {
           this.refreshPromise = null;
+          // If refresh fails, still allow using the old token for another 24 hours
+          if (hoursSinceRefresh < 72) {
+            console.log('⚠️ Refresh failed, but using old token for now');
+            return { success: true, refreshed: false, error: error.message };
+          }
           throw error;
         }
       }
 
-      // If token is older than 12 hours and we can't refresh, require re-auth
-      const hoursSinceRefresh = minutesSinceRefresh / 60;
-      if (hoursSinceRefresh > 12) {
-        console.log('⚠️ Token is old and cannot be refreshed, requiring re-authentication');
+      // If token is older than 72 hours and we can't refresh, require re-auth
+      if (hoursSinceRefresh > 72) {
+        console.log('⚠️ Token is very old and cannot be refreshed, requiring re-authentication');
         this.authData = null;
         return { 
           success: false, 
@@ -289,18 +300,20 @@ class XMCLAuthHandler {
         };
       }
 
-      // Token is still relatively fresh, use it
-      console.log('✅ Token is acceptable for use');
+      // Token is old but still usable
+      console.log(`✅ Token is old but still acceptable (${hoursSinceRefresh.toFixed(1)} hours old)`);
       return { success: true, refreshed: false };
 
     } catch (error) {
-      // console.error('❌ Error during auth check:', error.message);      // On error, if token isn't too old, try to use it anyway
+      // console.error('❌ Error during auth check:', error.message);
+
+      // On error, if token isn't too old, try to use it anyway
       const savedDate = new Date(this.authData.savedAt || 0);
       const now = new Date();
       const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
       
-      if (hoursSinceSaved < 6) {
-        // console.log('⚠️ Using cached token despite refresh error');
+      if (hoursSinceSaved < 48) {
+        console.log('⚠️ Using cached token despite refresh error');
         return { success: true, refreshed: false, error: error.message };
       }
 
@@ -317,7 +330,27 @@ class XMCLAuthHandler {
       // Use MSMC to refresh the Microsoft token first
       const msmc_meta = this.authData.msmc_meta;
       if (!msmc_meta) {
-        throw new Error('No MSMC metadata available for refresh');
+        // Instead of throwing error, handle gracefully
+        console.warn('⚠️ No MSMC metadata available for token refresh. Authentication may need to be renewed.');
+        
+        // Check if the token is still relatively fresh
+        const savedDate = new Date(this.authData.savedAt || 0);
+        const now = new Date();
+        const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
+        
+        if (hoursSinceSaved < 8) {
+          // Token is less than 8 hours old, still usable
+          console.log('✅ Using cached token despite missing refresh metadata');
+          return { success: true, refreshed: false, usedCache: true };
+        } else {
+          // Token is too old, need fresh authentication
+          this.authData = null;
+          return { 
+            success: false, 
+            error: 'Authentication token expired and cannot be refreshed. Please authenticate again.',
+            requiresAuth: true 
+          };
+        }
       }
 
       // Try to refresh the Microsoft token using MSMC
@@ -329,7 +362,24 @@ class XMCLAuthHandler {
         // Alternative refresh method
         refreshedXboxManager = msmc_meta;
       } else {
-        throw new Error('No refresh method available in MSMC metadata');
+        // Similar graceful handling for missing refresh methods
+        console.warn('⚠️ No refresh method available in MSMC metadata');
+        
+        const savedDate = new Date(this.authData.savedAt || 0);
+        const now = new Date();
+        const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
+        
+        if (hoursSinceSaved < 8) {
+          console.log('✅ Using cached token despite missing refresh method');
+          return { success: true, refreshed: false, usedCache: true };
+        } else {
+          this.authData = null;
+          return { 
+            success: false, 
+            error: 'Authentication token expired and refresh method unavailable. Please authenticate again.',
+            requiresAuth: true 
+          };
+        }
       }
 
       if (!refreshedXboxManager || !refreshedXboxManager.msToken) {
@@ -351,6 +401,7 @@ class XMCLAuthHandler {
         throw new Error('Xbox Live authorization failed during refresh');
       }
 
+      // Use the xboxProfile to get the Minecraft access token
       const minecraftProfile = await this.authenticator.loginMinecraftWithXBox(
         xboxProfile.DisplayClaims.xui[0].uhs, 
         xboxProfile.Token
@@ -419,6 +470,16 @@ class XMCLAuthHandler {
           error.message.includes('network')) {
         console.log('⚠️ Network error during refresh, using cached token');
         return { success: true, refreshed: false, networkError: true };
+      }
+
+      // For other errors, check if we can use cached token
+      const savedDate = new Date(this.authData.savedAt || 0);
+      const now = new Date();
+      const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
+      
+      if (hoursSinceSaved < 6) {
+        console.log('⚠️ Using cached token despite refresh error');
+        return { success: true, refreshed: false, error: error.message };
       }
 
       throw error;

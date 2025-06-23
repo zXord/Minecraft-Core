@@ -13,9 +13,10 @@ const utils = require('./utils.cjs');
  * Maintains compatibility with existing UI events and progress system
  */
 class XMCLClientDownloader {
-  constructor(javaManager, eventEmitter) {
+  constructor(javaManager, eventEmitter, legacyClientDownloader = null) {
     this.javaManager = javaManager;
     this.emitter = eventEmitter;
+    this.legacyClientDownloader = legacyClientDownloader;
     this.versionCache = null;
   }
 
@@ -64,7 +65,7 @@ class XMCLClientDownloader {
       serverInfo = null 
     } = options;
     
-    const needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
+    let needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
     let requestedFabricVersion = serverInfo?.loaderVersion || 'latest';
     let resolvedFabricVersion = requestedFabricVersion;
     
@@ -177,34 +178,62 @@ class XMCLClientDownloader {
             task: `Installing Fabric loader ${requestedFabricVersion}...`,
             total: 100,
             current: 90
-          });          try {
+          });
+
+          try {
             resolvedFabricVersion = await this.resolveFabricVersion(requestedFabricVersion);
             
-            // For now, skip Fabric installation via XMCL and fall back to vanilla
+            // For now, skip Fabric installation via XMCL and fall back to legacy method
             // This can be enhanced later with proper Fabric API integration
             throw new Error('XMCL Fabric integration needs further API research');
             
           } catch (fabricError) {
-            console.error('❌ Fabric installation failed:', fabricError);
+            console.log('⚠️ XMCL Fabric installation failed, attempting legacy method...');
             
-            const hasRequiredMods = requiredMods && requiredMods.length > 0;
-            
-            if (hasRequiredMods) {
-              throw new Error(`Cannot install Fabric for required mods: ${fabricError.message}`);
-            } else {
-              // Continue with vanilla if Fabric fails and no required mods
-              finalVersion = minecraftVersion;
-              this.emitter.emit('client-download-progress', {
-                type: 'Warning',
-                task: '⚠️ Fabric installation failed, using vanilla Minecraft',
-                total: 100,
-                current: 95
-              });
+            // Fall back to legacy Fabric installation
+            try {
+              if (!this.legacyClientDownloader) {
+                throw new Error('Legacy downloader not available for Fabric fallback');
+              }
+              
+              const legacyFabricResult = await this.legacyClientDownloader.installFabricLoader(clientPath, minecraftVersion, requestedFabricVersion);
+              
+              if (legacyFabricResult.success) {
+                resolvedFabricVersion = legacyFabricResult.loaderVersion;
+                finalVersion = legacyFabricResult.profileName;
+                
+                this.emitter.emit('client-download-progress', {
+                  type: 'Fabric',
+                  task: `✅ Fabric ${resolvedFabricVersion} installed successfully (legacy method)`,
+                  total: 100,
+                  current: 95
+                });
+              } else {
+                throw new Error(`Legacy Fabric installation failed: ${legacyFabricResult.error}`);
+              }
+            } catch (legacyFabricError) {
+              console.error('❌ Both XMCL and legacy Fabric installation failed:', legacyFabricError);
+              
+              const hasRequiredMods = requiredMods && requiredMods.length > 0;
+              
+              if (hasRequiredMods) {
+                throw new Error(`Cannot install Fabric for required mods: ${legacyFabricError.message}`);
+              } else {
+                // Continue with vanilla if Fabric fails and no required mods
+                needsFabric = false;
+                finalVersion = minecraftVersion;
+                this.emitter.emit('client-download-progress', {
+                  type: 'Warning',
+                  task: '⚠️ Fabric installation failed, using vanilla Minecraft',
+                  total: 100,
+                  current: 95
+                });
+              }
             }
           }
         }
 
-        // Step 5: Final verification
+        // Step 5: Final verification (now with correct finalVersion)
         this.emitter.emit('client-download-progress', {
           type: 'Verifying',
           task: 'Verifying installation...',
@@ -212,13 +241,26 @@ class XMCLClientDownloader {
           current: 98
         });
 
-        const verificationResult = await this.verifyInstallation(clientPath, finalVersion);
-        if (!verificationResult.success) {
-          throw new Error(`Installation verification failed: ${verificationResult.error}`);
-        }        // Step 6: Success!
+        // Use the legacy downloader's more comprehensive check for final verification
+        // This ensures proper Fabric validation if Fabric was installed
+        const verificationResult = await this.legacyClientDownloader.checkMinecraftClient(clientPath, finalVersion, {
+          requiredMods,
+          serverInfo
+        });
+        
+        if (!verificationResult.synchronized) {
+          throw new Error(`Installation verification failed: ${verificationResult.reason}`);
+        }
+
+        // Step 6: Success!
+        const clientType = needsFabric ? `Fabric ${resolvedFabricVersion}` : 'Vanilla';
+        const successMessage = needsFabric ? 
+          `✅ Minecraft ${minecraftVersion} with ${clientType} installation completed successfully` :
+          `✅ Minecraft ${minecraftVersion} (${clientType}) installation completed successfully`;
+          
         this.emitter.emit('client-download-progress', {
           type: 'Complete',
-          task: `✅ Minecraft ${minecraftVersion} installation completed successfully`,
+          task: successMessage,
           total: 100,
           current: 100
         });
@@ -306,7 +348,6 @@ class XMCLClientDownloader {
       const versionsDir = path.join(clientPath, 'versions');
       const versionDir = path.join(versionsDir, version);
       const versionJson = path.join(versionDir, `${version}.json`);
-      const versionJar = path.join(versionDir, `${version}.jar`);
 
       // Check if version directory exists
       if (!fs.existsSync(versionDir)) {
@@ -318,19 +359,49 @@ class XMCLClientDownloader {
         return { success: false, error: `Version JSON not found: ${versionJson}` };
       }
 
-      // Check if client JAR exists (may not exist for Fabric profiles)
-      const baseVersion = version.includes('fabric-loader') ? version.split('-').slice(-1)[0] : version;
-      const baseVersionJar = path.join(versionsDir, baseVersion, `${baseVersion}.jar`);
+      // For Fabric profiles, we need to check the base Minecraft JAR, not the Fabric profile JAR
+      const isFabricProfile = version.includes('fabric-loader');
       
-      if (!fs.existsSync(versionJar) && !fs.existsSync(baseVersionJar)) {
-        return { success: false, error: `Client JAR not found for version: ${version}` };
-      }
-
-      // Basic size check for JAR files
-      const jarToCheck = fs.existsSync(versionJar) ? versionJar : baseVersionJar;
-      const jarStats = fs.statSync(jarToCheck);
-      if (jarStats.size < 1024 * 1024) { // Less than 1MB is suspicious
-        return { success: false, error: `Client JAR file appears to be incomplete: ${jarToCheck}` };
+      if (isFabricProfile) {
+        // Extract base version from Fabric profile name (e.g., fabric-loader-0.16.14-1.21.2 -> 1.21.2)
+        const baseVersion = version.split('-').pop();
+        const baseVersionDir = path.join(versionsDir, baseVersion);
+        const baseVersionJar = path.join(baseVersionDir, `${baseVersion}.jar`);
+        
+        // Check if base Minecraft JAR exists
+        if (!fs.existsSync(baseVersionJar)) {
+          return { success: false, error: `Base Minecraft JAR not found for Fabric profile: ${baseVersionJar}` };
+        }
+        
+        // Basic size check for base JAR
+        const jarStats = fs.statSync(baseVersionJar);
+        if (jarStats.size < 1024 * 1024) { // Less than 1MB is suspicious
+          return { success: false, error: `Base Minecraft JAR appears to be incomplete: ${baseVersionJar}` };
+        }
+        
+        // For Fabric profiles, we also need to check if the profile JSON is properly set up
+        try {
+          const profileJson = JSON.parse(fs.readFileSync(versionJson, 'utf8'));
+          if (!profileJson.inheritsFrom && !profileJson.jar) {
+            return { success: false, error: `Fabric profile appears to be incomplete: missing inheritsFrom or jar reference` };
+          }
+        } catch (jsonError) {
+          return { success: false, error: `Fabric profile JSON is corrupted: ${jsonError.message}` };
+        }
+        
+      } else {
+        // For vanilla versions, check the version's own JAR
+        const versionJar = path.join(versionDir, `${version}.jar`);
+        
+        if (!fs.existsSync(versionJar)) {
+          return { success: false, error: `Client JAR not found for version: ${versionJar}` };
+        }
+        
+        // Basic size check for JAR files
+        const jarStats = fs.statSync(versionJar);
+        if (jarStats.size < 1024 * 1024) { // Less than 1MB is suspicious
+          return { success: false, error: `Client JAR file appears to be incomplete: ${versionJar}` };
+        }
       }
 
       return { success: true };
