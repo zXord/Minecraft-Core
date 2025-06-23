@@ -13,55 +13,58 @@
 
 <header class="client-header">
   <h1>Minecraft Client</h1>
-  <div class="connection-status">
-    <div class="status-section">
-      <span class="status-section-label">Management Server:</span>
+  <!-- Hide status section on play tab since PlayTab has compact header -->
+  {#if state.activeTab !== 'play'}
+    <div class="connection-status">
+      <div class="status-section">
+        <span class="status-section-label">Management Server:</span>
+        {#if state.connectionStatus === 'connected'}
+          <div class="status-indicator connected" title="Connected to management server">
+            <span class="status-dot"></span>
+            <span class="status-text">Connected</span>
+          </div>
+        {:else if state.connectionStatus === 'connecting'}
+          <div class="status-indicator connecting" title="Connecting to management server">
+            <span class="status-dot"></span>
+            <span class="status-text">Connecting...</span>
+          </div>
+        {:else}
+          <div class="status-indicator disconnected" title="Not connected to management server">
+            <span class="status-dot"></span>
+            <span class="status-text">Disconnected</span>
+          </div>
+        {/if}
+      </div>
+
       {#if state.connectionStatus === 'connected'}
-        <div class="status-indicator connected" title="Connected to management server">
-          <span class="status-dot"></span>
-          <span class="status-text">Connected</span>
-        </div>
-      {:else if state.connectionStatus === 'connecting'}
-        <div class="status-indicator connecting" title="Connecting to management server">
-          <span class="status-dot"></span>
-          <span class="status-text">Connecting...</span>
-        </div>
-      {:else}
-        <div class="status-indicator disconnected" title="Not connected to management server">
-          <span class="status-dot"></span>
-          <span class="status-text">Disconnected</span>
+        <div class="server-details">
+          <span class="server-address">
+            <span class="address-label">Management Server:</span>
+            {instance?.serverIp || 'Unknown'}:{instance?.serverPort || '8080'}
+          </span>
+          <div class="status-section">
+            <span class="status-section-label">Minecraft Server:</span>
+            {#if minecraftServerStatus === 'running'}
+              <div class="status-indicator server-running" title="Minecraft server is running">
+                <span class="status-dot"></span>
+                <span class="status-text">Running</span>
+              </div>
+            {:else if minecraftServerStatus === 'stopped'}
+              <div class="status-indicator server-stopped" title="Minecraft server is stopped">
+                <span class="status-dot"></span>
+                <span class="status-text">Stopped</span>
+              </div>
+            {:else}
+              <div class="status-indicator server-unknown" title="Minecraft server status unknown">
+                <span class="status-dot"></span>
+                <span class="status-text">Status Unknown</span>
+              </div>
+            {/if}
+          </div>
         </div>
       {/if}
     </div>
-
-    {#if state.connectionStatus === 'connected'}
-      <div class="server-details">
-        <span class="server-address">
-          <span class="address-label">Management Server:</span>
-          {instance?.serverIp || 'Unknown'}:{instance?.serverPort || '8080'}
-        </span>
-        <div class="status-section">
-          <span class="status-section-label">Minecraft Server:</span>
-          {#if minecraftServerStatus === 'running'}
-            <div class="status-indicator server-running" title="Minecraft server is running">
-              <span class="status-dot"></span>
-              <span class="status-text">Running</span>
-            </div>
-          {:else if minecraftServerStatus === 'stopped'}
-            <div class="status-indicator server-stopped" title="Minecraft server is stopped">
-              <span class="status-dot"></span>
-              <span class="status-text">Stopped</span>
-            </div>
-          {:else}
-            <div class="status-indicator server-unknown" title="Minecraft server status unknown">
-              <span class="status-dot"></span>
-              <span class="status-text">Status Unknown</span>
-            </div>
-          {/if}
-        </div>
-      </div>
-    {/if}
-  </div>
+  {/if}
   <div class="client-tabs">
     {#each tabs as tab (tab)}
       <button class="tab-button {state.activeTab === tab ? 'active' : ''}" on:click={() => selectTab(tab)}>

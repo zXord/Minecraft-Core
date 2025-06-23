@@ -50,6 +50,34 @@
 </script>
 
       <div class="client-main">
+        <!-- Compact Status Header -->
+        <div class="status-header-container">
+          <div class="connection-card">
+            <div class="compact-status-item">
+              <div class="status-dot {$clientState.connectionStatus}"></div>
+              <div class="status-info">
+                <span class="status-label">Management</span>
+                <code class="server-address">localhost:8080</code>
+              </div>
+              <span class="connection-text {$clientState.connectionStatus}">
+                {$clientState.connectionStatus === 'connected' ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
+          </div>
+
+          <div class="server-card">
+            <div class="compact-status-item">
+              <div class="status-dot {$clientState.minecraftServerStatus}"></div>
+              <div class="status-info">
+                <span class="status-label">Minecraft Server</span>
+              </div>
+              <span class="server-status {$clientState.minecraftServerStatus}">
+                {$clientState.minecraftServerStatus === 'running' ? 'Running' : 'Stopped'}
+              </span>
+            </div>
+          </div>
+        </div>
+
         <div class="client-status">
           {#if $clientState.connectionStatus !== 'connected'}
             <div class="connection-status-display">
@@ -81,23 +109,42 @@
               </div>
             </div>
           {:else if authStatus === 'authenticated' || (username && authData) || (username && username.length > 0)}
-            <!-- Show game information and launch controls -->
-            <div class="game-info">
-              <h2>Ready to Play</h2>
-              <div class="player-info">
-                <span class="player-label">Logged in as:</span>
-                <span class="player-name">{username}</span>
+            <!-- Compact Game Information and Controls -->
+            <div class="game-info-compact">
+              <!-- Dynamic Status Header with User Info -->
+              <div class="ready-header">
+                <h2 class="status-header {
+                  $clientState.minecraftServerStatus !== 'running' ? 'waiting' :
+                  clientSyncStatus !== 'ready' ? 'needs-client' :
+                  downloadStatus !== 'ready' ? 'needs-mods' : 'ready'
+                }">
+                  {#if $clientState.minecraftServerStatus !== 'running'}
+                    ⏸️ Waiting for Server
+                  {:else if clientSyncStatus !== 'ready'}
+                    📥 Client Download Required
+                  {:else if downloadStatus !== 'ready'}
+                    🔄 Mods Need Update
+                  {:else}
+                    🚀 Ready to Play
+                  {/if}
+                </h2>
+                <div class="player-info-inline">
+                  <span class="player-label">Logged in as:</span>
+                  <span class="player-name">{username}</span>
+                </div>
               </div>
               
+              <!-- Compact Server Info Card -->
               {#if serverInfo}
-                <div class="server-info-display">
-                  <div class="info-item">
-                    <span class="info-label">Server:</span>
-                    <span class="info-value">{serverInfo.serverInfo?.name || 'Minecraft Server'}</span>
+                <div class="server-info-compact">
+                  <div class="server-detail-card">
+                    <span class="detail-label">Server</span>
+                    <span class="detail-value">{serverInfo.serverInfo?.name || 'A Minecraft Server'}</span>
                   </div>
-                  <div class="info-item">
-                    <span class="info-label">Version:</span>
-                    <span class="info-value">
+                  <div class="divider"></div>
+                  <div class="server-detail-card">
+                    <span class="detail-label">Version</span>
+                    <span class="detail-value">
                       {#if serverInfo.loaderType && serverInfo.loaderType !== 'vanilla'}
                         {serverInfo.loaderType}/{serverInfo.minecraftVersion || 'Unknown'}
                         {#if serverInfo.loaderVersion}
@@ -108,21 +155,66 @@
                       {/if}
                     </span>
                   </div>
-                  <div class="info-item">
-                    <span class="info-label">Required Mods:</span>
-                    <span class="info-value">{requiredMods.length}</span>
+                  <div class="divider"></div>
+                  <div class="server-detail-card">
+                    <span class="detail-label">Required Mods</span>
+                    <span class="detail-value">{requiredMods.length}</span>
                   </div>
                 </div>
               {/if}
               
-              <!-- Client synchronization status -->
-              {#if clientSyncStatus === 'checking'}
-                <div class="sync-status checking">
-                  <h3>Checking Client Files...</h3>
-                  <p>Verifying Minecraft client installation...</p>
-                </div>
-              {:else if clientSyncStatus === 'needed'}
-                <div class="sync-status needed">
+              <!-- Compact Status Indicators -->
+              <div class="status-row">
+                <!-- Client Status -->
+                {#if clientSyncStatus === 'checking'}
+                  <div class="status-indicator checking">
+                    ⏳ <span>Checking Client Files...</span>
+                  </div>
+                {:else if clientSyncStatus === 'needed'}
+                  <div class="status-indicator needed">
+                    ❌ <span>Client Files Need Download</span>
+                  </div>
+                {:else if clientSyncStatus === 'downloading'}
+                  <div class="status-indicator downloading">
+                    📥 <span>Downloading Client ({Math.round((clientDownloadProgress.current / clientDownloadProgress.total) * 100) || 0}%)</span>
+                  </div>
+                {:else if clientSyncStatus === 'ready'}
+                  <div class="status-indicator ready">
+                    ✅ <span>Client Files Ready</span>
+                  </div>
+                {/if}
+
+                <!-- Mod Status -->
+                {#if downloadStatus === 'checking'}
+                  <div class="status-indicator checking">
+                    ⏳ <span>Checking Mods...</span>
+                  </div>
+                {:else if downloadStatus === 'needed'}
+                  <div class="status-indicator needed">
+                    ❌ <span>Mods Need Update</span>
+                  </div>
+                {:else if downloadStatus === 'downloading'}
+                  <div class="status-indicator downloading">
+                    📥 <span>Downloading Mods ({downloadProgress}%)</span>
+                  </div>
+                {:else if downloadStatus === 'checking-updates'}
+                  <div class="status-indicator ready">
+                    ✅ <span>All Required Mods Ready</span>
+                  </div>
+                {:else if downloadStatus === 'ready'}
+                  <div class="status-indicator ready">
+                    ✅ <span>All Required Mods Ready</span>
+                  </div>
+                {:else if downloadStatus === 'error'}
+                  <div class="status-indicator error">
+                    ❌ <span>Mod Check Failed</span>
+                  </div>
+                {/if}
+              </div>
+
+              <!-- Detailed Status Sections (when needed) -->
+              {#if clientSyncStatus === 'needed'}
+                <div class="detail-section">
                   <h3>Client Files Need Download</h3>
                   {#if clientSyncInfo}
                     <p>{clientSyncInfo.reason}</p>
@@ -131,16 +223,17 @@
                     {/if}
                   {/if}
                   <p>Minecraft {serverInfo?.minecraftVersion || 'Unknown'} client files are required.</p>
-                  <button class="download-button" on:click={downloadClient}>
+                  <button class="action-button" on:click={downloadClient}>
                     📥 Download Minecraft Client {clientSyncInfo?.needsJava ? '& Java' : ''}
                   </button>
                 </div>
               {:else if clientSyncStatus === 'downloading'}
-                <div class="sync-status downloading">
+                <div class="detail-section">
                   <h3>Downloading Minecraft Client</h3>
-                  <div class="launch-progress">
+                  <div class="progress-container">
                     <p>{clientDownloadProgress.type}: {clientDownloadProgress.task}</p>
-                    {#if clientDownloadProgress.total > 0}                      <div class="progress-bar">
+                    {#if clientDownloadProgress.total > 0}
+                      <div class="progress-bar">
                         <div class="progress-fill" style="width: {Math.round((clientDownloadProgress.current / clientDownloadProgress.total) * 100)}%"></div>
                       </div>
                       {#if clientDownloadProgress.type === 'Downloading' && clientDownloadProgress.totalMB}
@@ -149,296 +242,180 @@
                     {/if}
                   </div>
                 </div>
-              {:else if clientSyncStatus === 'ready'}
-                <div class="sync-status ready">
-                  <h3>✅ Client Files Ready</h3>
-                  <p>Minecraft {serverInfo?.minecraftVersion || 'Unknown'} client is installed and ready.</p>
-                  {#if clientSyncInfo?.javaVersion}
-                    <p>Java {clientSyncInfo.javaVersion} is available and ready.</p>
-                  {/if}
-                </div>
               {/if}
-              
-              <!-- Mod synchronization status -->
-              {#if downloadStatus === 'checking'}
-                <div class="sync-status checking">
-                  <h3>Checking Mods...</h3>
-                  <p>Verifying installed mods...</p>
-                </div>              {:else if downloadStatus === 'needed'}                <div class="sync-status needed">
-                  {#if modSyncStatus}                    <!-- Use new response structure with filtered acknowledgments -->
+
+              {#if downloadStatus === 'needed'}
+                <div class="detail-section">
+                  <!-- Show mod sync details when needed -->
+                  {#if modSyncStatus}
+                    {@const totalUpdatesNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0) + (modSyncStatus.clientModUpdates?.length || 0)}
                     {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
                     {@const acknowledgments = filteredAcknowledgments || []}
-                      <!-- Dynamic title based on what needs to happen -->
-                    {@const totalDownloadsNeeded = (modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0) + (modSyncStatus?.clientModUpdates?.length || 0)}
-                    {#if totalDownloadsNeeded > 0 || actualRemovals.length > 0}
-                      <h3>Mods Need Update</h3>
-                    {:else if acknowledgments.length > 0}
-                      <h3>Dependency Notifications</h3>
-                    {:else}
-                      <h3>Mod Sync Required</h3>                    {/if}
-
-                    <!-- Display appropriate message based on what needs to happen -->
-                    {@const totalUpdatesNeeded = (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0) + (modSyncStatus?.clientModUpdates?.length || 0)}
-                    {@const totalNewDownloads = (modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0)}
                     
-                    {#if totalDownloadsNeeded > 0 && actualRemovals.length > 0 && acknowledgments.length > 0}
-                      <p>{totalDownloadsNeeded} mod(s) need attention ({totalUpdatesNeeded} updates, {totalNewDownloads} new), {actualRemovals.length} mod(s) need to be removed, and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
-                    {:else if totalDownloadsNeeded > 0 && actualRemovals.length > 0}
-                      <p>{totalDownloadsNeeded} mod(s) need attention ({totalUpdatesNeeded} updates, {totalNewDownloads} new) and {actualRemovals.length} mod(s) need to be removed.</p>
-                    {:else if totalDownloadsNeeded > 0 && acknowledgments.length > 0}
-                      <p>{totalDownloadsNeeded} mod(s) need attention ({totalUpdatesNeeded} updates, {totalNewDownloads} new) and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
-                    {:else if actualRemovals.length > 0 && acknowledgments.length > 0}
-                      <p>{actualRemovals.length} mod(s) need to be removed and {acknowledgments.length} dependency notification(s) need acknowledgment.</p>
-                    {:else if totalDownloadsNeeded > 0}
-                      <p>{totalDownloadsNeeded} mod(s) need attention: {totalUpdatesNeeded} updates and {totalNewDownloads} new downloads.</p>
-                    {:else if actualRemovals.length > 0}
-                      <p>{actualRemovals.length} mod(s) need to be removed from your client.</p>
-                    {:else if acknowledgments.length > 0}
-                      <p>{acknowledgments.length} mod(s) are being kept as dependencies and need acknowledgment.</p>
-                    {:else}
-                      <p>Mod synchronization required.</p>
-                    {/if}{:else}
-                    <h3>Mods Need Update</h3>
-                    <p>Checking mod status...</p>
-                  {/if}
-                    {#if modSyncStatus}
-                    <!-- Required Mod Updates -->
+                    <h3>Mods Need Update ({totalUpdatesNeeded})</h3>
+                    
+                    <!-- Compact mod lists -->
                     {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
-                      <div class="mod-changes-section">
-                        <h4>� Required Mod Updates:</h4>                        <ul class="mod-list">                          {#each modSyncStatus.outdatedMods as update, index (update.name || update.fileName || `req-update-${index}`)}
-                            <li class="mod-item mod-update">
+                      <div class="compact-mod-section">
+                        <h4>📦 Required Updates:</h4>
+                        <div class="compact-mod-list">
+                          {#each modSyncStatus.outdatedMods as update, index (update.name || update.fileName || `req-update-${index}`)}
+                            <div class="compact-mod-item">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
-                              <span class="version-change">
-                                <span class="current-version">v{update.currentVersion}</span>
-                                <span class="version-arrow">→</span>
-                                <span class="new-version">v{update.newVersion}</span>
-                              </span>
-                            </li>
+                              <span class="version-badge">v{update.currentVersion} → v{update.newVersion}</span>
+                            </div>
                           {/each}
-                        </ul>
+                        </div>
                       </div>
-                    {/if}                    <!-- Optional Mod Updates -->
+                    {/if}
+
                     {#if modSyncStatus.outdatedOptionalMods && modSyncStatus.outdatedOptionalMods.length > 0}
-                      <div class="mod-changes-section">
-                        <h4>🔄 Optional Mod Updates:</h4>                        <ul class="mod-list">                          {#each modSyncStatus.outdatedOptionalMods as update, index (update.name || update.fileName || `opt-update-${index}`)}
-                            <li class="mod-item mod-update optional">
+                      <div class="compact-mod-section">
+                        <h4>🔄 Optional Updates:</h4>
+                        <div class="compact-mod-list">
+                          {#each modSyncStatus.outdatedOptionalMods as update, index (update.name || update.fileName || `opt-update-${index}`)}
+                            <div class="compact-mod-item optional">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
-                              <span class="version-change">
-                                <span class="current-version">v{update.currentVersion}</span>
-                                <span class="version-arrow">→</span>
-                                <span class="new-version">v{update.newVersion}</span>
-                              </span>
-                            </li>
+                              <span class="version-badge">v{update.currentVersion} → v{update.newVersion}</span>
+                            </div>
                           {/each}
-                        </ul>
+                        </div>
                       </div>
-                    {/if}                    <!-- Client Downloaded Mod Updates -->
+                    {/if}
+
                     {#if modSyncStatus.clientModUpdates && modSyncStatus.clientModUpdates.length > 0}
-                      <div class="mod-changes-section">
-                        <h4>📱 Client Downloaded Mod Updates:</h4>                        <ul class="mod-list">
+                      <div class="compact-mod-section">
+                        <h4>📱 Client Mod Updates:</h4>
+                        <div class="compact-mod-list">
                           {#each modSyncStatus.clientModUpdates as update, index (update.name || update.fileName || `client-update-${index}`)}
-                            <li class="mod-item mod-update client-mod">
+                            <div class="compact-mod-item client-mod">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
-                              <span class="version-change">
-                                <span class="current-version">v{update.currentVersion}</span>
-                                <span class="version-arrow">→</span>
-                                <span class="new-version">v{update.newVersion}</span>
-                              </span>
-                            </li>
+                              <span class="version-badge">v{update.currentVersion} → v{update.newVersion}</span>
+                            </div>
                           {/each}
-                        </ul>
+                        </div>
+                      </div>
+                    {/if}
+
+                    {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
+                      <div class="compact-mod-section">
+                        <h4>📥 New Required:</h4>
+                        <div class="compact-mod-list">
+                          {#each modSyncStatus.missingMods as modName (modName)}
+                            <div class="compact-mod-item new-download">
+                              <span class="mod-name">{modName}</span>
+                              <span class="new-badge">NEW</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    {#if actualRemovals.length > 0}
+                      <div class="compact-mod-section">
+                        <h4>❌ To be Removed:</h4>
+                        <div class="compact-mod-list">
+                          {#each actualRemovals as removal (removal.fileName)}
+                            <div class="compact-mod-item removal">
+                              <span class="mod-name">{removal.fileName}</span>
+                              <span class="removal-badge">{removal.reason || 'no longer required'}</span>
+                            </div>
+                          {/each}
+                        </div>
                       </div>
                     {/if}
                     
-                    <!-- Client Mod Compatibility Issues -->
-                    {#if modSyncStatus.clientModDisables && modSyncStatus.clientModDisables.length > 0}
-                      <div class="mod-changes-section">
-                        <h4>⚠️ Client Mod Compatibility Issues:</h4>
-                        <ul class="mod-list">
-                          {#each modSyncStatus.clientModDisables as disable, index (disable.name || disable.fileName || `client-disable-${index}`)}
-                            <li class="mod-item mod-disable client-mod">
-                              {disable.name || disable.fileName || 'Unknown Mod'} v{disable.currentVersion} - {disable.reason}
-                            </li>
-                          {/each}
-                        </ul>
-                      </div>
-                    {/if}
-
-                    <!-- New Required Downloads -->
-                    {#if modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
-                      <div class="mod-changes-section">
-                        <h4>📥 New Required Downloads:</h4>
-                        <ul class="mod-list">
-                          {#each modSyncStatus.missingMods as modName (modName)}
-                            <li class="mod-item new-download">{modName}</li>
-                          {/each}
-                        </ul>
-                      </div>
-                    {/if}
-
-                    <!-- New Optional Downloads -->
-                    {#if modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0}                      <div class="mod-changes-section">
-                        <h4>📥 New Optional Downloads:</h4>
-                        <p class="clarification-note">
-                          <em>Note: New optional mods must be downloaded individually from the Mods tab. They are not included in bulk updates.</em>
-                        </p>
-                        <ul class="mod-list">
-                          {#each modSyncStatus.missingOptionalMods as modName (modName)}
-                            <li class="mod-item new-download optional">{modName}</li>
-                          {/each}
-                        </ul>
-                      </div>
-                    {/if}<!-- Client Mod Removals - Use new response structure -->
-                    {#if (modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0)}
-                      <div class="mod-changes-section">
-                        <h4>❌ Mods to be Removed:</h4>
-                        <ul class="mod-list">
-                          {#each [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])] as removal (removal.fileName)}
-                            <li class="mod-item mod-removal">
-                              {removal.fileName} → {removal.reason || 'no longer required'}
-                            </li>
-                          {/each}
-                        </ul>
-                      </div>
-                    {/if}                    <!-- Client Mod Dependency Acknowledgments - Use filtered acknowledgments -->
-                    {#if filteredAcknowledgments && filteredAcknowledgments.length > 0}
-                      <div class="mod-changes-section dependency-section">
-                        <h4>🔗 Dependency Notifications:</h4>
-                        <ul class="mod-list">
-                          {#each filteredAcknowledgments as acknowledgment (acknowledgment.fileName)}
-                            <li class="mod-item mod-dependency">
-                              {acknowledgment.fileName} → {acknowledgment.reason || 'required as dependency by client downloaded mods'}
-                            </li>
-                          {/each}
-                        </ul>
-                      </div>                    {/if}                  {/if}                  <!-- Show appropriate action button based on what's needed -->                  {#if modSyncStatus}
-                    {@const totalUpdatesNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0) + (modSyncStatus.clientModUpdates?.length || 0)}
+                    <!-- Action buttons -->
                     {#if totalUpdatesNeeded > 0}
-                      <button class="download-button" on:click={onDownloadModsClick}>
+                      <button class="action-button" on:click={onDownloadModsClick}>
                         📥 Download & Update Mods ({totalUpdatesNeeded})
                       </button>
-                    {:else if ((modSyncStatus.requiredRemovals && modSyncStatus.requiredRemovals.length > 0) || (modSyncStatus.optionalRemovals && modSyncStatus.optionalRemovals.length > 0) || (filteredAcknowledgments && filteredAcknowledgments.length > 0))}
-                      {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
-                      {@const acknowledgments = filteredAcknowledgments || []}
-                      
-                      {#if actualRemovals.length > 0}
-                        <button class="download-button" on:click={onDownloadModsClick}>
-                          🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
-                        </button>
-                      {/if}
-                      
-                      {#if acknowledgments.length > 0}
-                        <button class="acknowledge-button" on:click={onAcknowledgeAllDependencies}>
-                          ✓ Acknowledge Dependencies ({acknowledgments.length})
-                        </button>
-                      {/if}
-                    {:else}
-                      <button class="download-button" on:click={onDownloadModsClick}>
-                        🔄 Synchronize Mods
+                    {:else if actualRemovals.length > 0}
+                      <button class="action-button" on:click={onDownloadModsClick}>
+                        🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
                       </button>
                     {/if}
+                    
+                    {#if acknowledgments.length > 0}
+                      <button class="acknowledge-button" on:click={onAcknowledgeAllDependencies}>
+                        ✓ Acknowledge Dependencies ({acknowledgments.length})
+                      </button>
+                    {/if}
+                  {:else}
+                    <h3>Mods Need Update</h3>
+                    <button class="action-button" on:click={onDownloadModsClick}>
+                      🔄 Synchronize Mods
+                    </button>
                   {/if}
                 </div>
               {:else if downloadStatus === 'downloading'}
-                <div class="sync-status downloading">
+                <div class="detail-section">
                   <h3>Downloading Mods</h3>
-                  <div class="progress-bar">
-                    <div class="progress-fill" style="width: {downloadProgress}%"></div>
-                  </div>
-                  <p class="progress-text">Overall Progress: {downloadProgress}%</p>
-                  {#if currentDownloadFile}
-                    <div class="current-file-section">
-                      <p class="current-file">Downloading: {currentDownloadFile}</p>
-                      {#if fileProgress > 0}
-                        <div class="file-progress-bar">
-                          <div class="file-progress-fill" style="width: {fileProgress}%"></div>
-                        </div>
-                        <p class="file-progress-text">File Progress: {fileProgress}%</p>
-                      {/if}
-                      {#if downloadSpeed && downloadSpeed !== '0 MB/s'}
-                        <p class="download-speed">{downloadSpeed}</p>
-                      {/if}
+                  <div class="progress-container">
+                    <div class="progress-bar">
+                      <div class="progress-fill" style="width: {downloadProgress}%"></div>
                     </div>
-                  {/if}
-                  </div>
-                {:else if downloadStatus === 'error'}
-                  <div class="sync-status error">
-                    <h3>Mod Check Failed</h3>
-                    <p>Unable to verify mod status. Please refresh and try again.</p>
-                  </div>                {:else if downloadStatus === 'checking-updates'}
-                <div class="sync-status checking">
-                  <h3>✅ All Required Mods Ready</h3>
-                  <p class="update-check-status">Checking for mod updates...</p>
-                </div>
-              {:else if downloadStatus === 'ready'}                  <div class="sync-status ready">
-                    <h3>✅ All Required Mods Ready</h3>
-                    {#if modSyncStatus}
-                      {@const optionalAvailable = (modSyncStatus.missingOptionalMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
-                      {#if optionalAvailable > 0}
-                        <p>All required mods are installed and up to date.</p>
-                        <div class="optional-mods-notice">
-                          <span class="optional-icon">ℹ️</span>
-                          <span class="optional-text">
-                            {optionalAvailable} optional mod{optionalAvailable > 1 ? 's are' : ' is'} available for download. 
-                            Check the <strong>Mods</strong> tab to download them.
-                          </span>
-                        </div>
-                      {:else}
-                        <p>All mods are installed and up to date.</p>
-                      {/if}
-                    {:else}
-                      <p>All mods are installed and up to date.</p>
-                    {/if}                  </div>
-                {/if}
-              
-              <!-- Memory Settings -->
-              <div class="memory-settings">
-                <h3>🧠 Memory Settings</h3>
-                <div class="memory-setting">
-                  <label for="max-memory">Maximum RAM (GB):</label>
-                  <input 
-                    type="number" 
-                    id="max-memory"
-                    bind:value={maxMemory} 
-                    min="0.5" 
-                    max="16" 
-                    step="0.5"
-                    disabled={isLaunching || launchStatus === 'running'}
-                    title="Amount of RAM to allocate to Minecraft. Higher values may improve performance but require more system memory."
-                  />
-                  <span class="memory-info">
-                    {maxMemory}GB
-                    {#if maxMemory < 1}
-                      (Low - may cause lag)
-                    {:else if maxMemory >= 1 && maxMemory < 2}
-                      (Recommended for most users)
-                    {:else if maxMemory >= 2 && maxMemory < 4}
-                      (Good for modded Minecraft)
-                    {:else}
-                      (High - ensure you have enough system RAM)
+                    <p class="progress-text">Overall Progress: {downloadProgress}%</p>
+                    {#if currentDownloadFile}
+                      <div class="current-file-section">
+                        <p class="current-file">Downloading: {currentDownloadFile}</p>
+                        {#if fileProgress > 0}
+                          <div class="file-progress-bar">
+                            <div class="file-progress-fill" style="width: {fileProgress}%"></div>
+                          </div>
+                          <p class="file-progress-text">File Progress: {fileProgress}%</p>
+                        {/if}
+                        {#if downloadSpeed && downloadSpeed !== '0 MB/s'}
+                          <p class="download-speed">{downloadSpeed}</p>
+                        {/if}
+                      </div>
                     {/if}
-                  </span>
+                  </div>
                 </div>
-                {#if isLaunching || launchStatus === 'running'}
-                  <p class="memory-disabled-note">Memory settings cannot be changed while Minecraft is launching or running.</p>
-                {/if}
+              {/if}
+              
+              <!-- Compact Memory Settings -->
+              <div class="memory-settings-compact">
+                <span class="memory-label">🧠 Max RAM (GB):</span>
+                <input 
+                  type="number" 
+                  class="memory-input"
+                  bind:value={maxMemory} 
+                  min="0.5" 
+                  max="16" 
+                  step="0.5"
+                  disabled={isLaunching || launchStatus === 'running'}
+                  title="Amount of RAM to allocate to Minecraft"
+                />
+                <span class="memory-info">
+                  {#if maxMemory < 1}
+                    {maxMemory}GB (Low - may cause lag)
+                  {:else if maxMemory >= 1 && maxMemory < 2}
+                    {maxMemory}GB (Recommended for most users)
+                  {:else if maxMemory >= 2 && maxMemory < 4}
+                    {maxMemory}GB (Good for modded Minecraft)
+                  {:else}
+                    {maxMemory}GB (High - ensure enough system RAM)
+                  {/if}
+                </span>
               </div>
-                <!-- Launch controls -->
-              <div class="launch-controls">                <!-- Debug terminal toggle -->
-                <div class="debug-toggle">
-                  <label class="debug-checkbox">
+                
+              <!-- Compact Launch Controls -->
+              <div class="launch-section">
+                <div class="debug-toggle-compact">
+                  <label class="debug-checkbox-compact">
                     <input type="checkbox" bind:checked={showDebugTerminal} />
-                    🐛 Show Debug Terminal (for troubleshooting launch issues)
+                    🐛 Show Debug Terminal
                   </label>
                 </div>
                 
                 {#if launchStatus === 'ready'}
                   {#if $clientState.minecraftServerStatus === 'running' && clientSyncStatus === 'ready' && downloadStatus === 'ready'}
-                    <button class="play-button" on:click={launchMinecraftWithDebug}>
+                    <button class="play-button-main" on:click={launchMinecraftWithDebug}>
                       🎮 PLAY MINECRAFT
                     </button>
                   {:else}
-                    <button class="play-button disabled" disabled>
+                    <button class="play-button-main disabled" disabled>
                       {#if $clientState.minecraftServerStatus !== 'running'}
                         ⏸️ WAITING FOR SERVER
                       {:else if clientSyncStatus !== 'ready'}
@@ -450,25 +427,26 @@
                       {/if}
                     </button>
                     {#if $clientState.minecraftServerStatus !== 'running'}
-                      <p class="server-status-message">
+                      <div class="status-message">
                         The Minecraft server is not running. Please wait for it to start.
-                      </p>
+                      </div>
                     {:else if clientSyncStatus !== 'ready'}
-                      <p class="server-status-message">
+                      <div class="status-message">
                         Download the Minecraft client files before playing.
-                      </p>
+                      </div>
                     {:else if downloadStatus !== 'ready'}
-                      <p class="server-status-message">
+                      <div class="status-message">
                         Download the required mods before playing.
-                      </p>
+                      </div>
                     {/if}
                   {/if}
                 {:else if launchStatus === 'launching'}
-                  <div class="launching-status">
+                  <div class="launching-section">
                     <h3>🚀 Launching Minecraft...</h3>
-                    <div class="launch-progress">
+                    <div class="progress-container">
                       <p>{launchProgress.type}: {launchProgress.task}</p>
-                      {#if launchProgress.total > 0}                        <div class="progress-bar">
+                      {#if launchProgress.total > 0}
+                        <div class="progress-bar">
                           <div class="progress-fill" style="width: {Math.round((launchProgress.current / launchProgress.total) * 100)}%"></div>
                         </div>
                       {/if}
@@ -478,7 +456,7 @@
                     </button>
                   </div>
                 {:else if launchStatus === 'running'}
-                  <div class="running-status">
+                  <div class="running-section">
                     <h3>🎮 Minecraft is Running</h3>
                     <p>Minecraft is currently running. You can close this window.</p>
                     <button class="stop-button" on:click={stopMinecraft}>
@@ -486,7 +464,7 @@
                     </button>
                   </div>
                 {:else if launchStatus === 'error'}
-                  <div class="error-status">
+                  <div class="error-section">
                     <h3>❌ Launch Failed</h3>
                     <p>There was an error launching Minecraft. Check the logs for details.</p>
                     <button class="retry-button" on:click={() => launchStatus = 'ready'}>
@@ -518,10 +496,14 @@
         </div>
         
         <div class="last-check">
-          {#if lastCheck}
-            Last checked: {lastCheck.toLocaleTimeString()}
-          {/if}
-            {#if isChecking}
+          <span class="last-check-time">
+            {#if lastCheck}
+              Last checked: {lastCheck.toLocaleTimeString()}
+            {:else}
+              Never checked
+            {/if}
+          </span>
+          {#if isChecking}
             <span class="checking">Checking...</span>
           {:else}
             <button class="refresh-button" on:click={handleRefreshFromDashboard}>
@@ -535,9 +517,753 @@
   .client-main {
     display: flex;
     flex-direction: column;
+    max-width: 1200px;
+    margin: 0 auto;
+    gap: 0.25rem;
   }
-  
-  /* Client mod styling */  .mod-item.client-mod {
+
+  /* Improved Status Header */
+  .status-header-container {
+    display: flex;
+    gap: 0.75rem;
+    margin: 1rem 0 0.75rem 0;
+    justify-content: center;
+  }
+
+  .connection-card,
+  .server-card {
+    background: rgba(31, 41, 55, 0.6);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 6px;
+    padding: 0.4rem 0.6rem;
+    transition: all 0.2s ease;
+    min-width: fit-content;
+    max-width: 200px;
+  }
+
+  .connection-card:hover,
+  .server-card:hover {
+    background: rgba(31, 41, 55, 0.8);
+    border-color: rgba(75, 85, 99, 0.5);
+  }
+
+  .compact-status-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .status-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+
+  .status-label {
+    font-size: 0.65rem;
+    color: #9ca3af;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #ef4444; /* Default red */
+    box-shadow: 0 0 4px rgba(239, 68, 68, 0.6);
+  }
+
+  /* Connection status - green when connected */
+  .connection-card .status-dot.connected {
+    background: #10b981 !important;
+    box-shadow: 0 0 4px rgba(16, 185, 129, 0.6) !important;
+  }
+
+  /* Server status - green when running */
+  .server-card .status-dot.running {
+    background: #10b981 !important;
+    box-shadow: 0 0 4px rgba(16, 185, 129, 0.6) !important;
+  }
+
+  /* Keep red for stopped/disconnected (default) */
+  .connection-card .status-dot.disconnected,
+  .server-card .status-dot.stopped {
+    background: #ef4444;
+    box-shadow: 0 0 4px rgba(239, 68, 68, 0.6);
+  }
+
+  .server-address {
+    background: rgba(17, 24, 39, 0.8);
+    color: #60a5fa;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    white-space: nowrap;
+  }
+
+  .connection-text {
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .connection-text.connected {
+    color: #10b981;
+  }
+
+  .connection-text:not(.connected) {
+    color: #ef4444;
+  }
+
+  .server-status {
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .server-status.running {
+    color: #10b981;
+  }
+
+  .server-status:not(.running) {
+    color: #ef4444;
+  }
+
+  /* Compact Game Info */
+  .game-info-compact {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .ready-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid #334155;
+  }
+
+  .ready-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+  }
+
+  /* Dynamic header colors */
+  .status-header.ready {
+    color: #10b981;
+  }
+
+  .status-header.waiting {
+    color: #f59e0b;
+  }
+
+  .status-header.needs-client {
+    color: #ef4444;
+  }
+
+  .status-header.needs-mods {
+    color: #3b82f6;
+  }
+
+  .player-info-inline {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+  }
+
+  .player-label {
+    color: #9ca3af;
+  }
+
+  .player-name {
+    color: #10b981;
+    font-weight: 600;
+  }
+
+  /* Compact Server Info Card */
+  .server-info-compact {
+    display: flex;
+    align-items: center;
+    background: rgba(17, 24, 39, 0.6);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    font-size: 0.9rem;
+    border-top: 1px solid #334155;
+    gap: 1rem;
+  }
+
+  .server-detail-card {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    text-align: center;
+    gap: 0.25rem;
+  }
+
+  .detail-label {
+    color: #9ca3af;
+    font-weight: 500;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .detail-value {
+    color: #e5e7eb;
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+
+  .loader-version {
+    color: #9ca3af;
+    font-size: 0.8rem;
+  }
+
+  .divider {
+    width: 1px;
+    height: 30px;
+    background: linear-gradient(to bottom, transparent, #6b7280, transparent);
+    flex-shrink: 0;
+  }
+
+  /* Status Row */
+  .status-row {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    padding: 0.5rem;
+    background: rgba(17, 24, 39, 0.3);
+    border-radius: 6px;
+    border-top: 1px solid #334155;
+  }
+
+  .status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    background: rgba(17, 24, 39, 0.6);
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    border: 1px solid;
+  }
+
+  .status-indicator.ready {
+    border-color: rgba(16, 185, 129, 0.3);
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+  }
+
+  .status-indicator.checking {
+    border-color: rgba(59, 130, 246, 0.3);
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+  }
+
+  .status-indicator.needed {
+    border-color: rgba(239, 68, 68, 0.3);
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+  }
+
+  .status-indicator.downloading {
+    border-color: rgba(245, 158, 11, 0.3);
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+  }
+
+  .status-indicator.error {
+    border-color: rgba(239, 68, 68, 0.3);
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+  }
+
+  /* Detail Sections */
+  .detail-section {
+    background: rgba(31, 41, 55, 0.4);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem;
+    border-top: 1px solid #334155;
+  }
+
+  .detail-section h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1rem;
+    color: #e5e7eb;
+  }
+
+  .detail-section p {
+    margin: 0.25rem 0;
+    font-size: 0.9rem;
+    color: #9ca3af;
+  }
+
+  /* Compact Memory Settings */
+  .memory-settings-compact {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.9rem;
+    background: rgba(31, 41, 55, 0.4);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    border-top: 1px solid #334155;
+  }
+
+  .memory-label {
+    color: #e5e7eb;
+    font-weight: 500;
+  }
+
+  .memory-input {
+    width: 60px !important;
+    height: 28px !important;
+    padding: 0.25rem !important;
+    background: rgba(17, 24, 39, 0.8) !important;
+    border: 1px solid rgba(75, 85, 99, 0.5) !important;
+    border-radius: 4px !important;
+    color: #e5e7eb !important;
+    font-size: 0.85rem !important;
+    text-align: center !important;
+  }
+
+  .memory-input:focus {
+    outline: none !important;
+    border-color: #3b82f6 !important;
+  }
+
+  .memory-info {
+    color: #9ca3af;
+    font-size: 0.8rem;
+  }
+
+  /* Launch Section */
+  .launch-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem;
+    background: rgba(17, 24, 39, 0.2);
+    border-radius: 6px;
+    border-top: 1px solid #334155;
+  }
+
+  .debug-toggle-compact {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+  }
+
+  .debug-checkbox-compact {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    color: #9ca3af;
+    user-select: none;
+  }
+
+  .debug-checkbox-compact input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: #3b82f6;
+    cursor: pointer;
+  }
+
+  .debug-checkbox-compact:hover {
+    color: #e5e7eb;
+  }
+
+  /* Main Play Button */
+  .play-button-main {
+    width: 100% !important;
+    height: 40px !important;
+    background: linear-gradient(135deg, #10b981, #059669) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 6px !important;
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+    cursor: pointer !important;
+    transition: all 0.2s !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .play-button-main:hover:not(:disabled) {
+    background: linear-gradient(135deg, #059669, #047857) !important;
+    transform: translateY(-1px) !important;
+  }
+
+  .play-button-main:disabled {
+    background: rgba(75, 85, 99, 0.5) !important;
+    color: rgba(156, 163, 175, 0.8) !important;
+    cursor: not-allowed !important;
+    transform: none !important;
+    box-shadow: 0 0 8px rgba(156, 163, 175, 0.3) !important;
+    border: 1px solid rgba(156, 163, 175, 0.4) !important;
+  }
+
+  /* Action Buttons */
+  .action-button {
+    background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 6px !important;
+    padding: 0.5rem 1rem !important;
+    font-size: 0.9rem !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: all 0.2s !important;
+    margin: 0.5rem 0 0 0 !important;
+  }
+
+  .action-button:hover {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
+  }
+
+  /* Acknowledge Button */
+  .acknowledge-button {
+    background: linear-gradient(135deg, #10b981, #059669) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 6px !important;
+    padding: 0.5rem 1rem !important;
+    font-size: 0.9rem !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: all 0.2s !important;
+    margin: 0.5rem 0 0 0 !important;
+  }
+
+  .acknowledge-button:hover {
+    background: linear-gradient(135deg, #059669, #047857) !important;
+  }
+
+  /* Compact Mod Lists */
+  .compact-mod-section {
+    margin: 0.75rem 0;
+  }
+
+  .compact-mod-section h4 {
+    font-size: 0.9rem;
+    color: #e5e7eb;
+    margin: 0 0 0.5rem 0;
+    font-weight: 600;
+  }
+
+  .compact-mod-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .compact-mod-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0.5rem;
+    background: rgba(17, 24, 39, 0.4);
+    border-radius: 4px;
+    border-left: 3px solid #3b82f6;
+    font-size: 0.85rem;
+  }
+
+  .compact-mod-item.optional {
+    border-left-color: #f59e0b;
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .compact-mod-item.client-mod {
+    border-left-color: #a855f7;
+    background: rgba(168, 85, 247, 0.1);
+  }
+
+  .compact-mod-item.new-download {
+    border-left-color: #10b981;
+    background: rgba(16, 185, 129, 0.1);
+  }
+
+  .compact-mod-item.removal {
+    border-left-color: #ef4444;
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  .compact-mod-item .mod-name {
+    color: #e5e7eb;
+    font-weight: 500;
+    flex: 1;
+    margin-right: 0.5rem;
+  }
+
+  .version-badge {
+    background: rgba(59, 130, 246, 0.2);
+    color: #60a5fa;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .new-badge {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .removal-badge {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  /* Status Message */
+  .status-message {
+    font-size: 0.8rem;
+    color: #ef4444;
+    text-align: center;
+    margin-top: 0.25rem;
+    font-style: italic;
+  }
+
+  /* Progress Components */
+  .progress-container {
+    margin-top: 0.5rem;
+  }
+
+  .progress-bar {
+    width: 100%;
+    height: 8px;
+    background: rgba(75, 85, 99, 0.3);
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 0.25rem 0;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6, #10b981);
+    transition: width 0.3s ease;
+  }
+
+  .progress-text {
+    font-size: 0.8rem;
+    color: #9ca3af;
+    margin: 0.25rem 0;
+  }
+
+  .current-file {
+    font-size: 0.8rem;
+    color: #e5e7eb;
+    margin: 0.25rem 0;
+    font-weight: 500;
+  }
+
+  .current-file-section {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background: rgba(17, 24, 39, 0.4);
+    border-radius: 4px;
+    border: 1px solid rgba(75, 85, 99, 0.2);
+  }
+
+  .file-progress-bar {
+    width: 100%;
+    height: 6px;
+    background: rgba(75, 85, 99, 0.3);
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 0.25rem 0;
+  }
+
+  .file-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #f59e0b, #f97316);
+    transition: width 0.3s ease;
+  }
+
+  .file-progress-text {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    margin: 0.25rem 0;
+  }
+
+  .download-speed {
+    font-size: 0.75rem;
+    color: #3b82f6;
+    margin: 0.25rem 0;
+    font-weight: 500;
+  }
+
+  /* Special Status Sections */
+  .launching-section,
+  .running-section,
+  .error-section {
+    background: rgba(31, 41, 55, 0.6);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem;
+    text-align: center;
+  }
+
+  .launching-section h3,
+  .running-section h3,
+  .error-section h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1rem;
+  }
+
+  .launching-section h3 {
+    color: #3b82f6;
+  }
+
+  .running-section h3 {
+    color: #10b981;
+  }
+
+  .error-section h3 {
+    color: #ef4444;
+  }
+
+  /* Control Buttons */
+  .stop-button,
+  .retry-button {
+    background: linear-gradient(135deg, #ef4444, #dc2626) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 6px !important;
+    padding: 0.5rem 1rem !important;
+    font-size: 0.9rem !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: all 0.2s !important;
+    margin: 0.5rem 0 0 0 !important;
+  }
+
+  .stop-button:hover,
+  .retry-button:hover {
+    background: linear-gradient(135deg, #dc2626, #b91c1c) !important;
+  }
+
+  .retry-button {
+    background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
+  }
+
+  .retry-button:hover {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
+  }
+
+  /* Last Check Section */
+  .last-check {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8rem;
+    color: #9ca3af;
+    padding: 0.5rem;
+    background: rgba(31, 41, 55, 0.4);
+    border-radius: 6px;
+    margin-top: 0.5rem;
+  }
+
+  .refresh-button {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(99, 102, 241, 0.2)) !important;
+    color: #3b82f6 !important;
+    border: 1px solid rgba(59, 130, 246, 0.3) !important;
+    border-radius: 4px !important;
+    padding: 0.25rem 0.5rem !important;
+    font-size: 0.9rem !important;
+    cursor: pointer !important;
+    transition: all 0.2s !important;
+  }
+
+  .refresh-button:hover {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.3), rgba(99, 102, 241, 0.3)) !important;
+    transform: translateY(-1px) !important;
+  }
+
+  .checking {
+    color: #f59e0b;
+    font-style: italic;
+  }
+
+  /* Auth Section Styling */
+  .auth-section {
+    background: rgba(31, 41, 55, 0.6);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+  }
+
+  .auth-section h2 {
+    color: #e5e7eb;
+    margin-bottom: 1rem;
+  }
+
+  .auth-section p {
+    color: #9ca3af;
+    margin-bottom: 1rem;
+  }
+
+  .auth-button {
+    background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 6px !important;
+    padding: 0.75rem 1.5rem !important;
+    font-size: 1rem !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: all 0.2s !important;
+  }
+
+  .auth-button:hover {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
+  }
+
+  .connection-status-display {
+    background: rgba(31, 41, 55, 0.6);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+  }
+
+  .connection-status-display h2 {
+    color: #f59e0b;
+    margin-bottom: 1rem;
+  }
+
+  .connection-status-display p {
+    color: #9ca3af;
+  }
+
+  /* Legacy styling kept for compatibility */
+  .mod-item.client-mod {
     border-left: 3px solid #a855f7;
     background: rgba(168, 85, 247, 0.1);
   }
@@ -547,7 +1273,6 @@
     background: rgba(245, 158, 11, 0.1);
   }
 
-  /* Mod name and version styling for better distinction */
   .mod-name {
     font-weight: 600;
     color: rgba(255, 255, 255, 0.95);
@@ -580,49 +1305,37 @@
     background: rgba(16, 185, 129, 0.15);
     padding: 0.15rem 0.4rem;
     border-radius: 4px;
-    font-size: 0.85rem;    font-weight: 600;
-  }
-  /* Debug terminal toggle */
-  .debug-toggle {
-    margin-bottom: 1rem;
-    padding: 0.75rem;
-    background: rgba(59, 130, 246, 0.1);
-    border: 1px solid rgba(59, 130, 246, 0.2);
-    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 600;
   }
 
-  .debug-checkbox {
-    display: flex;
-    align-items: center;
-    cursor: pointer;
-    font-size: 0.9rem;
-    color: #e5e7eb;
-    user-select: none;
-    gap: 0.5rem;
-  }
-
-  .debug-checkbox input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: #3b82f6;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
-  .debug-checkbox:hover {
-    color: #f3f4f6;
-  }
-
-  /* Update check status styling */
   .update-check-status {
     color: rgba(255, 255, 255, 0.6);
     font-size: 0.9rem;
     font-style: italic;
     margin-top: 0.5rem;
   }
-  
-  /* Make checking-updates status appear as ready but with subtle check indicator */
-  .sync-status.checking h3 {
-    color: #10b981; /* Same green as ready status */
+
+  /* Responsive Design */
+  @media (max-width: 768px) {
+    .status-header-container {
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .server-info-compact {
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .status-row {
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .memory-settings-compact {
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
   }
 </style>
