@@ -140,9 +140,13 @@ async function cleanupOldServerVersions(serverPath, oldConfig) {
           }
         }
         
-        // Clean up Fabric launcher JARs
-        if (file.includes('fabric-server-launch') && file.endsWith('.jar')) {
-          filesToCleanup.push({ file, reason: `Old Fabric server launcher JAR` });
+        // NOTE: Do NOT clean up fabric-server-launch.jar - it's the current launcher file needed to run the server
+        // Only clean up version-specific fabric server JARs that contain old version numbers
+        if (file.includes('fabric-server') && file.endsWith('.jar') && file !== 'fabric-server-launch.jar') {
+          // Only delete fabric server JARs that contain the old MC version
+          if (oldConfig.version && (file.includes(oldConfig.version) || file.includes(`mc.${oldConfig.version}`) || file.includes(`mc${oldConfig.version}`))) {
+            filesToCleanup.push({ file, reason: `Old Fabric server JAR with version (${oldConfig.version})` });
+          }
         }
         
         // Clean up old server backups that might have version info
