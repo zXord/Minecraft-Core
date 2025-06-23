@@ -889,84 +889,87 @@
     {#if $installedMods.length === 0}
       <div class="no-mods">No mods installed</div>
     {:else}
-      <div class="grid-header">
-        <div class="header-cell select-cell">
+      <div class="table-header">
+        <div class="header-checkbox">
           <input type="checkbox"
             checked={selectedMods.size === $installedMods.filter(mod => !$disabledMods.has(mod)).length}
             on:change={toggleSelectAllInstalledMods}
           />
         </div>
-        <div class="header-cell">Mod Name</div>
-        <div class="header-cell">Location</div>
-        <div class="header-cell">Current Version</div>
-        <div class="header-cell">Available Update</div>
-        <div class="header-cell">Actions</div>      </div>
+        <div class="header-mod-name">Mod Name</div>
+        <div class="header-location">Location</div>
+        <div class="header-version">Current Version</div>
+        <div class="header-update">Available Update</div>
+        <div class="header-actions">Actions</div>
+      </div>
       <div class="mods-grid">
         {#each $installedMods.filter(mod => !$disabledMods.has(mod)) as mod (mod)}
           {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
           {@const modCategoryInfo = $categorizedMods.find(m => m.fileName === mod)}
           <div class="mod-card {$expandedInstalledMod === mod ? 'expanded' : ''} {modCategoryInfo?.category || ''}">
-            <div class="mod-item-header-container">
-              <div class="select-cell">
+            <div class="table-row">
+              <div class="row-checkbox">
                 <input type="checkbox"
                   checked={selectedMods.has(mod)}
                   on:change={() => toggleSelectMod(mod)}
                 />
               </div>
-              <div class="mod-info">
+              <div class="row-mod-name">
                 <span class="mod-name">{modCategoryInfo?.name || mod}</span>
                 
                 {#if modInfo && modInfo.mcVersion}
                     <span class="mc-version-tag">MC {modInfo.mcVersion}</span>
                 {/if}
-                
-                <div class="mod-category-container">
-                  <select 
-                    class="mod-category-select"
-                    value={modCategoryInfo?.category || 'server-only'}
-                    on:change={(e) => handleCategoryChange(mod, e)}
-                    disabled={$serverState.status === 'Running'}
-                  >
-                    <option value="server-only">Server Only</option>
-                    <option value="client-only">Client Only</option>
-                    <option value="both">Client & Server</option>
-                  </select>
-                  
-                  {#if modCategoryInfo?.category === 'client-only' || modCategoryInfo?.category === 'both'}
-                    <div class="mod-required-checkbox">
-                      <label title="Whether this mod is required for clients to connect">
-                        <input 
-                          type="checkbox"
-                          checked={modCategoryInfo?.required}
-                          on:change={(e) => handleRequirementChange(mod, e)}
-                          disabled={$serverState.status === 'Running'}
-                        />
-                        <span>Client Requirement</span>
-                      </label>
-                    </div>
-                  {/if}
-                </div>
               </div>
 
-              <div class="mod-location-column">
-                {#if modCategoryInfo}
-                  {#if modCategoryInfo.category === 'server-only'}
-                    <span class="location-tag server-tag">Server</span>
-                  {:else if modCategoryInfo.category === 'client-only'}
-                    <span class="location-tag client-tag">Client</span>
-                  {:else if modCategoryInfo.category === 'both'}
-                    <span class="location-tag both-tag">Both</span>
+              <div class="row-location">
+                <div class="location-content">
+                  {#if modCategoryInfo}
+                    {#if modCategoryInfo.category === 'server-only'}
+                      <span class="location-tag server-tag">Server</span>
+                    {:else if modCategoryInfo.category === 'client-only'}
+                      <span class="location-tag client-tag">Client</span>
+                    {:else if modCategoryInfo.category === 'both'}
+                      <span class="location-tag both-tag">Both</span>
+                    {/if}
                   {/if}
-                {/if}
+                  
+                  <div class="mod-category-container">
+                    <select 
+                      class="mod-category-select"
+                      value={modCategoryInfo?.category || 'server-only'}
+                      on:change={(e) => handleCategoryChange(mod, e)}
+                      disabled={$serverState.status === 'Running'}
+                    >
+                      <option value="server-only">Server Only</option>
+                      <option value="client-only">Client Only</option>
+                      <option value="both">Client & Server</option>
+                    </select>
+                    
+                    {#if modCategoryInfo?.category === 'client-only' || modCategoryInfo?.category === 'both'}
+                      <div class="mod-required-checkbox">
+                        <label title="Whether this mod is required for clients to connect">
+                          <input 
+                            type="checkbox"
+                            checked={modCategoryInfo?.required}
+                            on:change={(e) => handleRequirementChange(mod, e)}
+                            disabled={$serverState.status === 'Running'}
+                          />
+                          <span>Client Requirement</span>
+                        </label>
+                      </div>
+                    {/if}
+                  </div>
+                </div>
               </div>
               
-              <div class="mod-version-column">
+              <div class="row-version">
                 {#if modInfo && modInfo.versionNumber}
                     <span class="version-tag current-version">{modInfo.versionNumber}</span>
                 {/if}
               </div>
               
-              <div class="mod-update-column">
+              <div class="row-update">
                 {#if $modsWithUpdates.has(mod)}
                   {@const updateInfo = $modsWithUpdates.get(mod)}
                   <div class="update-container">
@@ -975,7 +978,9 @@
                 {:else}
                   <span class="up-to-date">Up to date</span>
                 {/if}
-              </div>                <div class="mod-actions">
+              </div>
+              
+              <div class="row-actions">
                 {#if $modsWithUpdates.has(mod) && !$disabledMods.has(mod)}
                   <button class="update-button" on:click={() => updateModToLatest(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
                     {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Update
@@ -1125,26 +1130,28 @@
       </div>
       
       <div class="mods-list">
-        <div class="grid-header">          <div class="header-cell select-cell">
+        <div class="table-header disabled-table-header">
+          <div class="header-checkbox">
             <input type="checkbox"
               checked={selectedDisabledMods.size === Array.from($disabledMods).length}
               on:change={toggleSelectAllDisabledMods}
             />
           </div>
-          <div class="header-cell">Mod Name</div>
-          <div class="header-cell">Current Version</div>
-          <div class="header-cell">Available Update</div>
-          <div class="header-cell">Actions</div>        </div>        <div class="mods-grid">
+          <div class="header-mod-name">Mod Name</div>
+          <div class="header-version">Current Version</div>
+          <div class="header-update">Available Update</div>
+          <div class="header-actions">Actions</div>
+        </div>        <div class="mods-grid">
           {#each Array.from($disabledMods) as mod (mod)}
             <div class="mod-card disabled">
-              <div class="mod-item-header-container">
-                <div class="select-cell">
+              <div class="table-row disabled-table-row">
+                <div class="row-checkbox">
                   <input type="checkbox"
                     checked={selectedDisabledMods.has(mod)}
                     on:change={() => toggleSelectDisabledMod(mod)}
                   />
                 </div>
-                <div class="mod-info">
+                <div class="row-mod-name">
                   <span class="mod-name">{mod}</span>
                   
                   {#if $installedModInfo.find(m => m.fileName === mod)}
@@ -1155,7 +1162,7 @@
                   {/if}
                 </div>
                 
-                <div class="mod-version-column">
+                <div class="row-version">
                   {#if $installedModInfo.find(m => m.fileName === mod)}
                     {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
                     {#if modInfo.versionNumber}
@@ -1164,7 +1171,7 @@
                   {/if}
                 </div>
                 
-                <div class="mod-update-column">
+                <div class="row-update">
                   {#if $modsWithUpdates.has(mod)}
                     {@const updateInfo = $modsWithUpdates.get(mod)}
                     <div class="update-container">
@@ -1175,7 +1182,7 @@
                   {/if}
                 </div>
                 
-                <div class="mod-actions">
+                <div class="row-actions">
                   <div class="button-row">
                     <button class="delete-button" on:click={() => showDeleteConfirmation(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
                       {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete
@@ -1539,13 +1546,153 @@
     padding: 0.5rem;
   }
   
-  .grid-header {
-    display: grid;
-    grid-template-columns: auto 2fr 1fr 1fr auto;
-    border-left: 1px solid transparent;
+  /* NEW TABLE-BASED LAYOUT */
+  .table-header {
+    display: flex;
+    align-items: center;
     padding: 0.75rem 1rem;
     margin-bottom: 0.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   }
+  
+  .table-row {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    overflow: hidden;
+  }
+  
+  /* FIXED COLUMN WIDTHS */
+  .header-checkbox,
+  .row-checkbox {
+    width: 60px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+  }
+  
+  .header-mod-name,
+  .row-mod-name {
+    width: 200px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .header-location,
+  .row-location {
+    width: 180px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+  
+  .header-version,
+  .row-version {
+    width: 120px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+  
+  .header-update,
+  .row-update {
+    width: 120px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+  
+  .header-actions,
+  .row-actions {
+    flex: 1;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+  }
+  
+  /* HEADER STYLING */
+  .table-header > div {
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.9rem;
+  }
+  
+  /* DISABLED MODS TABLE (5 columns - no location) */
+  .disabled-table-header {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  
+  .disabled-table-row {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    overflow: hidden;
+  }
+  
+  /* DISABLED TABLE COLUMN WIDTHS (5 columns) */
+  .disabled-table-header .header-checkbox,
+  .disabled-table-row .row-checkbox {
+    width: 60px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+  }
+  
+  .disabled-table-header .header-mod-name,
+  .disabled-table-row .row-mod-name {
+    width: 250px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .disabled-table-header .header-version,
+  .disabled-table-row .row-version {
+    width: 150px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+  
+  .disabled-table-header .header-update,
+  .disabled-table-row .row-update {
+    width: 150px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+  
+  .disabled-table-header .header-actions,
+  .disabled-table-row .row-actions {
+    flex: 1;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+  }
+  
+  /* OLD GRID CSS - DISABLED */
+  .grid-header {
+    display: none;
+  }
+  
+
   
   .header-cell {
     font-weight: 500;
@@ -1562,19 +1709,7 @@
     text-align: right;
   }
   
-  .grid-header .header-cell:nth-child(1) {
-    text-align: center;
-  }
-  .grid-header .header-cell:nth-child(2) {
-    text-align: left;
-  }
-  .grid-header .header-cell:nth-child(3),
-  .grid-header .header-cell:nth-child(4) {
-    text-align: center;
-  }
-  .grid-header .header-cell:nth-child(5) {
-    text-align: right;
-  }
+
   
   .mods-grid {
     display: flex;
@@ -1623,37 +1758,16 @@
     font-weight: 500;
   }
   
-  .mod-item-header-container {
-    display: grid;
-    grid-template-columns: auto 2fr 1fr 1fr auto;
-    align-items: center;
-    padding: 0.75rem 1rem;
-  }
+
   
-  .mod-item-header-container .select-cell {
-    justify-self: center;
-  }
-  
-  .mod-item-header-container .mod-info {
-    justify-self: start;
-  }
-  
-  .mod-item-header-container .mod-version-column {
-    justify-self: center;
-  }
-  
-  .mod-item-header-container .mod-update-column {
-    justify-self: center;
-  }
-  
-  .mod-item-header-container .mod-actions {
-    justify-self: end;
-  }
+
   
   .mod-info {
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
+    max-width: 100%;
+    overflow: hidden;
   }
   
   .mod-name {
@@ -1671,17 +1785,19 @@
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
-    margin-top: 0.5rem;
+    margin-top: 0.25rem;
+    max-width: 100%;
+    width: 100%;
   }
 
   .mod-category-select {
-    padding: 0.25rem;
+    padding: 0.2rem 0.3rem;
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 4px;
     color: white;
-    font-size: 0.85rem;
-    width: auto;
+    font-size: 0.75rem;
+    width: 100%;
     cursor: pointer;
   }
 
@@ -1695,8 +1811,8 @@
   }
 
   .mod-required-checkbox {
-    margin-top: 0.25rem;
-    font-size: 0.85rem;
+    margin-top: 0.2rem;
+    font-size: 0.7rem;
     color: rgba(255, 255, 255, 0.9);
   }
 
@@ -1724,6 +1840,9 @@
     justify-content: center;
     text-align: center;
     gap: 0.25rem;
+    max-width: 100%;
+    overflow: hidden;
+    width: 100%;
   }
   
   .update-container {
@@ -1779,8 +1898,11 @@
   .mod-actions {
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: flex-end;
     gap: 0.5rem;
+    max-width: 100%;
+    overflow: hidden;
+    width: 100%;
   }
   
   .delete-button, .update-button, .disable-button, .enable-button, .update-all-button {
@@ -1795,8 +1917,13 @@
   .delete-button {
     background: rgba(244, 67, 54, 0.2);
     color: #ff6b6b;
+    padding: 0.35rem 0.75rem;
     width: 100%;
     text-align: center;
+    min-height: 2.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   
   .delete-button:hover {
@@ -1884,9 +2011,14 @@
   .disable-button {
     background: rgba(255, 152, 0, 0.2);
     color: #ffae42;
+    padding: 0.35rem 0.75rem;
     border-radius: 6px;
     width: 100%;
     text-align: center;
+    min-height: 2.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   
   .disable-button:hover {
@@ -1896,9 +2028,14 @@
   .enable-button {
     background: rgba(76, 175, 80, 0.2);
     color: #66bb6a;
+    padding: 0.35rem 0.75rem;
     border-radius: 6px;
     width: 100%;
     text-align: center;
+    min-height: 2.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   
   .enable-button:hover {
@@ -2247,6 +2384,7 @@
   .button-row .disable-button,
   .button-row .enable-button {
     flex: 1;
+    min-height: 2.2rem;
   }
   
   .disabled-mods-section {
@@ -2283,35 +2421,7 @@
     flex: none;
   }
   
-  /* Align header-cell content precisely over columns */
-  .grid-header .header-cell.select-cell {
-    justify-self: center;
-  }
-  .grid-header .header-cell:nth-child(2) {
-    justify-self: start;
-  }
-  .grid-header .header-cell:nth-child(3),
-  .grid-header .header-cell:nth-child(4) {
-    justify-self: center;
-  }
-  .grid-header .header-cell:nth-child(5) {
-    justify-self: end;
-  }
-  
-  /* Ensure mod-item header cells line up by column position */
-  .mod-item-header-container > *:nth-child(1) {
-    justify-self: center;
-  }
-  .mod-item-header-container > *:nth-child(2) {
-    justify-self: start;
-  }
-  .mod-item-header-container > *:nth-child(3),
-  .mod-item-header-container > *:nth-child(4) {
-    justify-self: center;
-  }
-  .mod-item-header-container > *:nth-child(5) {
-    justify-self: end;
-  }
+
 
   .required-by {
     font-size: 0.85rem;
@@ -2331,10 +2441,19 @@
   }
 
   .mod-location-column {
-    flex: 0 0 80px;
     display: flex;
     align-items: center;
     justify-content: center;
+    max-width: 100%;
+    overflow: hidden;
+  }
+  
+  .location-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
   }
   
   .location-tag {
