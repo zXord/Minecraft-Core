@@ -119,6 +119,12 @@ contextBridge.exposeInMainWorld('electron', {
       'toggle-manual-mod',      'update-manual-mod',
       'download-client-mod-version-updates',
       'clear-client-mod-cache',
+      // Server Java management channels
+      'server-java-check-requirements',
+      'server-java-ensure',
+      'server-java-get-path',
+      'server-java-get-available-versions',
+      'server-java-is-available',
       // Application lifecycle
       'app-close-response',
       // Management server events
@@ -200,6 +206,7 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-progress',
       'launcher-client-download-complete',
       'launcher-client-download-error',
+      'server-java-download-progress',
       'app-close-request',
     ];
     if (validChannels.includes(channel)) {
@@ -250,6 +257,7 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-progress',
       'launcher-client-download-complete',
       'launcher-client-download-error',
+      'server-java-download-progress',
       'app-close-request',
     ];
     if (validChannels.includes(channel)) {
@@ -302,6 +310,7 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-progress',
       'launcher-client-download-complete',
       'launcher-client-download-error',
+      'server-java-download-progress',
       'app-close-request',
     ];
     if (validChannels.includes(channel)) {

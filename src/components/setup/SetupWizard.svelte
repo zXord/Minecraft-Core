@@ -119,6 +119,25 @@
         fabricVersion: selectedFabric
       });
       
+      // Download Java for the server
+      installLogs = [...installLogs, 'Checking Java requirements...'];
+      try {
+        const javaResult = await window.electron.invoke('server-java-ensure', {
+          minecraftVersion: selectedMC,
+          serverPath: path
+        });
+        
+        if (javaResult.success) {
+          installLogs = [...installLogs, 'Java ready for server!'];
+        } else {
+          // Java download failed, but don't fail the whole setup - it will download on first start
+          installLogs = [...installLogs, `Java setup skipped: ${javaResult.error || 'Will download on first server start'}`];
+        }
+      } catch (javaError) {
+        // Java download failed, but don't fail the whole setup
+        installLogs = [...installLogs, 'Java setup skipped - will download on first server start'];
+      }
+      
       // Complete setup
       installLogs = [...installLogs, 'Setup completed successfully!'];
       installing = false;
@@ -134,6 +153,7 @@
     window.electron.removeAllListeners('minecraft-server-progress');
     window.electron.removeAllListeners('fabric-install-progress');
     window.electron.removeAllListeners('install-log');
+    window.electron.removeAllListeners('server-java-download-progress');
     
     // Add new listeners
     window.electron.on('minecraft-server-progress', (data) => {
@@ -153,6 +173,16 @@
     window.electron.on('install-log', (line) => {
       if (line && typeof line === 'string') {
         installLogs = [...installLogs, line];
+      }
+    });
+    
+    window.electron.on('server-java-download-progress', (data) => {
+      if (data && typeof data === 'object') {
+        installProgress = data.progress || 0;
+        installSpeed = data.downloadedMB && data.totalMB 
+          ? `${data.downloadedMB}/${data.totalMB} MB`
+          : '';
+        installLogs = [...installLogs, `Java: ${data.task}`];
       }
     });
   }
@@ -182,6 +212,7 @@
       window.electron.removeAllListeners('minecraft-server-progress');
       window.electron.removeAllListeners('fabric-install-progress');
       window.electron.removeAllListeners('install-log');
+      window.electron.removeAllListeners('server-java-download-progress');
     };
   });
 </script>

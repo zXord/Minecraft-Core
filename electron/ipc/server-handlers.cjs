@@ -14,7 +14,7 @@ const fs = require("fs");
 const appStore = require("../utils/app-store.cjs");
 function createServerHandlers(win) {
   return {
-    "start-server": (_e, { targetPath, port, maxRam }) => {
+    "start-server": async (_e, { targetPath, port, maxRam }) => {
       if (!targetPath || !fs.existsSync(targetPath)) {
         throw new Error("Invalid server path");
       }
@@ -52,7 +52,7 @@ function createServerHandlers(win) {
 
         initFromServerConfig(targetPath);
         cancelAutoRestart();
-        return startMinecraftServer(targetPath, port, maxRam);
+        return await startMinecraftServer(targetPath, port, maxRam);
     },
 
     "stop-server": () => {
