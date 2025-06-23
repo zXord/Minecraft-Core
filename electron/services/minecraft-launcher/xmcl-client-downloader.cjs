@@ -646,6 +646,52 @@ class XMCLClientDownloader {
     // Remove everything else - no exceptions
     return { keep: false, reason: 'Old version - cleaning up' };
   }
+
+  // Clear Minecraft client files for re-download
+  async clearMinecraftClient(clientPath, minecraftVersion) {
+    try {
+      const versionsDir = path.join(clientPath, 'versions');
+      
+      // Remove specific version directory
+      if (minecraftVersion) {
+        const versionDir = path.join(versionsDir, minecraftVersion);
+        if (fs.existsSync(versionDir)) {
+          fs.rmSync(versionDir, { recursive: true, force: true });
+        }
+        
+        // Also remove Fabric profiles for this version
+        if (fs.existsSync(versionsDir)) {
+          const allVersions = fs.readdirSync(versionsDir);
+          for (const version of allVersions) {
+            if (version.includes(`fabric-loader-`) && version.endsWith(`-${minecraftVersion}`)) {
+              const fabricDir = path.join(versionsDir, version);
+              if (fs.existsSync(fabricDir)) {
+                fs.rmSync(fabricDir, { recursive: true, force: true });
+                console.log(`🗑️ Removed Fabric profile: ${version}`);
+              }
+            }
+          }
+        }
+      }
+      
+      return { success: true, message: `Cleared client files for ${minecraftVersion}` };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Clear assets directory
+  async clearAssets(clientPath) {
+    try {
+      const assetsDir = path.join(clientPath, 'assets');
+      if (fs.existsSync(assetsDir)) {
+        fs.rmSync(assetsDir, { recursive: true, force: true });
+      }
+      return { success: true, message: 'Cleared assets directory' };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
 }
 
 module.exports = XMCLClientDownloader;
