@@ -99,7 +99,20 @@
   
   // Auto-start settings
   let autoStartMinecraft = false;
-  let autoStartManagement = false;  // Version update tracking
+  let autoStartManagement = false;
+  
+  // Help text dismissal
+  let helpTextDismissed = false;
+  
+  // Function to dismiss help text
+  function dismissHelpText() {
+    helpTextDismissed = true;
+    if (typeof window !== 'undefined' && window.localStorage) {
+      localStorage.setItem('managementHelpDismissed', 'true');
+    }
+  }
+  
+  // Version update tracking
   $: currentMcVersion = $settingsStore.mcVersion;
   $: currentFabricVersion = $settingsStore.fabricVersion;
   $: latestMcVersion = $latestVersions.mc;
@@ -248,6 +261,11 @@
   }
 
   onMount(() => {
+    // Load dismissed help text state
+    if (typeof window !== 'undefined' && window.localStorage) {
+      helpTextDismissed = localStorage.getItem('managementHelpDismissed') === 'true';
+    }
+    
     // Set up visibility change listener
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
@@ -460,35 +478,41 @@
 </script>  
 
 <div class="server-controls">
-  <div class="status-section">
+  <!-- COMPACT HEADER - Everything on one line -->
+  <div class="compact-header">
     <h3>Minecraft Server Control Panel</h3>
-    <div class="update-section">
+    <div class="header-actions">
       <button class="check-updates-button" on:click={checkVersionUpdates}>Check Updates</button>
       {#if mcUpdateAvailable || fabricUpdateAvailable}
-        <div class="update-notice">
-          {#if mcUpdateAvailable}
-            <span>Minecraft {currentMcVersion} → {latestMcVersion}</span>
-          {/if}
-          {#if fabricUpdateAvailable}
-            <span>Fabric {currentFabricVersion} → {latestFabricVersion}</span>
-          {/if}
-        </div>
+        <span class="update-notice">
+          {#if mcUpdateAvailable}MC {currentMcVersion} → {latestMcVersion}{/if}
+          {#if fabricUpdateAvailable} Fabric {currentFabricVersion} → {latestFabricVersion}{/if}
+        </span>
       {:else if upToDate}
-        <div class="update-notice up-to-date">All versions are up to date.</div>
+        <span class="update-notice up-to-date">All versions are up to date</span>
       {/if}
     </div>
-    <div class="status-display">
-      <span class="status-label">Minecraft Server Status:</span>
-      <span class="status-value" class:status-running={status === 'Running'} class:status-stopped={status !== 'Running'}>
-        {status}
-      </span>
+  </div>
+
+  <!-- MINECRAFT SERVER SECTION -->
+  <div class="minecraft-server-section">
+    <div class="minecraft-header">
+      <h4>Minecraft Server</h4>
+      <div class="status-compact">
+        <span class="status-label">Status:</span>
+        <span class="status-value" class:status-running={status === 'Running'} class:status-stopped={status !== 'Running'}>
+          {status}
+        </span>
+      </div>
     </div>
+
+    <!-- Main controls -->
+    <div class="main-controls">
     
-    <div class="settings" class:has-running-server={isServerRunning}>
-      <div class="setting-item">
-        <label id="port-label" for="port-input" class:disabled={isServerRunning}>
-          Port:
-        </label>
+    <!-- Settings Group -->
+    <div class="settings-group">
+      <div class="input-group">
+        <label for="port-input">Port:</label>
         <input
           id="port-input"
           type="number"
@@ -501,10 +525,8 @@
         />
       </div>
       
-      <div class="setting-item">
-        <label id="ram-label" for="ram-input" class:disabled={isServerRunning}>
-          RAM (GB):
-        </label>
+      <div class="input-group">
+        <label for="ram-input">RAM:</label>
         <input
           id="ram-input"
           type="number"
@@ -515,138 +537,149 @@
           disabled={isServerRunning}
           class:disabled-input={isServerRunning}
         />
+        <span class="unit">GB</span>
       </div>
     </div>
     
-    <div class="auto-start-section">
-      <div class="auto-start-item">
-        <input
-          type="checkbox"
-          id="auto-start-minecraft"
-          bind:checked={autoStartMinecraft}
-          on:change={updateSettings}
-        />
-        <label for="auto-start-minecraft">Auto-start Minecraft server on app launch</label>
-      </div>
+    <!-- Auto-start checkbox -->
+    <div class="auto-start-compact">
+      <input
+        type="checkbox"
+        id="auto-start-minecraft"
+        bind:checked={autoStartMinecraft}
+        on:change={updateSettings}
+      />
+      <label for="auto-start-minecraft">Auto-start server</label>
     </div>
     
-    <div class="button-group">
+    <!-- Action buttons -->
+    <div class="button-group-compact">
       <button 
-        class="control-button start-button" 
+        class="btn-compact start-button" 
         on:click={startServer}
         disabled={isServerRunning || !serverPath}
       >
-        Start Minecraft Server
+        Start
       </button>
       <button 
-        class="control-button stop-button" 
+        class="btn-compact stop-button" 
         on:click={stopServer}
         disabled={!isServerRunning}
       >
-        Stop Minecraft Server
+        Stop
       </button>
       <button 
-        class="control-button kill-button" 
+        class="btn-compact kill-button" 
         on:click={killServer}
         disabled={!isServerRunning}
       >
-        Force Kill
+        Kill
       </button>
     </div>
+    </div>
   </div>
   
-  <div class="players-section">
-    <h4>Online Players ({playerNames.length})</h4>
-    {#if playerNames.length === 0}
-    <p class="no-players">No players online</p>
-    {:else}
-      <ul class="player-list">
-        {#each playerNames as playerName (playerName)}
-          <li class="player-item" on:contextmenu={(e) => showPlayerContextMenu(e, playerName)}>
-            {playerName}
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </div>
-  
-  <!-- Management Server Section -->
-  <div class="management-server-section">
-    <h3>Client Management Server (Port {managementPort})</h3>
-    <div class="management-status">
-      <span class="status-label">Management Server Status:</span>
-      <span class="status-value" 
-            class:status-running={managementServerStatus === 'running'} 
-            class:status-stopped={managementServerStatus === 'stopped'}
-            class:status-starting={managementServerStatus === 'starting'}
-            class:status-stopping={managementServerStatus === 'stopping'}>
-        {#if managementServerStatus === 'starting'}
-          Starting...
-        {:else if managementServerStatus === 'stopping'}
-          Stopping...
-        {:else if managementServerStatus === 'running'}
-          Running
-        {:else}
-          Stopped
-        {/if}
-      </span>
+  <!-- COMPACT MANAGEMENT SERVER - Horizontal layout -->
+  <div class="management-compact">
+    <div class="management-header">
+      <h4>Client Management Server</h4>
+      <div class="management-status-compact">
+        <span class="status-label">Status:</span>
+        <span class="status-value" 
+              class:status-running={managementServerStatus === 'running'} 
+              class:status-stopped={managementServerStatus === 'stopped'}
+              class:status-starting={managementServerStatus === 'starting'}
+              class:status-stopping={managementServerStatus === 'stopping'}>
+          {#if managementServerStatus === 'starting'}
+            Starting...
+          {:else if managementServerStatus === 'stopping'}
+            Stopping...
+          {:else if managementServerStatus === 'running'}
+            Running
+          {:else}
+            Stopped
+          {/if}
+        </span>
+      </div>
     </div>
     
-    {#if managementServerStatus === 'running'}
-      <div class="management-info">
-        <p class="management-detail">Port: {managementPort}</p>
-        <p class="management-detail">Connected clients: {connectedClients}</p>
-        <p class="management-url">Server URL: http://localhost:{managementPort}</p>
-      </div>
-    {/if}
-    
-    <div class="management-controls">
-      <input
-        type="number"
-        min="1025"
-        max="65535"
-        bind:value={managementPort}
-        disabled={managementServerStatus === 'running' || managementServerStatus === 'starting'}
-        placeholder="8080"
-        class="port-input"
-      />
+    <div class="management-controls-compact">
+      <!-- Info when running -->
+      {#if managementServerStatus === 'running'}
+        <div class="management-info-compact">
+          <span>Port: {managementPort}</span>
+          <span>Clients: {connectedClients}</span>
+          <span class="management-url">http://localhost:{managementPort}</span>
+        </div>
+      {/if}
       
-      <div class="auto-start-section">
-        <div class="auto-start-item">
+      <!-- Controls row -->
+      <div class="management-row">
+        <div class="input-group">
+          <label for="management-port-input">Port:</label>
+          <input
+            id="management-port-input"
+            type="number"
+            min="1025"
+            max="65535"
+            bind:value={managementPort}
+            disabled={managementServerStatus === 'running' || managementServerStatus === 'starting'}
+            class="port-input"
+          />
+        </div>
+        
+        <div class="auto-start-compact">
           <input
             type="checkbox"
             id="auto-start-management"
             bind:checked={autoStartManagement}
             on:change={updateSettings}
           />
-          <label for="auto-start-management">Auto-start management server on app launch</label>
+          <label for="auto-start-management">Auto-start</label>
+        </div>
+        
+        <div class="button-group-compact">
+          <button 
+            class="btn-compact start-button" 
+            on:click={startManagementServer}
+            disabled={managementServerStatus === 'running' || managementServerStatus === 'starting' || !serverPath}
+          >
+            {managementServerStatus === 'starting' ? 'Starting...' : 'Start'}
+          </button>
+          <button 
+            class="btn-compact stop-button" 
+            on:click={stopManagementServer}
+            disabled={managementServerStatus === 'stopped' || managementServerStatus === 'stopping'}
+          >
+            {managementServerStatus === 'stopping' ? 'Stopping...' : 'Stop'}
+          </button>
         </div>
       </div>
       
-      <div class="button-group">
-        <button 
-          class="control-button start-button" 
-          on:click={startManagementServer}
-          disabled={managementServerStatus === 'running' || managementServerStatus === 'starting' || !serverPath}
-        >
-          {managementServerStatus === 'starting' ? 'Starting...' : 'Start Management Server'}
-        </button>
-        <button 
-          class="control-button stop-button" 
-          on:click={stopManagementServer}
-          disabled={managementServerStatus === 'stopped' || managementServerStatus === 'stopping'}
-        >
-          {managementServerStatus === 'stopping' ? 'Stopping...' : 'Stop Management Server'}
-        </button>
+      <!-- Help text - compact -->
+      {#if !helpTextDismissed}
+        <div class="management-help-compact">
+          <span>Remote clients connect to: <strong>your-server-ip:{managementPort}</strong></span>
+          <button class="dismiss-btn" on:click={dismissHelpText} title="Dismiss this message">×</button>
+        </div>
+      {/if}
+    </div>
+  </div>
+  
+  <!-- COMPACT PLAYERS - One line -->
+  <div class="players-compact">
+    <span class="players-label">Online Players ({playerNames.length}):</span>
+    {#if playerNames.length === 0}
+      <span class="no-players">No players online</span>
+    {:else}
+      <div class="player-list-inline">
+        {#each playerNames as playerName (playerName)}
+          <span class="player-name" role="button" tabindex="0" on:contextmenu={(e) => showPlayerContextMenu(e, playerName)}>
+            {playerName}
+          </span>
+        {/each}
       </div>
-    </div>
-    
-    <div class="management-help">
-      <p class="help-text">
-        The management server allows remote clients to connect and sync mods/configurations.
-        Clients should connect to: <strong>your-server-ip:{managementPort}</strong>
-      </p>
-    </div>
+    {/if}
   </div>
 </div>
 
@@ -655,67 +688,396 @@
 {/if}
 
 <style>
-  .settings {
+  /* COMPACT HORIZONTAL LAYOUT STYLES */
+  .server-controls {
+    background: rgba(20, 20, 20, 0.9);
+    border-radius: 8px;
+    padding: 1rem;
+    width: 100%;
+    margin: 0 0 1rem 0;
+    box-sizing: border-box;
+  }
+
+  /* Header - horizontal layout */
+  .compact-header {
     display: flex;
-    flex-direction: column;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #444;
+  }
+
+  .compact-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    color: #fff;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .check-updates-button {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    color: #fff;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: background 0.2s;
+  }
+
+  .check-updates-button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .update-notice {
+    font-size: 0.75rem;
+    color: #fbbf24;
+  }
+
+  .update-notice.up-to-date {
+    color: #10b981;
+  }
+
+  /* Main controls - everything horizontal */
+  .main-controls {
+    display: flex;
     align-items: center;
     gap: 1rem;
-    margin-bottom: 1.5rem;
-    padding: 0.8rem;
-    margin-top: 1.5rem;
-    background-color: rgba(30, 30, 30, 0.5);
-    border-radius: 8px;
-    max-width: 300px;
+    background: rgba(30, 30, 30, 0.6);
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin: 0;
+    flex-wrap: wrap;
+  }
+
+  .status-compact {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+  }
+
+  .settings-group {
+    display: flex;
+    gap: 1rem;
+  }
+
+  .input-group {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.8rem;
+  }
+
+  .input-group label {
+    color: #ccc;
+    margin: 0;
+    white-space: nowrap;
+  }
+
+  .input-group input[type="number"] {
+    padding: 0.25rem 0.375rem;
+    border-radius: 4px;
+    border: 1px solid #555;
+    background-color: #333;
+    color: white;
+    width: 75px;
+    text-align: center;
+    font-size: 0.8rem;
+  }
+
+  .unit {
+    color: #888;
+    font-size: 0.75rem;
+  }
+
+  .auto-start-compact {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.8rem;
+  }
+
+  .auto-start-compact input[type="checkbox"] {
+    margin: 0;
+    transform: scale(0.9);
+  }
+
+  .auto-start-compact label {
+    color: #ccc;
+    margin: 0;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .button-group-compact {
+    display: flex;
+    gap: 0.25rem;
     margin-left: auto;
-    margin-right: auto;
+    align-items: center;
+    flex-shrink: 0;
+  }
+
+  .btn-compact {
+    padding: 0 !important;
+    margin: 0 !important;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 0.75rem !important;
+    transition: all 0.2s ease;
+    width: 65px !important;
+    height: 28px !important;
+    min-width: 65px !important;
+    max-width: 65px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+    flex-shrink: 0 !important;
+    flex-grow: 0 !important;
+    box-sizing: border-box !important;
+    line-height: 1 !important;
+    font-family: inherit !important;
   }
   
-  .settings label {
-    font-weight: normal;
-    color: #dddddd !important;
-    margin-right: 0.5rem;
-  }
-  
-  .setting-item label {
-    color: #dddddd !important;
-  }
-  
-  /* Styling for disabled inputs when server is running */
-  label.disabled {
-    opacity: 0.7;
-    position: relative;
+  /* Button states */
+  .btn-compact:disabled {
+    opacity: 0.5;
     cursor: not-allowed;
   }
-  
-  /* Remove the underline indicator to reduce clutter */
-  label.disabled::after {
-    content: "";
-    display: none;
+
+  .start-button {
+    background-color: #10b981;
+    color: white;
+    width: 65px !important;
+    height: 28px !important;
+    min-width: 65px !important;
+    max-width: 65px !important;
+    padding: 0 !important;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
   }
-  
-  .setting-item {
-    position: relative;
+
+  .start-button:hover:not(:disabled) {
+    background-color: #059669;
+  }
+
+  .stop-button {
+    background-color: #6b7280;
+    color: white;
+    width: 65px !important;
+    height: 28px !important;
+    min-width: 65px !important;
+    max-width: 65px !important;
+    padding: 0 !important;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .stop-button:hover:not(:disabled) {
+    background-color: #4b5563;
+  }
+
+  .kill-button {
+    background-color: #ef4444;
+    color: white;
+    width: 65px !important;
+    height: 28px !important;
+    min-width: 65px !important;
+    max-width: 65px !important;
+    padding: 0 !important;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .kill-button:hover:not(:disabled) {
+    background-color: #dc2626;
+  }
+
+  /* Players section - inline */
+  .players-compact {
     display: flex;
-    width: 100%;
     align-items: center;
+    gap: 0.75rem;
+    background: rgba(30, 30, 30, 0.4);
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    margin-top: 0;
+    font-size: 0.85rem;
+  }
+
+  .players-label {
+    color: #ccc;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .no-players {
+    color: #888;
+    font-style: italic;
+  }
+
+  .player-list-inline {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .player-name {
+    background: rgba(66, 153, 225, 0.2);
+    color: #93c5fd;
+    padding: 0.125rem 0.375rem;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+
+  .player-name:hover {
+    background: rgba(66, 153, 225, 0.3);
+  }
+
+  /* Minecraft server section */
+  .minecraft-server-section {
+    background: rgba(30, 30, 30, 0.6);
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .minecraft-header {
+    display: flex;
     justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.375rem;
+    border-bottom: 1px solid #10b981;
   }
-  
-  /* Show a single "Server running" indicator for the settings */
-  .settings.has-running-server::before {
-    content: "Server running";
-    position: absolute;
-    top: -20px;
-    left: 50%;
-    transform: translateX(-50%);
-    font-size: 0.75rem;
-    color: #ff8800;
-    background-color: rgba(20, 20, 20, 0.7);
-    padding: 3px 8px;
+
+  .minecraft-header h4 {
+    margin: 0;
+    font-size: 0.95rem;
+    color: #10b981;
+  }
+
+  /* Management server - compact */
+  .management-compact {
+    background: rgba(30, 30, 30, 0.6);
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .management-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.375rem;
+    border-bottom: 1px solid #4299e1;
+  }
+
+  .management-header h4 {
+    margin: 0;
+    font-size: 0.95rem;
+    color: #4299e1;
+  }
+
+  .management-status-compact {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.8rem;
+  }
+
+  .management-controls-compact {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .management-info-compact {
+    display: flex;
+    gap: 1rem;
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.3);
     border-radius: 4px;
-    z-index: 10;
+    padding: 0.375rem 0.5rem;
+    font-size: 0.75rem;
   }
-  
+
+  .management-info-compact span {
+    color: #d1fae5;
+  }
+
+  .management-url {
+    font-family: monospace;
+    color: #4299e1 !important;
+    background: rgba(66, 153, 225, 0.1);
+    padding: 0.125rem 0.25rem;
+    border-radius: 3px;
+  }
+
+  .management-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .management-help-compact {
+    font-size: 0.7rem;
+    color: #888;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    border-radius: 4px;
+    padding: 0.375rem 0.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .management-help-compact strong {
+    color: #f59e0b;
+    font-family: monospace;
+  }
+
+  .dismiss-btn {
+    background: none;
+    border: none;
+    color: #f59e0b;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: bold;
+    padding: 0;
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    transition: background-color 0.2s;
+  }
+
+  .dismiss-btn:hover {
+    background-color: rgba(245, 158, 11, 0.2);
+  }
+
   .disabled-input {
     cursor: not-allowed !important;
     background-color: #3a3a3a !important;
@@ -725,212 +1087,51 @@
     opacity: 0.7;
     box-shadow: inset 0 0 5px rgba(255, 0, 0, 0.2);
   }
-  
-  /* Player list styling */
-  .players-section {
-    margin-top: 1.5rem;
-  }
-  
-  .player-list {
-    list-style: none;
-    padding: 0;
-    margin: 0.5rem 0;
-    max-width: 300px;
-    margin-left: auto;
-    margin-right: auto;
-  }
-  
-  .player-item {
-    padding: 0.5rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    cursor: pointer;
-  }
-  
-  .player-item:hover {
-    background-color: rgba(66, 153, 225, 0.2);
-  }
-  
-  .no-players {
-    color: rgba(255, 255, 255, 0.5);
-    font-style: italic;
-  }
-  
-  /* Server control buttons */
-  .button-group {
-    display: flex;
-    justify-content: center;
-    gap: 0.5rem;
-    margin-top: 1rem;
-  }
-  
-  .control-button {
-    padding: 0.5rem 1rem;
-    border-radius: 4px;
-    border: 1px solid transparent;
-    cursor: pointer;
-    font-weight: bold;
-    transition: all 0.2s ease;
-  }
-  
-  .control-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  
-  .start-button {
-    background-color: #4caf50;
-    color: white;
-  }
-  
-  .start-button:hover:not(:disabled) {
-    background-color: #3f9142;
-  }
-  
-  .stop-button {
-    background-color: #f44336;
-    color: white;
-  }
-  
-  .stop-button:hover:not(:disabled) {
-    background-color: #d32f2f;
-  }
-  
-  .kill-button {
-    background-color: #ff9800;
-    color: white;
-  }
-    .kill-button:hover:not(:disabled) {
-    background-color: #ef6c00;
-  }
-
-  label {
-    display: block;
-    margin-bottom: 1rem;
-  }
-  
-  input[type="number"] {
-    padding: 0.5rem;
-    border-radius: 4px;
-    border: 1px solid #444;
-    background-color: #333;
-    color: white;
-    width: 100px;
-    text-align: center;
-    font-size: 0.9rem;
-  }
-  
-  input[type="number"]:focus {
-    outline: none;
-    border-color: #666;
-    box-shadow: 0 0 0 2px rgba(100, 100, 100, 0.3);
-  }
-  
-  input[type="number"]::-webkit-inner-spin-button,
-  input[type="number"]::-webkit-outer-spin-button {
-    opacity: 1;
-    height: 22px;
-  }
-
-  .status-display {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    margin: 1rem 0;
-    padding: 0.5rem;
-    background-color: rgba(30, 30, 30, 0.3);
-    border-radius: 4px;
-  }
-  
+  /* Status styling */
   .status-label {
-    font-weight: bold;
-    color: #dddddd;
+    font-weight: 500;
+    color: #ccc;
   }
   
   .status-value {
-    font-weight: bold;
+    font-weight: 600;
   }
   
   .status-running {
-    color: #4caf50;
+    color: #10b981;
   }
   
   .status-stopped {
-    color: #f44336;
+    color: #ef4444;
   }
 
-  /* Management Server Styles */
-  .management-server-section {
-    background: rgba(32, 32, 32, 0.8);
-    border: 1px solid #444;
-    border-radius: 8px;
-    padding: 1rem;
-    margin-top: 1rem;
-  }
-  
-  .management-server-section h3 {
-    color: #4299e1;
-    margin-bottom: 1rem;
-    border-bottom: 1px solid #4299e1;
-    padding-bottom: 0.5rem;
-  }
-  
-  .management-status {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-  }
-  
   .status-starting, .status-stopping {
-    color: #f59e0b !important;
+    color: #f59e0b;
   }
-  
-  .management-info {
-    background: rgba(16, 185, 129, 0.1);
-    border: 1px solid rgba(16, 185, 129, 0.3);
-    border-radius: 6px;
-    padding: 0.75rem;
-    margin-bottom: 1rem;
-  }
-  
-  .management-detail {
-    margin: 0.25rem 0;
-    color: #e2e8f0;
-    font-size: 0.9rem;
-  }
-  
-  .management-url {
-    margin: 0.5rem 0 0 0;
-    color: #4299e1;
-    font-family: monospace;
-    font-size: 0.85rem;
-    background: rgba(66, 153, 225, 0.1);
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-  }
-  
-  .management-controls {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    margin-bottom: 1rem;
-  }
-  
-  .port-input {
-    background-color: #2d2d2d;
-    color: white;
-    border: 1px solid #555;
-    border-radius: 4px;
-    padding: 0.5rem;
-    font-size: 1rem;
-    width: 100px;
+
+  /* Input focus states */
+  .input-group input[type="number"]:focus {
+    outline: none;
+    border-color: #666;
+    box-shadow: 0 0 0 2px rgba(100, 100, 100, 0.3);
   }
   
   .port-input:focus {
     outline: none;
     border-color: #4299e1;
     box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.2);
+  }
+
+  /* Port input styling */
+  .port-input {
+    background-color: #2d2d2d;
+    color: white;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 0.375rem;
+    font-size: 0.8rem;
+    width: 90px;
+    text-align: center;
   }
   
   .port-input:disabled {
@@ -939,87 +1140,28 @@
     cursor: not-allowed;
     opacity: 0.7;
   }
-  
-  .management-help {
-    background: rgba(245, 158, 11, 0.1);
-    border: 1px solid rgba(245, 158, 11, 0.3);
-    border-radius: 6px;
-    padding: 0.75rem;
-  }
-  
-  .help-text {
-    margin: 0;
-    color: #e2e8f0;
-    font-size: 0.85rem;
-    line-height: 1.4;
-  }
-  
-  .help-text strong {
-    color: #f59e0b;
-    font-family: monospace;
-  }
-  
-  /* Auto-start section styles */
-  .auto-start-section {
-    background: rgba(32, 32, 32, 0.5);
-    border: 1px solid #444;
-    border-radius: 6px;
-    padding: 0.75rem;
-    margin: 1rem 0;
-  }
-  
-  .auto-start-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  
-  .auto-start-item input[type="checkbox"] {
-    width: auto;
-    margin: 0;
-    cursor: pointer;
-  }
-  
-  .auto-start-item label {
-    color: #e2e8f0;
-    font-size: 0.9rem;
-    margin: 0;
-    cursor: pointer;
-    user-select: none;
-  }
-  
-  .auto-start-item input[type="checkbox"]:checked + label {
-    color: #4caf50;
-  }
 
-  .update-section {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
-  }
-
-  .check-updates-button {
-    background: rgba(255, 255, 255, 0.1);
-    border: none;
-    border-radius: 4px;
-    padding: 0.25rem 0.5rem;
-    cursor: pointer;
-    transition: background 0.2s;
-  }
-
-  .check-updates-button:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .update-notice {
-    color: #fbbf24;
-    font-size: 0.9rem;
-    text-align: center;
-  }
-
-  .update-notice.up-to-date {
-    color: #a0e881;
+  /* Responsive adjustments */
+  @media (max-width: 768px) {
+    .main-controls {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.5rem;
+    }
+    
+    .settings-group {
+      justify-content: space-between;
+    }
+    
+    .button-group-compact {
+      margin-left: 0;
+      justify-content: center;
+    }
+    
+    .management-row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.5rem;
+    }
   }
 </style>
