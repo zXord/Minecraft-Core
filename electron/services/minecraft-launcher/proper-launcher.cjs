@@ -62,7 +62,7 @@ class ProperMinecraftLauncher extends EventEmitter {
     const vanillaJar = path.join(versionsDir, version, `${version}.jar`);
     if (fs.existsSync(vanillaJar)) {
       const AdmZip = require('adm-zip');
-      const zip = new AdmZip(vanillaJar);
+      const zip = new (/** @type {any} */ (AdmZip))(vanillaJar);
       const entries = zip.getEntries();
       const logUtilsEntry = entries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
       

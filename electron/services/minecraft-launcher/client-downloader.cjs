@@ -961,7 +961,7 @@ Specification-Vendor: FabricMC
 `;
       
       const AdmZip = require('adm-zip').default;
-      const zip = new AdmZip();
+              const zip = new (/** @type {any} */ (AdmZip))();
       
       zip.addFile('META-INF/MANIFEST.MF', Buffer.from(manifest, 'utf8'));
       

@@ -50,7 +50,7 @@ function parseForgeToml(content) {
 
 async function readModMetadataFromJar(jarPath) {
   try {
-    const zip = new AdmZip(jarPath);
+    const zip = new (/** @type {any} */ (AdmZip))(jarPath);
     const entries = zip.getEntries();
     
     const fabric = entries.find(e =>

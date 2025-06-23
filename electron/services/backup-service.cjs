@@ -298,7 +298,7 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
       }
     }
     // For full backups, just extract and overwrite everything
-    const zip = new AdmZip(zipPath);
+    const zip = new (/** @type {any} */ (AdmZip))(zipPath);
     zip.extractAllTo(serverPath, true);
     return { success: true, message: 'Backup restored successfully.', preRestoreBackup: preRestoreBackupName };
   } catch (err) {
