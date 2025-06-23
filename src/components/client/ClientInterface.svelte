@@ -2261,7 +2261,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {downloadSpeed}
         {currentDownloadFile}
         {fileProgress}
-        {clientDownloadProgress}        {handleRefreshFromDashboard}
+        {clientDownloadProgress}
+        {handleRefreshFromDashboard}
         {lastCheck}
         {isChecking}
       />    {:else if $clientState.activeTab === 'mods'}      <ModsTab
