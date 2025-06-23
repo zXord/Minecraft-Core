@@ -1,4 +1,4 @@
-<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    updateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';  import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
+<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    updateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    disabledModUpdates,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates, enableAndUpdateMod } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';  import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
   import { slide } from 'svelte/transition';
   import { checkDependencyCompatibility } from '../../../utils/mods/modCompatibility.js';
   import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
@@ -313,6 +313,35 @@
       confirmDisableVisible = false;
     }  }
   
+  /**
+   * Enable and update a disabled mod to a newer compatible version
+   */
+  async function handleEnableAndUpdate(modFileName) {
+    const updateInfo = $disabledModUpdates.get(modFileName);
+    
+    if (!updateInfo) {
+      errorMessage.set('No update information available for this mod');
+      return;
+    }
+    
+    try {
+      const success = await enableAndUpdateMod(
+        serverPath,
+        modFileName,
+        updateInfo.projectId,
+        updateInfo.latestVersion,
+        updateInfo.latestVersionId
+      );
+      
+      if (success) {
+        // Reload mods to reflect the changes
+        await loadMods(serverPath);
+      }
+    } catch (error) {
+      errorMessage.set(`Failed to enable and update mod: ${error.message}`);
+    }
+  }
+
   /**
    * Handle Check Updates button click
    */
@@ -1165,20 +1194,40 @@
                 <div class="row-version">
                   {#if $installedModInfo.find(m => m.fileName === mod)}
                     {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-                    {#if modInfo.versionNumber}
-                      <span class="version-tag current-version">{modInfo.versionNumber}</span>
-                    {/if}
+                    {@const updateInfo = $disabledModUpdates.get(mod)}
+                    {@const mcVer = $minecraftVersion}
+                    
+                    <div class="version-info-container">
+                      {#if modInfo.versionNumber}
+                        <span class="version-tag current-version">{modInfo.versionNumber}</span>
+                      {/if}
+                      
+                      <!-- Show compatibility status below version -->
+                      {#if updateInfo && !updateInfo.isCompatibleUpdate}
+                        <div class="compatibility-status-mini incompatible">
+                          Not compatible with MC {mcVer}
+                        </div>
+                      {:else if updateInfo && updateInfo.reason && updateInfo.reason.includes('Current version is compatible')}
+                        <div class="compatibility-status-mini compatible">
+                          Compatible with MC {mcVer}
+                        </div>
+                      {:else if modInfo.minecraftVersion && modInfo.minecraftVersion !== mcVer}
+                        <div class="compatibility-status-mini unknown">
+                          Version compatibility unknown
+                        </div>
+                      {/if}
+                    </div>
                   {/if}
                 </div>
                 
                 <div class="row-update">
-                  {#if $modsWithUpdates.has(mod)}
-                    {@const updateInfo = $modsWithUpdates.get(mod)}
+                  {#if $disabledModUpdates.has(mod)}
+                    {@const updateInfo = $disabledModUpdates.get(mod)}
                     <div class="update-container">
-                      <span class="version-tag new-version">{updateInfo.versionNumber}</span>
+                      <span class="version-tag new-version">{updateInfo.latestVersion}</span>
                     </div>
                   {:else}
-                    <span class="up-to-date">Up to date</span>
+                    <span class="no-update">No update available</span>
                   {/if}
                 </div>
                 
@@ -1188,9 +1237,15 @@
                       {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete
                     </button>
                     
-                    <button class="enable-button" on:click={() => showDisableConfirmation(mod, true)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Enable
-                    </button>
+                    {#if $disabledModUpdates.has(mod)}
+                      <button class="enable-update-button" on:click={() => handleEnableAndUpdate(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : 'Enable and update this mod to a compatible version'}>
+                        {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Enable & Update
+                      </button>
+                    {:else}
+                      <button class="enable-button" on:click={() => showDisableConfirmation(mod, true)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
+                        {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Enable
+                      </button>
+                    {/if}
                   </div>
                 </div>
               </div>
@@ -1853,6 +1908,15 @@
     width: 100%;
     padding: 0.25rem;
   }
+
+  .update-reason {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.6);
+    text-align: center;
+    max-width: 100px;
+    word-wrap: break-word;
+    line-height: 1.2;
+  }
   
   .version-tag, .mc-version-tag {
     background: rgba(100, 108, 255, 0.2);
@@ -2040,6 +2104,26 @@
   
   .enable-button:hover {
     background: rgba(76, 175, 80, 0.3);
+  }
+
+  .enable-update-button {
+    background: rgba(33, 150, 243, 0.2);
+    color: #42a5f5;
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    width: 100%;
+    text-align: center;
+    min-height: 2.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    border: 1px solid rgba(33, 150, 243, 0.3);
+  }
+  
+  .enable-update-button:hover {
+    background: rgba(33, 150, 243, 0.3);
+    transform: translateY(-1px);
   }
   
   .version-toggle-button {
@@ -2382,7 +2466,8 @@
   
   .button-row .delete-button,
   .button-row .disable-button,
-  .button-row .enable-button {
+  .button-row .enable-button,
+  .button-row .enable-update-button {
     flex: 1;
     min-height: 2.2rem;
   }
@@ -2432,7 +2517,7 @@
 
   .lock-icon { margin-right: 0.3em; }
 
-  .mod-action-button:disabled, .delete-button:disabled, .disable-button:disabled, .enable-button:disabled, .update-button:disabled, .select-version:disabled {
+  .mod-action-button:disabled, .delete-button:disabled, .disable-button:disabled, .enable-button:disabled, .enable-update-button:disabled, .update-button:disabled, .select-version:disabled {
     background: #444 !important;
     color: #aaa !important;
     cursor: not-allowed !important;
@@ -2491,5 +2576,75 @@
   
   .mod-card.both {
     border-left: 3px solid #ffa500;
+  }
+  
+  /* Version info container */
+  .version-info-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  
+  /* Compatibility status indicators */
+  .compatibility-status {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    margin-top: 0.3rem;
+    text-align: center;
+    font-weight: 500;
+  }
+  
+  .compatibility-status.compatible {
+    background: rgba(76, 175, 80, 0.2);
+    color: #66bb6a;
+    border: 1px solid rgba(76, 175, 80, 0.3);
+  }
+  
+  .compatibility-status.incompatible {
+    background: rgba(244, 67, 54, 0.2);
+    color: #ff6b6b;
+    border: 1px solid rgba(244, 67, 54, 0.3);
+  }
+  
+  .compatibility-status.unknown {
+    background: rgba(255, 152, 0, 0.2);
+    color: #ffae42;
+    border: 1px solid rgba(255, 152, 0, 0.3);
+  }
+  
+  /* Mini compatibility status for disabled mods */
+  .compatibility-status-mini {
+    font-size: 0.65rem;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    text-align: center;
+    font-weight: 400;
+    max-width: 100%;
+    word-wrap: break-word;
+    line-height: 1.1;
+  }
+  
+  .compatibility-status-mini.compatible {
+    background: rgba(76, 175, 80, 0.15);
+    color: #66bb6a;
+  }
+  
+  .compatibility-status-mini.incompatible {
+    background: rgba(244, 67, 54, 0.15);
+    color: #ff6b6b;
+  }
+  
+  .compatibility-status-mini.unknown {
+    background: rgba(255, 152, 0, 0.15);
+    color: #ffae42;
+  }
+  
+  /* Updated text styling */
+  .no-update {
+    color: rgba(255, 255, 255, 0.6);
+    font-style: italic;
+    font-size: 0.9rem;
   }
 </style> 

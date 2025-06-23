@@ -4,29 +4,25 @@ const modAnalysisUtils = require('../mod-utils/mod-analysis-utils.cjs');
 function compareVersions(versionA, versionB) {
   if (!versionA || !versionB) return 0;
   if (versionA === versionB) return 0;
-  const partsA = versionA.split(/[.-]/).map(part => {
-    const num = parseInt(part, 10);
-    return isNaN(num) ? part : num;
-  });
-  const partsB = versionB.split(/[.-]/).map(part => {
-    const num = parseInt(part, 10);
-    return isNaN(num) ? part : num;
-  });
-  const minLength = Math.min(partsA.length, partsB.length);
-  for (let i = 0; i < minLength; i++) {
-    const a = partsA[i];
-    const b = partsB[i];
-    if (typeof a === 'number' && typeof b === 'number') {
-      if (a !== b) return a - b;
-    } else if (typeof a === 'string' && typeof b === 'string') {
-      if (a !== b) return a.localeCompare(b);
-    } else if (typeof a === 'number') {
-      return 1;
-    } else {
-      return -1;
-    }
+  
+  // Remove any suffixes like "-rc.3", "-alpha", etc. for comparison
+  const cleanA = versionA.split('-')[0];
+  const cleanB = versionB.split('-')[0];
+  
+  const partsA = cleanA.split('.').map(Number);
+  const partsB = cleanB.split('.').map(Number);
+  
+  const maxLength = Math.max(partsA.length, partsB.length);
+  
+  for (let i = 0; i < maxLength; i++) {
+    const a = partsA[i] || 0;
+    const b = partsB[i] || 0;
+    
+    if (a > b) return 1;
+    if (a < b) return -1;
   }
-  return partsA.length - partsB.length;
+  
+  return 0;
 }
 
 function extractVersionFromFilename(filename) {
@@ -77,9 +73,107 @@ function checkModCompatibilityFromFilename(filename, minecraftVersion) {
   return { isCompatible: false, confidence: 'medium' };
 }
 
+// Helper function for version compatibility checking
+function checkMinecraftVersionCompatibility(modVersion, targetVersion) {
+  if (!modVersion || !targetVersion) return false;
+  
+  // Exact match
+  if (modVersion === targetVersion) return true;
+  
+  // Handle arrays (like ["1.21.x"])
+  if (Array.isArray(modVersion)) {
+    return modVersion.some(v => checkMinecraftVersionCompatibility(v, targetVersion));
+  }
+  
+  // Handle range format like ">=1.21.2 <=1.21.3" or ">=1.21.4- <1.21.5-"
+  if ((modVersion.includes('>=') || modVersion.includes('>')) && (modVersion.includes('<=') || modVersion.includes('<'))) {
+    const rangeParts = modVersion.split(' ').filter(p => p.trim());
+    let minPart = null;
+    let maxPart = null;
+    let minInclusive = true;
+    let maxInclusive = true;
+    
+    for (const part of rangeParts) {
+      if (part.startsWith('>=')) {
+        minPart = part.substring(2).trim();
+        minInclusive = true;
+      } else if (part.startsWith('>')) {
+        minPart = part.substring(1).trim();
+        minInclusive = false;
+      } else if (part.startsWith('<=')) {
+        maxPart = part.substring(2).trim();
+        maxInclusive = true;
+      } else if (part.startsWith('<')) {
+        maxPart = part.substring(1).trim();
+        maxInclusive = false;
+      }
+    }
+    
+    if (minPart && maxPart) {
+      // Clean version strings by removing trailing dashes and suffixes
+      const cleanMinVersion = minPart.replace(/[-+].*$/, '');
+      const cleanMaxVersion = maxPart.replace(/[-+].*$/, '');
+      const cleanTargetVersion = targetVersion.replace(/[-+].*$/, '');
+      
+      const minCheck = minInclusive ? 
+        compareVersions(cleanTargetVersion, cleanMinVersion) >= 0 : 
+        compareVersions(cleanTargetVersion, cleanMinVersion) > 0;
+      
+      const maxCheck = maxInclusive ? 
+        compareVersions(cleanTargetVersion, cleanMaxVersion) <= 0 : 
+        compareVersions(cleanTargetVersion, cleanMaxVersion) < 0;
+      
+      return minCheck && maxCheck;
+    }
+  }
+  
+  // Handle version ranges like "1.21.x" or "1.21.*"
+  if (modVersion.includes('.x') || modVersion.includes('.*')) {
+    const baseVersion = modVersion.replace(/\.[x*].*$/, '');
+    return targetVersion.startsWith(baseVersion + '.');
+  }
+  
+  // Handle ">=" comparisons like ">=1.21.4-rc.3"
+  if (modVersion.startsWith('>=')) {
+    const minVersion = modVersion.substring(2).trim();
+    return compareVersions(targetVersion, minVersion) >= 0;
+  }
+  
+  // Handle ">" comparisons
+  if (modVersion.startsWith('>')) {
+    const minVersion = modVersion.substring(1).trim();
+    return compareVersions(targetVersion, minVersion) > 0;
+  }
+  
+  // Handle "<=" comparisons
+  if (modVersion.startsWith('<=')) {
+    const maxVersion = modVersion.substring(2).trim();
+    return compareVersions(targetVersion, maxVersion) <= 0;
+  }
+  
+  // Handle "<" comparisons
+  if (modVersion.startsWith('<')) {
+    const maxVersion = modVersion.substring(1).trim();
+    return compareVersions(targetVersion, maxVersion) < 0;
+  }
+  
+  // Handle "~" (approximately equal) like "~1.21.4"
+  if (modVersion.startsWith('~')) {
+    const baseVersion = modVersion.substring(1).trim();
+    const [baseMajor, baseMinor] = baseVersion.split('.');
+    const [targetMajor, targetMinor] = targetVersion.split('.');
+    return baseMajor === targetMajor && baseMinor === targetMinor;
+  }
+  
+  return false;
+}
+
+
+
 module.exports = {
   compareVersions,
   extractVersionFromFilename,
   readModMetadata,
-  checkModCompatibilityFromFilename
+  checkModCompatibilityFromFilename,
+  checkMinecraftVersionCompatibility
 };

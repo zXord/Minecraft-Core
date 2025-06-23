@@ -30,7 +30,8 @@ import {
   filterModLoader,
   disabledMods,
   installingModIds,
-  modCategories
+  modCategories,
+  disabledModUpdates
 } from '../../stores/modStore.js';
 
 // IDs to track concurrent operations
@@ -548,16 +549,18 @@ export async function checkForUpdates(serverPath) {
       isCheckingUpdates.set(false);
       return updatesMap;
     }
-      // Skip update check if no mods have project IDs
+    
+    // Skip update check if no mods have project IDs
     const modsInfo = get(installedModInfo);
     const disabledModsSet = get(disabledMods);
     const modsWithProjectIds = modsInfo.filter(m => m.projectId && !disabledModsSet.has(m.fileName));
     
     if (modsWithProjectIds.length === 0) {
       modsWithUpdates.set(new Map());
-      return updatesMap;
     }
     
+    // Check for disabled mod updates in parallel
+    checkDisabledModUpdates(serverPath);
     
     for (const modInfo of modsWithProjectIds) {
       // Check if a newer update check has started
@@ -586,7 +589,8 @@ export async function checkForUpdates(serverPath) {
             
             // Store the project ID separately for reference in the Find Mods tab
             // We'll use a special prefix to distinguish it from actual mod filenames
-            updatesMap.set(`project:${modInfo.projectId}`, updateVersion);          }
+            updatesMap.set(`project:${modInfo.projectId}`, updateVersion);
+          }
         } catch {
           // Silently skip this mod
         }
@@ -600,6 +604,107 @@ export async function checkForUpdates(serverPath) {
     return updatesMap;
   } finally {
     isCheckingUpdates.set(false);
+  }
+}
+
+/**
+ * Check for updates available for disabled mods
+ * @param {string} serverPath - Server path
+ */
+export async function checkDisabledModUpdates(serverPath) {
+  try {
+    const mcVersion = get(minecraftVersion);
+    
+    if (!mcVersion || !serverPath) {
+      disabledModUpdates.set(new Map());
+      return;
+    }
+    
+    // Call the new backend handler to check disabled mod updates
+    const results = await safeInvoke('check-disabled-mod-updates', {
+      serverPath,
+      mcVersion
+    });
+    
+    if (!results || !Array.isArray(results)) {
+      disabledModUpdates.set(new Map());
+      return;
+    }
+    
+    // Filter for mods that have compatible updates available
+    const disabledUpdatesMap = new Map();
+    
+    for (const result of results) {
+      if (result.isCompatibleUpdate && result.hasUpdate) {
+        disabledUpdatesMap.set(result.fileName, {
+          projectId: result.projectId,
+          currentVersion: result.currentVersion,
+          latestVersion: result.latestVersion,
+          latestVersionId: result.latestVersionId,
+          reason: result.reason,
+          name: result.name
+        });
+      }
+    }
+    disabledModUpdates.set(disabledUpdatesMap);
+    
+  } catch (error) {
+    console.error('Failed to check disabled mod updates:', error);
+    disabledModUpdates.set(new Map());
+  }
+}
+
+/**
+ * Enable and update a disabled mod to a newer compatible version
+ * @param {string} serverPath - Server path
+ * @param {string} modFileName - The disabled mod filename
+ * @param {string} projectId - Modrinth project ID
+ * @param {string} targetVersion - Target version number
+ * @param {string} targetVersionId - Target version ID
+ * @returns {Promise<boolean>} - Success status
+ */
+export async function enableAndUpdateMod(serverPath, modFileName, projectId, targetVersion, targetVersionId) {
+  try {
+    const result = await safeInvoke('enable-and-update-mod', {
+      serverPath,
+      modFileName,
+      projectId,
+      targetVersion,
+      targetVersionId
+    });
+    
+    if (result.success) {
+      // Remove from disabled mod updates since it's now enabled and updated
+      disabledModUpdates.update(updates => {
+        const newUpdates = new Map(updates);
+        newUpdates.delete(modFileName);
+        return newUpdates;
+      });
+      
+      // Remove from disabled mods store
+      disabledMods.update(mods => {
+        const newMods = new Set(mods);
+        newMods.delete(modFileName);
+        return newMods;
+      });
+      
+      // Force reload the mod list to get the latest information
+      await loadMods(serverPath);
+      
+      successMessage.set(`${modFileName} successfully enabled and updated to ${targetVersion}`);
+      setTimeout(() => successMessage.set(''), 3000);
+      
+      return true;
+    } else {
+      errorMessage.set(`Failed to enable and update mod: ${result.error}`);
+      setTimeout(() => errorMessage.set(''), 5000);
+      return false;
+    }
+    
+  } catch (error) {
+    errorMessage.set(`Error enabling and updating mod: ${error.message}`);
+    setTimeout(() => errorMessage.set(''), 5000);
+    return false;
   }
 }
 
