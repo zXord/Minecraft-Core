@@ -492,7 +492,7 @@ class MinecraftLauncher extends EventEmitter {
         // Support both old format (:natives-) and new format (separate native entries)
         if ((libInfo.name.includes(':natives-') || libInfo.name.includes(':natives-')) && libInfo.path.endsWith('.jar')) {
           try {
-            const zip = new AdmZip(libInfo.path);
+            const zip = new (/** @type {any} */ (AdmZip))(libInfo.path);
             const entries = zip.getEntries();
 
             for (const entry of entries) {

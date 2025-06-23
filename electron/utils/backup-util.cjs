@@ -13,7 +13,7 @@ async function createZip(items, outputPath) {
   return new Promise((resolve, reject) => {
     try {
       const output = fs.createWriteStream(outputPath);
-      const archive = archiver('zip', {
+      const archive = (/** @type {any} */ (archiver))('zip', {
         zlib: { level: 5 }
       });
       

@@ -135,7 +135,7 @@ class JavaManager {
           return true;
         }
       }
-    } catch (error) {
+    } catch {
       // If there's an error reading directories, fall back to false
     }
     
@@ -173,7 +173,7 @@ class JavaManager {
           return compatibleExe;
         }
       }
-    } catch (error) {
+    } catch {
       // If there's an error reading directories, fall back to null
     }
     
@@ -328,7 +328,7 @@ class JavaManager {
     fs.mkdirSync(extractPath, { recursive: true });
 
     const AdmZip = require('adm-zip');
-    const zip = new AdmZip(zipPath);
+    const zip = new (/** @type {any} */ (AdmZip))(zipPath);
     zip.extractAllTo(extractPath, true);
     await this.flattenJavaDirectory(extractPath);
   }

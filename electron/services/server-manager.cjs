@@ -239,7 +239,7 @@ function startMinecraftServer(targetPath, port, maxRam) {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       useFabric = !!config.fabric; // Use Fabric if Fabric version is specified
     }
-  } catch (err) {
+  } catch {
     // If config can't be read, fall back to detecting JAR files
   }
   
@@ -281,7 +281,7 @@ function startMinecraftServer(targetPath, port, maxRam) {
           launchJar = path.join(targetPath, serverJars[0]);
         }
       }
-    } catch (err) {
+    } catch {
       // Could not read directory
     }
   }

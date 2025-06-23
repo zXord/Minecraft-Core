@@ -204,7 +204,7 @@ class XMCLClientDownloader {
                 console.error(`❌ Task failed [${task.path}]:`, error);
               }
             },
-            onSucceed: (task) => {
+            onSucceed: () => {
               if (isCancelled) return;
               
               // Task completed successfully - emit a simpler message
@@ -241,7 +241,7 @@ class XMCLClientDownloader {
             // This can be enhanced later with proper Fabric API integration
             throw new Error('XMCL Fabric integration needs further API research');
             
-          } catch (fabricError) {
+          } catch {
             console.log('⚠️ XMCL Fabric installation failed, attempting legacy method...');
             
             // Fall back to legacy Fabric installation

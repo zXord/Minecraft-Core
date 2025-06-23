@@ -36,7 +36,7 @@ async function extractDependenciesFromJar(jarPath) {
     }
 
     try {
-      const zip = new AdmZip(jarPath);
+      const zip = new (/** @type {any} */ (AdmZip))(jarPath);
       const zipEntries = zip.getEntries();
 
       // Try fabric.mod.json
