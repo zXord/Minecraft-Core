@@ -38,7 +38,7 @@ class MinecraftLauncher extends EventEmitter {
     
     // Hybrid approach: Use both downloaders during migration
     this.legacyClientDownloader = new ClientDownloader(this.javaManager, this);
-    this.xmclClientDownloader = new XMCLClientDownloader(this.javaManager, this);    // Flag to switch between downloaders (can be controlled via settings)
+    this.xmclClientDownloader = new XMCLClientDownloader(this.javaManager, this, this.legacyClientDownloader);
     this.useXMCLDownloader = true; // Disable XMCL, use legacy
     
     // Set the active downloader based on flag
@@ -745,7 +745,8 @@ class MinecraftLauncher extends EventEmitter {
   
   // Check if Minecraft client files are present and up to date
   async checkMinecraftClient(clientPath, requiredVersion, options = {}) {
-    return this.clientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
+    // Always use the legacy downloader for client checking because it has proper Fabric validation
+    return this.legacyClientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
   }
   
   // Clear Minecraft client files for re-download

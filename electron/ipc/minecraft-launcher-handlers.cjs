@@ -899,6 +899,28 @@ function createMinecraftLauncherHandlers(win) {
           showDebugTerminal = false
         } = options;
 
+        // CRITICAL FIX: Load authentication data for this client path before launching
+        // This ensures the launcher has access to auth data even if it wasn't previously loaded
+        console.log('🔐 Loading authentication data for client path:', clientPath);
+        try {
+          const loadAuthResult = await launcher.loadAuthData(clientPath);
+          if (loadAuthResult.success) {
+            console.log('✅ Authentication data loaded successfully for:', loadAuthResult.username);
+          } else {
+            console.warn('⚠️ No authentication data found for this client path');
+            return { 
+              success: false, 
+              error: 'No authentication data available. Please authenticate first in the Settings tab.' 
+            };
+          }
+        } catch (authError) {
+          console.error('❌ Failed to load authentication data:', authError.message);
+          return { 
+            success: false, 
+            error: 'Failed to load authentication data. Please re-authenticate in the Settings tab.' 
+          };
+        }
+
         await ensureServersDat(
           clientPath,
           serverIp,
