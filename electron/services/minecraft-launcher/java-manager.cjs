@@ -104,10 +104,82 @@ class JavaManager {
     return null;
   }
   
-  isJavaInstalled(javaVersion) {
-    const javaExe = this.getJavaExecutablePath(javaVersion);
-    return javaExe !== null && fs.existsSync(javaExe);
+  isJavaInstalled(requiredJavaVersion) {
+    // First, try to find the exact version
+    const exactVersionExe = this.getJavaExecutablePath(requiredJavaVersion);
+    if (exactVersionExe !== null && fs.existsSync(exactVersionExe)) {
+      return true;
+    }
+    
+    // If exact version not found, check if we have a higher version that can satisfy the requirement
+    if (!fs.existsSync(this.javaBaseDir)) {
+      return false;
+    }
+    
+    try {
+      const javaDirs = fs.readdirSync(this.javaBaseDir);
+      const availableVersions = javaDirs
+        .filter(dir => dir.startsWith('java-'))
+        .map(dir => parseInt(dir.replace('java-', '')))
+        .filter(version => !isNaN(version))
+        .sort((a, b) => b - a); // Sort descending (highest first)
+      
+      const requiredVersion = parseInt(requiredJavaVersion);
+      
+      // Find the highest available version that satisfies the requirement
+      const compatibleVersion = availableVersions.find(version => version >= requiredVersion);
+      
+      if (compatibleVersion) {
+        const compatibleExe = this.getJavaExecutablePath(compatibleVersion.toString());
+        if (compatibleExe !== null && fs.existsSync(compatibleExe)) {
+          return true;
+        }
+      }
+    } catch (error) {
+      // If there's an error reading directories, fall back to false
+    }
+    
+    return false;
   }
+  
+  getBestJavaPath(requiredJavaVersion) {
+    // First, try to find the exact version
+    const exactVersionExe = this.getJavaExecutablePath(requiredJavaVersion);
+    if (exactVersionExe !== null && fs.existsSync(exactVersionExe)) {
+      return exactVersionExe;
+    }
+    
+    // If exact version not found, find the best compatible version
+    if (!fs.existsSync(this.javaBaseDir)) {
+      return null;
+    }
+    
+    try {
+      const javaDirs = fs.readdirSync(this.javaBaseDir);
+      const availableVersions = javaDirs
+        .filter(dir => dir.startsWith('java-'))
+        .map(dir => parseInt(dir.replace('java-', '')))
+        .filter(version => !isNaN(version))
+        .sort((a, b) => b - a); // Sort descending (highest first)
+      
+      const requiredVersion = parseInt(requiredJavaVersion);
+      
+      // Find the highest available version that satisfies the requirement
+      const compatibleVersion = availableVersions.find(version => version >= requiredVersion);
+      
+      if (compatibleVersion) {
+        const compatibleExe = this.getJavaExecutablePath(compatibleVersion.toString());
+        if (compatibleExe !== null && fs.existsSync(compatibleExe)) {
+          return compatibleExe;
+        }
+      }
+    } catch (error) {
+      // If there's an error reading directories, fall back to null
+    }
+    
+    return null;
+  }
+  
     async downloadJava(javaVersion, progressCallback) {
     if (progressCallback) {
       progressCallback({ type: 'Preparing', task: `Preparing to download Java ${javaVersion}...`, progress: 0 });
@@ -324,16 +396,19 @@ class JavaManager {
     });
   }
   
-  async ensureJava(javaVersion, progressCallback) {
+  async ensureJava(requiredJavaVersion, progressCallback) {
     
-    const javaInstalled = this.isJavaInstalled(javaVersion);
+    const javaInstalled = this.isJavaInstalled(requiredJavaVersion);
     
     if (javaInstalled) {
-      const javaPath = this.getJavaExecutablePath(javaVersion);
-      return { success: true, javaPath: javaPath };
+      // Find the best compatible Java version to use
+      const javaPath = this.getBestJavaPath(requiredJavaVersion);
+      if (javaPath) {
+        return { success: true, javaPath: javaPath };
+      }
     }
     
-    const result = await this.downloadJava(javaVersion, progressCallback);
+    const result = await this.downloadJava(requiredJavaVersion, progressCallback);
     
     
     return result;

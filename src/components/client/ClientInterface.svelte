@@ -878,12 +878,17 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           synchronized: !hasAnyWork // Override synchronized based on actual work needed
         };
 
-        // Only show "ready" status if no actual work is needed
-        // (Don't rely solely on result.synchronized as it might not account for resolved acknowledgments)
+        // Only update status if it's necessary - avoid disrupting ready/checking states unnecessarily
         if (!hasAnyWork) {
-          downloadStatus = 'ready'; // No mods need attention
+          // Only change to ready if we're not already in a good state
+          if (downloadStatus !== 'ready' && downloadStatus !== 'checking-updates') {
+            downloadStatus = 'ready'; // No mods need attention
+          }
         } else {
-          downloadStatus = 'needed'; // Show as needed if ANY mod actions are required
+          // Only change to needed if we're not in checking state
+          if (downloadStatus !== 'checking-updates') {
+            downloadStatus = 'needed'; // Show as needed if ANY mod actions are required
+          }
         }
       } else {
         downloadStatus = 'ready'; // Assume ready if check fails
@@ -1470,11 +1475,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         setTimeout(() => successMessage.set(''), 5000);        // Re-check mod synchronization after download with a delay to allow file I/O to complete
         // Also give time for client mod version updates to be cleared
         setTimeout(async () => {
+          // Show checking updates status while we verify everything
+          downloadStatus = 'checking-updates';
+          
           // Clear any cached client mod version updates to prevent stale data
           setClientModVersionUpdates(null);
           localStorage.removeItem('clientModVersionUpdates');
             // Force a complete refresh of mod detection
-          await checkModSynchronization();
+          await checkModSynchronization(true); // Use silent refresh to prevent status override
 
           // Wait a bit and force refresh client mod data before compatibility check
           setTimeout(async () => {
@@ -1486,6 +1494,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               console.warn('Failed to refresh client mod info:', error);
             }
             await checkClientModVersionCompatibility(true);
+            
+            // After all checks complete, ensure we have the correct final status
+            setTimeout(() => {
+              if (downloadStatus === 'checking-updates') {
+                // Only reset to ready if we're still in checking-updates state
+                downloadStatus = 'ready';
+              }
+            }, 500);
           }, 1000); // Reduced delay since cache is already cleared above
         }, 3000);
       } else {
@@ -1581,8 +1597,21 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       setTimeout(() => errorMessage.set(''), 5000);
     } finally {
       isDownloadingClient = false;
-      // Trigger a sync check after download completes
-      setTimeout(() => checkSyncStatus(), 1000);
+      // Trigger a sync check after download completes without disrupting ready status
+      setTimeout(async () => {
+        // Only show checking if we're not already ready
+        const wasReady = downloadStatus === 'ready';
+        if (!wasReady) {
+          downloadStatus = 'checking-updates';
+        }
+        
+        await checkSyncStatus();
+        
+        // If we were ready before and still checking, restore ready status
+        if (wasReady && downloadStatus === 'checking-updates') {
+          downloadStatus = 'ready';
+        }
+      }, 1000);
     }
   }
   
@@ -1831,10 +1860,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         successMessage.set(`Client download complete: ${data.message || 'Minecraft client files downloaded successfully'}`);
         setTimeout(() => successMessage.set(''), 5000);
         
-        // Refresh both client and mod sync status after client download
-        setTimeout(() => {
-          checkSyncStatus();
-        }, 1000);
+        // Sync check is already handled by the download function's finally block
       } else {
         errorMessage.set(`Client download failed: ${data.error || 'Unknown error'}`);
         setTimeout(() => errorMessage.set(''), 5000);
@@ -1906,7 +1932,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
     // Set up periodic mod synchronization check
     const modCheckInterval = setInterval(() => {
-      if ($clientState.connectionStatus === 'connected') {
+      if ($clientState.connectionStatus === 'connected' && 
+          !isDownloadingClient && !isDownloadingMods && !isCheckingSync) {
         checkModSynchronization(true); // Silent refresh
       }
     }, 30000); // Every 30 seconds
@@ -2075,25 +2102,52 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
 
     isCheckingSync = true;
+    
+    // Remember the current status to be conservative about changes
+    const previousStatus = downloadStatus;
 
     try {
-
       // Refresh client and mod synchronization separately
       await checkClientSynchronization();
       await checkModSynchronization();
 
-      // Determine overall status
+      // Be very conservative about status changes - only change if there's a clear issue
       if (clientSyncStatus !== 'ready') {
-        downloadStatus = 'needs-client';      } else if (downloadStatus === 'ready' && modSyncStatus?.synchronized) {
-        downloadStatus = 'ready';
-      } else if (downloadStatus === 'needed') {
-        downloadStatus = 'needs-mods';
+        downloadStatus = 'needs-client';
+      } else if (modSyncStatus?.synchronized) {
+        // If mods are synchronized and we were ready/checking, stay that way
+        if (previousStatus === 'ready' || previousStatus === 'checking-updates') {
+          downloadStatus = previousStatus;
+        } else {
+          downloadStatus = 'ready';
+        }
+      } else {
+        // Only change from ready/checking states if there's actually work to do
+        const hasActualWork = (modSyncStatus?.missingMods?.length || 0) > 0 || 
+                            (modSyncStatus?.outdatedMods?.length || 0) > 0 ||
+                            (modSyncStatus?.requiredRemovals?.length || 0) > 0 ||
+                            (modSyncStatus?.optionalRemovals?.length || 0) > 0 ||
+                            (modSyncStatus?.clientModUpdates?.length || 0) > 0;
+        
+        if (hasActualWork) {
+          downloadStatus = 'needs-mods';
+        } else if (previousStatus === 'ready' || previousStatus === 'checking-updates') {
+          // If no actual work and we were in a good state, preserve it
+          downloadStatus = previousStatus;
+        } else {
+          downloadStatus = 'ready';
+        }
       }
 
     } catch (error) {
-      downloadStatus = 'error';    } finally {
+      // Only change to error if we weren't in a good state
+      if (previousStatus !== 'ready' && previousStatus !== 'checking-updates') {
+        downloadStatus = 'error';
+      }
+    } finally {
       isCheckingSync = false;
-    }  }
+    }
+  }
   // Handle acknowledging all dependencies at once
   async function onAcknowledgeAllDependencies() {
     if (!modSyncStatus?.acknowledgments) return;

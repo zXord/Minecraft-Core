@@ -18,6 +18,16 @@ class XMCLClientDownloader {
     this.emitter = eventEmitter;
     this.legacyClientDownloader = legacyClientDownloader;
     this.versionCache = null;
+    
+    // Increase max listeners to prevent memory leak warnings
+    if (this.emitter && this.emitter.setMaxListeners) {
+      this.emitter.setMaxListeners(20);
+    }
+    
+    // Also increase for process if needed
+    if (process.setMaxListeners) {
+      process.setMaxListeners(20);
+    }
   }
 
   /**
@@ -35,10 +45,37 @@ class XMCLClientDownloader {
   }
 
   /**
+   * Extract clean version from fabric profile name if needed
+   */
+  extractVersionFromProfileName(versionString) {
+    if (!versionString) return 'latest';
+    
+    // If already a clean version (just numbers and dots), return as-is
+    if (/^\d+\.\d+\.\d+$/.test(versionString)) {
+      return versionString;
+    }
+    
+    // If it's a fabric profile name like "fabric-loader-0.16.14-1.21.1", extract just the loader version
+    if (versionString.startsWith('fabric-loader-')) {
+      const parts = versionString.split('-');
+      // fabric-loader-X.Y.Z-MC_VERSION -> extract X.Y.Z
+      if (parts.length >= 3) {
+        return parts[2]; // The loader version part
+      }
+    }
+    
+    // Otherwise return as-is
+    return versionString;
+  }
+
+  /**
    * Resolve Fabric loader version (handle 'latest' keyword)
    */
   async resolveFabricVersion(requestedVersion) {
-    if (requestedVersion === 'latest') {
+    // First clean the version in case it's a profile name
+    const cleanVersion = this.extractVersionFromProfileName(requestedVersion);
+    
+    if (cleanVersion === 'latest') {
       try {
         // Fetch from Fabric Meta API directly
         const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
@@ -51,7 +88,7 @@ class XMCLClientDownloader {
         return '0.15.11'; // Fallback
       }
     }
-    return requestedVersion;
+    return cleanVersion;
   }
 
   /**
@@ -130,44 +167,61 @@ class XMCLClientDownloader {
 
         const installTaskInstance = installTask(versionInfo, clientPath);
         
-        // Monitor installation progress with XMCL's task system
-        await installTaskInstance.startAndWait({
-          onStart: (task) => {
-            // Convert XMCL task path to user-friendly message
-            const taskMessage = this.getTaskDisplayName(task);
-            this.emitter.emit('client-download-progress', {
-              type: 'Installing',
-              task: taskMessage,
-              total: 100,
-              current: Math.round((installTaskInstance.progress / installTaskInstance.total) * 100)
-            });
-          },
-          onUpdate: (task) => {
-            // Update progress based on overall installation progress
-            const overallProgress = Math.round((installTaskInstance.progress / installTaskInstance.total) * 100);
-            const taskMessage = this.getTaskDisplayName(task);
-            
-            this.emitter.emit('client-download-progress', {
-              type: 'Installing',
-              task: `${taskMessage} (${overallProgress}%)`,
-              total: 100,
-              current: overallProgress
-            });
-          },
-          onFailed: (task, error) => {
-            console.error(`❌ Task failed [${task.path}]:`, error);
-          },
-          onSucceed: (task) => {
-            // Task completed successfully
-            const taskMessage = this.getTaskDisplayName(task);
-            this.emitter.emit('client-download-progress', {
-              type: 'Installing',
-              task: `✅ ${taskMessage} completed`,
-              total: 100,
-              current: Math.round((installTaskInstance.progress / installTaskInstance.total) * 100)
-            });
-          }
-        });
+        // Track if download is cancelled to prevent memory leaks
+        let isCancelled = false;
+        
+        try {
+          // Monitor installation progress with XMCL's task system
+          await installTaskInstance.startAndWait({
+            onStart: (task) => {
+              if (isCancelled) return;
+              
+              // Convert XMCL task path to user-friendly message
+              const taskMessage = this.getTaskDisplayName(task);
+              this.emitter.emit('client-download-progress', {
+                type: 'Installing',
+                task: taskMessage,
+                total: 100,
+                current: Math.round((installTaskInstance.progress / installTaskInstance.total) * 100)
+              });
+            },
+            onUpdate: (task) => {
+              if (isCancelled) return;
+              
+              // Update progress based on overall installation progress
+              const overallProgress = Math.round((installTaskInstance.progress / installTaskInstance.total) * 100);
+              const taskMessage = this.getTaskDisplayName(task);
+              
+              this.emitter.emit('client-download-progress', {
+                type: 'Installing',
+                task: taskMessage,
+                total: 100,
+                current: overallProgress
+              });
+            },
+            onFailed: (task, error) => {
+              if (!isCancelled) {
+                console.error(`❌ Task failed [${task.path}]:`, error);
+              }
+            },
+            onSucceed: (task) => {
+              if (isCancelled) return;
+              
+              // Task completed successfully - emit a simpler message
+              const overallProgress = Math.round((installTaskInstance.progress / installTaskInstance.total) * 100);
+              this.emitter.emit('client-download-progress', {
+                type: 'Installing',
+                task: 'Installing Minecraft client...',
+                total: 100,
+                current: overallProgress
+              });
+            }
+          });
+        } catch (error) {
+          // Mark as cancelled to stop further event emissions
+          isCancelled = true;
+          throw error;
+        }
 
         let finalVersion = minecraftVersion;
 
@@ -196,7 +250,9 @@ class XMCLClientDownloader {
                 throw new Error('Legacy downloader not available for Fabric fallback');
               }
               
-              const legacyFabricResult = await this.legacyClientDownloader.installFabricLoader(clientPath, minecraftVersion, requestedFabricVersion);
+              // Pass only the resolved version, not a profile name
+              const cleanFabricVersion = this.extractVersionFromProfileName(requestedFabricVersion);
+              const legacyFabricResult = await this.legacyClientDownloader.installFabricLoader(clientPath, minecraftVersion, cleanFabricVersion);
               
               if (legacyFabricResult.success) {
                 resolvedFabricVersion = legacyFabricResult.loaderVersion;
@@ -241,15 +297,11 @@ class XMCLClientDownloader {
           current: 98
         });
 
-        // Use the legacy downloader's more comprehensive check for final verification
-        // This ensures proper Fabric validation if Fabric was installed
-        const verificationResult = await this.legacyClientDownloader.checkMinecraftClient(clientPath, finalVersion, {
-          requiredMods,
-          serverInfo
-        });
+        // Use the XMCL verifier directly to avoid any legacy version resolution issues
+        const verificationResult = await this.verifyInstallation(clientPath, finalVersion);
         
-        if (!verificationResult.synchronized) {
-          throw new Error(`Installation verification failed: ${verificationResult.reason}`);
+        if (!verificationResult.success) {
+          throw new Error(`Installation verification failed: ${verificationResult.error}`);
         }
 
         // Step 6: Success!
@@ -273,7 +325,7 @@ class XMCLClientDownloader {
           current: 100
         });
 
-        const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, needsFabric ? resolvedFabricVersion : null);
+        const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, needsFabric ? finalVersion : null);
         if (cleanupResult.success) {
           console.log(`✅ Cleanup completed: ${cleanupResult.message}`);
         } else {
@@ -322,21 +374,21 @@ class XMCLClientDownloader {
     
     // Convert technical task paths to user-friendly messages
     if (path.includes('install.version.json')) {
-      return 'Downloading version manifest';
+      return 'Downloading version manifest...';
     } else if (path.includes('install.version.jar')) {
-      return `Downloading Minecraft ${taskName} client`;
+      return `Downloading Minecraft ${taskName} client...`;
     } else if (path.includes('install.dependencies.assets')) {
-      return 'Downloading game assets';
+      return 'Downloading game assets...';
     } else if (path.includes('install.dependencies.libraries')) {
-      return 'Downloading game libraries';
+      return 'Downloading game libraries...';
     } else if (path.includes('install.assets')) {
-      return 'Processing game assets';
+      return 'Installing game assets...';
     } else if (path.includes('install.libraries')) {
-      return 'Processing game libraries';
-    } else if (taskName) {
-      return taskName;
+      return 'Installing game libraries...';
+    } else if (taskName && taskName !== 'install') {
+      return `Installing ${taskName}...`;
     } else {
-      return 'Processing installation';
+      return 'Installing Minecraft client...';
     }
   }
 
@@ -415,6 +467,13 @@ class XMCLClientDownloader {
    */
   async checkMinecraftClient(clientPath, version) {
     try {
+      // Check if version has changed since last check
+      const versionChangeDetected = await this._checkForVersionChange(clientPath, version);
+      if (versionChangeDetected) {
+        // Clean up old versions when server version changes
+        await this._cleanupOldVersionsOnChange(clientPath, version);
+      }
+      
       const verification = await this.verifyInstallation(clientPath, version);
       return {
         synchronized: verification.success,
@@ -424,6 +483,90 @@ class XMCLClientDownloader {
       return {
         synchronized: false,
         reason: `Check failed: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * Check if the server version has changed since the last client check
+   */
+  async _checkForVersionChange(clientPath, requiredVersion) {
+    try {
+      const lastVersionFile = path.join(clientPath, '.last-server-version');
+      
+      if (!fs.existsSync(lastVersionFile)) {
+        // First time check - save the version and no cleanup needed
+        fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
+        return false;
+      }
+      
+      const lastVersion = fs.readFileSync(lastVersionFile, 'utf8').trim();
+      
+      if (lastVersion !== requiredVersion) {
+        // Version changed - update the file
+        fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
+        console.log(`🔄 Server version changed: ${lastVersion} → ${requiredVersion}`);
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Failed to check version change:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Clean up old versions when server version changes
+   */
+  async _cleanupOldVersionsOnChange(clientPath, currentVersion) {
+    try {
+      const versionsDir = path.join(clientPath, 'versions');
+      if (!fs.existsSync(versionsDir)) {
+        return { success: true, message: 'No versions directory to clean up' };
+      }
+
+      const versionDirs = fs.readdirSync(versionsDir, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => dirent.name);
+
+      let cleanedVersions = [];
+
+      for (const versionDir of versionDirs) {
+        // Keep only the current version - remove all others
+        if (versionDir === currentVersion) {
+          continue; // Keep current vanilla version
+        }
+        
+        // For Fabric profiles, keep only those matching the current version
+        if (versionDir.startsWith('fabric-loader-') && versionDir.endsWith(`-${currentVersion}`)) {
+          continue; // Keep current Fabric profile
+        }
+
+        // Remove everything else
+        const versionPath = path.join(versionsDir, versionDir);
+        try {
+          fs.rmSync(versionPath, { recursive: true, force: true });
+          cleanedVersions.push(versionDir);
+          console.log(`🗑️ Cleaned up old version: ${versionDir}`);
+        } catch (error) {
+          console.error(`❌ Failed to remove ${versionDir}:`, error.message);
+        }
+      }
+
+      console.log(`🔄 Version change cleanup: removed ${cleanedVersions.length} old versions`);
+
+      return {
+        success: true,
+        message: `Cleaned up ${cleanedVersions.length} old versions due to version change`,
+        cleanedVersions
+      };
+
+    } catch (error) {
+      console.error('❌ Version change cleanup failed:', error);
+      return {
+        success: false,
+        error: error.message
       };
     }
   }
