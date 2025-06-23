@@ -54,6 +54,16 @@
         currentTask = `Updating ${data.name || 'mod'}...`;
       }
     });
+    
+    window.electron.on('server-java-download-progress', (data) => {
+      if (data && typeof data === 'object') {
+        updateProgress = data.progress || 0;
+        updateStatus = data.downloadedMB && data.totalMB 
+          ? `${data.downloadedMB}/${data.totalMB} MB`
+          : '';
+        currentTask = `Java: ${data.task}`;
+      }
+    });
   });
 
   async function fetchMinecraftVersions() {
@@ -175,8 +185,8 @@
     completedUpdates = [];
     updateSummary = null;
       
-      // Calculate total stepsfor progress tracking
-    totalSteps = 3; // Minecraft server, Fabric, Config
+      // Calculate total steps for progress tracking
+    totalSteps = 4; // Minecraft server, Fabric, Java, Config
     if (modsWithUpdates.length > 0) totalSteps += modsWithUpdates.length;
     if (incompatibleMods.length > 0) totalSteps += 1;
     currentStep = 0;
@@ -194,7 +204,28 @@
       updateProgress = Math.round((currentStep / totalSteps) * 100);
       await safeInvoke('download-and-install-fabric', { path: resolvedPath, mcVersion: selectedMC, fabricVersion: selectedFabric });
       
-      // Step 3: Update mods that have new versions
+      // Step 3: Check and download Java if needed
+      currentStep++;
+      currentTask = 'Checking Java requirements...';
+      updateProgress = Math.round((currentStep / totalSteps) * 100);
+      try {
+        const javaResult = await safeInvoke('server-java-ensure', {
+          minecraftVersion: selectedMC,
+          serverPath: resolvedPath
+        });
+        
+        if (javaResult.success) {
+          currentTask = 'Java ready for server!';
+        } else {
+          // Java download failed, but don't fail the whole update - it will download on server start
+          currentTask = `Java setup skipped - will download on server start`;
+        }
+      } catch (javaError) {
+        // Java download failed, but don't fail the whole update
+        currentTask = 'Java setup skipped - will download on server start';
+      }
+      
+      // Step 4: Update mods that have new versions
       if (modsWithUpdates.length > 0) {
         for (let i = 0; i < modsWithUpdates.length; i++) {
           const mod = modsWithUpdates[i];
@@ -226,19 +257,19 @@
         }
       }
       
-      // Step 4: Update server config
+      // Step 5: Update server config
       currentStep++;
       currentTask = 'Updating configuration...';
       updateProgress = Math.round((currentStep / totalSteps) * 100);
       await safeInvoke('update-config', { serverPath: resolvedPath, updates: { version: selectedMC, fabric: selectedFabric } });
       
-      // Step 5: Handle incompatible mods
+      // Step 6: Handle incompatible mods
       if (incompatibleMods.length > 0) {
         currentStep++;
         currentTask = 'Disabling incompatible mods...';
         updateProgress = Math.round((currentStep / totalSteps) * 100);
         await safeInvoke('save-disabled-mods', resolvedPath, incompatibleMods);
-      }        // Step 6: Update version state
+      }        // Step 7: Update version state
       updateVersions(selectedMC, selectedFabric);
       compatChecked = false;
         // Create comprehensive update summary

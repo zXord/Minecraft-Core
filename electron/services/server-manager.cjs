@@ -7,6 +7,10 @@ const process = require('process');
 const { safeSend } = require('../utils/safe-send.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const { resetCrashCount } = require('./auto-restart.cjs');
+const { ServerJavaManager } = require('./server-java-manager.cjs');
+
+// Initialize server Java manager (will be updated per server)
+let serverJavaManager = new ServerJavaManager();
 
 // Server process state
 let serverProcess = null;
@@ -202,9 +206,87 @@ function enableIntensiveChecking() {
   }, 6000);
 }
 
+/**
+ * Detect Minecraft version from server directory
+ * @param {string} serverPath - Path to the server directory
+ * @returns {Promise<string>} - Minecraft version or 'unknown'
+ */
+async function detectMinecraftVersion(serverPath) {
+  try {
+    // First priority: check .minecraft-core.json config file
+    const minecraftCoreConfigPath = path.join(serverPath, '.minecraft-core.json');
+    if (fs.existsSync(minecraftCoreConfigPath)) {
+      const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
+      if (coreConfig.version) {
+        return coreConfig.version;
+      }
+    }
+    
+    // Second priority: try to find version from server jar files
+    const files = fs.readdirSync(serverPath);
+    const serverJars = files.filter(file =>
+      file.endsWith('.jar') && (
+        file.includes('server') ||
+        file.includes('minecraft') ||
+        file.includes('paper') || 
+        file.includes('forge') || 
+        file.includes('fabric') ||
+        file === 'fabric-server-launch.jar'
+      )
+    );
+    
+    if (serverJars.length > 0) {
+      const jarName = serverJars[0];
+      // Extract version from jar name (e.g., "minecraft_server.1.20.1.jar" or "paper-1.20.1-196.jar")
+      const versionMatch = jarName.match(/(\d+\.\d+(?:\.\d+)?)/);
+      if (versionMatch) {
+        return versionMatch[1];
+      }
+    }
+    
+    // Third priority: check version.json if it exists
+    const versionPath = path.join(serverPath, 'version.json');
+    if (fs.existsSync(versionPath)) {
+      const versionData = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
+      if (versionData.name || versionData.id) {
+        return versionData.name || versionData.id;
+      }
+    }
+    
+    // Fourth priority: check Fabric loader version info
+    const fabricLoaderPath = path.join(serverPath, '.fabric', 'remappedJars');
+    if (fs.existsSync(fabricLoaderPath)) {
+      const fabricFiles = fs.readdirSync(fabricLoaderPath);
+      for (const file of fabricFiles) {
+        const match = file.match(/minecraft-(\d+\.\d+(?:\.\d+)?)/);
+        if (match) {
+          return match[1];
+        }
+      }
+    }
+    
+    // Fifth priority: check logs directory
+    const logsPath = path.join(serverPath, 'logs');
+    if (fs.existsSync(logsPath)) {
+      const latestLog = path.join(logsPath, 'latest.log');
+      if (fs.existsSync(latestLog)) {
+        const logContent = fs.readFileSync(latestLog, 'utf8');
+        const versionMatch = logContent.match(/Starting minecraft server version (\d+\.\d+(?:\.\d+)?)|Minecraft (\d+\.\d+(?:\.\d+)?)|version (\d+\.\d+(?:\.\d+)?)/i);
+        if (versionMatch) {
+          return versionMatch[1] || versionMatch[2] || versionMatch[3];
+        }
+      }
+    }
+    
+    return 'unknown';
+  } catch (error) {
+    return 'unknown';
+  }
+}
+
 // Set up event listeners
-eventBus.on('request-server-start', ({ targetPath, port, maxRam }) => {
-  const result = startMinecraftServer(targetPath, port, maxRam);
+eventBus.on('request-server-start', async ({ targetPath, port, maxRam }) => {
+  const result = await startMinecraftServer(targetPath, port, maxRam);
   if (result) {
     safeSend('server-log', `[INFO] Server start successful via event`);
   } else {
@@ -218,14 +300,62 @@ eventBus.on('request-server-start', ({ targetPath, port, maxRam }) => {
  * @param {string} targetPath - Path to the server directory
  * @param {number} port - The port number to run the server on
  * @param {number} maxRam - Maximum RAM allocation in GB
- * @returns {boolean} Success status
+ * @returns {Promise<boolean>} Success status
  */
-function startMinecraftServer(targetPath, port, maxRam) {
+async function startMinecraftServer(targetPath, port, maxRam) {
   if (serverProcess) return false;
-  
   
   serverStartMs = Date.now();
   serverMaxRam = maxRam;
+
+  // First, detect the Minecraft version and ensure correct Java is available
+  const minecraftVersion = await detectMinecraftVersion(targetPath);
+  if (!minecraftVersion || minecraftVersion === 'unknown') {
+    safeSend('server-log', '[ERROR] Could not determine Minecraft version. Cannot ensure correct Java version.');
+    return false;
+  }
+
+  safeSend('server-log', `[INFO] Detected Minecraft version: ${minecraftVersion}`);
+
+  // Set server path for Java manager and check if correct Java is available
+  serverJavaManager.setServerPath(targetPath);
+  const javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(minecraftVersion);
+  safeSend('server-log', `[INFO] Required Java version: ${javaRequirements.requiredJavaVersion}`);
+
+  let javaPath = javaRequirements.javaPath;
+
+  if (!javaRequirements.isAvailable) {
+    safeSend('server-log', `[INFO] Java ${javaRequirements.requiredJavaVersion} not found. Downloading...`);
+    
+    try {
+      const javaResult = await serverJavaManager.ensureJavaForMinecraft(
+        minecraftVersion,
+        (progress) => {
+          // Send progress updates
+          safeSend('server-log', `[JAVA] ${progress.task}`);
+          if (progress.progress) {
+            const progressMsg = progress.downloadedMB && progress.totalMB 
+              ? `${progress.progress}% (${progress.downloadedMB}/${progress.totalMB} MB)`
+              : `${progress.progress}%`;
+            safeSend('server-log', `[JAVA] Progress: ${progressMsg}`);
+          }
+        }
+      );
+
+      if (!javaResult.success) {
+        safeSend('server-log', `[ERROR] Failed to download Java ${javaRequirements.requiredJavaVersion}: ${javaResult.error}`);
+        return false;
+      }
+
+      javaPath = javaResult.javaPath;
+      safeSend('server-log', `[INFO] Java ${javaRequirements.requiredJavaVersion} downloaded successfully`);
+    } catch (error) {
+      safeSend('server-log', `[ERROR] Java download failed: ${error.message}`);
+      return false;
+    }
+  } else {
+    safeSend('server-log', `[INFO] Using Java at: ${javaPath}`);
+  }
 
   // Determine the correct server JAR to use based on configuration
   let launchJar = null;
@@ -293,7 +423,9 @@ function startMinecraftServer(targetPath, port, maxRam) {
   try {
     const serverIdentifier = `minecraft-core-server-${Date.now()}`;
     
-    serverProcess = spawn('java', [
+    safeSend('server-log', `[INFO] Starting server with Java: ${javaPath}`);
+    
+    serverProcess = spawn(javaPath, [
       `-Xmx${maxRam}G`,
       `-Dminecraft.core.server.id=${serverIdentifier}`,
       '-jar', launchJar,
