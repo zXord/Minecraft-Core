@@ -227,8 +227,66 @@ function startMinecraftServer(targetPath, port, maxRam) {
   serverStartMs = Date.now();
   serverMaxRam = maxRam;
 
-  const launchJar = path.join(targetPath, 'fabric-server-launch.jar');
-  if (!fs.existsSync(launchJar)) {
+  // Determine the correct server JAR to use based on configuration
+  let launchJar = null;
+  
+  // First, try to read configuration to determine server type
+  const configPath = path.join(targetPath, '.minecraft-core.json');
+  let useFabric = false;
+  
+  try {
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      useFabric = !!config.fabric; // Use Fabric if Fabric version is specified
+    }
+  } catch (err) {
+    // If config can't be read, fall back to detecting JAR files
+  }
+  
+  if (useFabric) {
+    // Try to use Fabric launcher
+    const fabricJar = path.join(targetPath, 'fabric-server-launch.jar');
+    if (fs.existsSync(fabricJar)) {
+      launchJar = fabricJar;
+    }
+  }
+  
+  // Fall back to vanilla server.jar if Fabric not available or not configured
+  if (!launchJar) {
+    const vanillaJar = path.join(targetPath, 'server.jar');
+    if (fs.existsSync(vanillaJar)) {
+      launchJar = vanillaJar;
+    }
+  }
+  
+  // Final fallback: look for any server JAR files
+  if (!launchJar) {
+    try {
+      const files = fs.readdirSync(targetPath);
+      const serverJars = files.filter(f => 
+        f.endsWith('.jar') && 
+        (f.includes('server') || f.includes('fabric-server-launch'))
+      );
+      
+      if (serverJars.length > 0) {
+        // Prefer fabric-server-launch.jar, then server.jar, then any server JAR
+        const fabricLaunch = serverJars.find(f => f === 'fabric-server-launch.jar');
+        const serverJar = serverJars.find(f => f === 'server.jar');
+        
+        if (fabricLaunch) {
+          launchJar = path.join(targetPath, fabricLaunch);
+        } else if (serverJar) {
+          launchJar = path.join(targetPath, serverJar);
+        } else {
+          launchJar = path.join(targetPath, serverJars[0]);
+        }
+      }
+    } catch (err) {
+      // Could not read directory
+    }
+  }
+  
+  if (!launchJar || !fs.existsSync(launchJar)) {
     return false;
   }
 
@@ -253,7 +311,7 @@ function startMinecraftServer(targetPath, port, maxRam) {
       port: port,
       maxRam: maxRam,
       startTime: serverStartMs,
-      commandLineIdentifier: `fabric-server-launch.jar nogui --port ${port}`,
+      commandLineIdentifier: `${path.basename(launchJar)} nogui --port ${port}`,
       targetPath: targetPath
     };
 

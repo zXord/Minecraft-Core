@@ -365,7 +365,12 @@
                   <div class="sync-status error">
                     <h3>Mod Check Failed</h3>
                     <p>Unable to verify mod status. Please refresh and try again.</p>
-                  </div>                {:else if downloadStatus === 'ready'}                  <div class="sync-status ready">
+                  </div>                {:else if downloadStatus === 'checking-updates'}
+                <div class="sync-status checking">
+                  <h3>✅ All Required Mods Ready</h3>
+                  <p class="update-check-status">Checking for mod updates...</p>
+                </div>
+              {:else if downloadStatus === 'ready'}                  <div class="sync-status ready">
                     <h3>✅ All Required Mods Ready</h3>
                     {#if modSyncStatus}
                       {@const optionalAvailable = (modSyncStatus.missingOptionalMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
@@ -606,5 +611,18 @@
 
   .debug-checkbox:hover {
     color: #f3f4f6;
+  }
+
+  /* Update check status styling */
+  .update-check-status {
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 0.9rem;
+    font-style: italic;
+    margin-top: 0.5rem;
+  }
+  
+  /* Make checking-updates status appear as ready but with subtle check indicator */
+  .sync-status.checking h3 {
+    color: #10b981; /* Same green as ready status */
   }
 </style>

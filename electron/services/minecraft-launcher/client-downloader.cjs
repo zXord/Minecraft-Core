@@ -12,6 +12,15 @@ class ClientDownloader {
   }
 
   async _resolveFabricLoaderVersion(requestedVersion) {
+    // If already a fabric profile name, extract the version part
+    if (requestedVersion && requestedVersion.startsWith('fabric-loader-')) {
+      const parts = requestedVersion.split('-');
+      if (parts.length >= 3) {
+        // Extract loader version from fabric-loader-X.Y.Z-MC_VERSION format
+        return parts[2]; // This should be the loader version (e.g., 0.16.14)
+      }
+    }
+    
     if (requestedVersion === 'latest') {
       try {
         const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
@@ -24,6 +33,7 @@ class ClientDownloader {
         return '0.14.21'; // Fallback
       }
     }
+    
     return requestedVersion;
   }
 
@@ -1183,6 +1193,14 @@ Specification-Vendor: FabricMC
       if (!fs.existsSync(clientPath)) {
         return { synchronized: false, reason: 'Client path does not exist' };
       }
+      
+      // Check if version has changed since last check
+      const versionChangeDetected = await this._checkForVersionChange(clientPath, requiredVersion);
+      if (versionChangeDetected) {
+        // Clean up old versions when server version changes
+        await this._cleanupOldVersionsOnChange(clientPath, requiredVersion);
+      }
+      
       const { 
         requiredMods = [], 
         serverInfo = null 
@@ -1589,6 +1607,90 @@ Specification-Vendor: FabricMC
 
     // Remove everything else - no exceptions
     return { keep: false, reason: 'Old version - cleaning up' };
+  }
+
+  /**
+   * Check if the server version has changed since the last client check
+   */
+  async _checkForVersionChange(clientPath, requiredVersion) {
+    try {
+      const lastVersionFile = path.join(clientPath, '.last-server-version');
+      
+      if (!fs.existsSync(lastVersionFile)) {
+        // First time check - save the version and no cleanup needed
+        fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
+        return false;
+      }
+      
+      const lastVersion = fs.readFileSync(lastVersionFile, 'utf8').trim();
+      
+      if (lastVersion !== requiredVersion) {
+        // Version changed - update the file
+        fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
+        console.log(`🔄 Server version changed: ${lastVersion} → ${requiredVersion}`);
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Failed to check version change:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Clean up old versions when server version changes
+   */
+  async _cleanupOldVersionsOnChange(clientPath, currentVersion) {
+    try {
+      const versionsDir = path.join(clientPath, 'versions');
+      if (!fs.existsSync(versionsDir)) {
+        return { success: true, message: 'No versions directory to clean up' };
+      }
+
+      const versionDirs = fs.readdirSync(versionsDir, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => dirent.name);
+
+      let cleanedVersions = [];
+
+      for (const versionDir of versionDirs) {
+        // Keep only the current version - remove all others
+        if (versionDir === currentVersion) {
+          continue; // Keep current vanilla version
+        }
+        
+        // For Fabric profiles, keep only those matching the current version
+        if (versionDir.startsWith('fabric-loader-') && versionDir.endsWith(`-${currentVersion}`)) {
+          continue; // Keep current Fabric profile
+        }
+
+        // Remove everything else
+        const versionPath = path.join(versionsDir, versionDir);
+        try {
+          fs.rmSync(versionPath, { recursive: true, force: true });
+          cleanedVersions.push(versionDir);
+          console.log(`🗑️ Cleaned up old version: ${versionDir}`);
+        } catch (error) {
+          console.error(`❌ Failed to remove ${versionDir}:`, error.message);
+        }
+      }
+
+      console.log(`🔄 Version change cleanup: removed ${cleanedVersions.length} old versions`);
+
+      return {
+        success: true,
+        message: `Cleaned up ${cleanedVersions.length} old versions due to version change`,
+        cleanedVersions
+      };
+
+    } catch (error) {
+      console.error('❌ Version change cleanup failed:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
   }
 
   // Clear Minecraft client files for re-download
