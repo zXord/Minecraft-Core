@@ -127,7 +127,10 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 1rem;
-    margin: 1rem 0;
+    margin: 1rem auto;
+    width: 100%;
+    max-width: 1200px;
+    box-sizing: border-box;
   }
   
   .metric-card {

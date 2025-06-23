@@ -70,7 +70,7 @@
 </script>
 
 <!-- Fixed console view with improved styling -->
-<div class="console-frame-container" style="width: 1200px !important; max-width: none !important;">
+<div class="console-frame-container">
   <!-- Static black background -->
   <div class="console-background"></div>
   
@@ -112,7 +112,7 @@
   .console-frame-container {
     position: relative;
     width: 100% !important;
-    max-width: 1600px !important;
+    max-width: 1200px !important;
     margin: 0 auto 20px auto;
     height: 700px !important;
     box-sizing: border-box !important;
