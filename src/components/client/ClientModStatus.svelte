@@ -64,9 +64,7 @@
               <span class="status-text warning">⚠️ {modSyncStatus.needsDownload} need download</span>
             {/if}
           </div>
-          <div class="progress-info">
-            {modSyncStatus.totalPresent} / {modSyncStatus.totalRequired} ready
-          </div>
+
         {:else if requiredModsCount === 0}
           <div class="sync-status">
             <span class="status-text info">ℹ️ No required mods</span>
@@ -95,9 +93,7 @@
               <span class="status-text success">✅ All available</span>
             {/if}
           </div>
-          <div class="progress-info">
-            {modSyncStatus.totalOptionalPresent || 0} / {modSyncStatus.totalOptional} present
-          </div>
+
         {:else if optionalModsCount > 0}
           <div class="sync-status">
             <span class="status-text info">🎛️ User configurable</span>
@@ -324,10 +320,7 @@
   .status-text.pending {
     color: #9ca3af;
   }
-  .progress-info {
-    font-size: 0.8rem;
-    color: #9ca3af;
-  }
+
 
   .overall-status {
     margin: 1.5rem 0;
