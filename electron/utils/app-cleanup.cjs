@@ -2,7 +2,7 @@
 const { ipcMain } = require('electron');
 const { safeSend } = require('./safe-send.cjs');
 const process = require('process');
-const { spawn, exec } = require('child_process');
+const { exec } = require('child_process');
 let isQuitting = false;
 
 /**
@@ -10,7 +10,6 @@ let isQuitting = false;
  */
 function killDevelopmentProcesses() {
   return new Promise((resolve) => {
-    console.log('🔄 Killing development processes...');
     
     if (process.platform === 'win32') {
       // Windows - kill processes on ports 5173 and 5174
@@ -22,7 +21,7 @@ function killDevelopmentProcesses() {
       let processesKilled = 0;
       let commandsCompleted = 0;
       
-      killCommands.forEach((findCmd, index) => {
+      killCommands.forEach((findCmd) => {
         exec(findCmd, (error, stdout) => {
           commandsCompleted++;
           
@@ -35,7 +34,6 @@ function killDevelopmentProcesses() {
                 exec(`taskkill /PID ${pid} /F`, (killError) => {
                   if (!killError) {
                     processesKilled++;
-                    console.log(`✅ Killed development process PID ${pid}`);
                   }
                 });
               }
@@ -79,7 +77,6 @@ function killDevelopmentProcesses() {
                 exec(`kill -9 ${pid}`, (killError) => {
                   if (!killError) {
                     processesKilled++;
-                    console.log(`✅ Killed development process PID ${pid}`);
                   }
                 });
               }
@@ -106,7 +103,6 @@ function killDevelopmentProcesses() {
  * Clear all application intervals and timers
  */
 function clearAllIntervals() {
-  console.log('🔄 Clearing all intervals and timers...');
   
   try {
     // Clear server manager intervals
@@ -123,8 +119,6 @@ function clearAllIntervals() {
     // Clear backup intervals
     const { clearBackupIntervals } = require('../ipc/backup-handlers.cjs');
     clearBackupIntervals();
-    
-    console.log('✅ All intervals cleared');
   } catch (error) {
     console.warn('⚠️ Error clearing some intervals:', error.message);
   }
@@ -134,7 +128,6 @@ function clearAllIntervals() {
  * Complete application cleanup
  */
 async function performCompleteCleanup() {
-  console.log('🔄 Starting complete application cleanup...');
   
   try {
     // 1. Stop metrics reporting
