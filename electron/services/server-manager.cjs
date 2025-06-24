@@ -525,6 +525,10 @@ async function startMinecraftServer(targetPath, port, maxRam) {
     eventBus.emit('server-started');
     safeSend('server-status', 'running');
     
+    // Start metrics reporting when server starts
+    const { startMetricsReporting } = require('./system-metrics.cjs');
+    startMetricsReporting();
+    
     serverProcess.on('exit', (code, signal) => {
       
       const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';

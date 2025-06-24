@@ -2,6 +2,7 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { getRuntimePaths } = require('../utils/runtime-paths.cjs');
+const { wmicExecSync, wmicTerminate } = require('../utils/wmic-utils.cjs');
 
 const mainPid = parseInt(process.argv[2], 10);
 let serverIdentifier = process.argv[3] || 'minecraft-core';
@@ -60,8 +61,8 @@ try {
 
 function logRunningJavaProcesses() {  try {
     log('Listing all running Java processes for debugging:');
-    const stdout = execSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv', /** @type {import('child_process').ExecSyncOptions} */({ encoding: 'utf8' }));
-    const lines = String(stdout).trim().split('\n');
+    const filteredOutput = wmicExecSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv');
+    const lines = String(filteredOutput).trim().split('\n');
     
     if (lines.length <= 1) {
       log('No Java processes found running.');
@@ -88,8 +89,7 @@ function killJavaProcesses() {
   
   try {
     log(`Attempt 1: Using WMIC to kill Java processes with "${serverIdentifier}" in command line`);
-    execSync(`wmic process where "commandline like '%${serverIdentifier}%' and name='java.exe'" call terminate`,
-      /** @type {import('child_process').ExecSyncOptions} */({ stdio: 'ignore' }));
+    wmicTerminate(`wmic process where "commandline like '%${serverIdentifier}%' and name='java.exe'" call terminate`);
     log("WMIC kill command executed");
   } catch (e) {
     log(`WMIC kill error: ${e.message}`);
@@ -97,8 +97,7 @@ function killJavaProcesses() {
   
   try {
     log("Attempt 2: Looking for any process with fabric-server-launch.jar");
-    execSync(`wmic process where "commandline like '%fabric-server-launch.jar%' and name='java.exe'" call terminate`,
-      /** @type {import('child_process').ExecSyncOptions} */({ stdio: 'ignore' }));
+    wmicTerminate(`wmic process where "commandline like '%fabric-server-launch.jar%' and name='java.exe'" call terminate`);
     log("Fabric server kill command executed");
   } catch (e) {
     log(`Fabric server kill error: ${e.message}`);
@@ -106,8 +105,7 @@ function killJavaProcesses() {
   
   try {
     log("Attempt 3: Looking for any process with minecraft_server.jar");
-    execSync(`wmic process where "commandline like '%minecraft_server.jar%' and name='java.exe'" call terminate`,
-      /** @type {import('child_process').ExecSyncOptions} */({ stdio: 'ignore' }));
+    wmicTerminate(`wmic process where "commandline like '%minecraft_server.jar%' and name='java.exe'" call terminate`);
     log("Minecraft server jar kill command executed");
   } catch (e) {
     log(`Minecraft server jar kill error: ${e.message}`);
@@ -115,11 +113,10 @@ function killJavaProcesses() {
   
   try {
     log("Attempt 4: Searching for Java processes with Minecraft server in command line");
-    const stdout = execSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv',
-      /** @type {import('child_process').ExecSyncOptions} */({ encoding: 'utf8' }));
-      log(`Process list obtained: ${stdout.length} bytes`);
+    const filteredOutput = wmicExecSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv');
+    log(`Process list obtained: ${filteredOutput.length} bytes`);
     
-    const lines = String(stdout).trim().split('\n');
+    const lines = String(filteredOutput).trim().split('\n');
     for (const line of lines) {
       if (line.includes('fabric-server-launch.jar') || 
           line.includes('minecraft_server.jar') || 
@@ -144,7 +141,7 @@ function killJavaProcesses() {
   }
     try {
     log("Final check for any remaining Java processes:");
-      const remainingJava = String(execSync('wmic process where "name=\'java.exe\'" get ProcessId', /** @type {import('child_process').ExecSyncOptions} */({ encoding: 'utf8' }))).trim();
+    const remainingJava = wmicExecSync('wmic process where "name=\'java.exe\'" get ProcessId').trim();
     
     if (remainingJava && remainingJava.includes('ProcessId')) {
       const lines = remainingJava.split('\n').filter(line => line.trim() && !line.includes('ProcessId'));
@@ -169,24 +166,21 @@ function killJavaProcesses() {
 function checkProcess() {
   try {
     log(`Checking if process ${mainPid} is still running...`);
-    const result = execSync(`tasklist /FI "PID eq ${mainPid}" /FO CSV`, /** @type {import('child_process').ExecSyncOptions} */({ encoding: 'utf8' }));
     
-    if (!result.includes(`"${mainPid}"`)) {
-      log(`Main process ${mainPid} terminated, killing Minecraft server Java processes...`);
-      killJavaProcesses();
-      log('Cleanup complete, exiting watchdog');
-      process.exit(0);
-    } else {
-      log(`Process ${mainPid} is still running`);
-    }
+    // Use lightweight Node.js process check instead of heavy tasklist command
+    process.kill(mainPid, 0); // Signal 0 just tests if process exists, doesn't kill it
+    
+    log(`Process ${mainPid} is still running`);
   } catch (e) {
-    log(`Error checking main process ${mainPid}: ${e.message}`);
-    log('Assuming main process is terminated, killing Minecraft server Java processes...');
+    // Process doesn't exist - this is the normal way this check works
+    log(`Main process ${mainPid} terminated, killing Minecraft server Java processes...`);
     killJavaProcesses();
     log('Cleanup complete, exiting watchdog');
     process.exit(0);
   }
-  setTimeout(checkProcess, 5000);
+  
+  // Check less frequently since we're using lightweight method
+  setTimeout(checkProcess, 30000); // Check every 30 seconds - much lighter check
 }
 log("Starting process monitoring loop");
 checkProcess();

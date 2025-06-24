@@ -116,7 +116,14 @@ class ClientDownloader {
         }
         
         if (!downloadSuccess) {
-          throw new Error('All download methods failed. Please check your internet connection and try again.');
+          if (retryCount < maxRetries - 1) {
+            console.log(`Download attempt ${retryCount + 1} failed, retrying... (${maxRetries - retryCount - 1} attempts remaining)`);
+            retryCount++;
+            await new Promise(resolve => setTimeout(resolve, 2000 * retryCount)); // Progressive delay
+            continue;
+          } else {
+            throw new Error('All download methods failed after multiple attempts. Please check your internet connection and try again later.');
+          }
         }
         
         this.emitter.emit('client-download-progress', {
@@ -501,7 +508,7 @@ class ClientDownloader {
 
   async _downloadJsonSingle(url) {
     return new Promise((resolve, reject) => {
-      const timeout = 15000;
+      const timeout = 30000; // Increased timeout
       const request = https.get(url, { timeout }, (response) => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
           return this._downloadJsonSingle(response.headers.location).then(resolve, reject);
@@ -545,7 +552,7 @@ class ClientDownloader {
   async _downloadFileSingle(url, filePath, progressCallback = null) {
     return new Promise((resolve, reject) => {
       const file = fs.createWriteStream(filePath);
-      const timeout = 60000;
+      const timeout = 120000; // Increased to 2 minutes for large files
       let downloadedBytes = 0;
       let totalBytes = 0;
       let lastProgressUpdate = 0;

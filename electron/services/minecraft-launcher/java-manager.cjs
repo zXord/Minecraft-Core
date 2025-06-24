@@ -422,8 +422,8 @@ class JavaManager {
       const execAsync = promisify(exec);
       if (clientPath) {
         const clientPathEscaped = clientPath.replace(/\\/g, '\\\\');
-        await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, { timeout: 5000 }).catch(() => {});
-        await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, { timeout: 5000 }).catch(() => {});
+        await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, { timeout: 5000, windowsHide: true }).catch(() => {});
+        await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, { timeout: 5000, windowsHide: true }).catch(() => {});
       }
     }
   }

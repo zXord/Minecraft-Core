@@ -396,4 +396,15 @@ function loadBackupManager() {
     }
 }
 
-module.exports = { createBackupHandlers, loadBackupManager, initializeAutomatedBackups };
+/**
+ * Clear backup intervals for app shutdown
+ */
+function clearBackupIntervals() {
+  if (autoBackupIntervalId) {
+    clearInterval(autoBackupIntervalId);
+    autoBackupIntervalId = null;
+    console.log('✅ Backup intervals cleared');
+  }
+}
+
+module.exports = { createBackupHandlers, loadBackupManager, initializeAutomatedBackups, clearBackupIntervals };

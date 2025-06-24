@@ -61,7 +61,7 @@ export async function loadModsFromServer(instance: Instance) {
   isLoadingMods.set(true);
   try {
     const testUrl = `http://${instance.serverIp}:${instance.serverPort}/api/test`;
-    const testResponse = await fetch(testUrl, { method: 'GET', signal: AbortSignal.timeout(5000) });
+    const testResponse = await fetch(testUrl, { method: 'GET', signal: AbortSignal.timeout(10000) }); // Increased timeout
     if (!testResponse.ok) {
       connectionStatus.set('disconnected');
       serverManagedFiles.set(new Set());
@@ -69,7 +69,7 @@ export async function loadModsFromServer(instance: Instance) {
     }
     connectionStatus.set('connected');
     const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
-    const serverInfoResponse = await fetch(serverInfoUrl, { method: 'GET', signal: AbortSignal.timeout(5000) });
+    const serverInfoResponse = await fetch(serverInfoUrl, { method: 'GET', signal: AbortSignal.timeout(10000) }); // Increased timeout
     if (serverInfoResponse.ok) {
       const serverInfo = await serverInfoResponse.json();
       if (serverInfo.success) {

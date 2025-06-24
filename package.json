@@ -1,13 +1,16 @@
 {
   "name": "minecraft-core",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k --success=first \"npm run dev:vite\" \"npm run dev:electron\"",
     "dev:vite": "vite dev",
-    "dev:electron": "wait-on --timeout 30000 http-get://localhost:5173 && electron . || wait-on --timeout 30000 http-get://localhost:5174 && electron ."
+    "dev:electron": "wait-on --timeout 30000 http-get://localhost:5173 && electron . || wait-on --timeout 30000 http-get://localhost:5174 && electron .",
+    "build": "vite build",
+    "start": "electron .",
+    "prod": "npm run build && npm run start"
   },
   "devDependencies": {
     "@eslint/js": "^9.28.0",

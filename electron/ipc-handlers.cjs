@@ -18,6 +18,7 @@ const { createBackupHandlers, loadBackupManager } = require('./ipc/backup-handle
 const { createManagementServerHandlers } = require('./ipc/management-server-handlers.cjs');
 const { createMinecraftLauncherHandlers } = require('./ipc/minecraft-launcher-handlers.cjs');
 const { createServerJavaHandlers } = require('./ipc/server-java-handlers.cjs');
+const { createAppSettingsHandlers } = require('./ipc/app-settings-handlers.cjs');
 
 // Import auto-restart services for the one remaining handler
 const {
@@ -52,6 +53,9 @@ function setupIpcHandlers(win) {
     const managementServerHandlers = createManagementServerHandlers(win);
     const minecraftLauncherHandlers = createMinecraftLauncherHandlers(win);
     const serverJavaHandlers = createServerJavaHandlers(win);
+    const appSettingsHandlers = createAppSettingsHandlers();
+    
+
     
     // Initialize backup manager
     loadBackupManager();    // Loop through each handler object and register the handlers
@@ -68,7 +72,8 @@ function setupIpcHandlers(win) {
       settingsHandlers,
       managementServerHandlers,
       minecraftLauncherHandlers,
-      serverJavaHandlers
+      serverJavaHandlers,
+      appSettingsHandlers
     ].forEach((handlers) => {
       if (!handlers) {
         return;

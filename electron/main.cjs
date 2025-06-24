@@ -1,6 +1,6 @@
 // Main electron entry point
 const path = require('path');
-const { app, BrowserWindow, Menu } = require('electron');
+const { app, BrowserWindow, Menu, Tray } = require('electron');
 const { setupIpcHandlers } = require('./ipc-handlers.cjs');
 const { startMetricsReporting } = require('./services/system-metrics.cjs');
 const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
@@ -54,12 +54,145 @@ let handlersInitialized = false;
 // Global reference to the main window
 let win;
 
+// Global reference to the system tray
+let tray = null;
+
+// Check if app should start minimized
+const shouldStartMinimized = process.argv.includes('--start-minimized');
+
+
+
+/**
+ * Creates the system tray
+ */
+function createTray() {
+  const { nativeImage } = require('electron');
+  
+    try {
+    let trayIcon;
+    
+    // Try to get app icon from common locations
+    const possibleIconPaths = [
+      path.join(process.resourcesPath, 'app.ico'),
+      path.join(process.resourcesPath, 'icon.ico'),
+      path.join(__dirname, '../icon.ico'),
+      path.join(__dirname, '../assets/icon.ico'),
+      path.join(__dirname, '../../icon.ico')
+    ];
+    
+    for (const iconPath of possibleIconPaths) {
+      if (fs.existsSync(iconPath) && !iconPath.endsWith('.svg')) {
+        trayIcon = nativeImage.createFromPath(iconPath);
+        if (!trayIcon.isEmpty()) break;
+      }
+    }
+    
+    // If no icon found, create a blue square matching app theme
+    if (!trayIcon || trayIcon.isEmpty()) {
+      const width = 16;
+      const height = 16;
+      const buffer = Buffer.alloc(width * height * 4);
+      
+      // Fill with app theme blue (#3b82f6)
+      for (let i = 0; i < buffer.length; i += 4) {
+        buffer[i] = 59;      // Red
+        buffer[i + 1] = 130; // Green
+        buffer[i + 2] = 246; // Blue
+        buffer[i + 3] = 255; // Alpha
+      }
+      
+      trayIcon = nativeImage.createFromBuffer(buffer, { width, height });
+    }
+    
+    // Ensure proper sizing and create tray
+    if (trayIcon && !trayIcon.isEmpty()) {
+      trayIcon = trayIcon.resize({ width: 16, height: 16 });
+    }
+    
+    tray = new Tray(trayIcon);
+    
+    if (!tray) {
+      return;
+    }
+  } catch (error) {
+    // Fallback creation
+    try {
+      const width = 16;
+      const height = 16;
+      const buffer = Buffer.alloc(width * height * 4);
+      
+      for (let i = 0; i < buffer.length; i += 4) {
+        buffer[i] = 59;
+        buffer[i + 1] = 130;
+        buffer[i + 2] = 246;
+        buffer[i + 3] = 255;
+      }
+      
+      const simpleIcon = nativeImage.createFromBuffer(buffer, { width, height });
+      tray = new Tray(simpleIcon);
+    } catch (fallbackError) {
+      tray = null;
+      return;
+    }
+  }
+  
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Show Minecraft Core',
+      click: () => {
+        if (win) {
+          win.show();
+          win.focus();
+        }
+      }
+    },
+    {
+      label: 'Hide to Tray',
+      click: () => {
+        if (win) {
+          win.hide();
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        // Trigger the normal close process (including confirmation dialogs)
+        if (win && !win.isDestroyed()) {
+          win.close();
+        } else {
+          app.quit();
+        }
+      }
+    }
+  ]);
+  
+  tray.setToolTip('Minecraft Core');
+  tray.setContextMenu(contextMenu);
+  
+  // Double-click to show/hide window
+  tray.on('double-click', () => {
+    if (win) {
+      if (win.isVisible()) {
+        win.hide();
+      } else {
+        win.show();
+        win.focus();
+      }
+    }
+  });
+}
+
 /**
  * Creates the main application window
  */
 function createWindow() {
   // Get stored window bounds or use defaults
   const { width, height } = appStore.get('windowBounds');
+  
+  // Get app settings
+  const appSettings = appStore.get('appSettings') || {};
 
   // Debug: print the preload script path
   const preloadPath = path.join(__dirname, 'preload.cjs');
@@ -75,13 +208,33 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false
     },
-    // Suppress security warnings in dev mode
+    // Don't show initially if starting minimized
     show: false
   });
   
-  // Show window after load to reduce initial console spam
+  // Handle window minimize behavior - check current settings each time
+  win.on('minimize', (event) => {
+    const currentSettings = appStore.get('appSettings') || {};
+    
+    if (currentSettings.minimizeToTray && tray) {
+      event.preventDefault(); // Prevent default minimize behavior
+      win.hide(); // Hide window completely (removes from taskbar)
+    }
+  });
+  
+  // Handle close button - should NOT minimize to tray, let normal close behavior happen
+  // The minimize to tray feature should ONLY work for the minimize button, not the close button
+  win.on('close', () => {
+    // Always allow normal close behavior for X button
+    // Do NOT prevent close or hide to tray here
+    // This ensures X button always closes the app normally
+  });
+  
+  // Show window after load unless starting minimized
   win.once('ready-to-show', () => {
-    win.show();
+    if (!shouldStartMinimized || !appSettings.startMinimized || !tray) {
+      win.show();
+    }
   });
   // Set the main window reference
   setMainWindow(win);
@@ -125,18 +278,35 @@ function createWindow() {
   }
 
   // Open DevTools for debugging
-  win.webContents.openDevTools();
+  win.webContents.openDevTools(); // Re-enabled for development
   
-  // Load the app - try port 5173 first, then 5174 if that fails
-  const tryLoadURL = (url) => {
-    win.loadURL(url).catch(() => {
-      if (url.includes('5173')) {
+  // Load the app - in development mode try dev server, in production serve built files
+  const isDevelopment = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
+  
+  if (isDevelopment) {
+    // Development mode - try port 5173 first, then 5174 if that fails
+    const tryLoadURL = (url) => {
+      win.loadURL(url).catch(() => {
+        if (url.includes('5173')) {
+          win.loadURL('http://localhost:5174');
+        }
+      });
+    };
+    
+    tryLoadURL('http://localhost:5173');
+  } else {
+    // Production mode - serve built files directly
+    const distPath = path.join(__dirname, '..', 'dist', 'index.html');
+    
+    if (fs.existsSync(distPath)) {
+      win.loadFile(distPath);
+    } else {
+      // Fallback to dev server if built files don't exist
+      win.loadURL('http://localhost:5173').catch(() => {
         win.loadURL('http://localhost:5174');
-      }
-    });
-  };
-  
-  tryLoadURL('http://localhost:5173');
+      });
+    }
+  }
   
   // Save window size when resized
   win.on('resize', () => {
@@ -156,6 +326,10 @@ app.whenReady().then(() => {
   cleanupRuntimeFiles();
   
   Menu.setApplicationMenu(null);
+  
+  // Create system tray
+  createTray();
+  
   createWindow();
   
   // Start app watchdog only when a Minecraft server starts
@@ -211,8 +385,8 @@ app.whenReady().then(() => {
   eventBus.on('server-normal-exit', stopAppWatchdog);
   eventBus.on('server-crashed', stopAppWatchdog);
   
-  // Start periodic metrics reporting
-  startMetricsReporting();
+  // DON'T start metrics on app startup - only when server starts
+  // startMetricsReporting();
   
   // Initialize with last server path if available
   // IMPORTANT: Wait for the web contents to be ready before sending data
@@ -267,7 +441,19 @@ app.whenReady().then(() => {
 
 // Quit when all windows are closed (except on macOS)
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // Always quit when X button is used to close the window
+  // The minimize to tray feature should ONLY work with the minimize button
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+
+// Clean up tray on quit
+app.on('before-quit', () => {
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
 });
 
 app.on('activate', () => {

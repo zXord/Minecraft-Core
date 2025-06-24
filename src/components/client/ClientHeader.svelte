@@ -3,6 +3,7 @@
   export let tabs = ['play', 'mods', 'settings'];
   export let instance = {};
   export let minecraftServerStatus = 'unknown';
+  export let onOpenAppSettings = () => {};
 
   $: state = $clientState;
 
@@ -12,7 +13,17 @@
 </script>
 
 <header class="client-header">
-  <h1>Minecraft Client</h1>
+  <div class="header-title-row">
+    <h1>Minecraft Client</h1>
+    <button 
+      class="app-settings-button" 
+      on:click={onOpenAppSettings}
+      title="App Settings"
+      aria-label="Open app settings"
+    >
+      ⚙️
+    </button>
+  </div>
   <!-- Hide status section on play tab since PlayTab has compact header -->
   {#if state.activeTab !== 'play'}
     <div class="connection-status">
@@ -90,6 +101,45 @@
     flex-direction: column;
     align-items: center;
     border-bottom: 1px solid #374151;
+  }
+
+  .header-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    width: 100%;
+  }
+
+  h1 {
+    margin: 0;
+    color: white;
+    text-align: center;
+  }
+
+  .app-settings-button {
+    position: absolute;
+    right: 0;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: rgba(255, 255, 255, 0.8);
+    border-radius: 6px;
+    padding: 0.5rem;
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+
+  .app-settings-button:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
+    border-color: rgba(255, 255, 255, 0.3);
+    transform: scale(1.05);
   }
 
   .connection-status {

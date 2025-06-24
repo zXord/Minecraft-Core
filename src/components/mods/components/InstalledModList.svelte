@@ -674,12 +674,18 @@
     loadMods(serverPath);
     checkForUpdates(serverPath);
     
-    // Set up an interval to check for updates every 5 minutes
+    // Set up an interval to check for updates ONLY when component is active
     const updateInterval = setInterval(() => {
-      if (!get(isCheckingUpdates)) {
+      // Only check for updates if:
+      // 1. Not already checking
+      // 2. Component is mounted and visible
+      // 3. Document is visible (tab is active)
+      if (!get(isCheckingUpdates) && 
+          document.visibilityState === 'visible' && 
+          serverPath) {
         checkForUpdates(serverPath);
       }
-    }, 5 * 60 * 1000);
+    }, 10 * 60 * 1000); // Check every 10 minutes (reduced from 5 minutes)
     
     // Listen for download progress events
     // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces

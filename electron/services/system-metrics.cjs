@@ -3,31 +3,68 @@ const os = require('os');
 const pidusage = require('pidusage');
 const { execSync } = require('child_process');
 const { getServerState, sendMetricsUpdate } = require('./server-manager.cjs');
+const { wmicExecSync } = require('../utils/wmic-utils.cjs');
 const process = require('process');
 
 // Initialize metrics state
 let prevCpuTimes = os.cpus().map(cpu => ({ ...cpu.times }));
 let memLookupTimer = 0;
 let metricsInterval = null;
+let isMetricsActive = false;
 
 function startMetricsReporting() {
+  console.log('🔄 Starting metrics reporting...');
+  
   // Clear any existing interval
-  if (metricsInterval) {
-    clearInterval(metricsInterval);
-  }
+  stopMetricsReporting();
   
-  // System metrics update every half second
-  metricsInterval = setInterval(() => {
-    publishSystemMetrics().catch(console.error);
-  }, 500); // 500ms for faster UI updates
+  isMetricsActive = true;
   
-  // Also listen for server state changes to ensure metrics are updated
+  // DON'T start interval immediately - only when server actually starts
+  // Use a simple setInterval that can be properly stopped
+  metricsInterval = setInterval(async () => {
+    if (!isMetricsActive) {
+      return; // Skip if metrics were disabled
+    }
+    
+    const { serverProcess } = getServerState();
+    
+    // Only collect metrics if server is running, OTHERWISE STOP THE INTERVAL
+    if (serverProcess && serverProcess.pid) {
+      try {
+        await publishSystemMetrics();
+      } catch (error) {
+        console.error('Metrics error:', error);
+      }
+    } else {
+      // NO SERVER RUNNING - STOP WASTING CPU
+      console.log('📊 No server running - stopping metrics interval');
+      stopMetricsReporting();
+    }
+  }, 3000); // Every 3 seconds when server is running
+  
+  // Listen for server events
   const eventBus = require('../utils/event-bus.cjs');
   
-  // Reset metrics when server stops
-  eventBus.on('server-normal-exit', () => {
+  // Send metrics immediately when server starts and restart interval
+  eventBus.on('server-started', async () => {
+    console.log('📊 Server started - ensuring metrics are active');
     
-    // Send zeroed metrics on server exit
+    // Restart metrics if stopped
+    if (!metricsInterval || !isMetricsActive) {
+      startMetricsReporting();
+    }
+    
+    try {
+      await publishSystemMetrics();
+    } catch (error) {
+      console.error('Initial metrics error:', error);
+    }
+  });
+  
+  // Send zeroed metrics when server stops and STOP INTERVAL
+  eventBus.on('server-normal-exit', () => {
+    console.log('📊 Server stopped - sending zero metrics and stopping interval');
     sendMetricsUpdate({
       cpuPct: 0,
       memUsedMB: 0,
@@ -37,6 +74,9 @@ function startMetricsReporting() {
       players: 0,
       names: []
     });
+    
+    // STOP the interval when server stops
+    stopMetricsReporting();
   });
 }
 
@@ -89,9 +129,11 @@ async function getServerMemoryUsage(serverProcess) {
     return currentLookupMem;
   }
   
-  // Throttle memory lookup to every 5s
+  // Throttle memory lookups to reduce system load
   const now = Date.now();
-  if (now - memLookupTimer < 5000 && publishSystemMetrics.lastMemUsedMB) {
+  const throttleTime = 5000; // 5 second throttle
+  
+  if (now - memLookupTimer < throttleTime && publishSystemMetrics.lastMemUsedMB) {
     return publishSystemMetrics.lastMemUsedMB;
   }
   
@@ -99,63 +141,35 @@ async function getServerMemoryUsage(serverProcess) {
   
   if (process.platform === 'win32') {
     try {
-      // First try a more reliable method for Windows
-      let minecraftServerMemory = 0;
-      
+      // Try pidusage first as it's more reliable
       try {
-        // Get all java processes on the system
-        const javaProcesses = execSync(
-          'wmic process where "name=\'java.exe\'" get ProcessId,WorkingSetSize /format:csv',
-          { encoding: 'utf8' }
-        ).trim().split('\n').slice(1); // Skip header
-        
-        // Find the process with the highest memory footprint
-        for (const line of javaProcesses) {
-          if (!line.trim()) continue;
-          const parts = line.trim().split(',');
-          if (parts.length >= 3) {
-            const memInBytes = parseInt(parts[2], 10);
-            if (!isNaN(memInBytes) && memInBytes > minecraftServerMemory) {
-              minecraftServerMemory = memInBytes;
-            }
-          }
-        }
-        
-        if (minecraftServerMemory > 0) {
-          currentLookupMem = parseFloat((minecraftServerMemory / 1024 / 1024).toFixed(1));
-        }      } catch (wmicErr) {
-        if (process.env.DEBUG) {
-          console.error('WMIC memory lookup failed:', wmicErr.message);
-        }
-      }
-        // If the first method failed, try direct PowerShell as backup
-      if (minecraftServerMemory === 0) {
+        const stats = await pidusage(serverProcess.pid);
+        currentLookupMem = parseFloat((stats.memory / 1024 / 1024).toFixed(1));
+      } catch (pidError) {
+        // Fallback to WMIC if pidusage fails
         try {
-          // Check if process exists in PowerShell before trying to get metrics
-          const processExists = execSync(
-            `powershell -Command "if (Get-Process -Id ${serverProcess.pid} -ErrorAction SilentlyContinue) { Write-Output 'true' } else { Write-Output 'false' }"`, 
-            { encoding: 'utf8' }
-          ).trim();
+          const filteredOutput = wmicExecSync(
+            `wmic process where "ProcessId=${serverProcess.pid}" get WorkingSetSize /format:csv`
+          );
           
-          if (processExists === 'true') {
-            const memoryOutput = execSync(
-              `powershell -Command "(Get-Process -Id ${serverProcess.pid} -ErrorAction Stop).WorkingSet64 / 1MB"`, 
-              { encoding: 'utf8' }
-            ).trim();
-            const memoryValue = parseFloat(memoryOutput);
-            if (!isNaN(memoryValue) && memoryValue > 0) {
-              currentLookupMem = memoryValue;
+          const lines = filteredOutput.trim().split('\n');
+          for (const line of lines) {
+            if (!line.trim() || line.includes('WorkingSetSize')) continue;
+            const parts = line.trim().split(',');
+            if (parts.length >= 2) {
+              const memInBytes = parseInt(parts[1], 10);
+              if (!isNaN(memInBytes) && memInBytes > 0) {
+                currentLookupMem = parseFloat((memInBytes / 1024 / 1024).toFixed(1));
+                break;
+              }
             }
           }
-        } catch (psErr) {
-          // Silently handle the error and don't output to console as this is expected sometimes
-          if (process.env.DEBUG) {
-            console.error('PowerShell memory lookup failed:', psErr.message);
-          }
+        } catch (wmicErr) {
+          // Silent fallback
         }
       }
     } catch (err) {
-      console.error(err);
+      // Silent fallback
     }
   } else {
     // For non-Windows systems, use pidusage
@@ -163,7 +177,7 @@ async function getServerMemoryUsage(serverProcess) {
       const stats = await pidusage(serverProcess.pid);
       currentLookupMem = parseFloat((stats.memory / 1024 / 1024).toFixed(1));
     } catch (err) {
-      console.error(err);
+      // Silent fallback
     }
   }
   
@@ -189,29 +203,22 @@ async function publishSystemMetrics() {
     
     if (serverProcess && serverProcess.pid) {
       // Server is running - collect real metrics
-      if (process.platform !== 'win32') {
-        // On non-Windows, use pidusage
-        try {
-          const stat = await pidusage(serverProcess.pid);
-          cpuPct = parseFloat(stat.cpu.toFixed(1));
-        } catch {
-          cpuPct = 0; // Fallback
-        }
-      } else {
-        // Skip per-process CPU usage on Windows to avoid pidusage errors
-        cpuPct = 0;
+      try {
+        // Get memory usage
+        memUsedMB = await getServerMemoryUsage(serverProcess);
+        
+        // For CPU, use minimal system impact
+        cpuPct = 0.1; // Just show it's running without expensive CPU calculation
+        
+        // Ensure non-zero state to indicate running server
+        if (memUsedMB <= 0) memUsedMB = 1; // Minimal value to show it's actually running
+      } catch (error) {
+        // Fallback values if metrics collection fails
+        cpuPct = 0.1;
+        memUsedMB = publishSystemMetrics.lastMemUsedMB || 1;
       }
-      
-      // Get memory usage
-      memUsedMB = await getServerMemoryUsage(serverProcess);
-      
-      // Ensure non-zero state to indicate running server
-      if (cpuPct <= 0) cpuPct = 0.1; // Minimal value to show it's actually running
-      if (memUsedMB <= 0) memUsedMB = 1; // Minimal value to show it's actually running
     } else {
-      // If server is not running, explicitly reset all metrics to zero
-      // Only log the first time we zero out metrics to avoid log spam
-      
+      // Server not running - zero everything
       cpuPct = 0;
       memUsedMB = 0;
       publishSystemMetrics.lastMemUsedMB = 0;
@@ -244,7 +251,7 @@ async function publishSystemMetrics() {
       names: playersInfo.names
     });
   } catch (err) {
-    console.error(err);
+    console.error('Metrics publishing error:', err);
   }
 }
 
@@ -252,6 +259,10 @@ async function publishSystemMetrics() {
 publishSystemMetrics.lastMemUsedMB = 0;
 
 function stopMetricsReporting() {
+  console.log('🛑 Stopping metrics reporting...');
+  
+  isMetricsActive = false;
+  
   if (metricsInterval) {
     clearInterval(metricsInterval);
     metricsInterval = null;

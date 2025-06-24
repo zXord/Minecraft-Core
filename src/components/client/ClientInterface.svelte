@@ -16,6 +16,10 @@ import {
 import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../stores/clientModManager';
   import { createEventDispatcher } from 'svelte';
   import { openFolder } from '../../utils/folderUtils.js';
+  
+  // App settings handler
+  export let onOpenAppSettings = () => {};
+  
   // Minecraft version compatibility checker
   function checkMinecraftVersionCompatibility(modVersion, targetVersion) {
     if (!modVersion || !targetVersion) return false;
@@ -1057,11 +1061,12 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           setTimeout(() => successMessage.set(''), 3000);
         } else {
           authStatus = 'needs-auth';
-          errorMessage.set('Authentication timed out. Please try again.');
-          setTimeout(() => errorMessage.set(''), 5000);
+          // Remove timeout message since authentication might still be in progress
+          // errorMessage.set('Authentication timed out. Please try again.');
+          // setTimeout(() => errorMessage.set(''), 5000);
         }
       }
-    }, 15000); // 15 second timeout
+    }, 30000); // Increased to 30 second timeout
     
     try {
       const result = await window.electron.invoke('minecraft-auth', {
@@ -1912,38 +1917,37 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Check connection immediately
     connectToServer();
 
-    // Attempt an initial auth refresh after loading
-    setTimeout(() => {
-      refreshAuthToken();
-    }, 5000);
-    
-    // Set up periodic connection check
+    // Set up periodic connection check with backoff - ONLY if disconnected
     connectionCheckInterval = setInterval(() => {
       if ($clientState.connectionStatus === 'disconnected') {
         connectToServer();
       }
-    }, 30000); // Every 30 seconds
-      // Set up periodic server status check (reduced frequency)
+    }, 60000); // Every 60 seconds
+      
+    // Set up periodic server status check - ONLY if connected
     statusCheckInterval = setInterval(() => {
       if ($clientState.connectionStatus === 'connected') {
         checkServerStatus(true); // Silent refresh
       }
-    }, 60000); // Every 60 seconds (reduced frequency)
+    }, 120000); // Every 2 minutes
 
-    // Set up periodic mod synchronization check
+    // Set up periodic mod synchronization check - ONLY if connected and not busy
     const modCheckInterval = setInterval(() => {
       if ($clientState.connectionStatus === 'connected' && 
           !isDownloadingClient && !isDownloadingMods && !isCheckingSync) {
         checkModSynchronization(true); // Silent refresh
       }
-    }, 30000); // Every 30 seconds
+    }, 60000); // Every 60 seconds
 
-    // Set up periodic authentication refresh
+    // Set up periodic authentication refresh - ONLY when authenticated
     authRefreshInterval = setInterval(() => {
-      refreshAuthToken();
+      // Only refresh if we're actually authenticated and connected
+      if (authStatus === 'authenticated' && $clientState.connectionStatus === 'connected') {
+        refreshAuthToken();
+      }
     }, 30 * 60 * 1000); // Every 30 minutes
     
-    // Set up periodic launcher status check to detect when Minecraft stops  
+    // Set up periodic launcher status check - ONLY when Minecraft is running
     const launcherStatusInterval = setInterval(async () => {
       if (launchStatus === 'running') {
         try {
@@ -1952,11 +1956,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             launchStatus = 'ready';
           }
         } catch (err) {
-          // Remove console spam - errors should only be logged if meaningful
-          // (This is just a periodic status check, don't spam on every failure)
+          // Silent error handling for periodic checks
         }
       }
-    }, 5000); // Every 5 seconds when running
+    }, 15000); // Every 15 seconds when running
       // Store intervals for cleanup
     connectionCheckInterval = connectionCheckInterval;
     statusCheckInterval = statusCheckInterval;
@@ -2232,7 +2235,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 </script>
 
 <div class="client-container">
-  <ClientHeader {instance} {tabs} minecraftServerStatus={$clientState.minecraftServerStatus} />
+  <ClientHeader {instance} {tabs} minecraftServerStatus={$clientState.minecraftServerStatus} {onOpenAppSettings} />
 
   <div class="client-content">
     {#if $clientState.activeTab === 'play'}      <PlayTab

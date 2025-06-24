@@ -125,6 +125,11 @@ contextBridge.exposeInMainWorld('electron', {
       'server-java-get-path',
       'server-java-get-available-versions',
       'server-java-is-available',
+      // App settings channels
+      'save-app-settings',
+      'get-app-settings',
+      'get-app-version',
+      'check-for-updates',
       // Application lifecycle
       'app-close-response',
       // Management server events
