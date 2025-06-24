@@ -12,7 +12,7 @@ let metricsInterval = null;
 let isMetricsActive = false;
 
 function startMetricsReporting() {
-  console.log('🔄 Starting metrics reporting...');
+  
   
   // Clear any existing interval
   stopMetricsReporting();
@@ -37,7 +37,7 @@ function startMetricsReporting() {
       }
     } else {
       // NO SERVER RUNNING - STOP WASTING CPU
-      console.log('📊 No server running - stopping metrics interval');
+      
       stopMetricsReporting();
     }
   }, 3000); // Every 3 seconds when server is running
@@ -47,7 +47,7 @@ function startMetricsReporting() {
   
   // Send metrics immediately when server starts and restart interval
   eventBus.on('server-started', async () => {
-    console.log('📊 Server started - ensuring metrics are active');
+    
     
     // Restart metrics if stopped
     if (!metricsInterval || !isMetricsActive) {
@@ -63,7 +63,7 @@ function startMetricsReporting() {
   
   // Send zeroed metrics when server stops and STOP INTERVAL
   eventBus.on('server-normal-exit', () => {
-    console.log('📊 Server stopped - sending zero metrics and stopping interval');
+    
     sendMetricsUpdate({
       cpuPct: 0,
       memUsedMB: 0,

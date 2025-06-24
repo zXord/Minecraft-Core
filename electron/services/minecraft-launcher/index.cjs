@@ -401,24 +401,12 @@ class MinecraftLauncher extends EventEmitter {
         throw new Error('Authentication data missing after refresh check. Please authenticate again.');
       }
       
-      // DEBUG: Log authentication details for troubleshooting invalid session issues
-      console.log('Authentication Debug Info:');
-      console.log('- Player Name:', authData.name);
-      console.log('- UUID Format:', authData.uuid);
-      console.log('- UUID Length:', authData.uuid ? authData.uuid.length : 'null');
-      console.log('- Access Token Length:', authData.access_token ? authData.access_token.length : 'null');
-      console.log('- Auth Saved At:', authData.savedAt);
-      console.log('- Hours Since Auth:', authData.savedAt ? ((new Date().getTime() - new Date(authData.savedAt).getTime()) / (1000 * 60 * 60)).toFixed(2) : 'unknown');
-      
       // Try both UUID formats to see which one works
       const uuidWithDashes = authData.uuid.includes('-') ? 
         authData.uuid : // Already has dashes, use as-is
         authData.uuid.length === 32 ? 
           `${authData.uuid.substring(0,8)}-${authData.uuid.substring(8,12)}-${authData.uuid.substring(12,16)}-${authData.uuid.substring(16,20)}-${authData.uuid.substring(20)}` :
           authData.uuid;
-      
-      console.log('- UUID With Dashes:', uuidWithDashes);
-      console.log('- UUID Without Dashes:', authData.uuid.replace(/-/g, ''));
       
       // Use the dashed UUID format as Minecraft expects it
       const minecraftUuid = uuidWithDashes;

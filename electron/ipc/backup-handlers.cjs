@@ -403,7 +403,7 @@ function clearBackupIntervals() {
   if (autoBackupIntervalId) {
     clearInterval(autoBackupIntervalId);
     autoBackupIntervalId = null;
-    console.log('✅ Backup intervals cleared');
+    
   }
 }
 

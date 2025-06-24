@@ -30,7 +30,7 @@ class XMCLAuthHandler {
 
     try {
       this.isAuthenticating = true;
-      console.log('🔐 Starting Microsoft authentication with @xmcl/user...');
+
 
       // For now, we'll use a hybrid approach:
       // Use @xmcl/user for Xbox Live authentication, but handle Microsoft OAuth manually
@@ -47,7 +47,7 @@ class XMCLAuthHandler {
         throw new Error('Failed to get Microsoft access token');
       }
       
-      console.log('✅ Microsoft OAuth successful, proceeding with Xbox authentication...');
+
         // Use @xmcl/user to authenticate with Xbox Live
       // REVERTED: Use the original working API flow with better error handling
       const xboxLiveToken = await this.authenticator.authenticateXboxLive(xboxManager.msToken.access_token);
@@ -56,7 +56,7 @@ class XMCLAuthHandler {
         throw new Error('Xbox Live authentication failed');
       }
       
-      console.log('✅ Xbox Live authentication successful');
+
       
       // Authorize Xbox Live for Minecraft
       const xboxProfile = await this.authenticator.authorizeXboxLive(xboxLiveToken.Token);
@@ -65,7 +65,7 @@ class XMCLAuthHandler {
         throw new Error('Xbox Live authorization failed');
       }
       
-      console.log('✅ Xbox Live authorization successful');
+
       
       // Get the Minecraft access token - Use correct parameter order (uhs, xstsToken)
       const minecraftProfile = await this.authenticator.loginMinecraftWithXBox(
@@ -77,7 +77,7 @@ class XMCLAuthHandler {
         throw new Error('Minecraft authentication failed');
       }
       
-      console.log('✅ Minecraft authentication successful');
+
       
       // Get the game profile (we'll use the Minecraft token to get profile info)
       // For now, let's get the profile info from the original MSMC token since that's more reliable
@@ -112,7 +112,7 @@ class XMCLAuthHandler {
         lastRefresh: new Date().toISOString()
       };
 
-      console.log('AUTH SUCCESS: Authenticated as', originalToken.profile.name, 'UUID:', formattedUuid);
+
       
       this.emitter.emit('auth-success', { 
         username: originalToken.profile.name, 
@@ -126,7 +126,7 @@ class XMCLAuthHandler {
       };
 
     } catch (error) {
-      console.error('❌ Microsoft authentication failed:', error.message);
+
       this.emitter.emit('auth-error', error.message);
       return { success: false, error: error.message };
     } finally {
@@ -167,11 +167,11 @@ class XMCLAuthHandler {
       };
 
       fs.writeFileSync(authFile, JSON.stringify(authDataToSave, null, 2));
-      console.log('💾 Authentication data saved successfully');
+
       return { success: true };
 
     } catch (error) {
-      console.error('❌ Failed to save auth data:', error.message);
+
       return { success: false, error: error.message };
     }
   }
@@ -215,7 +215,7 @@ class XMCLAuthHandler {
             this.authData.msmc_meta = authManager;
           }
         } catch (error) {
-          console.warn('⚠️ Could not restore MSMC metadata for refresh:', error.message);
+
         }
       }
 
@@ -228,7 +228,7 @@ class XMCLAuthHandler {
       };
 
     } catch (error) {
-      console.error('❌ Failed to load auth data:', error.message);
+
       return { success: false, error: error.message };
     }
   }
@@ -263,13 +263,13 @@ class XMCLAuthHandler {
 
       // Be much more lenient - if token is less than 48 hours old, just use it
       if (hoursSinceRefresh < 48) {
-        console.log(`✅ Token is acceptable for use (${hoursSinceRefresh.toFixed(1)} hours old, no refresh needed)`);
+
         return { success: true, refreshed: false };
       }
 
       // Only try to refresh if token is very old (over 48 hours) and we have refresh capability
       if (this.authData.msmc_meta || (this.authData.xmcl_tokens && this.authData.xmcl_tokens.microsoft)) {
-        console.log('🔄 Token is very old, attempting refresh...');
+
         
         // Start refresh (store promise to prevent concurrent refreshes)
         this.refreshPromise = this.performTokenRefresh();
@@ -282,7 +282,7 @@ class XMCLAuthHandler {
           this.refreshPromise = null;
           // If refresh fails, still allow using the old token for another 24 hours
           if (hoursSinceRefresh < 72) {
-            console.log('⚠️ Refresh failed, but using old token for now');
+
             return { success: true, refreshed: false, error: error.message };
           }
           throw error;
@@ -291,7 +291,7 @@ class XMCLAuthHandler {
 
       // If token is older than 72 hours and we can't refresh, require re-auth
       if (hoursSinceRefresh > 72) {
-        console.log('⚠️ Token is very old and cannot be refreshed, requiring re-authentication');
+
         this.authData = null;
         return { 
           success: false, 
@@ -301,7 +301,7 @@ class XMCLAuthHandler {
       }
 
       // Token is old but still usable
-      console.log(`✅ Token is old but still acceptable (${hoursSinceRefresh.toFixed(1)} hours old)`);
+
       return { success: true, refreshed: false };
 
     } catch (error) {
@@ -313,7 +313,6 @@ class XMCLAuthHandler {
       const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
       
       if (hoursSinceSaved < 48) {
-        console.log('⚠️ Using cached token despite refresh error');
         return { success: true, refreshed: false, error: error.message };
       }
 
@@ -331,7 +330,7 @@ class XMCLAuthHandler {
       const msmc_meta = this.authData.msmc_meta;
       if (!msmc_meta) {
         // Instead of throwing error, handle gracefully
-        console.warn('⚠️ No MSMC metadata available for token refresh. Authentication may need to be renewed.');
+
         
         // Check if the token is still relatively fresh
         const savedDate = new Date(this.authData.savedAt || 0);
@@ -340,7 +339,7 @@ class XMCLAuthHandler {
         
         if (hoursSinceSaved < 8) {
           // Token is less than 8 hours old, still usable
-          console.log('✅ Using cached token despite missing refresh metadata');
+
           return { success: true, refreshed: false, usedCache: true };
         } else {
           // Token is too old, need fresh authentication
@@ -363,14 +362,14 @@ class XMCLAuthHandler {
         refreshedXboxManager = msmc_meta;
       } else {
         // Similar graceful handling for missing refresh methods
-        console.warn('⚠️ No refresh method available in MSMC metadata');
+
         
         const savedDate = new Date(this.authData.savedAt || 0);
         const now = new Date();
         const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
         
         if (hoursSinceSaved < 8) {
-          console.log('✅ Using cached token despite missing refresh method');
+
           return { success: true, refreshed: false, usedCache: true };
         } else {
           this.authData = null;
@@ -386,7 +385,7 @@ class XMCLAuthHandler {
         throw new Error('Failed to refresh Microsoft token');
       }
 
-      console.log('✅ Microsoft token refreshed, updating Xbox/Minecraft tokens...');
+
 
       // Now use @xmcl/user to get fresh Xbox and Minecraft tokens
       const xboxLiveToken = await this.authenticator.authenticateXboxLive(refreshedXboxManager.msToken.access_token);
@@ -446,7 +445,7 @@ class XMCLAuthHandler {
 
       this.lastRefreshTime = new Date();
 
-      console.log('✅ Token refresh successful for:', updatedToken.profile.name);
+
 
       return { success: true, refreshed: true };
 
@@ -468,7 +467,7 @@ class XMCLAuthHandler {
       if (error.message.includes('ENOTFOUND') || 
           error.message.includes('timeout') || 
           error.message.includes('network')) {
-        console.log('⚠️ Network error during refresh, using cached token');
+
         return { success: true, refreshed: false, networkError: true };
       }
 
@@ -478,7 +477,6 @@ class XMCLAuthHandler {
       const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
       
       if (hoursSinceSaved < 6) {
-        console.log('⚠️ Using cached token despite refresh error');
         return { success: true, refreshed: false, error: error.message };
       }
 
@@ -493,7 +491,7 @@ class XMCLAuthHandler {
     this.authData = null;
     this.lastRefreshTime = null;
     this.refreshPromise = null;
-    console.log('🔐 Authentication data cleared');
+
   }
 
   /**

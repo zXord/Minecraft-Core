@@ -42,7 +42,6 @@ function killDevelopmentProcesses() {
           
           if (commandsCompleted === killCommands.length) {
             setTimeout(() => {
-              console.log(`🔄 Development cleanup complete (${processesKilled} processes killed)`);
               resolve();
             }, 1000);
           }
@@ -85,7 +84,6 @@ function killDevelopmentProcesses() {
           
           if (commandsCompleted === killCommands.length) {
             setTimeout(() => {
-              console.log(`🔄 Development cleanup complete (${processesKilled} processes killed)`);
               resolve();
             }, 1000);
           }
@@ -120,7 +118,7 @@ function clearAllIntervals() {
     const { clearBackupIntervals } = require('../ipc/backup-handlers.cjs');
     clearBackupIntervals();
   } catch (error) {
-    console.warn('⚠️ Error clearing some intervals:', error.message);
+
   }
 }
 
@@ -147,9 +145,9 @@ async function performCompleteCleanup() {
     // 4. Kill development processes (Vite, etc.)
     await killDevelopmentProcesses();
     
-    console.log('✅ Complete cleanup finished');
+    
   } catch (error) {
-    console.error('❌ Error during cleanup:', error);
+
   }
 }
 
@@ -181,7 +179,7 @@ function setupAppCleanup(app, win) {
               isQuitting = true;
               win.close();
             } catch (err) {
-              console.error(err);
+
               isQuitting = true;
               win.close();
             }
@@ -191,7 +189,7 @@ function setupAppCleanup(app, win) {
           try {
             await performCompleteCleanup();
           } catch (error) {
-            console.error('Cleanup error:', error);
+
           }
           
           isQuitting = true;
@@ -210,7 +208,7 @@ function setupAppCleanup(app, win) {
   const signals = ['SIGINT', 'SIGTERM'];
   signals.forEach(signal => {
     process.on(signal, async () => {
-      console.log(`📡 Received ${signal}, cleaning up...`);
+      
       
       try {
         await performCompleteCleanup();
@@ -220,7 +218,7 @@ function setupAppCleanup(app, win) {
           process.exit(0);
         }, 1500);
       } catch (err) {
-        console.error('Cleanup error:', err);
+
         process.exit(1);
       }
     });

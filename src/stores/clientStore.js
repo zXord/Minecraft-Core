@@ -104,7 +104,6 @@ export function clearVersionChangeDetected() {
 export function clearPersistedClientState() {
   try {
     localStorage.removeItem('clientState');
-    console.log('Cleared persisted client state from localStorage');
   } catch (error) {
     console.warn('Failed to clear persisted client state:', error);
   }

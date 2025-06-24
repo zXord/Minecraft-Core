@@ -1,4 +1,4 @@
-<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    updateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    disabledModUpdates,    categorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates, enableAndUpdateMod } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';  import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
+<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    getUpdateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    disabledModUpdates,    getCategorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates, enableAndUpdateMod } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';  import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
   import { slide } from 'svelte/transition';
   import { checkDependencyCompatibility } from '../../../utils/mods/modCompatibility.js';
   import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
@@ -29,6 +29,18 @@
   const dispatch = createEventDispatcher();
     // Track download events
   let downloadListener;
+  
+  // Get derived store values reactively using get() to avoid store subscription at module level
+  let updateCount = 0;
+  let categorizedMods = [];
+  
+  // Function to update values manually when needed
+  function updateDerivedValues() {
+    const updateCountStore = getUpdateCount();
+    const categorizedModsStore = getCategorizedMods();
+    updateCount = get(updateCountStore);
+    categorizedMods = get(categorizedModsStore);
+  }
   
   /**
    * Toggle version selector for an installed mod
@@ -670,6 +682,9 @@
   
   // Load mods on mount and check for updates
   onMount(() => {
+    // Initialize derived store values
+    updateDerivedValues();
+    
     // Load initial data
     loadMods(serverPath);
     checkForUpdates(serverPath);
@@ -686,6 +701,11 @@
         checkForUpdates(serverPath);
       }
     }, 10 * 60 * 1000); // Check every 10 minutes (reduced from 5 minutes)
+    
+    // Set up an interval to update derived store values
+    const derivedValuesInterval = setInterval(() => {
+      updateDerivedValues();
+    }, 1000); // Update every second to keep UI reactive
     
     // Listen for download progress events
     // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces
@@ -764,6 +784,7 @@
     // Clean up the interval when the component is destroyed
     return () => {
       clearInterval(updateInterval);
+      clearInterval(derivedValuesInterval);
       // Clean up listener
       // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces
       if (downloadListener && typeof window !== 'undefined' && window.ipcRenderer) {
@@ -898,13 +919,13 @@
       <button class="action-button" on:click={checkAllModsCompatibility}>
         Check Compatibility
       </button>
-      {#if $updateCount > 0}
+      {#if updateCount > 0}
           <button
           class="action-button update-all-button"
             on:click={updateAllMods}
           disabled={updateAllInProgress}
         >
-          {updateAllInProgress ? 'Updating...' : `Update All (${$updateCount})`}
+          {updateAllInProgress ? 'Updating...' : `Update All (${updateCount})`}
           </button>
         {/if}
       {#if selectedMods.size > 0}
@@ -940,7 +961,7 @@
       <div class="mods-grid">
         {#each $installedMods.filter(mod => !$disabledMods.has(mod)) as mod (mod)}
           {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-          {@const modCategoryInfo = $categorizedMods.find(m => m.fileName === mod)}
+          {@const modCategoryInfo = categorizedMods.find(m => m.fileName === mod)}
           <div class="mod-card {$expandedInstalledMod === mod ? 'expanded' : ''} {modCategoryInfo?.category || ''}">
             <div class="table-row">
               <div class="row-checkbox">
