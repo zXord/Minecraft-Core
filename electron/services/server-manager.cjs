@@ -165,16 +165,8 @@ function parsePlayerList(text) {
 
 // Helper function to enable intensive checking with cleanup
 function enableIntensiveChecking() {
-  // Clean up any existing intensive checking
-  if (intensiveCheckTimer) {
-    clearTimeout(intensiveCheckTimer);
-    intensiveCheckTimer = null;
-  }
-  
-  if (intensiveCheckTimeouts.length) {
-    intensiveCheckTimeouts.forEach(clearTimeout);
-    intensiveCheckTimeouts = [];
-  }
+  // Always clear any existing intensive checking first to prevent accumulation
+  clearIntensiveChecking();
   
   // Enable intensive player list checking for a short period
   intensivePlayerCheckMode = true;
@@ -198,12 +190,26 @@ function enableIntensiveChecking() {
   
   // Stop intensive checking after 6 seconds total
   intensiveCheckTimer = setTimeout(() => {
-    if (intensiveCheckTimeouts.length) {
-      intensiveCheckTimeouts.forEach(clearTimeout);
-      intensiveCheckTimeouts = [];
-    }
-    intensivePlayerCheckMode = false;
+    clearIntensiveChecking();
   }, 6000);
+}
+
+// Helper function to clear all intensive checking timers
+function clearIntensiveChecking() {
+  // Clear the main intensive check timer
+  if (intensiveCheckTimer) {
+    clearTimeout(intensiveCheckTimer);
+    intensiveCheckTimer = null;
+  }
+  
+  // Clear all pending check timeouts
+  if (intensiveCheckTimeouts.length) {
+    intensiveCheckTimeouts.forEach(clearTimeout);
+    intensiveCheckTimeouts = [];
+  }
+  
+  // Disable intensive mode
+  intensivePlayerCheckMode = false;
 }
 
 /**
@@ -609,7 +615,12 @@ function stopMinecraftServer() {
   
   serverProcess.stdin.write('stop\n');
 
-  if (listInterval) clearInterval(listInterval);
+  // Clean up all intervals and timers
+  if (listInterval) {
+    clearInterval(listInterval);
+    listInterval = null;
+  }
+  clearIntensiveChecking();
   
   // Reset all server state immediately
   serverProcess = null;
@@ -656,11 +667,12 @@ function killMinecraftServer() {
     catch { process.kill(pid, 'SIGKILL'); }
   }
 
-  // Clean up interval
+  // Clean up all intervals and timers
   if (listInterval) {
     clearInterval(listInterval);
     listInterval = null;
   }
+  clearIntensiveChecking();
   
   // Clear server state
   serverProcess = null;
@@ -732,13 +744,16 @@ function getServerProcess() {
 }
 
 /**
- * Clear all intervals
+ * Clear all intervals and timers
  */
 function clearIntervals() {
   if (listInterval) {
     clearInterval(listInterval);
     listInterval = null;
   }
+  
+  // Clear intensive checking timers to prevent memory leaks
+  clearIntensiveChecking();
 }
 
 module.exports = {
