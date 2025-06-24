@@ -275,7 +275,7 @@
         checkServerStatus();
         checkManagementServerStatus();
       }
-    }, 5000); // Check every 5 seconds when visible
+    }, 30000); // Check every 30 seconds when visible
 
     // Load settings first, then check server status
     (async () => {

@@ -776,7 +776,7 @@ function createMinecraftLauncherHandlers(win) {
                   reject(err);
                 });
                 
-                request.setTimeout(30000, () => {
+                request.setTimeout(60000, () => { // Increased timeout to 60 seconds
                   request.abort();
                   reject(new Error(`Download timeout for ${mod.fileName}`));
                 });

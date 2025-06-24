@@ -59,6 +59,11 @@ const storeConfig = {
       maxRam: 4,
       autoStartMinecraft: false,
       autoStartManagement: false
+    },
+    appSettings: {
+      minimizeToTray: false,
+      startMinimized: false,
+      startOnStartup: false
     }
   }
 };

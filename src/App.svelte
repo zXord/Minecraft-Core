@@ -19,6 +19,7 @@
   import ClientSetupWizard from './components/client/ClientSetupWizard.svelte';
   import StatusManager from './components/common/StatusManager.svelte';
   import ConfirmationDialog from './components/common/ConfirmationDialog.svelte';
+  import AppSettingsModal from './components/common/AppSettingsModal.svelte';
   import { showExitConfirmation } from './stores/exitStore.js';
   
   // --- Flow & Tabs ---
@@ -42,6 +43,9 @@
   // Instance renaming functionality
   let editId = null;
   let editName = '';
+
+  // App settings modal state
+  let showAppSettings = false;
 
   function startRenaming(instance, event) {
     // Prevent triggering the instance selection
@@ -506,7 +510,17 @@
         </div>
       {:else if instanceType === 'server'}
         <header class="app-header">
-          <h1>Minecraft Core</h1>          <nav class="tabs-container">
+          <div class="header-title-row">
+            <h1>Minecraft Core</h1>
+            <button 
+              class="app-settings-button" 
+              on:click={() => showAppSettings = true}
+              title="App Settings"
+              aria-label="Open app settings"
+            >
+              ⚙️
+            </button>
+          </div>          <nav class="tabs-container">
             {#each tabs as t (t)}
               <button
                 class="tab-button"
@@ -570,6 +584,7 @@
         </div>
       {:else if instanceType === 'client'}        <ClientInterface 
           instance={currentInstance} 
+          onOpenAppSettings={() => showAppSettings = true}
           on:deleted={(e) => {
             // Remove the instance from the list
             instances = instances.filter(i => i.id !== e.detail.id);
@@ -609,6 +624,10 @@
       window.electron.invoke('app-close-response', false);
       showExitConfirmation.set(false);
     }}
+  />
+  <AppSettingsModal 
+    bind:visible={showAppSettings}
+    on:close={() => showAppSettings = false}
   />
   <StatusManager />
 </main>
@@ -686,10 +705,44 @@
     border-bottom: 1px solid #374151;
   }
 
-  h1 {
+  .header-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    width: 100%;
     margin-bottom: 1.5rem;
+  }
+
+  h1 {
+    margin: 0;
     color: white;
     text-align: center;
+  }
+
+  .app-settings-button {
+    position: absolute;
+    right: 0;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: rgba(255, 255, 255, 0.8);
+    border-radius: 6px;
+    padding: 0.5rem;
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+
+  .app-settings-button:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
+    border-color: rgba(255, 255, 255, 0.3);
+    transform: scale(1.05);
   }
 
   .tabs-container {

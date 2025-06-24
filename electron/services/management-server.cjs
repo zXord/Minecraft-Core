@@ -5,6 +5,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { createHash } = require('crypto');
+const { wmicExecAsync } = require('../utils/wmic-utils.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const process = require('process');
 
@@ -94,6 +95,11 @@ class ManagementServer {
         lastSeen: new Date()
       });
       
+      // Start cleanup interval when first client connects
+      if (this.clients.size === 1 && !this.clientCleanupInterval) {
+        console.log('👥 First client connected - starting cleanup interval');
+        this.startClientCleanup();
+      }
       
       res.json({ 
         success: true, 
@@ -132,6 +138,13 @@ class ManagementServer {
       const client = this.clients.get(clientId);
       if (client) {
         this.clients.delete(clientId);
+        
+        // Stop cleanup interval when no clients remain
+        if (this.clients.size === 0 && this.clientCleanupInterval) {
+          console.log('👥 No clients remaining - stopping cleanup interval');
+          this.stopClientCleanup();
+        }
+        
         res.json({ success: true });
       } else {
         res.status(404).json({ error: 'Client not found' });
@@ -513,11 +526,13 @@ class ManagementServer {
     return new Promise((resolve) => {
       this.server = this.app.listen(port, () => {
         this.isRunning = true;
+        console.log(`🌐 Management server started on port ${port}`);
 
-        // Start client cleanup interval (check every 30 seconds)
-        this.startClientCleanup();
+        // Start version watcher and check versions
         this.startVersionWatcher();
         this.checkVersionChange();
+        
+        // DON'T start cleanup interval automatically - only when clients connect
 
         resolve({ success: true, port });
       });
@@ -586,9 +601,11 @@ class ManagementServer {
       
       // On Windows, check for java processes running from the server directory
       if (process.platform === 'win32') {        try {
-          // More specific check - look for java processes with minecraft-related command lines
-          const { stdout } = await execAsync(`wmic process where "name='java.exe'" get ProcessId,CommandLine /format:csv`, { timeout: 5000 });
-          const lines = stdout.split('\n');
+          // More specific check - look for java processes with minecraft-related command lines using centralized WMIC utility
+          const { stdout } = await wmicExecAsync(`wmic process where "name='java.exe'" get ProcessId,CommandLine /format:csv`);
+          const filteredOutput = stdout;
+            
+          const lines = filteredOutput.split('\n');
           
           // Look for processes that contain minecraft server indicators
           const minecraftProcesses = lines.filter(line => {
@@ -934,14 +951,12 @@ class ManagementServer {
   // Start client cleanup interval
   startClientCleanup() {
     if (this.clientCleanupInterval) {
-      clearInterval(this.clientCleanupInterval);
+      return; // Already running
     }
     
-    // Check for stale clients every 30 seconds
     this.clientCleanupInterval = setInterval(() => {
       this.cleanupStaleClients();
     }, 30000);
-    
   }
   
   // Stop client cleanup interval
@@ -972,6 +987,13 @@ class ManagementServer {
           this.clients.delete(clientId);
         }
       });
+      console.log(`🧹 Cleaned up ${staleClients.length} stale clients`);
+    }
+    
+    // Stop cleanup interval if no clients remain
+    if (this.clients.size === 0 && this.clientCleanupInterval) {
+      console.log('👥 No clients remaining after cleanup - stopping cleanup interval');
+      this.stopClientCleanup();
     }
   }
 
