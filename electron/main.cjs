@@ -2,7 +2,6 @@
 const path = require('path');
 const { app, BrowserWindow, Menu, Tray } = require('electron');
 const { setupIpcHandlers } = require('./ipc-handlers.cjs');
-const { startMetricsReporting } = require('./services/system-metrics.cjs');
 const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
 const { setMainWindow } = require('./utils/safe-send.cjs');
 const appStore = require('./utils/app-store.cjs');
@@ -68,72 +67,50 @@ const shouldStartMinimized = process.argv.includes('--start-minimized');
 function createTray() {
   const { nativeImage } = require('electron');
   
-    try {
+  try {
     let trayIcon;
     
-    // Try to get app icon from common locations
-    const possibleIconPaths = [
-      path.join(process.resourcesPath, 'app.ico'),
-      path.join(process.resourcesPath, 'icon.ico'),
-      path.join(__dirname, '../icon.ico'),
-      path.join(__dirname, '../assets/icon.ico'),
-      path.join(__dirname, '../../icon.ico')
-    ];
-    
-    for (const iconPath of possibleIconPaths) {
-      if (fs.existsSync(iconPath) && !iconPath.endsWith('.svg')) {
+          // Use the custom Minecraft Core icon
+      const iconPath = path.join(__dirname, '../icon.png');
+      
+      if (fs.existsSync(iconPath)) {
         trayIcon = nativeImage.createFromPath(iconPath);
-        if (!trayIcon.isEmpty()) break;
-      }
-    }
-    
-    // If no icon found, create a blue square matching app theme
-    if (!trayIcon || trayIcon.isEmpty()) {
-      const width = 16;
-      const height = 16;
-      const buffer = Buffer.alloc(width * height * 4);
-      
-      // Fill with app theme blue (#3b82f6)
-      for (let i = 0; i < buffer.length; i += 4) {
-        buffer[i] = 59;      // Red
-        buffer[i + 1] = 130; // Green
-        buffer[i + 2] = 246; // Blue
-        buffer[i + 3] = 255; // Alpha
+        // Resize to appropriate tray size (bigger for better visibility)
+        if (!trayIcon.isEmpty()) {
+          trayIcon = trayIcon.resize({ width: 32, height: 32 });
+        }
       }
       
-      trayIcon = nativeImage.createFromBuffer(buffer, { width, height });
-    }
+      // Fallback if icon loading fails
+      if (!trayIcon || trayIcon.isEmpty()) {
+        console.warn('Could not load custom icon, using fallback');
+        const width = 32;
+        const height = 32;
+        const buffer = Buffer.alloc(width * height * 4);
+        
+        // Create a simple dark square as fallback
+        for (let i = 0; i < buffer.length; i += 4) {
+          buffer[i] = 64;      // Red (dark gray)
+          buffer[i + 1] = 64;  // Green (dark gray)
+          buffer[i + 2] = 64;  // Blue (dark gray)
+          buffer[i + 3] = 255; // Alpha (fully opaque)
+        }
+        
+        trayIcon = nativeImage.createFromBuffer(buffer, { width, height });
+      }
     
-    // Ensure proper sizing and create tray
-    if (trayIcon && !trayIcon.isEmpty()) {
-      trayIcon = trayIcon.resize({ width: 16, height: 16 });
-    }
-    
+    // Create tray with the icon (or system default if empty)
     tray = new Tray(trayIcon);
     
-    if (!tray) {
-      return;
-    }
   } catch (error) {
-    // Fallback creation
-    try {
-      const width = 16;
-      const height = 16;
-      const buffer = Buffer.alloc(width * height * 4);
-      
-      for (let i = 0; i < buffer.length; i += 4) {
-        buffer[i] = 59;
-        buffer[i + 1] = 130;
-        buffer[i + 2] = 246;
-        buffer[i + 3] = 255;
-      }
-      
-      const simpleIcon = nativeImage.createFromBuffer(buffer, { width, height });
-      tray = new Tray(simpleIcon);
-    } catch (fallbackError) {
-      tray = null;
-      return;
-    }
+    console.error('Failed to create system tray:', error);
+    tray = null;
+    return;
+  }
+  
+  // If tray creation failed, exit early
+  if (!tray) {
+    return;
   }
   
   const contextMenu = Menu.buildFromTemplate([
@@ -197,9 +174,18 @@ function createWindow() {
   // Debug: print the preload script path
   const preloadPath = path.join(__dirname, 'preload.cjs');
 
+  // Set up the window icon
+  const iconPath = path.join(__dirname, '../icon.png');
+  let windowIcon = null;
+  
+  if (fs.existsSync(iconPath)) {
+    windowIcon = iconPath;
+  }
+
   win = new BrowserWindow({
     width,
     height,
+    icon: windowIcon, // Set the window icon
     webPreferences: {
       contextIsolation: true,
       preload: preloadPath,

@@ -526,7 +526,6 @@ class ManagementServer {
     return new Promise((resolve) => {
       this.server = this.app.listen(port, () => {
         this.isRunning = true;
-        console.log(`🌐 Management server started on port ${port}`);
 
         // Start version watcher and check versions
         this.startVersionWatcher();

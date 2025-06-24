@@ -1,7 +1,6 @@
 // System metrics service
 const os = require('os');
 const pidusage = require('pidusage');
-const { execSync } = require('child_process');
 const { getServerState, sendMetricsUpdate } = require('./server-manager.cjs');
 const { wmicExecSync } = require('../utils/wmic-utils.cjs');
 const process = require('process');
@@ -259,7 +258,6 @@ async function publishSystemMetrics() {
 publishSystemMetrics.lastMemUsedMB = 0;
 
 function stopMetricsReporting() {
-  console.log('🛑 Stopping metrics reporting...');
   
   isMetricsActive = false;
   
