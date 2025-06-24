@@ -28,11 +28,6 @@
   let path = '';
   let isLoading = true; // Add loading state
   
-  // Save instances whenever they change
-  $: if (step === 'done' && instances) {
-    saveInstances(instances);
-  }
-  
   // Sidebar and instance management
   let isSidebarOpen = false;
   let instances = [];
@@ -74,6 +69,7 @@
 
       // Explicitly save instances to ensure persistence
       await saveInstances(instances);
+      saveInstancesIfNeeded();
     }
     
     // Reset edit state
@@ -89,16 +85,6 @@
     editId = null;
     editName = '';
   }
-  // Access globally shared serverPath - only for server instances
-  $: {
-    // When path updates from server components, sync to global store
-    // Client instances should not affect the global serverPath
-    if (path && instanceType === 'server') {
-      window.serverPath.set(path);
-    }
-  }
-  
-  
   
   // Save instances to persistent storage
   
@@ -215,11 +201,25 @@
     checkExistingSetup();
   });
   
+  // Helper functions to handle reactive behavior manually
+  function saveInstancesIfNeeded() {
+    if (step === 'done' && instances) {
+      saveInstances(instances);
+    }
+  }
+  
+  function updateServerPath() {
+    if (path && instanceType === 'server' && window.serverPath) {
+      window.serverPath.set(path);
+    }
+  }
+  
   // Handle setup completion
   function handleSetupComplete(event) {
     const newPath = event.detail.path;
     // Update path to the selected folder for the new instance
     path = newPath;
+    updateServerPath();
     
     // If no instances exist, this is the initial setup
     if (instances.length === 0) {
@@ -231,6 +231,7 @@
       };
       instances = [inst];
       currentInstance = inst;
+      saveInstancesIfNeeded();
     } else if (instanceType === 'server') {
       // Check if a server instance already exists
       const hasServer = instances.some(i => i.type === 'server');
@@ -251,6 +252,7 @@
       };
       instances = [...instances, inst];
       currentInstance = inst;
+      saveInstancesIfNeeded();
     }
     
     // Save settings as well to ensure path is remembered
@@ -373,6 +375,7 @@
     if (instance.type === 'server') {
       path = instance.path;
       instanceType = 'server';
+      updateServerPath();
     } else {
       instanceType = 'client';
     }

@@ -97,7 +97,7 @@ class ManagementServer {
       
       // Start cleanup interval when first client connects
       if (this.clients.size === 1 && !this.clientCleanupInterval) {
-        console.log('👥 First client connected - starting cleanup interval');
+        
         this.startClientCleanup();
       }
       
@@ -141,7 +141,7 @@ class ManagementServer {
         
         // Stop cleanup interval when no clients remain
         if (this.clients.size === 0 && this.clientCleanupInterval) {
-          console.log('👥 No clients remaining - stopping cleanup interval');
+          
           this.stopClientCleanup();
         }
         
@@ -986,12 +986,12 @@ class ManagementServer {
           this.clients.delete(clientId);
         }
       });
-      console.log(`🧹 Cleaned up ${staleClients.length} stale clients`);
+      
     }
     
     // Stop cleanup interval if no clients remain
     if (this.clients.size === 0 && this.clientCleanupInterval) {
-      console.log('👥 No clients remaining after cleanup - stopping cleanup interval');
+      
       this.stopClientCleanup();
     }
   }

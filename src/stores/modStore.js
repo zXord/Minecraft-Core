@@ -100,57 +100,75 @@ function compareVersions(versionA, versionB) {
   return partsA.length - partsB.length;
 }
 
-// Derived store for whether any mods have updates
-const hasUpdates = derived(
-  modsWithUpdates,
-  $modsWithUpdates => {
-    for (const key of $modsWithUpdates.keys()) {
-      if (key.startsWith('project:')) {
-        return true;
+// Lazy-loaded derived stores to avoid effect_orphan errors
+let hasUpdates = null;
+let updateCount = null;
+let categorizedMods = null;
+
+// Functions to create derived stores when needed (within component context)
+function getHasUpdates() {
+  if (!hasUpdates) {
+    hasUpdates = derived(
+      modsWithUpdates,
+      $modsWithUpdates => {
+        for (const key of $modsWithUpdates.keys()) {
+          if (key.startsWith('project:')) {
+            return true;
+          }
+        }
+        return false;
       }
-    }
-    return false;
+    );
   }
-);
+  return hasUpdates;
+}
 
-// Derived store to count mods with updates (excluding disabled mods unless they have compatible updates)
-const updateCount = derived([modsWithUpdates, disabledModUpdates], ([$updates, $disabledUpdates]) => {
-  // Count regular enabled mod updates
-  let count = 0;
-  for (const [modName] of $updates.entries()) {
-    if (!modName.startsWith('project:')) {
-      count++;
-    }
-  }
-  
-  // Add disabled mods with compatible updates
-  count += $disabledUpdates.size;
-  
-  return count;
-});
-
-// Derived store for installed mods with categories
-const categorizedMods = derived(
-  [installedMods, modCategories],
-  ([$installedMods, $modCategories]) => {
-    return $installedMods.map(mod => {
-      // If the mod is just a string (filename)
-      const modFileName = typeof mod === 'string' ? mod : mod.fileName;
+function getUpdateCount() {
+  if (!updateCount) {
+    updateCount = derived([modsWithUpdates, disabledModUpdates], ([$updates, $disabledUpdates]) => {
+      // Count regular enabled mod updates
+      let count = 0;
+      for (const [modName] of $updates.entries()) {
+        if (!modName.startsWith('project:')) {
+          count++;
+        }
+      }
       
-      const categoryInfo = $modCategories.get(modFileName) || { 
-        category: 'server-only', 
-        required: true 
-      };
+      // Add disabled mods with compatible updates
+      count += $disabledUpdates.size;
       
-      return {
-        fileName: modFileName,
-        name: modFileName.replace('.jar', ''),
-        category: categoryInfo.category,
-        required: categoryInfo.required
-      };
+      return count;
     });
   }
-);
+  return updateCount;
+}
+
+function getCategorizedMods() {
+  if (!categorizedMods) {
+    categorizedMods = derived(
+      [installedMods, modCategories],
+      ([$installedMods, $modCategories]) => {
+        return $installedMods.map(mod => {
+          // If the mod is just a string (filename)
+          const modFileName = typeof mod === 'string' ? mod : mod.fileName;
+          
+          const categoryInfo = $modCategories.get(modFileName) || { 
+            category: 'server-only', 
+            required: true 
+          };
+          
+          return {
+            fileName: modFileName,
+            name: modFileName.replace('.jar', ''),
+            category: categoryInfo.category,
+            required: categoryInfo.required
+          };
+        });
+      }
+    );
+  }
+  return categorizedMods;
+}
 
 // Export all stores and helper functions
 export {
@@ -193,10 +211,10 @@ export {
   filterMinecraftVersion,
   filterModLoader,
   modCategories,
-  // Derived stores
-  hasUpdates,
-  updateCount,
-  categorizedMods,
+  // Derived store getters (lazy-loaded)
+  getHasUpdates,
+  getUpdateCount,
+  getCategorizedMods,
 
   // Helper functions
   compareVersions

@@ -242,7 +242,7 @@ class XMCLClientDownloader {
             throw new Error('XMCL Fabric integration needs further API research');
             
           } catch {
-            console.log('⚠️ XMCL Fabric installation failed, attempting legacy method...');
+            
             
             // Fall back to legacy Fabric installation
             try {
@@ -327,7 +327,7 @@ class XMCLClientDownloader {
 
         const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, needsFabric ? finalVersion : null);
         if (cleanupResult.success) {
-          console.log(`✅ Cleanup completed: ${cleanupResult.message}`);
+          
         } else {
           console.warn(`⚠️ Cleanup warning: ${cleanupResult.error}`);
         }
@@ -505,7 +505,7 @@ class XMCLClientDownloader {
       if (lastVersion !== requiredVersion) {
         // Version changed - update the file
         fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
-        console.log(`🔄 Server version changed: ${lastVersion} → ${requiredVersion}`);
+        
         return true;
       }
       
@@ -554,7 +554,7 @@ class XMCLClientDownloader {
         }
       }
 
-      console.log(`🔄 Version change cleanup: removed ${cleanedVersions.length} old versions`);
+      
 
       return {
         success: true,
@@ -667,7 +667,7 @@ class XMCLClientDownloader {
               const fabricDir = path.join(versionsDir, version);
               if (fs.existsSync(fabricDir)) {
                 fs.rmSync(fabricDir, { recursive: true, force: true });
-                console.log(`🗑️ Removed Fabric profile: ${version}`);
+                
               }
             }
           }

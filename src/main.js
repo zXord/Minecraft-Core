@@ -1,3 +1,4 @@
+import { mount } from 'svelte'
 import App from './App.svelte'
 import './app.css'
 import './components/client/client.css'
@@ -19,10 +20,32 @@ const serverPathStore = {
 // Make stores available globally
 if (typeof window !== 'undefined') {
   window.getInitialInstances = () => initialInstanceStore;
-  window.serverPath = serverPathStore; // Initialize the missing global store
+  
+  // Safely set serverPath - check if it's already defined
+  try {
+    if (!window.serverPath) {
+      window.serverPath = serverPathStore;
+    }
+  } catch (error) {
+    // If setting fails, use Object.defineProperty for more control
+    try {
+      Object.defineProperty(window, 'serverPath', {
+        value: serverPathStore,
+        writable: true,
+        configurable: true
+      });
+    } catch (defineError) {
+      console.warn('Could not set window.serverPath:', defineError);
+    }
+  }
 }
 
-// 1) Fetch saved instances before mounting the app
+// Mount the App first, then initialize async data
+const app = mount(App, {
+  target: document.getElementById('app')
+});
+
+// After app is mounted, fetch instances asynchronously
 window.electron.invoke('get-instances')
   .then(instances => {
     const initialInstances = Array.isArray(instances) ? instances : [];
@@ -36,34 +59,5 @@ window.electron.invoke('get-instances')
     // Mark as loaded anyway
     initialInstanceStore.loaded = true;
   });
-
-// TEMPORARILY DISABLED - Testing if our monitoring code causes the spikes
-// Global interval tracking for debugging
-// console.log('🔍 Frontend Interval Tracker Enabled');
-// const originalSetInterval = window.setInterval;
-// const originalSetTimeout = window.setTimeout;
-// let intervalCount = 0;
-
-// window.setInterval = function(fn, delay, ...args) {
-//   intervalCount++;
-//   console.log(`➕ Frontend Interval #${intervalCount}: ${delay}ms`);
-//   
-//   if (delay >= 4000 && delay <= 6000) {
-//     console.log(`🚨 SUSPICIOUS 5-SECOND INTERVAL DETECTED!`, new Error().stack);
-//   }
-//   
-//   return originalSetInterval.call(this, function() {
-//     console.log(`🔄 [${new Date().toISOString()}] Frontend Interval ${delay}ms FIRED`);
-//     return fn.apply(this, args);
-//   }, delay, ...args);
-// };
-
-// Note: setTimeout override removed due to TypeScript typing conflicts
-// Focus on setInterval tracking above which is more likely to cause recurring spikes
-
-// 2) Mount the App immediately (it will check for loaded instances in onMount)
-const app = new App({
-  target: document.getElementById('app')
-});
 
 export default app;

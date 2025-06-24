@@ -117,7 +117,7 @@ class ClientDownloader {
         
         if (!downloadSuccess) {
           if (retryCount < maxRetries - 1) {
-            console.log(`Download attempt ${retryCount + 1} failed, retrying... (${maxRetries - retryCount - 1} attempts remaining)`);
+            
             retryCount++;
             await new Promise(resolve => setTimeout(resolve, 2000 * retryCount)); // Progressive delay
             continue;
@@ -264,7 +264,7 @@ class ClientDownloader {
 
           const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, needsFabric ? resolvedFabricVersion : null);
           if (cleanupResult.success) {
-            console.log(`✅ Cleanup completed: ${cleanupResult.message}`);
+            
           } else {
             console.warn(`⚠️ Cleanup warning: ${cleanupResult.error}`);
           }
@@ -1634,7 +1634,7 @@ Specification-Vendor: FabricMC
       if (lastVersion !== requiredVersion) {
         // Version changed - update the file
         fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
-        console.log(`🔄 Server version changed: ${lastVersion} → ${requiredVersion}`);
+        
         return true;
       }
       
@@ -1683,7 +1683,7 @@ Specification-Vendor: FabricMC
         }
       }
 
-      console.log(`🔄 Version change cleanup: removed ${cleanedVersions.length} old versions`);
+      
 
       return {
         success: true,

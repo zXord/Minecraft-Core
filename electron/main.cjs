@@ -83,7 +83,7 @@ function createTray() {
       
       // Fallback if icon loading fails
       if (!trayIcon || trayIcon.isEmpty()) {
-        console.warn('Could not load custom icon, using fallback');
+
         const width = 32;
         const height = 32;
         const buffer = Buffer.alloc(width * height * 4);
@@ -103,7 +103,7 @@ function createTray() {
     tray = new Tray(trayIcon);
     
   } catch (error) {
-    console.error('Failed to create system tray:', error);
+
     tray = null;
     return;
   }
@@ -263,36 +263,31 @@ function createWindow() {
     });
   }
 
-  // Open DevTools for debugging
-  win.webContents.openDevTools(); // Re-enabled for development
+  // Open DevTools for development
+  win.webContents.openDevTools();
   
-  // Load the app - in development mode try dev server, in production serve built files
-  const isDevelopment = process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
+  // Load the app - always prefer dev server if available
+  // Simple approach: try dev server first, fallback to production build
   
-  if (isDevelopment) {
-    // Development mode - try port 5173 first, then 5174 if that fails
-    const tryLoadURL = (url) => {
-      win.loadURL(url).catch(() => {
-        if (url.includes('5173')) {
-          win.loadURL('http://localhost:5174');
-        }
-      });
-    };
-    
-    tryLoadURL('http://localhost:5173');
-  } else {
-    // Production mode - serve built files directly
-    const distPath = path.join(__dirname, '..', 'dist', 'index.html');
-    
-    if (fs.existsSync(distPath)) {
-      win.loadFile(distPath);
-    } else {
-      // Fallback to dev server if built files don't exist
-      win.loadURL('http://localhost:5173').catch(() => {
-        win.loadURL('http://localhost:5174');
-      });
-    }
-  }
+  const tryLoadURL = (url) => {
+    win.loadURL(url).catch(() => {
+      if (url.includes('5173')) {
+        // Try port 5174
+        win.loadURL('http://localhost:5174').catch(() => {
+                     // Both dev servers failed, try production build
+           const distPath = path.join(__dirname, '..', 'dist', 'index.html');
+           if (fs.existsSync(distPath)) {
+             win.loadFile(distPath);
+           } else {
+
+           }
+        });
+      }
+    });
+  };
+  
+  // Always try dev server first (this ensures dev mode works)
+  tryLoadURL('http://localhost:5173');
   
   // Save window size when resized
   win.on('resize', () => {
