@@ -19,9 +19,9 @@
   import { installedModIds, installedModInfo } from '../../stores/modStore.js';
   import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
   import DownloadProgress from '../mods/components/DownloadProgress.svelte';
-  import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';  import ClientModList from './ClientModList.svelte';
+  import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';
+  import ClientModList from './ClientModList.svelte';
   import ClientManualModList from './ClientManualModList.svelte';
-  import ClientModStatus from './ClientModStatus.svelte';
   import ModSearch from '../mods/components/ModSearch.svelte';
   import ModDropZone from '../mods/components/ModDropZone.svelte';
   import { uploadDroppedMods } from '../../utils/directFileUpload.js';
@@ -86,8 +86,9 @@
   let downloadManagerCleanup;
   let unsubscribeInstalledInfo;
   let previousPath: string | null = null;
-  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
+
   let isCheckingModSync = false; // Guard to prevent reactive loops
+  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
   
   // keep track of which fileNames we've acknowledged is managed by store
   $: displayRequiredMods = (() => {
@@ -251,6 +252,8 @@
     
     return filtered;
   })();
+
+
 
   // Function to load acknowledged dependencies from persistent storage
   async function loadAcknowledgedDependencies() {
@@ -591,46 +594,8 @@
 <div class="client-mod-manager">
   <DownloadProgress />
   <ModDependencyModal on:install={handleInstallWithDependencies} />
-  <div class="mod-manager-header">
+  <div class="page-header">
     <h2>Client Mods</h2>
-    <div class="connection-status">
-      {#if $connectionStatus === 'connected'}
-        <span class="status connected">✅ Connected to Server</span>
-      {:else}
-        <span class="status disconnected">❌ Disconnected from Server</span>
-      {/if}
-      {#if $lastModCheck}
-        <span class="last-check">Last updated: {$lastModCheck.toLocaleTimeString()}</span>
-      {/if}
-    </div>    <div class="mod-actions">
-      <button class="refresh-button" on:click={refreshMods} disabled={$isLoadingMods}>
-        {$isLoadingMods ? '⏳ Loading...' : '🔄 Refresh'}
-      </button>
-      
-      {#if $modSyncStatus && !$modSyncStatus.synchronized}
-        <!-- Use same logic as Play tab for consistent button text -->
-        {#if $modSyncStatus.needsDownload > 0}
-          <button class="download-button" on:click={() => downloadRequiredMods(instance)}>
-            📥 Download Required Mods ({$modSyncStatus.needsDownload})
-          </button>        {:else}
-          {@const actualRemovals = [...($modSyncStatus.requiredRemovals || []), ...($modSyncStatus.optionalRemovals || [])]}
-          {@const acknowledgments = pendingAcknowledgments || []}
-          
-          {#if actualRemovals.length > 0}
-            <button class="download-button" on:click={() => downloadRequiredMods(instance)}>
-              🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
-            </button>          {:else if acknowledgments.length > 0}
-            <button class="download-button" on:click={() => acknowledgeAllDependencies(instance)}>
-              ✓ Acknowledge Dependencies ({acknowledgments.length})
-            </button>
-          {:else}
-            <button class="download-button" on:click={() => downloadRequiredMods(instance)}>
-              🔄 Synchronize Mods
-            </button>
-          {/if}
-        {/if}
-      {/if}
-    </div>
   </div>
 
   <!-- Tab Navigation -->
@@ -649,6 +614,55 @@
     </button>
   </div>
 
+  <!-- Compact Status Header -->
+  {#if activeTab === 'installed-mods'}
+    <div class="compact-status">
+      <div class="status-line">
+        {#if $connectionStatus === 'connected'}
+          <span class="status-item connected">🔗 Connected</span>
+        {:else}
+          <span class="status-item disconnected">❌ Disconnected</span>
+        {/if}
+        
+        {#if $lastModCheck}
+          <span class="status-item">Last sync: {$lastModCheck.toLocaleTimeString()}</span>
+        {/if}
+        
+        {#if $modSyncStatus}
+          <span class="status-item">Required: {$modSyncStatus.synchronized && (!$modSyncStatus.needsAcknowledgment || $modSyncStatus.needsAcknowledgment === 0) ? '✅' : '⚠️'} {$requiredMods.length}/{$modSyncStatus.totalRequired || $requiredMods.length}</span>
+          <span class="status-item">Optional: {$modSyncStatus.needsOptionalDownload && $modSyncStatus.needsOptionalDownload > 0 ? '⚠️' : '✅'} {displayOptionalMods.length - ($modSyncStatus.needsOptionalDownload || 0)}/{displayOptionalMods.length}</span>
+        {/if}
+      </div>
+      
+      <div class="status-actions">
+        <button class="compact-btn" on:click={refreshMods} disabled={$isLoadingMods}>
+          {$isLoadingMods ? '⏳' : '🔄'} Refresh
+        </button>
+        
+        {#if $modSyncStatus && !$modSyncStatus.synchronized}
+          {#if $modSyncStatus.needsDownload > 0}
+            <button class="compact-btn primary" on:click={() => downloadRequiredMods(instance)}>
+              📥 Download Required ({$modSyncStatus.needsDownload})
+            </button>
+          {:else}
+            {@const actualRemovals = [...($modSyncStatus.requiredRemovals || []), ...($modSyncStatus.optionalRemovals || [])]}
+            {@const acknowledgments = pendingAcknowledgments || []}
+            
+            {#if actualRemovals.length > 0}
+              <button class="compact-btn primary" on:click={() => downloadRequiredMods(instance)}>
+                🔄 Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''}
+              </button>
+            {:else if acknowledgments.length > 0}
+              <button class="compact-btn primary" on:click={() => acknowledgeAllDependencies(instance)}>
+                ✓ Acknowledge ({acknowledgments.length})
+              </button>
+            {/if}
+          {/if}
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <div class="mod-content">
     {#if activeTab === 'installed-mods'}
       <!-- Original server mod synchronization content -->
@@ -666,73 +680,57 @@
           <p>Fetching mod information from server...</p>
         </div>
       {:else}
-        <!-- Mod Status Overview -->
-        <ClientModStatus
-          modSyncStatus={$modSyncStatus}
-          requiredModsCount={$requiredMods.length}
-          optionalModsCount={displayOptionalMods.length}
-          {pendingAcknowledgments}
-          on:download-required={() => downloadRequiredMods(instance)}
-          on:download-optional={() => downloadOptionalMods(instance)}
-          on:refresh={refreshMods}
-          on:acknowledge-all-dependencies={() => acknowledgeAllDependencies(instance)}
-        />
+
 
         <!-- Mod Lists -->
         <div class="mod-sections">
           <!-- Required Mods Section -->
           <div class="mod-section">
-            <h3>Required Mods</h3>
-            <p class="section-description">
-              These mods are required by the server and cannot be disabled.
-            </p>          <ClientModList
-            mods={displayRequiredMods}
-            type="required"
-modSyncStatus={$modSyncStatus}
-            serverManagedFiles={$serverManagedFiles}
-            on:download={() => downloadRequiredMods(instance)}
-            on:remove={(e) => handleServerModRemoval(instance, e.detail.fileName)}
-            on:acknowledge={(e) => handleDependencyAcknowledgment(instance, e.detail.fileName)}
-            on:updateMod={(e) => updateServerMod(instance, e)}
-          />
+            <ClientModList
+              mods={displayRequiredMods}
+              type="required"
+              modSyncStatus={$modSyncStatus}
+              serverManagedFiles={$serverManagedFiles}
+              on:download={() => downloadRequiredMods(instance)}
+              on:remove={(e) => handleServerModRemoval(instance, e.detail.fileName)}
+              on:acknowledge={(e) => handleDependencyAcknowledgment(instance, e.detail.fileName)}
+              on:updateMod={(e) => updateServerMod(instance, e)}
+            />
           </div>
 
           <!-- Optional Mods Section -->
           {#if displayOptionalMods.length > 0}
             <div class="mod-section">
-              <h3>Optional Mods</h3>
-              <p class="section-description">
-                These mods are available but not required. You can enable or disable them before playing.
-              </p>          <ClientModList
-            mods={displayOptionalMods}
-            type="optional"
-modSyncStatus={$modSyncStatus}
-            serverManagedFiles={$serverManagedFiles}
-            on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
-            on:download={() => downloadOptionalMods(instance)}
-            on:downloadSingle={(e) => downloadSingleOptionalMod(instance, e.detail.mod)}
-            on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
-            on:updateMod={(e) => updateServerMod(instance, e)}
-          />
-        </div>
-      {/if}          <!-- Client Downloaded Mods Section -->
+              <ClientModList
+                mods={displayOptionalMods}
+                type="optional"
+                modSyncStatus={$modSyncStatus}
+                serverManagedFiles={$serverManagedFiles}
+                on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
+                on:download={() => downloadOptionalMods(instance)}
+                on:downloadSingle={(e) => downloadSingleOptionalMod(instance, e.detail.mod)}
+                on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
+                on:updateMod={(e) => updateServerMod(instance, e)}
+              />
+            </div>
+          {/if}
+
+          <!-- Client Downloaded Mods Section -->
           <div class="mod-section">
-            <h3>Client Downloaded Mods</h3>
-          <p class="section-description">
-            Mods installed by you (not synced from server).
-          </p>
-          {#if $errorMessage}            <p class="error-message">
-              {$errorMessage} Ensure your client path contains a <code>mods</code> directory.
-            </p>
-          {/if}          <ClientManualModList
-            clientPath={instance?.path || ''}
-            refreshTrigger={manualModsRefreshTrigger}
-            modSyncStatus={$modSyncStatus}
-            {clientModVersionUpdates}
-            on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
-            on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
-            on:install={handleInstallMod}
-          />
+            {#if $errorMessage}
+              <p class="error-message">
+                {$errorMessage} Ensure your client path contains a <code>mods</code> directory.
+              </p>
+            {/if}
+            <ClientManualModList
+              clientPath={instance?.path || ''}
+              refreshTrigger={manualModsRefreshTrigger}
+              modSyncStatus={$modSyncStatus}
+              {clientModVersionUpdates}
+              on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
+              on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
+              on:install={handleInstallMod}
+            />
           </div>
         </div>
 
@@ -762,81 +760,99 @@ modSyncStatus={$modSyncStatus}
     padding: 1rem;
   }
 
-  .mod-manager-header {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    margin-bottom: 2rem;
-    padding: 1rem;
-    background-color: #1f2937;
-    border-radius: 8px;
-    border: 1px solid #374151;
+  .page-header {
+    margin-bottom: 1.5rem;
   }
 
-  .mod-manager-header h2 {
+  .page-header h2 {
     color: white;
     margin: 0;
     font-size: 1.5rem;
   }
 
-  .connection-status {
+  /* Compact status header */
+  .compact-status {
     display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .status {
-    font-size: 0.9rem;
-    font-weight: 500;
-  }
-
-  .status.connected {
-    color: #10b981;
-  }
-
-  .status.disconnected {
-    color: #ef4444;
-  }
-
-  .last-check {
-    font-size: 0.8rem;
-    color: #9ca3af;
-  }
-
-  .mod-actions {
-    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem;
+    background-color: #1f2937;
+    border-radius: 6px;
+    border: 1px solid #374151;
+    margin-bottom: 1.5rem;
     gap: 1rem;
     flex-wrap: wrap;
   }
-  .refresh-button, .download-button, .retry-button {
+
+  .status-line {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .status-item {
+    font-size: 0.85rem;
+    color: #d1d5db;
+    white-space: nowrap;
+  }
+
+  .status-item.connected {
+    color: #10b981;
+  }
+
+  .status-item.disconnected {
+    color: #ef4444;
+  }
+
+  .status-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .compact-btn {
+    padding: 0.4rem 0.75rem;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    white-space: nowrap;
+  }
+
+  .compact-btn {
+    background-color: #374151;
+    color: white;
+  }
+
+  .compact-btn:hover:not(:disabled) {
+    background-color: #4b5563;
+  }
+
+  .compact-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .compact-btn.primary {
+    background-color: #3b82f6;
+    color: white;
+  }
+
+  .compact-btn.primary:hover {
+    background-color: #2563eb;
+  }
+
+
+  .retry-button {
     padding: 0.5rem 1rem;
     border: none;
     border-radius: 6px;
     font-weight: 500;
     cursor: pointer;
     transition: background-color 0.2s;
-  }
-
-  .refresh-button {
-    background-color: #374151;
-    color: white;
-  }
-
-  .refresh-button:hover:not(:disabled) {
-    background-color: #4b5563;
-  }
-
-  .refresh-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .download-button {
-    background-color: #3b82f6;
-    color: white;
-  }
-
-  .download-button:hover {
-    background-color: #2563eb;
   }
 
   .retry-button {
@@ -850,6 +866,12 @@ modSyncStatus={$modSyncStatus}
 
   .mod-content {
     min-height: 400px;
+  }
+
+  .mod-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
   }
 
   .connection-error, .loading {
@@ -870,30 +892,9 @@ modSyncStatus={$modSyncStatus}
     margin-bottom: 1.5rem;
   }
 
-  .mod-sections {
-    display: flex;
-    flex-direction: column;
-    gap: 2rem;
-  }
 
-  .mod-section {
-    background-color: #1f2937;
-    border-radius: 8px;
-    border: 1px solid #374151;
-    padding: 1.5rem;
-  }
 
-  .mod-section h3 {
-    color: white;
-    margin: 0 0 0.5rem 0;
-    font-size: 1.25rem;
-  }
 
-  .section-description {
-    color: #9ca3af;
-    font-size: 0.9rem;
-    margin-bottom: 1rem;
-  }
 
   .tab-navigation {
     display: flex;
