@@ -1,5 +1,4 @@
 <script lang="ts">  import { onMount } from 'svelte';
-  import { slide } from 'svelte/transition';
   import { get } from 'svelte/store'; // Import get
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { serverManagedFiles, minecraftVersion } from '../../stores/modStore';
@@ -58,7 +57,6 @@
   let mods: DetailedMod[] = [];
   let loading = true;
   let error = '';
-  let expanded: string = '';
   let checkingUpdates = false;
   let updatingMods: Set<string> = new Set();
   let showRemoveDialog = false;
@@ -273,27 +271,8 @@
     }
   }
 
-  function toggleExpanded(fileName: string) {
-    expanded = expanded === fileName ? '' : fileName;
-  }
-  function formatFileSize(bytes: number): string {
-    if (bytes === null || bytes === undefined || isNaN(bytes)) return 'Unknown size';
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  }
 
-  function formatDate(date: Date): string {
-    return new Intl.DateTimeFormat('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).format(date);
-  }
+
 
   // Helper function to get client mod version update info for a mod
   function getClientModVersionUpdate(mod: DetailedMod) {
@@ -317,146 +296,135 @@
   </div>
 {:else}
   <div class="manual-mods-container">
-    <!-- Removed "Manual Mods ({mods.length})" header -->
-    <div class="actions-header">
-      <button 
-        class="action-btn check-updates-btn" 
-        on:click={checkForUpdates}
-        disabled={checkingUpdates}
-      >
-        {checkingUpdates ? 'Checking...' : 'Check for Updates'}
-      </button>
-      <button class="action-btn refresh-btn" on:click={loadManualMods}>
-        Refresh
-      </button>
-    </div>
-
-    <div class="grid-header">
-      <div class="header-cell">Mod Details</div>
-      <div class="header-cell">Status</div>
-      <div class="header-cell">Version</div>
-      <div class="header-cell">Actions</div>
-    </div>    <div class="mods-grid">
-      {#each mods as mod (mod.fileName)}        <div class="mod-card {expanded === mod.fileName ? 'expanded' : ''} {!mod.enabled ? 'disabled' : ''}">
-          <div class="mod-header" 
-               role="button" 
-               tabindex="0"
-               on:click={() => toggleExpanded(mod.fileName)}
-               on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpanded(mod.fileName); } }}>
-            <div class="mod-info">
-              <div class="mod-name">{mod.name || mod.fileName}</div>
-              {#if mod.authors && mod.authors.length > 0}
-                <div class="mod-authors">by {mod.authors.join(', ')}</div>
-              {/if}
-              <div class="mod-file-info">
-                <span class="file-size">{formatFileSize(mod.size)}</span>
-                <span class="file-date">Modified: {formatDate(mod.lastModified)}</span>
-              </div>
-            </div>            <div class="mod-status">
-              {#if $serverManagedFiles.has(mod.fileName.toLowerCase())}
-                <span class="status-tag server-mod">Server Mod</span>
-              {:else}
-                <span class="status-tag {mod.enabled ? 'enabled' : 'disabled'}">
-                  {mod.enabled ? 'Enabled' : 'Disabled'}
-                </span>
-              {/if}
-              {#if mod.hasUpdate}
-                <span class="update-badge">Update Available</span>
-              {/if}
-            </div>              <div class="mod-version">
-              {#if getClientModVersionUpdate(mod)}
-                {@const updateInfo = getClientModVersionUpdate(mod)}
-                <span class="version-tag current">v{mod.version || 'Unknown'}</span>
-                <span class="version-arrow">→</span>
-                <span class="version-tag update">v{updateInfo.newVersion}</span>
-              {:else if mod.version}
-                <span class="version-tag">v{mod.version}</span>
-              {:else}
-                <span class="version-tag unknown">Unknown</span>
-              {/if}            </div>
-            
-            <div class="mod-actions">              <!-- Show client mod version update button if available -->
-              {#if getClientModVersionUpdate(mod) && !$serverManagedFiles.has(mod.fileName.toLowerCase())}
-                <button 
-                  class="action-btn client-update-btn"
-                  on:click|stopPropagation={() => {}}
-                  title="Update for Minecraft {clientModVersionUpdates.minecraftVersion} compatibility"
-                >
-                  Update
-                </button>
-              {:else if mod.hasUpdate && !$serverManagedFiles.has(mod.fileName.toLowerCase())}
-                <button 
-                  class="action-btn update-btn"
-                  on:click|stopPropagation={() => updateMod(mod)}
-                  disabled={updatingMods.has(mod.fileName)}
-                  title="Update to v{mod.latestVersion}"
-                >
-                  {updatingMods.has(mod.fileName) ? 'Updating...' : 'Update'}
-                </button>
-              {/if}
-              {#if !$serverManagedFiles.has(mod.fileName.toLowerCase())}
-                <button 
-                  class="action-btn toggle-btn" 
-                  on:click|stopPropagation={() => toggleMod(mod)}
-                  title={mod.enabled ? 'Disable mod' : 'Enable mod'}
-                >
-                  {mod.enabled ? 'Disable' : 'Enable'}
-                </button>
-                <button
-                  class="action-btn delete-btn"
-                  on:click|stopPropagation={() => promptRemove(mod)}
-                  title="Remove mod"                >
-                  Remove
-                </button>
-              {:else}
-                <span class="server-mod-label">Managed by Server</span>
-              {/if}
-            </div>
-          </div>
-          
-          {#if expanded === mod.fileName}
-            <div class="mod-details" transition:slide={{ duration: 200 }}>              <div class="details-grid">
-                <div class="detail-item">
-                  <div class="detail-label">File Name:</div>
-                  <span>{mod.fileName}</span>
+    <!-- Integrated table with header -->
+    <div class="table-container">
+      <table class="client-mods-table client-table">
+        <thead>
+          <!-- Section header as first row -->
+          <tr class="section-header">
+            <td colspan="5">
+              <div class="section-header-content">
+                <h3>Client Downloaded Mods</h3>
+                <p class="section-description">Mods installed by you (not synced from server).</p>
+                
+                <!-- Check Updates button within header -->
+                <div class="header-actions">
+                  <button 
+                    class="header-btn" 
+                    on:click={checkForUpdates}
+                    disabled={checkingUpdates}
+                    title={checkingUpdates ? 'Checking for updates...' : 'Check for Updates'}
+                  >
+                    {checkingUpdates ? '⏳' : '🔄'} Check Updates
+                  </button>
                 </div>
-                {#if mod.description}
-                  <div class="detail-item description">
-                    <div class="detail-label">Description:</div>
-                    <span>{mod.description}</span>
-                  </div>
-                {/if}
-                {#if mod.projectId}
-                  <div class="detail-item">
-                    <div class="detail-label">Project ID:</div>
-                    <span>{mod.projectId}</span>
-                  </div>
-                {/if}
-                {#if mod.loaderType}
-                  <div class="detail-item">
-                    <div class="detail-label">Mod Loader:</div>
-                    <span class="loader-tag">{mod.loaderType}</span>
-                  </div>
-                {/if}
-                {#if mod.gameVersions && mod.gameVersions.length > 0}                  <div class="detail-item">
-                    <div class="detail-label">Game Versions:</div>
-                    <div class="game-versions">
-                      {#each mod.gameVersions as version (version)}
-                        <span class="version-chip">{version}</span>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}                {#if 'error' in mod && mod.error}
-                  <div class="detail-item error-detail">
-                    <div class="detail-label">⚠️ Update Check Error:</div>
-                    <span class="error-text">{mod.error}</span>
-                  </div>
-                {/if}
               </div>
-            </div>
+            </td>
+          </tr>
+          
+          <!-- Column headers -->
+          {#if mods.length > 0}
+            <tr class="column-headers">
+              <th>Mod Name</th>
+              <th class="status">Status</th>
+              <th class="ver">Version</th>
+              <th class="upd">Update</th>
+              <th class="act">Actions</th>
+            </tr>
           {/if}
-        </div>
-      {/each}
+        </thead>
+        <tbody>
+          {#each mods as mod (mod.fileName)}
+            <tr class:disabled={!mod.enabled}>
+              
+              <!-- Mod Name -->
+              <td>
+                <div class="mod-name-cell">
+                  <strong>{mod.name || mod.fileName}</strong>
+                </div>
+              </td>
+
+              <!-- Status -->
+              <td class="status">
+                {#if $serverManagedFiles.has(mod.fileName.toLowerCase())}
+                  <span class="tag server">🔒 Server</span>
+                {:else}
+                  <span class="tag {mod.enabled ? 'ok' : 'disabled'}">
+                    {mod.enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                {/if}
+              </td>
+
+              <!-- Version -->
+              <td class="ver">
+                {#if getClientModVersionUpdate(mod)}
+                  {@const updateInfo = getClientModVersionUpdate(mod)}
+                  <div class="version-update">
+                    <code class="current-ver">{mod.version || 'Unknown'}</code>
+                    <span class="version-arrow">→</span>
+                    <code class="new-ver">{updateInfo.newVersion}</code>
+                  </div>
+                {:else if mod.version}
+                  <code>{mod.version}</code>
+                {:else}
+                  <span class="no-version">—</span>
+                {/if}
+              </td>
+
+              <!-- Update -->
+              <td class="upd">
+                {#if getClientModVersionUpdate(mod)}
+                  <button class="tag new clickable" 
+                          on:click={() => {}}
+                          title="Update for MC {clientModVersionUpdates.minecraftVersion}">
+                    ↑ Client Update
+                  </button>
+                {:else if mod.hasUpdate}
+                  <button class="tag new clickable" 
+                          on:click={() => updateMod(mod)}
+                          disabled={updatingMods.has(mod.fileName)}
+                          title="Update to {mod.latestVersion}">
+                    {updatingMods.has(mod.fileName) ? '⏳' : '↑'} {mod.latestVersion}
+                  </button>
+                {:else}
+                  <span class="tag ok">Up to date</span>
+                {/if}
+              </td>
+
+              <!-- Actions -->
+              <td class="act">
+                {#if !$serverManagedFiles.has(mod.fileName.toLowerCase())}
+                  <div class="action-group">
+                    <button class="toggle sm" 
+                            class:primary={!mod.enabled}
+                            class:warn={mod.enabled}
+                            on:click={() => toggleMod(mod)}
+                            title={mod.enabled ? 'Disable mod' : 'Enable mod'}>
+                      {mod.enabled ? 'Disable' : 'Enable'}
+                    </button>
+                    <button class="danger sm" on:click={() => promptRemove(mod)} title="Remove mod">
+                      🗑️
+                    </button>
+                  </div>
+                {:else}
+                  <span class="server-tag">Server Managed</span>
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+        
+        <!-- Empty state as table row -->
+        {#if mods.length === 0}
+          <tbody>
+            <tr class="empty-state">
+              <td colspan="5">
+                <p>No client downloaded mods found.</p>
+              </td>
+            </tr>
+          </tbody>
+        {/if}
+      </table>
     </div>
   </div>
 {/if}
@@ -469,13 +437,86 @@
   on:cancel={() => { showRemoveDialog = false; modToRemove = null; }}
 />
 
-<style>  .loading-container, .error-container {
+<style>
+  /* CSS variables matching other sections exactly */
+  .manual-mods-container {
+    --row-py: 3px;
+    --cell-px: 6px;
+    --col-ok: #14a047;
+    --col-warn: #c9801f;
+    --col-danger: #b33;
+    --col-primary: #0a84ff;
+    --bg-primary: #181818;
+    --bg-secondary: #141414;
+    --bg-tertiary: #1a1a1a;
+    --text-primary: #ddd;
+    --text-secondary: #aaa;
+    --border-color: #333;
+    width: 100%;
+  }
+
+  .loading-container, .error-container {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 3rem;    text-align: center;
+    padding: 3rem;
+    text-align: center;
     color: rgba(255, 255, 255, 0.7);
+  }
+
+  /* Section header as table row */
+  .section-header td {
+    background-color: #1f2937;
+    border-top: 3px solid #22c55e; /* Green for client downloaded */
+    padding: 0.75rem var(--cell-px) !important;
+  }
+
+  .section-header-content {
+    text-align: center;
+    position: relative;
+  }
+
+  .section-header-content h3 {
+    color: white;
+    margin: 0 0 0.15rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .section-header-content .section-description {
+    color: #9ca3af;
+    font-size: 0.8rem;
+    margin: 0;
+    line-height: 1.3;
+  }
+
+  .header-actions {
+    position: absolute;
+    top: 0;
+    right: 0;
+  }
+
+  .header-btn {
+    padding: 0.3rem 0.6rem;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    background-color: #374151;
+    color: white;
+    white-space: nowrap;
+  }
+
+  .header-btn:hover:not(:disabled) {
+    background-color: #4b5563;
+  }
+
+  .header-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .error-message {
@@ -483,371 +524,261 @@
     margin-bottom: 1rem;
   }
 
-  .manual-mods-container {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .actions-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0 0.5rem;
-  }
-
-  .actions-header button {
-    padding: 0.5rem 1rem;
-    border: none;
-    border-radius: 4px;
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-
-  .check-updates-btn {
-    background: rgba(34, 197, 94, 0.2);
-    color: #22c55e;
-    border: 1px solid rgba(34, 197, 94, 0.3);
-  }
-
-  .check-updates-btn:hover:not(:disabled) {
-    background: rgba(34, 197, 94, 0.3);
-    border-color: rgba(34, 197, 94, 0.5);
-  }
-
-  .check-updates-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .refresh-btn {
-    background: rgba(156, 163, 175, 0.2);
-    color: #9ca3af;
-    border: 1px solid rgba(156, 163, 175, 0.3);
-  }
-
-  .refresh-btn:hover {
-    background: rgba(156, 163, 175, 0.3);
-    border-color: rgba(156, 163, 175, 0.5);
-  }
-
-  .grid-header {
-    display: grid;
-    grid-template-columns: 2.5fr 1fr 1fr 2fr;
-    gap: 1rem;
-    padding: 0.75rem 1rem;
-    background: rgba(255, 255, 255, 0.05);
+  /* Table layout */
+  .table-container {
+    width: 100%;
+    overflow-x: auto;
+    border: 1px solid #374151;
     border-radius: 6px;
-    font-weight: 600;
-    color: rgba(255, 255, 255, 0.9);
-    border: 1px solid rgba(255, 255, 255, 0.1);
   }
 
-  .header-cell {
-    display: flex;
-    align-items: center;
+  .client-mods-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    background: linear-gradient(to bottom, var(--bg-primary), var(--bg-secondary));
+    table-layout: auto;
   }
 
-  .header-cell:nth-child(2),
-  .header-cell:nth-child(3) {
-    justify-content: center;
+  .client-mods-table th,
+  .client-mods-table td {
+    padding: var(--row-py) var(--cell-px);
   }
 
-  .header-cell:nth-child(4) {
-    justify-content: flex-end;
+  .client-mods-table tr {
+    transition: background-color 0.15s, box-shadow 0.15s;
   }
 
-  .mods-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  .mod-card {
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    overflow: hidden;
-    transition: all 0.3s ease; /* Increased duration for smoother transitions */
+  .client-mods-table thead {
+    background: var(--bg-tertiary);
+    position: sticky;
+    top: 0;
+    z-index: 6;
   }
 
-  .mod-card:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.2);
+  .client-mods-table th {
+    text-align: center;
   }
 
-  .mod-card.disabled {
+  .client-mods-table th:first-child {
+    text-align: left;
+  }
+
+
+
+  .client-mods-table tbody tr:nth-child(even) {
+    background: rgba(24, 24, 24, 0.8);
+  }
+
+  .client-mods-table tbody tr:hover {
+    background: #212121;
+    box-shadow: 0 0 4px rgba(255, 255, 255, 0.1);
+  }
+
+  .client-mods-table tbody tr.disabled {
     opacity: 0.7;
-    background: rgba(139, 69, 19, 0.15);
-    transition: all 0.3s ease; /* Smooth transition when disabling */
+    background: rgba(139, 69, 19, 0.15) !important;
+    transition: all 0.3s ease;
   }
 
-  .mod-header {
-    display: grid;
-    grid-template-columns: 2.5fr 1fr 1fr 2fr;
-    gap: 1rem;
-    padding: 1rem;
-    align-items: center;
-    cursor: pointer;
+  /* Column widths - match the other sections exactly */
+  .client-mods-table td:first-child {
+    text-align: left;
   }
 
-  .mod-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    min-width: 0; /* Allow shrinking */
+  .client-mods-table th.status,
+  .client-mods-table td.status {
+    width: 80px;
+    min-width: 70px;
+    text-align: center;
   }
 
-  .mod-name {
+  .client-mods-table th.ver,
+  .client-mods-table td.ver {
+    width: 100px;
+    min-width: 80px;
+    text-align: center;
+  }
+
+  .client-mods-table th.upd,
+  .client-mods-table td.upd {
+    width: 100px;
+    min-width: 90px;
+    text-align: center;
+  }
+
+  .client-mods-table th.act,
+  .client-mods-table td.act {
+    width: 120px;
+    min-width: 110px;
+    text-align: center;
+  }
+
+  /* Mod name cell */
+  .mod-name-cell strong {
+    color: var(--text-primary);
     font-weight: 600;
-    color: white;
-    font-size: 1rem;
     word-break: break-word;
   }
 
-  .mod-authors {
-    font-size: 0.8rem;
-    color: rgba(255, 255, 255, 0.6);
-  }
 
-  .mod-file-info {
-    display: flex;
-    gap: 1rem;
-    font-size: 0.75rem;
-    color: rgba(255, 255, 255, 0.5);
-  }
 
-  .mod-status {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.25rem;
-  }
-  .status-tag {
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
+  /* Status tags */
+  .tag {
+    padding: 1px 6px;
+    border-radius: 3px;
     font-size: 0.75rem;
     font-weight: 500;
-    text-transform: uppercase;
-    transition: all 0.3s ease; /* Smooth transition for status changes */
-  }
-  .status-tag.enabled {
-    background: rgba(34, 197, 94, 0.2);
-    color: #22c55e;
-    border: 1px solid rgba(34, 197, 94, 0.3);
-  }
-
-  .status-tag.server-mod {
-    background: rgba(139, 92, 246, 0.2);
-    color: #8b5cf6;
-    border: 1px solid rgba(139, 92, 246, 0.3);
-  }
-
-  .status-tag.disabled {
-    background: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.3);
-  }
-
-  .update-badge {
-    padding: 0.2rem 0.4rem;
-    background: rgba(251, 191, 36, 0.2);
-    color: #fbbf24;
-    border: 1px solid rgba(251, 191, 36, 0.3);
-    border-radius: 4px;
-    font-size: 0.65rem;
-    font-weight: 500;
-    text-transform: uppercase;
-  }
-
-  .mod-version {
-    display: flex;
-    justify-content: center;
-  }
-
-  .version-tag {
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-weight: 500;
-    background: rgba(59, 130, 246, 0.2);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-  }
-
-  .version-tag.unknown {
-    background: rgba(156, 163, 175, 0.2);
-    color: #9ca3af;
-    border: 1px solid rgba(156, 163, 175, 0.3);
-  }
-
-  .mod-actions {
-    display: flex;
-    gap: 0.5rem;
-    justify-content: flex-end;
-    flex-wrap: wrap;
-  }
-
-  .action-btn {
-    padding: 0.4rem 0.8rem;
-    border: none;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
+    text-align: center;
     white-space: nowrap;
   }
 
-  .update-btn {
-    background: rgba(251, 191, 36, 0.2);
-    color: #fbbf24;
-    border: 1px solid rgba(251, 191, 36, 0.3);
+  .tag.ok {
+    background: rgba(20, 160, 71, 0.2);
+    color: var(--col-ok);
   }
 
-  .update-btn:hover:not(:disabled) {
-    background: rgba(251, 191, 36, 0.3);
-    border-color: rgba(251, 191, 36, 0.5);
+
+
+  .tag.new {
+    background: rgba(10, 132, 255, 0.2);
+    color: var(--col-primary);
   }
 
-  .update-btn:disabled {
+  .tag.server {
+    background: rgba(139, 92, 246, 0.2);
+    color: #8b5cf6;
+  }
+
+  .tag.disabled {
+    background: rgba(179, 51, 51, 0.2);
+    color: var(--col-danger);
+  }
+
+  .tag.clickable {
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .tag.clickable:hover:not(:disabled) {
+    opacity: 0.8;
+    transform: translateY(-1px);
+  }
+
+  .tag.clickable:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }
 
-  .toggle-btn {
+  /* Version display */
+  .ver code {
+    background: var(--border-color);
+    color: var(--text-primary);
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+  }
+
+  .no-version {
+    color: var(--text-secondary);
+    font-style: italic;
+  }
+
+  .version-update {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.75rem;
+  }
+
+  .current-ver {
+    background: rgba(107, 114, 128, 0.2);
+    color: #9ca3af;
+  }
+
+  .new-ver {
+    background: rgba(34, 197, 94, 0.2);
+    color: #22c55e;
+  }
+
+  .version-arrow {
+    color: var(--text-secondary);
+    font-weight: bold;
+  }
+
+  /* Buttons */
+  .primary, .danger, .warn, .toggle {
+    padding: 2px 8px;
+    border: none;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .sm {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+  }
+
+  .primary {
+    background: var(--col-primary);
+    color: white;
+  }
+
+  .primary:hover {
+    background: #0066cc;
+  }
+
+  .danger {
+    background: var(--col-danger);
+    color: white;
+  }
+
+  .danger:hover {
+    background: #990000;
+  }
+
+  .warn {
+    background: var(--col-warn);
+    color: white;
+  }
+
+  .warn:hover {
+    background: #a66500;
+  }
+
+  .toggle {
     background: rgba(168, 85, 247, 0.2);
     color: #a855f7;
     border: 1px solid rgba(168, 85, 247, 0.3);
   }
 
-  .toggle-btn:hover {
+  .toggle:hover {
     background: rgba(168, 85, 247, 0.3);
-    border-color: rgba(168, 85, 247, 0.5);
   }
 
-  .delete-btn {
-    background: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.3);
-  }
-
-  .delete-btn:hover {
-    background: rgba(239, 68, 68, 0.3);
-    border-color: rgba(239, 68, 68, 0.5);
-  }
-
-  .mod-details {
-    padding: 1rem;
-    background: rgba(0, 0, 0, 0.2);
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-  }
-
-  .details-grid {
-    display: grid;
-    gap: 0.75rem;
-  }
-
-  .detail-item {
-    display: grid;
-    grid-template-columns: 120px 1fr;
-    gap: 0.5rem;
-    align-items: start;
-  }
-
-  .detail-item.description {
-    grid-template-columns: 120px 1fr;
-  }
-  .detail-item .detail-label {
-    font-weight: 500;
-    color: rgba(255, 255, 255, 0.8);
-    font-size: 0.85rem;
-  }
-
-  .detail-item span {
-    color: rgba(255, 255, 255, 0.9);
-    font-size: 0.85rem;
-    word-break: break-word;
-  }
-
-  .loader-tag {
-    padding: 0.2rem 0.4rem;
-    background: rgba(139, 92, 246, 0.2);
-    color: #8b5cf6;
-    border: 1px solid rgba(139, 92, 246, 0.3);
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-weight: 500;
-  }
-
-  .game-versions {
+  /* Action groups */
+  .action-group {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
-  }
-  .version-chip {
-    padding: 0.2rem 0.4rem;
-    background: rgba(59, 130, 246, 0.2);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    border-radius: 4px;
-    font-size: 0.7rem;
-    font-weight: 500;
+    gap: 4px;
+    align-items: center;
+    justify-content: center;
   }
 
-  .server-mod-label {
-    padding: 0.4rem 0.8rem;
-    background: rgba(139, 92, 246, 0.2);
-    color: #8b5cf6;
-    border: 1px solid rgba(139, 92, 246, 0.3);
-    border-radius: 4px;
+  .server-tag {
     font-size: 0.75rem;
-    font-weight: 500;
+    color: #8b5cf6;
     font-style: italic;
+    text-align: center;
   }
 
-  .error-detail {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.2);
-    border-radius: 6px;
-    padding: 0.5rem;
-    margin-top: 0.5rem;
-  }
-
-  .error-text {
-    color: #ef4444;
-    font-size: 0.8rem;
-    font-weight: 500;
-    line-height: 1.4;
-  }
-  /* Client mod version update styles */
-  .version-arrow {
-    color: rgba(255, 255, 255, 0.6);
-    font-weight: bold;
-    margin: 0 0.25rem;
-  }
-
-  .version-tag.current {
-    background: rgba(107, 114, 128, 0.2);
+  /* Empty state */
+  .empty-state td {
+    text-align: center;
+    padding: 2rem var(--cell-px) !important;
     color: #9ca3af;
-    border: 1px solid rgba(107, 114, 128, 0.3);
-  }
-
-  .version-tag.update {
-    background: rgba(34, 197, 94, 0.2);
-    color: #22c55e;
-    border: 1px solid rgba(34, 197, 94, 0.3);
-  }
-
-  .client-update-btn {
-    background: rgba(34, 197, 94, 0.2);
-    color: #22c55e;
-    border: 1px solid rgba(34, 197, 94, 0.3);
-  }
-
-  .client-update-btn:hover {
-    background: rgba(34, 197, 94, 0.3);
-    border-color: rgba(34, 197, 94, 0.5);
+    font-style: italic;
   }
 </style>

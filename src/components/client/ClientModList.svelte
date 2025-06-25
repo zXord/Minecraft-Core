@@ -14,6 +14,7 @@
     synchronized: boolean;
     missingMods?: string[];
     missingOptionalMods?: string[];
+    needsOptionalDownload?: number;
     outdatedMods?: Array<{
       fileName: string;
       name: string;
@@ -62,11 +63,23 @@
       newDownloads?: string[];
     };
   }
-  // Props
+    // Props  
   export let mods: Mod[] = [];
   export let type: 'required' | 'optional' = 'required';
   export let modSyncStatus: ModSyncStatus | null = null;
   export let serverManagedFiles: Set<string> = new Set();
+  
+  // Section titles and descriptions
+  const sectionInfo = {
+    required: {
+      title: 'Required Mods',
+      description: 'These mods are required by the server and cannot be disabled.'
+    },
+    optional: {
+      title: 'Optional Mods', 
+      description: 'These mods are available but not required. You can enable or disable them before playing.'
+    }
+  };
   // Create event dispatcher
   const dispatch = createEventDispatcher();  // Local state to track mod enabled/disabled status for optimistic updates
   let localModStates: Record<string, { enabled: boolean }> = {};
@@ -149,23 +162,7 @@
     );
   }
 
-  // Get removal info for a mod
-  function getRemovalInfo(mod: Mod) {
-    // Check in the new response structure
-    if (type === 'required' && modSyncStatus?.requiredRemovals) {
-      return modSyncStatus.requiredRemovals.find(removal => 
-        removal.fileName.toLowerCase() === mod.fileName.toLowerCase()
-      );
-    }
-    
-    if (type === 'optional' && modSyncStatus?.optionalRemovals) {
-      return modSyncStatus.optionalRemovals.find(removal => 
-        removal.fileName.toLowerCase() === mod.fileName.toLowerCase()
-      );
-    }
-    
-    return null;
-  }
+
 
   // Get dependency acknowledgment info for a mod
   function getAcknowledgmentInfo(mod: Mod) {
@@ -176,15 +173,7 @@
     );
   }
 
-  // Format file size
-  function formatFileSize(bytes: number): string {
-    if (!bytes) return 'Unknown size';
-    
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    if (bytes === 0) return '0 Bytes';
-    
-    const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024)).toString(), 10);
-    return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];  }
+
   // Handle mod toggle for optional mods
   function handleToggle(mod: Mod, enabled: boolean): void {
     if (type === 'required') return; // Required mods cannot be toggled
@@ -293,136 +282,174 @@
 </script>
 
 <div class="client-mod-list">
-  {#if mods.length === 0}
-    <div class="empty-state">
-      <p>No {type} mods found.</p>
-    </div>  {:else}
-    <div class="grid-header">
-      <div class="header-cell">Mod Details</div>
-      <div class="header-cell">Status</div>
-      <div class="header-cell">Version</div>
-      <div class="header-cell">Actions</div>
-    </div>
-      <div class="mods-grid">
-      {#each mods as mod (mod.fileName)}
-        <div class="mod-card {type} {getModStatus(mod) === 'disabled' ? 'disabled' : ''}">
-          <div class="mod-info">
-            <div class="mod-name">{mod.name || mod.fileName}</div>
-            <div class="mod-details">
-              {#if mod.size}
-                <span class="mod-size">{formatFileSize(mod.size)}</span>
-              {/if}
-              {#if mod.lastModified}
-                <span class="mod-date">Modified: {new Date(mod.lastModified).toLocaleDateString()}</span>
-              {/if}
-              {#if mod.location}
-                <span class="mod-location">Location: {mod.location}</span>
+  <!-- Integrated table with header -->
+  <div class="table-container">
+    <table class="client-mods-table" class:required-table={type === 'required'} class:optional-table={type === 'optional'}>
+      <!-- Section header as first row -->
+      <thead>
+        <tr class="section-header {type}">
+          <td colspan="5">
+            <div class="section-header-content">
+              <h3>{sectionInfo[type].title}</h3>
+              <p class="section-description">{sectionInfo[type].description}</p>
+              
+              <!-- Optional mod download notification -->
+              {#if type === 'optional' && modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
+                <div class="optional-notification">
+                  <span class="notification-text">⚠️ {modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's' : ''} available</span>
+                  <button class="notification-btn" on:click={handleDownload}>
+                    📥 Download All Optional
+                  </button>
+                </div>
               {/if}
             </div>
-          </div>            <div class="mod-status">
-            {#if needsRemoval(mod)}
-              <span class="status-badge removal">⚠️ Needs Removal</span>
-            {:else if needsAcknowledgment(mod)}
-              <span class="status-badge acknowledgment">🔗 Needs Acknowledgment</span>
-            {:else if getModStatus(mod) === 'server mod'}
-              <span class="status-badge server-mod">🔒 Server Mod</span>
-            {:else if getModStatus(mod) === 'installed'}
-              <span class="status-badge installed">Enabled</span>
-            {:else if getModStatus(mod) === 'disabled'}
-              <span class="status-badge disabled">Disabled</span>
-            {:else if getModStatus(mod) === 'missing'}
-              <span class="status-badge missing">❌ Missing</span>
-            {:else}
-              <span class="status-badge unknown">❓ Unknown</span>
-            {/if}
-          </div>
-          
-          <div class="mod-version">
-            {#if mod.versionNumber}
-              <span class="version-tag">v{mod.versionNumber}</span>
-            {:else}
-              <span class="version-tag unknown">Unknown</span>
-            {/if}
-          </div>          <div class="mod-actions">
-            {#if type === 'required'}
-              {#if needsAcknowledgment(mod)}
-                {@const acknowledgmentInfo = getAcknowledgmentInfo(mod)}
-                <div class="dependency-notification">
-                  <span class="dependency-reason">🔗 {acknowledgmentInfo?.reason || 'required as dependency by client downloaded mods'}</span>
-                  <button class="action-btn acknowledge-btn" on:click={() => handleAcknowledge(mod)} title="Acknowledge this dependency">
-                    ✓ Acknowledge
-                  </button>
-                </div>
-              {:else if needsRemoval(mod)}
-                {@const removalInfo = getRemovalInfo(mod)}
-                <span class="removal-reason">{removalInfo?.reason || 'No longer required'}</span>
-                <button class="action-btn remove-btn" on:click={() => handleRemove(mod)} title="Remove this mod">
-                  🗑️ Remove
-                </button>              {:else}
-                <span class="required-label">Required</span>
-                {#if getModStatus(mod) === 'missing'}
-                  <button class="download-button" on:click={handleDownload}>
-                    📥 Download
-                  </button>
-                {:else if needsUpdate(mod)}
+          </td>
+        </tr>
+        
+        <!-- Column headers -->
+        {#if mods.length > 0}
+          <tr class="column-headers">
+            <th>Mod Name</th>
+            <th class="status">Status</th>
+            <th class="ver">Version</th>
+            <th class="upd">Update</th>
+            <th class="act">Actions</th>
+          </tr>
+        {/if}
+      </thead>
+        <tbody>
+          {#each mods as mod (mod.fileName)}
+            {@const modStatus = getModStatus(mod)}
+            <tr class:disabled={modStatus === 'disabled'}>
+              
+              <!-- Mod Name -->
+              <td>
+                                 <div class="mod-name-cell">
+                   <strong>{mod.name || mod.fileName}</strong>
+                 </div>
+              </td>
+
+              <!-- Status -->
+              <td class="status">
+                {#if needsRemoval(mod)}
+                  <span class="tag warn">⚠️ Remove</span>
+                {:else if needsAcknowledgment(mod)}
+                  <span class="tag new">🔗 Acknowledge</span>
+                {:else if modStatus === 'server mod'}
+                  <span class="tag server">🔒 Server</span>
+                {:else if modStatus === 'installed'}
+                  <span class="tag ok">Enabled</span>
+                {:else if modStatus === 'disabled'}
+                  <span class="tag disabled">Disabled</span>
+                {:else if modStatus === 'missing'}
+                  <span class="tag missing">❌ Missing</span>
+                {:else}
+                  <span class="tag unknown">❓ Unknown</span>
+                {/if}
+              </td>
+
+              <!-- Version -->
+              <td class="ver">
+                {#if mod.versionNumber}
+                  <code>{mod.versionNumber}</code>
+                {:else}
+                  <span class="no-version">—</span>
+                {/if}
+              </td>
+
+              <!-- Update -->
+              <td class="upd">
+                {#if needsUpdate(mod)}
                   {@const updateInfo = getUpdateInfo(mod)}
-                  <button class="action-btn update-btn" on:click={() => handleUpdate(mod)} title="Update to version {updateInfo?.newVersion}">
-                    🔄 Update
+                  <button class="tag new clickable" 
+                          on:click={() => handleUpdate(mod)}
+                          title="Update to {updateInfo?.newVersion}">
+                    ↑ {updateInfo?.newVersion}
                   </button>
-                  <div class="update-info">
-                    v{updateInfo?.currentVersion} → v{updateInfo?.newVersion}
-                  </div>
+                {:else}
+                  <span class="tag ok">Up to date</span>
                 {/if}
-              {/if}            {:else if type === 'optional'}
-              {#if needsAcknowledgment(mod)}
-                {@const acknowledgmentInfo = getAcknowledgmentInfo(mod)}
-                <div class="dependency-notification">
-                  <span class="dependency-reason">🔗 {acknowledgmentInfo?.reason || 'required as dependency by client downloaded mods'}</span>
-                  <button class="action-btn acknowledge-btn" on:click={() => handleAcknowledge(mod)} title="Acknowledge this dependency">
-                    ✓ Acknowledge
-                  </button>
-                </div>
-              {:else if needsRemoval(mod)}
-                {@const removalInfo = getRemovalInfo(mod)}
-                <span class="removal-reason">{removalInfo?.reason || 'No longer provided by server'}</span>
-                <button class="action-btn remove-btn" on:click={() => handleRemove(mod)} title="Remove this mod">
-                  🗑️ Remove
-                </button>
-              {:else if getModStatus(mod) === 'missing'}
-                <button class="download-button" on:click={() => handleDownloadSingle(mod)}>
-                  📥 Download
-                </button>
-              {:else if needsUpdate(mod)}
-                {@const updateInfo = getUpdateInfo(mod)}
-                <button class="action-btn update-btn" on:click={() => handleUpdate(mod)} title="Update to version {updateInfo?.newVersion}">
-                  🔄 Update
-                </button>
-                <div class="update-info">
-                  v{updateInfo?.currentVersion} → v{updateInfo?.newVersion}
-                </div>
-              {:else}
-                <button 
-                  class="action-btn toggle-btn"
-                  on:click={() => handleToggle(mod, getModStatus(mod) !== 'installed')}
-                  title={getModStatus(mod) === 'installed' ? 'Disable mod' : 'Enable mod'}
-                >
-                  {#if getModStatus(mod) === 'installed'}
-                    Disable
+              </td>
+
+              <!-- Actions -->
+              <td class="act">
+                {#if type === 'required'}
+                  {#if needsAcknowledgment(mod)}
+                    <button class="primary sm" on:click={() => handleAcknowledge(mod)} title="Acknowledge dependency">
+                      ✓ Ack
+                    </button>
+                  {:else if needsRemoval(mod)}
+                    <button class="danger sm" on:click={() => handleRemove(mod)} title="Remove mod">
+                      🗑️ Remove
+                    </button>
+                  {:else if modStatus === 'missing'}
+                    <button class="primary sm" on:click={handleDownload}>
+                      📥 Download
+                    </button>
                   {:else}
-                    Enable
+                    <span class="required-tag">Required</span>
                   {/if}
-                </button>
-                {#if getModStatus(mod) !== 'missing'}
-                  <button class="action-btn delete-btn" on:click={() => handleDelete(mod)} title="Remove mod">
-                    Remove
-                  </button>
+                {:else if type === 'optional'}
+                  {#if needsAcknowledgment(mod)}
+                    <button class="primary sm" on:click={() => handleAcknowledge(mod)} title="Acknowledge dependency">
+                      ✓ Ack
+                    </button>
+                  {:else if needsRemoval(mod)}
+                    <button class="danger sm" on:click={() => handleRemove(mod)} title="Remove mod">
+                      🗑️ Remove
+                    </button>
+                  {:else if modStatus === 'missing'}
+                    <button class="primary sm" on:click={() => handleDownloadSingle(mod)}>
+                      📥 Download
+                    </button>
+                  {:else}
+                    <div class="action-group">
+                      <button class="toggle sm" 
+                              class:primary={modStatus === 'disabled'}
+                              class:warn={modStatus === 'installed'}
+                              on:click={() => handleToggle(mod, modStatus !== 'installed')}
+                              title={modStatus === 'installed' ? 'Disable mod' : 'Enable mod'}>
+                        {modStatus === 'installed' ? 'Disable' : 'Enable'}
+                      </button>
+                      {#if modStatus !== 'missing'}
+                        <button class="danger sm" on:click={() => handleDelete(mod)} title="Remove mod">
+                          🗑️
+                        </button>
+                      {/if}
+                    </div>
+                  {/if}
                 {/if}
-              {/if}
+              </td>
+            </tr>
+
+            <!-- Dependency notification row -->
+            {#if needsAcknowledgment(mod)}
+              {@const acknowledgmentInfo = getAcknowledgmentInfo(mod)}
+              <tr class="dependency-row">
+                <td colspan="5">
+                  <div class="dependency-info">
+                    <span class="dependency-reason">🔗 {acknowledgmentInfo?.reason || 'required as dependency'}</span>
+                  </div>
+                </td>
+              </tr>
             {/if}
-          </div>
-        </div>
-      {/each}
-    </div>    <!-- Summary for missing mods -->
+          {/each}
+        </tbody>
+        
+        <!-- Empty state as table row -->
+        {#if mods.length === 0}
+          <tbody>
+            <tr class="empty-state">
+              <td colspan="5">
+                <p>No {type} mods found.</p>
+              </td>
+            </tr>
+          </tbody>
+        {/if}
+      </table>
+    </div>
+    
+    <!-- Summary for missing mods -->
     {#if type === 'required' && modSyncStatus && modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
       <div class="summary">
         <div class="missing-summary">
@@ -435,26 +462,96 @@
         </div>
       </div>
     {/if}
-    
-    <!-- Summary for missing optional mods -->
-    {#if type === 'optional' && modSyncStatus && modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0}
-      <div class="summary">
-        <div class="missing-summary optional">
-          <span class="summary-text">
-            {modSyncStatus.missingOptionalMods.length} optional mod(s) available for download
-          </span>
-          <button class="download-all-button optional" on:click={handleDownload}>
-            📥 Download All Optional
-          </button>
-        </div>
-      </div>
-    {/if}
-  {/if}
 </div>
 
 <style>
+  /* CSS variables and color tokens */
+  .client-mod-list {
+    --row-py: 3px;
+    --cell-px: 6px;
+    --col-ok: #14a047;
+    --col-warn: #c9801f;
+    --col-danger: #b33;
+    --col-primary: #0a84ff;
+    --bg-primary: #181818;
+    --bg-secondary: #141414;
+    --bg-tertiary: #1a1a1a;
+    --text-primary: #ddd;
+    --text-secondary: #aaa;
+    --border-color: #333;
+  }
+
   .client-mod-list {
     width: 100%;
+  }
+
+  /* Section header as table row */
+  .section-header td {
+    background-color: #1f2937;
+    border-top: 3px solid #3b82f6; /* Default blue */
+    padding: 0.75rem var(--cell-px) !important;
+  }
+
+  .section-header.required td {
+    border-top-color: #ef4444; /* Red for required */
+  }
+
+  .section-header.optional td {
+    border-top-color: #f59e0b; /* Orange for optional */
+  }
+
+  .section-header-content {
+    text-align: center;
+  }
+
+  .section-header h3 {
+    color: white;
+    margin: 0 0 0.15rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .section-header .section-description {
+    color: #9ca3af;
+    font-size: 0.8rem;
+    margin: 0;
+    line-height: 1.3;
+  }
+
+  /* Optional notification within section header */
+  .optional-notification {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0.6rem;
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 4px;
+    margin-top: 0.4rem;
+    gap: 0.75rem;
+  }
+
+  .notification-text {
+    font-size: 0.8rem;
+    color: #3b82f6;
+    font-weight: 500;
+  }
+
+  .notification-btn {
+    padding: 0.3rem 0.6rem;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    background-color: #3b82f6;
+    color: white;
+    white-space: nowrap;
+  }
+
+  .notification-btn:hover {
+    background-color: #2563eb;
   }
 
   .empty-state {
@@ -462,296 +559,262 @@
     padding: 2rem;
     color: #9ca3af;
     font-style: italic;
+    background-color: #1f2937;
+    border: 1px solid #374151;
+    border-top: none;
+    border-radius: 0 0 6px 6px;
   }
 
-  .grid-header {
-    display: grid;
-    grid-template-columns: 2.5fr 1fr 1fr 2fr;
-    gap: 1rem;
-    padding: 0.75rem 1rem;
-    background: rgba(255, 255, 255, 0.05);
+  /* Table layout */
+  .table-container {
+    width: 100%;
+    overflow-x: auto;
+    border: 1px solid #374151;
     border-radius: 6px;
-    font-weight: 600;
-    color: rgba(255, 255, 255, 0.9);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    margin-bottom: 0.5rem;
   }
 
-  .header-cell {
-    display: flex;
-    align-items: center;
+  .client-mods-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    background: linear-gradient(to bottom, var(--bg-primary), var(--bg-secondary));
+    table-layout: auto;
   }
 
-  .header-cell:nth-child(2),
-  .header-cell:nth-child(3) {
-    justify-content: center;
+  .client-mods-table th, 
+  .client-mods-table td {
+    padding: var(--row-py) var(--cell-px);
   }
 
-  .header-cell:nth-child(4) {
-    justify-content: flex-end;
+  .client-mods-table tr {
+    transition: background-color 0.15s, box-shadow 0.15s;
   }
 
-  .mods-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
+  .client-mods-table thead {
+    background: var(--bg-tertiary);
+    position: sticky;
+    top: 0;
+    z-index: 6;
   }
 
-  .mod-card {
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    overflow: hidden;
-    transition: all 0.3s ease;
-    display: grid;
-    grid-template-columns: 2.5fr 1fr 1fr 2fr;
-    gap: 1rem;
-    padding: 1rem;
-    align-items: center;
+  .client-mods-table th {
+    text-align: center;
   }
 
-  .mod-card:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.2);
+  .client-mods-table th:first-child {
+    text-align: left;
   }
 
-  .mod-card.required {
-    border-left: 4px solid #ef4444;
+
+
+  .client-mods-table tbody tr:nth-child(even) {
+    background: rgba(24, 24, 24, 0.8);
   }
 
-  .mod-card.optional {
-    border-left: 4px solid #3b82f6;
+  .client-mods-table tbody tr:hover {
+    background: #212121;
+    box-shadow: 0 0 4px rgba(255, 255, 255, 0.1);
   }
 
-  .mod-card.disabled {
+  .client-mods-table tbody tr.disabled {
     opacity: 0.7;
-    background: rgba(139, 69, 19, 0.15);
-    transition: all 0.3s ease; /* Smooth transition when disabling */
-  }
-  
-  .mod-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    min-width: 0;
+    background: rgba(139, 69, 19, 0.15) !important;
+    transition: all 0.3s ease;
   }
 
-  .mod-name {
-    color: white;
+    /* Column widths */
+  .client-mods-table td:first-child {
+    text-align: left;
+  }
+
+  .client-mods-table th.status,
+  .client-mods-table td.status {
+    width: 80px;
+    min-width: 70px;
+    text-align: center;
+  }
+
+  .client-mods-table th.ver,
+  .client-mods-table td.ver {
+    width: 100px;
+    min-width: 80px;
+    text-align: center;
+  }
+
+  .client-mods-table th.upd,
+  .client-mods-table td.upd {
+    width: 100px;
+    min-width: 90px;
+    text-align: center;
+  }
+
+  .client-mods-table th.act,
+  .client-mods-table td.act {
+    width: 120px;
+    min-width: 110px;
+    text-align: center;
+  }
+
+  /* Mod name cell */
+  .mod-name-cell strong {
+    color: var(--text-primary);
     font-weight: 600;
-    font-size: 1rem;
     word-break: break-word;
   }
 
-  .mod-details {
-    display: flex;
-    gap: 1rem;
-    font-size: 0.75rem;
-    color: rgba(255, 255, 255, 0.5);
-    flex-wrap: wrap;
-  }
-
-  .mod-status {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-  }
-
-  .status-badge {
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
+  /* Status tags */
+  .tag {
+    padding: 1px 6px;
+    border-radius: 3px;
     font-size: 0.75rem;
     font-weight: 500;
     text-align: center;
-  }
-  .status-badge.installed {
-    background-color: rgba(16, 185, 129, 0.2);
-    color: #10b981;
-  }
-
-  .status-badge.server-mod {
-    background-color: rgba(139, 92, 246, 0.2);
-    color: #8b5cf6;
-    border: 1px solid rgba(139, 92, 246, 0.3);
-  }
-  .status-badge.disabled {
-    background-color: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.3);
-  }
-  .status-badge.missing {
-    background-color: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-  }
-  .status-badge.removal {
-    background-color: rgba(245, 158, 11, 0.2);
-    color: #f59e0b;
-    border: 1px solid rgba(245, 158, 11, 0.3);
-  }
-
-  .status-badge.acknowledgment {
-    background-color: rgba(16, 185, 129, 0.2);
-    color: #10b981;
-    border: 1px solid rgba(16, 185, 129, 0.3);
-  }
-
-  .status-badge.acknowledged {
-    background-color: rgba(16, 185, 129, 0.1);
-    color: #059669;
-    border: 1px solid rgba(16, 185, 129, 0.2);
-  }
-
-  .status-badge.unknown {
-    background-color: rgba(107, 114, 128, 0.2);
-    color: #9ca3af;
-  }
-
-  .mod-version {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-  }
-
-  .version-tag {
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-weight: 500;
-    background: rgba(59, 130, 246, 0.2);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    text-align: center;
-  }
-
-  .version-tag.unknown {
-    background: rgba(156, 163, 175, 0.2);
-    color: #9ca3af;
-    border: 1px solid rgba(156, 163, 175, 0.3);
-  }
-
-  .mod-actions {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .required-label {
-    color: #ef4444;
-    font-weight: 500;
-    font-size: 0.9rem;
-  }
-
-  .download-button, .download-all-button {
-    background-color: #3b82f6;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 0.4rem 0.75rem;
-    font-size: 0.75rem;
-    cursor: pointer;
-    transition: background-color 0.2s;
-  }
-
-  .download-button:hover, .download-all-button:hover {
-    background-color: #2563eb;
-  }
-
-  .action-btn {
-    padding: 0.4rem 0.8rem;
-    border: none;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
     white-space: nowrap;
   }
 
-  .toggle-btn {
+  .tag.ok {
+    background: rgba(20, 160, 71, 0.2);
+    color: var(--col-ok);
+  }
+
+  .tag.warn {
+    background: rgba(200, 128, 31, 0.2);
+    color: var(--col-warn);
+  }
+
+  .tag.new {
+    background: rgba(10, 132, 255, 0.2);
+    color: var(--col-primary);
+  }
+
+  .tag.server {
+    background: rgba(139, 92, 246, 0.2);
+    color: #8b5cf6;
+  }
+
+  .tag.disabled {
+    background: rgba(179, 51, 51, 0.2);
+    color: var(--col-danger);
+  }
+
+  .tag.missing {
+    background: rgba(179, 51, 51, 0.2);
+    color: var(--col-danger);
+  }
+
+  .tag.unknown {
+    background: rgba(156, 163, 175, 0.2);
+    color: #9ca3af;
+  }
+
+  .tag.clickable {
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .tag.clickable:hover {
+    opacity: 0.8;
+    transform: translateY(-1px);
+  }
+
+  /* Version display */
+  .ver code {
+    background: var(--border-color);
+    color: var(--text-primary);
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+  }
+
+  .no-version {
+    color: var(--text-secondary);
+    font-style: italic;
+  }
+
+  /* Buttons */
+  .primary, .danger, .warn, .toggle {
+    padding: 2px 8px;
+    border: none;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .sm {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+  }
+
+  .primary {
+    background: var(--col-primary);
+    color: white;
+  }
+
+  .primary:hover {
+    background: #0066cc;
+  }
+
+  .danger {
+    background: var(--col-danger);
+    color: white;
+  }
+
+  .danger:hover {
+    background: #990000;
+  }
+
+  .warn {
+    background: var(--col-warn);
+    color: white;
+  }
+
+  .warn:hover {
+    background: #a66500;
+  }
+
+  .toggle {
     background: rgba(168, 85, 247, 0.2);
     color: #a855f7;
     border: 1px solid rgba(168, 85, 247, 0.3);
   }
 
-  .toggle-btn:hover:not(:disabled) {
+  .toggle:hover {
     background: rgba(168, 85, 247, 0.3);
-    border-color: rgba(168, 85, 247, 0.5);
   }
 
-  .toggle-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-    background: rgba(156, 163, 175, 0.2);
-    color: #9ca3af;
-    border: 1px solid rgba(156, 163, 175, 0.3);
-  }
-  .delete-btn {
-    background: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.3);
-  }
-  
-  .delete-btn:hover {
-    background: rgba(239, 68, 68, 0.3);
-    border-color: rgba(239, 68, 68, 0.5);
-  }
-
-  .remove-btn {
-    background: rgba(245, 158, 11, 0.2);
-    color: #f59e0b;
-    border: 1px solid rgba(245, 158, 11, 0.3);
-  }
-  
-  .remove-btn:hover {
-    background: rgba(245, 158, 11, 0.3);
-    border-color: rgba(245, 158, 11, 0.5);
-  }
-  .removal-reason {
-    font-size: 0.8rem;
-    color: rgba(255, 255, 255, 0.7);
-    font-style: italic;
-    margin-right: 0.5rem;
-  }
-
-  .dependency-notification {
+  /* Action groups */
+  .action-group {
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 0.3rem;
+    gap: 4px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .required-tag {
+    font-size: 0.75rem;
+    color: var(--col-danger);
+    font-weight: 500;
+    text-align: center;
+  }
+
+  /* Dependency notification row */
+  .dependency-row {
+    background: rgba(16, 185, 129, 0.05) !important;
+  }
+
+  .dependency-info {
+    padding: 4px 8px;
+    font-size: 0.75rem;
   }
 
   .dependency-reason {
-    font-size: 0.8rem;
     color: #10b981;
     font-style: italic;
-    text-align: right;
   }
 
-  .acknowledge-btn {
-    background: rgba(16, 185, 129, 0.2);
-    color: #10b981;
-    border: 1px solid rgba(16, 185, 129, 0.3);
-  }
-    .acknowledge-btn:hover {
-    background: rgba(16, 185, 129, 0.3);
-    border-color: rgba(16, 185, 129, 0.5);
-  }
-
-  .dependency-notification.acknowledged {
-    opacity: 0.8;
-  }
-
-  .acknowledged-label {
-    font-size: 0.75rem;
-    color: #10b981;
-    background: rgba(16, 185, 129, 0.1);
-    padding: 0.2rem 0.5rem;
-    border-radius: 0.25rem;
-    border: 1px solid rgba(16, 185, 129, 0.2);
-  }
-
+  /* Summary sections */
   .summary {
     margin-top: 1rem;
     padding: 1rem;
@@ -759,6 +822,7 @@
     border-radius: 6px;
     border: 1px solid #4b5563;
   }
+
   .missing-summary {
     display: flex;
     justify-content: space-between;
@@ -775,8 +839,21 @@
     font-weight: 500;
   }
 
-  .missing-summary.optional .summary-text {
-    color: #3b82f6;
+
+
+  .download-all-button {
+    background-color: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .download-all-button:hover {
+    background-color: #2563eb;
   }
 
   .download-all-button.optional {
@@ -785,24 +862,5 @@
 
   .download-all-button.optional:hover {
     background-color: #2563eb;
-  }
-
-  .update-btn {
-    background: rgba(34, 197, 94, 0.2);
-    color: #22c55e;
-    border: 1px solid rgba(34, 197, 94, 0.3);
-    font-size: 0.7rem;
-  }
-
-  .update-btn:hover {
-    background: rgba(34, 197, 94, 0.3);
-    border-color: rgba(34, 197, 94, 0.5);
-  }
-
-  .update-info {
-    font-size: 0.65rem;
-    color: #22c55e;
-    margin-top: 0.2rem;
-    font-weight: 500;
   }
 </style>
