@@ -349,26 +349,30 @@
                     {/if}
                     
                     <!-- Action buttons -->
-                    {#if totalUpdatesNeeded > 0}
-                      <button class="action-button" on:click={onDownloadModsClick}>
-                        📥 Download & Update Mods ({totalUpdatesNeeded})
-                      </button>
-                    {:else if actualRemovals.length > 0}
-                      <button class="action-button" on:click={onDownloadModsClick}>
-                        🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
-                      </button>
-                    {/if}
-                    
-                    {#if acknowledgments.length > 0}
-                      <button class="acknowledge-button" on:click={onAcknowledgeAllDependencies}>
-                        ✓ Acknowledge Dependencies ({acknowledgments.length})
-                      </button>
-                    {/if}
+                    <div class="mod-actions-compact">
+                      {#if totalUpdatesNeeded > 0}
+                        <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
+                          📥 Download & Update ({totalUpdatesNeeded})
+                        </button>
+                      {:else if actualRemovals.length > 0}
+                        <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
+                          🔄 Apply Changes ({actualRemovals.length})
+                        </button>
+                      {/if}
+                      
+                      {#if acknowledgments.length > 0}
+                        <button class="mod-action-btn acknowledge" on:click={onAcknowledgeAllDependencies}>
+                          ✓ Acknowledge ({acknowledgments.length})
+                        </button>
+                      {/if}
+                    </div>
                   {:else}
                     <h3>Mods Need Update</h3>
-                    <button class="action-button" on:click={onDownloadModsClick}>
-                      🔄 Synchronize Mods
-                    </button>
+                    <div class="mod-actions-compact">
+                      <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
+                        🔄 Synchronize Mods
+                      </button>
+                    </div>
                   {/if}
                 </div>
               {:else if downloadStatus === 'downloading'}
@@ -958,42 +962,53 @@
     border: 1px solid rgba(156, 163, 175, 0.4) !important;
   }
 
-  /* Action Buttons */
-  .action-button {
-    background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 6px !important;
-    padding: 0.5rem 1rem !important;
-    font-size: 0.9rem !important;
-    font-weight: 500 !important;
-    cursor: pointer !important;
-    transition: all 0.2s !important;
-    margin: 0.5rem 0 0 0 !important;
-    width: 100% !important;
+  /* Modern Compact Action Buttons */
+  .mod-actions-compact {
+    display: flex;
+    gap: 0.75rem;
+    margin: 0.75rem 0;
+    flex-wrap: wrap;
+    justify-content: center;
   }
 
-  .action-button:hover {
-    background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
+  .mod-action-btn {
+    padding: 0.5rem 1rem;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
   }
 
-  /* Acknowledge Button */
-  .acknowledge-button {
-    background: linear-gradient(135deg, #10b981, #059669) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 6px !important;
-    padding: 0.5rem 1rem !important;
-    font-size: 0.9rem !important;
-    font-weight: 500 !important;
-    cursor: pointer !important;
-    transition: all 0.2s !important;
-    margin: 0.5rem 0 0 0 !important;
-    width: 100% !important;
+  .mod-action-btn.primary {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border-color: rgba(59, 130, 246, 0.3);
   }
 
-  .acknowledge-button:hover {
-    background: linear-gradient(135deg, #059669, #047857) !important;
+  .mod-action-btn.primary:hover {
+    background: rgba(59, 130, 246, 0.25);
+    border-color: rgba(59, 130, 246, 0.5);
+    transform: translateY(-1px);
+    color: #2563eb;
+  }
+
+  .mod-action-btn.acknowledge {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    border-color: rgba(16, 185, 129, 0.3);
+  }
+
+  .mod-action-btn.acknowledge:hover {
+    background: rgba(16, 185, 129, 0.25);
+    border-color: rgba(16, 185, 129, 0.5);
+    transform: translateY(-1px);
+    color: #059669;
   }
 
   /* Compact Mod Lists */
@@ -1418,6 +1433,16 @@
     .memory-settings-compact {
       flex-wrap: wrap;
       gap: 0.5rem;
+    }
+
+    .mod-actions-compact {
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .mod-action-btn {
+      width: 100%;
+      justify-content: center;
     }
   }
 </style>

@@ -179,25 +179,27 @@
       </div>
     {/if}
   </div>  <!-- Action Buttons -->
-  <div class="action-buttons">
+  <div class="mod-actions-compact">
     {#if modSyncStatus && !modSyncStatus.synchronized}
       <!-- Use same logic as Play tab for consistent button text -->
       {#if modSyncStatus.needsDownload > 0}
-        <button class="download-action-button required" on:click={downloadRequired}>
-          📥 Download Required Mods ({modSyncStatus.needsDownload})
-        </button>      {:else}
+        <button class="mod-action-btn primary" on:click={downloadRequired}>
+          📥 Download Required ({modSyncStatus.needsDownload})
+        </button>
+      {:else}
         {@const actualRemovals = [...((modSyncStatus as any).requiredRemovals || []), ...((modSyncStatus as any).optionalRemovals || [])]}
         {@const acknowledgments = pendingAcknowledgments || []}
         
         {#if actualRemovals.length > 0}
-          <button class="download-action-button required" on:click={downloadRequired}>
-            🔄 Apply Mod Changes (Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''})
-          </button>        {:else if acknowledgments.length > 0}
-          <button class="download-action-button required" on:click={acknowledgeAllDependencies}>
-            ✓ Acknowledge Dependencies ({acknowledgments.length})
+          <button class="mod-action-btn primary" on:click={downloadRequired}>
+            🔄 Apply Changes ({actualRemovals.length})
+          </button>
+        {:else if acknowledgments.length > 0}
+          <button class="mod-action-btn acknowledge" on:click={acknowledgeAllDependencies}>
+            ✓ Acknowledge ({acknowledgments.length})
           </button>
         {:else}
-          <button class="download-action-button required" on:click={downloadRequired}>
+          <button class="mod-action-btn primary" on:click={downloadRequired}>
             🔄 Synchronize Mods
           </button>
         {/if}
@@ -205,15 +207,18 @@
     {/if}
     
     {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
-      <button class="download-action-button optional" on:click={downloadOptional}>
-        📥 Download All Optional Mods ({modSyncStatus.needsOptionalDownload})
+      <button class="mod-action-btn secondary" on:click={downloadOptional}>
+        📥 Download Optional ({modSyncStatus.needsOptionalDownload})
       </button>
-      <div class="optional-mod-note">
-        <span class="note-icon">💡</span>
-        <span class="note-text">You can also download individual optional mods from the mods list below.</span>
-      </div>
     {/if}
   </div>
+
+  {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
+    <div class="optional-mod-note">
+      <span class="note-icon">💡</span>
+      <span class="note-text">You can also download individual optional mods from the mods list below.</span>
+    </div>
+  {/if}
 
   <!-- Last Sync Info -->
   {#if modSyncStatus}
@@ -377,60 +382,65 @@
     text-align: center;
   }
 
-  .action-buttons {
+  .mod-actions-compact {
     display: flex;
     justify-content: center;
-    gap: 1rem;
-    margin-bottom: 1rem;
+    gap: 0.75rem;
+    margin: 1rem 0;
     flex-wrap: wrap;
   }
 
-  .download-action-button {
-    color: white;
-    border: none;
+  .mod-action-btn {
+    padding: 0.5rem 1rem;
+    border: 1px solid transparent;
     border-radius: 6px;
-    padding: 0.75rem 1.5rem;
-    font-weight: 600;
+    font-size: 0.85rem;
+    font-weight: 500;
     cursor: pointer;
-    transition: background-color 0.2s;
-    min-width: 200px;
-  }
-
-  .download-action-button.required {
-    background-color: #ef4444;
-  }
-
-  .download-action-button.required:hover {
-    background-color: #dc2626;
-  }
-
-  .download-action-button.optional {
-    background-color: #3b82f6;
-  }
-  .download-action-button.optional:hover {
-    background-color: #2563eb;
-  }
-
-  .optional-mod-note {
+    transition: all 0.2s ease;
+    white-space: nowrap;
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-top: 0.75rem;
-    padding: 0.75rem;
-    background-color: rgba(59, 130, 246, 0.1);
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    border-radius: 6px;
   }
 
-  .note-icon {
-    font-size: 1rem;
-    flex-shrink: 0;
+  .mod-action-btn.primary {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border-color: rgba(59, 130, 246, 0.3);
   }
 
-  .note-text {
-    font-size: 0.85rem;
-    color: #d1d5db;
-    line-height: 1.4;
+  .mod-action-btn.primary:hover {
+    background: rgba(59, 130, 246, 0.25);
+    border-color: rgba(59, 130, 246, 0.5);
+    transform: translateY(-1px);
+    color: #2563eb;
+  }
+
+  .mod-action-btn.secondary {
+    background: rgba(168, 85, 247, 0.15);
+    color: #a855f7;
+    border-color: rgba(168, 85, 247, 0.3);
+  }
+
+  .mod-action-btn.secondary:hover {
+    background: rgba(168, 85, 247, 0.25);
+    border-color: rgba(168, 85, 247, 0.5);
+    transform: translateY(-1px);
+    color: #9333ea;
+  }
+
+  .mod-action-btn.acknowledge {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    border-color: rgba(16, 185, 129, 0.3);
+  }
+
+  .mod-action-btn.acknowledge:hover {
+    background: rgba(16, 185, 129, 0.25);
+    border-color: rgba(16, 185, 129, 0.5);
+    transform: translateY(-1px);
+    color: #059669;
   }
 
   .sync-info {
@@ -459,5 +469,44 @@
 
   .refresh-action-button:hover {
     background-color: #4b5563;
+  }
+
+  .optional-mod-note {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background-color: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 6px;
+  }
+
+  .note-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+  }
+
+  .note-text {
+    font-size: 0.85rem;
+    color: #d1d5db;
+    line-height: 1.4;
+  }
+
+  /* Responsive Design */
+  @media (max-width: 768px) {
+    .mod-actions-compact {
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .mod-action-btn {
+      width: 100%;
+      justify-content: center;
+    }
+
+    .status-cards {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

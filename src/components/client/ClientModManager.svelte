@@ -80,15 +80,20 @@
   // Core state now provided by clientModManager store
   
   // Client mod finding state
-  let activeTab: string = 'installed-mods'; // 'installed-mods' or 'find-mods'
+  let filterType = 'all';
+  let activeTab = 'installed-mods';
+  let manualModsRefreshTrigger = 0;
+
+  // Component references
+  let optionalModListComponent;
+  let clientManualModListComponent;
+
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
-  let filterType = 'client';
   let downloadManagerCleanup;
   let unsubscribeInstalledInfo;
   let previousPath: string | null = null;
 
   let isCheckingModSync = false; // Guard to prevent reactive loops
-  let manualModsRefreshTrigger: number = 0; // Trigger to refresh manual mods list
   
   // keep track of which fileNames we've acknowledged is managed by store
   $: displayRequiredMods = (() => {
@@ -588,29 +593,54 @@
   // Update an individual server-managed mod
   // Update server-managed mods handled via utility
 
-  // Enhance mod data with clean names from JAR files  // ...existing code...
+  // Enhance mod data with clean names from JAR files  
+  // ...existing code...
+
+  // Wrapper function for mod toggle that handles completion notification
+  async function handleModToggleWrapper(instance, fileName, enabled) {
+    try {
+      await handleModToggle(instance, fileName, enabled);
+      
+      // Notify the appropriate component that the toggle is complete
+      if (optionalModListComponent) {
+        optionalModListComponent.onToggleComplete(fileName);
+      }
+      if (clientManualModListComponent) {
+        clientManualModListComponent.onToggleComplete(fileName);
+      }
+      
+      // No immediate sync refresh to avoid flickering - the backend operation already succeeded
+      // The mod status will be correct on the next natural refresh
+    } catch (error) {
+      // Error handling is already done in the utility function
+      // Just notify completion to remove loading state
+      if (optionalModListComponent) {
+        optionalModListComponent.onToggleComplete(fileName);
+      }
+      if (clientManualModListComponent) {
+        clientManualModListComponent.onToggleComplete(fileName);
+      }
+    }
+  }
 </script>
 
 <div class="client-mod-manager">
   <DownloadProgress />
   <ModDependencyModal on:install={handleInstallWithDependencies} />
-  <div class="page-header">
-    <h2>Client Mods</h2>
-  </div>
 
-  <!-- Tab Navigation -->
-  <div class="tab-navigation">
+  <!-- Modern Tab Navigation -->
+  <div class="modern-tab-navigation">
     <button
-      class="tab {activeTab === 'installed-mods' ? 'active' : ''}"
+      class="modern-tab {activeTab === 'installed-mods' ? 'active' : ''}"
       on:click={() => switchTab('installed-mods')}
     >
-      Installed Mods
+      📦 Installed Mods
     </button>
     <button 
-      class="tab {activeTab === 'find-mods' ? 'active' : ''}"
+      class="modern-tab {activeTab === 'find-mods' ? 'active' : ''}"
       on:click={() => switchTab('find-mods')}
     >
-      Find & Install Mods
+      🔍 Find & Install
     </button>
   </div>
 
@@ -702,11 +732,12 @@
           {#if displayOptionalMods.length > 0}
             <div class="mod-section">
               <ClientModList
+                bind:this={optionalModListComponent}
                 mods={displayOptionalMods}
                 type="optional"
                 modSyncStatus={$modSyncStatus}
                 serverManagedFiles={$serverManagedFiles}
-                on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
+                on:toggle={(e) => handleModToggleWrapper(instance, e.detail.fileName, e.detail.enabled)}
                 on:download={() => downloadOptionalMods(instance)}
                 on:downloadSingle={(e) => downloadSingleOptionalMod(instance, e.detail.mod)}
                 on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
@@ -723,11 +754,12 @@
               </p>
             {/if}
             <ClientManualModList
+              bind:this={clientManualModListComponent}
               clientPath={instance?.path || ''}
               refreshTrigger={manualModsRefreshTrigger}
               modSyncStatus={$modSyncStatus}
               {clientModVersionUpdates}
-              on:toggle={(e) => handleModToggle(instance, e.detail.fileName, e.detail.enabled)}
+              on:toggle={(e) => handleModToggleWrapper(instance, e.detail.fileName, e.detail.enabled)}
               on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
               on:install={handleInstallMod}
             />
@@ -758,16 +790,6 @@
     max-width: 1200px;
     margin: 0 auto;
     padding: 1rem;
-  }
-
-  .page-header {
-    margin-bottom: 1.5rem;
-  }
-
-  .page-header h2 {
-    color: white;
-    margin: 0;
-    font-size: 1.5rem;
   }
 
   /* Compact status header */
@@ -892,29 +914,51 @@
     margin-bottom: 1.5rem;
   }
 
-
-
-
-
-  .tab-navigation {
+  /* Modern Tab Navigation */
+  .modern-tab-navigation {
     display: flex;
-    gap: 1rem;
-    margin-bottom: 2rem;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+    justify-content: center;
+    padding: 0.5rem;
+    background: rgba(31, 41, 55, 0.4);
+    border-radius: 8px;
+    border: 1px solid rgba(75, 85, 99, 0.3);
   }
 
-  .tab {
-    padding: 0.5rem 1rem;
-    border: none;
+  .modern-tab {
+    padding: 0.75rem 1.5rem;
+    border: 1px solid transparent;
     border-radius: 6px;
+    font-size: 0.9rem;
     font-weight: 500;
     cursor: pointer;
-    transition: background-color 0.2s;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: transparent;
+    color: #9ca3af;
   }
 
-  .tab.active {
-    background-color: #3b82f6;
-    color: white;
+  .modern-tab:hover:not(.active) {
+    background: rgba(75, 85, 99, 0.3);
+    color: #d1d5db;
+    transform: translateY(-1px);
   }
+
+  .modern-tab.active {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+
+  .modern-tab.active:hover {
+    background: rgba(59, 130, 246, 0.25);
+    border-color: rgba(59, 130, 246, 0.5);
+  }
+
   .mod-search-section {
     padding: 1.5rem;
     background-color: #1f2937;
@@ -925,6 +969,37 @@
   .error-message {
     color: #ef4444;
     margin-bottom: 1rem;
+  }
+
+  /* Responsive Design */
+  @media (max-width: 768px) {
+    .modern-tab-navigation {
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.75rem;
+    }
+
+    .modern-tab {
+      width: 100%;
+      justify-content: center;
+      padding: 0.75rem 1rem;
+    }
+
+    .compact-status {
+      flex-direction: column;
+      gap: 1rem;
+      align-items: stretch;
+    }
+
+    .status-line {
+      justify-content: center;
+      gap: 0.75rem;
+    }
+
+    .status-actions {
+      justify-content: center;
+      flex-wrap: wrap;
+    }
   }
 
 </style>

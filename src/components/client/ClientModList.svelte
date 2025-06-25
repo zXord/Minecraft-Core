@@ -81,24 +81,10 @@
     }
   };
   // Create event dispatcher
-  const dispatch = createEventDispatcher();  // Local state to track mod enabled/disabled status for optimistic updates
-  let localModStates: Record<string, { enabled: boolean }> = {};
-  let optimisticUpdates: Set<string> = new Set(); // Track which mods have pending optimistic updates  // Initialize local states when mods change
-  $: if (mods && modSyncStatus) {
-    // Initialize local state for each mod based on current sync status
-    // But don't override mods that have pending optimistic updates
-    localModStates = mods.reduce((acc, mod) => {
-      if (optimisticUpdates.has(mod.fileName)) {
-        // Keep the existing optimistic state
-        acc[mod.fileName] = localModStates[mod.fileName] || { enabled: true };
-      } else {
-        // Use the backend state
-        const isDisabled = modSyncStatus.presentDisabledMods?.includes(mod.fileName) || false;
-        acc[mod.fileName] = { enabled: !isDisabled };
-      }
-      return acc;
-    }, {} as Record<string, { enabled: boolean }>);
-  }
+  const dispatch = createEventDispatcher();
+
+  // Track which mods are currently being toggled
+  let togglingMods: Set<string> = new Set();
 
   // Get mod status from sync status
   function getModStatus(mod: Mod): string {
@@ -113,26 +99,27 @@
     
     if (isMissing) {
       return 'missing';
-    }    // Check if this mod is server-managed (use lowercase for comparison)
+    }
+
+    // Check if this mod is server-managed (use lowercase for comparison)
     const isServerManaged = serverManagedFiles.has(mod.fileName.toLowerCase());
     
     // Only show "server mod" status for required mods, not optional mods
     if (isServerManaged && type === 'required') {
       return 'server mod';
-    }    // For optional mods, check local state first for optimistic updates
+    }
+
+    // For optional mods, check if disabled
     if (type === 'optional') {
-      const localState = localModStates[mod.fileName];
-      if (localState) {
-        return localState.enabled ? 'installed' : 'disabled';
-      }
-      // Fallback to sync status if local state not available
       if (modSyncStatus.presentDisabledMods && modSyncStatus.presentDisabledMods.includes(mod.fileName)) {
         return 'disabled';
       }
     }
     
     return 'installed';
-  }  // Check if a mod needs to be removed
+  }
+
+  // Check if a mod needs to be removed
   function needsRemoval(mod: Mod): boolean {
     // Check if the mod object itself has the needsRemoval property
     if (mod.needsRemoval) return true;
@@ -162,8 +149,6 @@
     );
   }
 
-
-
   // Get dependency acknowledgment info for a mod
   function getAcknowledgmentInfo(mod: Mod) {
     if (!modSyncStatus?.acknowledgments) return null;
@@ -173,38 +158,52 @@
     );
   }
 
-
   // Handle mod toggle for optional mods
   function handleToggle(mod: Mod, enabled: boolean): void {
     if (type === 'required') return; // Required mods cannot be toggled
 
-    // Mark this mod as having a pending optimistic update
-    optimisticUpdates.add(mod.fileName);
-    
-    // Optimistic UI update - update the local state immediately
-    if (!localModStates[mod.fileName]) {
-      localModStates[mod.fileName] = { enabled: !enabled };
-    }
-    localModStates[mod.fileName].enabled = enabled;
-    localModStates = localModStates; // Trigger reactivity
+    // Mark this mod as being toggled
+    togglingMods.add(mod.fileName);
+    togglingMods = new Set(togglingMods); // Trigger reactivity
 
     // Dispatch to parent component for backend call
     dispatch('toggle', {
       fileName: mod.fileName,
       enabled: enabled
     });
-    
-    // Clear optimistic update flag after a short delay
-    // This allows the backend state to eventually take over
-    setTimeout(() => {
-      optimisticUpdates.delete(mod.fileName);
-      optimisticUpdates = new Set(optimisticUpdates); // Trigger reactivity
-    }, 2000);
   }
+
+  // Function to handle toggle completion (called from parent)
+  export function onToggleComplete(fileName: string) {
+    togglingMods.delete(fileName);
+    togglingMods = new Set(togglingMods); // Trigger reactivity
+    
+    // Update the local mod sync status to reflect the successful toggle
+    if (modSyncStatus && type === 'optional') {
+      const isCurrentlyDisabled = modSyncStatus.presentDisabledMods?.includes(fileName);
+      
+      if (isCurrentlyDisabled) {
+        // Mod was disabled, now enabled - remove from disabled list
+        modSyncStatus.presentDisabledMods = modSyncStatus.presentDisabledMods.filter(m => m !== fileName);
+      } else {
+        // Mod was enabled, now disabled - add to disabled list
+        if (!modSyncStatus.presentDisabledMods) {
+          modSyncStatus.presentDisabledMods = [];
+        }
+        modSyncStatus.presentDisabledMods.push(fileName);
+      }
+      
+      // Trigger reactivity
+      modSyncStatus = modSyncStatus;
+    }
+  }
+
   // Handle mod deletion
   function handleDelete(mod: Mod): void {
     dispatch('delete', { fileName: mod.fileName });
-  }  // Handle mod removal (for server-managed mods no longer required)
+  }
+
+  // Handle mod removal (for server-managed mods no longer required)
   function handleRemove(mod: Mod): void {
     dispatch('remove', { fileName: mod.fileName });
   }
@@ -277,8 +276,6 @@
       mod: mod
     });
   }
-
-
 </script>
 
 <div class="client-mod-list">
@@ -404,13 +401,19 @@
                     </button>
                   {:else}
                     <div class="action-group">
-                      <button class="toggle sm" 
-                              class:primary={modStatus === 'disabled'}
-                              class:warn={modStatus === 'installed'}
-                              on:click={() => handleToggle(mod, modStatus !== 'installed')}
-                              title={modStatus === 'installed' ? 'Disable mod' : 'Enable mod'}>
-                        {modStatus === 'installed' ? 'Disable' : 'Enable'}
-                      </button>
+                      {#if togglingMods.has(mod.fileName)}
+                        <button class="toggle sm loading" disabled title="Processing...">
+                          ⏳ Loading...
+                        </button>
+                      {:else}
+                        <button class="toggle sm" 
+                                class:primary={modStatus === 'disabled'}
+                                class:warn={modStatus === 'installed'}
+                                on:click={() => handleToggle(mod, modStatus !== 'installed')}
+                                title={modStatus === 'installed' ? 'Disable mod' : 'Enable mod'}>
+                          {modStatus === 'installed' ? 'Disable' : 'Enable'}
+                        </button>
+                      {/if}
                       {#if modStatus !== 'missing'}
                         <button class="danger sm" on:click={() => handleDelete(mod)} title="Remove mod">
                           🗑️
@@ -604,8 +607,6 @@
   .client-mods-table th:first-child {
     text-align: left;
   }
-
-
 
   .client-mods-table tbody tr:nth-child(even) {
     background: rgba(24, 24, 24, 0.8);
@@ -838,8 +839,6 @@
     color: #f59e0b;
     font-weight: 500;
   }
-
-
 
   .download-all-button {
     background-color: #3b82f6;
