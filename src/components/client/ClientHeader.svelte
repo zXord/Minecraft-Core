@@ -96,11 +96,12 @@
 <style>
   .client-header {
     background-color: #1f2937;
-    padding: 1rem 2rem;
+    padding: 0.5rem 2rem 0 2rem;
     display: flex;
     flex-direction: column;
     align-items: center;
-    border-bottom: 1px solid #374151;
+    border-bottom: none;
+    margin: 0;
   }
 
   .header-title-row {
@@ -258,7 +259,7 @@
 
   .client-tabs {
     display: flex;
-    margin-top: 1rem;
+    margin: 0;
     gap: 1rem;
   }
 
@@ -266,11 +267,12 @@
     background: none;
     border: none;
     color: #9ca3af;
-    padding: 0.5rem 1rem;
+    padding: 0.25rem 1rem 0 1rem;
     font-size: 1rem;
     cursor: pointer;
     border-bottom: 2px solid transparent;
     transition: all 0.2s;
+    margin: 0;
   }
 
   .tab-button:hover {

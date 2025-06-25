@@ -145,14 +145,17 @@ async function listMods(serverPath) {
   });
   
   const serverFiles = await fs.readdir(serverModsDir);
-  const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));  const disabledModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
+  const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));  const serverDisabledModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
     .map(file => file.replace('.disabled', '')); // Remove .disabled extension for display
   
   let clientModFiles = [];
+  let clientDisabledModFiles = [];
   try {
     const clientFiles = await fs.readdir(clientModsDir);
     clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));
-  } catch {
+    clientDisabledModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
+      .map(file => file.replace('.disabled', '')); // Remove .disabled extension for display
+  } catch (err) {
     // Ignore client directory read errors
   }
   
@@ -167,21 +170,41 @@ async function listMods(serverPath) {
   }
   
   // Combine current disabled mods with any legacy ones
-  const allDisabledModFiles = [...new Set([...disabledModFiles, ...legacyDisabledFiles])];
+  const allDisabledModFiles = [...new Set([...serverDisabledModFiles, ...clientDisabledModFiles, ...legacyDisabledFiles])];
   
+  // Categorize enabled mods
   const modsInBoth = serverModFiles.filter(mod => clientModFiles.includes(mod));
   const serverOnlyMods = serverModFiles.filter(mod => !clientModFiles.includes(mod));
   const clientOnlyMods = clientModFiles.filter(mod => !serverModFiles.includes(mod));
   
+  // Categorize disabled mods based on where they're found
+  const disabledModsInBoth = allDisabledModFiles.filter(mod => 
+    serverDisabledModFiles.includes(mod) && clientDisabledModFiles.includes(mod)
+  );
+  const disabledServerOnlyMods = allDisabledModFiles.filter(mod => 
+    serverDisabledModFiles.includes(mod) && !clientDisabledModFiles.includes(mod) && !legacyDisabledFiles.includes(mod)
+  );
+  const disabledClientOnlyMods = allDisabledModFiles.filter(mod => 
+    clientDisabledModFiles.includes(mod) && !serverDisabledModFiles.includes(mod)
+  );
+  const disabledLegacyMods = allDisabledModFiles.filter(mod => 
+    legacyDisabledFiles.includes(mod) && !serverDisabledModFiles.includes(mod) && !clientDisabledModFiles.includes(mod)
+  );
+  
   const allMods = [
+    // Enabled mods
     ...serverOnlyMods.map(mod => ({ fileName: mod, locations: ['server'], category: 'server-only' })),
     ...clientOnlyMods.map(mod => ({ fileName: mod, locations: ['client'], category: 'client-only' })),
     ...modsInBoth.map(mod => ({ fileName: mod, locations: ['server', 'client'], category: 'both' })),
-    ...allDisabledModFiles.map(mod => ({ fileName: mod, locations: ['disabled'], category: 'disabled' }))
+    // Disabled mods - preserve their original location categories
+    ...disabledServerOnlyMods.map(mod => ({ fileName: mod, locations: ['server'], category: 'server-only' })),
+    ...disabledClientOnlyMods.map(mod => ({ fileName: mod, locations: ['client'], category: 'client-only' })),
+    ...disabledModsInBoth.map(mod => ({ fileName: mod, locations: ['server', 'client'], category: 'both' })),
+    // Legacy disabled mods - assume server-only for backwards compatibility
+    ...disabledLegacyMods.map(mod => ({ fileName: mod, locations: ['server'], category: 'server-only' }))
   ];
   
   const allModFiles = [...new Set([...serverModFiles, ...clientModFiles, ...allDisabledModFiles])];
-  
   
   return {
     mods: allMods,

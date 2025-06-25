@@ -25,7 +25,6 @@
     // Import components
 import ModSearch from '../mods/components/ModSearch.svelte';
 import InstalledModList from '../mods/components/InstalledModList.svelte';
-import ModDropZone from '../mods/components/ModDropZone.svelte';
 import StatusManager from '../common/StatusManager.svelte';
 import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';
 import DownloadProgress from '../mods/components/DownloadProgress.svelte';
@@ -43,7 +42,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     showDependencyModal
   } from '../../utils/mods/modDependencyHelper.js';
   import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
-  import { uploadDroppedMods } from '../../utils/directFileUpload.js';
+
   
   // Import utility for checking compatibility
   import { checkDependencyCompatibility } from '../../utils/mods/modCompatibility.js';
@@ -519,30 +518,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     handleSearch();
   }
   
-  // Handle file drop
-  async function handleDroppedFiles(event) {
-    const { files } = event.detail;
-    
-    if (files && files.length > 0) {
-      try {
-        successMessage.set(`Processing ${files.length} files...`);
-        
-        // Use direct upload method instead of trying to access file paths
-        const result = await uploadDroppedMods(files, serverPath);
-        
-        if (result.success) {
-          successMessage.set(`Successfully added ${result.count} mods`);
-          
-          // After processing, refresh the mod list
-          await loadMods(serverPath);
-        } else {
-          errorMessage.set(`Failed to add mods: ${result.failed.join(', ')}`);
-        }
-      } catch (error) {
-        errorMessage.set(`Failed to process files: ${error.message || 'Unknown error'}`);
-      }
-    }
-  }
+
     // Handle tab switching
   function switchTab(tabName) {
     if (activeTab === tabName) return;
@@ -673,8 +649,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       tabindex="0"
     >
       <h2>Installed Mods</h2>
-      
-      <ModDropZone on:filesDropped={handleDroppedFiles} />
       
       <InstalledModList 
         serverPath={serverPath}
