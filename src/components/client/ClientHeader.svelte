@@ -24,61 +24,9 @@
       ⚙️
     </button>
   </div>
-  <!-- Hide status section on play tab since PlayTab has compact header -->
-  {#if state.activeTab !== 'play'}
-    <div class="connection-status">
-      <div class="status-section">
-        <span class="status-section-label">Management Server:</span>
-        {#if state.connectionStatus === 'connected'}
-          <div class="status-indicator connected" title="Connected to management server">
-            <span class="status-dot"></span>
-            <span class="status-text">Connected</span>
-          </div>
-        {:else if state.connectionStatus === 'connecting'}
-          <div class="status-indicator connecting" title="Connecting to management server">
-            <span class="status-dot"></span>
-            <span class="status-text">Connecting...</span>
-          </div>
-        {:else}
-          <div class="status-indicator disconnected" title="Not connected to management server">
-            <span class="status-dot"></span>
-            <span class="status-text">Disconnected</span>
-          </div>
-        {/if}
-      </div>
-
-      {#if state.connectionStatus === 'connected'}
-        <div class="server-details">
-          <span class="server-address">
-            <span class="address-label">Management Server:</span>
-            {instance?.serverIp || 'Unknown'}:{instance?.serverPort || '8080'}
-          </span>
-          <div class="status-section">
-            <span class="status-section-label">Minecraft Server:</span>
-            {#if minecraftServerStatus === 'running'}
-              <div class="status-indicator server-running" title="Minecraft server is running">
-                <span class="status-dot"></span>
-                <span class="status-text">Running</span>
-              </div>
-            {:else if minecraftServerStatus === 'stopped'}
-              <div class="status-indicator server-stopped" title="Minecraft server is stopped">
-                <span class="status-dot"></span>
-                <span class="status-text">Stopped</span>
-              </div>
-            {:else}
-              <div class="status-indicator server-unknown" title="Minecraft server status unknown">
-                <span class="status-dot"></span>
-                <span class="status-text">Status Unknown</span>
-              </div>
-            {/if}
-          </div>
-        </div>
-      {/if}
-    </div>
-  {/if}
-  <div class="client-tabs">
+  <div class="modern-client-tabs">
     {#each tabs as tab (tab)}
-      <button class="tab-button {state.activeTab === tab ? 'active' : ''}" on:click={() => selectTab(tab)}>
+      <button class="modern-tab-button {state.activeTab === tab ? 'active' : ''}" on:click={() => selectTab(tab)}>
         {#if tab === 'play'}
           🎮 Play
         {:else if tab === 'mods'}
@@ -257,30 +205,76 @@
     border-radius: 0.25rem;
   }
 
-  .client-tabs {
+  .modern-client-tabs {
     display: flex;
-    margin: 0;
-    gap: 1rem;
+    gap: 0.75rem;
+    margin: 1rem 0 0.5rem 0;
+    justify-content: center;
+    padding: 0.5rem;
+    background: rgba(31, 41, 55, 0.4);
+    border-radius: 8px;
+    border: 1px solid rgba(75, 85, 99, 0.3);
   }
 
-  .tab-button {
-    background: none;
-    border: none;
-    color: #9ca3af;
-    padding: 0.25rem 1rem 0 1rem;
-    font-size: 1rem;
+  .modern-tab-button {
+    padding: 0.75rem 1.5rem;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    font-weight: 500;
     cursor: pointer;
-    border-bottom: 2px solid transparent;
-    transition: all 0.2s;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: transparent;
+    color: #9ca3af;
     margin: 0;
   }
 
-  .tab-button:hover {
-    color: white;
+  .modern-tab-button:hover:not(.active) {
+    background: rgba(75, 85, 99, 0.3);
+    color: #d1d5db;
+    transform: translateY(-1px);
   }
 
-  .tab-button.active {
-    color: white;
-    border-bottom: 2px solid #646cff;
+  .modern-tab-button.active {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+
+  .modern-tab-button.active:hover {
+    background: rgba(59, 130, 246, 0.25);
+    border-color: rgba(59, 130, 246, 0.5);
+  }
+
+  /* Responsive Design */
+  @media (max-width: 768px) {
+    .client-header {
+      padding: 0.5rem 1rem 0 1rem;
+    }
+
+    .modern-client-tabs {
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.75rem;
+      margin: 0.75rem 0 0.5rem 0;
+    }
+
+    .modern-tab-button {
+      width: 100%;
+      justify-content: center;
+      padding: 0.75rem 1rem;
+    }
+
+    .header-title-row {
+      margin-bottom: 0.5rem;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+    }
   }
 </style>

@@ -1,7 +1,11 @@
-<script lang="ts">  import { onMount } from 'svelte';
+<script lang="ts">
+  import { onMount, createEventDispatcher } from 'svelte';
   import { get } from 'svelte/store'; // Import get
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { serverManagedFiles, minecraftVersion } from '../../stores/modStore';
+
+  // Create event dispatcher
+  const dispatch = createEventDispatcher();
 
   interface DetailedMod {
     fileName: string;
@@ -60,7 +64,12 @@
   let checkingUpdates = false;
   let updatingMods: Set<string> = new Set();
   let showRemoveDialog = false;
-  let modToRemove: DetailedMod | null = null;  onMount(async () => {
+  let modToRemove: DetailedMod | null = null;
+  
+  // Track which mods are currently being toggled
+  let togglingMods: Set<string> = new Set();
+
+  onMount(async () => {
     await loadManualMods();
   });  // React to clientPath changes
   $: if (clientPath) {
@@ -169,30 +178,15 @@
     }
   }
   async function toggleMod(mod: DetailedMod) {
-    // Optimistic UI update - update the mod state immediately
-    const originalEnabled = mod.enabled;
-    mod.enabled = !mod.enabled;
-    mods = mods; // Trigger reactivity
+    // Mark this mod as being toggled
+    togglingMods.add(mod.fileName);
+    togglingMods = new Set(togglingMods); // Trigger reactivity
     
-    try {
-      const result = await window.electron.invoke('toggle-manual-mod', {
-        clientPath,
-        fileName: mod.fileName,
-        enable: mod.enabled
-      });
-      
-      if (!result.success) {
-        // Revert the optimistic update if the operation failed
-        mod.enabled = originalEnabled;
-        mods = mods; // Trigger reactivity
-        error = result.error || 'Failed to toggle mod';
-      }
-    } catch (err) {
-      // Revert the optimistic update if an error occurred
-      mod.enabled = originalEnabled;
-      mods = mods; // Trigger reactivity
-      error = err.message || 'Failed to toggle mod';
-    }
+    // Dispatch to parent component for backend call
+    dispatch('toggle', {
+      fileName: mod.fileName,
+      enabled: !mod.enabled
+    });
   }
   async function updateMod(mod: DetailedMod) {
     if (!mod.hasUpdate || updatingMods.has(mod.fileName)) return;
@@ -271,9 +265,6 @@
     }
   }
 
-
-
-
   // Helper function to get client mod version update info for a mod
   function getClientModVersionUpdate(mod: DetailedMod) {
     if (!clientModVersionUpdates?.updates) return null;
@@ -281,6 +272,19 @@
     return clientModVersionUpdates.updates.find(update => 
       update.fileName.toLowerCase() === mod.fileName.toLowerCase()
     );
+  }
+
+  // Function to handle toggle completion (called from parent)
+  export function onToggleComplete(fileName: string) {
+    togglingMods.delete(fileName);
+    togglingMods = new Set(togglingMods); // Trigger reactivity
+    
+    // Update the local mod state to reflect the successful toggle
+    const modIndex = mods.findIndex(m => m.fileName === fileName);
+    if (modIndex !== -1) {
+      mods[modIndex].enabled = !mods[modIndex].enabled;
+      mods = mods; // Trigger reactivity
+    }
   }
 </script>
 
@@ -395,13 +399,19 @@
               <td class="act">
                 {#if !$serverManagedFiles.has(mod.fileName.toLowerCase())}
                   <div class="action-group">
-                    <button class="toggle sm" 
-                            class:primary={!mod.enabled}
-                            class:warn={mod.enabled}
-                            on:click={() => toggleMod(mod)}
-                            title={mod.enabled ? 'Disable mod' : 'Enable mod'}>
-                      {mod.enabled ? 'Disable' : 'Enable'}
-                    </button>
+                    {#if togglingMods.has(mod.fileName)}
+                      <button class="toggle sm loading" disabled title="Processing...">
+                        ⏳ Loading...
+                      </button>
+                    {:else}
+                      <button class="toggle sm" 
+                              class:primary={!mod.enabled}
+                              class:warn={mod.enabled}
+                              on:click={() => toggleMod(mod)}
+                              title={mod.enabled ? 'Disable mod' : 'Enable mod'}>
+                        {mod.enabled ? 'Disable' : 'Enable'}
+                      </button>
+                    {/if}
                     <button class="danger sm" on:click={() => promptRemove(mod)} title="Remove mod">
                       🗑️
                     </button>
@@ -564,8 +574,6 @@
     text-align: left;
   }
 
-
-
   .client-mods-table tbody tr:nth-child(even) {
     background: rgba(24, 24, 24, 0.8);
   }
@@ -621,8 +629,6 @@
     word-break: break-word;
   }
 
-
-
   /* Status tags */
   .tag {
     padding: 1px 6px;
@@ -637,8 +643,6 @@
     background: rgba(20, 160, 71, 0.2);
     color: var(--col-ok);
   }
-
-
 
   .tag.new {
     background: rgba(10, 132, 255, 0.2);

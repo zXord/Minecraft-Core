@@ -228,7 +228,7 @@ export async function acknowledgeAllDependencies(instance: Instance) {
     setTimeout(() => successMessage.set(''), 5000);
     setTimeout(async () => {
       await checkModSynchronization(instance);
-    }, 300);
+    }, 3500); // Slightly longer than the 3-second optimistic update timeout
   } catch (err: any) {
     errorMessage.set('Error acknowledging dependencies: ' + err.message);
     setTimeout(() => errorMessage.set(''), 5000);
@@ -304,14 +304,12 @@ export async function handleModToggle(instance: Instance, modFileName: string, e
     } else {
       errorMessage.set(`Failed to ${enabled ? 'enable' : 'disable'} mod: ${result.error}`);
       setTimeout(() => errorMessage.set(''), 5000);
-      await loadInstalledInfo(instance);
-      await checkModSynchronization(instance);
+      throw new Error(result.error || 'Toggle failed');
     }
   } catch (err: any) {
     errorMessage.set('Error toggling mod: ' + err.message);
     setTimeout(() => errorMessage.set(''), 5000);
-    await loadInstalledInfo(instance);
-    await checkModSynchronization(instance);
+    throw err; // Re-throw to let the wrapper handle it
   }
 }
 
