@@ -1,5 +1,4 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
   import { clientState } from '../../stores/clientStore.js';
 
   export let instance;
@@ -22,9 +21,6 @@
   let isDeletingInstance = false;
   let showCopyConfirmation = false;
   let lastAuthDate = authData?.lastLogin || null;
-  let clientFileCount = null;
-  let clientFileSize = null;
-  let showKeyboardHelp = false;
 
   // Enhanced functions with loading states
   async function handleAuthenticate() {
@@ -41,9 +37,6 @@
     isCheckingClient = true;
     try {
       await checkClientSynchronization();
-      // Simulate getting file info
-      clientFileCount = Math.floor(Math.random() * 500) + 200;
-      clientFileSize = (Math.random() * 500 + 100).toFixed(1) + ' MB';
     } finally {
       isCheckingClient = false;
     }
@@ -53,8 +46,6 @@
     isRedownloading = true;
     try {
       await redownloadClient();
-      clientFileCount = null;
-      clientFileSize = null;
     } finally {
       isRedownloading = false;
     }
@@ -83,47 +74,6 @@
       }
     }
   }
-
-  // Keyboard shortcuts
-  function handleKeydown(event) {
-    if (event.ctrlKey || event.metaKey) {
-      switch (event.key) {
-        case 'r':
-          event.preventDefault();
-          if (!isAuthenticating) handleAuthenticate();
-          break;
-        case 'd':
-          event.preventDefault();
-          if (!isRedownloading) handleRedownload();
-          break;
-        case 'c':
-          if (event.shiftKey) {
-            event.preventDefault();
-            copyPath();
-          }
-          break;
-      }
-    }
-  }
-
-  onMount(() => {
-    document.addEventListener('keydown', handleKeydown);
-    // Initialize client file info if available
-    if (serverInfo?.minecraftVersion && clientSyncStatus === 'ready') {
-      clientFileCount = Math.floor(Math.random() * 500) + 200;
-      clientFileSize = (Math.random() * 500 + 100).toFixed(1) + ' MB';
-    }
-    
-    // Show keyboard shortcuts help briefly
-    showKeyboardHelp = true;
-    setTimeout(() => {
-      showKeyboardHelp = false;
-    }, 4000);
-  });
-
-  onDestroy(() => {
-    document.removeEventListener('keydown', handleKeydown);
-  });
 </script>
 
 <div class="settings-container">
@@ -169,7 +119,7 @@
               <span class="info-value path-text">{instance.path || 'Not configured'}</span>
               {#if instance.path}
                 <div class="path-actions">
-                  <button class="icon-btn" on:click={copyPath} title="Copy path (Ctrl+Shift+C)" disabled={showCopyConfirmation}>
+                  <button class="icon-btn" on:click={copyPath} title="Copy path" disabled={showCopyConfirmation}>
                     {showCopyConfirmation ? '✅' : '📋'}
                   </button>
                   <button class="icon-btn" on:click={openClientFolder} title="Open client folder">📁</button>
@@ -203,7 +153,7 @@
                   class="modern-btn secondary sm" 
                   on:click={handleAuthenticate} 
                   disabled={isAuthenticating}
-                  title="Re-authenticate (Ctrl+R)"
+                  title="Re-authenticate"
                 >
                   {isAuthenticating ? '⏳ Authenticating...' : '🔄 Re-authenticate'}
                 </button>
@@ -213,7 +163,7 @@
                   class="modern-btn primary sm" 
                   on:click={handleAuthenticate} 
                   disabled={isAuthenticating}
-                  title="Login with Microsoft (Ctrl+R)"
+                  title="Login with Microsoft"
                 >
                   {isAuthenticating ? '⏳ Authenticating...' : '🔑 Login with Microsoft'}
                 </button>
@@ -245,12 +195,6 @@
                     {/if}
                   </div>
                 </div>
-
-                {#if clientFileCount && clientFileSize}
-                  <div class="client-info-row">
-                    <span class="info-text">📊 {clientFileCount} files • {clientFileSize}</span>
-                  </div>
-                {/if}
                 
                 <div class="action-buttons compact">
                   <button 
@@ -265,7 +209,7 @@
                     class="modern-btn warning sm" 
                     on:click={handleRedownload}
                     disabled={isRedownloading}
-                    title="Re-download client files (Ctrl+D)"
+                    title="Re-download client files"
                   >
                     {isRedownloading ? '⏳ Downloading...' : '🔄 Re-download'}
                   </button>
@@ -317,32 +261,6 @@
       </div>
     </div>
   </div>
-
-  <!-- Keyboard Shortcuts Helper -->
-  {#if showKeyboardHelp}
-    <button 
-      class="keyboard-help" 
-      on:click={() => showKeyboardHelp = false}
-      on:keydown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Escape') {
-          e.preventDefault();
-          showKeyboardHelp = false;
-        }
-      }}
-      aria-label="Keyboard shortcuts help - click or press Enter to dismiss"
-      type="button"
-    >
-      <div class="help-content">
-        <h4>⌨️ Keyboard Shortcuts</h4>
-        <div class="shortcuts">
-          <span><kbd>Ctrl+R</kbd> Re-authenticate</span>
-          <span><kbd>Ctrl+D</kbd> Re-download</span>
-          <span><kbd>Ctrl+Shift+C</kbd> Copy path</span>
-        </div>
-        <p class="help-dismiss">Click to dismiss</p>
-      </div>
-    </button>
-  {/if}
 </div>
 
 <style>
@@ -689,19 +607,6 @@
     border-color: rgba(75, 85, 99, 0.4);
   }
 
-  .client-info-row {
-    padding: 0.3rem 0.6rem;
-    background: rgba(59, 130, 246, 0.1);
-    border-radius: 4px;
-    border: 1px solid rgba(59, 130, 246, 0.2);
-  }
-
-  .info-text {
-    color: #93c5fd;
-    font-size: 0.7rem;
-    font-weight: 500;
-  }
-
   .status-indicator {
     padding: 0.15rem 0.5rem;
     border-radius: 8px;
@@ -909,87 +814,6 @@
     word-break: break-all;
   }
 
-  /* Keyboard Shortcuts Helper */
-  .keyboard-help {
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    background: rgba(17, 24, 39, 0.95);
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    border-radius: 8px;
-    padding: 1rem;
-    z-index: 1000;
-    backdrop-filter: blur(10px);
-    animation: slideInRight 0.3s ease-out;
-    cursor: pointer;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-    
-    /* Button reset styles */
-    font-family: inherit;
-    font-size: inherit;
-    color: inherit;
-    text-align: left;
-    appearance: none;
-    outline: none;
-  }
-
-  .keyboard-help:focus {
-    border-color: rgba(59, 130, 246, 0.6);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 0 0 3px rgba(59, 130, 246, 0.3);
-  }
-
-  .help-content h4 {
-    margin: 0 0 0.75rem 0;
-    color: #3b82f6;
-    font-size: 0.9rem;
-    font-weight: 600;
-  }
-
-  .shortcuts {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    margin-bottom: 0.75rem;
-  }
-
-  .shortcuts span {
-    color: #d1d5db;
-    font-size: 0.8rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .shortcuts kbd {
-    background: rgba(75, 85, 99, 0.3);
-    border: 1px solid rgba(75, 85, 99, 0.5);
-    border-radius: 4px;
-    padding: 0.15rem 0.4rem;
-    font-size: 0.7rem;
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-    color: #e2e8f0;
-    min-width: fit-content;
-  }
-
-  .help-dismiss {
-    color: #9ca3af;
-    font-size: 0.7rem;
-    margin: 0;
-    text-align: center;
-    font-style: italic;
-  }
-
-  @keyframes slideInRight {
-    from {
-      transform: translateX(100%);
-      opacity: 0;
-    }
-    to {
-      transform: translateX(0);
-      opacity: 1;
-    }
-  }
-
   /* Enhanced Responsive Design */
   @media (max-width: 768px) {
     .settings-container {
@@ -1071,26 +895,6 @@
 
     .danger-actions {
       gap: 0.5rem;
-    }
-
-    .keyboard-help {
-      top: 10px;
-      right: 10px;
-      left: 10px;
-      padding: 0.75rem;
-    }
-
-    .shortcuts {
-      gap: 0.3rem;
-    }
-
-    .shortcuts span {
-      font-size: 0.75rem;
-    }
-
-    .shortcuts kbd {
-      font-size: 0.65rem;
-      padding: 0.1rem 0.3rem;
     }
   }
 </style>
