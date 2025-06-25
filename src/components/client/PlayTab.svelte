@@ -204,6 +204,15 @@
                 {:else if downloadStatus === 'ready'}
                   <div class="status-indicator ready">
                     ✅ <span>All Required Mods Ready</span>
+                    {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
+                      <button 
+                        class="optional-indicator" 
+                        on:click={() => $clientState.activeTab = 'mods'}
+                        title="{modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's' : ''} available for download"
+                      >
+                        ℹ️ {modSyncStatus.needsOptionalDownload}
+                      </button>
+                    {/if}
                   </div>
                 {:else if downloadStatus === 'error'}
                   <div class="status-indicator error">
@@ -774,42 +783,43 @@
   .status-indicator {
     display: flex;
     align-items: center;
-    gap: 0.25rem;
-    background: rgba(17, 24, 39, 0.6);
-    padding: 0.25rem 0.5rem;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
     border-radius: 6px;
-    font-size: 0.85rem;
-    border: 1px solid;
+    font-size: 0.9rem;
+    font-weight: 500;
+    border: 1px solid transparent;
+    transition: all 0.2s;
   }
 
   .status-indicator.ready {
-    border-color: rgba(16, 185, 129, 0.3);
     background: rgba(16, 185, 129, 0.1);
-    color: #10b981;
-  }
-
-  .status-indicator.checking {
-    border-color: rgba(59, 130, 246, 0.3);
-    background: rgba(59, 130, 246, 0.1);
-    color: #3b82f6;
+    border-color: rgba(16, 185, 129, 0.2);
+    color: #34d399;
   }
 
   .status-indicator.needed {
-    border-color: rgba(239, 68, 68, 0.3);
     background: rgba(239, 68, 68, 0.1);
-    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.2);
+    color: #f87171;
   }
 
   .status-indicator.downloading {
-    border-color: rgba(245, 158, 11, 0.3);
+    background: rgba(59, 130, 246, 0.1);
+    border-color: rgba(59, 130, 246, 0.2);
+    color: #60a5fa;
+  }
+
+  .status-indicator.checking {
     background: rgba(245, 158, 11, 0.1);
-    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
   }
 
   .status-indicator.error {
-    border-color: rgba(239, 68, 68, 0.3);
     background: rgba(239, 68, 68, 0.1);
-    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.2);
+    color: #f87171;
   }
 
   /* Detail Sections */
@@ -1361,6 +1371,31 @@
     font-size: 0.9rem;
     font-style: italic;
     margin-top: 0.5rem;
+  }
+
+  /* Optional Indicator */
+  .optional-indicator {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 4px;
+    padding: 0.2rem 0.4rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-left: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    white-space: nowrap;
+  }
+
+  .optional-indicator:hover {
+    background: rgba(59, 130, 246, 0.25);
+    border-color: rgba(59, 130, 246, 0.5);
+    transform: translateY(-1px);
+    color: #2563eb;
   }
 
   /* Responsive Design */
