@@ -11,6 +11,11 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* Mod location colors */
+  --col-server: #2c82ff;
+  --col-client: #34d58a;
+  --col-both: #f5aa28;
 }
 
 a {

@@ -218,15 +218,18 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path
       });
       
-      if (result.success && result.acknowledgedDeps) {
-        // Merge with existing acknowledged deps instead of overwriting
-        acknowledgedDeps.update(currentSet => {
-          const newSet = new Set(currentSet);
+      if (result.success && result.acknowledgedDeps && Array.isArray(result.acknowledgedDeps)) {
+        // Set acknowledged deps from persistent storage
+        acknowledgedDeps.update(() => {
+          const newSet = new Set();
           result.acknowledgedDeps.forEach(dep => {
+            if (dep && typeof dep === 'string') {
             newSet.add(dep.toLowerCase());
+            }
           });
           return newSet;
         });
+      } else {
       }
     } catch (error) {
       console.warn('[ClientInterface] Failed to load acknowledged dependencies:', error);
@@ -1996,6 +1999,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // synchronization status before visiting the Mods tab
     (async () => {
       try {
+        // Load acknowledged dependencies FIRST
+        await loadAcknowledgedDependencies();
+        
         const state = await window.electron.invoke('load-expected-mod-state', {
           clientPath: instance.path
         });
@@ -2004,9 +2010,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             new Set(state.expectedMods.map((m) => m.toLowerCase()))
           );
         }
-        
-        // Load acknowledged dependencies for Play tab filtering
-        await loadAcknowledgedDependencies();
       } catch (err) {
         console.warn('Failed to load persisted mod state:', err);
       }
@@ -2156,23 +2159,30 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     if (!modSyncStatus?.acknowledgments) return;
 
     try {
+      const acknowledgedFiles = [];
+      
       for (const ack of modSyncStatus.acknowledgments) {
         await window.electron.invoke('minecraft-acknowledge-dependency', {
           clientPath: instance.path,
-          fileName: ack.fileName,
-          reason: ack.reason
+          modFileName: ack.fileName
         });
-        // Update shared acknowledged set and remove from server-managed files
+        acknowledgedFiles.push(ack.fileName);
+      }
+
+      // Update acknowledged deps store
         acknowledgedDeps.update(set => {
           const updated = new Set(set);
-          updated.add(ack.fileName.toLowerCase());
+        acknowledgedFiles.forEach(fileName => {
+          updated.add(fileName.toLowerCase());
+        });
           return updated;
         });
-        removeServerManagedFiles([ack.fileName]);
-      }      // Refresh after acknowledging all
+
+      // Remove from server-managed files
+      removeServerManagedFiles(acknowledgedFiles);
+
+      // Refresh after acknowledging all
       await checkModSynchronization();
-      // Reload acknowledged deps to merge any backend updates
-      await loadAcknowledgedDependencies();
       
       // Check if any newly acknowledged mods need version updates
       await checkClientModVersionCompatibility();
@@ -2234,9 +2244,27 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   // ...existing code...
 </script>
 
+<style>
+  .client-container {
+    display: flex;
+    flex-direction: column;
+    max-width: 1400px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .client-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 2rem 0 2rem;
+    max-width: 100%;
+    box-sizing: border-box;
+    margin: 0;
+  }
+</style>
+
 <div class="client-container">
   <ClientHeader {instance} {tabs} minecraftServerStatus={$clientState.minecraftServerStatus} {onOpenAppSettings} />
-
   <div class="client-content">
     {#if $clientState.activeTab === 'play'}      <PlayTab
         {authStatus}

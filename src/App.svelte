@@ -807,7 +807,7 @@
     left: -250px;
     top: 0;
     width: 250px;
-    height: 100%;
+    height: 100vh;
     background-color: #1f2937;
     color: white;
     transition: left 0.3s ease;
@@ -815,11 +815,19 @@
     padding: 1rem;
     display: flex;
     flex-direction: column;
-    overflow-y: auto;
+    overflow: hidden;
+    /* Ensure no visual leakage when closed */
+    border-right: none;
+    box-shadow: none;
+    /* Completely hide when closed */
+    visibility: hidden;
+    box-sizing: border-box;
   }
 
   .sidebar.open {
     left: 0;
+    box-shadow: 2px 0 10px rgba(0, 0, 0, 0.3);
+    visibility: visible;
   }
 
   .sidebar-toggle {
@@ -853,6 +861,9 @@
   .instances-list {
     flex: 1;
     margin-bottom: 1rem;
+    overflow-y: auto;
+    min-height: 0;
+    max-height: calc(100vh - 180px);
   }
 
   .instance-item {
@@ -963,6 +974,8 @@
     align-items: center;
     justify-content: center;
     font-weight: bold;
+    flex-shrink: 0;
+    margin-top: auto;
   }
 
   .plus-icon {

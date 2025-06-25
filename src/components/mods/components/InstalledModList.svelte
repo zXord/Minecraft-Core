@@ -1,259 +1,419 @@
-<!-- @ts-ignore --><script>  import { createEventDispatcher } from 'svelte';  import { onMount, onDestroy } from 'svelte';  import { get } from 'svelte/store';  import {     installedMods,     installedModInfo,     modsWithUpdates,    getUpdateCount,    expandedInstalledMod,    isCheckingUpdates,    minecraftVersion,    successMessage,    errorMessage,    disabledMods,    disabledModUpdates,    getCategorizedMods,    updateModCategory,    updateModRequired  } from '../../../stores/modStore.js';  import { loadMods, deleteMod, checkForUpdates, enableAndUpdateMod } from '../../../utils/mods/modAPI.js';  import { fetchModVersions } from '../../../utils/mods/modAPI.js';  import { safeInvoke } from '../../../utils/ipcUtils.js';  import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
-  import { slide } from 'svelte/transition';
-  import { checkDependencyCompatibility } from '../../../utils/mods/modCompatibility.js';
-  import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
+<script>
+  import { createEventDispatcher, onMount } from 'svelte';
+  import { get } from 'svelte/store';
+  import { fly } from 'svelte/transition';
+  
+  // Import existing stores
+  import {
+    installedMods,
+    installedModInfo,
+    modsWithUpdates,
+    getUpdateCount,
+    expandedInstalledMod,
+    isCheckingUpdates,
+    successMessage,
+    errorMessage,
+    disabledMods,
+    disabledModUpdates,
+    getCategorizedMods,
+    updateModCategory,
+    updateModRequired
+  } from '../../../stores/modStore.js';
   import { serverState } from '../../../stores/serverState.js';
   
+  // Import existing API functions
+  import { loadMods, deleteMod, checkForUpdates, enableAndUpdateMod, fetchModVersions } from '../../../utils/mods/modAPI.js';
+  import { safeInvoke } from '../../../utils/ipcUtils.js';
+  import { checkDependencyCompatibility } from '../../../utils/mods/modCompatibility.js';
+  import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
+
+  
+  // Import confirmation dialog
+  import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
+
   // Props
   export let serverPath = '';
-  
-  // Local state
-  let installedModVersionsCache = {};
-  let modStatus = new Map();
-  let confirmDeleteVisible = false;
-  let modToDelete = null;
-  let compatibilityWarnings = [];
-  let showCompatibilityWarning = false;
-  let modsToUpdate = [];
-  let updateAllInProgress = false;
-  let confirmDisableVisible = false;
-  let modToToggle = null;
-  let selectedMods = new Set();
-  let selectedDisabledMods = new Set();
-  let confirmBulkDeleteVisible = false;
-  let confirmBulkDisableVisible = false;
-  let confirmBulkDeleteDisabledVisible = false;
-  let confirmBulkEnableDisabledVisible = false;
-  
+
   // Event dispatcher
   const dispatch = createEventDispatcher();
-    // Track download events
-  let downloadListener;
+
+  // Local state
+  let selectedMods = new Set();
+  let installedModVersionsCache = {};
+  let confirmDeleteVisible = false;
+  let modToDelete = null;
+
+  let updateAllInProgress = false;
+  // Initialize drop zone state from localStorage
+  let dropZoneCollapsed = localStorage.getItem('minecraft-core-drop-zone-collapsed') === 'true';
   
-  // Get derived store values reactively using get() to avoid store subscription at module level
-  let updateCount = 0;
-  let categorizedMods = [];
+  // State for enhancements  
+  let searchTerm = '';
+  let isDragover = false;
+
+  // Get stores 
+  const categorizedModsStore = getCategorizedMods();
+
+  // Reactive values
+  $: updateCount = get(getUpdateCount());
+  $: serverRunning = $serverState.status === 'Running';
   
-  // Function to update values manually when needed
-  function updateDerivedValues() {
-    const updateCountStore = getUpdateCount();
-    const categorizedModsStore = getCategorizedMods();
-    updateCount = get(updateCountStore);
-    categorizedMods = get(categorizedModsStore);
+  // Auto-collapse drop zone after successful mod upload
+  $: if ($installedMods.length > 0) {
+    // Only auto-collapse if we haven't done so already
+    if (!localStorage.getItem('minecraft-core-drop-zone-collapsed')) {
+      dropZoneCollapsed = true;
+      localStorage.setItem('minecraft-core-drop-zone-collapsed', 'true');
+    }
   }
   
-  /**
-   * Toggle version selector for an installed mod
-   * @param {string} modName - Mod filename
-   */
-  async function toggleInstalledVersionSelector(modName) {
+  // Filter mods based on search term
+  $: filteredMods = $installedMods.filter(mod => {
+    if (!searchTerm) return true;
+    const modInfo = $installedModInfo.find(m => m.fileName === mod);
+    const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod);
+    const searchLower = searchTerm.toLowerCase();
+    
+    return (
+      mod.toLowerCase().includes(searchLower) ||
+      (modInfo?.name && modInfo.name.toLowerCase().includes(searchLower)) ||
+      (modCategoryInfo?.name && modCategoryInfo.name.toLowerCase().includes(searchLower))
+    );
+  });
+  
+  function toggleDropZone() {
+    dropZoneCollapsed = !dropZoneCollapsed;
+  }
+  
+  // Enhanced drag and drop handlers
+  function handleDragOver(event) {
+    event.preventDefault();
+    if (!isDragover) {
+      isDragover = true;
+    }
+  }
+
+  function handleDragLeave(event) {
+    // Only hide highlight if leaving the component entirely
+    if (!event.currentTarget.contains(event.relatedTarget)) {
+      isDragover = false;
+    }
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    isDragover = false;
+    // Existing drop handling logic would go here
+  }
+
+  // Handle drag enter on the add mods button
+  function handleAddButtonDragEnter(event) {
+    event.preventDefault();
+    isDragover = true;
+  }
+
+
+
+  // Check if mod has compatibility issues (placeholder for now)
+  function hasCompatibilityIssues(_mod) {
+    // This would integrate with your existing compatibility checking logic
+    // For now, return false as a placeholder
+    return false;
+  }
+  
+
+  
+  // Handle file input change
+  function handleBrowseFiles() {
+    // Simple file selection without type issues
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.accept = '.jar';
+    input.click();
+    // File handling will be done via drag-and-drop for now
+  }
+
+  // Helper functions
+  const locColor = { 
+    'server-only': '#2c82ff', 
+    'client-only': '#34d58a', 
+    'both': '#f5aa28' 
+  };
+
+  function toggleSelect(modName) {
+    if (selectedMods.has(modName)) {
+      selectedMods.delete(modName);
+    } else {
+      selectedMods.add(modName);
+    }
+    selectedMods = new Set(selectedMods);
+  }
+
+
+
+  function toggleSelectAll() {
+    if (selectedMods.size === filteredMods.length) {
+      selectedMods = new Set();
+    } else {
+      selectedMods = new Set(filteredMods);
+    }
+  }
+
+
+
+  // Mod management functions
+  async function handleCheckUpdates() {
+    try {
+      await checkForUpdates(serverPath);
+      await loadMods(serverPath);
+      successMessage.set('Update check completed successfully!');
+      setTimeout(() => successMessage.set(''), 3000);
+    } catch (error) {
+      errorMessage.set(`Failed to check for updates: ${error.message}`);
+    }
+  }
+
+  async function checkAllModsCompatibility() {
+    try {
+      const modsWithInfo = $installedModInfo.filter(mod => 
+        mod.projectId && 
+        mod.fileName && 
+        !$disabledMods.has(mod.fileName)
+      );
+      
+      if (modsWithInfo.length === 0) {
+        successMessage.set('No mods with project information found');
+        return;
+      }
+      
+      successMessage.set('Checking mod compatibility...');
+      
+      const allIssues = [];
+      let checkedCount = 0;
+      
+      for (const mod of modsWithInfo) {
+        try {
+          if (!mod.projectId || !mod.fileName) continue;
+          
+          const deps = await checkModDependencies({
+            id: mod.projectId,
+            selectedVersionId: mod.versionId,
+            source: mod.source || 'modrinth'
+          });
+          checkedCount++;
+          
+          if (deps && deps.length > 0) {
+            const issues = await checkDependencyCompatibility(deps, mod.projectId);
+            if (issues.length > 0) {
+              allIssues.push({
+                mod: mod.fileName,
+                modName: mod.name || mod.fileName,
+                issues
+              });
+            }
+          }
+        } catch (error) {
+          console.warn(`Error checking compatibility for mod ${mod.fileName}:`, error);
+        }
+      }
+      
+      if (allIssues.length > 0) {
+        successMessage.set(`Found ${allIssues.flatMap(i => i.issues).length} compatibility issues in ${allIssues.length} mods`);
+      } else {
+        successMessage.set(`All mods compatible! Checked ${checkedCount} mods.`);
+      }
+    } catch (error) {
+      errorMessage.set(`Failed to check compatibility: ${error.message}`);
+    }
+  }
+
+  async function updateAllMods() {
+    const modsWithUpdatesList = [];
+    for (const [modName, updateInfo] of $modsWithUpdates.entries()) {
+      if (modName.startsWith('project:')) continue;
+      if ($disabledMods.has(modName)) continue;
+      
+      const modInfo = $installedModInfo.find(m => m.fileName === modName);
+      if (modInfo && modInfo.projectId) {
+        modsWithUpdatesList.push({
+          modName,
+          projectId: modInfo.projectId,
+          versionId: updateInfo.id,
+          version: updateInfo
+        });
+      }
+    }
+    
+    if (modsWithUpdatesList.length === 0) return;
+    
+    updateAllInProgress = true;
+    
+    try {
+      for (const mod of modsWithUpdatesList) {
+        await dispatch('updateMod', {
+          modName: mod.modName,
+          projectId: mod.projectId,
+          versionId: mod.versionId
+        });
+      }
+      
+      await loadMods(serverPath);
+      successMessage.set(`Updated ${modsWithUpdatesList.length} mods successfully!`);
+    } catch (error) {
+      errorMessage.set(`Failed to update all mods: ${error.message}`);
+    } finally {
+      updateAllInProgress = false;
+    }
+  }
+
+  async function handleDeleteSelected() {
+    if (selectedMods.size === 0) return;
+    
+    try {
+      for (const modName of selectedMods) {
+        await deleteMod(modName, serverPath, true);
+      }
+      selectedMods = new Set();
+      await loadMods(serverPath);
+      dispatch('modRemoved');
+    } catch (error) {
+      errorMessage.set(`Failed to delete selected mods: ${error.message}`);
+    }
+  }
+
+  async function handleBulkToggle() {
+    if (selectedMods.size === 0) return;
+    
+    // Determine what action to take based on selected mods
+    const selectedModsArray = Array.from(selectedMods);
+    const enabledSelected = selectedModsArray.filter(mod => !$disabledMods.has(mod));
+    const disabledSelected = selectedModsArray.filter(mod => $disabledMods.has(mod));
+    
+    let action = '';
+    let isMixedSelection = false;
+    
+    if (disabledSelected.length > 0 && enabledSelected.length === 0) {
+      // All selected are disabled - enable them all
+      action = 'enable all';
+    } else if (enabledSelected.length > 0 && disabledSelected.length === 0) {
+      // All selected are enabled - disable them all  
+      action = 'disable all';
+    } else {
+      // Mixed selection - toggle each mod individually
+      action = 'toggle each';
+      isMixedSelection = true;
+    }
+    
+    try {
+      disabledMods.update(mods => {
+        const newMods = new Set(mods);
+        
+        if (isMixedSelection) {
+          // For mixed selections, toggle each mod individually
+          for (const modName of selectedMods) {
+            if (newMods.has(modName)) {
+              // Mod is disabled, enable it
+              newMods.delete(modName);
+            } else {
+              // Mod is enabled, disable it
+              newMods.add(modName);
+            }
+          }
+        } else {
+          // For uniform selections, apply the same action to all
+          for (const modName of selectedMods) {
+            if (action === 'enable all') {
+              newMods.delete(modName); // Enable (remove from disabled set)
+            } else if (action === 'disable all') {
+              newMods.add(modName); // Disable (add to disabled set)
+            }
+          }
+        }
+        
+        return newMods;
+      });
+      
+      await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+      selectedMods = new Set();
+      
+      const count = selectedModsArray.length;
+      let actionText;
+      
+      if (isMixedSelection) {
+        actionText = 'toggled';
+      } else if (action === 'enable all') {
+        actionText = 'enabled';
+      } else {
+        actionText = 'disabled';
+      }
+      
+      successMessage.set(`${count} mod${count > 1 ? 's' : ''} ${actionText} successfully.`);
+      setTimeout(() => successMessage.set(''), 3000);
+    } catch (error) {
+      errorMessage.set(`Failed to ${action.replace(' all', '').replace(' each', '')} selected mods: ${error.message}`);
+    }
+  }
+
+
+
+  async function toggleVersionSelector(modName) {
     const isExpanded = $expandedInstalledMod === modName;
     
     if (isExpanded) {
-      $expandedInstalledMod = null;
+      expandedInstalledMod.set(null);
       return;
     }
     
-    $expandedInstalledMod = modName;
+    expandedInstalledMod.set(modName);
     
-    // Clear all status indicators for this mod when opening dropdown
-    // This prevents stale indicators from previous operations
-    clearModStatus(modName);
-    
-    // Find this mod in installedModInfo
     const modInfo = $installedModInfo.find(m => m.fileName === modName);
-    
-    // If this mod has a project ID but we don't have its versions cached, fetch them
     if (modInfo && modInfo.projectId) {
       try {
-        // Always refresh versions when a dropdown is opened to ensure we have the latest info
         const versions = await fetchModVersions(modInfo.projectId);
         installedModVersionsCache = { 
           ...installedModVersionsCache, 
           [modInfo.projectId]: versions 
         };
-          // Also check for updates to make sure the update button shows immediately
-        if (!get(isCheckingUpdates)) {
-          checkForUpdates(serverPath);
-        }
-      } catch {
+      } catch (error) {
+        console.warn('Failed to fetch versions:', error);
       }
     }
   }
-  
-  /**
-   * Clear all status indicators for a mod
-   * @param {string} modName - Mod filename to clear statuses for
-   */
-  function clearModStatus(modName) {
-    let hasChanges = false;
-    for (const key of [...modStatus.keys()]) {
-      if (key.startsWith(`${modName}:`)) {
-        modStatus.delete(key);
-        hasChanges = true;
-      }
-    }
-    
-    if (hasChanges) {
-      modStatus = new Map(modStatus); // Force reactivity update
-    }
-  }
-  
-  /**
-   * Update a mod to a specific version
-   * @param {string} modName - Mod filename
-   * @param {string} projectId - Mod project ID
-   * @param {string} versionId - Version ID to update to
-   */
-  async function updateInstalledMod(modName, projectId, versionId) {
-    if (!projectId || !versionId) return;
-    
-    // Find version details
-    const versions = installedModVersionsCache[projectId];
-    if (!versions) return;
-    
-    const version = versions.find(v => v.id === versionId);
-    if (!version) return;
-    
-    // Skip if already the current version
-    const modInfo = $installedModInfo.find(m => m.fileName === modName);
-    if (modInfo && modInfo.versionNumber === version.versionNumber) {
-      // Already on this version
-      return;
-    }
-    
-    // Check for dependencies and compatibility issues
-    if (version.dependencies && version.dependencies.length > 0) {
-      const issues = await checkDependencyCompatibility(version.dependencies);
-      if (issues.length > 0) {
-        // Dispatch to show dependency modal via ModManager
-        dispatch('compatibility-warning', {
-          issues,
-          modToUpdate: {
-            id: projectId,
-            name: modName,
-            selectedVersionId: versionId,
-            source: 'modrinth'
-          }
-        });
-        return;
-      }
-    }
-    
+
+  async function switchToVersion(modName, projectId, versionId) {
     try {
-      // Track status - use a composite key for the specific version
-      const statusKey = `${modName}:${versionId}`;
-      modStatus.set(statusKey, "updating");
-      modStatus = new Map(modStatus); // Force reactivity update
-      
-      // Update mod
-      await dispatch('updateMod', { 
-        modName, 
-        projectId, 
-        versionId, 
-        version 
-      });
-      
-      // Success indicator will be set by the event listener for download completion
-      // This is just the initial dispatch
+      dispatch('updateMod', { modName, projectId, versionId });
+      expandedInstalledMod.set(null);
     } catch (error) {
-      // Set error status for this specific version
-      const statusKey = `${modName}:${versionId}`;
-      modStatus.set(statusKey, "error");
-      modStatus = new Map(modStatus); // Force reactivity update
-      
-      // Clear error status after a delay
-      setTimeout(() => {
-        modStatus.delete(statusKey);
-        modStatus = new Map(modStatus); // Force reactivity update
-      }, 3000);
+      errorMessage.set(`Failed to switch version: ${error.message}`);
     }
   }
-  
-  /**
-   * Update a mod to the latest version
-   * @param {string} modName - Mod filename
-   */
+
   function updateModToLatest(modName) {
     const updateInfo = $modsWithUpdates.get(modName);
     const modInfo = $installedModInfo.find(m => m.fileName === modName);
     
     if (!updateInfo || !modInfo || !modInfo.projectId) return;
     
-    try {
-      // Check dependencies before updating
-      if (updateInfo.dependencies && updateInfo.dependencies.length > 0) {
-        checkDependencyCompatibility(updateInfo.dependencies).then(issues => {
-          if (issues.length > 0) {
-            // Show compatibility warning
-            compatibilityWarnings = issues;
-            showCompatibilityWarning = true;
-            // Store the mod info for later if the user confirms
-            modsToUpdate = [{
-              modName,
-              projectId: modInfo.projectId,
-              versionId: updateInfo.id,
-              version: updateInfo
-            }];
-            return;
-          } else {
-            // No issues, proceed with update
-            proceedWithUpdate(modName, modInfo.projectId, updateInfo.id, updateInfo);
-          }
-        });
-      } else {
-        // No dependencies, proceed directly
-        proceedWithUpdate(modName, modInfo.projectId, updateInfo.id, updateInfo);
-      }
-    } catch (error) {
-    }
-  }
-  
-  /**
-   * Proceed with update after dependency checks
-   */
-  function proceedWithUpdate(modName, projectId, versionId, version) {
-    // Clear any existing status indicators
-    clearModStatus(modName);
-    
-    // Track status - use a composite key for the update
-    const statusKey = `${modName}:${versionId}`;
-    modStatus.set(statusKey, "updating");
-    modStatus = new Map(modStatus); // Force reactivity update
-    
-    // Dispatch update request
     dispatch('updateMod', {
       modName,
-      projectId,
-      versionId,
-      version
-    });
-    
-    // Clear from modsWithUpdates immediately so button disappears
-    modsWithUpdates.update(updates => {
-      updates.delete(modName);
-      return updates;
+      projectId: modInfo.projectId,
+      versionId: updateInfo.id
     });
   }
-  
-  /**
-   * Show delete confirmation for a mod
-   * @param {string} modName - Mod filename
-   */
+
   function showDeleteConfirmation(modName) {
     modToDelete = modName;
     confirmDeleteVisible = true;
   }
-    /**
-   * Handle mod deletion after confirmation
-   */
+
   async function confirmDeleteMod() {
     if (modToDelete) {
       const wasDisabled = $disabledMods.has(modToDelete);
       
       const deleteSuccess = await deleteMod(modToDelete, serverPath, true);
       
-      // If deletion was successful and the mod was disabled, remove it from the disabled mods store
       if (deleteSuccess && wasDisabled) {
         disabledMods.update(mods => {
           const newMods = new Set(mods);
@@ -261,73 +421,39 @@
           return newMods;
         });
         
-        // Save the updated disabled mods list to persist the change
         await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
       }
       
       modToDelete = null;
       confirmDeleteVisible = false;
+      dispatch('modRemoved');
     }
   }
-  
-  /**
-   * Show disable/enable confirmation for a mod
-   * @param {string} modName - Mod filename
-   * @param {boolean} isDisabled - Whether the mod is currently disabled
-   */
-  function showDisableConfirmation(modName, isDisabled) {
-    modToToggle = { name: modName, isDisabled };
-    confirmDisableVisible = true;
-  }
-  
-  /**
-   * Toggle a mod's disabled status
-   */
-  async function confirmToggleModStatus() {
-    if (modToToggle) {
-      if (modToToggle.isDisabled) {
-        // Enable the mod
+
+
+
+  async function confirmToggleModStatus(modName, isDisabled) {
+    try {
         disabledMods.update(mods => {
           const newMods = new Set(mods);
-          newMods.delete(modToToggle.name);
-          return newMods;
-        });
+        if (isDisabled) {
+          newMods.delete(modName);
       } else {
-        // Disable the mod
-        disabledMods.update(mods => {
-          const newMods = new Set(mods);
-          newMods.add(modToToggle.name);
+          newMods.add(modName);
+        }
           return newMods;
         });
-      }
       
-      // Save the disabled mods state to a config file
-      try {
         await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
         
-        // Reload the mods list to show the updated disabled status
-        await loadMods(serverPath);
-        
-        // Show success message
-        const action = modToToggle.isDisabled ? 'enabled' : 'disabled';
-        successMessage.set(`Mod ${modToToggle.name} ${action} successfully.`);
-        
-        // Clear message after a delay
-        setTimeout(() => {
-          successMessage.set('');
-        }, 3000);
+      const action = isDisabled ? 'enabled' : 'disabled';
+      successMessage.set(`Mod ${modName} ${action} successfully.`);
+        setTimeout(() => successMessage.set(''), 3000);
       } catch (error) {
         errorMessage.set(`Failed to toggle mod: ${error.message}`);
-      }
-      
-      // Reset the state
-      modToToggle = null;
-      confirmDisableVisible = false;
-    }  }
-  
-  /**
-   * Enable and update a disabled mod to a newer compatible version
-   */
+    }
+  }
+
   async function handleEnableAndUpdate(modFileName) {
     const updateInfo = $disabledModUpdates.get(modFileName);
     
@@ -346,7 +472,6 @@
       );
       
       if (success) {
-        // Reload mods to reflect the changes
         await loadMods(serverPath);
       }
     } catch (error) {
@@ -354,2324 +479,853 @@
     }
   }
 
-  /**
-   * Handle Check Updates button click
-   */
-  async function handleCheckUpdates() {
+  async function handleCategoryChange(modName, event) {
     try {
-      // Check for updates
-      await checkForUpdates(serverPath);
+      const newCategory = event.target.value;
+      await updateModCategory(modName, newCategory);
       
-      // Force refresh the mod list to ensure we have the latest information
-      await loadMods(serverPath);
-      
-      // Show success message
-      successMessage.set('Update check completed successfully!');
-      
-      // Clear message after 3 seconds
-      setTimeout(() => {
-        successMessage.set('');
-      }, 3000);
-    } catch (error) {
-      errorMessage.set(`Failed to check for updates: ${error.message}`);
-    }
-  }
-    /**
-   * Check compatibility of all installed mods
-   * This will scan all installed mods for missing dependencies
-   */
-  async function checkAllModsCompatibility() {
-    try {
-      // Only check enabled mods with valid project information
-      const modsWithInfo = $installedModInfo.filter(mod => 
-        mod.projectId && 
-        mod.fileName && 
-        !$disabledMods.has(mod.fileName)
-      );
-      
-      if (modsWithInfo.length === 0) {
-        successMessage.set('No mods with project information found');
-        return;
-      }
-      
-      // Show a message that we're checking
-      successMessage.set('Checking mod compatibility...');
-      
-      // Keep track of all issues found
-      const allIssues = [];
-      let checkedCount = 0;
-      
-      // For each mod, check dependencies using the helper
-      for (const mod of modsWithInfo) {
-        try {
-          // Validate mod has required properties before checking dependencies
-          if (!mod.projectId || !mod.fileName) {
-            continue;
-          }
-          
-          // Use unified dependency check to gather all types of dependencies
-          const deps = await checkModDependencies({
-            id: mod.projectId,
-            selectedVersionId: mod.versionId,
-            source: mod.source || 'modrinth'
-          });
-          checkedCount++;
-          
-          // Now check for compatibility issues (missing, mismatches, updates)
-          if (deps && deps.length > 0) {
-            const issues = await checkDependencyCompatibility(deps, mod.projectId);
-            if (issues.length > 0) {
-              allIssues.push({
-                mod: mod.fileName,
-                modName: mod.name || mod.fileName,
-                issues
-              });
-            }
-          }
-        } catch (error) {
-          // Log the specific mod that caused the error for debugging
-          console.warn(`Error checking compatibility for mod ${mod.fileName || mod.name || 'unknown'}:`, error);
-        }
-      }
-      
-      // Show compatibility warnings if any were found
-      if (allIssues.length > 0) {
-        // Flatten all issues for the warning dialog
-        compatibilityWarnings = allIssues.flatMap(item => 
-          item.issues.map(issue => ({
-            ...issue,
-            modName: item.modName
-          }))
-        );
-        
-        showCompatibilityWarning = true;
-        // We don't set modsToUpdate here because this is just a check
-        
-        // Update the success message
-        successMessage.set(`Found ${compatibilityWarnings.length} compatibility issues in ${allIssues.length} mods`);
-      } else {
-        // No issues found
-        successMessage.set(`All mods compatible! Checked ${checkedCount} mods.`);
-      }
-    } catch (error) {
-      errorMessage.set(`Failed to check compatibility: ${error.message}`);
-    }
-  }
-  
-  /**
-   * Update all mods at once
-   */  async function updateAllMods() {
-    // Get all mods with updates (excluding disabled mods)
-    const modsWithUpdatesList = [];
-    for (const [modName, updateInfo] of $modsWithUpdates.entries()) {
-      // Skip entries that start with "project:" as they're duplicates
-      if (modName.startsWith('project:')) continue;
-      
-      // Skip disabled mods
-      if ($disabledMods.has(modName)) continue;
-      
-      const modInfo = $installedModInfo.find(m => m.fileName === modName);
-      if (modInfo && modInfo.projectId) {
-        modsWithUpdatesList.push({
-          modName,
-          projectId: modInfo.projectId,
-          versionId: updateInfo.id,
-          version: updateInfo
-        });
-      }
-    }
-    
-    // Skip if no mods to update
-    if (modsWithUpdatesList.length === 0) {
-      return;
-    }
-    
-    // Check for compatibility issues across all mods
-    const allIssues = [];
-    for (const mod of modsWithUpdatesList) {
-      if (mod.version.dependencies && mod.version.dependencies.length > 0) {
-        const issues = await checkDependencyCompatibility(mod.version.dependencies);
-        if (issues.length > 0) {
-          allIssues.push({
-            mod: mod.modName,
-            issues
-          });
-        }
-      }
-    }
-    
-    if (allIssues.length > 0) {
-      // Show compatibility warning with all issues
-      compatibilityWarnings = allIssues.flatMap(item => 
-        item.issues.map(issue => ({
-          ...issue,
-          modName: item.mod
-        }))
-      );
-      showCompatibilityWarning = true;
-      modsToUpdate = modsWithUpdatesList;
-      return;
-    }
-    
-    // No issues, proceed with all updates
-    updateAllInProgress = true;
-    
-    try {
-      for (const mod of modsWithUpdatesList) {
-        await proceedWithUpdate(mod.modName, mod.projectId, mod.versionId, mod.version);
-      }
-    } finally {
-      updateAllInProgress = false;
-    }
-  }
-  
-  /**
-   * Proceed with updates after confirming compatibility warnings
-   */
-  function proceedWithUpdatesAnyway() {
-    showCompatibilityWarning = false;
-    
-    // Process all the updates
-    for (const mod of modsToUpdate) {
-      proceedWithUpdate(mod.modName, mod.projectId, mod.versionId, mod.version);
-    }
-    
-    // Reset state
-    modsToUpdate = [];
-    compatibilityWarnings = [];
-  }
-  
-  /** Toggle selection of a mod for bulk actions */
-  function toggleSelectMod(modName) {
-    if (selectedMods.has(modName)) {
-      selectedMods.delete(modName);
-    } else {
-      selectedMods.add(modName);
-    }
-    selectedMods = new Set(selectedMods);
-  }
-  
-  /** Delete all selected mods */
-  async function deleteSelectedMods() {
-    if (selectedMods.size === 0) return;
-    for (const modName of selectedMods) {
-      await deleteMod(modName, serverPath, false);
-    }
-    selectedMods = new Set();
-    await loadMods(serverPath);
-  }
-  
-  /** Disable all selected mods */
-  async function disableSelectedMods() {
-    if (selectedMods.size === 0) return;
-    selectedMods.forEach(modName => {
-      disabledMods.update(mods => {
-        const newMods = new Set(mods);
-        newMods.add(modName);
-        return newMods;
-      });
-    });
-    selectedMods = new Set();
-    await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
-    await loadMods(serverPath);
-  }
-    /** Delete all selected disabled mods */
-  async function deleteSelectedDisabledMods() {
-    if (selectedDisabledMods.size === 0) return;
-    
-    const modsToDelete = Array.from(selectedDisabledMods);
-    let successfullyDeleted = [];
-    
-    for (const modName of modsToDelete) {
-      const deleteSuccess = await deleteMod(modName, serverPath, false);
-      if (deleteSuccess) {
-        successfullyDeleted.push(modName);
-      }
-    }
-    
-    // Remove successfully deleted mods from the disabled mods store
-    if (successfullyDeleted.length > 0) {
-      disabledMods.update(mods => {
-        const newMods = new Set(mods);
-        successfullyDeleted.forEach(modName => newMods.delete(modName));
-        return newMods;
-      });
-      
-      // Save the updated disabled mods list to persist the change
-      await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
-    }
-    
-    selectedDisabledMods = new Set();
-    await loadMods(serverPath);
-  }
-  
-  /** Enable all selected disabled mods */
-  async function enableSelectedDisabledMods() {
-    if (selectedDisabledMods.size === 0) return;
-    selectedDisabledMods.forEach(modName => {
-      disabledMods.update(mods => {
-        const newMods = new Set(mods);
-        newMods.delete(modName);
-        return newMods;
-      });
-    });
-    selectedDisabledMods = new Set();
-    await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
-    await loadMods(serverPath);
-  }
-  
-  /** Toggle selection of a disabled mod for bulk actions */
-  function toggleSelectDisabledMod(modName) {
-    if (selectedDisabledMods.has(modName)) {
-      selectedDisabledMods.delete(modName);
-    } else {
-      selectedDisabledMods.add(modName);
-    }
-    selectedDisabledMods = new Set(selectedDisabledMods);
-  }
-  
-  /** Show bulk delete confirmation for installed mods */
-  function showBulkDeleteConfirmation() { confirmBulkDeleteVisible = true; }
-  /** Show bulk disable confirmation for installed mods */
-  function showBulkDisableConfirmation() { confirmBulkDisableVisible = true; }
-  /** Show bulk delete confirmation for disabled mods */
-  function showBulkDeleteDisabledConfirmation() { confirmBulkDeleteDisabledVisible = true; }
-  /** Show bulk enable confirmation for disabled mods */
-  function showBulkEnableDisabledConfirmation() { confirmBulkEnableDisabledVisible = true; }
-  
-  /** Confirm and execute bulk delete for installed mods */
-  async function confirmBulkDelete() {
-    confirmBulkDeleteVisible = false;
-    await deleteSelectedMods();
-  }
-  /** Confirm and execute bulk disable for installed mods */
-  async function confirmBulkDisable() {
-    confirmBulkDisableVisible = false;
-    await disableSelectedMods();
-  }
-  /** Confirm and execute bulk delete for disabled mods */
-  async function confirmBulkDeleteDisabled() {
-    confirmBulkDeleteDisabledVisible = false;
-    await deleteSelectedDisabledMods();
-  }
-  /** Confirm and execute bulk enable for disabled mods */
-  async function confirmBulkEnableDisabled() {
-    confirmBulkEnableDisabledVisible = false;
-    await enableSelectedDisabledMods();
-  }
-  
-  // Bulk toggle all installed mods selection
-  function toggleSelectAllInstalledMods(event) {
-    const all = event.target.checked;
-    if (all) {
-      selectedMods = new Set($installedMods.filter(mod => !$disabledMods.has(mod)));
-    } else {
-      selectedMods = new Set();
-    }
-  }
-    // Bulk toggle all disabled mods selection
-  function toggleSelectAllDisabledMods(event) {
-    const all = event.target.checked;
-    const disabledList = Array.from($disabledMods);
-    if (all) {
-      selectedDisabledMods = new Set(disabledList);
-    } else {
-      selectedDisabledMods = new Set();
-    }
-  }
-  
-  // Load mods on mount and check for updates
-  onMount(() => {
-    // Initialize derived store values
-    updateDerivedValues();
-    
-    // Load initial data
-    loadMods(serverPath);
-    checkForUpdates(serverPath);
-    
-    // Set up an interval to check for updates ONLY when component is active
-    const updateInterval = setInterval(() => {
-      // Only check for updates if:
-      // 1. Not already checking
-      // 2. Component is mounted and visible
-      // 3. Document is visible (tab is active)
-      if (!get(isCheckingUpdates) && 
-          document.visibilityState === 'visible' && 
-          serverPath) {
-        checkForUpdates(serverPath);
-      }
-    }, 10 * 60 * 1000); // Check every 10 minutes (reduced from 5 minutes)
-    
-    // Set up an interval to update derived store values
-    const derivedValuesInterval = setInterval(() => {
-      updateDerivedValues();
-    }, 1000); // Update every second to keep UI reactive
-    
-    // Listen for download progress events
-    // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces
-    if (typeof window !== 'undefined' && window.ipcRenderer) {
-      // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces
-      downloadListener = window.ipcRenderer.on('download-progress', (event, data) => {
-        if (!data) return;
-        
-        // Find mod by name in our list
-        const mod = $installedMods.find(m => m.includes(data.name) || data.name.includes(m));
-        if (!mod) return;
-        
-        // Handle based on progress state
-        if (data.error) {
-          // Download error
-          for (const statusKey of [...modStatus.keys()]) {
-            if (statusKey.startsWith(`${mod}:`)) {
-              modStatus.set(statusKey, "error");
-            }
-          }
-          modStatus = new Map(modStatus); // Force reactivity update
-          
-          // Clear error status after a delay
-          setTimeout(() => {
-            for (const statusKey of [...modStatus.keys()]) {
-              if (statusKey.startsWith(`${mod}:`)) {
-                modStatus.delete(statusKey);
-              }
-            }
-            modStatus = new Map(modStatus); // Force reactivity update
-          }, 3000);
-        } else if (data.completed) {
-          // Download completed
-          for (const statusKey of [...modStatus.keys()]) {
-            if (statusKey.startsWith(`${mod}:`) && modStatus.get(statusKey) === "updating") {
-              // Set success state briefly
-              modStatus.set(statusKey, "success");
-              modStatus = new Map(modStatus); // Force reactivity update
-              
-              // Remove from updates list
-              modsWithUpdates.update(updates => {
-                updates.delete(mod);
-                return updates;
-              });
-              
-              // Clear all status indicators for this mod after a delay
-              setTimeout(() => {
-                clearModStatus(mod);
-                
-                // Refresh the mod info to show the updated version
-                dispatch('refresh');
-              }, 2000);
-            }
-          }
-        } else {
-          // Still downloading
-          for (const statusKey of [...modStatus.keys()]) {
-            if (statusKey.startsWith(`${mod}:`) && modStatus.get(statusKey) !== "updating") {
-              modStatus.set(statusKey, "updating");
-              modStatus = new Map(modStatus); // Force reactivity update
-            }
-          }
-        }
-      });
-    }
-    
-    // Load disabled mods
-    try {      safeInvoke('get-disabled-mods', serverPath).then(disabledModsList => {
-        if (Array.isArray(disabledModsList)) {
-          disabledMods.set(new Set(disabledModsList));
-        }
-      });
-    } catch {
-    }
-    
-    // Clean up the interval when the component is destroyed
-    return () => {
-      clearInterval(updateInterval);
-      clearInterval(derivedValuesInterval);
-      // Clean up listener
-      // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces
-      if (downloadListener && typeof window !== 'undefined' && window.ipcRenderer) {
-        // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces
-        window.ipcRenderer.removeListener('download-progress', downloadListener);
-      }
-    };
-  });
-
-  onDestroy(() => {
-    // Clean up listener
-    // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces
-    if (downloadListener && typeof window !== 'undefined' && window.ipcRenderer) {
-      // @ts-ignore - TypeScript doesn't know about our Electron preload interfaces
-      window.ipcRenderer.removeListener('download-progress', downloadListener);
-    }
-  });
-
-  async function enableDependency(dependency) {
-    // Remove the dependency from the disabledMods store
-    disabledMods.update(mods => {
-      const newMods = new Set(mods);
-      // Find the installed mod by projectId to get the fileName
-      const mod = $installedModInfo.find(m => m.projectId === dependency.projectId);
-      if (mod) {
-        newMods.delete(mod.fileName);
-      }
-      return newMods;
-    });
-    // Persist the change and reload mods
-    const mod = $installedModInfo.find(m => m.projectId === dependency.projectId);
-    if (mod) {
-      await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
-      await loadMods(serverPath);
-    }
-  }
-
-  // Group compatibility warnings by dependency projectId
-  function groupDependencyWarnings(warnings) {
-    const grouped = {};
-    for (const warning of warnings) {
-      const depId = warning.dependency?.projectId;
-      if (!depId) continue;
-      if (!grouped[depId]) {
-        grouped[depId] = {
-          dependency: warning.dependency,
-          type: warning.type,
-          mods: [],
-          warningObjs: []
-        };
-      }
-      grouped[depId].mods.push(warning.modName);
-      grouped[depId].warningObjs.push(warning);
-      // If any warning for this dep is 'missing', set type to 'missing' (highest priority)
-      if (warning.type === 'missing') grouped[depId].type = 'missing';
-      else if (warning.type === 'disabled' && grouped[depId].type !== 'missing') grouped[depId].type = 'disabled';
-      else if (warning.type === 'version_mismatch' && !['missing','disabled'].includes(grouped[depId].type)) grouped[depId].type = 'version_mismatch';
-      else if (warning.type === 'update_available' && !['missing','disabled','version_mismatch'].includes(grouped[depId].type)) grouped[depId].type = 'update_available';
-    }
-    return Object.values(grouped);
-  }
-
-  /**
-   * Handle category change for a mod
-   * @param {Object} mod - The mod object to update
-   * @param {Event} event - The change event from the select element
-   */
-  async function handleCategoryChange(mod, event) {
-    try {
-      const select = event.target;
-      if (!(select instanceof HTMLSelectElement)) {
-        return;
-      }
-
-      const newCategory = select.value;
-      const fileName = typeof mod === 'string' ? mod : mod.fileName;
-      
-      
-      // First, update the category in the store
-      await updateModCategory(fileName, newCategory);
-      
-      // Now, update the file locations through IPC
       const result = await safeInvoke('move-mod-file', {
-        fileName, 
+        fileName: modName, 
         newCategory,
         serverPath
       });
       
       if (result && result.success) {
-        successMessage.set(`Changed ${fileName} to "${newCategory}"`);
+        successMessage.set(`Changed ${modName} to "${newCategory}"`);
+        setTimeout(() => successMessage.set(''), 3000);
       } else {
         throw new Error(result?.error || 'Unknown error occurred');
       }
       
-      // Reload mods list to update UI without navigating away
       await loadMods(serverPath);
     } catch (err) {
       errorMessage.set(`Failed to update mod category: ${err.message}`);
     }
   }
-  
-  async function handleRequirementChange(mod, event) {
+
+  async function handleRequirementChange(modName, event) {
     try {
-      const checkbox = event.target;
-      if (!(checkbox instanceof HTMLInputElement)) {
-        return;
-      }
-      
-      const required = checkbox.checked;
-      const fileName = typeof mod === 'string' ? mod : mod.fileName;
-      
-      
-      // Update the required status in the store
-      await updateModRequired(fileName, required);
-      
-      successMessage.set(`${fileName} is now ${required ? 'required' : 'optional'} for clients`);
+      const required = event.target.checked;
+      await updateModRequired(modName, required);
+      successMessage.set(`${modName} is now ${required ? 'required' : 'optional'} for clients`);
+      setTimeout(() => successMessage.set(''), 3000);
     } catch (err) {
       errorMessage.set(`Failed to update mod requirement: ${err.message}`);
-    }  }
+    }
+  }
+
+  // Simple keyboard shortcut for search focus
+  function handleGlobalKeyDown(event) {
+    if (event.key === '/' && event.target.tagName !== 'INPUT' && event.target.tagName !== 'TEXTAREA') {
+      event.preventDefault();
+      const searchInput = document.querySelector('.search-input');
+      if (searchInput instanceof HTMLInputElement) {
+        searchInput.focus();
+      }
+    }
+  }
+
+  onMount(() => {
+    // Add global keyboard listener for search shortcut
+    document.addEventListener('keydown', handleGlobalKeyDown);
+    
+    // Load mod categories and disabled mods from storage on startup
+    const initAsync = async () => {
+    try {
+      const { loadModCategories } = await import('../../../stores/modStore.js');
+      await loadModCategories();
+      
+      // Load disabled mods from storage
+      if (serverPath) {
+        try {
+          const disabledModsList = await safeInvoke('get-disabled-mods', serverPath);
+          if (Array.isArray(disabledModsList)) {
+            disabledMods.set(new Set(disabledModsList));
+          }
+        } catch (error) {
+          console.warn('Failed to load disabled mods:', error);
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to load mod settings:', error);
+    }
+    };
+    
+    // Start async initialization
+    initAsync();
+    
+    // Return cleanup function
+    return () => {
+      document.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  });
 </script>
 
-<div class="installed-mods-section">
-  <!-- Mod list header with filters -->
-  <div class="mod-list-header">
-    <div class="header-left">
-      <h2>Installed Mods</h2>
-    </div>
-    <div class="header-actions">
-      <button class="action-button" on:click={handleCheckUpdates}>
-        {$isCheckingUpdates ? 'Checking...' : 'Check for Updates'}
+<!-- Header actions -->
+<div class="mods-header">
+  <div class="left">
+    <!-- Unified toolbar -->
+    <div class="mods-toolbar">
+      <button class="icon-btn" on:click={handleCheckUpdates} disabled={$isCheckingUpdates} title={$isCheckingUpdates ? 'Checking...' : 'Check for Updates'}>
+        🔄
       </button>
-      <button class="action-button" on:click={checkAllModsCompatibility}>
-        Check Compatibility
+      <button class="icon-btn" on:click={checkAllModsCompatibility} title="Check Compatibility">
+        ✅
       </button>
-      {#if updateCount > 0}
-          <button
-          class="action-button update-all-button"
-            on:click={updateAllMods}
-          disabled={updateAllInProgress}
-        >
-          {updateAllInProgress ? 'Updating...' : `Update All (${updateCount})`}
-          </button>
+      
+      <!-- Search box -->
+      <div class="search-container">
+        <input 
+          type="text" 
+          class="search-input" 
+          placeholder="Search mods ( / )"
+          bind:value={searchTerm}
+        />
+        {#if searchTerm}
+          <button class="search-clear" on:click={() => searchTerm = ''} title="Clear search">×</button>
         {/if}
-      {#if selectedMods.size > 0}
-        <div class="bulk-actions">
-          <button class="action-button delete-selected" on:click={showBulkDeleteConfirmation} disabled={$serverState.status === 'Running'}>
-          {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete Selected ({selectedMods.size})
-        </button>
-          <button class="action-button disable-selected" on:click={showBulkDisableConfirmation} disabled={$serverState.status === 'Running'}>
-          {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Disable Selected ({selectedMods.size})
-        </button>
-      </div>
-      {/if}
-    </div>
-  </div>
-  
-  <div class="mods-list">
-    {#if $installedMods.length === 0}
-      <div class="no-mods">No mods installed</div>
-    {:else}
-      <div class="table-header">
-        <div class="header-checkbox">
-          <input type="checkbox"
-            checked={selectedMods.size === $installedMods.filter(mod => !$disabledMods.has(mod)).length}
-            on:change={toggleSelectAllInstalledMods}
-          />
-        </div>
-        <div class="header-mod-name">Mod Name</div>
-        <div class="header-location">Location</div>
-        <div class="header-version">Current Version</div>
-        <div class="header-update">Available Update</div>
-        <div class="header-actions">Actions</div>
-      </div>
-      <div class="mods-grid">
-        {#each $installedMods.filter(mod => !$disabledMods.has(mod)) as mod (mod)}
-          {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-          {@const modCategoryInfo = categorizedMods.find(m => m.fileName === mod)}
-          <div class="mod-card {$expandedInstalledMod === mod ? 'expanded' : ''} {modCategoryInfo?.category || ''}">
-            <div class="table-row">
-              <div class="row-checkbox">
-                <input type="checkbox"
-                  checked={selectedMods.has(mod)}
-                  on:change={() => toggleSelectMod(mod)}
-                />
-              </div>
-              <div class="row-mod-name">
-                <span class="mod-name">{modCategoryInfo?.name || mod}</span>
-                
-                {#if modInfo && modInfo.mcVersion}
-                    <span class="mc-version-tag">MC {modInfo.mcVersion}</span>
-                {/if}
-              </div>
-
-              <div class="row-location">
-                <div class="location-content">
-                  {#if modCategoryInfo}
-                    {#if modCategoryInfo.category === 'server-only'}
-                      <span class="location-tag server-tag">Server</span>
-                    {:else if modCategoryInfo.category === 'client-only'}
-                      <span class="location-tag client-tag">Client</span>
-                    {:else if modCategoryInfo.category === 'both'}
-                      <span class="location-tag both-tag">Both</span>
-                    {/if}
-                  {/if}
-                  
-                  <div class="mod-category-container">
-                    <select 
-                      class="mod-category-select"
-                      value={modCategoryInfo?.category || 'server-only'}
-                      on:change={(e) => handleCategoryChange(mod, e)}
-                      disabled={$serverState.status === 'Running'}
-                    >
-                      <option value="server-only">Server Only</option>
-                      <option value="client-only">Client Only</option>
-                      <option value="both">Client & Server</option>
-                    </select>
-                    
-                    {#if modCategoryInfo?.category === 'client-only' || modCategoryInfo?.category === 'both'}
-                      <div class="mod-required-checkbox">
-                        <label title="Whether this mod is required for clients to connect">
-                          <input 
-                            type="checkbox"
-                            checked={modCategoryInfo?.required}
-                            on:change={(e) => handleRequirementChange(mod, e)}
-                            disabled={$serverState.status === 'Running'}
-                          />
-                          <span>Client Requirement</span>
-                        </label>
-                      </div>
-                    {/if}
-                  </div>
-                </div>
-              </div>
-              
-              <div class="row-version">
-                {#if modInfo && modInfo.versionNumber}
-                    <span class="version-tag current-version">{modInfo.versionNumber}</span>
-                {/if}
-              </div>
-              
-              <div class="row-update">
-                {#if $modsWithUpdates.has(mod)}
-                  {@const updateInfo = $modsWithUpdates.get(mod)}
-                  <div class="update-container">
-                    <span class="version-tag new-version">{updateInfo.versionNumber}</span>
-                  </div>
-                {:else}
-                  <span class="up-to-date">Up to date</span>
-                {/if}
-              </div>
-              
-              <div class="row-actions">
-                {#if $modsWithUpdates.has(mod) && !$disabledMods.has(mod)}
-                  <button class="update-button" on:click={() => updateModToLatest(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                    {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Update
-                  </button>
-                  
-                  <div class="button-row">
-                    <button 
-                      class="version-toggle-button" 
-                      on:click={() => toggleInstalledVersionSelector(mod)}
-                      type="button"
-                      aria-expanded={$expandedInstalledMod === mod}
-                      aria-label="Toggle version selection"
-                      disabled={$serverState.status === 'Running'}
-                      title={$serverState.status === 'Running' ? 'Disabled while server is running' : 'Toggle version selection'}
-                    >
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if}
-                      <span class="version-toggle-icon">{$expandedInstalledMod === mod ? '▲' : '▼'}</span>
-                    </button>
-                    
-                    <button class="delete-button" on:click={() => showDeleteConfirmation(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete
-                    </button>
-                    
-                    <!-- Add disable button -->
-                    <button class="disable-button" on:click={() => showDisableConfirmation(mod, false)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Disable
-                    </button>
-                  </div>
-                {:else}
-                  <div class="button-row">
-                    <button 
-                      class="version-toggle-button" 
-                      on:click={() => toggleInstalledVersionSelector(mod)}
-                      type="button"
-                      aria-expanded={$expandedInstalledMod === mod}
-                      aria-label="Toggle version selection"
-                      disabled={$serverState.status === 'Running'}
-                      title={$serverState.status === 'Running' ? 'Disabled while server is running' : 'Toggle version selection'}
-                    >
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if}
-                      <span class="version-toggle-icon">{$expandedInstalledMod === mod ? '▲' : '▼'}</span>
-                    </button>
-                    
-                    <button class="delete-button" on:click={() => showDeleteConfirmation(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete
-                    </button>
-                    
-                    <!-- Add disable button -->
-                    <button class="disable-button" on:click={() => showDisableConfirmation(mod, false)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Disable
-                    </button>
-                  </div>
-                {/if}
-              </div>
-            </div>
-            
-            {#if $expandedInstalledMod === mod}
-              {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-              {#if modInfo && modInfo.projectId}
-                <div 
-                  class="installed-mod-versions" 
-                  id={`versions-for-${mod.replace(/\W/g, '')}`}
-                  transition:slide|local={{ duration: 200 }}
-                >
-                  {#if !installedModVersionsCache[modInfo.projectId]}
-                    <div class="loading-versions">Loading versions...</div>
-                  {:else if installedModVersionsCache[modInfo.projectId].length === 0}
-                    <div class="no-versions">No versions available</div>
-                  {:else}                    <div class="mod-versions" transition:slide|local={{ duration: 200 }}>
-                      {#each installedModVersionsCache[modInfo.projectId] as version (version.id)}
-                        {@const isCurrentVersion = modInfo && modInfo.versionId === version.id}
-                        {@const statusKey = `${modInfo.fileName}:${version.id}`}
-                        {@const status = modStatus.get(statusKey) || ""}
-                        
-                        <div class="mod-version-item {isCurrentVersion ? 'current' : ''}">
-                          <div class="version-info">
-                            <span class="version-number">{version.versionNumber || version.name}</span>
-                            
-                            {#if version.gameVersions && version.gameVersions.includes($minecraftVersion)}
-                              <span class="compatibility-badge compatible">
-                                ✓ {$minecraftVersion}
-                              </span>
-                            {/if}
-                          </div>
-                          
-                          {#if isCurrentVersion}
-                            <span class="version-status current">Installed</span>
-                          {:else}
-                            <div class="version-controls">
-                              {#if status === "updating"}
-                                <span class="mod-status updating"></span>
-                              {:else if status === "success"}
-                                <span class="mod-status success"></span>
-                              {:else if status === "error"}
-                                <span class="mod-status error"></span>
-                              {:else}
-                                <button 
-                                  class="select-version" 
-                                  on:click={() => updateInstalledMod(modInfo.fileName, modInfo.projectId, version.id)}
-                                >
-                                  Select
-                                </button>
-                              {/if}
-                            </div>
-                          {/if}
-                        </div>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-              {:else}
-                <div class="no-version-info">
-                  <p>
-                    This mod doesn't have project information for updates.
-                    {#if !modInfo}
-                      Unable to read mod metadata.
-                    {:else if !modInfo.projectId}
-                      No project ID found in mod metadata.
-                    {/if}
-                  </p>
-                </div>
-              {/if}
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
-  </div>
-  
-  <!-- Disabled Mods Section - Only shown if there are disabled mods -->
-  {#if $disabledMods && $disabledMods.size > 0}
-    <div class="disabled-mods-section">
-      <div class="section-header">
-        <h3>
-          <span class="disabled-badge">{$disabledMods.size} Disabled Mod{$disabledMods.size > 1 ? 's' : ''}</span>
-        </h3>
-        <div class="header-actions">
-          <div class="button-row">
-            <button class="delete-button" on:click={showBulkDeleteDisabledConfirmation} disabled={$serverState.status === 'Running' || selectedDisabledMods.size === 0} title={$serverState.status === 'Running' ? 'Disabled while server is running' : 'Delete selected disabled mods'}>
-              {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete Selected ({selectedDisabledMods.size})
-            </button>
-            <button class="enable-button" on:click={showBulkEnableDisabledConfirmation} disabled={$serverState.status === 'Running' || selectedDisabledMods.size === 0} title={$serverState.status === 'Running' ? 'Disabled while server is running' : 'Enable selected disabled mods'}>
-              {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Enable Selected ({selectedDisabledMods.size})
-            </button>
-          </div>
-        </div>
       </div>
       
-      <div class="mods-list">
-        <div class="table-header disabled-table-header">
-          <div class="header-checkbox">
-            <input type="checkbox"
-              checked={selectedDisabledMods.size === Array.from($disabledMods).length}
-              on:change={toggleSelectAllDisabledMods}
-            />
-          </div>
-          <div class="header-mod-name">Mod Name</div>
-          <div class="header-version">Current Version</div>
-          <div class="header-update">Available Update</div>
-          <div class="header-actions">Actions</div>
-        </div>        <div class="mods-grid">
-          {#each Array.from($disabledMods) as mod (mod)}
-            <div class="mod-card disabled">
-              <div class="table-row disabled-table-row">
-                <div class="row-checkbox">
-                  <input type="checkbox"
-                    checked={selectedDisabledMods.has(mod)}
-                    on:change={() => toggleSelectDisabledMod(mod)}
-                  />
-                </div>
-                <div class="row-mod-name">
-                  <span class="mod-name">{mod}</span>
-                  
-                  {#if $installedModInfo.find(m => m.fileName === mod)}
-                    {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-                    {#if modInfo.mcVersion}
-                      <span class="mc-version-tag">MC {modInfo.mcVersion}</span>
-                    {/if}
-                  {/if}
-                </div>
-                
-                <div class="row-version">
-                  {#if $installedModInfo.find(m => m.fileName === mod)}
-                    {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
-                    {@const updateInfo = $disabledModUpdates.get(mod)}
-                    {@const mcVer = $minecraftVersion}
-                    
-                    <div class="version-info-container">
-                      {#if modInfo.versionNumber}
-                        <span class="version-tag current-version">{modInfo.versionNumber}</span>
-                      {/if}
-                      
-                      <!-- Show compatibility status below version -->
-                      {#if updateInfo && !updateInfo.isCompatibleUpdate}
-                        <div class="compatibility-status-mini incompatible">
-                          Not compatible with MC {mcVer}
-                        </div>
-                      {:else if updateInfo && updateInfo.reason && updateInfo.reason.includes('Current version is compatible')}
-                        <div class="compatibility-status-mini compatible">
-                          Compatible with MC {mcVer}
-                        </div>
-                      {:else if modInfo.minecraftVersion && modInfo.minecraftVersion !== mcVer}
-                        <div class="compatibility-status-mini unknown">
-                          Version compatibility unknown
-                        </div>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-                
-                <div class="row-update">
-                  {#if $disabledModUpdates.has(mod)}
-                    {@const updateInfo = $disabledModUpdates.get(mod)}
-                    <div class="update-container">
-                      <span class="version-tag new-version">{updateInfo.latestVersion}</span>
-                    </div>
-                  {:else}
-                    <span class="no-update">No update available</span>
-                  {/if}
-                </div>
-                
-                <div class="row-actions">
-                  <div class="button-row">
-                    <button class="delete-button" on:click={() => showDeleteConfirmation(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                      {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Delete
-                    </button>
-                    
-                    {#if $disabledModUpdates.has(mod)}
-                      <button class="enable-update-button" on:click={() => handleEnableAndUpdate(mod)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : 'Enable and update this mod to a compatible version'}>
-                        {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Enable & Update
-                      </button>
-                    {:else}
-                      <button class="enable-button" on:click={() => showDisableConfirmation(mod, true)} disabled={$serverState.status === 'Running'} title={$serverState.status === 'Running' ? 'Disabled while server is running' : ''}>
-                        {#if $serverState.status === 'Running'}<span class="lock-icon">🔒</span>{/if} Enable
-                      </button>
-                    {/if}
-                  </div>
-                </div>
-              </div>
-            </div>
-          {/each}
-        </div>
+      <!-- Add mods button -->
+      <button class="add-mods-btn-outline" 
+              class:drag-highlight={isDragover}
+              on:click={toggleDropZone} 
+              on:dragenter={handleAddButtonDragEnter}
+              on:dragover={handleDragOver}
+              on:dragleave={handleDragLeave}
+              on:drop={handleDrop}
+              title="Add mods by dragging files or clicking to browse">
+        📦 Add Mods
+      </button>
+      
+      <!-- Search hint -->
+      <div class="keyboard-hint" title="Use Tab to navigate between controls, / to focus search">
+        ⌨️
       </div>
     </div>
+  </div>
+
+  {#if updateCount > 0}
+    <button class="primary sm" on:click={updateAllMods} disabled={updateAllInProgress || serverRunning} title="Update all outdated mods">
+      {#if serverRunning}🔒{/if} ⬆️ {updateAllInProgress ? 'Updating...' : `Update All (${updateCount})`}
+    </button>
   {/if}
-  
-  <!-- Delete Confirmation Dialog -->
-  <ConfirmationDialog
-    bind:visible={confirmDeleteVisible}
-    title="Delete Mod"
-    message={modToDelete ? `Are you sure you want to delete ${modToDelete}?` : 'Are you sure you want to delete this mod?'}
-    confirmText="Delete"
-    cancelText="Cancel"
-    confirmType="danger"
-    on:confirm={confirmDeleteMod}
-    on:cancel={() => { confirmDeleteVisible = false; }}
-  />
-  
-  <!-- Disable/Enable Confirmation Dialog -->
-  <ConfirmationDialog
-    bind:visible={confirmDisableVisible}
-    title={modToToggle && modToToggle.isDisabled ? "Enable Mod" : "Disable Mod"}
-    message={modToToggle ? 
-      (modToToggle.isDisabled ? 
-        `Are you sure you want to enable ${modToToggle.name}?` : 
-        `Are you sure you want to disable ${modToToggle.name}?`) : 
-      'Are you sure you want to toggle this mod?'
-    }
-    confirmText={modToToggle && modToToggle.isDisabled ? "Enable" : "Disable"}
-    cancelText="Cancel"
-    confirmType="warning"
-    on:confirm={confirmToggleModStatus}
-    on:cancel={() => { confirmDisableVisible = false; }}
-  />
-    <!-- Compatibility Warning Dialog -->
-  {#if showCompatibilityWarning}
-    <div 
-      class="compatibility-warning-overlay" 
-      on:click={() => { showCompatibilityWarning = false; modsToUpdate = []; compatibilityWarnings = []; }}
-      on:keydown={(e) => { if (e.key === 'Escape') { showCompatibilityWarning = false; modsToUpdate = []; compatibilityWarnings = []; } }}
-      role="button"
-      tabindex="0"
-      aria-label="Close compatibility warning dialog"
-    >      <div 
-        class="compatibility-warning-dialog" 
-        on:click|stopPropagation
-        on:keydown|stopPropagation
-        role="dialog"
-        aria-labelledby="compatibility-dialog-title"
-        aria-modal="true"
-        tabindex="-1"
-      >
-        <h3 id="compatibility-dialog-title">Compatibility Issues</h3>
-        <div class="warnings-container">
-          {#each groupDependencyWarnings(compatibilityWarnings) as group (group.dependency?.projectId)}
-            {#if group.type === 'missing' || group.type === 'disabled'}
-              <div class="warning-item {group.type}">
-                <h4>{group.type === 'missing' ? 'Missing Dependency' : 'Disabled Dependency'}</h4>
-                <span class="dependency-name">{group.dependency?.name || 'Required Dependency'}</span>
-                <div class="required-by">Required by: {group.mods.join(', ')}</div>
-                <span class="warning-badge">{group.type}</span>
-                {#if group.type === 'disabled'}
-                  <button class="enable-dependency-button" on:click={() => {
-                    enableDependency(group.dependency);
-                    // Remove this group from the warnings UI immediately
-                    compatibilityWarnings = compatibilityWarnings.filter(w => w.dependency?.projectId !== group.dependency?.projectId || w.type !== 'disabled');
-                  }}>
-                    Enable Dependency
-                  </button>
-                {/if}
-              </div>
-            {/if}
-            {#if group.type === 'version_mismatch'}
-              <div class="warning-item version-mismatch">
-                <h4>Version Compatibility Issue</h4>
-                <span class="dependency-name">{group.dependency?.name || 'Required Dependency'}</span>
-                <div class="required-by">Required by: {group.mods.join(', ')}</div>
-                <span class="warning-badge">compatibility</span>
-              </div>
-            {/if}
-            {#if group.type === 'update_available'}
-              <div class="warning-item update">
-                <h4>Update Available</h4>
-                <span class="dependency-name">{group.dependency?.name || 'Required Dependency'}</span>
-                <div class="required-by">Required by: {group.mods.join(', ')}</div>
-                <span class="warning-badge">optional</span>
-              </div>
-            {/if}
-          {/each}
-        </div>
-        <div class="warning-message">
-          {#if modsToUpdate.length > 0}
-            <p>These dependency issues may cause compatibility problems. How would you like to proceed?</p>
-          {:else}
-            <p>The compatibility check found these issues. Installing missing dependencies or enabling disabled ones may help fix these problems.</p>
-          {/if}
-        </div>
-        <div class="warning-actions">
-          <button class="warning-cancel" on:click={() => {
-            showCompatibilityWarning = false;
-            modsToUpdate = [];
-            compatibilityWarnings = [];
-          }}>
-            Cancel
-          </button>
-          {#if modsToUpdate.length > 0}
-            <button class="warning-proceed" on:click={proceedWithUpdatesAnyway}>
-              Proceed Without Dependencies
-            </button>
-          {/if}
-          {#if groupDependencyWarnings(compatibilityWarnings).every(g => g.type === 'disabled')}
-            <button class="warning-install" on:click={() => {
-              // Enable all disabled dependencies
-              groupDependencyWarnings(compatibilityWarnings).forEach(group => {
-                if (group.type === 'disabled') enableDependency(group.dependency);
-              });
-              showCompatibilityWarning = false;
-            }}>
-              Enable Dependencies
-            </button>
-          {:else if groupDependencyWarnings(compatibilityWarnings).every(g => g.type === 'missing')}
-            <button class="warning-install" on:click={() => {
-              showCompatibilityWarning = false;
-              // Install all missing dependencies
-              const dependencies = groupDependencyWarnings(compatibilityWarnings)
-                .filter(g => g.type === 'missing')
-                .map(g => ({
-                  projectId: g.dependency?.projectId,
-                  name: g.dependency?.name || 'Required Dependency',
-                  dependencyType: 'required',
-                  requiredVersion: g.dependency?.versionRequirement
-                }));
-              if (dependencies.length > 0) {
-                const modToUpdate = {
-                  id: dependencies[0].projectId,
-                  name: dependencies[0].name,
-                  selectedVersionId: null
-                };
-                dispatch('install-dependencies', {
-                  mod: modToUpdate,
-                  dependencies
-                });
-              }
-            }}>
-              Install Missing Dependencies
-            </button>
-          {:else if groupDependencyWarnings(compatibilityWarnings).some(g => g.type === 'missing' || g.type === 'disabled')}
-            <button class="warning-install" on:click={() => {
-              // Enable all disabled dependencies
-              groupDependencyWarnings(compatibilityWarnings).forEach(group => {
-                if (group.type === 'disabled') enableDependency(group.dependency);
-              });
-              // Install all missing dependencies
-              const dependencies = groupDependencyWarnings(compatibilityWarnings)
-                .filter(g => g.type === 'missing')
-                .map(g => ({
-                  projectId: g.dependency?.projectId,
-                  name: g.dependency?.name || 'Required Dependency',
-                  dependencyType: 'required',
-                  requiredVersion: g.dependency?.versionRequirement
-                }));
-              if (dependencies.length > 0) {
-                const modToUpdate = {
-                  id: dependencies[0].projectId,
-                  name: dependencies[0].name,
-                  selectedVersionId: null
-                };
-                dispatch('install-dependencies', {
-                  mod: modToUpdate,
-                  dependencies
-                });
-              }
-              showCompatibilityWarning = false;
-            }}>
-              Fix All Dependencies
-            </button>
-          {/if}
-        </div>
-      </div>
+
+  {#if selectedMods.size > 0}
+    {@const selectedModsArray = Array.from(selectedMods)}
+    {@const enabledSelected = selectedModsArray.filter(mod => !$disabledMods.has(mod))}
+    {@const disabledSelected = selectedModsArray.filter(mod => $disabledMods.has(mod))}
+    {@const buttonText = disabledSelected.length > 0 && enabledSelected.length === 0 ? 'Enable' : 
+                        enabledSelected.length > 0 && disabledSelected.length === 0 ? 'Disable' : 
+                        'Toggle'}
+    {@const buttonClass = disabledSelected.length > 0 && enabledSelected.length === 0 ? 'primary' : 
+                          enabledSelected.length > 0 && disabledSelected.length === 0 ? 'warn' :
+                          'primary'}
+    <div class="bulk">
+      <button class="danger sm" on:click={handleDeleteSelected} disabled={serverRunning}>
+        {#if serverRunning}🔒{/if} 🗑 Delete Selected ({selectedMods.size})
+      </button>
+      <button class="{buttonClass} sm" on:click={handleBulkToggle} disabled={serverRunning}>
+        {#if serverRunning}🔒{/if} 
+        {buttonText === 'Enable' ? '✅' : buttonText === 'Disable' ? '🚫' : '⚡'} 
+        {buttonText} Selected ({selectedMods.size})
+      </button>
     </div>
   {/if}
-  
-  <!-- Bulk Delete Installed Mods Confirmation -->
-  <ConfirmationDialog
-    bind:visible={confirmBulkDeleteVisible}
-    title="Delete Mods"
-    message={`Are you sure you want to delete ${selectedMods.size} selected mod(s)?`}
-    confirmText="Delete"
-    cancelText="Cancel"
-    confirmType="danger"
-    on:confirm={confirmBulkDelete}
-    on:cancel={() => { confirmBulkDeleteVisible = false; }}
-  />
-  
-  <!-- Bulk Disable Installed Mods Confirmation -->
-  <ConfirmationDialog
-    bind:visible={confirmBulkDisableVisible}
-    title="Disable Mods"
-    message={`Are you sure you want to disable ${selectedMods.size} selected mod(s)?`}
-    confirmText="Disable"
-    cancelText="Cancel"
-    confirmType="warning"
-    on:confirm={confirmBulkDisable}
-    on:cancel={() => { confirmBulkDisableVisible = false; }}
-  />
-  
-  <!-- Bulk Delete Disabled Mods Confirmation -->
-  <ConfirmationDialog
-    bind:visible={confirmBulkDeleteDisabledVisible}
-    title="Delete Disabled Mods"
-    message={`Are you sure you want to delete ${selectedDisabledMods.size} selected disabled mod(s)?`}
-    confirmText="Delete"
-    cancelText="Cancel"
-    confirmType="danger"
-    on:confirm={confirmBulkDeleteDisabled}
-    on:cancel={() => { confirmBulkDeleteDisabledVisible = false; }}
-  />
-  
-  <!-- Bulk Enable Disabled Mods Confirmation -->
-  <ConfirmationDialog
-    bind:visible={confirmBulkEnableDisabledVisible}
-    title="Enable Disabled Mods"
-    message={`Are you sure you want to enable ${selectedDisabledMods.size} selected disabled mod(s)?`}
-    confirmText="Enable"
-    cancelText="Cancel"
-    confirmType="warning"
-    on:confirm={confirmBulkEnableDisabled}
-    on:cancel={() => { confirmBulkEnableDisabledVisible = false; }}
-  />
 </div>
 
+<!-- Optional expanded drop zone (only shown when button is clicked) -->
+{#if !dropZoneCollapsed}
+<div class="drop-zone-container">
+    <div class="drop-zone-full" 
+         class:drag-highlight={isDragover}
+         transition:fly="{{ y: -20, duration: 300 }}">
+      <div class="drop-zone-content">
+        <div class="drop-icon">📦</div>
+        <p>Drag and drop .jar files here</p>
+        <p class="drop-or">or</p>
+        <button class="browse-btn" on:click={handleBrowseFiles}>Browse Files</button>
+      </div>
+      <button class="collapse-btn" on:click={toggleDropZone} title="Collapse drop zone">−</button>
+    </div>
+</div>
+{/if}
+
+<!-- Installed Mods table -->
+<div class="table-container">
+<table class="mods-table">
+  <thead>
+    <tr>
+      <th class="chk sel-all" title="Select all" on:click={toggleSelectAll}>
+        {#if selectedMods.size === filteredMods.length && selectedMods.size > 0}
+          ■
+        {:else if selectedMods.size > 0}
+          ◩
+        {:else}
+          ▢
+        {/if}
+        <input type="checkbox"
+               checked={selectedMods.size === filteredMods.length}
+               indeterminate={selectedMods.size && selectedMods.size !== filteredMods.length}
+               on:change={toggleSelectAll}
+               style="opacity: 0; position: absolute; pointer-events: none;">
+      </th>
+      <th>Mod Name</th>
+      <th class="loc">Location</th>
+      <th class="ver">Current</th>
+      <th class="alert">⚠️</th>
+      <th class="status">Status</th>
+      <th class="upd">Update</th>
+      <th class="act">Actions</th>
+    </tr>
+  </thead>
+
+  <tbody>
+    {#if filteredMods.length === 0 && searchTerm}
+      <tr>
+        <td colspan="8" class="no-results">
+          No mods found matching "{searchTerm}"
+        </td>
+      </tr>
+    {:else}
+      {#each filteredMods as mod (mod)}
+      {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
+              {@const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod)}
+      {@const location = modCategoryInfo?.category || 'server-only'}
+        {@const isDisabled = $disabledMods.has(mod)}
+        {@const borderColor = locColor[location] || '#2c82ff'}
+        
+        <tr class:selected={selectedMods.has(mod)} 
+            class:disabled={isDisabled}
+            style="border-left-color:{borderColor}; border-left-width: 4px; border-left-style: solid;">
+        <!-- checkbox -->
+        <td>
+          <input type="checkbox"
+                 checked={selectedMods.has(mod)}
+                 on:change={() => toggleSelect(mod)} />
+        </td>
+
+        <!-- name + MC version tag -->
+        <td>
+          <strong>{modCategoryInfo?.name || mod}</strong>
+          {#if modInfo && modInfo.mcVersion}
+            <span class="mc-tag">MC {modInfo.mcVersion}</span>
+          {/if}
+        </td>
+
+        <!-- location selector -->
+        <td>
+          <select
+            class="loc-select"
+              disabled={serverRunning || isDisabled}
+            value={location}
+            on:change={(e) => handleCategoryChange(mod, e)}>
+            <option value="server-only">Server Only</option>
+            <option value="client-only">Client Only</option>
+            <option value="both">Client & Server</option>
+          </select>
+          {#if (location === 'client-only' || location === 'both')}
+            <label class="req">
+              <input type="checkbox"
+                       disabled={serverRunning || isDisabled}
+                     checked={modCategoryInfo?.required}
+                     on:change={(e) => handleRequirementChange(mod, e)} />
+              required
+            </label>
+          {/if}
+        </td>
+
+        <!-- current version -->
+        <td class="ver">
+          {#if modInfo && modInfo.versionNumber}
+            <code>{modInfo.versionNumber}</code>
+          {/if}
+        </td>
+
+          <!-- warning/error column -->
+          <td class="alert">
+            {#if hasCompatibilityIssues(mod)}
+              <span class="warn-badge" title="Compatibility issues detected">⚠️</span>
+            {/if}
+          </td>
+
+          <!-- status column -->
+          <td class="status">
+            {#if isDisabled}
+              <span class="status-badge disabled">Disabled</span>
+            {:else}
+              <span class="status-badge enabled">Enabled</span>
+            {/if}
+          </td>
+
+        <!-- update badge / selector trigger -->
+        <td class="upd">
+            {#if isDisabled && $disabledModUpdates.has(mod)}
+              {@const updateInfo = $disabledModUpdates.get(mod)}
+              <button class="tag new clickable" 
+                      disabled={serverRunning}
+                      on:click={() => handleEnableAndUpdate(mod)}
+                      title={serverRunning ? 'Server must be stopped to enable and update mods' : `Enable and update to ${updateInfo.latestVersion}`}>
+                {#if serverRunning}🔒{/if} ↑ {updateInfo.latestVersion}
+              </button>
+            {:else if !isDisabled && $modsWithUpdates.has(mod)}
+            {@const updateInfo = $modsWithUpdates.get(mod)}
+            <button class="tag new clickable"
+                    disabled={serverRunning}
+                    on:click={() => updateModToLatest(mod)}
+                    title={serverRunning ? 'Server must be stopped to update mods' : `Update to ${updateInfo.versionNumber}`}>
+              {#if serverRunning}🔒{/if} ↑ {updateInfo.versionNumber}
+            </button>
+          {:else}
+              <span class="tag ok">{isDisabled ? '—' : 'Up to date'}</span>
+          {/if}
+        </td>
+
+        <!-- action buttons -->
+        <td class="act">
+          <button class="danger sm"
+                  disabled={serverRunning}
+                  title={serverRunning ? 'Stop the server to delete mods' : 'Delete mod'}
+                  on:click={() => showDeleteConfirmation(mod)}>
+            {#if serverRunning}🔒{/if} 🗑
+          </button>
+
+            {#if isDisabled}
+              <button class="primary sm"
+                      disabled={serverRunning}
+                      title={serverRunning ? 'Stop the server to enable mods' : 'Enable mod'}
+                      on:click={() => confirmToggleModStatus(mod, true)}>
+                {#if serverRunning}🔒{/if} Enable
+              </button>
+            {:else}
+          <button class="warn sm"
+                  disabled={serverRunning}
+                  title={serverRunning ? 'Stop the server to disable mods' : 'Disable mod'}
+                      on:click={() => confirmToggleModStatus(mod, false)}>
+                {#if serverRunning}🔒{/if} Disable
+          </button>
+              
+              <button class="ghost sm" 
+                      title="Change version" 
+                      disabled={serverRunning}
+                      on:click={() => toggleVersionSelector(mod)}>
+                {#if serverRunning}🔒{/if} {$expandedInstalledMod === mod ? '▲' : '▼'}
+              </button>
+            {/if}
+        </td>
+      </tr>
+
+        {#if !isDisabled && $expandedInstalledMod === mod}
+        <tr transition:fly="{{ x: 10, duration: 100 }}">
+            <td colspan="8">
+            <div class="versions">
+              {#if !installedModVersionsCache[modInfo?.projectId]}
+                <span class="loading">Loading versions...</span>
+              {:else if installedModVersionsCache[modInfo?.projectId]?.length === 0}
+                <span class="err">No versions available</span>
+              {:else}
+                {#each installedModVersionsCache[modInfo?.projectId] || [] as version}
+                  {@const isCurrentVersion = modInfo && modInfo.versionId === version.id}
+                  <button
+                    class:sel={isCurrentVersion}
+                    disabled={isCurrentVersion}
+                    on:click={() => switchToVersion(mod, modInfo.projectId, version.id)}>
+                    {version.versionNumber || version.name}
+                    {#if isCurrentVersion} (current){/if}
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          </td>
+        </tr>
+      {/if}
+    {/each}
+      {/if}
+    </tbody>
+  </table>
+    </div>
+
+
+
+<!-- Confirmation Dialogs -->
+<ConfirmationDialog
+  bind:visible={confirmDeleteVisible}
+  title="Delete Mod"
+  message={modToDelete ? `Are you sure you want to delete ${modToDelete}?` : 'Are you sure you want to delete this mod?'}
+  confirmText="Delete"
+  cancelText="Cancel"
+  confirmType="danger"
+  on:confirm={confirmDeleteMod}
+  on:cancel={() => { confirmDeleteVisible = false; }}
+/>
+
+
 <style>
-  /* global box-sizing to include borders in width calculations */
-  :global(*), :global(*::before), :global(*::after) {
-    box-sizing: border-box;
+  /* ——————————————————— CSS variables (scoped to component) ——————————————————— */
+  .mods-table {
+    --row-py: 3px;
+    --cell-px: 6px;
+    --top-nav: 60px;
+  }
+  
+  /* Color tokens for theming */
+  :root {
+    --col-ok: #14a047;
+    --col-warn: #c9801f;
+    --col-danger: #b33;
+    --col-primary: #0a84ff;
+    --col-server: #2c82ff;
+    --col-client: #34d58a;
+    --col-both: #f5aa28;
+    --bg-primary: #181818;
+    --bg-secondary: #141414;
+    --bg-tertiary: #1a1a1a;
+    --text-primary: #ddd;
+    --text-secondary: #aaa;
+    --border-color: #333;
   }
 
-  /* Custom Checkbox Styling */
-  .select-cell input[type="checkbox"] {
-    -webkit-appearance: none;
-    -moz-appearance: none;
+  /* ——————————————————— container & table ——————————————————— */
+
+  
+  .mods-header { 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: center; 
+    gap: 8px; 
+    margin-bottom: 6px; 
+    flex-wrap: wrap;
+  }
+  .mods-header .left { display: flex; gap: 6px; flex-wrap: wrap; }
+  .bulk { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  
+  /* Unified toolbar */
+  .mods-toolbar {
+    display: flex; 
+    align-items: center; 
+    gap: 4px; 
+    background: var(--bg-tertiary); 
+    padding: 3px 8px; 
+    border-radius: 6px;
+    margin-bottom: 4px;
+  }
+  
+  .mods-table { 
+    width: 100%; 
+    border-collapse: collapse; 
+    font-size: 0.9rem;
+    background: linear-gradient(to bottom, var(--bg-primary), var(--bg-secondary));
+    table-layout: auto;
+    margin-top: 8px;
+  }
+  .mods-table th, .mods-table td { padding: var(--row-py) var(--cell-px); }
+  .mods-table tr { 
+    border-left: 4px solid transparent; 
+    transition: background-color 0.15s, box-shadow 0.15s, border-left-color 0.15s; 
+  }
+  .mods-table thead { 
+    background: var(--bg-tertiary); 
+    position: sticky; 
+    top: calc(var(--top-nav) + 6px); 
+    z-index: 6; 
+  }
+  .mods-table tbody tr:nth-child(even) { background: rgba(24, 24, 24, 0.8); }
+  .mods-table tbody tr:hover { 
+    background: #212121; 
+    box-shadow: 0 0 4px rgba(255, 255, 255, 0.1);
+  }
+  .mods-table tbody tr:hover[style*="border-left-color:#2c82ff"] {
+    box-shadow: 0 0 6px rgba(44, 130, 255, 0.3);
+  }
+  .mods-table tbody tr:hover[style*="border-left-color:#34d58a"] {
+    box-shadow: 0 0 6px rgba(52, 213, 138, 0.3);
+  }
+  .mods-table tbody tr:hover[style*="border-left-color:#f5aa28"] {
+    box-shadow: 0 0 6px rgba(245, 170, 40, 0.3);
+  }
+  .mods-table tbody tr:focus-within { 
+    background: #232323; 
+    outline: 1px solid #3a90ff; 
+  }
+  
+  /* Column widths - Main table */
+  .mods-table th.chk, .mods-table td:nth-child(1) { width: 40px; min-width: 40px; }
+  .mods-table th.loc, .mods-table td:nth-child(3) { width: 100px; min-width: 90px; }
+  .mods-table th.ver, .mods-table td:nth-child(4) { width: 120px; min-width: 100px; }
+  .mods-table th.alert, .mods-table td:nth-child(5) { width: 28px; min-width: 28px; }
+  .mods-table th.status, .mods-table td:nth-child(6) { width: 70px; min-width: 65px; }
+  .mods-table th.upd, .mods-table td:nth-child(7) { width: 80px; min-width: 70px; }
+  .mods-table th.act, .mods-table td:nth-child(8) { width: 95px; min-width: 90px; }
+  
+
+
+  /* ——————————————————— row specifics ——————————————————— */
+  tr.selected { background: #23324a; }
+  
+  /* Disabled mod styling - exactly like client mods */
+  tr.disabled {
+    opacity: 0.7;
+    background: rgba(139, 69, 19, 0.15) !important;
+    transition: all 0.3s ease;
+  }
+  
+  .mc-tag { 
+    background: var(--border-color); 
+    color: var(--text-secondary); 
+    padding: 0 4px; 
+    border-radius: 3px; 
+    margin-left: 4px; 
+    font-size: 0.75rem; 
+  }
+  .loc-select { 
+    font-size: 0.75rem; 
+    background: var(--bg-secondary); 
+    border: 1px solid var(--border-color); 
+    color: var(--text-primary); 
+    border-radius: 3px; 
+    padding: 1px 2px;
     appearance: none;
-    width: 20px;
-    height: 20px;
-    border-radius: 4px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    background: rgba(255, 255, 255, 0.1);
-    cursor: pointer;
+    background-image: url('data:image/svg+xml;charset=US-ASCII,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" fill="%23999"><path d="M0 0l5 6 5-6z"/></svg>');
+    background-repeat: no-repeat;
+    background-position: 95% 50%;
+    background-size: 10px;
+    padding-right: 16px;
+  }
+  .req { 
+    font-size: 0.75rem; 
+    color: var(--text-secondary); 
+    margin-left: 4px; 
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .ver, .upd, .alert, .status { text-align: center; white-space: nowrap; }
+  .alert { 
+    text-align: center; 
+    padding: 0 !important;
+    width: 28px;
+  }
+  .warn-badge {
+    font-size: 0.9rem;
+    color: var(--col-warn);
+    cursor: help;
+    transition: all 0.15s;
+    opacity: 0.7;
+  }
+  .warn-badge:hover {
+    color: #ff9500;
+    filter: drop-shadow(0 0 2px rgba(255, 149, 0, 0.5));
+    opacity: 1;
+  }
+  
+  /* Checkbox column */
+  .chk {
     position: relative;
-    outline: none;
-    transition: all 0.2s ease;
+    text-align: center;
   }
-
-  .select-cell input[type="checkbox"]:checked {
-    background-color: #646cff;
-    border-color: #646cff;
-  }
-
-  .select-cell input[type="checkbox"]:checked::after {
-    content: "";
-    position: absolute;
-    top: 2px;
-    left: 6px;
-    width: 5px;
-    height: 10px;
-    border: solid white;
-    border-width: 0 2px 2px 0;
-    transform: rotate(45deg);
-  }
-
-  .select-cell input[type="checkbox"]:hover {
-    border-color: rgba(255, 255, 255, 0.5);
-  }
-
-  .select-cell {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-  }
-
-  .installed-mods-section {
-    margin-top: 2rem;
-  }
-  
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1rem;
-  }
-  
-  h3 {
-    margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  
-  .header-actions {
-    display: flex;
-    gap: 0.5rem;
-  }
-  
-  .refresh-button, .check-updates-button {
-    background: rgba(255, 255, 255, 0.1);
-    border: none;
-    border-radius: 4px;
-    width: 2rem;
-    height: 2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  .sel-all {
+    color: #666;
     cursor: pointer;
-    transition: all 0.2s;
+    user-select: none;
+    transition: color 0.15s;
   }
-  
-  .refresh-button:hover, .check-updates-button:hover {
-    background: rgba(255, 255, 255, 0.2);
+  .sel-all:hover {
+    color: var(--text-secondary);
   }
-  
-  .checking-updates {
-    font-size: 0.8rem;
-    font-style: italic;
-    color: #ffa500;
-    font-weight: normal;
-  }
-  
-  .updates-badge {
-    font-size: 0.8rem;
-    background-color: #4caf50;
-    color: white;
-    padding: 0.2rem 0.5rem;
-    border-radius: 10px;
-    font-weight: normal;
-  }
-  
-  .disabled-badge {
-    font-size: 0.8rem;
-    background-color: #ff9800;
-    color: white;
-    padding: 0.2rem 0.5rem;
-    border-radius: 10px;
-    font-weight: normal;
-  }
-  
-  .mods-list {
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 8px;
-    padding: 0.5rem;
-  }
-  
-  /* NEW TABLE-BASED LAYOUT */
-  .table-header {
-    display: flex;
-    align-items: center;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.5rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  }
-  
-  .table-row {
-    display: flex;
-    align-items: center;
-    padding: 0.75rem 1rem;
-    overflow: hidden;
-  }
-  
-  /* FIXED COLUMN WIDTHS */
-  .header-checkbox,
-  .row-checkbox {
-    width: 60px;
-    flex-shrink: 0;
-    display: flex;
-    justify-content: center;
-  }
-  
-  .header-mod-name,
-  .row-mod-name {
-    width: 200px;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  
-  .header-location,
-  .row-location {
-    width: 180px;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    text-align: center;
-  }
-  
-  .header-version,
-  .row-version {
-    width: 120px;
-    flex-shrink: 0;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-  }
-  
-  .header-update,
-  .row-update {
-    width: 120px;
-    flex-shrink: 0;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-  }
-  
-  .header-actions,
-  .row-actions {
-    flex: 1;
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-  }
-  
-  /* HEADER STYLING */
-  .table-header > div {
-    font-weight: 500;
-    color: rgba(255, 255, 255, 0.7);
-    font-size: 0.9rem;
-  }
-  
-  /* DISABLED MODS TABLE (5 columns - no location) */
-  .disabled-table-header {
-    display: flex;
-    align-items: center;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.5rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  }
-  
-  .disabled-table-row {
-    display: flex;
-    align-items: center;
-    padding: 0.75rem 1rem;
-    overflow: hidden;
-  }
-  
-  /* DISABLED TABLE COLUMN WIDTHS (5 columns) */
-  .disabled-table-header .header-checkbox,
-  .disabled-table-row .row-checkbox {
-    width: 60px;
-    flex-shrink: 0;
-    display: flex;
-    justify-content: center;
-  }
-  
-  .disabled-table-header .header-mod-name,
-  .disabled-table-row .row-mod-name {
-    width: 250px;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  
-  .disabled-table-header .header-version,
-  .disabled-table-row .row-version {
-    width: 150px;
-    flex-shrink: 0;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-  }
-  
-  .disabled-table-header .header-update,
-  .disabled-table-row .row-update {
-    width: 150px;
-    flex-shrink: 0;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-  }
-  
-  .disabled-table-header .header-actions,
-  .disabled-table-row .row-actions {
-    flex: 1;
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-  }
-  
-  /* OLD GRID CSS - DISABLED */
-  .grid-header {
-    display: none;
-  }
-  
-
-  
-  .header-cell {
-    font-weight: 500;
-    color: rgba(255, 255, 255, 0.7);
-    font-size: 0.9rem;
-    text-align: center;
-  }
-  
-  .header-cell:first-child {
-    text-align: left;
-  }
-  
-  .header-cell:last-child {
-    text-align: right;
-  }
-  
-
-  
-  .mods-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-  
-  .no-mods {
-    text-align: center;
-    padding: 2rem;
-    color: rgba(255, 255, 255, 0.5);
-    font-style: italic;
-  }
-  
-  .mod-card {
-    background: rgba(255, 255, 255, 0.07);
-    border-radius: 8px;
-    overflow: hidden;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    transition: all 0.2s ease;
-  }
-  
-  .mod-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
-    border-color: rgba(255, 255, 255, 0.2);
-  }
-  
-  .mod-card.expanded {
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  }
-  
-  .mod-card.disabled {
-    background: rgba(255, 255, 255, 0.05);
-    border-left: 3px solid #ff9800;
-    opacity: 0.8;
-  }
-  
-  .disabled-tag {
-    font-size: 0.8rem;
-    background-color: rgba(255, 152, 0, 0.2);
-    color: #ffae42;
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-    font-weight: 500;
-  }
-  
-
-  
-
-  
-  .mod-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    max-width: 100%;
-    overflow: hidden;
-  }
-  
-  .mod-name {
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 200px;
-    color: rgba(255, 255, 255, 1);
-    font-size: 1rem;
-    text-shadow: 0px 1px 2px rgba(0, 0, 0, 0.3);
-  }
-
-  .mod-category-container {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    margin-top: 0.25rem;
-    max-width: 100%;
-    width: 100%;
-  }
-
-  .mod-category-select {
-    padding: 0.2rem 0.3rem;
-    background: rgba(255, 255, 255, 0.1);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 4px;
-    color: white;
-    font-size: 0.75rem;
-    width: 100%;
-    cursor: pointer;
-  }
-
-  .mod-category-select:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.15);
-  }
-
-  .mod-category-select:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .mod-required-checkbox {
-    margin-top: 0.2rem;
-    font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.9);
-  }
-
-  .mod-required-checkbox label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    cursor: pointer;
-  }
-
-  .mod-required-checkbox input[type="checkbox"] {
-    cursor: pointer;
-  }
-
-  .mod-required-checkbox input[type="checkbox"]:disabled {
-    cursor: not-allowed;
-    opacity: 0.6;
-  }
-  
-  .mod-version-column, 
-  .mod-update-column {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    gap: 0.25rem;
-    max-width: 100%;
-    overflow: hidden;
-    width: 100%;
-  }
-  
-  .update-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.5rem;
-    width: 100%;
-    padding: 0.25rem;
-  }
-
-  .update-reason {
-    font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.6);
-    text-align: center;
-    max-width: 100px;
-    word-wrap: break-word;
-    line-height: 1.2;
-  }
-  
-  .version-tag, .mc-version-tag {
-    background: rgba(100, 108, 255, 0.2);
-    color: #a0a8ff;
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-    font-size: 0.8rem;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  
-  .version-tag.current-version {
-    background: rgba(76, 175, 80, 0.2);
-    color: #66bb6a;
-    font-weight: 500;
-  }
-  
-  .version-tag.new-version {
-    background: rgba(255, 152, 0, 0.2);
-    color: #ffae42;
-    font-weight: 500;
-    margin-bottom: 0.25rem;
-    padding: 0.2rem 0.6rem;
-  }
-  
-  .mc-version-tag {
-    background: rgba(255, 152, 0, 0.2);
-    color: #ffae42;
-  }
-  
-  .up-to-date {
-    font-size: 0.85rem;
-    color: rgba(255, 255, 255, 0.6);
-    font-style: italic;
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  
-  .mod-actions {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 0.5rem;
-    max-width: 100%;
-    overflow: hidden;
-    width: 100%;
-  }
-  
-  .delete-button, .update-button, .disable-button, .enable-button, .update-all-button {
-    padding: 0.35rem 0.75rem;
-    border: none;
-    border-radius: 6px;
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  
-  .delete-button {
-    background: rgba(244, 67, 54, 0.2);
-    color: #ff6b6b;
-    padding: 0.35rem 0.75rem;
-    width: 100%;
-    text-align: center;
-    min-height: 2.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  
-  .delete-button:hover {
-    background: rgba(244, 67, 54, 0.3);
-  }
-
-  .bulk-actions {
-    display: flex;
-    gap: 0.5rem;
-    margin-left: 0.5rem;
-  }
-
-  .delete-selected, .disable-selected {
-    padding: 0.35rem 0.75rem;
-    border: none;
-    border-radius: 6px;
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: all 0.2s;
-    white-space: nowrap;
-  }
-
-  .delete-selected {
-    background: rgba(244, 67, 54, 0.2);
-    color: #ff6b6b;
-    font-weight: 500;
-  }
-
-  .delete-selected:hover:not(:disabled) {
-    background: rgba(244, 67, 54, 0.3);
-  }
-
-  .disable-selected {
-    background: rgba(255, 152, 0, 0.2);
-    color: #ffae42;
-    font-weight: 500;
-  }
-
-  .disable-selected:hover:not(:disabled) {
-    background: rgba(255, 152, 0, 0.3);
-  }
-  
-  .update-button {
-    background: #1bd96a;
-    color: #000;
-    font-weight: 600;
-    padding: 0.35rem 0.75rem;
-    border-radius: 6px;
-    border: none;
-    cursor: pointer;
-    transition: all 0.2s;
-    white-space: nowrap;
-    width: 100%;
-    text-align: center;
-  }
-  
-  .update-button:hover {
-    background: #0ec258;
-    transform: translateY(-1px);
-  }
-  
-  .update-all-button {
-    background: #1bd96a;
-    color: #000;
-    font-weight: 600;
-    padding: 0.35rem 0.75rem;
-    border-radius: 6px;
-    border: none;
-    cursor: pointer;
-    transition: all 0.2s;
-    white-space: nowrap;
-  }
-  
-  .update-all-button:hover {
-    background: #0ec258;
-    transform: translateY(-1px);
-  }
-  
-  .update-all-button:disabled {
-    background: #1bd96a88;
-    cursor: not-allowed;
-    transform: none;
-  }
-  
-  .disable-button {
-    background: rgba(255, 152, 0, 0.2);
-    color: #ffae42;
-    padding: 0.35rem 0.75rem;
-    border-radius: 6px;
-    width: 100%;
-    text-align: center;
-    min-height: 2.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  
-  .disable-button:hover {
-    background: rgba(255, 152, 0, 0.3);
-  }
-  
-  .enable-button {
-    background: rgba(76, 175, 80, 0.2);
-    color: #66bb6a;
-    padding: 0.35rem 0.75rem;
-    border-radius: 6px;
-    width: 100%;
-    text-align: center;
-    min-height: 2.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  
-  .enable-button:hover {
-    background: rgba(76, 175, 80, 0.3);
-  }
-
-  .enable-update-button {
-    background: rgba(33, 150, 243, 0.2);
-    color: #42a5f5;
-    padding: 0.35rem 0.75rem;
-    border-radius: 6px;
-    width: 100%;
-    text-align: center;
-    min-height: 2.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 600;
-    border: 1px solid rgba(33, 150, 243, 0.3);
-  }
-  
-  .enable-update-button:hover {
-    background: rgba(33, 150, 243, 0.3);
-    transform: translateY(-1px);
-  }
-  
-  .version-toggle-button {
-    background: rgba(255, 255, 255, 0.1);
-    border: none;
-    border-radius: 4px;
-    width: 2rem;
-    height: 2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all 0.2s;
-    align-self: center;
-  }
-  
-  .version-toggle-button:hover {
-    background: rgba(255, 255, 255, 0.2);
-  }
-  
-  .version-toggle-icon {
-    font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.7);
-  }
-  
-  .installed-mod-versions {
-    padding: 0.75rem;
-    background: rgba(0, 0, 0, 0.3);
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-    width: 100%;
-    box-sizing: border-box;
-  }
-  
-  .loading-versions, .no-versions, .no-version-info {
-    text-align: center;
-    padding: 1rem;
-    color: rgba(255, 255, 255, 0.7);
-    font-size: 0.9rem;
-  }
-  
-  .mod-versions {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    width: 100%;
-  }
-  
-  .mod-version-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.75rem;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 4px;
-    text-align: left;
-    width: 100%;
-    box-sizing: border-box;
-    border: none;
-    color: inherit;
-    font-family: inherit;
-    font-size: inherit;
-    transition: background-color 0.15s;
-  }
-  
-  .mod-version-item:hover {
-    background: rgba(255, 255, 255, 0.1);
-  }
-  
-  .mod-version-item.current {
-    background: rgba(100, 108, 255, 0.2);
-    border-left: 3px solid #646cff;
-  }
-  
-  .version-info {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    max-width: 70%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  
-  .version-number {
-    font-weight: 500;
-    font-size: 14px;
-    color: rgba(255, 255, 255, 0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  
-  .version-status {
-    color: #4caf50;
-    font-weight: 500;
-  }
-  
-  .version-controls {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-  }
-  
-  .select-version {
-    white-space: nowrap;
-    padding: 4px 12px;
-    font-size: 13px;
-    border-radius: 4px;
-    border: none;
-    background: #646cff;
-    color: white;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  
-  .select-version:hover {
-    background: #7a81ff;
-  }
-  
-  .mod-status {
-    width: 1rem;
-    height: 1rem;
-    border-radius: 50%;
-    background-color: rgba(255, 255, 255, 0.2);
-  }
-  
-  .mod-status.updating {
-    background-color: #ffa726;
-    animation: pulse 1.5s infinite;
-  }
-  
-  .mod-status.success {
-    background-color: #66bb6a;
-  }
-  
-  .mod-status.error {
-    background-color: #ff6b6b;
-  }
-  
-  .compatibility-badge {
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-    font-size: 0.8rem;
-  }
-  
-  .compatibility-badge.compatible {
-    background-color: rgba(76, 175, 80, 0.1);
-    border: 1px solid rgba(76, 175, 80, 0.3);
-    color: rgba(76, 175, 80, 0.9);
-  }
-  
-  /* Compatibility warning dialog */
-  .compatibility-warning-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-  
-  .compatibility-warning-dialog {
-    background: #2a2a2a;
-    border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-    width: 90%;
-    max-width: 600px;
-    max-height: 80vh;
-    padding: 1.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-  
-  .compatibility-warning-dialog h3 {
-    color: #ff9800;
-    margin: 0;
-    text-align: center;
-    font-size: 1.2rem;
-  }
-  
-  .compatibility-warning-dialog h4 {
-    color: rgba(255, 255, 255, 0.9);
-    margin: 1rem 0 0.5rem 0;
-    font-size: 1rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    padding-bottom: 0.25rem;
-  }
-  
-  .warnings-container {
-    max-height: 50vh;
-    overflow-y: auto;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 4px;
-    padding: 1rem;
-  }
-  
-  .warning-item {
-    margin-bottom: 1rem;
-    padding-bottom: 1rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  .chk input[type="checkbox"] {
     position: relative;
+    z-index: 1;
+  }
+  .ok { color: var(--col-ok); font-size: 0.75rem; }
+  .act { 
+    white-space: nowrap; 
+    text-align: right; 
   }
   
-  .warning-item:last-child {
+  .act button {
+    display: block;
+    margin-bottom: 2px;
+    width: 100%;
+  }
+  
+  .act button:last-child {
     margin-bottom: 0;
-    padding-bottom: 0;
-    border-bottom: none;
+  }
+  .no-results {
+    text-align: center;
+    color: #666;
+    font-style: italic;
+    padding: 20px !important;
   }
   
-  .warning-item.missing {
-    border-left: 3px solid #f44336;
-    padding-left: 0.5rem;
-  }
-  
-  .warning-item.version-mismatch {
-    border-left: 3px solid #ff9800; 
-    padding-left: 0.5rem;
-  }
-  
-  .warning-item.update {
-    border-left: 3px solid #4caf50;
-    padding-left: 0.5rem;
-  }
-  
-  .warning-item.disabled {
-    border-left: 3px solid #ff9800;
-    padding-left: 0.5rem;
-  }
-  
-  .warning-badge {
-    position: absolute;
-    top: 0;
-    right: 0;
-    font-size: 0.7rem;
-    padding: 0.1rem 0.3rem;
+  /* ——————————————————— compact tag badges ——————————————————— */
+  .tag {
+    display: inline-block; 
+    padding: 0 6px; 
     border-radius: 3px;
+    font-size: 0.72rem; 
+    line-height: 18px; 
+    user-select: none;
+    border: none;
+    font-family: inherit;
+  }
+  .tag.ok { background: #123b20; color: var(--col-ok); }
+  .tag.new { background: #0b2c48; color: #4af; }
+  .tag.clickable { 
+    cursor: pointer; 
+    transition: all 0.15s; 
+  }
+  .tag.clickable:hover:not(:disabled) { 
+    background: #165a7a; 
+    color: #6cf; 
+  }
+  .tag.clickable:disabled { 
+    opacity: 0.5; 
+    cursor: not-allowed; 
+  }
+
+  /* Status badges */
+  .status-badge {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
     text-transform: uppercase;
   }
-  
-  .warning-item.missing .warning-badge {
-    background: rgba(244, 67, 54, 0.2);
-    color: #ff6b6b;
+
+  .status-badge.enabled {
+    background: rgba(34, 197, 94, 0.2);
+    color: #22c55e;
+    border: 1px solid rgba(34, 197, 94, 0.3);
   }
-  
-  .warning-item.version-mismatch .warning-badge {
-    background: rgba(255, 152, 0, 0.2);
-    color: #ffae42;
+
+  .status-badge.disabled {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.3);
   }
-  
-  .warning-item.update .warning-badge {
-    background: rgba(76, 175, 80, 0.2);
-    color: #66bb6a;
+
+  /* ——————————————————— versions expander ——————————————————— */
+  .versions { 
+    display: flex; 
+    flex-wrap: wrap; 
+    gap: 4px; 
+    padding: 4px; 
+    background: #101010; 
+    border: 1px solid #333; 
+    border-radius: 4px; 
   }
-  
-  .warning-item.disabled .warning-badge {
-    background: rgba(255, 152, 0, 0.2);
-    color: #ffae42;
+  .versions button { 
+    padding: 2px 6px; 
+    font-size: 0.75rem; 
+    border-radius: 3px; 
+    background: #262626; 
+    border: 1px solid #444; 
+    color: #ccc; 
+    cursor: pointer; 
   }
-  
-  .version-detail {
-    display: flex;
-    justify-content: space-between;
-    margin-top: 0.5rem;
-    font-size: 0.85rem;
+  .versions button:hover:not(:disabled) { background: #2d2d2d; }
+  .versions button.sel { 
+    background: #09f; 
+    border-color: #49f; 
+    color: #fff; 
+    cursor: default; 
   }
-  
-  .warning-message {
-    color: rgba(255, 255, 255, 0.9);
-    line-height: 1.4;
-  }
-  
-  .warning-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    margin-top: 1rem;
-  }
-  
-  .warning-cancel, .warning-proceed, .warning-install {
-    padding: 0.5rem 1rem;
-    border-radius: 4px;
+  .err, .loading { color: #f66; font-size: 0.8rem; }
+
+  /* ——————————————————— buttons ——————————————————— */
+  button { font: inherit; cursor: pointer; border: none; border-radius: 3px; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .sm { font-size: 0.75rem; padding: 2px 6px; }
+  .ghost { background: none; color: #bbb; }
+  .ghost:hover:not(:disabled) { color: #eee; }
+  .primary { background: var(--col-primary); color: #fff; }
+  .primary:hover:not(:disabled) { background: #006dd9; }
+  .danger { background: var(--col-danger); color: #fff; }
+  .danger:hover:not(:disabled) { background: #922; }
+  .warn { background: var(--col-warn); color: #222; }
+  .warn:hover:not(:disabled) { background: #ad7f00; }
+
+
+  /* ——————————————————— toolbar buttons ——————————————————— */
+  .icon-btn {
+    padding: 4px 8px; 
+    font-size: 0.8rem; 
+    background: none; 
+    color: #bbb;
     border: none;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  
-  .warning-cancel {
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
-  }
-  
-  .warning-proceed {
-    background: #ff9800;
-    color: #fff;
-  }
-  
-  .warning-install {
-    background: #4caf50;
-    color: #fff;
-  }
-  
-  .warning-cancel:hover {
-    background: rgba(255, 255, 255, 0.2);
-  }
-  
-  .warning-proceed:hover {
-    background: #f57c00;
-  }
-  
-  .warning-install:hover {
-    background: #388e3c;
-  }
-  
-  @keyframes pulse {
-    0% { opacity: 0.5; }
-    50% { opacity: 1; }
-    100% { opacity: 0.5; }
-  }
-  
-  .loading-spinner {
-    display: inline-block;
-    animation: spin 1.5s linear infinite;
-  }
-  
-  @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-  }
-  
-  .button-row {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    width: 100%;
-  }
-  
-  .button-row .delete-button,
-  .button-row .disable-button,
-  .button-row .enable-button,
-  .button-row .enable-update-button {
-    flex: 1;
-    min-height: 2.2rem;
-  }
-  
-  .disabled-mods-section {
-    margin-top: 2rem;
-  }
-  
-  .check-updates-button:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.3);
-  }
-  
-  .check-compatibility-button {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    width: 2rem;
-    height: 2rem;
-    background: rgba(255, 255, 255, 0.1);
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    transition: all 0.2s;
-    font-size: 1rem;
-  }
-  
-  .check-compatibility-button:hover {
-    background: rgba(255, 255, 255, 0.3);
-  }
-  
-  /* Make header-actions buttons fit content */
-  .header-actions .delete-button,
-  .header-actions .disable-button,
-  .header-actions .enable-button {
-    width: auto;
-    flex: none;
-  }
-  
-
-
-  .required-by {
-    font-size: 0.85rem;
-    color: #ffae42;
-    margin-top: 0.25rem;
-    margin-bottom: 0.25rem;
-  }
-
-  .lock-icon { margin-right: 0.3em; }
-
-  .mod-action-button:disabled, .delete-button:disabled, .disable-button:disabled, .enable-button:disabled, .enable-update-button:disabled, .update-button:disabled, .select-version:disabled {
-    background: #444 !important;
-    color: #aaa !important;
-    cursor: not-allowed !important;
-    opacity: 0.7;
-    text-decoration: line-through;
-  }
-
-  .mod-location-column {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    max-width: 100%;
-    overflow: hidden;
-  }
-  
-  .location-content {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.5rem;
-    width: 100%;
-  }
-  
-  .location-tag {
-    padding: 4px 8px;
-    border-radius: 12px;
-    font-size: 0.8rem;
-    font-weight: 500;
-    text-align: center;
-    white-space: nowrap;
-  }
-  
-  .server-tag {
-    background-color: #6c7ae0;
-    color: white;
-  }
-  
-  .client-tag {
-    background-color: #50c878;
-    color: white;
-  }
-  
-  .both-tag {
-    background-color: #ffa500;
-    color: white;
-  }
-  
-  /* Add category-based coloring to mod cards */
-  .mod-card.server-only {
-    border-left: 3px solid #6c7ae0;
-  }
-  
-  .mod-card.client-only {
-    border-left: 3px solid #50c878;
-  }
-  
-  .mod-card.both {
-    border-left: 3px solid #ffa500;
-  }
-  
-  /* Version info container */
-  .version-info-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.25rem;
-  }
-  
-  /* Compatibility status indicators */
-  .compatibility-status {
-    font-size: 0.75rem;
-    padding: 0.2rem 0.4rem;
-    border-radius: 4px;
-    margin-top: 0.3rem;
-    text-align: center;
-    font-weight: 500;
-  }
-  
-  .compatibility-status.compatible {
-    background: rgba(76, 175, 80, 0.2);
-    color: #66bb6a;
-    border: 1px solid rgba(76, 175, 80, 0.3);
-  }
-  
-  .compatibility-status.incompatible {
-    background: rgba(244, 67, 54, 0.2);
-    color: #ff6b6b;
-    border: 1px solid rgba(244, 67, 54, 0.3);
-  }
-  
-  .compatibility-status.unknown {
-    background: rgba(255, 152, 0, 0.2);
-    color: #ffae42;
-    border: 1px solid rgba(255, 152, 0, 0.3);
-  }
-  
-  /* Mini compatibility status for disabled mods */
-  .compatibility-status-mini {
-    font-size: 0.65rem;
-    padding: 0.1rem 0.3rem;
     border-radius: 3px;
-    text-align: center;
-    font-weight: 400;
-    max-width: 100%;
-    word-wrap: break-word;
-    line-height: 1.1;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .icon-btn:hover:not(:disabled) { 
+    color: #fff; 
+    background: #2a2a2a; 
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   }
   
-  .compatibility-status-mini.compatible {
-    background: rgba(76, 175, 80, 0.15);
-    color: #66bb6a;
+  .add-mods-btn-outline {
+    padding: 4px 8px;
+    font-size: 0.8rem;
+    background: none;
+    color: #bbb;
+    border: 1px solid #444;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .add-mods-btn-outline:hover:not(:disabled) {
+    color: #ddd;
+    border-color: #666;
+    background: #2a2a2a;
+  }
+  .add-mods-btn-outline.drag-highlight {
+    outline: 2px dashed #4af;
+    background: #111;
+    color: #4af;
   }
   
-  .compatibility-status-mini.incompatible {
-    background: rgba(244, 67, 54, 0.15);
-    color: #ff6b6b;
+  /* ——————————————————— search box ——————————————————— */
+  .search-container {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .search-input {
+    width: 160px;
+    padding: 3px 8px;
+    font-size: 0.8rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 3px;
+    transition: all 0.15s;
+  }
+  .search-input:focus {
+    outline: none;
+    border-color: #4af;
+    background: #222;
+    box-shadow: 0 0 0 2px rgba(68, 170, 255, 0.2);
+  }
+  .search-clear {
+    position: absolute;
+    right: 4px;
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 0;
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 2px;
+  }
+  .search-clear:hover {
+    background: #333;
+    color: #ccc;
   }
   
-  .compatibility-status-mini.unknown {
-    background: rgba(255, 152, 0, 0.15);
-    color: #ffae42;
-  }
-  
-  /* Updated text styling */
-  .no-update {
-    color: rgba(255, 255, 255, 0.6);
-    font-style: italic;
+  /* ——————————————————— keyboard hint ——————————————————— */
+  .keyboard-hint {
     font-size: 0.9rem;
+    color: #666;
+    cursor: help;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: color 0.15s;
+  }
+  .keyboard-hint:hover {
+    color: #aaa;
+  }
+  
+  /* ——————————————————— drop zone ——————————————————— */
+  .drop-zone-container {
+    margin: 8px 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .drop-zone-full.drag-highlight {
+    outline: 2px dashed #4af;
+    background: rgba(68, 170, 255, 0.1);
+  }
+  
+  .drop-zone-full {
+    position: relative;
+    padding: 24px;
+    border: 2px dashed #444;
+    border-radius: 8px;
+    background: #1a1a1a;
+    text-align: center;
+    max-width: 600px;
+    width: 100%;
+  }
+  .drop-zone-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  .drop-icon {
+    font-size: 2rem;
+  }
+  .drop-or {
+    color: #666;
+    margin: 0;
+  }
+  .browse-btn {
+    background: #2a2a2a;
+    color: #ddd;
+    border: 1px solid #444;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .browse-btn:hover {
+    background: #333;
+  }
+  .collapse-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: #333;
+    color: #bbb;
+    border: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 3px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .collapse-btn:hover {
+    background: #444;
+    color: #ddd;
+  }
+
+
+
+  /* ——————————————————— responsive ——————————————————— */
+  @media (min-width: 900px) {
+    /* Adaptive row height - more compact when there's space */
+    .mods-table {
+      --row-py: 2px;
+  }
+    .mods-table tbody tr {
+      height: 44px;
+    }
+  }
+  
+  @media (max-width: 768px) {
+    .mods-header { flex-direction: column; align-items: stretch; }
+    .mods-header .left { justify-content: center; }
+    .bulk { justify-content: center; }
+    .loc { display: none; }
+    .act { text-align: center; }
   }
 </style> 

@@ -325,6 +325,20 @@
                       </div>
                     {/if}
                     
+                    {#if acknowledgments.length > 0}
+                      <div class="compact-mod-section">
+                        <h4>🔗 Need Acknowledgment:</h4>
+                        <div class="compact-mod-list">
+                          {#each acknowledgments as ack (ack.fileName)}
+                            <div class="compact-mod-item acknowledgment">
+                              <span class="mod-name">{ack.fileName}</span>
+                              <span class="dependency-badge">{ack.reason || 'required as dependency'}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+                    
                     <!-- Action buttons -->
                     {#if totalUpdatesNeeded > 0}
                       <button class="action-button" on:click={onDownloadModsClick}>
@@ -517,9 +531,12 @@
   .client-main {
     display: flex;
     flex-direction: column;
-    max-width: 1200px;
-    margin: 0 auto;
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
     gap: 0.25rem;
+    padding: 0;
+    box-sizing: border-box;
   }
 
   /* Improved Status Header */
@@ -641,6 +658,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
+    margin-top: 0;
   }
 
   .ready-header {
@@ -701,6 +719,8 @@
     font-size: 0.9rem;
     border-top: 1px solid #334155;
     gap: 1rem;
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .server-detail-card {
@@ -742,10 +762,13 @@
     display: flex;
     gap: 1rem;
     flex-wrap: wrap;
+    justify-content: center;
     padding: 0.5rem;
     background: rgba(17, 24, 39, 0.3);
     border-radius: 6px;
     border-top: 1px solid #334155;
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .status-indicator {
@@ -796,6 +819,8 @@
     border-radius: 6px;
     padding: 0.75rem;
     border-top: 1px solid #334155;
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .detail-section h3 {
@@ -814,6 +839,7 @@
   .memory-settings-compact {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 0.75rem;
     font-size: 0.9rem;
     background: rgba(31, 41, 55, 0.4);
@@ -821,6 +847,8 @@
     border-radius: 6px;
     padding: 0.5rem 0.75rem;
     border-top: 1px solid #334155;
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .memory-label {
@@ -859,6 +887,8 @@
     background: rgba(17, 24, 39, 0.2);
     border-radius: 6px;
     border-top: 1px solid #334155;
+    width: 100%;
+    box-sizing: border-box;
   }
 
   .debug-toggle-compact {
@@ -930,6 +960,7 @@
     cursor: pointer !important;
     transition: all 0.2s !important;
     margin: 0.5rem 0 0 0 !important;
+    width: 100% !important;
   }
 
   .action-button:hover {
@@ -948,6 +979,7 @@
     cursor: pointer !important;
     transition: all 0.2s !important;
     margin: 0.5rem 0 0 0 !important;
+    width: 100% !important;
   }
 
   .acknowledge-button:hover {
@@ -1003,6 +1035,11 @@
     background: rgba(239, 68, 68, 0.1);
   }
 
+  .compact-mod-item.acknowledgment {
+    border-left-color: #10b981;
+    background: rgba(16, 185, 129, 0.1);
+  }
+
   .compact-mod-item .mod-name {
     color: #e5e7eb;
     font-weight: 500;
@@ -1033,6 +1070,16 @@
   .removal-badge {
     background: rgba(239, 68, 68, 0.2);
     color: #f87171;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .dependency-badge {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
     font-size: 0.75rem;

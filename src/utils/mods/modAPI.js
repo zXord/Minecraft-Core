@@ -86,64 +86,88 @@ export async function loadMods(serverPath) {
       modsList.push(...extractedMods);
     }
     
-    // Log the results for debugging
-    
     // Store all mods in the installedMods store
     installedMods.set(modsList);
     
-    // Load existing saved categories first
+    // Load existing saved categories first - with multiple attempts if needed
     const { loadModCategories } = await import('../../stores/modStore.js');
-    await loadModCategories();
+    
+    // Try loading categories multiple times to ensure they're properly loaded
+    let categoriesLoaded = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await loadModCategories();
+        const currentCategories = get(modCategories);
+        if (currentCategories.size > 0 || modsList.length === 0) {
+          categoriesLoaded = true;
+          break;
+        }
+        // Small delay before retry
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } catch (error) {
+        console.warn(`Category loading attempt ${attempt + 1} failed:`, error);
+      }
+    }
     
     // Get current categories to merge with new mod data
     let currentCategories = get(modCategories);
     
-    // If categories are unexpectedly empty but we have mods, try loading again
-    if (currentCategories.size === 0 && result.mods && result.mods.length > 0) {
-      await loadModCategories();
-      currentCategories = get(modCategories);
+    // If we have mod data but no categories loaded, this indicates a persistence issue
+    if (!categoriesLoaded && result.mods && result.mods.length > 0) {
+      console.warn('Failed to load saved categories, initializing from scan results');
+      currentCategories = new Map();
     }
     
-    // If we have saved categories, preserve them and only update location info
+    // Always update categories based on current file locations
+    const updatedCategories = new Map();
+    
+    // First, preserve any existing category settings
     if (currentCategories.size > 0) {
-      
-      // Update mod categories based on file locations, preserving existing settings
-      const updatedCategories = new Map(currentCategories);
-      
-      result.mods?.forEach(mod => {
-        const existingCategoryInfo = currentCategories.get(mod.fileName);
-        
-        if (existingCategoryInfo) {
-          // Existing mod - preserve saved settings but update category if file location changed
-          updatedCategories.set(mod.fileName, {
-            category: mod.category, // Update to match current file location
-            required: existingCategoryInfo.required // Preserve saved requirement status
-          });
-        } else {
-          // New mod not in saved categories - set defaults
-          updatedCategories.set(mod.fileName, {
-            category: mod.category,
-            required: true // Default to required for new mods
-          });
-        }
+      currentCategories.forEach((value, key) => {
+        updatedCategories.set(key, { ...value });
       });
-      
-      modCategories.set(updatedCategories);
-    } else {
-      
-      // No saved categories - set up initial categories
-      const initialCategories = new Map();
-      
-      result.mods?.forEach(mod => {
-        initialCategories.set(mod.fileName, {
-          category: mod.category,
-          required: true // Default to required for initial setup
-        });
-      });
-      
-      modCategories.set(initialCategories);
     }
     
+    // Then update based on current file scan results
+    result.mods?.forEach(mod => {
+      const existingCategoryInfo = updatedCategories.get(mod.fileName);
+      
+      if (existingCategoryInfo) {
+        // Existing mod - preserve saved settings but update category if file location changed
+        updatedCategories.set(mod.fileName, {
+          category: mod.category, // Update to match current file location
+          required: existingCategoryInfo.required // Preserve saved requirement status
+        });
+      } else {
+        // New mod not in saved categories - set defaults
+        updatedCategories.set(mod.fileName, {
+          category: mod.category,
+          required: true // Default to required for new mods
+        });
+      }
+    });
+    
+    // Remove categories for mods that no longer exist
+    const currentModSet = new Set(modsList);
+    const categoriesToRemove = [];
+    updatedCategories.forEach((_, key) => {
+      if (!currentModSet.has(key)) {
+        categoriesToRemove.push(key);
+      }
+    });
+    categoriesToRemove.forEach(key => updatedCategories.delete(key));
+    
+    // Update the store with the merged categories
+    modCategories.set(updatedCategories);
+    
+    // Save updated categories to persistent storage
+    try {
+      const { saveModCategories } = await import('../../stores/modStore.js');
+      await saveModCategories();
+    } catch (error) {
+      console.warn('Failed to save updated mod categories:', error);
+    }
+
     // Get installed mod IDs and version info
     try {
       // Clear existing installedModInfo to ensure we get fresh data
@@ -191,11 +215,13 @@ export async function loadMods(serverPath) {
         checkForUpdates(serverPath)
       }, 500);
         return true;
-    } catch {
+    } catch (err) {
+      console.error('Error getting mod info:', err);
       // Continue without installed mod IDs, still consider this a success
       return true;
     }
   } catch (err) {
+    console.error('Fatal error in loadMods:', err);
     errorMessage.set(`Failed to load mods: ${err.message || 'Unknown error'}`);
     return false;
   } finally {

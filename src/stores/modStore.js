@@ -152,17 +152,20 @@ function getCategorizedMods() {
           // If the mod is just a string (filename)
           const modFileName = typeof mod === 'string' ? mod : mod.fileName;
           
-          const categoryInfo = $modCategories.get(modFileName) || { 
-            category: 'server-only', 
-            required: true 
-          };
+          const categoryInfo = $modCategories.get(modFileName);
           
-          return {
+          // If no category info found, provide safe defaults
+          const defaultCategory = 'server-only';
+          const defaultRequired = true;
+          
+          const result = {
             fileName: modFileName,
             name: modFileName.replace('.jar', ''),
-            category: categoryInfo.category,
-            required: categoryInfo.required
+            category: categoryInfo?.category || defaultCategory,
+            required: categoryInfo?.required !== undefined ? categoryInfo.required : defaultRequired
           };
+          
+          return result;
         });
       }
     );
@@ -291,7 +294,8 @@ export async function loadModCategories() {
     }
     
     return true;
-  } catch {
+  } catch (error) {
+    console.error('Error loading categories:', error);
     return false;
   }
 }
