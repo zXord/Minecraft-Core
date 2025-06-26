@@ -184,9 +184,9 @@
     
     // Dispatch to parent component for backend call
     dispatch('toggle', {
-      fileName: mod.fileName,
+        fileName: mod.fileName,
       enabled: !mod.enabled
-    });
+      });
   }
   async function updateMod(mod: DetailedMod) {
     if (!mod.hasUpdate || updatingMods.has(mod.fileName)) return;
@@ -404,13 +404,13 @@
                         ⏳ Loading...
                       </button>
                     {:else}
-                      <button class="toggle sm" 
-                              class:primary={!mod.enabled}
-                              class:warn={mod.enabled}
-                              on:click={() => toggleMod(mod)}
-                              title={mod.enabled ? 'Disable mod' : 'Enable mod'}>
-                        {mod.enabled ? 'Disable' : 'Enable'}
-                      </button>
+                    <button class="toggle sm" 
+                            class:primary={!mod.enabled}
+                            class:warn={mod.enabled}
+                            on:click={() => toggleMod(mod)}
+                            title={mod.enabled ? 'Disable mod' : 'Enable mod'}>
+                      {mod.enabled ? 'Disable' : 'Enable'}
+                    </button>
                     {/if}
                     <button class="danger sm" on:click={() => promptRemove(mod)} title="Remove mod">
                       🗑️

@@ -393,28 +393,41 @@
 <style>
   .players-page-container {
     width: 100%;
-    max-width: 1200px;
+    max-width: 100%;
     margin: 0 auto;
     padding: 0.5rem;
+    box-sizing: border-box;
+    overflow-x: hidden;
   }
   
   .players-grid {
-    display: flex;
-    flex-direction: row;
-    flex-wrap: nowrap;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 0.75rem;
     width: 100%;
-    overflow-x: auto;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  /* Responsive grid */
+  @media (max-width: 1000px) {
+    .players-grid {
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.5rem;
+    }
+  }
+
+  @media (max-width: 800px) {
+    .players-grid {
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 0.4rem;
+    }
   }
   
   .player-card {
     display: flex;
     flex-direction: column;
-    min-width: 220px;
-    max-width: 280px;
     width: 100%;
-    flex: 1;
     background: rgba(20, 20, 20, 0.7);
     border-radius: 6px;
     border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
@@ -455,6 +468,8 @@
     padding: 0.5rem;
     gap: 0.3rem;
     border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+    width: 100%;
+    box-sizing: border-box;
   }
   
   .player-input {
@@ -484,6 +499,8 @@
     cursor: pointer;
     transition: all 0.2s;
     min-width: 28px;
+    max-width: 32px;
+    flex-shrink: 0;
   }
   
   .add-button:hover {

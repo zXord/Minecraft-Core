@@ -206,19 +206,19 @@
       {/if}
     {/if}
     
-    {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
-      <button class="mod-action-btn secondary" on:click={downloadOptional}>
-        📥 Download Optional ({modSyncStatus.needsOptionalDownload})
-      </button>
-    {/if}
+          {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
+        <button class="mod-action-btn secondary" on:click={downloadOptional}>
+          📥 Download Optional ({modSyncStatus.needsOptionalDownload})
+        </button>
+      {/if}
   </div>
 
   {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
-    <div class="optional-mod-note">
-      <span class="note-icon">💡</span>
-      <span class="note-text">You can also download individual optional mods from the mods list below.</span>
-    </div>
-  {/if}
+      <div class="optional-mod-note">
+        <span class="note-icon">💡</span>
+        <span class="note-text">You can also download individual optional mods from the mods list below.</span>
+      </div>
+    {/if}
 
   <!-- Last Sync Info -->
   {#if modSyncStatus}

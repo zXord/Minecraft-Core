@@ -310,8 +310,7 @@
   }
 </script>
 
-<div class="version-updater">
-  <h3>Server Version Updater</h3>  <div class="version-select">    <select bind:value={selectedMC} on:change={onMCChange}>
+<div class="version-updater">  <div class="version-select">    <select bind:value={selectedMC} on:change={onMCChange}>
       <option value="" disabled selected>Select Minecraft Version</option>
       {#each mcVersions as v (v)}
         <option value={v}>
@@ -582,6 +581,62 @@
 />
 
 <style>
+  /* Remove ALL old container styling - this component is now wrapped in cards */
+  .version-updater {
+    background: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    max-width: none !important;
+  }
+
+  /* Override component-specific sizes for compactness */
+  .version-select select {
+    background: rgba(17, 24, 39, 0.6) !important;
+    border: 1px solid rgba(75, 85, 99, 0.4) !important;
+    color: #e2e8f0 !important;
+    border-radius: 4px !important;
+    padding: 0.3rem 0.5rem !important;
+    font-size: 0.8rem !important;
+    margin: 0.25rem 0 !important;
+  }
+
+  .check-btn,
+  .update-btn {
+    background: rgba(59, 130, 246, 0.3) !important;
+    border: 1px solid rgba(59, 130, 246, 0.5) !important;
+    color: #3b82f6 !important;
+    border-radius: 4px !important;
+    padding: 0.3rem 0.6rem !important;
+    font-size: 0.75rem !important;
+    margin: 0.25rem 0 !important;
+  }
+
+  .check-btn:hover:not(:disabled),
+  .update-btn:hover:not(:disabled) {
+    background: rgba(59, 130, 246, 0.5) !important;
+  }
+
+  /* Compact results containers */
+  .compat-results-container {
+    margin: 0.5rem 0 !important;
+    gap: 0.5rem !important;
+  }
+
+  .compat-results {
+    margin: 0.25rem 0 !important;
+    padding: 0.5rem !important;
+    border-radius: 4px !important;
+  }
+
+  .compat-results h4 {
+    margin: 0 0 0.25rem 0 !important;
+    font-size: 0.8rem !important;
+  }
+
+  /* Original styles continue below... */
   .version-updater {
     background-color: #272727;
     padding: 1.5rem;

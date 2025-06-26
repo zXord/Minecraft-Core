@@ -165,11 +165,28 @@ function createTray() {
  * Creates the main application window
  */
 function createWindow() {
-  // Get stored window bounds or use defaults
-  const { width, height } = appStore.get('windowBounds');
-  
-  // Get app settings
+  // Get app settings including window settings
   const appSettings = appStore.get('appSettings') || {};
+  
+  // Calculate window size based on settings
+  let windowWidth, windowHeight, isResizable;
+  
+  const windowPresets = {
+    small: { width: 1000, height: 700 },
+    medium: { width: 1200, height: 800 },
+    large: { width: 1400, height: 900 }
+  };
+  
+  if (appSettings.windowSize === 'custom') {
+    windowWidth = Math.max(800, Math.min(2560, appSettings.customWidth || 1200));
+    windowHeight = Math.max(600, Math.min(1440, appSettings.customHeight || 800));
+  } else {
+    const preset = windowPresets[appSettings.windowSize] || windowPresets.medium;
+    windowWidth = preset.width;
+    windowHeight = preset.height;
+  }
+  
+     isResizable = false; // Always lock window size
 
   // Debug: print the preload script path
   const preloadPath = path.join(__dirname, 'preload.cjs');
@@ -183,8 +200,9 @@ function createWindow() {
   }
 
   win = new BrowserWindow({
-    width,
-    height,
+    width: windowWidth,
+    height: windowHeight,
+    resizable: isResizable,
     icon: windowIcon, // Set the window icon
     webPreferences: {
       contextIsolation: true,
@@ -289,10 +307,13 @@ function createWindow() {
   // Always try dev server first (this ensures dev mode works)
   tryLoadURL('http://localhost:5173');
   
-  // Save window size when resized
+  // Save window size when resized (only if window is resizable)
   win.on('resize', () => {
-    const { width, height } = win.getBounds();
-    appStore.set('windowBounds', { width, height });
+    if (win.isResizable()) {
+      const { width, height } = win.getBounds();
+      // Update stored window bounds for fallback
+      appStore.set('windowBounds', { width, height });
+    }
   });
   
   // Event handler for window closed

@@ -199,6 +199,23 @@
     };
     
     checkExistingSetup();
+    
+    // Update content area width based on current window size
+    updateContentAreaWidth();
+    
+    // Listen for window resize events
+    window.addEventListener('resize', updateContentAreaWidth);
+    
+    // Enable layout debug by default so user can see outlines
+    setTimeout(() => {
+      enableLayoutDebug();
+      console.log('🎨 Layout debug enabled by default - check the colored outlines!');
+    }, 1000);
+    
+    // Cleanup on component destroy
+    return () => {
+      window.removeEventListener('resize', updateContentAreaWidth);
+    };
   });
   
   // Helper functions to handle reactive behavior manually
@@ -380,6 +397,159 @@
       instanceType = 'client';
     }
   }
+
+  // Update CSS variable for content area width based on window size
+  function updateContentAreaWidth() {
+    if (typeof window !== 'undefined') {
+      const windowWidth = window.innerWidth;
+      let contentWidth;
+
+      if (windowWidth <= 1000) {
+        contentWidth = Math.max(800, windowWidth - 200); // Small: minimum 800px with 200px buffer
+      } else if (windowWidth <= 1200) {
+        contentWidth = Math.max(900, windowWidth - 200); // Medium: minimum 900px
+      } else {
+        contentWidth = Math.max(1000, windowWidth - 200); // Large: minimum 1000px
+      }
+
+      // DEBUG: Log the width calculation
+      console.log('🔍 WIDTH DEBUG:', {
+        windowWidth,
+        contentWidth,
+        currentSetting: `${contentWidth}px`,
+        breakpoint: windowWidth <= 1000 ? 'Small' : windowWidth <= 1200 ? 'Medium' : 'Large',
+        buffer: 200,
+        minimum: windowWidth <= 1000 ? 800 : windowWidth <= 1200 ? 900 : 1000
+      });
+
+      // Update the CSS variable
+      document.documentElement.style.setProperty('--content-area-width', `${contentWidth}px`);
+      
+      // DEBUG: Verify it was set and show what changed
+      const actualValue = getComputedStyle(document.documentElement).getPropertyValue('--content-area-width');
+      console.log('✅ CSS Variable Updated:', {
+        old: document.documentElement.style.getPropertyValue('--content-area-width') || 'default',
+        new: actualValue,
+        element: 'document.documentElement'
+      });
+      
+      // Also ensure no horizontal scrolling on body/html
+      document.documentElement.style.overflowX = 'hidden';
+      document.body.style.overflowX = 'hidden';
+    }
+  }
+  
+  // DEBUG: Add visual layout debugging
+  function enableLayoutDebug() {
+    const debugCSS = `
+      .content-panel { outline: 3px solid red !important; }
+      .tab-content { outline: 2px solid blue !important; }
+      .mods-table { outline: 2px solid green !important; }
+      .table-container { outline: 2px solid orange !important; }
+      .mod-manager-content { outline: 2px solid purple !important; }
+      .main-content { outline: 4px solid yellow !important; } /* Main content width debug */
+      .client-content { outline: 3px solid cyan !important; } /* Client content debug */
+      .client-interface { outline: 3px solid lime !important; } /* Client interface debug */
+      .server-header { outline: 3px solid magenta !important; } /* Server header debug */
+      .client-header { outline: 3px solid pink !important; } /* Client header debug */
+    `;
+    
+    const style = document.createElement('style');
+    style.id = 'layout-debug';
+    style.textContent = debugCSS;
+    document.head.appendChild(style);
+    
+    // Also log width information for main containers
+    setTimeout(() => {
+      const mainContent = document.querySelector('.main-content');
+      const clientContent = document.querySelector('.client-content');
+      const clientInterface = document.querySelector('.client-interface');
+      const contentPanel = document.querySelector('.content-panel');
+      const tabContent = document.querySelector('.tab-content');
+      const serverHeader = document.querySelector('.server-header');
+      const clientHeader = document.querySelector('.client-header');
+      
+      console.log('📏 DETAILED WIDTH DEBUG:', {
+        windowWidth: window.innerWidth,
+        contentAreaVar: getComputedStyle(document.documentElement).getPropertyValue('--content-area-width'),
+        mainContent: mainContent ? `${mainContent['offsetWidth']}px (padding: ${getComputedStyle(mainContent).padding})` : 'not found',
+        clientContent: clientContent ? `${clientContent['offsetWidth']}px (padding: ${getComputedStyle(clientContent).padding}, width: ${getComputedStyle(clientContent).width})` : 'not found',
+        clientInterface: clientInterface ? `${clientInterface['offsetWidth']}px (margin: ${getComputedStyle(clientInterface).margin})` : 'not found',
+        contentPanel: contentPanel ? `${contentPanel['offsetWidth']}px (width: ${getComputedStyle(contentPanel).width})` : 'not found',
+        tabContent: tabContent ? `${tabContent['offsetWidth']}px (padding: ${getComputedStyle(tabContent).padding})` : 'not found',
+        serverHeader: serverHeader ? `${serverHeader['offsetWidth']}px` : 'not found',
+        clientHeader: clientHeader ? `${clientHeader['offsetWidth']}px` : 'not found'
+      });
+      
+      // Log which instance type we're currently viewing
+      const title = document.querySelector('h1');
+      const instanceType = title ? title.textContent : 'unknown';
+      console.log(`🎯 Current Instance Type: ${instanceType}`);
+      
+      // DETAILED COMPARISON: Log the exact styles for comparison
+      if (clientContent) {
+        const clientStyles = getComputedStyle(clientContent);
+        console.log('🔵 CLIENT STYLES:', {
+          width: clientStyles.width,
+          padding: clientStyles.padding,
+          margin: clientStyles.margin,
+          boxSizing: clientStyles.boxSizing,
+          totalWidth: clientContent['offsetWidth'] + 'px'
+        });
+      }
+      
+      if (mainContent) {
+        const mainStyles = getComputedStyle(mainContent);
+        console.log('🟡 MAIN-CONTENT STYLES:', {
+          width: mainStyles.width,
+          padding: mainStyles.padding,
+          margin: mainStyles.margin,
+          boxSizing: mainStyles.boxSizing,
+          totalWidth: mainContent['offsetWidth'] + 'px',
+          instanceType: instanceType
+        });
+      }
+      
+      if (contentPanel) {
+        const panelStyles = getComputedStyle(contentPanel);
+        console.log('🔴 SERVER CONTENT-PANEL STYLES:', {
+          width: panelStyles.width,
+          padding: panelStyles.padding,
+          margin: panelStyles.margin,
+          boxSizing: panelStyles.boxSizing,
+          totalWidth: contentPanel['offsetWidth'] + 'px'
+        });
+      }
+      
+      if (tabContent) {
+        const tabStyles = getComputedStyle(tabContent);
+        console.log('🔵 SERVER TAB-CONTENT STYLES:', {
+          width: tabStyles.width,
+          padding: tabStyles.padding,
+          margin: tabStyles.margin,
+          boxSizing: tabStyles.boxSizing,
+          totalWidth: tabContent['offsetWidth'] + 'px'
+        });
+      }
+      
+    }, 500);
+    
+    console.log('🎨 Layout Debug Enabled - Check element outlines!');
+  }
+  
+  function disableLayoutDebug() {
+    const existingStyle = document.getElementById('layout-debug');
+    if (existingStyle) {
+      existingStyle.remove();
+      console.log('🎨 Layout Debug Disabled');
+    }
+  }
+  
+  // Make debug functions available globally
+  if (typeof window !== 'undefined') {
+    window['enableLayoutDebug'] = enableLayoutDebug;
+    window['disableLayoutDebug'] = disableLayoutDebug;
+  }
 </script>
 
 <main class="app-container">
@@ -512,7 +682,7 @@
           </div>
         </div>
       {:else if instanceType === 'server'}
-        <header class="app-header">
+        <header class="server-header">
           <div class="header-title-row">
             <h1>Minecraft Core</h1>
             <button 
@@ -523,66 +693,73 @@
             >
               ⚙️
             </button>
-          </div>          <nav class="tabs-container">
+          </div>
+          <div class="server-tabs">
             {#each tabs as t (t)}
               <button
-                class="tab-button"
-                class:active={$route === '/' + t}
+                class="server-tab-button {$route === '/' + t ? 'active' : ''}"
                 on:click={() => navigate('/' + t)}
               >
                 {#if t === 'dashboard'}
-                  <span class="tab-icon">📊</span>
+                  📊 Dashboard
                 {:else if t === 'players'}
-                  <span class="tab-icon">👥</span>
+                  👥 Players
                 {:else if t === 'mods'}
-                  <span class="tab-icon">🧩</span>
+                  🧩 Mods
                 {:else if t === 'backups'}
-                  <span class="tab-icon">💾</span>
+                  💾 Backups
                 {:else if t === 'settings'}
-                  <span class="tab-icon">⚙️</span>
+                  ⚙️ Settings
                 {/if}
-                <span class="tab-text">{t[0].toUpperCase() + t.slice(1)}</span>
               </button>
             {/each}
-          </nav>
+          </div>
         </header>
         
         <!-- Tab content container -->
         <div class="tab-content">
           {#if $route === '/dashboard'}
-            <ServerDashboard serverPath={path} />
+            <div class="content-panel">
+              <ServerDashboard serverPath={path} />
+            </div>
           {:else if $route === '/players'}
             <div class="content-panel">
               <PlayerList serverPath={path} />
             </div>
           {:else if $route === '/mods'}
-            <ModsPage serverPath={path} />
+            <div class="content-panel">
+              <ModsPage serverPath={path} />
+            </div>
           {:else if $route === '/backups'}
             <div class="content-panel">
               <Backups serverPath={path} />
-            </div>          {:else if $route === '/settings'}
-            <SettingsPage              serverPath={path} 
-              currentInstance={currentInstance} 
-              on:deleted={(e) => {
-                // Remove the instance from the list
-                instances = instances.filter(i => i.id !== e.detail.id);
-                
-                // Switch to a different instance if available, otherwise show empty state
-                if (instances.length > 0) {
-                  currentInstance = instances[0];
-                  if (currentInstance.type === 'server') {
-                    path = currentInstance.path;
-                    instanceType = 'server';
+            </div>
+          {:else if $route === '/settings'}
+            <div class="content-panel">
+              <SettingsPage
+                serverPath={path} 
+                currentInstance={currentInstance} 
+                on:deleted={(e) => {
+                  // Remove the instance from the list
+                  instances = instances.filter(i => i.id !== e.detail.id);
+                  
+                  // Switch to a different instance if available, otherwise show empty state
+                  if (instances.length > 0) {
+                    currentInstance = instances[0];
+                    if (currentInstance.type === 'server') {
+                      path = currentInstance.path;
+                      instanceType = 'server';
+                    } else {
+                      instanceType = 'client';
+                    }
                   } else {
-                    instanceType = 'client';
+                    // Show empty state instead of forcing instance selector
+                    currentInstance = null;
+                    step = 'done';
                   }
-                } else {
-                  // Show empty state instead of forcing instance selector
-                  currentInstance = null;
-                  step = 'done';
-                }
-              }}
-            />
+                }}
+              />
+            </div>
           {/if}
         </div>
       {:else if instanceType === 'client'}        <ClientInterface 
@@ -650,6 +827,7 @@
     flex: 1;
     padding: 0;
     margin-left: 0;
+    box-sizing: border-box; /* Match other containers */
   }
 
   /* Setup container */
@@ -698,14 +876,16 @@
     font-size: 1rem;
   }
 
-  /* App header and tabs */
-  .app-header {
+  /* Server header design - matching client header style */
+  .server-header {
     background-color: #1f2937;
-    padding: 1rem 2rem;
+    padding: 0.5rem 2rem 0 2rem;
     display: flex;
     flex-direction: column;
     align-items: center;
-    border-bottom: 1px solid #374151;
+    border-bottom: none;
+    margin: 0;
+    min-height: 120px; /* Same as client header */
   }
 
   .header-title-row {
@@ -714,7 +894,6 @@
     justify-content: center;
     position: relative;
     width: 100%;
-    margin-bottom: 1.5rem;
   }
 
   h1 {
@@ -748,57 +927,87 @@
     transform: scale(1.05);
   }
 
-  .tabs-container {
+  /* Server tabs - horizontal layout like client */
+  .server-tabs {
     display: flex;
-    width: 100%;
-    background-color: #2d3748;
-    border-radius: 8px;
-    padding: 0.5rem;
-    justify-content: space-between;
-    margin-bottom: 0;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
   }
 
-  .tab-button {
-    flex: 1;
-    padding: 0.75rem 1rem;
-    border: none;
-    background: transparent;
-    color: #a0aec0;
-    cursor: pointer;
+  .server-tab-button {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: rgba(255, 255, 255, 0.8);
     border-radius: 6px;
-    margin: 0 0.25rem;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    transition: all 0.2s ease;
-  }
-
-  .tab-button:hover {
-    color: white;
-    background-color: #374151;
-  }
-
-  .tab-button.active {
-    background: #3b82f6;
-    color: white;
-  }
-
-  .tab-icon {
-    font-size: 1.25rem;
-    margin-bottom: 0.25rem;
-  }
-  .tab-text {
+    padding: 0.5rem 1rem;
+    font-size: 0.9rem;
     font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    white-space: nowrap;
   }
 
-  /* Tab content */
+  .server-tab-button:hover:not(.active) {
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
+    border-color: rgba(255, 255, 255, 0.3);
+    transform: translateY(-1px);
+  }
+
+  .server-tab-button.active {
+    background: rgba(59, 130, 246, 0.2);
+    color: #3b82f6;
+    border-color: rgba(59, 130, 246, 0.4);
+  }
+
+  .server-tab-button.active:hover {
+    background: rgba(59, 130, 246, 0.3);
+    border-color: rgba(59, 130, 246, 0.6);
+  }
+
+
+
+  /* Tab content - FIXED HORIZONTAL SIZING FOR ALL TABS */
   .tab-content {
-    padding: 2rem;
+    padding: 0.25rem 2rem 2rem 2rem; /* Reduced top padding from 1rem to 0.25rem */
+    position: relative;
+    box-sizing: border-box;
+    min-height: auto;
   }
 
   .content-panel {
-    max-width: 1200px;
+    /* RESPONSIVE WIDTH FOR ALL TAB CONTENT */
+    width: var(--content-area-width) !important;
     margin: 0 auto;
+    box-sizing: border-box !important;
+    padding: 0 !important; /* Consistent padding */
+  }
+
+  /* Force consistent dimensions for all tab content - FIXED OVERFLOW */
+  .content-panel > :global(*) {
+    /* Prevent overflow while maintaining responsiveness */
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 1rem;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+  }
+
+  /* Override any component-specific size rules - SAFER APPROACH */
+  :global(.backups-tab),
+  :global(.mod-manager),
+  :global(.dashboard-panel),
+  :global(.players-page-container) {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 1rem;
+    overflow-x: hidden; /* Prevent horizontal overflow */
   }
 
   /* Sidebar styles */
@@ -1127,34 +1336,33 @@
     font-size: 1.3rem;
   }
 
-  /* Ensure client components use consistent styling */
-  :global(.client-container) {
+  /* Minimal client styling - let component handle its own layout */
+  :global(.client-interface) {
     background-color: #1a1a1a;
     color: white;
-    padding: 0;
   }
   
-  :global(.client-container h2),
-  :global(.client-container h3) {
+  :global(.client-interface h2),
+  :global(.client-interface h3) {
     color: white;
   }
   
-  :global(.client-container .connection-form),
-  :global(.client-container .server-list) {
+  :global(.client-interface .connection-form),
+  :global(.client-interface .server-list) {
     background-color: #2d3748;
     border: 1px solid #4b5563;
   }
   
-  :global(.client-container .empty-state) {
+  :global(.client-interface .empty-state) {
     background-color: #374151;
     color: #a0aec0;
   }
   
-  :global(.client-container th) {
+  :global(.client-interface th) {
     background-color: #1f2937;
   }
   
-  :global(.client-container td) {
+  :global(.client-interface td) {
     border-bottom: 1px solid #4b5563;
   }
 </style>

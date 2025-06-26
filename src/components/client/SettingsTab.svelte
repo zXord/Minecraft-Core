@@ -76,7 +76,7 @@
   }
 </script>
 
-<div class="settings-container">
+      <div class="settings-container">
   <!-- Enhanced Compact Cards Layout -->
   <div class="settings-cards">
     <!-- Combined Status & Client Overview Card -->
@@ -101,7 +101,7 @@
               <span class="info-icon">📛</span>
               <span>Name</span>
             </div>
-            <span class="info-value">{instance.name || 'Unnamed Client'}</span>
+              <span class="info-value">{instance.name || 'Unnamed Client'}</span>
           </div>
           <div class="info-row enhanced" title="Management server address">
             <div class="info-label">
@@ -142,9 +142,9 @@
               <div class="status-badge {authStatus === 'authenticated' ? 'success' : 'error'}">
                 {authStatus === 'authenticated' ? '✅ Logged In' : '❌ Not Authenticated'}
               </div>
-            </div>
+          </div>
             <div class="section-content">
-              {#if authStatus === 'authenticated'}
+            {#if authStatus === 'authenticated'}
                 <p class="auth-description">Logged in as <strong>{username}</strong></p>
                 {#if lastAuthDate}
                   <p class="auth-date">Last login: {new Date(lastAuthDate).toLocaleDateString()}</p>
@@ -156,8 +156,8 @@
                   title="Re-authenticate"
                 >
                   {isAuthenticating ? '⏳ Authenticating...' : '🔄 Re-authenticate'}
-                </button>
-              {:else}
+              </button>
+            {:else}
                 <p class="auth-description">Microsoft authentication required</p>
                 <button 
                   class="modern-btn primary sm" 
@@ -166,11 +166,11 @@
                   title="Login with Microsoft"
                 >
                   {isAuthenticating ? '⏳ Authenticating...' : '🔑 Login with Microsoft'}
-                </button>
-              {/if}
+              </button>
+            {/if}
             </div>
           </div>
-
+          
           <!-- Client Management Section (60%) -->
           <div class="section management-section">
             <div class="section-header">
@@ -180,22 +180,22 @@
               {/if}
             </div>
             <div class="section-content">
-              {#if serverInfo?.minecraftVersion}
+            {#if serverInfo?.minecraftVersion}
                 <div class="client-status-compact">
                   <span class="status-label">Status:</span>
                   <div class="status-indicator {clientSyncStatus}">
-                    {#if clientSyncStatus === 'ready'}
-                      ✅ Ready
-                    {:else if clientSyncStatus === 'needed'}
+                {#if clientSyncStatus === 'ready'}
+                  ✅ Ready
+                {:else if clientSyncStatus === 'needed'}
                       ⚠️ Needs Download
-                    {:else if clientSyncStatus === 'downloading'}
+                {:else if clientSyncStatus === 'downloading'}
                       ⏳ Downloading...
-                    {:else}
-                      ❓ Unknown
-                    {/if}
+                {:else}
+                  ❓ Unknown
+                {/if}
                   </div>
                 </div>
-                
+              
                 <div class="action-buttons compact">
                   <button 
                     class="modern-btn secondary sm" 
@@ -204,7 +204,7 @@
                     title="Check client files integrity"
                   >
                     {isCheckingClient ? '⏳ Checking...' : '🔍 Check Files'}
-                  </button>
+                </button>
                   <button 
                     class="modern-btn warning sm" 
                     on:click={handleRedownload}
@@ -212,23 +212,23 @@
                     title="Re-download client files"
                   >
                     {isRedownloading ? '⏳ Downloading...' : '🔄 Re-download'}
-                  </button>
-                </div>
-                
+                </button>
+              </div>
+              
                 <p class="help-text">
                   If Minecraft won't launch, try re-downloading client files.
-                </p>
-              {:else}
+              </p>
+            {:else}
                 <div class="no-connection">
                   <p>❌ No server connection</p>
                 </div>
-              {/if}
+            {/if}
             </div>
           </div>
         </div>
       </div>
-    </div>
-
+          </div>
+          
     <!-- Enhanced Danger Zone Card -->
     <div class="settings-card danger-card">
       <div class="card-header">
@@ -237,37 +237,39 @@
       </div>
       <div class="card-content">
         <p class="danger-warning">Actions cannot be undone. Please be careful.</p>
-        
+            
         <div class="danger-actions">
-          {#if instance.path}
+            {#if instance.path}
             <div class="delete-option">
               <label class="checkbox-container" title="Include all client files in deletion">
-                <input type="checkbox" bind:checked={deleteFiles} />
+                  <input type="checkbox" bind:checked={deleteFiles} />
                 <span class="checkbox-label">Delete all client files</span>
-              </label>
+                </label>
               <p class="delete-path">{instance.path}</p>
-            </div>
-          {/if}
-          
-          <button 
+              </div>
+            {/if}
+            
+            <button 
             class="modern-btn danger sm" 
             on:click={handleDeleteInstance}
             disabled={isDeletingInstance}
             title="Permanently delete this client instance"
           >
             {isDeletingInstance ? '⏳ Deleting...' : '🗑️ Delete Instance'}
-          </button>
+            </button>
         </div>
       </div>
-    </div>
-  </div>
-</div>
+          </div>
+        </div>
+      </div>
 
 <style>
   .settings-container {
     padding: 1rem;
-    max-width: 1000px;
+    max-width: 100%;
     margin: 0 auto;
+    box-sizing: border-box;
+    overflow-x: hidden;
   }
 
   /* Enhanced Cards Layout */
@@ -481,10 +483,22 @@
     display: grid;
     gap: 1rem;
     grid-template-columns: 1fr 1fr;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 
   .dual-sections.asymmetric {
     grid-template-columns: 2fr 3fr;
+  }
+
+  /* Responsive dual sections */
+  @media (max-width: 800px) {
+    .dual-sections,
+    .dual-sections.asymmetric {
+      grid-template-columns: 1fr;
+      gap: 0.75rem;
+    }
   }
 
   .section {

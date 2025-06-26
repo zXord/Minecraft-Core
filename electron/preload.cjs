@@ -130,6 +130,7 @@ contextBridge.exposeInMainWorld('electron', {
       'get-app-settings',
       'get-app-version',
       'check-for-updates',
+      'set-window-size',
       // Application lifecycle
       'app-close-response',
       // Management server events

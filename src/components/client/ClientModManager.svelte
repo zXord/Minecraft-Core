@@ -660,7 +660,8 @@
         
         {#if $modSyncStatus}
           <span class="status-item">Required: {$modSyncStatus.synchronized && (!$modSyncStatus.needsAcknowledgment || $modSyncStatus.needsAcknowledgment === 0) ? '✅' : '⚠️'} {$requiredMods.length}/{$modSyncStatus.totalRequired || $requiredMods.length}</span>
-          <span class="status-item">Optional: {$modSyncStatus.needsOptionalDownload && $modSyncStatus.needsOptionalDownload > 0 ? '⚠️' : '✅'} {displayOptionalMods.length - ($modSyncStatus.needsOptionalDownload || 0)}/{displayOptionalMods.length}</span>
+          {@const optionalWork = ($modSyncStatus.missingOptionalMods?.length || 0) + ($modSyncStatus.outdatedOptionalMods?.length || 0)}
+          <span class="status-item">Optional: {optionalWork > 0 ? '⚠️' : '✅'} {displayOptionalMods.length - optionalWork}/{displayOptionalMods.length}</span>
         {/if}
       </div>
       
@@ -787,9 +788,11 @@
 <style>
   .client-mod-manager {
     width: 100%;
-    max-width: 1200px;
+    max-width: 100%;
     margin: 0 auto;
     padding: 1rem;
+    box-sizing: border-box;
+    overflow-x: hidden;
   }
 
   /* Compact status header */
@@ -804,6 +807,9 @@
     margin-bottom: 1.5rem;
     gap: 1rem;
     flex-wrap: wrap;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 
   .status-line {
@@ -964,6 +970,10 @@
     background-color: #1f2937;
     border-radius: 8px;
     border: 1px solid #374151;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow-x: hidden;
   }
 
   .error-message {

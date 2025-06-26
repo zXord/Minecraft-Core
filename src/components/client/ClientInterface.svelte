@@ -1987,10 +1987,28 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   // Debug removed - no longer needed
   
   onMount(() => {
+
     // Debug functions for testing - add to window object
     window['clearClientState'] = clearPersistedClientState;    window['forceClientModCheck'] = () => {
       checkClientModVersionCompatibility();
     };
+    
+    // Debug: Log that client interface is active
+    setTimeout(() => {
+      console.log('🎯 CLIENT INTERFACE LOADED - Classes should be active');
+      const clientContent = document.querySelector('.client-content');
+      const clientInterface = document.querySelector('.client-interface');
+      if (clientContent) {
+        console.log('✅ .client-content found:', clientContent['offsetWidth'], 'px');
+      } else {
+        console.log('❌ .client-content NOT FOUND');
+      }
+      if (clientInterface) {
+        console.log('✅ .client-interface found:', clientInterface['offsetWidth'], 'px');
+      } else {
+        console.log('❌ .client-interface NOT FOUND');
+      }
+    }, 100);
     
     // Initialize client functionality
     setupLauncherEvents();
@@ -2245,28 +2263,28 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 </script>
 
 <style>
-  .client-container {
-    display: flex;
-    flex-direction: column;
-    max-width: 1400px;
-    margin: 0 auto;
-    width: 100%;
+  /* Remove client-container - make this direct like server's tab-content */
+  .client-interface {
+    padding: 0.25rem 2rem 2rem 2rem; /* Same as server tab-content padding */
+    position: relative;
+    box-sizing: border-box;
+    min-height: auto;
   }
 
   .client-content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 2rem 0 2rem;
-    max-width: 100%;
-    box-sizing: border-box;
-    margin: 0;
+    /* Match server's content-panel exactly */
+    width: var(--content-area-width) !important; /* 800px like content-panel */
+    margin: 0 auto;
+    box-sizing: border-box !important;
+    padding: 0 !important; /* Let child components handle their own padding */
   }
 </style>
 
-<div class="client-container">
-  <ClientHeader {instance} {tabs} minecraftServerStatus={$clientState.minecraftServerStatus} {onOpenAppSettings} />
+<div class="client-interface">
+  <ClientHeader {tabs} {onOpenAppSettings} />
   <div class="client-content">
-    {#if $clientState.activeTab === 'play'}      <PlayTab
+    {#if $clientState.activeTab === 'play'}
+      <PlayTab
         {authStatus}
         {authenticateWithMicrosoft}
         {checkAuthentication}
@@ -2296,7 +2314,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {handleRefreshFromDashboard}
         {lastCheck}
         {isChecking}
-      />    {:else if $clientState.activeTab === 'mods'}      <ModsTab
+      />
+    {:else if $clientState.activeTab === 'mods'}
+      <ModsTab
         {instance}
         bind:clientModManagerComponent
         {modSyncStatus}
