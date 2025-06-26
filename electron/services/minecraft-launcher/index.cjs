@@ -52,8 +52,6 @@ class MinecraftLauncher extends EventEmitter {
     
 
     // utils.logSystemInfo(); // Use util function
-    // Update alias to use the downloader's method
-    this.downloadMinecraftClient = this.clientDownloader.downloadMinecraftClientSimple.bind(this.clientDownloader);
 
   }
   
@@ -179,30 +177,7 @@ class MinecraftLauncher extends EventEmitter {
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
     return this.clientDownloader.downloadMinecraftClientSimple(clientPath, minecraftVersion, options);
   }
-    // Manual download method for when automated downloads fail
-  async downloadMinecraftManually(clientPath, minecraftVersion) {
-    return this.legacyClientDownloader.downloadMinecraftManually(clientPath, minecraftVersion);
-  }
-  
-  // Helper method to download JSON with retry logic
-  async downloadJson(url, maxRetries = 3) {
-    return this.legacyClientDownloader.downloadJson(url, maxRetries);
-  }
-  
-  // Single JSON download attempt
-  async _downloadJsonSingle(url) {
-    return this.legacyClientDownloader._downloadJsonSingle(url);
-  }
-  
-  // Helper method to download file with retry logic
-  async downloadFile(url, filePath, maxRetries = 3) {
-    return this.legacyClientDownloader.downloadFile(url, filePath, maxRetries);
-  }
-  
-  // Single download attempt
-  async _downloadFileSingle(url, filePath) {
-    return this.legacyClientDownloader._downloadFileSingle(url, filePath);
-  }
+
     // Launch Minecraft client
   async launchMinecraft(options) {
     const {
@@ -732,10 +707,16 @@ class MinecraftLauncher extends EventEmitter {
     return this.clientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
   }
   
-  // Clear Minecraft client files for re-download
+  // Clear Minecraft client files for re-download (smart repair - only core files)
   async clearMinecraftClient(clientPath, minecraftVersion) {
     // Use the active downloader (XMCL now has this method)
     return this.clientDownloader.clearMinecraftClient(clientPath, minecraftVersion);
+  }
+
+  // Full clear - removes EVERYTHING including libraries and assets
+  async clearMinecraftClientFull(clientPath, minecraftVersion) {
+    // Use the active downloader (XMCL now has this method)
+    return this.clientDownloader.clearMinecraftClientFull(clientPath, minecraftVersion);
   }
 
   // Force clear just assets directory - useful when assets are corrupted
@@ -1137,8 +1118,6 @@ let launcherInstance = null;
 function getMinecraftLauncher() {
   if (!launcherInstance) {
     launcherInstance = new MinecraftLauncher();
-    // Redirect all calls to the new "Simple" downloader:
-    launcherInstance.downloadMinecraftClient = launcherInstance.downloadMinecraftClientSimple;
   }
   return launcherInstance;
 }

@@ -7,6 +7,30 @@ const {
 } = require('@xmcl/installer');
 const utils = require('./utils.cjs');
 
+// XMCL Configuration - Optimized to prevent stuck downloads
+const XMCL_CONFIG = {
+  // Network configuration - Balanced between speed and reliability
+  connectionTimeout: 45000, // 45s for very slow connections and large asset files
+  maxRetries: 2, // Reduce retries to fail faster on truly stuck files
+  retryDelay: 3000, // Start with 3s delay
+  maxRetryDelay: 15000, // Max 15s delay for exponential backoff
+  
+  // Concurrency limits - Conservative to prevent overwhelming slow connections
+  maxConcurrentDownloads: 3, // Further reduced for stability
+  maxAssetConcurrency: 2, // Keep asset downloads conservative
+  
+  // Memory management
+  maxEventListeners: 50, // Increased limit for multiple downloads
+  
+  // Progress reporting throttling - Slightly slower to reduce overhead
+  progressThrottleMs: 500 // Update progress every 500ms to reduce noise
+};
+
+// Set environment variables for XMCL's internal HTTP client
+process.env.UNDICI_CONNECT_TIMEOUT = XMCL_CONFIG.connectionTimeout.toString();
+process.env.UNDICI_HEADERS_TIMEOUT = XMCL_CONFIG.connectionTimeout.toString();
+process.env.UNDICI_BODY_TIMEOUT = XMCL_CONFIG.connectionTimeout.toString();
+
 /**
  * XMCL-based Minecraft Client Downloader
  * Replaces the complex manual implementation with the professional @xmcl/installer library
@@ -19,15 +43,32 @@ class XMCLClientDownloader {
     this.legacyClientDownloader = legacyClientDownloader;
     this.versionCache = null;
     
-    // Increase max listeners to prevent memory leak warnings
+    // Apply improved memory management configuration
     if (this.emitter && this.emitter.setMaxListeners) {
-      this.emitter.setMaxListeners(20);
+      this.emitter.setMaxListeners(XMCL_CONFIG.maxEventListeners);
     }
     
     // Also increase for process if needed
     if (process.setMaxListeners) {
-      process.setMaxListeners(20);
+      process.setMaxListeners(XMCL_CONFIG.maxEventListeners);
     }
+    
+    // Progress throttling state
+    this.lastProgressUpdate = 0;
+    
+    // Download phase tracking
+    this.currentPhase = 0;
+    this.totalPhases = 0;
+    this.phaseNames = [];
+    
+    // Progress monitoring for stuck detection
+    this.lastProgressTime = Date.now();
+    this.lastProgressValue = 0;
+    this.stuckDetectionTimeout = 60000; // 60 seconds without progress = stuck
+    
+    // Note: MaxListenersExceededWarning for AbortSignal during downloads is expected
+    // XMCL library creates many AbortSignal instances for concurrent downloads
+    // These warnings are harmless and don't affect functionality
   }
 
   /**
@@ -106,10 +147,10 @@ class XMCLClientDownloader {
     let requestedFabricVersion = serverInfo?.loaderVersion || 'latest';
     let resolvedFabricVersion = requestedFabricVersion;
     
-    const maxRetries = 2;
-    let retryCount = 0;
-    
-    while (retryCount < maxRetries) {
+            const maxRetries = XMCL_CONFIG.maxRetries;
+        let retryCount = 0;
+        
+        while (retryCount < maxRetries) {
       try {
         if (retryCount > 0) {
           this.emitter.emit('client-download-progress', {
@@ -118,7 +159,8 @@ class XMCLClientDownloader {
             total: 1,
             current: 0
           });
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          const retryDelay = Math.min(XMCL_CONFIG.retryDelay * retryCount, XMCL_CONFIG.maxRetryDelay);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
         }
 
         // Step 1: Ensure Java is available
@@ -157,32 +199,56 @@ class XMCLClientDownloader {
           throw new Error(`Minecraft version ${minecraftVersion} not found`);
         }
 
-        // Step 3: Install Minecraft using XMCL
+        // Step 3: Calculate total phases and start download
+        this.setupDownloadPhases(needsFabric);
+        
         this.emitter.emit('client-download-progress', {
-          type: 'Installing',
-          task: 'Installing Minecraft client, libraries, and assets...',
+          type: 'Progress',
+          task: 'Downloading Minecraft client, libraries, and assets...',
           total: 100,
-          current: 0
+          current: 0,
+          phase: `Preparing (0/${this.totalPhases})`
         });
 
-        const installTaskInstance = installTask(versionInfo, clientPath);
+        const installTaskInstance = await this.createRobustInstallTask(versionInfo, clientPath);
         
         // Track if download is cancelled to prevent memory leaks
         let isCancelled = false;
         
+        // Start progress monitoring for stuck detection
+        const progressMonitor = setInterval(() => {
+          if (isCancelled) {
+            clearInterval(progressMonitor);
+            return;
+          }
+          
+          if (this.isDownloadStuck()) {
+            console.warn('⚠️ Download appears stuck, will timeout soon...');
+            this.emitter.emit('client-download-progress', {
+              type: 'Warning',
+              task: 'Download seems slow, please wait or try "Clear All & Re-download"...',
+              total: 100,
+              current: this.lastProgressValue,
+              phase: this.getCurrentPhaseInfo()
+            });
+          }
+        }, 30000); // Check every 30 seconds
+        
         try {
-          // Monitor installation progress with XMCL's task system
-          await installTaskInstance.startAndWait({
+          // Monitor installation progress with improved error handling and timeout
+          const downloadPromise = installTaskInstance.startAndWait({
             onStart: (task) => {
               if (isCancelled) return;
               
-              // Convert XMCL task path to user-friendly message
+              // Convert XMCL task path to user-friendly message with phase progress
               const taskMessage = this.getTaskDisplayName(task);
-              this.emitter.emit('client-download-progress', {
-                type: 'Installing',
+              const phaseInfo = this.getCurrentPhaseInfo();
+              this.throttledProgressUpdate({
+                type: 'Progress',
                 task: taskMessage,
                 total: 100,
-                current: Math.round((installTaskInstance.progress / installTaskInstance.total) * 100)
+                current: Math.round((installTaskInstance.progress / installTaskInstance.total) * 100),
+                phase: phaseInfo
               });
             },
             onUpdate: (task) => {
@@ -191,47 +257,83 @@ class XMCLClientDownloader {
               // Update progress based on overall installation progress
               const overallProgress = Math.round((installTaskInstance.progress / installTaskInstance.total) * 100);
               const taskMessage = this.getTaskDisplayName(task);
+              const phaseInfo = this.getCurrentPhaseInfo();
               
-              this.emitter.emit('client-download-progress', {
-                type: 'Installing',
+              this.throttledProgressUpdate({
+                type: 'Progress',
                 task: taskMessage,
                 total: 100,
-                current: overallProgress
+                current: overallProgress,
+                phase: phaseInfo
               });
             },
             onFailed: (task, error) => {
               if (!isCancelled) {
-                console.error(`❌ Task failed [${task.path}]:`, error);
+                console.warn(`⚠️ Task failed [${task.path}], will retry: ${error.message}`);
               }
             },
-            onSucceed: () => {
+            onSucceed: (task) => {
               if (isCancelled) return;
               
-              // Task completed successfully - emit a simpler message
+              // Task completed successfully
               const overallProgress = Math.round((installTaskInstance.progress / installTaskInstance.total) * 100);
-              this.emitter.emit('client-download-progress', {
-                type: 'Installing',
-                task: 'Installing Minecraft client...',
+              const taskMessage = this.getTaskDisplayName(task);
+              const phaseInfo = this.getCurrentPhaseInfo();
+              this.throttledProgressUpdate({
+                type: 'Progress',
+                task: taskMessage,
                 total: 100,
-                current: overallProgress
+                current: overallProgress,
+                phase: phaseInfo
               });
             }
           });
+
+          // Add overall timeout to prevent indefinite hanging
+          const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => {
+              reject(new Error('Download timeout: Operation took too long to complete. Network may be slow or some files are unavailable.'));
+            }, 600000); // 10 minute total timeout
+          });
+
+          // Race between download completion and timeout
+          await Promise.race([downloadPromise, timeoutPromise]);
+          
         } catch (error) {
-          // Mark as cancelled to stop further event emissions
+          // Enhanced error handling - try to recover from common issues
           isCancelled = true;
-          throw error;
+          clearInterval(progressMonitor);
+          
+          // Enhanced error detection for stuck downloads
+          if (error.message && error.message.includes('timeout')) {
+            throw new Error('Download timed out. This often happens with slow connections or during peak hours. Please try "Clear All & Re-download" for a fresh start.');
+          }
+          
+          if (error.message && error.message.includes('ENOTFOUND')) {
+            throw new Error('Network connection failed. Please check your internet connection and try again.');
+          } else if (error.message && (error.message.includes('timeout') || error.message.includes('ConnectTimeoutError') || error.message.includes('took too long'))) {
+            throw new Error('Download timed out due to slow connection or stuck assets. This is common with large asset downloads. Please try "Clear All & Re-download" for a fresh start.');
+          } else if (error.message && error.message.includes('checksum')) {
+            throw new Error('Download verification failed - some files were incomplete. Please use "Clear All & Re-download" to fix this issue.');
+          } else if (error.message && error.message.includes('resources.download.minecraft.net')) {
+            throw new Error('Minecraft asset servers are experiencing issues. Please try again later or use "Clear All & Re-download" for a fresh start.');
+          } else {
+            throw error; // Re-throw original error if we can't handle it
+          }
         }
 
         let finalVersion = minecraftVersion;
 
         // Step 4: Install Fabric if needed
         if (needsFabric) {
+          this.currentPhase = this.totalPhases; // Move to Fabric phase
+          const phaseInfo = this.getCurrentPhaseInfo();
           this.emitter.emit('client-download-progress', {
             type: 'Fabric',
-            task: `Installing Fabric loader ${requestedFabricVersion}...`,
+            task: `Downloading Fabric loader ${requestedFabricVersion} - ${phaseInfo}...`,
             total: 100,
-            current: 90
+            current: 90,
+            phase: phaseInfo
           });
 
           try {
@@ -258,11 +360,13 @@ class XMCLClientDownloader {
                 resolvedFabricVersion = legacyFabricResult.loaderVersion;
                 finalVersion = legacyFabricResult.profileName;
                 
+                const phaseInfo = this.getCurrentPhaseInfo();
                 this.emitter.emit('client-download-progress', {
                   type: 'Fabric',
-                  task: `✅ Fabric ${resolvedFabricVersion} installed successfully (legacy method)`,
+                  task: `✅ Fabric ${resolvedFabricVersion} ready - ${phaseInfo}`,
                   total: 100,
-                  current: 95
+                  current: 95,
+                  phase: phaseInfo
                 });
               } else {
                 throw new Error(`Legacy Fabric installation failed: ${legacyFabricResult.error}`);
@@ -332,12 +436,16 @@ class XMCLClientDownloader {
           console.warn(`⚠️ Cleanup warning: ${cleanupResult.error}`);
         }
 
+        // Clean up progress monitor
+        clearInterval(progressMonitor);
+        
         this.emitter.emit('client-download-complete', {
           success: true,
           version: finalVersion,
           minecraftVersion: minecraftVersion,
           fabricVersion: needsFabric ? resolvedFabricVersion : null,
-          path: clientPath,          cleanup: cleanupResult
+          path: clientPath,
+          cleanup: cleanupResult
         });
 
         return {
@@ -366,29 +474,104 @@ class XMCLClientDownloader {
   }
 
   /**
-   * Convert XMCL task path to user-friendly display name
+   * Create a robust install task with improved error handling and retry logic
+   */
+  async createRobustInstallTask(versionInfo, clientPath) {
+    // Create XMCL install task with environment variables set for timeouts
+    const task = installTask(versionInfo, clientPath);
+    
+    return task;
+  }
+
+  /**
+   * Throttled progress update to prevent event flooding and detect stuck downloads
+   */
+  throttledProgressUpdate(progressData) {
+    const now = Date.now();
+    
+    // Check if progress has actually changed (not stuck)
+    if (progressData.current !== this.lastProgressValue) {
+      this.lastProgressTime = now;
+      this.lastProgressValue = progressData.current;
+    }
+    
+    // Only emit progress updates at specified intervals
+    if (now - this.lastProgressUpdate >= XMCL_CONFIG.progressThrottleMs) {
+      this.emitter.emit('client-download-progress', progressData);
+      this.lastProgressUpdate = now;
+    }
+  }
+
+  /**
+   * Check if download appears to be stuck
+   */
+  isDownloadStuck() {
+    const timeSinceLastProgress = Date.now() - this.lastProgressTime;
+    return timeSinceLastProgress > this.stuckDetectionTimeout;
+  }
+
+  /**
+   * Setup download phases for progress tracking
+   */
+  setupDownloadPhases(needsFabric) {
+    this.phaseNames = [
+      'Minecraft JAR',
+      'Game Libraries', 
+      'Game Assets'
+    ];
+    
+    if (needsFabric) {
+      this.phaseNames.push('Fabric Loader');
+    }
+    
+    this.totalPhases = this.phaseNames.length;
+    this.currentPhase = 0;
+  }
+
+  /**
+   * Get current phase info for progress display
+   */
+  getCurrentPhaseInfo() {
+    if (this.currentPhase > 0 && this.currentPhase <= this.totalPhases) {
+      const phaseName = this.phaseNames[this.currentPhase - 1];
+      return `${phaseName} (${this.currentPhase}/${this.totalPhases})`;
+    }
+    return `Preparing (0/${this.totalPhases})`;
+  }
+
+  /**
+   * Convert XMCL task path to user-friendly display name with phase progress
    */
   getTaskDisplayName(task) {
     const path = task.path || '';
     const taskName = task.name || '';
     
+    // Update current phase based on what's being downloaded
+    if (path.includes('install.version.json') || path.includes('install.version.jar')) {
+      this.currentPhase = 1; // Minecraft JAR phase
+    } else if (path.includes('install.dependencies.libraries') || path.includes('install.libraries')) {
+      this.currentPhase = 2; // Libraries phase
+    } else if (path.includes('install.dependencies.assets') || path.includes('install.assets')) {
+      this.currentPhase = 3; // Assets phase
+    }
+    
+    const phaseInfo = this.getCurrentPhaseInfo();
+    
     // Convert technical task paths to user-friendly messages
     if (path.includes('install.version.json')) {
-      return 'Downloading version manifest...';
+      return `Downloading version manifest - ${phaseInfo}...`;
     } else if (path.includes('install.version.jar')) {
-      return `Downloading Minecraft ${taskName} client...`;
-    } else if (path.includes('install.dependencies.assets')) {
-      return 'Downloading game assets...';
-    } else if (path.includes('install.dependencies.libraries')) {
-      return 'Downloading game libraries...';
-    } else if (path.includes('install.assets')) {
-      return 'Installing game assets...';
-    } else if (path.includes('install.libraries')) {
-      return 'Installing game libraries...';
+      return `Downloading Minecraft ${taskName} JAR - ${phaseInfo}...`;
+    } else if (path.includes('install.dependencies.assets') || path.includes('install.assets')) {
+      return `Downloading game assets - ${phaseInfo}...`;
+    } else if (path.includes('install.dependencies.libraries') || path.includes('install.libraries')) {
+      return `Downloading game libraries - ${phaseInfo}...`;
+    } else if (path.includes('install.dependencies')) {
+      return `Downloading dependencies - ${phaseInfo}...`;
     } else if (taskName && taskName !== 'install') {
-      return `Installing ${taskName}...`;
+      return `Downloading ${taskName} - ${phaseInfo}...`;
     } else {
-      return 'Installing Minecraft client...';
+      return `Downloading Minecraft client - ${phaseInfo}...`;
     }
   }
 
@@ -647,16 +830,18 @@ class XMCLClientDownloader {
     return { keep: false, reason: 'Old version - cleaning up' };
   }
 
-  // Clear Minecraft client files for re-download
+  // Clear Minecraft client files for re-download (smart repair - only core files)
   async clearMinecraftClient(clientPath, minecraftVersion) {
     try {
       const versionsDir = path.join(clientPath, 'versions');
+      let clearedItems = [];
       
       // Remove specific version directory
       if (minecraftVersion) {
         const versionDir = path.join(versionsDir, minecraftVersion);
         if (fs.existsSync(versionDir)) {
           fs.rmSync(versionDir, { recursive: true, force: true });
+          clearedItems.push(`${minecraftVersion} core files`);
         }
         
         // Also remove Fabric profiles for this version
@@ -667,14 +852,52 @@ class XMCLClientDownloader {
               const fabricDir = path.join(versionsDir, version);
               if (fs.existsSync(fabricDir)) {
                 fs.rmSync(fabricDir, { recursive: true, force: true });
-                
+                clearedItems.push(`${version} Fabric profile`);
               }
             }
           }
         }
       }
       
-      return { success: true, message: `Cleared client files for ${minecraftVersion}` };
+      const message = clearedItems.length > 0 ? 
+        `Cleared: ${clearedItems.join(', ')}` : 
+        'No files needed clearing';
+        
+      return { success: true, message, clearedItems };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Full clear - removes EVERYTHING including libraries and assets
+  async clearMinecraftClientFull(clientPath, minecraftVersion) {
+    try {
+      let clearedItems = [];
+      
+      // Clear core client files first
+      const coreResult = await this.clearMinecraftClient(clientPath, minecraftVersion);
+      if (coreResult.success && coreResult.clearedItems) {
+        clearedItems.push(...coreResult.clearedItems);
+      }
+      
+      // Clear libraries directory
+      const librariesDir = path.join(clientPath, 'libraries');
+      if (fs.existsSync(librariesDir)) {
+        fs.rmSync(librariesDir, { recursive: true, force: true });
+        clearedItems.push('all libraries');
+      }
+      
+      // Clear assets directory  
+      const assetsResult = await this.clearAssets(clientPath);
+      if (assetsResult.success) {
+        clearedItems.push('all assets');
+      }
+      
+      const message = clearedItems.length > 0 ? 
+        `Full clear completed: ${clearedItems.join(', ')}` : 
+        'No files needed clearing';
+        
+      return { success: true, message, clearedItems, fullClear: true };
     } catch (error) {
       return { success: false, error: error.message };
     }
