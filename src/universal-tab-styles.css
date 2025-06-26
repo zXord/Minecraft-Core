@@ -144,8 +144,33 @@
    CONSISTENT CONTENT AREA SIZING
    ============================================================================= */
 
-/* Remove client-specific sizing - use server's dynamic system */
-/* Client content will inherit the same responsive width as server content */
+/* Ensure client content areas match server content areas exactly */
+.client-content {
+  width: var(--content-area-width) !important;
+  max-width: var(--content-area-width) !important;
+  margin: 0 auto !important;
+  box-sizing: border-box !important;
+  padding: 0 1rem !important; /* Add side padding to prevent cutoff */
+}
+
+.client-interface {
+  width: 100% !important; /* Use full width, let content control its own width */
+  max-width: none !important;
+  margin: 0 !important;
+  box-sizing: border-box !important;
+  min-height: calc(100vh - 100px) !important; /* Reduced header height account */
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  padding: 0 !important; /* Remove padding, let content handle it */
+}
+
+.client-header {
+  width: var(--content-area-width) !important;
+  max-width: var(--content-area-width) !important;
+  margin: 0 auto !important;
+  box-sizing: border-box !important;
+  padding-top: 0.25rem !important; /* Reduce top padding */
+}
 
 /* =============================================================================
    MOBILE RESPONSIVE DESIGN

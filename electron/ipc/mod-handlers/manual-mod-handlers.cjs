@@ -671,7 +671,7 @@ function createManualModHandlers() {
     },
 
     // Update multiple client-side mods to new versions
-    // Removed loaderType from parameters as it's unused
+  
     'update-client-mods': async (_event, { mods, clientPath, minecraftVersion }) => {
       try {
         

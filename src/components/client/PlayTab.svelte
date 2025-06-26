@@ -503,14 +503,10 @@
               </div>
             </div>
           {:else}
-            <!-- Catch-all for debugging -->
+            <!-- Fallback authentication state -->
             <div class="auth-section">
-              <h2>Status Check</h2>
-              <p>Connection: {$clientState.connectionStatus}</p>
-              <p>Auth Status: {authStatus}</p>
-              <p>Username: {username || 'None'}</p>
-              <p>Auth Data: {authData ? 'Present' : 'Missing'}</p>
-              <p>Condition Check: {authStatus === 'authenticated' || (username && authData)}</p>
+              <h2>Authentication Required</h2>
+              <p>Please authenticate with your Microsoft account to continue.</p>
               <div style="display: flex; gap: 1rem; justify-content: center; margin-top: 1rem;">
                 <button class="auth-button" on:click={checkAuthentication}>
                   🔄 Check Authentication
@@ -557,7 +553,7 @@
   .status-header-container {
     display: flex;
     gap: 0.75rem;
-    margin: 1rem 0 0.75rem 0;
+    margin: 0 0 1rem 0; /* Consistent bottom margin */
     justify-content: center;
   }
 

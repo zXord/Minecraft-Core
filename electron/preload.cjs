@@ -8,7 +8,7 @@ const listenerMap = new Map();
 contextBridge.exposeInMainWorld('electron', {
   // Add file path handling for dropped files
   invoke: (channel, ...args) => {
-    // Log all requested channels for debugging
+  
     
     const validChannels = [
       'select-mod-files',

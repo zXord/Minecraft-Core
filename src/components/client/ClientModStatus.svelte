@@ -206,10 +206,10 @@
       {/if}
     {/if}
     
-          {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
+    {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
         <button class="mod-action-btn secondary" on:click={downloadOptional}>
           📥 Download Optional ({modSyncStatus.needsOptionalDownload})
-        </button>
+      </button>
       {/if}
   </div>
 

@@ -91,6 +91,8 @@
   onMount(() => {
     setupIpcListeners();
     
+
+    
     // 1) First, set up the restoration listeners BEFORE anything else
     window.electron.on('update-server-path', (newPath) => {
       if (newPath) {
@@ -206,11 +208,7 @@
     // Listen for window resize events
     window.addEventListener('resize', updateContentAreaWidth);
     
-    // Enable layout debug by default so user can see outlines
-    setTimeout(() => {
-      enableLayoutDebug();
-      console.log('🎨 Layout debug enabled by default - check the colored outlines!');
-    }, 1000);
+
     
     // Cleanup on component destroy
     return () => {
@@ -412,26 +410,8 @@
         contentWidth = Math.max(1000, windowWidth - 200); // Large: minimum 1000px
       }
 
-      // DEBUG: Log the width calculation
-      console.log('🔍 WIDTH DEBUG:', {
-        windowWidth,
-        contentWidth,
-        currentSetting: `${contentWidth}px`,
-        breakpoint: windowWidth <= 1000 ? 'Small' : windowWidth <= 1200 ? 'Medium' : 'Large',
-        buffer: 200,
-        minimum: windowWidth <= 1000 ? 800 : windowWidth <= 1200 ? 900 : 1000
-      });
-
       // Update the CSS variable
       document.documentElement.style.setProperty('--content-area-width', `${contentWidth}px`);
-      
-      // DEBUG: Verify it was set and show what changed
-      const actualValue = getComputedStyle(document.documentElement).getPropertyValue('--content-area-width');
-      console.log('✅ CSS Variable Updated:', {
-        old: document.documentElement.style.getPropertyValue('--content-area-width') || 'default',
-        new: actualValue,
-        element: 'document.documentElement'
-      });
       
       // Also ensure no horizontal scrolling on body/html
       document.documentElement.style.overflowX = 'hidden';
@@ -439,117 +419,7 @@
     }
   }
   
-  // DEBUG: Add visual layout debugging
-  function enableLayoutDebug() {
-    const debugCSS = `
-      .content-panel { outline: 3px solid red !important; }
-      .tab-content { outline: 2px solid blue !important; }
-      .mods-table { outline: 2px solid green !important; }
-      .table-container { outline: 2px solid orange !important; }
-      .mod-manager-content { outline: 2px solid purple !important; }
-      .main-content { outline: 4px solid yellow !important; } /* Main content width debug */
-      .client-content { outline: 3px solid cyan !important; } /* Client content debug */
-      .client-interface { outline: 3px solid lime !important; } /* Client interface debug */
-      .server-header { outline: 3px solid magenta !important; } /* Server header debug */
-      .client-header { outline: 3px solid pink !important; } /* Client header debug */
-    `;
-    
-    const style = document.createElement('style');
-    style.id = 'layout-debug';
-    style.textContent = debugCSS;
-    document.head.appendChild(style);
-    
-    // Also log width information for main containers
-    setTimeout(() => {
-      const mainContent = document.querySelector('.main-content');
-      const clientContent = document.querySelector('.client-content');
-      const clientInterface = document.querySelector('.client-interface');
-      const contentPanel = document.querySelector('.content-panel');
-      const tabContent = document.querySelector('.tab-content');
-      const serverHeader = document.querySelector('.server-header');
-      const clientHeader = document.querySelector('.client-header');
-      
-      console.log('📏 DETAILED WIDTH DEBUG:', {
-        windowWidth: window.innerWidth,
-        contentAreaVar: getComputedStyle(document.documentElement).getPropertyValue('--content-area-width'),
-        mainContent: mainContent ? `${mainContent['offsetWidth']}px (padding: ${getComputedStyle(mainContent).padding})` : 'not found',
-        clientContent: clientContent ? `${clientContent['offsetWidth']}px (padding: ${getComputedStyle(clientContent).padding}, width: ${getComputedStyle(clientContent).width})` : 'not found',
-        clientInterface: clientInterface ? `${clientInterface['offsetWidth']}px (margin: ${getComputedStyle(clientInterface).margin})` : 'not found',
-        contentPanel: contentPanel ? `${contentPanel['offsetWidth']}px (width: ${getComputedStyle(contentPanel).width})` : 'not found',
-        tabContent: tabContent ? `${tabContent['offsetWidth']}px (padding: ${getComputedStyle(tabContent).padding})` : 'not found',
-        serverHeader: serverHeader ? `${serverHeader['offsetWidth']}px` : 'not found',
-        clientHeader: clientHeader ? `${clientHeader['offsetWidth']}px` : 'not found'
-      });
-      
-      // Log which instance type we're currently viewing
-      const title = document.querySelector('h1');
-      const instanceType = title ? title.textContent : 'unknown';
-      console.log(`🎯 Current Instance Type: ${instanceType}`);
-      
-      // DETAILED COMPARISON: Log the exact styles for comparison
-      if (clientContent) {
-        const clientStyles = getComputedStyle(clientContent);
-        console.log('🔵 CLIENT STYLES:', {
-          width: clientStyles.width,
-          padding: clientStyles.padding,
-          margin: clientStyles.margin,
-          boxSizing: clientStyles.boxSizing,
-          totalWidth: clientContent['offsetWidth'] + 'px'
-        });
-      }
-      
-      if (mainContent) {
-        const mainStyles = getComputedStyle(mainContent);
-        console.log('🟡 MAIN-CONTENT STYLES:', {
-          width: mainStyles.width,
-          padding: mainStyles.padding,
-          margin: mainStyles.margin,
-          boxSizing: mainStyles.boxSizing,
-          totalWidth: mainContent['offsetWidth'] + 'px',
-          instanceType: instanceType
-        });
-      }
-      
-      if (contentPanel) {
-        const panelStyles = getComputedStyle(contentPanel);
-        console.log('🔴 SERVER CONTENT-PANEL STYLES:', {
-          width: panelStyles.width,
-          padding: panelStyles.padding,
-          margin: panelStyles.margin,
-          boxSizing: panelStyles.boxSizing,
-          totalWidth: contentPanel['offsetWidth'] + 'px'
-        });
-      }
-      
-      if (tabContent) {
-        const tabStyles = getComputedStyle(tabContent);
-        console.log('🔵 SERVER TAB-CONTENT STYLES:', {
-          width: tabStyles.width,
-          padding: tabStyles.padding,
-          margin: tabStyles.margin,
-          boxSizing: tabStyles.boxSizing,
-          totalWidth: tabContent['offsetWidth'] + 'px'
-        });
-      }
-      
-    }, 500);
-    
-    console.log('🎨 Layout Debug Enabled - Check element outlines!');
-  }
-  
-  function disableLayoutDebug() {
-    const existingStyle = document.getElementById('layout-debug');
-    if (existingStyle) {
-      existingStyle.remove();
-      console.log('🎨 Layout Debug Disabled');
-    }
-  }
-  
-  // Make debug functions available globally
-  if (typeof window !== 'undefined') {
-    window['enableLayoutDebug'] = enableLayoutDebug;
-    window['disableLayoutDebug'] = disableLayoutDebug;
-  }
+
 </script>
 
 <main class="app-container">
@@ -988,8 +858,12 @@
     padding: 0 !important; /* Consistent padding */
   }
 
-  /* Force consistent dimensions for all tab content - FIXED OVERFLOW */
-  .content-panel > :global(*) {
+  /* Force consistent dimensions for server tab content only - don't interfere with client */
+  .content-panel > :global(.dashboard-panel),
+  .content-panel > :global(.mod-manager),
+  .content-panel > :global(.backups-tab),
+  .content-panel > :global(.players-page-container),
+  .content-panel > :global(.settings-page) {
     /* Prevent overflow while maintaining responsiveness */
     width: 100%;
     max-width: 100%;

@@ -32,16 +32,16 @@
   }
   
   async function openServerFolder() {
-    if (!validateServerPath(serverPath)) {
-      errorMessage.set('Server path is empty or invalid. Please set up the server first.');
-      setTimeout(() => errorMessage.set(''), 5000);
-      return;
-    }
-    const success = await openFolder(serverPath);
-    if (!success) {
-      errorMessage.set(`Failed to open folder. Please access it manually at: ${serverPath}`);
-      setTimeout(() => errorMessage.set(''), 5000);
-    }
+          if (!validateServerPath(serverPath)) {
+            errorMessage.set('Server path is empty or invalid. Please set up the server first.');
+            setTimeout(() => errorMessage.set(''), 5000);
+            return;
+          }
+          const success = await openFolder(serverPath);
+          if (!success) {
+            errorMessage.set(`Failed to open folder. Please access it manually at: ${serverPath}`);
+            setTimeout(() => errorMessage.set(''), 5000);
+          }
   }
 </script>
 
@@ -79,7 +79,7 @@
                 <div class="path-actions">
                   <button class="icon-btn" on:click={copyPath} title="Copy path" disabled={showCopyConfirmation}>
                     {showCopyConfirmation ? '✅' : '📋'}
-                  </button>
+      </button>
                   <button class="icon-btn" on:click={openServerFolder} title="Open server folder">📁</button>
                 </div>
               {/if}
@@ -93,9 +93,9 @@
     <div class="settings-card">
       <div class="card-header">
         <h3>⚙️ Server Properties</h3>
-      </div>
+  </div>
       <div class="card-content">
-        <ServerPropertiesEditor serverPath={serverPath} />
+  <ServerPropertiesEditor serverPath={serverPath} />
       </div>
     </div>
 
@@ -104,7 +104,7 @@
         <h3>🌍 World Management</h3>
       </div>
       <div class="card-content">
-        <WorldSettings serverPath={serverPath} />
+  <WorldSettings serverPath={serverPath} />
       </div>
     </div>
 
@@ -113,7 +113,7 @@
         <h3>🔄 Auto-Restart</h3>
       </div>
       <div class="card-content">
-        <AutoRestartSettings />
+  <AutoRestartSettings />
       </div>
     </div>
 
@@ -134,16 +134,16 @@
           <div class="warning-badge" title="These actions are permanent">Destructive</div>
         </div>
         <div class="card-content">
-          <InstanceSettings
-            instance={currentInstance}
-            on:deleted={(e) => {
-              // Forward the deletion event to the parent component (App.svelte)
-              dispatch('deleted', e.detail);
-            }}
-          />
+    <InstanceSettings
+      instance={currentInstance}
+      on:deleted={(e) => {
+        // Forward the deletion event to the parent component (App.svelte)
+        dispatch('deleted', e.detail);
+      }}
+    />
         </div>
       </div>
-    {/if}
+  {/if}
   </div>
 </div>
 

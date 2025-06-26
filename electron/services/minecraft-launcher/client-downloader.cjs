@@ -212,7 +212,7 @@ class ClientDownloader {
               total: 5
             });
           }
-          // Removed empty else block
+  
         } catch { // _assetError unused, catch effectively empty (L193)
           // Don't fail the entire process for asset errors, but warn
         }
@@ -832,8 +832,8 @@ class ClientDownloader {
               });
               
               modified = true;
-            } // Removed empty "else {}" block.
-          } // Removed empty "else {}" block.
+                    }
+        }
           
           // Add inheritsFrom field to link to vanilla
           if (!fabricJson.inheritsFrom) {
@@ -928,16 +928,16 @@ class ClientDownloader {
           
           if (modified) {
             fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2));
-          } // Removed empty "else {}" block.
-        } // Removed empty "else {}" block.
+          }
+        }
       } catch { // _fabricFixError unused, removing try/catch as per L930
-        // console.error('Error fixing Fabric JSON:', _fabricFixError); // Optional logging
+
       }
       
       try {
         fs.unlinkSync(installerPath);
       } catch { // _cleanupError unused, removing try/catch as per L956
-        // console.warn('Error cleaning up Fabric installer:', _cleanupError); // Optional logging
+
       }
       return { 
         success: true, 
@@ -1136,7 +1136,7 @@ Specification-Vendor: FabricMC
           } catch { // _parseError unused (L1164), but existingServers is set.
             existingServers = [];
           }
-          // Removed empty "else {}" block for "if (fs.existsSync(serversDatPath))".
+  
         }
 
         // Create new server entry (simple object)

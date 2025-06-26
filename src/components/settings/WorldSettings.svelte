@@ -125,7 +125,7 @@
   .world-settings-section h3 {
     display: none !important; /* Hide - title is in parent card */
   }
-
+  
   .section-content {
     padding: 0 !important;
   }
@@ -135,7 +135,7 @@
     font-size: 0.8rem !important;
     color: #9ca3af !important;
   }
-
+  
   .danger-zone {
     background: rgba(239, 68, 68, 0.1) !important;
     border: 1px solid rgba(239, 68, 68, 0.3) !important;
@@ -143,19 +143,19 @@
     padding: 0.5rem !important;
     margin: 0.5rem 0 0 0 !important;
   }
-
+  
   .danger-zone h4 {
     color: #ef4444 !important;
     margin: 0 0 0.25rem 0 !important;
     font-size: 0.8rem !important;
   }
-
+  
   .warning-text {
     color: #9ca3af !important;
     font-size: 0.75rem !important;
     margin: 0 0 0.5rem 0 !important;
   }
-
+  
   .delete-world-button {
     background: rgba(239, 68, 68, 0.2) !important;
     border: 1px solid rgba(239, 68, 68, 0.4) !important;
@@ -167,16 +167,16 @@
     width: 100% !important;
     margin-bottom: 0.25rem !important;
   }
-
+  
   .delete-world-button:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.3) !important;
   }
-
+  
   .delete-world-button:disabled {
     opacity: 0.5 !important;
     cursor: not-allowed !important;
   }
-
+  
   .server-running-warning {
     color: #f59e0b !important;
     font-size: 0.7rem !important;

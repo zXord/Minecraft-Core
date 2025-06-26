@@ -472,7 +472,7 @@ class ManagementServer {
       }
     });
     
-    // Debug: Get required mods endpoint
+    // Get required mods endpoint
     this.app.get('/api/debug/required-mods', async (_, res) => {
       try {
         const requiredMods = await this.getRequiredMods();

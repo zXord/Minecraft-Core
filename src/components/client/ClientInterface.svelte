@@ -109,8 +109,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     setMinecraftServerStatus,
     setMinecraftVersion,
     setClientModVersionUpdates,
-    clearVersionChangeDetected,
-    clearPersistedClientState
+    clearVersionChangeDetected
   } from '../../stores/clientStore.js';
   
   // Props
@@ -1984,31 +1983,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       checkModSynchronization();
     }, 100);  }
   
-  // Debug removed - no longer needed
-  
   onMount(() => {
-
-    // Debug functions for testing - add to window object
-    window['clearClientState'] = clearPersistedClientState;    window['forceClientModCheck'] = () => {
-      checkClientModVersionCompatibility();
-    };
-    
-    // Debug: Log that client interface is active
-    setTimeout(() => {
-      console.log('🎯 CLIENT INTERFACE LOADED - Classes should be active');
-      const clientContent = document.querySelector('.client-content');
-      const clientInterface = document.querySelector('.client-interface');
-      if (clientContent) {
-        console.log('✅ .client-content found:', clientContent['offsetWidth'], 'px');
-      } else {
-        console.log('❌ .client-content NOT FOUND');
-      }
-      if (clientInterface) {
-        console.log('✅ .client-interface found:', clientInterface['offsetWidth'], 'px');
-      } else {
-        console.log('❌ .client-interface NOT FOUND');
-      }
-    }, 100);
     
     // Initialize client functionality
     setupLauncherEvents();

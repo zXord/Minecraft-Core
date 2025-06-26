@@ -142,13 +142,13 @@
   @media (max-width: 768px) {
     .client-header {
       padding: 0.5rem 1rem 0 1rem;
-    }
+  }
 
     .modern-client-tabs {
-      flex-direction: column;
-      gap: 0.5rem;
+    flex-direction: column;
+    gap: 0.5rem;
       margin: 0.75rem 0 0.5rem 0;
-    }
+  }
 
     .modern-tab-button {
       width: 100%;
@@ -158,7 +158,7 @@
 
     .header-title-row {
       margin-bottom: 0.5rem;
-    }
+  }
 
     h1 {
       font-size: 1.5rem;

@@ -219,7 +219,7 @@ class XMCLAuthHandler {
         }
       }
 
-      // console.log('📂 Loaded authentication data for:', savedAuthData.name);
+      
 
       return { 
         success: true, 
@@ -259,7 +259,7 @@ class XMCLAuthHandler {
       const minutesSinceRefresh = (now.getTime() - lastRefreshDate.getTime()) / (1000 * 60);
       const hoursSinceRefresh = minutesSinceRefresh / 60;
 
-      // console.log(`🔍 Token check: ${minutesSinceRefresh.toFixed(1)} minutes since last refresh`);
+      
 
       // Be much more lenient - if token is less than 48 hours old, just use it
       if (hoursSinceRefresh < 48) {
@@ -305,7 +305,7 @@ class XMCLAuthHandler {
       return { success: true, refreshed: false };
 
     } catch (error) {
-      // console.error('❌ Error during auth check:', error.message);
+
 
       // On error, if token isn't too old, try to use it anyway
       const savedDate = new Date(this.authData.savedAt || 0);
@@ -324,7 +324,7 @@ class XMCLAuthHandler {
    */
   async performTokenRefresh() {
     try {
-      // console.log('🔄 Refreshing authentication token...');
+
 
       // Use MSMC to refresh the Microsoft token first
       const msmc_meta = this.authData.msmc_meta;
@@ -450,7 +450,7 @@ class XMCLAuthHandler {
       return { success: true, refreshed: true };
 
     } catch (error) {
-      // console.error('❌ Token refresh failed:', error.message);
+
       
       // Handle specific error cases
       if (error.message.includes('invalid_grant') || error.message.includes('expired')) {
