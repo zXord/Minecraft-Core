@@ -604,7 +604,7 @@
     flex-direction: column !important;
     gap: 0.5rem !important;
   }
-
+  
   .search-box {
     background: rgba(17, 24, 39, 0.4) !important;
     border: 1px solid rgba(75, 85, 99, 0.3) !important;
@@ -614,7 +614,7 @@
     display: flex !important;
     align-items: center !important;
   }
-
+  
   .search-box input {
     background: none !important;
     border: none !important;
@@ -622,13 +622,13 @@
     font-size: 0.8rem !important;
     width: 100% !important;
   }
-
+  
   .action-buttons {
     display: flex !important;
     gap: 0.5rem !important;
     margin-top: 0.5rem !important;
   }
-
+  
   .action-buttons button {
     background: rgba(75, 85, 99, 0.3) !important;
     border: 1px solid rgba(75, 85, 99, 0.5) !important;
@@ -642,7 +642,7 @@
   .action-buttons button:hover {
     background: rgba(75, 85, 99, 0.5) !important;
   }
-
+  
   /* Category sections */
   .property-category {
     background: none !important;
@@ -664,13 +664,13 @@
     color: #e2e8f0 !important;
     text-align: left !important;
   }
-
+  
   .category-header h4 {
     margin: 0 !important;
     font-size: 0.8rem !important;
     color: #e2e8f0 !important;
   }
-
+  
   /* Property items */
   .category-properties {
     padding: 0.5rem !important;
@@ -685,11 +685,11 @@
     border-bottom: 1px solid rgba(75, 85, 99, 0.2) !important;
     gap: 0.5rem !important;
   }
-
+  
   .property-row:last-child {
     border-bottom: none !important;
   }
-
+  
   /* Form controls */
   .property-row label {
     color: #9ca3af !important;
@@ -697,12 +697,12 @@
     margin: 0 !important;
     flex: 1 !important;
   }
-
+  
   .property-input {
     flex: 1 !important;
     max-width: 180px !important;
   }
-
+  
   .property-input input,
   .property-input select {
     background: rgba(17, 24, 39, 0.6) !important;
@@ -718,7 +718,7 @@
     width: auto !important;
     max-width: none !important;
   }
-
+  
   /* Compact everything for card design */
 
   /* Remove any remaining old styles */
@@ -753,22 +753,22 @@
     font-size: 1rem !important;
     padding: 0 !important;
   }
-
+  
   .clear-search:hover {
     color: #e2e8f0 !important;
   }
-
+  
   .category-arrow {
     margin-right: 0.5rem !important;
     font-size: 0.8rem !important;
   }
-
+  
   .match-count {
     margin-left: auto !important;
     font-size: 0.7rem !important;
     color: #9ca3af !important;
   }
-
+  
   .save-button {
     background: rgba(59, 130, 246, 0.3) !important;
     border: 1px solid rgba(59, 130, 246, 0.5) !important;
@@ -778,11 +778,11 @@
     font-size: 0.75rem !important;
     cursor: pointer !important;
   }
-
+  
   .save-button:hover {
     background: rgba(59, 130, 246, 0.5) !important;
   }
-
+  
   .save-button:disabled {
     opacity: 0.5 !important;
     cursor: not-allowed !important;
@@ -802,7 +802,7 @@
     font-size: 0.8rem !important;
     color: #fb923c !important;
   }
-
+  
   .restart-button {
     background: rgba(251, 146, 60, 0.3) !important;
     border: 1px solid rgba(251, 146, 60, 0.5) !important;
@@ -813,11 +813,11 @@
     cursor: pointer !important;
     width: 100% !important;
   }
-
+  
   .restart-button:hover:not(:disabled) {
     background: rgba(251, 146, 60, 0.5) !important;
   }
-
+  
   .restart-button.full-width {
     width: 100% !important;
     margin-top: 0 !important;

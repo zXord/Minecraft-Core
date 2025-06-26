@@ -329,7 +329,7 @@
               <span class="setting-text">
                 <strong>Window Size</strong>
                 <small>Choose the size of the application window</small>
-              </span>
+            </span>
             </label>
             <select bind:value={windowSize} class="size-select" id="window-size-select">
               <option value="small">Small (1000×700)</option>
@@ -379,7 +379,7 @@
            
            <div class="setting-info">
              <small>💡 Window size is locked to prevent layout issues. Use the size dropdown to change dimensions.</small>
-           </div>
+          </div>
         </div>
       </div>
       
@@ -537,7 +537,7 @@
     font-size: 0.85rem;
     line-height: 1.3;
   }
-
+  
   .setting-info {
     background: rgba(59, 130, 246, 0.1);
     border: 1px solid rgba(59, 130, 246, 0.3);

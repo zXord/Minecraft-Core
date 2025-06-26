@@ -188,7 +188,7 @@ function createWindow() {
   
      isResizable = false; // Always lock window size
 
-  // Debug: print the preload script path
+
   const preloadPath = path.join(__dirname, 'preload.cjs');
 
   // Set up the window icon
@@ -310,9 +310,9 @@ function createWindow() {
   // Save window size when resized (only if window is resizable)
   win.on('resize', () => {
     if (win.isResizable()) {
-      const { width, height } = win.getBounds();
+    const { width, height } = win.getBounds();
       // Update stored window bounds for fallback
-      appStore.set('windowBounds', { width, height });
+    appStore.set('windowBounds', { width, height });
     }
   });
   

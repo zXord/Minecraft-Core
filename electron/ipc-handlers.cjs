@@ -26,7 +26,7 @@ const {
   getAutoRestartState
 } = require('./services/auto-restart.cjs');
 
-// This was preventing debug messages from appearing in minecraft launcher methods
+
 
 /**
  * Set up all IPC handlers

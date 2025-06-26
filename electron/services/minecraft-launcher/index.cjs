@@ -1,5 +1,5 @@
 // Minecraft launcher service for client launching with Microsoft authentication
-// REMOVED unused @xmcl imports - we now use direct Java execution instead
+
 const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
@@ -47,21 +47,17 @@ class MinecraftLauncher extends EventEmitter {
     
     // Add proper launcher for fixing LogUtils issues
     this.properLauncher = new ProperMinecraftLauncher();
-      // REMOVED: Old MCLC debug logging no longer needed since we use direct Java execution
+    
     // Our new approach logs directly from the spawned Java process
     
-    // Log system information for debugging - REMOVED: function no longer exists
+
     // utils.logSystemInfo(); // Use util function
     // Update alias to use the downloader's method
     this.downloadMinecraftClient = this.clientDownloader.downloadMinecraftClientSimple.bind(this.clientDownloader);
 
   }
   
-  // Log system information to help with debugging - MOVED to utils.cjs
-  // logSystemInfo() { ... }
   
-  // Log current memory usage for debugging - MOVED to utils.cjs
-  // logMemoryUsage() { ... }
   
   // Get the correct Java version for a Minecraft version - MOVED to utils.cjs
   // getRequiredJavaVersion(minecraftVersion) { ... }
@@ -93,8 +89,7 @@ class MinecraftLauncher extends EventEmitter {
     return this.authHandler.checkAndRefreshAuth();
   }
   
-  // Debug Java installation - Enhanced version
-  // REMOVED: debugJavaInstallation method is no longer needed
+  
   
   // Check Java installation 
   async checkJavaInstallation() {

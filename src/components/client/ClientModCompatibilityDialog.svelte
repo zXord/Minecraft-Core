@@ -31,14 +31,7 @@
   $: unknownCount = compatibilityReport?.unknown?.length || 0;
   $: totalIssues = incompatibleCount + needsUpdateCount + unknownCount;
   
-  // Debug logging to trace the data
-  $: if (compatibilityReport) {
-    console.log('🔍 [COMPATIBILITY DIALOG] Full report:', compatibilityReport);
-    console.log('🔍 [COMPATIBILITY DIALOG] Compatible mods:', compatibilityReport.compatible);
-    console.log('🔍 [COMPATIBILITY DIALOG] Incompatible mods:', compatibilityReport.incompatible);
-    console.log('🔍 [COMPATIBILITY DIALOG] Needs update mods:', compatibilityReport.needsUpdate);
-    console.log('🔍 [COMPATIBILITY DIALOG] Unknown mods:', compatibilityReport.unknown);
-  }
+
 </script>
 
 {#if show && compatibilityReport}

@@ -96,13 +96,7 @@
       </div>
       <div class="card-content">
         <div class="info-grid">
-          <div class="info-row enhanced" title="Client instance name">
-            <div class="info-label">
-              <span class="info-icon">📛</span>
-              <span>Name</span>
-            </div>
-              <span class="info-value">{instance.name || 'Unnamed Client'}</span>
-          </div>
+
           <div class="info-row enhanced" title="Management server address">
             <div class="info-label">
               <span class="info-icon">🖥️</span>

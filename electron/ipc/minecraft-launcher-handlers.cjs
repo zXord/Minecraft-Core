@@ -815,7 +815,7 @@ function createMinecraftLauncherHandlers(win) {
                   if (!allowed.has(fileName) && data.source === 'server') {
 
                   // Don't automatically remove - let the user decide through the UI
-                  // removed.push(fileName);
+          
                 }
             }
           }
@@ -1166,7 +1166,7 @@ function createMinecraftLauncherHandlers(win) {
             }
           }
         }
-          // Removed unused variables: manifestDir, extraMods, needsStateCleanup
+    
         const clientModChanges = {
           updates: [],
           removals: [],
@@ -1219,7 +1219,7 @@ function createMinecraftLauncherHandlers(win) {
             }        }
         
         // Log mod check summary (essential)
-        // console.log(`[IPC HANDLER] Mod check - Required: ${newServerRequiredModList.size}`);
+    
         
         if (serverRequiredModsActuallyChanged) {
           // Instead of clearing all acknowledgments, only clear those for mods that are now back on the server as required
@@ -1432,7 +1432,7 @@ function createMinecraftLauncherHandlers(win) {
         const currOptional = new Set(
           (allClientMods || []).filter(m => !m.required).map(m => m.fileName.toLowerCase())
         );
-        // Removed unused currServerAllMods variable
+
         
         // Get previous state
         const prevRequired = stateResult.requiredMods;
@@ -1689,7 +1689,7 @@ function createMinecraftLauncherHandlers(win) {
           
           // Update the sets for this check
           acknowledgedDependencies = cleanedAcknowledged;          
-          // console.log(`[IPC HANDLER] Cleaned up ${modsToRemoveFromState.length} required and ${optionalModsToRemoveFromState.length} optional mods from state (no longer on disk)`);
+  
         }// Save the current state with simplified tracking
         try {
           // The key insight: we need to persist mods that are flagged for removal
@@ -1789,10 +1789,7 @@ function createMinecraftLauncherHandlers(win) {
             }
           }          // await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
           await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
-          // console.log(`[IPC HANDLER] State saved - Required: ${requiredToSave.size}, Optional: ${optionalToSave.size}, Acknowledged: ${acknowledgedDependencies.size}`);
-          // console.log(`[IPC HANDLER] Required to save:`, Array.from(requiredToSave));
-          // console.log(`[IPC HANDLER] Optional to save:`, Array.from(optionalToSave));
-          // console.log(`[IPC HANDLER] Included ${requiredRemovals.length} required and ${optionalRemovals.length} optional removals in saved state`);
+
         } catch (stateError) {
           console.error('[IPC HANDLER] Failed to update persistent state:', stateError);
         }// log.info(`[IPC HANDLER] Removal arrays: Required=${requiredRemovals.length}, Optional=${optionalRemovals.length}, Acknowledgments=${acknowledgments.length}`);        // Determine overall sync status
@@ -1800,7 +1797,7 @@ function createMinecraftLauncherHandlers(win) {
                              requiredRemovals.length === 0 && // No required mods need removal
                              optionalRemovals.length === 0 && // No optional mods need removal
                              acknowledgments.length === 0;    // No acknowledgments needed        // Final response summary (keep this one for debugging if needed)
-        // console.log(`[IPC HANDLER] Mod sync result - Synchronized: ${synchronized}, Removals: ${requiredRemovals.length + optionalRemovals.length}, Acknowledgments: ${acknowledgments.length}`);
+
 
         const result = {
           success: true,
