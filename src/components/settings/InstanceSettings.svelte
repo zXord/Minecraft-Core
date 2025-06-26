@@ -91,92 +91,101 @@
 />
 
 <style>
+  /* Remove ALL old styling - this component is now wrapped in cards */
   .instance-settings-section {
-    max-width: 500px;
-    margin: 1.5rem auto;
-    padding: 1rem;
-    border: 1px solid #ffffff;
-    border-radius: 8px;
-    background: #272727;
+    background: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    max-width: none !important;
   }
-  
-  h3 {
-    margin-top: 0;
-    margin-bottom: 1rem;
-    text-align: center;
+
+  .instance-settings-section h3 {
+    display: none !important; /* Hide - title is in parent card */
   }
-  
+
   .section-content {
-    text-align: left;
+    padding: 0 !important;
   }
-  
+
+  .section-content > p {
+    margin: 0 0 0.5rem 0 !important;
+    font-size: 0.8rem !important;
+    color: #9ca3af !important;
+  }
+
   .danger-zone {
-    margin-top: 1.5rem;
-    padding: 1rem;
-    border: 1px solid #ff5555;
-    border-radius: 6px;
-    background: rgba(255, 0, 0, 0.1);
+    background: rgba(239, 68, 68, 0.1) !important;
+    border: 1px solid rgba(239, 68, 68, 0.3) !important;
+    border-radius: 4px !important;
+    padding: 0.5rem !important;
+    margin: 0.5rem 0 0 0 !important;
   }
-  
+
   .danger-zone h4 {
-    color: #ff5555;
-    margin-top: 0;
-    margin-bottom: 0.5rem;
+    color: #ef4444 !important;
+    margin: 0 0 0.25rem 0 !important;
+    font-size: 0.8rem !important;
   }
-  
+
   .warning-text {
-    color: rgba(255, 255, 255, 0.7);
-    font-size: 0.9rem;
-    margin-bottom: 1rem;
+    color: #9ca3af !important;
+    font-size: 0.75rem !important;
+    margin: 0 0 0.5rem 0 !important;
   }
-  
-  .delete-instance-button {
-    background: rgba(255, 0, 0, 0.2);
-    border: 1px solid rgba(255, 0, 0, 0.3);
-    border-radius: 4px;
-    padding: 0.5rem 1rem;
-    cursor: pointer;
-    font-size: 0.9rem;
-    transition: all 0.2s ease;
-    color: white;
-    display: block;
-    width: 100%;
-    text-align: center;
-    margin-bottom: 0.5rem;
-  }
-  
-  .delete-instance-button:hover:not(:disabled) {
-    background: rgba(255, 0, 0, 0.3);
-  }
-  
-  .delete-instance-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  
-  .server-running-warning {
-    color: #ff9800;
-    font-size: 0.8rem;
-    text-align: center;
-    margin-top: 0.5rem;
-  }
-  
+
   .delete-options {
-    margin-bottom: 1rem;
+    margin: 0 0 0.5rem 0 !important;
   }
-  
+
   .delete-files-option {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    user-select: none;
-    cursor: pointer;
+    display: flex !important;
+    align-items: center !important;
+    gap: 0.4rem !important;
+    user-select: none !important;
+    cursor: pointer !important;
+    font-size: 0.75rem !important;
+    color: #e2e8f0 !important;
   }
-  
+
+  .delete-files-option input[type="checkbox"] {
+    margin: 0 !important;
+    accent-color: #ef4444 !important;
+  }
+
   .delete-info {
-    margin-top: 0.25rem;
-    font-size: 0.8rem;
-    color: #ff9800;
-    margin-left: 1.5rem;
+    margin: 0.25rem 0 0 1.2rem !important;
+    font-size: 0.7rem !important;
+    color: #f59e0b !important;
+  }
+
+  .delete-instance-button {
+    background: rgba(239, 68, 68, 0.2) !important;
+    border: 1px solid rgba(239, 68, 68, 0.4) !important;
+    color: #ef4444 !important;
+    border-radius: 4px !important;
+    padding: 0.3rem 0.6rem !important;
+    font-size: 0.75rem !important;
+    cursor: pointer !important;
+    width: 100% !important;
+    margin-bottom: 0.25rem !important;
+  }
+
+  .delete-instance-button:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.3) !important;
+  }
+
+  .delete-instance-button:disabled {
+    opacity: 0.5 !important;
+    cursor: not-allowed !important;
+  }
+
+  .server-running-warning {
+    color: #f59e0b !important;
+    font-size: 0.7rem !important;
+    text-align: center !important;
+    margin: 0.25rem 0 0 0 !important;
   }
 </style>

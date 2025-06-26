@@ -125,12 +125,32 @@
 <style>
   .metrics-container {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    grid-template-columns: repeat(4, 1fr); /* Force 4 columns always */
     gap: 1rem;
     margin: 1rem auto;
     width: 100%;
     max-width: 1200px;
     box-sizing: border-box;
+  }
+  
+  /* For very small screens, keep the 4 columns but make them smaller */
+  @media (max-width: 768px) {
+    .metrics-container {
+      gap: 0.5rem;
+    }
+    
+    .metric-card {
+      padding: 0.5rem;
+      min-width: 0; /* Allow cards to shrink */
+    }
+    
+    .metric-card h3 {
+      font-size: 0.8rem;
+    }
+    
+    .metric-value {
+      font-size: 1.1rem;
+    }
   }
   
   .metric-card {

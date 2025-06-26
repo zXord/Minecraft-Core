@@ -1,6 +1,5 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
-  import { get } from 'svelte/store';
   import { fly } from 'svelte/transition';
   
   // Import existing stores
@@ -53,9 +52,10 @@
 
   // Get stores 
   const categorizedModsStore = getCategorizedMods();
+  const updateCountStore = getUpdateCount();
 
   // Reactive values
-  $: updateCount = get(getUpdateCount());
+  $: updateCount = $updateCountStore;
   $: serverRunning = $serverState.status === 'Running';
   
   // Auto-collapse drop zone after successful mod upload
@@ -258,7 +258,9 @@
         });
       }
       
+      // Force refresh mod list and update checks to ensure UI is current
       await loadMods(serverPath);
+      await checkForUpdates(serverPath);
       successMessage.set(`Updated ${modsWithUpdatesList.length} mods successfully!`);
     } catch (error) {
       errorMessage.set(`Failed to update all mods: ${error.message}`);
@@ -738,7 +740,7 @@
         <!-- current version -->
         <td class="ver">
           {#if modInfo && modInfo.versionNumber}
-            <code>{modInfo.versionNumber}</code>
+            <code title={modInfo.versionNumber}>{modInfo.versionNumber}</code>
           {/if}
         </td>
 
@@ -777,7 +779,7 @@
               {#if serverRunning}🔒{/if} ↑ {updateInfo.versionNumber}
             </button>
           {:else}
-              <span class="tag ok">{isDisabled ? '—' : 'Up to date'}</span>
+              <span class="tag ok" title={isDisabled ? 'Mod is disabled' : 'Up to date'}>{isDisabled ? '—' : 'Up to date'}</span>
           {/if}
         </td>
 
@@ -887,7 +889,6 @@
 
   /* ——————————————————— container & table ——————————————————— */
 
-  
   .mods-header { 
     display: flex; 
     justify-content: space-between; 
@@ -910,15 +911,25 @@
     margin-bottom: 4px;
   }
   
+  /* Table container - ensure no width constraints */
+  .table-container {
+    width: 100%;
+  }
+  
   .mods-table { 
     width: 100%; 
     border-collapse: collapse; 
     font-size: 0.9rem;
     background: linear-gradient(to bottom, var(--bg-primary), var(--bg-secondary));
-    table-layout: auto;
+    table-layout: fixed; /* FORCE FIXED LAYOUT - prevents action column cutoff */
     margin-top: 8px;
   }
-  .mods-table th, .mods-table td { padding: var(--row-py) var(--cell-px); }
+  .mods-table th, .mods-table td { 
+    padding: var(--row-py) var(--cell-px); 
+    overflow: hidden; /* Prevent content spillover */
+    text-overflow: ellipsis; /* Add ellipsis for long text */
+    white-space: nowrap; /* Prevent text wrapping that breaks layout */
+  }
   .mods-table tr { 
     border-left: 4px solid transparent; 
     transition: background-color 0.15s, box-shadow 0.15s, border-left-color 0.15s; 
@@ -948,14 +959,15 @@
     outline: 1px solid #3a90ff; 
   }
   
-  /* Column widths - Main table */
-  .mods-table th.chk, .mods-table td:nth-child(1) { width: 40px; min-width: 40px; }
-  .mods-table th.loc, .mods-table td:nth-child(3) { width: 100px; min-width: 90px; }
-  .mods-table th.ver, .mods-table td:nth-child(4) { width: 120px; min-width: 100px; }
-  .mods-table th.alert, .mods-table td:nth-child(5) { width: 28px; min-width: 28px; }
-  .mods-table th.status, .mods-table td:nth-child(6) { width: 70px; min-width: 65px; }
-  .mods-table th.upd, .mods-table td:nth-child(7) { width: 80px; min-width: 70px; }
-  .mods-table th.act, .mods-table td:nth-child(8) { width: 95px; min-width: 90px; }
+  /* Column widths - Main table - PERCENTAGE BASED */
+  .mods-table th.chk, .mods-table td:nth-child(1) { width: 5%; min-width: 40px; }
+  .mods-table th:nth-child(2), .mods-table td:nth-child(2) { width: 25%; min-width: 150px; } /* Mod name */
+  .mods-table th.loc, .mods-table td:nth-child(3) { width: 20%; min-width: 120px; } /* Location */
+  .mods-table th.ver, .mods-table td:nth-child(4) { width: 15%; min-width: 100px; } /* Current */
+  .mods-table th.alert, .mods-table td:nth-child(5) { width: 4%; min-width: 28px; } /* Alert */
+  .mods-table th.status, .mods-table td:nth-child(6) { width: 10%; min-width: 70px; } /* Status */
+  .mods-table th.upd, .mods-table td:nth-child(7) { width: 10%; min-width: 70px; } /* Update */
+  .mods-table th.act, .mods-table td:nth-child(8) { width: 11%; min-width: 90px; } /* Actions */
   
 
 
@@ -1000,6 +1012,61 @@
     gap: 2px;
   }
   .ver, .upd, .alert, .status { text-align: center; white-space: nowrap; }
+  
+  /* Version column specific styling with hover tooltip */
+  .ver {
+    font-size: 0.8rem; /* Slightly smaller to prevent truncation */
+    position: relative;
+  }
+  
+  .ver code {
+    font-size: 0.75rem; /* Even smaller for version numbers */
+    padding: 1px 3px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    cursor: help; /* Show it's hoverable */
+  }
+  
+  /* Hover tooltip for version */
+  .ver code:hover::after {
+    content: attr(title);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #333;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    z-index: 1000;
+    pointer-events: none;
+    border: 1px solid #555;
+  }
+  
+  /* Update column with tooltip */
+  .upd {
+    position: relative;
+  }
+  
+  .tag.clickable:hover::after {
+    content: attr(title);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #333;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    z-index: 1000;
+    pointer-events: none;
+    border: 1px solid #555;
+  }
+  
   .alert { 
     text-align: center; 
     padding: 0 !important;
@@ -1039,13 +1106,15 @@
   .ok { color: var(--col-ok); font-size: 0.75rem; }
   .act { 
     white-space: nowrap; 
-    text-align: right; 
+    text-align: center; /* Center align for better visual balance */
   }
   
   .act button {
     display: block;
     margin-bottom: 2px;
     width: 100%;
+    font-size: 0.7rem;
+    padding: 1px 4px;
   }
   
   .act button:last-child {
@@ -1088,7 +1157,7 @@
   .status-badge {
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
-    font-size: 0.75rem;
+    font-size: 0.55rem; /* Further reduced from 0.6rem for consistency */
     font-weight: 500;
     text-transform: uppercase;
   }
@@ -1327,5 +1396,19 @@
     .bulk { justify-content: center; }
     .loc { display: none; }
     .act { text-align: center; }
+  }
+
+  /* Exception columns that need wrapping */
+  .mods-table td:nth-child(3), /* Location column */
+  .mods-table td:nth-child(8) { /* Actions column */
+    white-space: normal; /* Allow wrapping for these columns */
+  }
+  
+  /* Version and current columns should stay nowrap */
+  .mods-table td:nth-child(4), /* Current version */
+  .mods-table td:nth-child(7) { /* Update */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style> 

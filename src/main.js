@@ -1,7 +1,7 @@
 import { mount } from 'svelte'
 import App from './App.svelte'
 import './app.css'
-import './components/client/client.css'
+
 
 // Create a simple global store for initial instances
 const initialInstanceStore = {

@@ -1,0 +1,168 @@
+/* =============================================================================
+   UNIVERSAL TAB STYLING SYSTEM
+   Centralized control for all tab dimensions and layouts across the app
+   ============================================================================= */
+
+:root {
+  /* Tab Container Styling */
+  --tab-container-bg: #2d3748;
+  --tab-container-border-radius: 8px;
+  --tab-container-padding: 0.5rem;
+  --tab-container-gap: 0.75rem;
+  --tab-container-border: 1px solid rgba(75, 85, 99, 0.3);
+
+  /* Universal Tab Button Dimensions */
+  --tab-button-width: 140px;              /* Fixed width for ALL tabs */
+  --tab-button-height: 4rem;              /* Fixed height for main app tabs */
+  --tab-button-padding: 0.75rem 1rem;     /* Consistent padding */
+  --tab-button-border-radius: 6px;
+  --tab-button-font-size: 0.95rem;
+  --tab-button-font-weight: 500;
+  --tab-button-gap: 0.5rem;
+  --tab-button-margin: 0;                 /* No individual margins - use container gap only */
+  --tab-button-min-height: 2.5rem;        /* Minimum for client tabs */
+  --tab-button-transition: all 0.2s ease;
+
+  /* Tab Icon Sizing (for main app tabs) */
+  --tab-icon-size: 1.25rem;
+  --tab-icon-margin-bottom: 0.25rem;
+
+  /* Tab Colors - Inactive State */
+  --tab-inactive-bg: transparent;
+  --tab-inactive-color: #9ca3af;
+  --tab-inactive-border: 1px solid transparent;
+
+  /* Tab Colors - Hover State */
+  --tab-hover-bg: rgba(75, 85, 99, 0.3);
+  --tab-hover-color: #d1d5db;
+  --tab-hover-transform: translateY(-1px);
+
+  /* Tab Colors - Active State */
+  --tab-active-bg: rgba(59, 130, 246, 0.15);
+  --tab-active-color: #3b82f6;
+  --tab-active-border: 1px solid rgba(59, 130, 246, 0.3);
+
+  /* Tab Colors - Active Hover State */
+  --tab-active-hover-bg: rgba(59, 130, 246, 0.25);
+  --tab-active-hover-border: 1px solid rgba(59, 130, 246, 0.5);
+
+  /* Content Area Sizing - Will be updated by JavaScript based on window size */
+  --content-area-width: 900px;               /* Default width, updated dynamically */
+
+  /* Mobile Responsive Adjustments */
+  --tab-mobile-width: 100%;               /* Full width on mobile */
+  --tab-mobile-height: 3rem;              /* Smaller height on mobile */
+  --tab-mobile-padding: 0.75rem 1rem;
+  --tab-mobile-gap: 0.5rem;
+  --tab-mobile-container-padding: 0.75rem;
+}
+
+/* =============================================================================
+   UNIVERSAL TAB CONTAINER STYLES
+   ============================================================================= */
+
+.universal-tab-container {
+  display: flex;
+  background: var(--tab-container-bg);
+  border-radius: var(--tab-container-border-radius);
+  padding: var(--tab-container-padding);
+  gap: var(--tab-container-gap);
+  border: var(--tab-container-border);
+  justify-content: center;
+  margin-bottom: 0.5rem;
+}
+
+/* =============================================================================
+   UNIVERSAL TAB BUTTON STYLES
+   ============================================================================= */
+
+.universal-tab-button {
+  /* Fixed dimensions - all tabs same size */
+  width: var(--tab-button-width) !important;
+  min-width: var(--tab-button-width) !important;
+  max-width: var(--tab-button-width) !important;
+  min-height: var(--tab-button-min-height);
+  padding: var(--tab-button-padding) !important;
+  margin: var(--tab-button-margin) !important;
+  border: var(--tab-inactive-border);
+  border-radius: var(--tab-button-border-radius);
+  font-size: var(--tab-button-font-size);
+  font-weight: var(--tab-button-font-weight);
+  cursor: pointer;
+  transition: var(--tab-button-transition);
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--tab-button-gap);
+  background: var(--tab-inactive-bg);
+  color: var(--tab-inactive-color);
+  box-sizing: border-box !important;
+  flex-shrink: 0 !important;
+}
+
+.universal-tab-button:hover:not(.active) {
+  background: var(--tab-hover-bg);
+  color: var(--tab-hover-color);
+  transform: var(--tab-hover-transform);
+}
+
+.universal-tab-button.active {
+  background: var(--tab-active-bg);
+  color: var(--tab-active-color);
+  border: var(--tab-active-border);
+}
+
+.universal-tab-button.active:hover {
+  background: var(--tab-active-hover-bg);
+  border: var(--tab-active-hover-border);
+}
+
+/* =============================================================================
+   TAB LAYOUT VARIANTS
+   ============================================================================= */
+
+/* Main app tabs (vertical layout with icons) */
+.universal-tab-button.vertical {
+  flex-direction: column;
+  text-align: center;
+  height: var(--tab-button-height);
+}
+
+.universal-tab-button.vertical .tab-icon {
+  font-size: var(--tab-icon-size);
+  margin-bottom: var(--tab-icon-margin-bottom);
+}
+
+/* Client interface tabs (horizontal layout) */
+.universal-tab-button.horizontal {
+  flex-direction: row;
+  justify-content: center;
+}
+
+/* =============================================================================
+   CONSISTENT CONTENT AREA SIZING
+   ============================================================================= */
+
+/* Remove client-specific sizing - use server's dynamic system */
+/* Client content will inherit the same responsive width as server content */
+
+/* =============================================================================
+   MOBILE RESPONSIVE DESIGN
+   ============================================================================= */
+
+@media (max-width: 768px) {
+  .universal-tab-container {
+    flex-direction: column;
+    gap: var(--tab-mobile-gap);
+    padding: var(--tab-mobile-container-padding);
+  }
+
+  .universal-tab-button {
+    width: var(--tab-mobile-width);
+    height: var(--tab-mobile-height);
+    justify-content: center;
+    padding: var(--tab-mobile-padding);
+    margin: 0;
+  }
+} 

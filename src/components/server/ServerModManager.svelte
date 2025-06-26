@@ -648,8 +648,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       aria-labelledby="installed-tab"
       tabindex="0"
     >
-      <h2>Installed Mods</h2>
-      
       <InstalledModList 
         serverPath={serverPath}
         on:modRemoved={() => loadMods(serverPath)}
@@ -669,8 +667,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       aria-labelledby="search-tab"
       tabindex="0"
     >
-      <h2>Find Mods</h2>
-      
       <ModSearch
         on:search={handleSearch}
         on:install={handleInstallMod}
@@ -691,55 +687,72 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   .mod-manager {
     display: flex;
     flex-direction: column;
-    height: 100%;
-    overflow: hidden;
   }
   
   .mod-manager-tabs {
+    /* Use universal tab container styling with NO MARGIN */
     display: flex;
-    border-bottom: 1px solid var(--border-color);
-    margin-bottom: 1rem;
+    background: var(--tab-container-bg);
+    border-radius: var(--tab-container-border-radius);
+    padding: var(--tab-container-padding);
+    border: var(--tab-container-border);
+    justify-content: center;
+    gap: var(--tab-container-gap);
+    margin: 0; /* NO margin */
   }
   
   .tab {
-    padding: 0.75rem 1.5rem;
+    /* EXACT SAME SIZE AS MAIN TABS - using universal system */
+    width: var(--tab-button-width) !important;
+    min-width: var(--tab-button-width) !important;
+    max-width: var(--tab-button-width) !important;
+    min-height: var(--tab-button-min-height);
+    padding: var(--tab-button-padding) !important;
+    margin: var(--tab-button-margin) !important;
+    border: var(--tab-inactive-border);
+    border-radius: var(--tab-button-border-radius);
+    font-size: var(--tab-button-font-size);
+    font-weight: var(--tab-button-font-weight);
     cursor: pointer;
-    border-bottom: 2px solid transparent;
-    transition: all 0.2s ease;
-    background: none;
-    border: none;
-    font-size: inherit;
-    font-family: inherit;
-    color: inherit;
-    text-align: left;
+    transition: var(--tab-button-transition);
+    background: var(--tab-inactive-bg);
+    color: var(--tab-inactive-color);
+    box-sizing: border-box !important;
+    flex-shrink: 0 !important;
+    
+    /* Horizontal layout like client tabs */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
   }
   
   .tab.active {
-    border-bottom-color: var(--primary-color);
-    color: var(--primary-color);
-    font-weight: 500;
+    background: var(--tab-active-bg);
+    color: var(--tab-active-color);
+    border: var(--tab-active-border);
   }
   
   .tab:hover:not(.active) {
-    border-bottom-color: var(--border-color);
-    background-color: var(--bg-hover);
+    background: var(--tab-hover-bg);
+    color: var(--tab-hover-color);
+    transform: var(--tab-hover-transform);
+  }
+  
+  .tab.active:hover {
+    background: var(--tab-active-hover-bg);
+    border: var(--tab-active-hover-border);
   }
   
   .mod-manager-content {
     flex: 1;
-    overflow-y: auto;
     padding: 0 1rem;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
   }
   
-  h2 {
-    margin-top: 0;
-    margin-bottom: 1rem;
-    font-size: 1.5rem;
-    font-weight: 500;
-  }
+  /* h2 headers removed - no longer needed since tabs indicate the content */
   
-  .installed-mods-section,
-  .search-mods-section {
-    height: 100%;
-  }
+
 </style> 

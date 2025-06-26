@@ -11,9 +11,19 @@
   let minimizeToTray = false;
   let startMinimized = false;
   let startOnStartup = false;
+  let windowSize = 'medium'; // 'small', 'medium', 'large', 'custom'
+  let customWidth = 1200;
+  let customHeight = 800;
   let currentVersion = 'v1.0.0'; // This will be loaded from the app
   let latestVersion = null;
   let updateStatus = 'checking'; // 'checking', 'up-to-date', 'available', 'error'
+  
+  // Window size presets
+  const windowPresets = {
+    small: { width: 1000, height: 700 },
+    medium: { width: 1200, height: 800 },
+    large: { width: 1400, height: 900 }
+  };
   
   // References for focus management
   let modalContent;
@@ -30,14 +40,18 @@
       const settings = {
         minimizeToTray,
         startMinimized,
-        startOnStartup
+        startOnStartup,
+        windowSize,
+        customWidth,
+        customHeight
       };
       
     try {
       const result = await window.electron.invoke('save-app-settings', settings);
       
       if (result.success) {
-        // Settings saved successfully
+        // Apply window settings immediately
+        await applyWindowSettings();
       } else {
         console.error('Failed to save app settings:', result.error);
       }
@@ -47,6 +61,49 @@
     
     closeModal();
   }
+  
+  // Apply window settings
+  async function applyWindowSettings() {
+    try {
+      let width, height;
+      
+      if (windowSize === 'custom') {
+        width = customWidth;
+        height = customHeight;
+      } else {
+        const preset = windowPresets[windowSize];
+        width = preset.width;
+        height = preset.height;
+      }
+      
+      await window.electron.invoke('set-window-size', {
+        width,
+        height,
+        resizable: false // Always lock window size - no manual resizing
+      });
+      
+      // Update content area width to match window size
+      updateContentAreaWidth(width);
+    } catch (error) {
+      console.error('Error applying window settings:', error);
+    }
+  }
+  
+  // Update CSS variable for content area width based on window size
+  function updateContentAreaWidth(windowWidth) {
+    // Calculate content width: window width minus padding and margins
+    // Account for: window padding, scrollbars, and content margins
+    const contentWidth = Math.max(600, windowWidth - 200); // 200px for padding/margins to prevent scrolling
+    
+    // Update the CSS variable
+    document.documentElement.style.setProperty('--content-area-width', `${contentWidth}px`);
+    
+    // Also ensure no horizontal scrolling on body/html
+    document.documentElement.style.overflowX = 'hidden';
+    document.body.style.overflowX = 'hidden';
+  }
+  
+
   
   // Check for updates
   async function checkForUpdates() {
@@ -74,6 +131,21 @@
     }
   }
   
+  // Handle window resize for responsive modal
+  function handleWindowResize() {
+    if (!visible) return;
+    
+    // Force re-render by updating a reactive variable
+    const windowWidth = window.innerWidth;
+    if (windowWidth < 768) {
+      // Mobile adjustments
+      document.documentElement.style.setProperty('--modal-padding', '1rem');
+    } else {
+      // Desktop adjustments  
+      document.documentElement.style.setProperty('--modal-padding', '1.5rem');
+    }
+  }
+  
   // Focus management
   $: if (visible) {
     previousFocus = document.activeElement;
@@ -90,6 +162,7 @@
   $: if (visible) {
     loadCurrentSettings();
     loadAppVersion();
+    // Don't call updateContentAreaOnOpen() here - it was causing size change bugs
   }
 
   async function loadCurrentSettings() {
@@ -100,6 +173,9 @@
         minimizeToTray = result.settings.minimizeToTray || false;
         startMinimized = result.settings.startMinimized || false;
         startOnStartup = result.settings.startOnStartup || false;
+        windowSize = result.settings.windowSize || 'medium';
+        customWidth = result.settings.customWidth || 1200;
+        customHeight = result.settings.customHeight || 800;
       }
     } catch (error) {
       console.error('Error loading app settings:', error);
@@ -118,7 +194,7 @@
   }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<svelte:window on:keydown={handleKeydown} on:resize={handleWindowResize} />
 
 {#if visible}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -241,17 +317,69 @@
           </div>
         </div>
 
-        <!-- Future Settings Placeholder -->
+        <!-- Window & Display Settings -->
         <div class="settings-section">
           <h4>
-            <span class="section-icon">🔧</span>
-            Advanced
+            <span class="section-icon">🖥️</span>
+            Window & Display
           </h4>
+          
           <div class="setting-item">
-            <span class="setting-placeholder">
-              Additional app-wide settings will appear here as they are implemented
-            </span>
+            <label class="setting-label" for="window-size-select">
+              <span class="setting-text">
+                <strong>Window Size</strong>
+                <small>Choose the size of the application window</small>
+              </span>
+            </label>
+            <select bind:value={windowSize} class="size-select" id="window-size-select">
+              <option value="small">Small (1000×700)</option>
+              <option value="medium">Medium (1200×800)</option>
+              <option value="large">Large (1400×900)</option>
+              <option value="custom">Custom Size</option>
+            </select>
           </div>
+          
+          {#if windowSize === 'custom'}
+            <div class="custom-size-settings">
+                             <div class="setting-item">
+                 <label class="setting-label" for="custom-width-input">
+                   <span class="setting-text">
+                     <strong>Custom Width</strong>
+                     <small>Width in pixels (minimum 800)</small>
+                   </span>
+                 </label>
+                 <input 
+                   type="number" 
+                   bind:value={customWidth} 
+                   min="800" 
+                   max="2560"
+                   class="size-input"
+                   id="custom-width-input"
+                 />
+               </div>
+              
+                             <div class="setting-item">
+                 <label class="setting-label" for="custom-height-input">
+                   <span class="setting-text">
+                     <strong>Custom Height</strong>
+                     <small>Height in pixels (minimum 600)</small>
+                   </span>
+                 </label>
+                 <input 
+                   type="number" 
+                   bind:value={customHeight} 
+                   min="600" 
+                   max="1440"
+                   class="size-input"
+                   id="custom-height-input"
+                 />
+               </div>
+            </div>
+                     {/if}
+           
+           <div class="setting-info">
+             <small>💡 Window size is locked to prevent layout issues. Use the size dropdown to change dimensions.</small>
+           </div>
         </div>
       </div>
       
@@ -293,13 +421,14 @@
   .modal-content {
     background: #1e1e1e;
     border-radius: 8px;
-    width: 90%;
+    width: min(90vw, 600px); /* Responsive width */
     max-width: 600px;
     max-height: 90vh;
-    overflow-y: auto;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     animation: slide-up 0.3s ease-out;
     border: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    flex-direction: column;
   }
   
   .modal-header {
@@ -312,7 +441,7 @@
   
   .modal-header h3 {
     margin: 0;
-    font-size: 1.5rem;
+    font-size: clamp(1.25rem, 2.5vw, 1.5rem); /* Responsive font size */
     color: white;
     display: flex;
     align-items: center;
@@ -320,7 +449,7 @@
   }
   
   .settings-icon {
-    font-size: 1.25rem;
+    font-size: clamp(1rem, 2vw, 1.25rem); /* Responsive icon size */
   }
   
   .close-button {
@@ -341,7 +470,7 @@
   
   .modal-body {
     padding: 1.5rem;
-    max-height: 60vh;
+    flex: 1;
     overflow-y: auto;
   }
   
@@ -408,16 +537,22 @@
     font-size: 0.85rem;
     line-height: 1.3;
   }
-  
-  .setting-placeholder {
-    color: rgba(255, 255, 255, 0.5);
-    font-style: italic;
-    font-size: 0.9rem;
-    padding: 1rem;
-    background: rgba(255, 255, 255, 0.05);
+
+  .setting-info {
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
     border-radius: 6px;
-    text-align: center;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
   }
+
+  .setting-info small {
+    color: #93c5fd;
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+  
+
 
   /* Update section styles */
   .update-info {
@@ -508,6 +643,48 @@
   .update-button:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  /* Window size settings */
+  .size-select {
+    width: 100%;
+    padding: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: #2d3748;
+    color: white;
+    font-size: 0.9rem;
+    margin-top: 0.5rem;
+  }
+
+  .size-select:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+  }
+
+  .custom-size-settings {
+    margin-left: 1rem;
+    padding-left: 1rem;
+    border-left: 2px solid rgba(59, 130, 246, 0.3);
+    margin-top: 1rem;
+  }
+
+  .size-input {
+    width: 100%;
+    padding: 0.5rem;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: #2d3748;
+    color: white;
+    font-size: 0.9rem;
+    margin-top: 0.5rem;
+  }
+
+  .size-input:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
   }
   
   .modal-footer {

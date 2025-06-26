@@ -75,6 +75,10 @@
 <style>
   .mods-container {
     padding: 1rem;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow-x: hidden;
   }
 
   /* Modern Status Header */

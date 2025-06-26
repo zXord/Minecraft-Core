@@ -125,46 +125,77 @@
 </div>
 
 <style>
-  /* Auto-restart styling */
+  /* Remove ALL old styling - this component is now wrapped in cards */
+  h3 {
+    display: none !important; /* Hide - title is in parent card */
+  }
+
   .auto-restart-section {
-    max-width: 500px;
-    margin: 0 auto 1.5rem;
-    padding: 1rem;
-    border: 1px solid #ffffff;
-    border-radius: 8px;
-    background: #272727;
+    background: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    max-width: none !important;
   }
-  
-  .auto-restart-section label {
-    display: block;
-    margin-bottom: 0.5rem;
-    font-weight: bold;
+
+  .auto-restart-section > label {
+    display: flex !important;
+    align-items: center !important;
+    gap: 0.5rem !important;
+    margin: 0 0 0.5rem 0 !important;
+    font-weight: 500 !important;
+    font-size: 0.8rem !important;
+    color: #e2e8f0 !important;
+    cursor: pointer !important;
   }
-  
-  .auto-restart-section .restart-settings {
-    margin: 1rem 0;
-    padding: 1rem;
-    border-top: 1px solid #e0e0e0;
+
+  .auto-restart-section > label input[type="checkbox"] {
+    margin: 0 !important;
+    accent-color: #3b82f6 !important;
   }
-  
-  .auto-restart-section .restart-settings.disabled {
-    opacity: 0.6;
+
+  .restart-settings {
+    background: rgba(17, 24, 39, 0.4) !important;
+    border: 1px solid rgba(75, 85, 99, 0.3) !important;
+    border-radius: 4px !important;
+    padding: 0.5rem !important;
+    margin: 0.5rem 0 0 0 !important;
   }
-  
-  .auto-restart-section .restart-settings label {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-weight: normal;
-    margin-bottom: 0.75rem;
+
+  .restart-settings.disabled {
+    opacity: 0.5 !important;
   }
-  
-  .auto-restart-section .restart-settings input {
-    width: 80px;
-    padding: 0.3rem;
+
+  .restart-settings label {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    font-weight: normal !important;
+    margin: 0 0 0.4rem 0 !important;
+    font-size: 0.75rem !important;
+    color: #9ca3af !important;
   }
-  
+
+  .restart-settings label:last-child {
+    margin-bottom: 0 !important;
+  }
+
+  .restart-settings input[type="number"] {
+    background: rgba(17, 24, 39, 0.6) !important;
+    border: 1px solid rgba(75, 85, 99, 0.4) !important;
+    color: #e2e8f0 !important;
+    border-radius: 3px !important;
+    padding: 0.2rem 0.4rem !important;
+    font-size: 0.75rem !important;
+    width: 60px !important;
+  }
+
   .warning {
-    color: orange;
+    color: #f59e0b !important;
+    font-size: 0.7rem !important;
+    margin: 0.5rem 0 0 0 !important;
+    text-align: center !important;
   }
 </style> 

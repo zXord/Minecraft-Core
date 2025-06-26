@@ -72,8 +72,7 @@ function setupIpcHandlers(win) {
       settingsHandlers,
       managementServerHandlers,
       minecraftLauncherHandlers,
-      serverJavaHandlers,
-      appSettingsHandlers
+      serverJavaHandlers
     ].forEach((handlers) => {
       if (!handlers) {
         return;
@@ -132,6 +131,26 @@ function setupIpcHandlers(win) {
     registerIpcHandlers({
       'get-auto-restart': () => getAutoRestartState(),
       'set-auto-restart': (_e, options) => setAutoRestartOptions(options)
+    });
+    
+    // Register app settings handlers
+    Object.entries(appSettingsHandlers).forEach(([channel, handler]) => {
+      // Skip if handler is not a function
+      if (typeof handler !== 'function') {
+        return;
+      }
+      
+      // Check for existing handler to avoid duplicates
+      if (registeredHandlers.has(channel)) {
+        // Remove existing handler to prevent conflicts
+        ipcMain.removeHandler(channel);
+        registeredHandlers.delete(channel);
+      }
+      
+      // Ensure handler has the correct signature for ipcMain.handle
+      const wrappedHandler = (event, ...args) => handler(event, ...args);
+      ipcMain.handle(channel, wrappedHandler);
+      registeredHandlers.add(channel);
     });
       // delete-instance handler is registered in settings-handlers.cjs
     

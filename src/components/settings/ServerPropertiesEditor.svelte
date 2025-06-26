@@ -441,9 +441,8 @@
   }
 </script>
 
-<div class="server-properties-editor">
-  <h3>Server Properties Editor</h3>
-  
+<!-- Remove the old container and title - they're now in the parent card -->
+<div class="server-properties-content">
   {#if isLoading}
     <div class="loading">Loading server properties...</div>
   {:else if error}
@@ -593,303 +592,236 @@
 </div>
 
 <style>
-  .server-properties-editor {
-    max-width: 600px;
-    margin: 0 auto 1.5rem;
-    padding: 1rem;
-    border: 1px solid #ffffff;
-    border-radius: 8px;
-    background: #272727;
-    position: relative;
-  }
-  
-  h3 {
-    margin-top: 0;
-    margin-bottom: 1rem;
-    text-align: center;
-  }
-  
-  .loading, .error {
-    text-align: center;
-    padding: 1rem;
-  }
-  
-  .error {
-    color: #ff5555;
-  }
-  
-  
-  .error-actions {
-    display: flex;
-    justify-content: center;
-    gap: 1rem;
-    margin-top: 1rem;
-  }
-  
+  /* Remove ALL old styling - this component is now wrapped in cards */
+
+  /* Style the controls to fit in the card */
   .controls {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1rem;
-    flex-wrap: wrap;
-    gap: 0.5rem;
+    background: none !important;
+    border: none !important;
+    padding: 0.5rem 0 !important;
+    margin: 0 0 0.5rem 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 0.5rem !important;
   }
-  
+
   .search-box {
-    position: relative;
-    flex: 1;
-    min-width: 200px;
+    background: rgba(17, 24, 39, 0.4) !important;
+    border: 1px solid rgba(75, 85, 99, 0.3) !important;
+    border-radius: 4px !important;
+    padding: 0.3rem 0.5rem !important;
+    position: relative !important;
+    display: flex !important;
+    align-items: center !important;
   }
-  
+
   .search-box input {
-    width: 100%;
-    padding: 0.5rem;
-    border-radius: 4px;
-    border: 1px solid #555;
-    background: #333;
-    color: white;
+    background: none !important;
+    border: none !important;
+    color: #e2e8f0 !important;
+    font-size: 0.8rem !important;
+    width: 100% !important;
   }
-  
-  .clear-search {
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: none;
-    border: none;
-    color: #aaa;
-    font-size: 1.2rem;
-    cursor: pointer;
-    padding: 0;
-  }
-  
+
   .action-buttons {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
+    display: flex !important;
+    gap: 0.5rem !important;
+    margin-top: 0.5rem !important;
   }
-  
-  .restore-button-container {
-    position: relative;
+
+  .action-buttons button {
+    background: rgba(75, 85, 99, 0.3) !important;
+    border: 1px solid rgba(75, 85, 99, 0.5) !important;
+    color: #e2e8f0 !important;
+    border-radius: 4px !important;
+    padding: 0.3rem 0.6rem !important;
+    font-size: 0.75rem !important;
+    cursor: pointer !important;
   }
-  
-  .tooltip-confirmation {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    margin-top: 5px;
-    z-index: 100;
-    width: 280px;
+
+  .action-buttons button:hover {
+    background: rgba(75, 85, 99, 0.5) !important;
   }
-  
-  .tooltip-content {
-    background: #333;
-    padding: 1rem;
-    border-radius: 4px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
-    border: 1px solid #444;
-  }
-  
-  .tooltip-content h4 {
-    margin-top: 0;
-    color: #ff5555;
-    font-size: 1rem;
-  }
-  
-  .tooltip-content p {
-    margin: 0.5rem 0;
-    font-size: 0.9rem;
-  }
-  
-  .tooltip-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
-  }
-  
-  button {
-    padding: 0.5rem 1rem;
-    border-radius: 4px;
-    border: 1px solid #555;
-    background: #3a3a3a;
-    color: white;
-    cursor: pointer;
-  }
-  
-  button:hover:not(:disabled) {
-    background: #444;
-  }
-  
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  
-  .save-button {
-    background: #2a5a8a;
-  }
-  
-  .save-button:hover:not(:disabled) {
-    background: #326aa0;
-  }
-  
-  .restore-button {
-    background: #8a2a5a;
-  }
-  
-  .restore-button:hover:not(:disabled) {
-    background: #a03268;
-  }
-  
-  .cancel-button {
-    background: #3a3a3a;
-    padding: 0.3rem 0.7rem;
-    font-size: 0.85rem;
-  }
-  
-  .confirm-button {
-    background: #8a2a5a;
-    padding: 0.3rem 0.7rem;
-    font-size: 0.85rem;
-  }
-  
+
+  /* Category sections */
   .property-category {
-    margin-bottom: 1rem;
-    border: 1px solid #444;
-    border-radius: 4px;
-    overflow: hidden;
+    background: none !important;
+    border: none !important;
+    margin: 0.25rem 0 !important;
+    border-radius: 4px !important;
+    overflow: hidden !important;
   }
-    .category-header {
-    width: 100%;
-    padding: 0.5rem;
-    background: #333;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    border: none;
-    color: white;
-    text-align: left;
+
+  .category-header {
+    background: rgba(17, 24, 39, 0.4) !important;
+    border: 1px solid rgba(75, 85, 99, 0.3) !important;
+    padding: 0.4rem 0.6rem !important;
+    border-radius: 4px !important;
+    cursor: pointer !important;
+    width: 100% !important;
+    display: flex !important;
+    align-items: center !important;
+    color: #e2e8f0 !important;
+    text-align: left !important;
   }
-  
-  .category-header:hover {
-    background: #3a3a3a;
-  }
-  
+
   .category-header h4 {
-    margin: 0;
-    flex: 1;
+    margin: 0 !important;
+    font-size: 0.8rem !important;
+    color: #e2e8f0 !important;
   }
-  
-  .match-count {
-    font-size: 0.8rem;
-    color: #aaa;
-    margin-left: 0.5rem;
-  }
-  
-  .category-arrow {
-    margin-right: 0.5rem;
-    display: inline-block;
-    width: 1rem;
-  }
-  
+
+  /* Property items */
   .category-properties {
-    padding: 0.5rem;
+    padding: 0.5rem !important;
+    background: rgba(17, 24, 39, 0.2) !important;
   }
-  
+
   .property-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.5rem 0;
-    border-bottom: 1px solid #3a3a3a;
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    padding: 0.3rem 0 !important;
+    border-bottom: 1px solid rgba(75, 85, 99, 0.2) !important;
+    gap: 0.5rem !important;
   }
-  
+
   .property-row:last-child {
-    border-bottom: none;
+    border-bottom: none !important;
   }
-  
+
+  /* Form controls */
   .property-row label {
-    flex: 1;
+    color: #9ca3af !important;
+    font-size: 0.75rem !important;
+    margin: 0 !important;
+    flex: 1 !important;
   }
-  
+
   .property-input {
-    width: 50%;
+    flex: 1 !important;
+    max-width: 180px !important;
   }
-  
-  .property-input input[type="text"],
-  .property-input input[type="number"],
+
+  .property-input input,
   .property-input select {
-    width: 100%;
-    padding: 0.3rem;
-    border-radius: 4px;
-    border: 1px solid #555;
-    background: #333;
-    color: white;
+    background: rgba(17, 24, 39, 0.6) !important;
+    border: 1px solid rgba(75, 85, 99, 0.4) !important;
+    color: #e2e8f0 !important;
+    border-radius: 3px !important;
+    padding: 0.2rem 0.4rem !important;
+    font-size: 0.75rem !important;
+    width: 100% !important;
   }
-  
+
+  .property-input input[type="checkbox"] {
+    width: auto !important;
+    max-width: none !important;
+  }
+
+  /* Compact everything for card design */
+
+  /* Remove any remaining old styles */
+  .loading,
+  .error {
+    background: none !important;
+    border: none !important;
+    padding: 0.5rem !important;
+    font-size: 0.8rem !important;
+    color: #9ca3af !important;
+    text-align: center !important;
+  }
+
   .no-results {
-    padding: 1rem;
-    color: #aaa;
-    text-align: center;
-    background: #333;
-    border-radius: 4px;
-    margin-bottom: 1rem;
+    background: rgba(17, 24, 39, 0.3) !important;
+    border: 1px solid rgba(75, 85, 99, 0.3) !important;
+    padding: 1rem !important;
+    font-size: 0.8rem !important;
+    color: #9ca3af !important;
+    text-align: center !important;
+    border-radius: 4px !important;
+    margin: 0.5rem 0 !important;
   }
-  
-  /* Make checkbox more visible */
-  input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    accent-color: #2a5a8a;
+
+  .clear-search {
+    position: absolute !important;
+    right: 8px !important;
+    background: none !important;
+    border: none !important;
+    color: #9ca3af !important;
+    cursor: pointer !important;
+    font-size: 1rem !important;
+    padding: 0 !important;
   }
-  
-  .restart-button {
-    background: #ffa500;
-    color: #fff;
-    border: none;
-    border-radius: 4px;
-    padding: 0.5rem 1rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s;
+
+  .clear-search:hover {
+    color: #e2e8f0 !important;
   }
-  
-  .restart-button:hover:not(:disabled) {
-    background: #ffb733;
+
+  .category-arrow {
+    margin-right: 0.5rem !important;
+    font-size: 0.8rem !important;
   }
-  
-  .restart-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+
+  .match-count {
+    margin-left: auto !important;
+    font-size: 0.7rem !important;
+    color: #9ca3af !important;
+  }
+
+  .save-button {
+    background: rgba(59, 130, 246, 0.3) !important;
+    border: 1px solid rgba(59, 130, 246, 0.5) !important;
+    color: #3b82f6 !important;
+    border-radius: 4px !important;
+    padding: 0.3rem 0.6rem !important;
+    font-size: 0.75rem !important;
+    cursor: pointer !important;
+  }
+
+  .save-button:hover {
+    background: rgba(59, 130, 246, 0.5) !important;
+  }
+
+  .save-button:disabled {
+    opacity: 0.5 !important;
+    cursor: not-allowed !important;
   }
 
   .restart-notification {
-    padding: 1rem;
-    background: rgba(255, 165, 0, 0.2);
-    border: 1px solid #ffa500;
-    border-radius: 4px;
-    margin-top: 1rem;
-    animation: pulse 2s infinite;
+    background: rgba(251, 146, 60, 0.1) !important;
+    border: 1px solid rgba(251, 146, 60, 0.3) !important;
+    border-radius: 4px !important;
+    padding: 0.5rem !important;
+    margin: 0.5rem 0 0 0 !important;
+    text-align: center !important;
   }
-  
+
   .restart-notification p {
-    margin: 0 0 0.5rem 0;
-    font-size: 0.9rem;
-    color: #ffa500;
-    font-weight: bold;
+    margin: 0 0 0.5rem 0 !important;
+    font-size: 0.8rem !important;
+    color: #fb923c !important;
   }
-  
-  @keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(255, 165, 0, 0.4); }
-    70% { box-shadow: 0 0 0 10px rgba(255, 165, 0, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(255, 165, 0, 0); }
+
+  .restart-button {
+    background: rgba(251, 146, 60, 0.3) !important;
+    border: 1px solid rgba(251, 146, 60, 0.5) !important;
+    color: #fb923c !important;
+    border-radius: 4px !important;
+    padding: 0.3rem 0.6rem !important;
+    font-size: 0.75rem !important;
+    cursor: pointer !important;
+    width: 100% !important;
   }
-  
+
+  .restart-button:hover:not(:disabled) {
+    background: rgba(251, 146, 60, 0.5) !important;
+  }
+
   .restart-button.full-width {
-    width: 100%;
-    margin-top: 0.5rem;
-    font-weight: bold;
-    padding: 0.75rem;
+    width: 100% !important;
+    margin-top: 0 !important;
+    font-weight: 500 !important;
+    padding: 0.4rem !important;
   }
 </style> 

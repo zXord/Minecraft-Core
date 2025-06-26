@@ -1,6 +1,6 @@
 // App-wide settings IPC handlers
 const appStore = require('../utils/app-store.cjs');
-const { app } = require('electron');
+const { app, BrowserWindow } = require('electron');
 
 /**
  * Create app settings IPC handlers
@@ -21,7 +21,10 @@ function createAppSettingsHandlers() {
           ...currentSettings,
           minimizeToTray: Boolean(settings.minimizeToTray),
           startMinimized: Boolean(settings.startMinimized),
-          startOnStartup: Boolean(settings.startOnStartup)
+          startOnStartup: Boolean(settings.startOnStartup),
+          windowSize: settings.windowSize || 'medium',
+          customWidth: Math.max(800, parseInt(settings.customWidth) || 1200),
+          customHeight: Math.max(600, parseInt(settings.customHeight) || 800)
         };
 
 
@@ -61,7 +64,10 @@ function createAppSettingsHandlers() {
         const defaultSettings = {
           minimizeToTray: false,
           startMinimized: false,
-          startOnStartup: false
+          startOnStartup: false,
+          windowSize: 'medium',
+          customWidth: 1200,
+          customHeight: 800
         };
 
         const settings = appStore.get('appSettings') || defaultSettings;
@@ -87,6 +93,46 @@ function createAppSettingsHandlers() {
         return { success: true, version };
       } catch (err) {
         console.error('Error getting app version:', err);
+        return { success: false, error: err.message };
+      }
+    },
+
+    'set-window-size': async (_e, sizeOptions) => {
+      try {
+        const mainWindow = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+        
+        if (!mainWindow) {
+          return { success: false, error: 'No main window found' };
+        }
+
+        const { width, height, resizable } = sizeOptions;
+        
+        // Validate dimensions
+        const validWidth = Math.max(800, Math.min(2560, parseInt(width) || 1200));
+        const validHeight = Math.max(600, Math.min(1440, parseInt(height) || 800));
+
+        // PRESERVE WINDOW POSITION - Get current position before resizing
+        const [currentX, currentY] = mainWindow.getPosition();
+
+        // Set window size and resizable state
+        // FORCE resize by setting min/max constraints temporarily
+        mainWindow.setMinimumSize(validWidth, validHeight);
+        mainWindow.setMaximumSize(validWidth, validHeight);
+        mainWindow.setSize(validWidth, validHeight);
+        mainWindow.setResizable(Boolean(resizable));
+        
+        // Reset constraints after a brief delay to allow the resize
+        setTimeout(() => {
+          mainWindow.setMinimumSize(800, 600); // Reset to minimum allowed
+          mainWindow.setMaximumSize(2560, 1440); // Reset to maximum allowed
+        }, 100);
+        
+        // RESTORE the original position (don't center!)
+        mainWindow.setPosition(currentX, currentY);
+
+        return { success: true, width: validWidth, height: validHeight, resizable };
+      } catch (err) {
+        console.error('Error setting window size:', err);
         return { success: false, error: err.message };
       }
     },

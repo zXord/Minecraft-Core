@@ -204,13 +204,14 @@
                 {:else if downloadStatus === 'ready'}
                   <div class="status-indicator ready">
                     ✅ <span>All Required Mods Ready</span>
-                    {#if modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
+                    {#if modSyncStatus && ((modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0) || (modSyncStatus.outdatedOptionalMods && modSyncStatus.outdatedOptionalMods.length > 0))}
+                      {@const totalOptionalWork = (modSyncStatus.missingOptionalMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
                       <button 
                         class="optional-indicator" 
                         on:click={() => $clientState.activeTab = 'mods'}
-                        title="{modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's' : ''} available for download"
+                        title="{totalOptionalWork} optional mod{totalOptionalWork > 1 ? 's' : ''} {modSyncStatus.missingOptionalMods?.length > 0 ? 'available' : 'need updates'}"
                       >
-                        ℹ️ {modSyncStatus.needsOptionalDownload}
+                        ℹ️ {totalOptionalWork}
                       </button>
                     {/if}
                   </div>
@@ -350,28 +351,28 @@
                     
                     <!-- Action buttons -->
                     <div class="mod-actions-compact">
-                      {#if totalUpdatesNeeded > 0}
+                    {#if totalUpdatesNeeded > 0}
                         <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
                           📥 Download & Update ({totalUpdatesNeeded})
-                        </button>
-                      {:else if actualRemovals.length > 0}
+                      </button>
+                    {:else if actualRemovals.length > 0}
                         <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
                           🔄 Apply Changes ({actualRemovals.length})
-                        </button>
-                      {/if}
-                      
-                      {#if acknowledgments.length > 0}
+                      </button>
+                    {/if}
+                    
+                    {#if acknowledgments.length > 0}
                         <button class="mod-action-btn acknowledge" on:click={onAcknowledgeAllDependencies}>
                           ✓ Acknowledge ({acknowledgments.length})
-                        </button>
-                      {/if}
+                      </button>
+                    {/if}
                     </div>
                   {:else}
                     <h3>Mods Need Update</h3>
                     <div class="mod-actions-compact">
                       <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
-                        🔄 Synchronize Mods
-                      </button>
+                      🔄 Synchronize Mods
+                    </button>
                     </div>
                   {/if}
                 </div>
@@ -548,7 +549,7 @@
     max-width: 100%;
     margin: 0;
     gap: 0.25rem;
-    padding: 0;
+    padding: 1rem; /* Add consistent padding like server components */
     box-sizing: border-box;
   }
 

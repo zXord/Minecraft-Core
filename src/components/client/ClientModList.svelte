@@ -107,7 +107,7 @@
     // Only show "server mod" status for required mods, not optional mods
     if (isServerManaged && type === 'required') {
       return 'server mod';
-    }
+      }
 
     // For optional mods, check if disabled
     if (type === 'optional') {
@@ -195,7 +195,7 @@
       
       // Trigger reactivity
       modSyncStatus = modSyncStatus;
-    }
+  }
   }
 
   // Handle mod deletion
@@ -291,9 +291,10 @@
               <p class="section-description">{sectionInfo[type].description}</p>
               
               <!-- Optional mod download notification -->
-              {#if type === 'optional' && modSyncStatus && modSyncStatus.needsOptionalDownload && modSyncStatus.needsOptionalDownload > 0}
+              {#if type === 'optional' && modSyncStatus && ((modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0) || (modSyncStatus.outdatedOptionalMods && modSyncStatus.outdatedOptionalMods.length > 0))}
+                {@const totalOptionalWork = (modSyncStatus.missingOptionalMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0)}
                 <div class="optional-notification">
-                  <span class="notification-text">⚠️ {modSyncStatus.needsOptionalDownload} optional mod{modSyncStatus.needsOptionalDownload > 1 ? 's' : ''} available</span>
+                  <span class="notification-text">⚠️ {totalOptionalWork} optional mod{totalOptionalWork > 1 ? 's' : ''} {modSyncStatus.missingOptionalMods?.length > 0 ? 'available' : 'need updates'}</span>
                   <button class="notification-btn" on:click={handleDownload}>
                     📥 Download All Optional
                   </button>
@@ -406,13 +407,13 @@
                           ⏳ Loading...
                         </button>
                       {:else}
-                        <button class="toggle sm" 
-                                class:primary={modStatus === 'disabled'}
-                                class:warn={modStatus === 'installed'}
-                                on:click={() => handleToggle(mod, modStatus !== 'installed')}
-                                title={modStatus === 'installed' ? 'Disable mod' : 'Enable mod'}>
-                          {modStatus === 'installed' ? 'Disable' : 'Enable'}
-                        </button>
+                      <button class="toggle sm" 
+                              class:primary={modStatus === 'disabled'}
+                              class:warn={modStatus === 'installed'}
+                              on:click={() => handleToggle(mod, modStatus !== 'installed')}
+                              title={modStatus === 'installed' ? 'Disable mod' : 'Enable mod'}>
+                        {modStatus === 'installed' ? 'Disable' : 'Enable'}
+                      </button>
                       {/if}
                       {#if modStatus !== 'missing'}
                         <button class="danger sm" on:click={() => handleDelete(mod)} title="Remove mod">

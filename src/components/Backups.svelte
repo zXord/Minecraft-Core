@@ -339,9 +339,7 @@
 </script>
 
 <div class="backups-tab">
-  <h2>Backups</h2>
-  
-  <!-- Automation Settings Section -->
+  <!-- Automation Settings Section moved to top -->
   <div class="automation-section">
     <div class="section-header">
       <h3>Backup Automation</h3>
@@ -609,9 +607,35 @@
 </div>
 
 <style>
-  .backups-tab { padding: 1rem; }
-  .backups-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
-  .backups-table th, .backups-table td { border: 1px solid #ccc; padding: 0.5rem; }
+  .backups-tab { 
+    padding: 1rem; 
+    box-sizing: border-box;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  
+  .backups-table { 
+    width: 100%; 
+    border-collapse: collapse; 
+    margin-top: 0.5rem;
+    table-layout: fixed;
+    max-width: 100%;
+  }
+  
+  .backups-table th, .backups-table td { 
+    border: 1px solid #ccc; 
+    padding: 0.5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .backups-table th:nth-child(1) { width: 40px; } /* Checkbox */
+  .backups-table th:nth-child(2) { width: 35%; } /* Name */
+  .backups-table th:nth-child(3) { width: 10%; } /* Type */
+  .backups-table th:nth-child(4) { width: 15%; } /* Size */
+  .backups-table th:nth-child(5) { width: 25%; } /* Timestamp */
+  .backups-table th:nth-child(6) { width: 15%; } /* Actions */
 
   .rename-dialog-modal {
     position: fixed;
@@ -630,6 +654,9 @@
     padding: 1rem;
     margin-bottom: 1rem;
     border: 1px solid #444;
+    max-width: 100%;
+    overflow-x: auto;
+    box-sizing: border-box;
   }
   
   .section-header {
@@ -701,11 +728,13 @@
   
   .settings-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 1rem 2rem;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
     margin-top: 0.5rem;
     padding-top: 0.8rem;
     border-top: 1px solid #444;
+    max-width: 100%;
+    overflow-x: auto;
   }
   
   .schedule-item {
@@ -796,8 +825,11 @@
   }
   
   .time-selectors select {
-    width: auto;    min-width: 55px;
+    width: auto;
+    min-width: 50px;
+    max-width: 70px;
     text-align: center;
+    flex-shrink: 0;
   }
   
   .bulk-delete {

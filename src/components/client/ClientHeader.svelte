@@ -1,8 +1,6 @@
 <script>
   import { clientState, setActiveTab } from '../../stores/clientStore.js';
   export let tabs = ['play', 'mods', 'settings'];
-  export let instance = {};
-  export let minecraftServerStatus = 'unknown';
   export let onOpenAppSettings = () => {};
 
   $: state = $clientState;
@@ -50,6 +48,7 @@
     align-items: center;
     border-bottom: none;
     margin: 0;
+    min-height: 120px; /* Same as server header */
   }
 
   .header-title-row {
@@ -91,163 +90,52 @@
     transform: scale(1.05);
   }
 
-  .connection-status {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    margin-top: 1rem;
-    gap: 0.5rem;
-  }
 
-  .status-section {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    margin-top: 0.5rem;
-    gap: 0.5rem;
-  }
-
-  .status-section-label {
-    color: #9ca3af;
-    font-size: 0.9rem;
-  }
-
-  .address-label {
-    color: #9ca3af;
-    font-size: 0.9rem;
-    margin-right: 0.5rem;
-  }
-
-  .status-indicator {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 1rem;
-    border-radius: 2rem;
-    font-size: 0.875rem;
-    font-weight: 500;
-  }
-
-  .status-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-  }
-
-  .connected {
-    background-color: rgba(16, 185, 129, 0.2);
-    color: #10b981;
-  }
-
-  .connected .status-dot {
-    background-color: #10b981;
-  }
-
-  .connecting {
-    background-color: rgba(245, 158, 11, 0.2);
-    color: #f59e0b;
-  }
-
-  .connecting .status-dot {
-    background-color: #f59e0b;
-    animation: pulse 1.5s infinite;
-  }
-
-  .disconnected {
-    background-color: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-  }
-
-  .disconnected .status-dot {
-    background-color: #ef4444;
-  }
-
-  .server-running {
-    background-color: rgba(16, 185, 129, 0.2);
-    color: #10b981;
-  }
-
-  .server-running .status-dot {
-    background-color: #10b981;
-  }
-
-  .server-stopped {
-    background-color: rgba(239, 68, 68, 0.2);
-    color: #ef4444;
-  }
-
-  .server-stopped .status-dot {
-    background-color: #ef4444;
-  }
-
-  .server-unknown {
-    background-color: rgba(107, 114, 128, 0.2);
-    color: #9ca3af;
-  }
-
-  .server-unknown .status-dot {
-    background-color: #9ca3af;
-  }
-
-  .server-details {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    margin-top: 0.5rem;
-    gap: 0.5rem;
-  }
-
-  .server-address {
-    color: #e2e8f0;
-    font-family: monospace;
-    background-color: #374151;
-    padding: 0.25rem 0.5rem;
-    border-radius: 0.25rem;
-  }
 
   .modern-client-tabs {
+    /* Use universal tab container with slight customization */
     display: flex;
-    gap: 0.75rem;
-    margin: 1rem 0 0.5rem 0;
+    gap: 0.5rem; /* Same as server tabs */
+    margin-top: 1rem;
     justify-content: center;
-    padding: 0.5rem;
-    background: rgba(31, 41, 55, 0.4);
-    border-radius: 8px;
-    border: 1px solid rgba(75, 85, 99, 0.3);
+    flex-wrap: wrap;
   }
 
   .modern-tab-button {
-    padding: 0.75rem 1.5rem;
-    border: 1px solid transparent;
+    /* Match server tab styling exactly */
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: rgba(255, 255, 255, 0.8);
     border-radius: 6px;
-    font-size: 0.95rem;
+    padding: 0.5rem 1rem;
+    font-size: 0.9rem;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: all 0.2s;
     white-space: nowrap;
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    background: transparent;
-    color: #9ca3af;
-    margin: 0;
+    box-sizing: border-box;
+    flex-shrink: 0;
   }
 
   .modern-tab-button:hover:not(.active) {
-    background: rgba(75, 85, 99, 0.3);
-    color: #d1d5db;
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
+    border-color: rgba(255, 255, 255, 0.3);
     transform: translateY(-1px);
   }
 
   .modern-tab-button.active {
-    background: rgba(59, 130, 246, 0.15);
+    background: rgba(59, 130, 246, 0.2);
     color: #3b82f6;
-    border-color: rgba(59, 130, 246, 0.3);
+    border-color: rgba(59, 130, 246, 0.4);
   }
 
   .modern-tab-button.active:hover {
-    background: rgba(59, 130, 246, 0.25);
-    border-color: rgba(59, 130, 246, 0.5);
+    background: rgba(59, 130, 246, 0.3);
+    border-color: rgba(59, 130, 246, 0.6);
   }
 
   /* Responsive Design */
@@ -259,7 +147,6 @@
     .modern-client-tabs {
       flex-direction: column;
       gap: 0.5rem;
-      padding: 0.75rem;
       margin: 0.75rem 0 0.5rem 0;
     }
 
