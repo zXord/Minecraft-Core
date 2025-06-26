@@ -1884,6 +1884,15 @@ function createMinecraftLauncherHandlers(win) {
       }
     },
 
+    'minecraft-clear-client-full': async (_e, { clientPath, minecraftVersion }) => {
+      try {
+        const result = await launcher.clearMinecraftClientFull(clientPath, minecraftVersion);
+        return result;
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
     'minecraft-clear-assets': async (_e, { clientPath }) => {
       try {
         const result = await launcher.clearAssets(clientPath);

@@ -11,13 +11,16 @@
   export let promptDelete;
   export let serverInfo;
   export let clientSyncStatus;
+  export let clientDownloadProgress = { type: '', task: '', total: 0, current: 0 };
   export let checkClientSynchronization;
   export let redownloadClient;
+  export let redownloadClientFull;
 
   // Enhanced state management
   let isAuthenticating = false;
   let isCheckingClient = false;
   let isRedownloading = false;
+  let isRedownloadingFull = false;
   let isDeletingInstance = false;
   let showCopyConfirmation = false;
   let lastAuthDate = authData?.lastLogin || null;
@@ -48,6 +51,15 @@
       await redownloadClient();
     } finally {
       isRedownloading = false;
+    }
+  }
+
+  async function handleRedownloadFull() {
+    isRedownloadingFull = true;
+    try {
+      await redownloadClientFull();
+    } finally {
+      isRedownloadingFull = false;
     }
   }
 
@@ -183,7 +195,8 @@
                 {:else if clientSyncStatus === 'needed'}
                       ⚠️ Needs Download
                 {:else if clientSyncStatus === 'downloading'}
-                      ⏳ Downloading...
+                      {@const percentage = Math.round((clientDownloadProgress.current / clientDownloadProgress.total) * 100) || 0}
+                      📥 Downloading {percentage}% {clientDownloadProgress.phase ? `• ${clientDownloadProgress.phase}` : ''}
                 {:else}
                   ❓ Unknown
                 {/if}
@@ -202,15 +215,23 @@
                   <button 
                     class="modern-btn warning sm" 
                     on:click={handleRedownload}
-                    disabled={isRedownloading}
-                    title="Re-download client files"
+                    disabled={isRedownloading || isRedownloadingFull}
+                    title="Repair client files (smart fix - preserves libraries and assets)"
                   >
-                    {isRedownloading ? '⏳ Downloading...' : '🔄 Re-download'}
+                    {isRedownloading ? '⏳ Repairing...' : '🔧 Repair Client'}
+                </button>
+                  <button 
+                    class="modern-btn danger sm" 
+                    on:click={handleRedownloadFull}
+                    disabled={isRedownloading || isRedownloadingFull}
+                    title="Clear everything and re-download (slower but thorough)"
+                  >
+                    {isRedownloadingFull ? '⏳ Clearing...' : '🗑️ Clear All & Re-download'}
                 </button>
               </div>
               
                 <p class="help-text">
-                  If Minecraft won't launch, try re-downloading client files.
+                  <strong>Repair Client</strong>: Fixes most issues quickly. <strong>Clear All</strong>: For stubborn problems.
               </p>
             {:else}
                 <div class="no-connection">

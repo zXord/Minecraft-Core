@@ -1700,16 +1700,18 @@ Specification-Vendor: FabricMC
     }
   }
 
-  // Clear Minecraft client files for re-download
+  // Clear Minecraft client files for re-download (smart repair - only core files)
   async clearMinecraftClient(clientPath, minecraftVersion) {
     try {
       const versionsDir = path.join(clientPath, 'versions');
+      let clearedItems = [];
       
       // Remove specific version directory
       if (minecraftVersion) {
         const versionDir = path.join(versionsDir, minecraftVersion);
         if (fs.existsSync(versionDir)) {
           fs.rmSync(versionDir, { recursive: true, force: true });
+          clearedItems.push(`${minecraftVersion} core files`);
         }
         
         // Also remove Fabric profiles for this version
@@ -1717,10 +1719,49 @@ Specification-Vendor: FabricMC
         const fabricDir = path.join(versionsDir, fabricProfileName);
         if (fs.existsSync(fabricDir)) {
           fs.rmSync(fabricDir, { recursive: true, force: true });
+          clearedItems.push(`${fabricProfileName} Fabric profile`);
         }
       }
       
-      return { success: true, message: `Cleared client files for ${minecraftVersion}` };
+      const message = clearedItems.length > 0 ? 
+        `Cleared: ${clearedItems.join(', ')}` : 
+        'No files needed clearing';
+        
+      return { success: true, message, clearedItems };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Full clear - removes EVERYTHING including libraries and assets
+  async clearMinecraftClientFull(clientPath, minecraftVersion) {
+    try {
+      let clearedItems = [];
+      
+      // Clear core client files first
+      const coreResult = await this.clearMinecraftClient(clientPath, minecraftVersion);
+      if (coreResult.success && coreResult.clearedItems) {
+        clearedItems.push(...coreResult.clearedItems);
+      }
+      
+      // Clear libraries directory
+      const librariesDir = path.join(clientPath, 'libraries');
+      if (fs.existsSync(librariesDir)) {
+        fs.rmSync(librariesDir, { recursive: true, force: true });
+        clearedItems.push('all libraries');
+      }
+      
+      // Clear assets directory  
+      const assetsResult = await this.clearAssets(clientPath);
+      if (assetsResult.success) {
+        clearedItems.push('all assets');
+      }
+      
+      const message = clearedItems.length > 0 ? 
+        `Full clear completed: ${clearedItems.join(', ')}` : 
+        'No files needed clearing';
+        
+      return { success: true, message, clearedItems, fullClear: true };
     } catch (error) {
       return { success: false, error: error.message };
     }

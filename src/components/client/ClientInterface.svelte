@@ -1622,7 +1622,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
   
-  // Clear and re-download client files
+  // Clear and re-download client files (smart repair)
   async function redownloadClient() {
     if (!serverInfo?.minecraftVersion) {
       errorMessage.set('No Minecraft version specified by server');
@@ -1632,13 +1632,52 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     try {
       
-      // Clear existing client files first
+      // Clear existing client files first (smart repair - preserves libraries/assets)
       const clearResult = await window.electron.invoke('minecraft-clear-client', {
         clientPath: instance.path,
         minecraftVersion: serverInfo.minecraftVersion
       });
       
       if (clearResult.success) {
+        successMessage.set(`Client repair started: ${clearResult.message}`);
+        setTimeout(() => successMessage.set(''), 3000);
+        
+        // Force re-check to show "needed" status
+        clientSyncStatus = 'needed';
+        
+        // Then download fresh files
+        await downloadClient();
+      } else {
+        errorMessage.set('Failed to clear client files: ' + clearResult.error);
+        setTimeout(() => errorMessage.set(''), 5000);
+      }
+      
+    } catch (err) {
+      errorMessage.set('Error clearing client files: ' + err.message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  }
+
+  // Full clear and re-download (everything including libraries and assets)
+  async function redownloadClientFull() {
+    if (!serverInfo?.minecraftVersion) {
+      errorMessage.set('No Minecraft version specified by server');
+      setTimeout(() => errorMessage.set(''), 5000);
+      return;
+    }
+    
+    try {
+      
+      // Clear ALL client files (full clear)
+      const clearResult = await window.electron.invoke('minecraft-clear-client-full', {
+        clientPath: instance.path,
+        minecraftVersion: serverInfo.minecraftVersion
+      });
+      
+      if (clearResult.success) {
+        successMessage.set(`Full client clear completed: ${clearResult.message}`);
+        setTimeout(() => successMessage.set(''), 5000);
+        
         // Force re-check to show "needed" status
         clientSyncStatus = 'needed';
         
@@ -2313,8 +2352,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {promptDelete}
         {serverInfo}
         {clientSyncStatus}
+        {clientDownloadProgress}
         {checkClientSynchronization}
         {redownloadClient}
+        {redownloadClientFull}
       />
     {/if}
   </div>
