@@ -692,6 +692,21 @@
 </main>
 
 <style>
+  /* Override global app.css styles that interfere with our layout */
+  :global(body) {
+    display: block !important;
+    place-items: unset !important;
+  }
+  
+  :global(#app) {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    text-align: left !important;
+    width: 100% !important;
+    height: 100vh !important;
+  }
+
   /* Main layout */
   .app-container {
     display: flex;
@@ -707,6 +722,10 @@
     padding: 0;
     margin-left: 0;
     box-sizing: border-box; /* Match other containers */
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    position: relative;
   }
 
   /* Setup container */
@@ -1168,17 +1187,23 @@
 
   /* Empty state */
   .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100vh;
-    padding: 2rem;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1;
+    width: auto;
+    height: auto;
   }
 
   .empty-state-content {
     text-align: center;
     max-width: 600px;
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
   }
 
   .empty-state-content h1 {

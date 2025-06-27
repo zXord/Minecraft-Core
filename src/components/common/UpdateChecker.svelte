@@ -18,7 +18,26 @@
     
     try {
       isChecking = true;
+      
+      // Immediately update UI state to show checking
+      updateStatus = {
+        ...updateStatus,
+        isCheckingForUpdates: true
+      };
+      
+      // Safety timeout to clear checking state after 10 seconds
+      const timeoutId = setTimeout(() => {
+        updateStatus = {
+          ...updateStatus,
+          isCheckingForUpdates: false
+        };
+        isChecking = false;
+      }, 10000);
+      
       const result = await window.electron.invoke('check-for-updates');
+      
+      // Clear the timeout since we got a result
+      clearTimeout(timeoutId);
       
       if (result.success) {
         lastChecked = new Date();
@@ -41,7 +60,7 @@
         }
         
         updateStatus = {
-          updateAvailable: result.updateAvailable,
+          updateAvailable: result.updateAvailable || false,
           latestVersion: result.latestVersion,
           isCheckingForUpdates: false,
           developmentMode: result.developmentMode || false
@@ -54,6 +73,12 @@
         description: error.message || 'Failed to check for updates',
         duration: 8000
       });
+      
+      // Make sure to clear checking state on error
+      updateStatus = {
+        ...updateStatus,
+        isCheckingForUpdates: false
+      };
     } finally {
       isChecking = false;
     }

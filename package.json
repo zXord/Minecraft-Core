@@ -76,7 +76,9 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "include": "build/uninstaller.nsh",
+      "warningsAsErrors": false
     },
     "publish": {
       "provider": "github",
