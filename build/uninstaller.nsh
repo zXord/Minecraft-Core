@@ -3,9 +3,6 @@
 
 !include "LogicLib.nsh"
 
-# Variables for uninstall options
-Var DeleteAppData
-
 # Custom uninstall function that runs after files are deleted
 Function un.onUninstSuccess
   # Show message box asking user if they want to delete app data
