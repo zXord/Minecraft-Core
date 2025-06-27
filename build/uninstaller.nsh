@@ -1,52 +1,17 @@
 # Custom NSIS script for Minecraft Core uninstaller
 # Adds option to delete saved app data (instances, settings, etc.)
 
-!include "MUI2.nsh"
 !include "LogicLib.nsh"
 
 # Variables for uninstall options
 Var DeleteAppData
-Var DeleteAppDataCheckbox
 
-# Custom uninstaller page for app data deletion
-Page custom un.DataDeletionPage un.DataDeletionPageLeave
-
-# Function to create the app data deletion page
-Function un.DataDeletionPage
-  !insertmacro MUI_HEADER_TEXT "Uninstall Options" "Choose what to remove during uninstallation"
-  
-  nsDialogs::Create 1018
-  Pop $0
-  
-  ${If} $0 == error
-    Abort
-  ${EndIf}
-  
-  # Create label explaining the option
-  ${NSD_CreateLabel} 0 0 100% 30u "Minecraft Core stores your server instances, settings, and other data in your user profile. You can choose to keep or remove this data:"
-  Pop $0
-  
-  # Create checkbox for deleting app data (checked by default)
-  ${NSD_CreateCheckbox} 0 35u 100% 15u "Delete saved data (instances, settings, configurations)"
-  Pop $DeleteAppDataCheckbox
-  ${NSD_Check} $DeleteAppDataCheckbox  # Check by default
-  
-  # Create description of what will be deleted
-  ${NSD_CreateLabel} 0 55u 100% 40u "This includes:$\n• Server instances and configurations$\n• App settings (window size, startup options)$\n• Mod categories and preferences$\n• Runtime files and logs"
-  Pop $0
-  
-  nsDialogs::Show
-FunctionEnd
-
-# Function called when leaving the app data deletion page
-Function un.DataDeletionPageLeave
-  ${NSD_GetState} $DeleteAppDataCheckbox $DeleteAppData
-FunctionEnd
-
-# Custom uninstall function
+# Custom uninstall function that runs after files are deleted
 Function un.onUninstSuccess
-  # Check if user wants to delete app data
-  ${If} $DeleteAppData == ${BST_CHECKED}
+  # Show message box asking user if they want to delete app data
+  MessageBox MB_YESNO|MB_ICONQUESTION "Do you want to delete your saved data?$\n$\nThis includes:$\n• Server instances and configurations$\n• App settings (window size, startup options)$\n• Mod categories and preferences$\n• Runtime files and logs$\n$\nChoose 'No' if you plan to reinstall later and want to keep your settings." /SD IDYES IDYES delete_data IDNO keep_data
+  
+  delete_data:
     DetailPrint "Removing saved app data..."
     
     # Get the app data directory path
@@ -64,11 +29,17 @@ Function un.onUninstSuccess
         MessageBox MB_OK|MB_ICONEXCLAMATION "Some app data files could not be deleted. You may need to manually remove them from:$\n$\n$0"
       ${Else}
         DetailPrint "App data successfully removed"
+        MessageBox MB_OK|MB_ICONINFORMATION "App data has been successfully removed."
       ${EndIf}
     ${Else}
       DetailPrint "No app data found to delete"
     ${EndIf}
-  ${Else}
+    Goto done
+  
+  keep_data:
     DetailPrint "Keeping saved app data"
-  ${EndIf}
+    MessageBox MB_OK|MB_ICONINFORMATION "Your app data has been preserved for future installations."
+    Goto done
+  
+  done:
 FunctionEnd 
