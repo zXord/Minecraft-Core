@@ -134,6 +134,17 @@ contextBridge.exposeInMainWorld('electron', {
       'get-app-version',
       'check-for-updates',
       'set-window-size',
+      // Update system channels
+      'download-update',
+      'install-update',
+      'ignore-update',
+      'remind-later',
+      'set-auto-install',
+      'get-update-status',
+      'start-periodic-checks',
+      'stop-periodic-checks',
+      'check-for-specific-version',
+      'get-current-version',
       // Application lifecycle
       'app-close-response',
       // Management server events
@@ -217,6 +228,14 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-error',
       'server-java-download-progress',
       'app-close-request',
+      // Update system events
+      'update-checking-for-update',
+      'update-available',
+      'update-not-available',
+      'update-error',
+      'update-download-progress',
+      'update-downloaded',
+      'update-ignored',
     ];
     if (validChannels.includes(channel)) {
       // Wrap the listener so we can remove it later
@@ -268,6 +287,14 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-error',
       'server-java-download-progress',
       'app-close-request',
+      // Update system events
+      'update-checking-for-update',
+      'update-available',
+      'update-not-available',
+      'update-error',
+      'update-download-progress',
+      'update-downloaded',
+      'update-ignored',
     ];
     if (validChannels.includes(channel)) {
       const map = listenerMap.get(channel);
@@ -321,6 +348,14 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-error',
       'server-java-download-progress',
       'app-close-request',
+      // Update system events
+      'update-checking-for-update',
+      'update-available',
+      'update-not-available',
+      'update-error',
+      'update-download-progress',
+      'update-downloaded',
+      'update-ignored',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.removeAllListeners(channel);

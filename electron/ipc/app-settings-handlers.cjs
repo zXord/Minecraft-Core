@@ -135,40 +135,6 @@ function createAppSettingsHandlers() {
         console.error('Error setting window size:', err);
         return { success: false, error: err.message };
       }
-    },
-
-    'check-for-updates': async () => {
-      try {
-        const currentVersion = app.getVersion();
-        
-        // For now, this is a placeholder implementation
-        // In a real app, you'd check against a remote server or GitHub releases
-        
-        // Simulate checking for updates
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // For demonstration, let's say we're up to date
-        // In real implementation, you'd:
-        // 1. Fetch latest version from GitHub releases API or your update server
-        // 2. Compare version numbers
-        // 3. Return appropriate response
-        
-        const mockLatestVersion = currentVersion; // Simulating up-to-date
-        const hasUpdate = false; // Would be determined by version comparison
-        
-        return {
-          success: true,
-          currentVersion,
-          latestVersion: mockLatestVersion,
-          hasUpdate,
-          // You could also include download URL, release notes, etc.
-          releaseNotes: hasUpdate ? 'Bug fixes and improvements' : null,
-          downloadUrl: hasUpdate ? 'https://example.com/download' : null
-        };
-      } catch (err) {
-        console.error('Error checking for updates:', err);
-        return { success: false, error: err.message };
-      }
     }
   };
 }

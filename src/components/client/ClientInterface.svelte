@@ -109,7 +109,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     setMinecraftServerStatus,
     setMinecraftVersion,
     setClientModVersionUpdates,
-    clearVersionChangeDetected
+    clearVersionChangeDetected,
+    setAppVersions,
+    clearAppVersions
   } from '../../stores/clientStore.js';
   
   // Props
@@ -140,7 +142,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let downloadProgress = 0;
   let downloadSpeed = '0 MB/s';
   let currentDownloadFile = '';  let fileProgress = 0;
-  let clientDownloadProgress = { type: '', task: '', total: 0 };
+  let clientDownloadProgress = { type: '', task: '', total: 0, current: 0 };
   let clientSyncInfo = null;
   let isChecking = false;
   let lastCheck = null;
@@ -239,6 +241,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   async function connectToServer() {
     if (!instance || !instance.serverIp || !instance.serverPort) {
       setConnectionStatus('disconnected');
+      clearAppVersions();
       return;
     }
 
@@ -262,8 +265,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       if (testData.success) {
         setConnectionStatus('connected');
         
-        // Register with the server
+        // Register with the server and check app version compatibility
         await registerWithServer();
+        await checkAppVersionCompatibility();
         
         // Check server status and get server info
         await checkServerStatus();
@@ -277,6 +281,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       setConnectionStatus('disconnected');
       setManagementServerStatus('unknown');
       setMinecraftServerStatus('unknown');
+      clearAppVersions();
     }
   }
   
@@ -316,6 +321,42 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       }
     } catch (err) {
     }  }
+
+  // Check app version compatibility between client and server
+  async function checkAppVersionCompatibility() {
+    try {
+      // Get client app version
+      const clientVersionResult = await window.electron.invoke('get-current-version');
+      const clientVersion = clientVersionResult?.success ? clientVersionResult.version : '1.0.0';
+
+      // Get server app version
+      const appVersionUrl = `http://${instance.serverIp}:${instance.serverPort}/api/app/version`;
+      const response = await fetch(appVersionUrl, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000)
+      });
+
+      if (response.ok) {
+        const versionData = await response.json();
+        if (versionData.success) {
+          const serverVersion = versionData.appVersion || versionData.version;
+          
+          // Update version compatibility status
+          setAppVersions(clientVersion, serverVersion);
+        } else {
+          // Server didn't provide version info, assume compatible
+          setAppVersions(clientVersion, clientVersion);
+        }
+      } else {
+        // Server doesn't support version endpoint, assume compatible
+        setAppVersions(clientVersion, clientVersion);
+      }
+    } catch (err) {
+      console.warn('Failed to check app version compatibility:', err);
+      // On error, assume compatible to avoid blocking users
+      clearAppVersions();
+    }
+  }
   
   // Check both management server and minecraft server status
   async function checkServerStatus(silentRefresh = false) {
@@ -1566,7 +1607,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     isDownloadingClient = true;
     clientSyncStatus = 'downloading';
-    clientDownloadProgress = { type: 'Preparing', task: 'Starting download...', total: 0 };
+          clientDownloadProgress = { type: 'Preparing', task: 'Starting download...', total: 0, current: 0 };
     
     try {
       const result = await window.electron.invoke('minecraft-download-client', {
@@ -1890,7 +1931,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Client download events
     window.electron.on('launcher-client-download-start', (data) => {
       clientSyncStatus = 'downloading';
-      clientDownloadProgress = { type: 'Starting', task: `Downloading Minecraft ${data.version}...`, total: 0 };
+      clientDownloadProgress = { type: 'Starting', task: `Downloading Minecraft ${data.version}...`, total: 0, current: 0 };
     });
     
     window.electron.on('launcher-client-download-progress', (data) => {
@@ -1899,7 +1940,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     window.electron.on('launcher-client-download-complete', (data) => {
       isDownloadingClient = false;
-      clientDownloadProgress = { type: 'Complete', task: 'Client download finished', total: 100 };
+      clientDownloadProgress = { type: 'Complete', task: 'Client download finished', total: 100, current: 100 };
       clientSyncStatus = 'ready';
       
       if (data.success) {

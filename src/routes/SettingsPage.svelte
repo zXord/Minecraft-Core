@@ -9,6 +9,7 @@
   import WorldSettings from '../components/settings/WorldSettings.svelte';
   import ServerPropertiesEditor from '../components/settings/ServerPropertiesEditor.svelte';
   import InstanceSettings from '../components/settings/InstanceSettings.svelte';
+  import UpdateChecker from '../components/common/UpdateChecker.svelte';
   import { errorMessage } from '../stores/modStore.js';
   
   const dispatch = createEventDispatcher();
@@ -123,6 +124,13 @@
       </div>
       <div class="card-content">
         <VersionUpdater serverPath={serverPath} />
+      </div>
+    </div>
+
+    <!-- Application Updates Card -->
+    <div class="settings-card">
+      <div class="card-content">
+        <UpdateChecker />
       </div>
     </div>
 

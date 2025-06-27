@@ -24,9 +24,21 @@ class ManagementServer {
     this.versionInfo = { minecraftVersion: null, loaderType: null, loaderVersion: null };
     this.versionWatcher = null;
     this.sseClients = [];
+    this.appVersion = this.getAppVersion(); // Get current app version
 
     this.setupMiddleware();
     this.setupRoutes();
+  }
+
+  // Get current app version from package.json
+  getAppVersion() {
+    try {
+      const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
+      return packageJson.version || '1.0.0';
+    } catch (error) {
+      console.error('Failed to read app version from package.json:', error);
+      return '1.0.0'; // Fallback version
+    }
   }
   
   setupMiddleware() {
@@ -51,7 +63,8 @@ class ManagementServer {
       res.json({
         status: 'ok',
         server: 'minecraft-core-management',
-        version: '1.0.0',
+        version: this.appVersion,
+        appVersion: this.appVersion, // Explicit app version field
         serverPath: this.serverPath
       });
     });
@@ -70,9 +83,19 @@ class ManagementServer {
       });
     });
 
-    // Endpoint to query current server version
+    // Endpoint to query current server version (Minecraft)
     this.app.get('/api/server/version', (_, res) => {
       res.json({ success: true, version: this.versionInfo });
+    });
+
+    // Endpoint to query current app version
+    this.app.get('/api/app/version', (_, res) => {
+      res.json({ 
+        success: true, 
+        appVersion: this.appVersion,
+        version: this.appVersion, // Backward compatibility
+        timestamp: new Date().toISOString()
+      });
     });    // Client registration
     this.app.post('/api/client/register', (req, res) => {
       const { clientId, name } = req.body;
@@ -106,7 +129,8 @@ class ManagementServer {
         token,
         serverInfo: {
           serverPath: this.serverPath,
-          hasServer: !!this.serverPath
+          hasServer: !!this.serverPath,
+          appVersion: this.appVersion // Include app version in registration response
         }
       });
     });    // Client heartbeat/ping to keep connection alive
@@ -351,6 +375,7 @@ class ManagementServer {
           loaderVersion: loaderVersion,
           requiredMods: requiredMods,
           allClientMods: allClientMods,
+          appVersion: this.appVersion, // Include app version in server info
           serverInfo: {
             name: serverProps['motd'] || 'Minecraft Server',
             maxPlayers: parseInt(serverProps['max-players']) || 20,
@@ -1115,7 +1140,8 @@ class ManagementServer {
       port: this.port,
       serverPath: this.serverPath,
       clientCount: this.clients.size,
-      version: this.versionInfo
+      version: this.versionInfo,
+      appVersion: this.appVersion // Include app version in status
     };
   }
 }
