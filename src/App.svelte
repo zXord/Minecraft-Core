@@ -20,6 +20,8 @@
   import StatusManager from './components/common/StatusManager.svelte';
   import ConfirmationDialog from './components/common/ConfirmationDialog.svelte';
   import AppSettingsModal from './components/common/AppSettingsModal.svelte';
+  import UpdateNotification from './components/common/UpdateNotification.svelte';
+  import { Toaster } from 'svelte-sonner';
   import { showExitConfirmation } from './stores/exitStore.js';
   
   // --- Flow & Tabs ---
@@ -90,6 +92,11 @@
   
   onMount(() => {
     setupIpcListeners();
+    
+    // Start periodic update checks
+    setTimeout(() => {
+      window.electron.invoke('start-periodic-checks');
+    }, 2000); // Start checking 2 seconds after app loads
     
 
     
@@ -680,6 +687,8 @@
     on:close={() => showAppSettings = false}
   />
   <StatusManager />
+  <UpdateNotification />
+  <Toaster richColors theme="dark" />
 </main>
 
 <style>

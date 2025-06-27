@@ -9,7 +9,12 @@ function loadInitialState() {
     activeTab: 'play',
     lastKnownMinecraftVersion: null,
     versionChangeDetected: false,
-    clientModVersionUpdates: null
+    clientModVersionUpdates: null,
+    // App version compatibility
+    clientAppVersion: null,
+    serverAppVersion: null,
+    appVersionCompatible: true,
+    appVersionMismatch: false
   };
 
   try {
@@ -95,6 +100,37 @@ export function setClientModVersionUpdates(updates) {
 export function clearVersionChangeDetected() {
   clientState.update(s => {
     const newState = { ...s, versionChangeDetected: false };
+    persistState(newState);
+    return newState;
+  });
+}
+
+export function setAppVersions(clientVersion, serverVersion) {
+  clientState.update(s => {
+    const compatible = clientVersion === serverVersion;
+    const mismatch = clientVersion && serverVersion && !compatible;
+    
+    const newState = { 
+      ...s, 
+      clientAppVersion: clientVersion,
+      serverAppVersion: serverVersion,
+      appVersionCompatible: compatible,
+      appVersionMismatch: mismatch
+    };
+    persistState(newState);
+    return newState;
+  });
+}
+
+export function clearAppVersions() {
+  clientState.update(s => {
+    const newState = { 
+      ...s, 
+      clientAppVersion: null,
+      serverAppVersion: null,
+      appVersionCompatible: true,
+      appVersionMismatch: false
+    };
     persistState(newState);
     return newState;
   });

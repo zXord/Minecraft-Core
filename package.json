@@ -10,7 +10,10 @@
     "dev:electron": "wait-on --timeout 30000 http-get://localhost:5173 && electron . || wait-on --timeout 30000 http-get://localhost:5174 && electron .",
     "build": "vite build",
     "start": "electron .",
-    "prod": "npm run build && npm run start"
+    "prod": "npm run build && npm run start",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "release": "npm run build && electron-builder --publish=always"
   },
   "devDependencies": {
     "@eslint/js": "^9.28.0",
@@ -19,6 +22,7 @@
     "@typescript-eslint/parser": "^8.34.0",
     "concurrently": "^9.1.2",
     "electron": "^28.1.0",
+    "electron-builder": "^26.0.12",
     "eslint": "^9.28.0",
     "eslint-plugin-svelte": "^3.9.2",
     "globals": "^16.2.0",
@@ -35,6 +39,7 @@
     "axios": "^1.6.2",
     "cors": "^2.8.5",
     "electron-store": "^8.1.0",
+    "electron-updater": "^6.6.2",
     "express": "^4.18.2",
     "fs-extra": "^11.3.0",
     "lucide-svelte": "^0.511.0",
@@ -48,5 +53,34 @@
     "rimraf": "^5.0.0",
     "svelte-sonner": "^1.0.1",
     "uuid": "^9.0.1"
+  },
+  "build": {
+    "appId": "com.minecraft-core.app",
+    "productName": "Minecraft Core",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "icon.png"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "zXord",
+      "repo": "Minecraft-Core"
+    }
   }
 }

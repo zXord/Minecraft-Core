@@ -9,6 +9,7 @@ const { ensureConfigFile } = require('./utils/config-manager.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const fs = require('fs');
 const { ipcMain } = require('electron');
+const { getUpdateService } = require('./services/update-service.cjs');
 
 // Utility function to open folders directly using child_process
 function openFolderDirectly(folderPath) {
@@ -333,6 +334,10 @@ app.whenReady().then(() => {
   createTray();
   
   createWindow();
+  
+  // Initialize update service and start periodic checks
+  const updateService = getUpdateService();
+  updateService.startPeriodicChecks();
   
   // Start app watchdog only when a Minecraft server starts
   const eventBus = require('./utils/event-bus.cjs');

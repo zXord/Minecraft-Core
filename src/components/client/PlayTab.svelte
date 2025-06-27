@@ -1,5 +1,6 @@
 <script>
   import { clientState } from '../../stores/clientStore.js';
+  import { toast } from 'svelte-sonner';
   export let authStatus;
   export let authenticateWithMicrosoft;
   export let checkAuthentication;
@@ -45,6 +46,54 @@
   // Modified launch function that passes debug terminal setting
   function launchMinecraftWithDebug() {
     launchMinecraft(showDebugTerminal);
+  }
+
+  // Open update checker (navigate to App Settings)
+  function openUpdateChecker() {
+    // Trigger app settings modal - this needs to be passed down from parent
+    if (typeof window !== 'undefined' && window.electron) {
+      // Send event to open app settings 
+      window.electron.invoke('open-app-settings');
+    }
+  }
+
+  // Download specific server version
+  async function downloadServerVersion(serverVersion) {
+    try {
+      // Check if this specific version is available
+      const result = await window.electron.invoke('check-for-specific-version', serverVersion);
+      
+      if (result.success && result.needsUpdate) {
+        // Trigger download of specific version
+        await window.electron.invoke('download-update');
+        
+        // Show progress notification
+        if (typeof window !== 'undefined' && typeof toast !== 'undefined') {
+          toast.info('Downloading Server Version', {
+            description: `Downloading version ${serverVersion} to match server requirements`,
+            duration: 8000
+          });
+        }
+      } else if (result.success && !result.needsUpdate) {
+        // Version already matches
+        if (typeof window !== 'undefined' && typeof toast !== 'undefined') {
+          toast.success('Version Already Current', {
+            description: `You already have version ${serverVersion}`,
+            duration: 5000
+          });
+        }
+      } else {
+        throw new Error(result.error || 'Unable to download server version');
+      }
+    } catch (error) {
+      console.error('Failed to download server version:', error);
+      if (typeof window !== 'undefined' && typeof toast !== 'undefined') {
+        toast.error('Download Failed', {
+          description: `Unable to download server version ${serverVersion}: ${error.message}`,
+          duration: 8000
+        });
+      }
+    }
   }
 
 </script>
@@ -114,11 +163,14 @@
               <!-- Dynamic Status Header with User Info -->
               <div class="ready-header">
                 <h2 class="status-header {
+                  !$clientState.appVersionCompatible && $clientState.appVersionMismatch ? 'needs-update' :
                   $clientState.minecraftServerStatus !== 'running' ? 'waiting' :
                   clientSyncStatus !== 'ready' ? 'needs-client' :
                   downloadStatus !== 'ready' ? 'needs-mods' : 'ready'
                 }">
-                  {#if $clientState.minecraftServerStatus !== 'running'}
+                  {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
+                    🔄 App Update Required
+                  {:else if $clientState.minecraftServerStatus !== 'running'}
                     ⏸️ Waiting for Server
                   {:else if clientSyncStatus !== 'ready'}
                     📥 Client Download Required
@@ -438,13 +490,15 @@
                 </div>
                 
                 {#if launchStatus === 'ready'}
-                  {#if $clientState.minecraftServerStatus === 'running' && clientSyncStatus === 'ready' && downloadStatus === 'ready'}
+                  {#if $clientState.minecraftServerStatus === 'running' && clientSyncStatus === 'ready' && downloadStatus === 'ready' && $clientState.appVersionCompatible}
                     <button class="play-button-main" on:click={launchMinecraftWithDebug}>
                       🎮 PLAY MINECRAFT
                     </button>
                   {:else}
                     <button class="play-button-main disabled" disabled>
-                      {#if $clientState.minecraftServerStatus !== 'running'}
+                      {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
+                        🔄 UPDATE REQUIRED
+                      {:else if $clientState.minecraftServerStatus !== 'running'}
                         ⏸️ WAITING FOR SERVER
                       {:else if clientSyncStatus !== 'ready'}
                         📥 DOWNLOAD CLIENT FIRST
@@ -454,7 +508,29 @@
                         🎮 PLAY MINECRAFT
                       {/if}
                     </button>
-                    {#if $clientState.minecraftServerStatus !== 'running'}
+                    {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
+                      <div class="status-message version-mismatch">
+                        <div class="version-warning">
+                          ⚠️ <strong>App Version Mismatch</strong>
+                        </div>
+                        <div class="version-details">
+                          Your app version ({$clientState.clientAppVersion}) doesn't match the server version ({$clientState.serverAppVersion}).
+                        </div>
+                        <div class="version-action">
+                          Please update your app to continue playing.
+                        </div>
+                        <div class="version-update-actions">
+                          <button class="update-action-btn" on:click={openUpdateChecker}>
+                            🔄 Check for Updates
+                          </button>
+                          {#if $clientState.serverAppVersion && $clientState.serverAppVersion !== $clientState.clientAppVersion}
+                            <button class="update-action-btn server-version" on:click={() => downloadServerVersion($clientState.serverAppVersion)}>
+                              📥 Download Server Version ({$clientState.serverAppVersion})
+                            </button>
+                          {/if}
+                        </div>
+                      </div>
+                    {:else if $clientState.minecraftServerStatus !== 'running'}
                       <div class="status-message">
                         The Minecraft server is not running. Please wait for it to start.
                       </div>
@@ -700,6 +776,10 @@
 
   .status-header.needs-mods {
     color: #3b82f6;
+  }
+
+  .status-header.needs-update {
+    color: #f59e0b;
   }
 
   .player-info-inline {
@@ -1116,6 +1196,85 @@
     text-align: center;
     margin-top: 0.25rem;
     font-style: italic;
+  }
+
+  .status-message.version-mismatch {
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem;
+    font-style: normal;
+    text-align: left;
+    margin-top: 0.5rem;
+  }
+
+  .version-warning {
+    color: #f59e0b;
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .version-details {
+    color: #e5e7eb;
+    font-size: 0.85rem;
+    margin-bottom: 0.5rem;
+    line-height: 1.4;
+  }
+
+  .version-action {
+    color: #fbbf24;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+
+  .version-update-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .update-action-btn {
+    padding: 0.5rem 1rem;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .update-action-btn {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+
+  .update-action-btn:hover {
+    background: rgba(59, 130, 246, 0.25);
+    border-color: rgba(59, 130, 246, 0.5);
+    transform: translateY(-1px);
+    color: #2563eb;
+  }
+
+  .update-action-btn.server-version {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.3);
+  }
+
+  .update-action-btn.server-version:hover {
+    background: rgba(245, 158, 11, 0.25);
+    border-color: rgba(245, 158, 11, 0.5);
+    color: #d97706;
   }
 
   /* Progress Components */
