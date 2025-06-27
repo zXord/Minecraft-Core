@@ -21,18 +21,27 @@ jobs:
         id: check
         run: |
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          PREVIOUS_VERSION=$(git show HEAD~1:package.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
           
-          echo "Current version: $CURRENT_VERSION"
-          echo "Previous version: $PREVIOUS_VERSION"
-          
-          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
+          # If manually triggered, always build
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
             echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-            echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
+            echo "Manual trigger - building version $CURRENT_VERSION"
           else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No version change detected"
+            # For push events, check for version changes
+            PREVIOUS_VERSION=$(git show HEAD~1:package.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
+            
+            echo "Current version: $CURRENT_VERSION"
+            echo "Previous version: $PREVIOUS_VERSION"
+            
+            if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
+              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+              echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+              echo "No version change detected"
+            fi
           fi
 
   build-and-release:
