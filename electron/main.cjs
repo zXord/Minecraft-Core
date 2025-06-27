@@ -10,6 +10,7 @@ const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const fs = require('fs');
 const { ipcMain } = require('electron');
 const { getUpdateService } = require('./services/update-service.cjs');
+const devConfig = require('../dev-config.cjs');
 
 // Utility function to open folders directly using child_process
 function openFolderDirectly(folderPath) {
@@ -282,31 +283,43 @@ function createWindow() {
     });
   }
 
-  // Open DevTools for development
-  win.webContents.openDevTools();
+  // Open DevTools only if enabled in dev config
+  if (devConfig.enableDevConsole) {
+    win.webContents.openDevTools();
+  }
   
-  // Load the app - always prefer dev server if available
-  // Simple approach: try dev server first, fallback to production build
+  // Load the app - check if in development mode
+  const isDev = devConfig.enableDevServer && (process.env.NODE_ENV === 'development' || process.argv.includes('--dev'));
   
-  const tryLoadURL = (url) => {
-    win.loadURL(url).catch(() => {
-      if (url.includes('5173')) {
-        // Try port 5174
-        win.loadURL('http://localhost:5174').catch(() => {
-                     // Both dev servers failed, try production build
-           const distPath = path.join(__dirname, '..', 'dist', 'index.html');
-           if (fs.existsSync(distPath)) {
-             win.loadFile(distPath);
-           } else {
-
-           }
-        });
-      }
-    });
-  };
-  
-  // Always try dev server first (this ensures dev mode works)
-  tryLoadURL('http://localhost:5173');
+  if (isDev) {
+    // Development mode: try dev servers
+    const tryLoadURL = (url) => {
+      win.loadURL(url).catch(() => {
+        if (url.includes('5173')) {
+          // Try port 5174
+          win.loadURL('http://localhost:5174').catch(() => {
+            // Both dev servers failed, fallback to production build
+            const distPath = path.join(__dirname, '..', 'dist', 'index.html');
+            if (fs.existsSync(distPath)) {
+              win.loadFile(distPath);
+            } else {
+              console.error('No dev server and no production build found');
+            }
+          });
+        }
+      });
+    };
+    
+    tryLoadURL('http://localhost:5173');
+  } else {
+    // Production mode: load the built app directly
+    const distPath = path.join(__dirname, '..', 'dist', 'index.html');
+    if (fs.existsSync(distPath)) {
+      win.loadFile(distPath);
+    } else {
+      console.error('Production build not found at:', distPath);
+    }
+  }
   
   // Save window size when resized (only if window is resizable)
   win.on('resize', () => {
