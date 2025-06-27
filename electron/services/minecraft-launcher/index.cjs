@@ -506,7 +506,7 @@ class MinecraftLauncher extends EventEmitter {
         // If debug terminal is enabled, show the console window
         const spawnOptions = {
           cwd: clientPath,
-          detached: false
+          detached: true  // Allow Minecraft to continue running after app closes
         };
       
       if (showDebugTerminal) {
@@ -521,6 +521,9 @@ class MinecraftLauncher extends EventEmitter {
       }
       
       const child = spawn(javaPath, allArgs, spawnOptions);
+      
+      // Properly detach the process so it continues running after app closes
+      child.unref();
       
       this.client = { child };
       
@@ -725,21 +728,6 @@ class MinecraftLauncher extends EventEmitter {
     return this.clientDownloader.clearAssets(clientPath);
   }
   
-  // Install Fabric loader for the client
-  async installFabricLoader(clientPath, minecraftVersion, fabricVersion = 'latest') {
-    return this.legacyClientDownloader.installFabricLoader(clientPath, minecraftVersion, fabricVersion);
-  }
-
-  // Fix Fabric profile to include asset index for MCLC compatibility
-  async fixFabricAssetIndex(clientPath, fabricProfileName, vanillaVersion) {
-    return this.legacyClientDownloader.fixFabricAssetIndex(clientPath, fabricProfileName, vanillaVersion);
-  }
-
-  // Add server to Minecraft's server list
-  async addServerToList(clientPath, serverInfo) {
-    return this.legacyClientDownloader.addServerToList(clientPath, serverInfo);
-  }
-
   // Inject vanilla downloads.client and merge vanilla libraries into Fabric profile
   async injectVanillaDownloadsAndLibraries(clientPath, profileName, vanillaVersion) {
     try {

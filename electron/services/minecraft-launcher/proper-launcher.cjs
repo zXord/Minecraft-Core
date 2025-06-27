@@ -246,8 +246,11 @@ class ProperMinecraftLauncher extends EventEmitter {
       const child = spawn(javaCommand, allArgs, {
         cwd: clientPath,
         stdio: ['ignore', 'pipe', 'pipe'],
-        detached: false
+        detached: true  // Allow Minecraft to continue running after app closes
       });
+      
+      // Properly detach the process so it continues running after app closes
+      child.unref();
       
       this.client = { child };      // Handle process output
       child.stdout.on('data', () => {
