@@ -83,20 +83,12 @@ function logRunningJavaProcesses() {  try {
 }
 
 function killJavaProcesses() {
-  log(`Killing Java processes related to "${serverIdentifier}"...`);
+  log(`Killing Java SERVER processes only (preserving Minecraft client)...`);
   
   logRunningJavaProcesses();
   
   try {
-    log(`Attempt 1: Using WMIC to kill Java processes with "${serverIdentifier}" in command line`);
-    wmicTerminate(`wmic process where "commandline like '%${serverIdentifier}%' and name='java.exe'" call terminate`);
-    log("WMIC kill command executed");
-  } catch (e) {
-    log(`WMIC kill error: ${e.message}`);
-  }
-  
-  try {
-    log("Attempt 2: Looking for any process with fabric-server-launch.jar");
+    log("Attempt 1: Looking for Fabric server processes");
     wmicTerminate(`wmic process where "commandline like '%fabric-server-launch.jar%' and name='java.exe'" call terminate`);
     log("Fabric server kill command executed");
   } catch (e) {
@@ -104,36 +96,60 @@ function killJavaProcesses() {
   }
   
   try {
-    log("Attempt 3: Looking for any process with minecraft_server.jar");
+    log("Attempt 2: Looking for vanilla Minecraft server processes");
     wmicTerminate(`wmic process where "commandline like '%minecraft_server.jar%' and name='java.exe'" call terminate`);
     log("Minecraft server jar kill command executed");
   } catch (e) {
     log(`Minecraft server jar kill error: ${e.message}`);
   }
+
+  try {
+    log("Attempt 3: Looking for server-specific identifier processes");
+    if (serverIdentifier && serverIdentifier.includes('server')) {
+      wmicTerminate(`wmic process where "commandline like '%${serverIdentifier}%' and name='java.exe'" call terminate`);
+      log(`Server identifier (${serverIdentifier}) kill command executed`);
+    }
+  } catch (e) {
+    log(`Server identifier kill error: ${e.message}`);
+  }
   
   try {
-    log("Attempt 4: Searching for Java processes with Minecraft server in command line");
+    log("Attempt 4: Searching for Java processes with Minecraft SERVER in command line (preserving client)");
     const filteredOutput = wmicExecSync('wmic process where "name=\'java.exe\'" get ProcessId,CommandLine /format:csv');
     log(`Process list obtained: ${filteredOutput.length} bytes`);
     
     const lines = String(filteredOutput).trim().split('\n');
     for (const line of lines) {
-      if (line.includes('fabric-server-launch.jar') || 
-          line.includes('minecraft_server.jar') || 
-          line.includes('minecraft-core') ||
-          (serverIdentifier && line.includes(serverIdentifier))) {
-        
+      // Only kill processes that are clearly SERVER processes, not client
+      const isServerProcess = (
+        line.includes('fabric-server-launch.jar') || 
+        line.includes('minecraft_server.jar') ||
+        (line.includes('minecraft-core') && line.includes('server')) ||
+        (serverIdentifier && line.includes(serverIdentifier) && serverIdentifier.includes('server'))
+      );
+      
+      // IMPORTANT: Do NOT kill client processes (these should keep running)
+      const isClientProcess = (
+        line.includes('net.minecraft.client.main.Main') ||
+        line.includes('-Djava.library.path') ||
+        line.includes('versions') && line.includes('natives') ||
+        line.includes('launcher') && line.includes('client')
+      );
+      
+      if (isServerProcess && !isClientProcess) {
         const match = line.match(/,(\d+)$/);
         if (match && match[1]) {
           const javaPid = match[1];
-          log(`Found Minecraft server process: ${javaPid}, killing...`);
+          log(`Found Minecraft SERVER process: ${javaPid}, killing...`);
           try {
             execSync(`taskkill /F /PID ${javaPid}`, /** @type {import('child_process').ExecSyncOptions} */({ stdio: 'ignore' }));
-            log(`Killed process ${javaPid}`);
+            log(`Killed server process ${javaPid}`);
           } catch (e) {
-            log(`Error killing process ${javaPid}: ${e.message}`);
+            log(`Error killing server process ${javaPid}: ${e.message}`);
           }
         }
+      } else if (isClientProcess) {
+        log(`Preserving Minecraft CLIENT process (not killing)`);
       }
     }
   } catch (e) {
@@ -147,9 +163,9 @@ function killJavaProcesses() {
       const lines = remainingJava.split('\n').filter(line => line.trim() && !line.includes('ProcessId'));
       
       if (lines.length > 0) {
-        log(`Warning: Found ${lines.length} remaining Java processes after targeted cleanup`);
-        log("NOT killing all Java processes - this could affect user's other applications");
-        log("If server processes remain, they will be manually cleaned up on next app start");
+        log(`Found ${lines.length} remaining Java processes after targeted cleanup`);
+        log("NOT killing all Java processes - this preserves user's Minecraft client and other applications");
+        log("Server cleanup complete - any remaining server processes will be cleaned up on next app start");
       } else {
         log("No remaining Java processes found - cleanup successful");
       }
@@ -160,7 +176,7 @@ function killJavaProcesses() {
     log(`Error checking for remaining processes: ${e.message}`);
   }
   
-  log("All kill attempts complete");
+  log("Server cleanup complete - Minecraft client processes preserved");
 }
 
 function checkProcess() {
