@@ -66,8 +66,7 @@
       "electron/**/*",
       "package.json",
       "icon.png",
-      "dev-config.cjs",
-      "build/**/*"
+      "dev-config.cjs"
     ],
     "win": {
       "target": "nsis",
@@ -77,8 +76,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "include": "build/uninstaller.nsh"
+      "createStartMenuShortcut": true
     },
     "publish": {
       "provider": "github",
