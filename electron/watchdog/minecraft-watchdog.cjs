@@ -102,7 +102,7 @@ function killJavaProcesses() {
   } catch (e) {
     log(`Minecraft server jar kill error: ${e.message}`);
   }
-
+  
   try {
     log("Attempt 3: Looking for server-specific identifier processes");
     if (serverIdentifier && serverIdentifier.includes('server')) {
@@ -123,7 +123,7 @@ function killJavaProcesses() {
       // Only kill processes that are clearly SERVER processes, not client
       const isServerProcess = (
         line.includes('fabric-server-launch.jar') || 
-        line.includes('minecraft_server.jar') ||
+          line.includes('minecraft_server.jar') || 
         (line.includes('minecraft-core') && line.includes('server')) ||
         (serverIdentifier && line.includes(serverIdentifier) && serverIdentifier.includes('server'))
       );

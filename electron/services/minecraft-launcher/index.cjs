@@ -727,7 +727,7 @@ class MinecraftLauncher extends EventEmitter {
     // Use the active downloader (XMCL now has this method)
     return this.clientDownloader.clearAssets(clientPath);
   }
-  
+
   // Inject vanilla downloads.client and merge vanilla libraries into Fabric profile
   async injectVanillaDownloadsAndLibraries(clientPath, profileName, vanillaVersion) {
     try {
