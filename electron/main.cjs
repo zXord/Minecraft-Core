@@ -289,7 +289,9 @@ function createWindow() {
   }
   
   // Load the app - check if in development mode
-  const isDev = devConfig.enableDevServer && (process.env.NODE_ENV === 'development' || process.argv.includes('--dev'));
+  // If running from source (npm run dev), always try dev server first
+  // If running from built app, only use dev server if enabled in config
+  const isDev = !app.isPackaged || devConfig.enableDevServer;
   
   if (isDev) {
     // Development mode: try dev servers
