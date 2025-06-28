@@ -51,17 +51,13 @@
             description: 'Update checking is disabled in development mode',
             duration: 5000
           });
-        } else if (result.updateAvailable) {
-          toast.success('Update Available!', {
-            description: `Version ${result.latestVersion} is available for download`,
-            duration: 8000
-          });
-        } else {
+        } else if (!result.updateAvailable) {
           toast.info('No Updates Available', {
             description: 'You are running the latest version',
             duration: 5000
           });
         }
+        // Note: Update available notifications are handled by UpdateNotification.svelte to avoid duplicates
         
         updateStatus = {
           updateAvailable: result.updateAvailable || false,

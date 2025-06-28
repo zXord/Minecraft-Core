@@ -145,7 +145,7 @@
   @media (max-width: 768px) {
     .header-title-row {
       padding: 0 1rem;
-    }
+  }
 
     .modern-client-tabs {
     flex-direction: column;

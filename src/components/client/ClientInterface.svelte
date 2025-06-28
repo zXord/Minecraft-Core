@@ -2354,7 +2354,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 <div class="client-wrapper">
   <ClientHeader {tabs} {onOpenAppSettings} />
   <div class="client-interface">
-    <div class="client-content">
+  <div class="client-content">
     {#if $clientState.activeTab === 'play'}
       <PlayTab
         {authStatus}
@@ -2417,7 +2417,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       />
     {/if}
   </div>
-</div>
+  </div>
 </div>
 <!-- Delete Confirmation Dialog -->
 <ConfirmationDialog

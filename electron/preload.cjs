@@ -134,6 +134,7 @@ contextBridge.exposeInMainWorld('electron', {
       'get-app-version',
       'check-for-updates',
       'set-window-size',
+      'open-app-settings',
       // Update system channels
       'download-update',
       'install-update',
@@ -144,7 +145,9 @@ contextBridge.exposeInMainWorld('electron', {
       'start-periodic-checks',
       'stop-periodic-checks',
       'check-for-specific-version',
+      'download-specific-version',
       'get-current-version',
+      'install-specific-version',
       // Application lifecycle
       'app-close-response',
       // Management server events
@@ -228,6 +231,8 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-error',
       'server-java-download-progress',
       'app-close-request',
+      // App settings events
+      'open-app-settings-modal',
       // Update system events
       'update-checking-for-update',
       'update-available',
@@ -236,6 +241,10 @@ contextBridge.exposeInMainWorld('electron', {
       'update-download-progress',
       'update-downloaded',
       'update-ignored',
+      // Specific version download events
+      'specific-version-download-progress',
+      'specific-version-download-complete',
+      'specific-version-download-error',
     ];
     if (validChannels.includes(channel)) {
       // Wrap the listener so we can remove it later
@@ -295,6 +304,10 @@ contextBridge.exposeInMainWorld('electron', {
       'update-download-progress',
       'update-downloaded',
       'update-ignored',
+      // Specific version download events
+      'specific-version-download-progress',
+      'specific-version-download-complete',
+      'specific-version-download-error',
     ];
     if (validChannels.includes(channel)) {
       const map = listenerMap.get(channel);
@@ -356,6 +369,10 @@ contextBridge.exposeInMainWorld('electron', {
       'update-download-progress',
       'update-downloaded',
       'update-ignored',
+      // Specific version download events
+      'specific-version-download-progress',
+      'specific-version-download-complete',
+      'specific-version-download-error',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.removeAllListeners(channel);

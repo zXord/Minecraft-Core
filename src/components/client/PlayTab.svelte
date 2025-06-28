@@ -1,6 +1,7 @@
 <script>
   import { clientState } from '../../stores/clientStore.js';
   import { toast } from 'svelte-sonner';
+  import { onMount } from 'svelte';
   export let authStatus;
   export let authenticateWithMicrosoft;
   export let checkAuthentication;
@@ -29,6 +30,19 @@
   export let clientDownloadProgress;
   export let handleRefreshFromDashboard;  export let lastCheck;
   export let isChecking;
+  
+  // State for specific version downloads
+  let specificVersionDownload = {
+    isDownloading: false,
+    isComplete: false,
+    progress: 0,
+    downloadedMB: 0,
+    totalMB: 0,
+    version: null,
+    filePath: null,
+    error: null
+  };
+  
   // Debug terminal toggle setting
   let showDebugTerminal = false;
   
@@ -48,37 +62,66 @@
     launchMinecraft(showDebugTerminal);
   }
 
-  // Open update checker (navigate to App Settings)
-  function openUpdateChecker() {
-    // Trigger app settings modal - this needs to be passed down from parent
-    if (typeof window !== 'undefined' && window.electron) {
-      // Send event to open app settings 
-      window.electron.invoke('open-app-settings');
-    }
-  }
-
   // Download specific server version
   async function downloadServerVersion(serverVersion) {
     try {
+      // Reset download state
+      specificVersionDownload = {
+        isDownloading: false,
+        isComplete: false,
+        progress: 0,
+        downloadedMB: 0,
+        totalMB: 0,
+        version: serverVersion,
+        filePath: null,
+        error: null
+      };
+      
       // Check if this specific version is available
       const result = await window.electron.invoke('check-for-specific-version', serverVersion);
       
       if (result.success && result.needsUpdate) {
-        // Trigger download of specific version
-        await window.electron.invoke('download-update');
+        // Start download tracking
+        specificVersionDownload.isDownloading = true;
+        specificVersionDownload = { ...specificVersionDownload };
         
-        // Show progress notification
+        // Show initial progress notification
         if (typeof window !== 'undefined' && typeof toast !== 'undefined') {
           toast.info('Downloading Server Version', {
             description: `Downloading version ${serverVersion} to match server requirements`,
             duration: 8000
           });
         }
+        
+        // Trigger download of specific version
+        const downloadResult = await window.electron.invoke('download-specific-version', serverVersion);
+        
+        if (!downloadResult.success) {
+          specificVersionDownload.isDownloading = false;
+          specificVersionDownload.error = downloadResult.error || 'Download failed';
+          specificVersionDownload = { ...specificVersionDownload };
+          throw new Error(downloadResult.error || 'Download failed');
+        } else if (downloadResult.needsManualInstall) {
+          // Show success message for manual download
+          specificVersionDownload.isDownloading = false;
+          specificVersionDownload = { ...specificVersionDownload };
+          
+          if (typeof window !== 'undefined' && typeof toast !== 'undefined') {
+            toast.success('Download Started', {
+              description: downloadResult.message || `Version ${serverVersion} download started in your browser. Please install manually.`,
+              duration: 10000
+            });
+          }
+        }
       } else if (result.success && !result.needsUpdate) {
-        // Version already matches
+        // Version already matches or development mode
         if (typeof window !== 'undefined' && typeof toast !== 'undefined') {
+          const message = result.developmentMode ? 
+            'Development mode - version checking disabled' :
+            `You already have version ${serverVersion}`;
+          
           toast.success('Version Already Current', {
-            description: `You already have version ${serverVersion}`,
+            description: message,
             duration: 5000
           });
         }
@@ -86,15 +129,86 @@
         throw new Error(result.error || 'Unable to download server version');
       }
     } catch (error) {
-      console.error('Failed to download server version:', error);
+      specificVersionDownload.isDownloading = false;
+      specificVersionDownload.error = error.message;
+      specificVersionDownload = { ...specificVersionDownload };
+      
       if (typeof window !== 'undefined' && typeof toast !== 'undefined') {
+        const errorMessage = error.message.includes('not found in GitHub releases') ?
+          `Version ${serverVersion} is not available. Please check with the server administrator.` :
+          `Unable to download server version ${serverVersion}: ${error.message}`;
+          
         toast.error('Download Failed', {
-          description: `Unable to download server version ${serverVersion}: ${error.message}`,
+          description: errorMessage,
           duration: 8000
         });
       }
     }
   }
+
+  // Install specific version
+  async function installSpecificVersion() {
+    try {
+      if (!specificVersionDownload.filePath) {
+        throw new Error('No installation file available');
+      }
+      
+      const result = await window.electron.invoke('install-specific-version', specificVersionDownload.filePath);
+      
+      if (result.success) {
+        toast.success('Installation Started', {
+          description: 'The installer will open shortly. Please follow the installation instructions.',
+          duration: 10000
+        });
+      } else {
+        throw new Error(result.error || 'Installation failed');
+      }
+    } catch (error) {
+      toast.error('Installation Failed', {
+        description: error.message,
+        duration: 8000
+      });
+    }
+  }
+
+  // Set up event listeners for specific version download events
+  onMount(() => {
+    if (typeof window !== 'undefined' && window.electron) {
+      // Listen for specific version download progress
+      window.electron.on('specific-version-download-progress', (progress) => {
+        specificVersionDownload.progress = progress.progress || 0;
+        specificVersionDownload.downloadedMB = parseFloat(progress.downloadedMB || 0);
+        specificVersionDownload.totalMB = parseFloat(progress.totalMB || 0) || 0;
+        specificVersionDownload = { ...specificVersionDownload };
+      });
+      
+      // Listen for specific version download completion
+      window.electron.on('specific-version-download-complete', (info) => {
+        specificVersionDownload.isDownloading = false;
+        specificVersionDownload.isComplete = true;
+        specificVersionDownload.filePath = info.filePath;
+        specificVersionDownload.progress = 100;
+        specificVersionDownload = { ...specificVersionDownload };
+        
+        toast.success('Download Complete! 🎉', {
+          description: `Version ${info.version} is ready to install. Install button should appear now.`,
+          duration: 10000
+        });
+      });
+      
+      // Listen for specific version download errors
+      window.electron.on('specific-version-download-error', (error) => {
+        specificVersionDownload.isDownloading = false;
+        specificVersionDownload.error = error.error || 'Download failed';
+        specificVersionDownload = { ...specificVersionDownload };
+        
+        toast.error('Download Failed', {
+          description: error.error || 'An error occurred during download',
+          duration: 8000
+        });
+      });
+    }
+  });
 
 </script>
 
@@ -408,17 +522,17 @@
                     {#if totalUpdatesNeeded > 0}
                         <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
                           📥 Download & Update ({totalUpdatesNeeded})
-                      </button>
+                        </button>
                     {:else if actualRemovals.length > 0}
                         <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
                           🔄 Apply Changes ({actualRemovals.length})
-                      </button>
+                        </button>
                     {/if}
                     
                     {#if acknowledgments.length > 0}
                         <button class="mod-action-btn acknowledge" on:click={onAcknowledgeAllDependencies}>
                           ✓ Acknowledge ({acknowledgments.length})
-                      </button>
+                        </button>
                     {/if}
                     </div>
                   {:else}
@@ -521,16 +635,69 @@
                         <div class="version-action">
                           Please update your app to continue playing.
                         </div>
-                        <div class="version-update-actions">
-                          <button class="update-action-btn" on:click={openUpdateChecker}>
-                            🔄 Check for Updates
-                          </button>
-                          {#if $clientState.serverAppVersion && $clientState.serverAppVersion !== $clientState.clientAppVersion}
-                            <button class="update-action-btn server-version" on:click={() => downloadServerVersion($clientState.serverAppVersion)}>
-                              📥 Download Server Version ({$clientState.serverAppVersion})
-                            </button>
-                          {/if}
-                        </div>
+                        
+                        <!-- Show download progress if downloading -->
+                        {#if specificVersionDownload.isDownloading}
+                          <div class="version-download-progress">
+                            <h4>📥 Downloading Version {specificVersionDownload.version}...</h4>
+                            <div class="progress-container">
+                              <div class="progress-bar">
+                                <div class="progress-fill" style="width: {specificVersionDownload.progress}%"></div>
+                              </div>
+                              <div class="progress-details">
+                                <span class="progress-text">{specificVersionDownload.progress}%</span>
+                                <span class="download-size">
+                                  {#if specificVersionDownload.totalMB > 0}
+                                    {specificVersionDownload.downloadedMB.toFixed(1)} MB / {specificVersionDownload.totalMB.toFixed(1)} MB
+                                  {:else}
+                                    {specificVersionDownload.downloadedMB.toFixed(1)} MB downloaded
+                                  {/if}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        {:else if specificVersionDownload.isComplete}
+                          <!-- Show install button when download is complete -->
+                          <div class="version-download-complete">
+                            <div class="completion-message">
+                              ✅ <strong>Download Complete!</strong>
+                            </div>
+                            <div class="completion-details">
+                              Version {specificVersionDownload.version} is ready to install.
+                            </div>
+                            <div class="version-update-actions">
+                              <button class="update-action-btn install" on:click={installSpecificVersion}>
+                                🚀 Install Version {specificVersionDownload.version}
+                              </button>
+                            </div>
+                          </div>
+                        {:else if specificVersionDownload.error}
+                          <!-- Show error message -->
+                          <div class="version-download-error">
+                            <div class="error-message">
+                              ❌ <strong>Download Failed</strong>
+                            </div>
+                            <div class="error-details">
+                              {specificVersionDownload.error}
+                            </div>
+                            <div class="version-update-actions">
+                              {#if $clientState.serverAppVersion && $clientState.serverAppVersion !== $clientState.clientAppVersion}
+                                <button class="update-action-btn server-version" on:click={() => downloadServerVersion($clientState.serverAppVersion)}>
+                                  🔄 Retry Download
+                                </button>
+                              {/if}
+                            </div>
+                          </div>
+                        {:else}
+                          <!-- Show initial download button -->
+                          <div class="version-update-actions">
+                            {#if $clientState.serverAppVersion && $clientState.serverAppVersion !== $clientState.clientAppVersion}
+                              <button class="update-action-btn server-version" on:click={() => downloadServerVersion($clientState.serverAppVersion)}>
+                                📥 Download Server Version ({$clientState.serverAppVersion})
+                              </button>
+                            {/if}
+                          </div>
+                        {/if}
                       </div>
                     {:else if $clientState.minecraftServerStatus !== 'running'}
                       <div class="status-message">
@@ -1308,6 +1475,90 @@
     background: rgba(245, 158, 11, 0.25);
     border-color: rgba(245, 158, 11, 0.5);
     color: #d97706;
+  }
+
+  .update-action-btn.install {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    border-color: rgba(16, 185, 129, 0.3);
+  }
+
+  .update-action-btn.install:hover {
+    background: rgba(16, 185, 129, 0.25);
+    border-color: rgba(16, 185, 129, 0.5);
+    color: #059669;
+  }
+
+  /* Version Download Progress Styles */
+  .version-download-progress {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 6px;
+  }
+
+  .version-download-progress h4 {
+    margin: 0 0 0.75rem 0;
+    color: #60a5fa;
+    font-size: 1rem;
+  }
+
+  .version-download-complete {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    border-radius: 6px;
+  }
+
+  .completion-message {
+    color: #34d399;
+    font-size: 1rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .completion-details {
+    color: #9ca3af;
+    font-size: 0.9rem;
+    margin-bottom: 1rem;
+  }
+
+  .version-download-error {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 6px;
+  }
+
+  .error-message {
+    color: #f87171;
+    font-size: 1rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .error-details {
+    color: #9ca3af;
+    font-size: 0.9rem;
+    margin-bottom: 1rem;
+  }
+
+  .progress-details {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+  }
+
+  .progress-details .progress-text {
+    color: #60a5fa;
+    font-weight: 600;
+  }
+
+  .download-size {
+    color: #9ca3af;
   }
 
   /* Progress Components */

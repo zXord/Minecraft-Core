@@ -133,6 +133,11 @@
     window.electron.on('app-close-request', () => {
       showExitConfirmation.set(true);
     });
+
+    // Show app settings modal when requested from client
+    window.electron.on('open-app-settings-modal', () => {
+      showAppSettings = true;
+    });
     
     // 2) Check for initial instances loaded by main.js
     const checkExistingSetup = async () => {
@@ -366,22 +371,22 @@
       serverIp: serverIp,
       serverPort: serverPort
     };
-    
+      
     // Add to instances array and set as current
     instances = [...instances, newInstance];
     currentInstance = newInstance;
-    
-    // Save instances to persistent storage
-    window.electron.invoke('save-instances', instances)
-      .then(result => {
-        if (!result || !result.success) {
-        } else {
-        }
-        step = 'done';
-      })
-      .catch(() => {
-        step = 'done';
-      });
+      
+      // Save instances to persistent storage
+      window.electron.invoke('save-instances', instances)
+        .then(result => {
+          if (!result || !result.success) {
+          } else {
+          }
+          step = 'done';
+        })
+        .catch(() => {
+          step = 'done';
+        });
   }
 
   // Switch between instances
@@ -644,28 +649,28 @@
       {:else if instanceType === 'client'}
         {#if currentInstance && currentInstance.path && currentInstance.serverIp}
           <ClientInterface 
-            instance={currentInstance} 
-            onOpenAppSettings={() => showAppSettings = true}
-            on:deleted={(e) => {
-              // Remove the instance from the list
-              instances = instances.filter(i => i.id !== e.detail.id);
-              
-              // Switch to a different instance if available, otherwise show empty state
-              if (instances.length > 0) {
-                currentInstance = instances[0];
-                if (currentInstance.type === 'server') {
-                  path = currentInstance.path;
-                  instanceType = 'server';
-                } else {
-                  instanceType = 'client';
-                }
+          instance={currentInstance} 
+          onOpenAppSettings={() => showAppSettings = true}
+          on:deleted={(e) => {
+            // Remove the instance from the list
+            instances = instances.filter(i => i.id !== e.detail.id);
+            
+            // Switch to a different instance if available, otherwise show empty state
+            if (instances.length > 0) {
+              currentInstance = instances[0];
+              if (currentInstance.type === 'server') {
+                path = currentInstance.path;
+                instanceType = 'server';
               } else {
-                // Show empty state instead of forcing instance selector
-                currentInstance = null;
-                step = 'done';
+                instanceType = 'client';
               }
-            }}
-          />
+            } else {
+              // Show empty state instead of forcing instance selector
+              currentInstance = null;
+              step = 'done';
+            }
+          }}
+        />
         {:else}
           <!-- Client instance exists but is not configured - show setup wizard -->
           <div class="setup-container">
@@ -1199,13 +1204,12 @@
 
   /* Empty state */
   .empty-state {
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 1;
-    width: auto;
-    height: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    min-height: 100vh;
+    width: 100%;
   }
 
   .empty-state-content {
