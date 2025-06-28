@@ -29,29 +29,21 @@ class UpdateService extends EventEmitter {
     try {
       // First check if we're running from source (npm run dev)
       if (process.env.NODE_ENV === 'development' || process.argv.includes('--dev')) {
+        console.log('Update service: Development mode - NODE_ENV or --dev detected');
         return true;
       }
 
       // Check if app is packaged - if not packaged, we're in development
       const { app } = require('electron');
+      console.log('Update service: app.isPackaged =', app.isPackaged);
       if (!app.isPackaged) {
+        console.log('Update service: Development mode - app not packaged');
         return true;
       }
 
-      // For packaged apps, check if repository config is valid
-      const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
-      const publishConfig = packageJson?.build?.publish;
-      
-      // If no publish config or placeholder values, consider it development
-      if (!publishConfig || 
-          publishConfig.owner === 'GITHUB_USERNAME' || 
-          publishConfig.repo === 'GITHUB_REPO_NAME' ||
-          !publishConfig.owner ||
-          !publishConfig.repo) {
-        return true;
-      }
-
-      // Packaged app with valid repository config = production
+      // For packaged apps, force production mode regardless of GitHub config
+      // Since we know this is a production build if it's packaged
+      console.log('Update service: Production mode - app is packaged');
       return false;
     } catch (error) {
       console.log('Update service: Error checking development mode, assuming development');
@@ -98,7 +90,10 @@ class UpdateService extends EventEmitter {
 
     autoUpdater.on('error', (error) => {
       this.isCheckingForUpdates = false;
-      this.emit('update-error', error);
+      
+      // Create user-friendly error message
+      const friendlyError = this.createFriendlyError(error);
+      this.emit('update-error', friendlyError);
     });
 
     autoUpdater.on('download-progress', (progress) => {
@@ -135,6 +130,61 @@ class UpdateService extends EventEmitter {
     return this.currentVersion;
   }
 
+  // Create user-friendly error messages
+  createFriendlyError(error) {
+    const errorMessage = error.message || error.toString();
+    
+    // Check for common error patterns
+    if (errorMessage.includes('404')) {
+      return {
+        type: 'repository_not_found',
+        title: 'Repository Not Available',
+        message: 'The update repository is not publicly accessible. This usually means the repository is private or doesn\'t exist.',
+        details: 'Updates will be available once the repository is made public.',
+        technical: errorMessage
+      };
+    }
+    
+    if (errorMessage.includes('403') || errorMessage.includes('authentication')) {
+      return {
+        type: 'authentication_error',
+        title: 'Access Denied',
+        message: 'Unable to access the update repository due to authentication issues.',
+        details: 'Please check if the repository is public or contact the developer.',
+        technical: errorMessage
+      };
+    }
+    
+    if (errorMessage.includes('ENOTFOUND') || errorMessage.includes('network')) {
+      return {
+        type: 'network_error',
+        title: 'Network Connection Error',
+        message: 'Unable to connect to the update server. Please check your internet connection.',
+        details: 'Try again later or check your network settings.',
+        technical: errorMessage
+      };
+    }
+    
+    if (errorMessage.includes('timeout')) {
+      return {
+        type: 'timeout_error',
+        title: 'Request Timeout',
+        message: 'The update check timed out. The server might be slow or unavailable.',
+        details: 'Please try again in a few minutes.',
+        technical: errorMessage
+      };
+    }
+    
+    // Generic error for unknown issues
+    return {
+      type: 'unknown_error',
+      title: 'Update Check Failed',
+      message: 'An unexpected error occurred while checking for updates.',
+      details: 'Please try again later or contact support if the problem persists.',
+      technical: errorMessage
+    };
+  }
+
   // Check for updates
   async checkForUpdates() {
     if (this.isCheckingForUpdates) {
@@ -163,7 +213,12 @@ class UpdateService extends EventEmitter {
       };
     } catch (error) {
       console.error('Update check failed:', error);
-      return { success: false, error: error.message };
+      const friendlyError = this.createFriendlyError(error);
+      return { 
+        success: false, 
+        error: friendlyError.message,
+        errorDetails: friendlyError
+      };
     }
   }
 

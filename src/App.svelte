@@ -341,18 +341,9 @@
         step = 'chooseFolder';
       }, 100);
     } else {
-      // Create a new client instance skeleton
-      // The actual configuration will be done in the setup wizard
-      const newInstance = {
-        id: `client-${Date.now()}`,
-        name: 'New Client',
-        type: 'client',
-        path: '',
-        serverIp: '',
-        serverPort: '8080'  // Management server port, not Minecraft port
-      };
-      instances = [...instances, newInstance];
-      currentInstance = newInstance;
+      // For client instances, don't create the instance until setup is complete
+      // This prevents incomplete instances from being created
+      currentInstance = null;
       
       // Set step to chooseFolder to show the client setup wizard
       setTimeout(() => {
@@ -366,33 +357,44 @@
   function handleClientSetupComplete(event) {
     const { path, serverIp, serverPort } = event.detail;
     
-    // Update the current client instance with the configured settings
-    if (currentInstance && currentInstance.type === 'client') {
-      currentInstance.path = path;
-      currentInstance.serverIp = serverIp;
-      currentInstance.serverPort = serverPort;
-      
-      // Update the instances array
-      instances = instances.map(inst => 
-        inst.id === currentInstance.id ? currentInstance : inst
-      );
-      
-      // Save instances to persistent storage
-      window.electron.invoke('save-instances', instances)
-        .then(result => {
-          if (!result || !result.success) {
-          } else {
-          }
-          step = 'done';
-        })
-        .catch(() => {
-          step = 'done';
-        });
-    }
+    // Create a new fully configured client instance
+    const newInstance = {
+      id: `client-${Date.now()}`,
+      name: 'Minecraft Client',
+      type: 'client',
+      path: path,
+      serverIp: serverIp,
+      serverPort: serverPort
+    };
+    
+    // Add to instances array and set as current
+    instances = [...instances, newInstance];
+    currentInstance = newInstance;
+    
+    // Save instances to persistent storage
+    window.electron.invoke('save-instances', instances)
+      .then(result => {
+        if (!result || !result.success) {
+        } else {
+        }
+        step = 'done';
+      })
+      .catch(() => {
+        step = 'done';
+      });
   }
 
   // Switch between instances
   function switchInstance(instance) {
+    // Clean up any incomplete client instances before switching
+    instances = instances.filter(inst => {
+      if (inst.type === 'client' && (!inst.path || !inst.serverIp)) {
+        // This is an incomplete client instance, remove it
+        return false;
+      }
+      return true;
+    });
+    
     currentInstance = instance;
     if (instance.type === 'server') {
       path = instance.path;
@@ -639,29 +641,39 @@
             </div>
           {/if}
         </div>
-      {:else if instanceType === 'client'}        <ClientInterface 
-          instance={currentInstance} 
-          onOpenAppSettings={() => showAppSettings = true}
-          on:deleted={(e) => {
-            // Remove the instance from the list
-            instances = instances.filter(i => i.id !== e.detail.id);
-            
-            // Switch to a different instance if available, otherwise show empty state
-            if (instances.length > 0) {
-              currentInstance = instances[0];
-              if (currentInstance.type === 'server') {
-                path = currentInstance.path;
-                instanceType = 'server';
+      {:else if instanceType === 'client'}
+        {#if currentInstance && currentInstance.path && currentInstance.serverIp}
+          <ClientInterface 
+            instance={currentInstance} 
+            onOpenAppSettings={() => showAppSettings = true}
+            on:deleted={(e) => {
+              // Remove the instance from the list
+              instances = instances.filter(i => i.id !== e.detail.id);
+              
+              // Switch to a different instance if available, otherwise show empty state
+              if (instances.length > 0) {
+                currentInstance = instances[0];
+                if (currentInstance.type === 'server') {
+                  path = currentInstance.path;
+                  instanceType = 'server';
+                } else {
+                  instanceType = 'client';
+                }
               } else {
-                instanceType = 'client';
+                // Show empty state instead of forcing instance selector
+                currentInstance = null;
+                step = 'done';
               }
-            } else {
-              // Show empty state instead of forcing instance selector
-              currentInstance = null;
-              step = 'done';
-            }
-          }}
-        />
+            }}
+          />
+        {:else}
+          <!-- Client instance exists but is not configured - show setup wizard -->
+          <div class="setup-container">
+            <ClientSetupWizard on:setup-complete={(event) => {
+              handleClientSetupComplete(event);
+            }} />
+          </div>
+        {/if}
       {/if}
     {/if}
   </div>
