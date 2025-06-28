@@ -285,9 +285,11 @@
                     {/if}
                   {/if}
                   <p>Minecraft {serverInfo?.minecraftVersion || 'Unknown'} client files are required.</p>
-                  <button class="action-button" on:click={downloadClient}>
-                    📥 Download Minecraft Client {clientSyncInfo?.needsJava ? '& Java' : ''}
-                  </button>
+                  <div class="action-button-container">
+                    <button class="action-button" on:click={downloadClient}>
+                      📥 Download Minecraft Client {clientSyncInfo?.needsJava ? '& Java' : ''}
+                    </button>
+                  </div>
                 </div>
               {:else if clientSyncStatus === 'downloading'}
                 <div class="detail-section">
@@ -924,6 +926,37 @@
     margin: 0.25rem 0;
     font-size: 0.9rem;
     color: #9ca3af;
+  }
+
+  /* Action Button Container for centering */
+  .action-button-container {
+    display: flex;
+    justify-content: center;
+    margin-top: 0.75rem;
+  }
+
+  /* Action Button Styling */
+  .action-button {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 6px;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .action-button:hover {
+    background: rgba(59, 130, 246, 0.25);
+    border-color: rgba(59, 130, 246, 0.5);
+    transform: translateY(-1px);
+    color: #2563eb;
   }
 
   /* Compact Memory Settings */
