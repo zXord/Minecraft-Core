@@ -8,6 +8,7 @@
   let isDownloaded = false;
   let lastChecked = null;
   let downloadProgress = { percent: 0, bytesPerSecond: 0, total: 0, transferred: 0 };
+  let downloadNotificationShown = false; // Prevent duplicate notifications
   let updateStatus = {
     updateAvailable: false,
     latestVersion: null,
@@ -197,9 +198,30 @@
     }
   }
 
+  // Check if server is running before install
+  async function checkServerStatus() {
+    try {
+      const result = await window.electron.invoke('get-server-status');
+      return result.isRunning || false;
+    } catch (error) {
+      return false;
+    }
+  }
+
   // Install update
   async function installUpdate() {
     try {
+      // Check if server is running
+      const serverRunning = await checkServerStatus();
+      
+      if (serverRunning) {
+        toast.error('Cannot Install Update', {
+          description: 'Please stop the Minecraft server before installing the update to prevent data corruption.',
+          duration: 10000
+        });
+        return;
+      }
+
       const result = await window.electron.invoke('install-update');
       
       if (result.success) {
@@ -233,6 +255,7 @@
       updateStatus.isCheckingForUpdates = false;
       updateStatus = { ...updateStatus };
       isDownloaded = false; // Reset download state for new update
+      downloadNotificationShown = false; // Reset notification flag for new update
     });
     
     window.electron.on('update-not-available', () => {
@@ -251,10 +274,15 @@
     window.electron.on('update-downloaded', (info) => {
       isDownloading = false;
       isDownloaded = true;
-      toast.success('Update Downloaded', {
-        description: `Version ${info.version} is ready to install`,
-        duration: 8000
-      });
+      
+      // Only show notification once per download
+      if (!downloadNotificationShown) {
+        downloadNotificationShown = true;
+        toast.success('Update Downloaded', {
+          description: `Version ${info.version} is ready to install`,
+          duration: 8000
+        });
+      }
     });
     
     // Handle update errors with friendly messages
