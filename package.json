@@ -78,7 +78,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "include": "build/uninstaller.nsh",
-      "warningsAsErrors": false
+      "warningsAsErrors": false,
+      "artifactName": "Minecraft-Core-Setup-${version}.exe"
     },
     "publish": {
       "provider": "github",

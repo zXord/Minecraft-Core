@@ -4,7 +4,10 @@
   
   let currentVersion = '1.0.0';
   let isChecking = false;
+  let isDownloading = false;
+  let isDownloaded = false;
   let lastChecked = null;
+  let downloadProgress = { percent: 0, bytesPerSecond: 0, total: 0, transferred: 0 };
   let updateStatus = {
     updateAvailable: false,
     latestVersion: null,
@@ -151,12 +154,68 @@
     return date.toLocaleDateString();
   }
 
+  // Format bytes per second to readable speed
+  function formatSpeed(bytesPerSecond) {
+    if (bytesPerSecond === 0) return '0 B/s';
+    
+    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    const i = Math.floor(Math.log(bytesPerSecond) / Math.log(1024));
+    const size = (bytesPerSecond / Math.pow(1024, i)).toFixed(1);
+    
+    return `${size} ${units[i]}`;
+  }
+
   // Test update notification (development only)
   function testUpdateNotification() {
     toast.info('Development Mode Test', {
       description: 'In development mode, update notifications are disabled. Configure your GitHub repository to enable real update checking.',
       duration: 5000
     });
+  }
+
+  // Download update
+  async function downloadUpdate() {
+    try {
+      isDownloading = true;
+      const result = await window.electron.invoke('download-update');
+      
+      if (result.success) {
+        toast.success('Download Started', {
+          description: 'Update download started. You will be notified when it completes.',
+          duration: 5000
+        });
+      } else {
+        isDownloading = false;
+        throw new Error(result.error);
+      }
+    } catch (error) {
+      isDownloading = false;
+      toast.error('Download Failed', {
+        description: error.message,
+        duration: 8000
+      });
+    }
+  }
+
+  // Install update
+  async function installUpdate() {
+    try {
+      const result = await window.electron.invoke('install-update');
+      
+      if (result.success) {
+        toast.info('Installing Update', {
+          description: 'The app will restart to complete the installation',
+          duration: 5000
+        });
+      } else {
+        throw new Error(result.error);
+      }
+    } catch (error) {
+      toast.error('Installation Failed', {
+        description: error.message,
+        duration: 8000
+      });
+    }
   }
 
   onMount(() => {
@@ -173,12 +232,29 @@
       updateStatus.latestVersion = info.version;
       updateStatus.isCheckingForUpdates = false;
       updateStatus = { ...updateStatus };
+      isDownloaded = false; // Reset download state for new update
     });
     
     window.electron.on('update-not-available', () => {
       updateStatus.updateAvailable = false;
       updateStatus.isCheckingForUpdates = false;
       updateStatus = { ...updateStatus };
+    });
+    
+    // Listen for download progress
+    window.electron.on('update-download-progress', (progress) => {
+      downloadProgress = progress;
+      isDownloading = true;
+    });
+    
+    // Listen for download completion
+    window.electron.on('update-downloaded', (info) => {
+      isDownloading = false;
+      isDownloaded = true;
+      toast.success('Update Downloaded', {
+        description: `Version ${info.version} is ready to install`,
+        duration: 8000
+      });
     });
     
     // Handle update errors with friendly messages
@@ -254,25 +330,55 @@
 
 <!-- Action Buttons -->
 <div class="action-buttons">
-  <button 
-    on:click={checkForUpdates}
-    disabled={isChecking || updateStatus.isCheckingForUpdates}
-    class="update-button"
-  >
-    {#if isChecking || updateStatus.isCheckingForUpdates}
-      🔄 Checking...
+  {#if updateStatus.updateAvailable && !updateStatus.developmentMode}
+    <!-- Update Available Actions -->
+    {#if isDownloaded}
+      <button 
+        on:click={installUpdate}
+        class="install-button"
+      >
+        🚀 Install & Restart
+      </button>
+    {:else if isDownloading}
+      <div class="downloading-status">
+        <div class="download-progress">
+          <span class="download-text">📥 Downloading... {downloadProgress.percent}%</span>
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: {downloadProgress.percent}%"></div>
+          </div>
+          <span class="download-speed">{formatSpeed(downloadProgress.bytesPerSecond)}</span>
+        </div>
+      </div>
     {:else}
-      {updateStatus.developmentMode ? '🧪 Test Update Check' : '🔄 Check for Updates'}
+      <button 
+        on:click={downloadUpdate}
+        class="download-button"
+      >
+        📥 Download Update
+      </button>
     {/if}
-  </button>
-  
-  {#if updateStatus.developmentMode}
+  {:else}
+    <!-- Regular Check Button -->
     <button 
-      on:click={testUpdateNotification}
-      class="test-button"
+      on:click={checkForUpdates}
+      disabled={isChecking || updateStatus.isCheckingForUpdates}
+      class="update-button"
     >
-      📋 Test Update UI
+      {#if isChecking || updateStatus.isCheckingForUpdates}
+        🔄 Checking...
+      {:else}
+        {updateStatus.developmentMode ? '🧪 Test Update Check' : '🔄 Check for Updates'}
+      {/if}
     </button>
+    
+    {#if updateStatus.developmentMode}
+      <button 
+        on:click={testUpdateNotification}
+        class="test-button"
+      >
+        📋 Test Update UI
+      </button>
+    {/if}
   {/if}
 </div>
 
@@ -394,7 +500,7 @@
     margin-bottom: 1rem;
   }
 
-  .update-button, .test-button {
+  .update-button, .test-button, .download-button, .install-button {
     background: #3b82f6;
     color: white;
     border: none;
@@ -422,6 +528,62 @@
 
   .test-button:hover {
     background: #6d28d9;
+  }
+
+  .download-button {
+    background: #059669;
+  }
+
+  .download-button:hover {
+    background: #047857;
+  }
+
+  .install-button {
+    background: #dc2626;
+  }
+
+  .install-button:hover {
+    background: #b91c1c;
+  }
+
+  .downloading-status {
+    width: 100%;
+  }
+
+  .download-progress {
+    padding: 0.5rem;
+    background: rgba(17, 24, 39, 0.6);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 6px;
+  }
+
+  .download-text {
+    font-size: 0.8rem;
+    color: #e2e8f0;
+    margin-bottom: 0.5rem;
+    display: block;
+  }
+
+  .download-speed {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    margin-top: 0.25rem;
+    display: block;
+  }
+
+  .progress-bar {
+    width: 100%;
+    background: rgba(75, 85, 99, 0.3);
+    border-radius: 9999px;
+    height: 0.5rem;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    background: #3b82f6;
+    height: 100%;
+    border-radius: 9999px;
+    transition: width 0.3s ease;
   }
 
   .dev-note, .info-note {
