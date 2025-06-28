@@ -179,10 +179,6 @@ We welcome contributions! Please see our contributing guidelines:
 - Test your changes thoroughly
 - Update documentation as needed
 
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 ## 🐛 Bug Reports
 
 Found a bug? Please open an issue with:
