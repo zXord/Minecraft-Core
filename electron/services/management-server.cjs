@@ -205,9 +205,13 @@ class ManagementServer {
           // First priority: check .minecraft-core.json config file
           const minecraftCoreConfigPath = path.join(this.serverPath, '.minecraft-core.json');
           if (fs.existsSync(minecraftCoreConfigPath)) {
-            const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
-            if (coreConfig.version) {
-              minecraftVersion = coreConfig.version;
+            try {
+              const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
+              if (coreConfig.version) {
+                minecraftVersion = coreConfig.version;
+              }
+            } catch (err) {
+              // Config file exists but is invalid, continue with other detection methods
             }
           }
           
@@ -314,9 +318,11 @@ class ManagementServer {
               
               if (minecraftVersion !== 'unknown') break;
             }
-          }
+                    }
           
-        
+          // If version is still unknown after all detection methods, 
+          // users can manually create .minecraft-core.json with their version
+
         // Get required mods for clients
         const requiredMods = await this.getRequiredMods();
         
