@@ -66,11 +66,36 @@
           developmentMode: result.developmentMode || false
         };
       } else {
-        throw new Error(result.error);
+        // Handle errors with friendly messages
+        let errorTitle = 'Update Check Failed';
+        let errorDescription = result.error || 'Failed to check for updates';
+        
+        // Use detailed error information if available
+        if (result.errorDetails) {
+          errorTitle = result.errorDetails.title;
+          errorDescription = result.errorDetails.message;
+          
+          // Add details if available
+          if (result.errorDetails.details) {
+            errorDescription += ` ${result.errorDetails.details}`;
+          }
+        }
+        
+        toast.error(errorTitle, {
+          description: errorDescription,
+          duration: 8000
+        });
+        
+        // Clear checking state
+        updateStatus = {
+          ...updateStatus,
+          isCheckingForUpdates: false
+        };
       }
     } catch (error) {
-      toast.error('Update Check Failed', {
-        description: error.message || 'Failed to check for updates',
+      // Handle unexpected errors (network issues, etc.)
+      toast.error('Connection Error', {
+        description: 'Unable to connect to update server. Please check your internet connection and try again.',
         duration: 8000
       });
       
@@ -154,6 +179,31 @@
       updateStatus.updateAvailable = false;
       updateStatus.isCheckingForUpdates = false;
       updateStatus = { ...updateStatus };
+    });
+    
+    // Handle update errors with friendly messages
+    window.electron.on('update-error', (errorData) => {
+      updateStatus.isCheckingForUpdates = false;
+      updateStatus = { ...updateStatus };
+      
+      // Show friendly error message
+      if (errorData && errorData.title) {
+        let description = errorData.message;
+        if (errorData.details) {
+          description += ` ${errorData.details}`;
+        }
+        
+        toast.error(errorData.title, {
+          description: description,
+          duration: 8000
+        });
+      } else {
+        // Fallback for old-style errors
+        toast.error('Update Check Failed', {
+          description: 'An unexpected error occurred while checking for updates',
+          duration: 8000
+        });
+      }
     });
   });
 </script>

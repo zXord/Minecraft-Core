@@ -2329,6 +2329,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 </script>
 
 <style>
+  .client-wrapper {
+    width: 100%;
+    background: #1a1a1a; /* Match app background */
+  }
+
   /* Remove client-container - make this direct like server's tab-content */
   .client-interface {
     padding: 0.25rem 2rem 2rem 2rem; /* Same as server tab-content padding */
@@ -2346,9 +2351,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 </style>
 
-<div class="client-interface">
+<div class="client-wrapper">
   <ClientHeader {tabs} {onOpenAppSettings} />
-  <div class="client-content">
+  <div class="client-interface">
+    <div class="client-content">
     {#if $clientState.activeTab === 'play'}
       <PlayTab
         {authStatus}
@@ -2411,6 +2417,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       />
     {/if}
   </div>
+</div>
 </div>
 <!-- Delete Confirmation Dialog -->
 <ConfirmationDialog
