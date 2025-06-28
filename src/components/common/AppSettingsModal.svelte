@@ -1,5 +1,6 @@
 <script>
   import { createEventDispatcher } from 'svelte';
+  import UpdateChecker from './UpdateChecker.svelte';
   
   // Props
   export let visible = false;
@@ -14,9 +15,6 @@
   let windowSize = 'medium'; // 'small', 'medium', 'large', 'custom'
   let customWidth = 1200;
   let customHeight = 800;
-  let currentVersion = 'v1.0.0'; // This will be loaded from the app
-  let latestVersion = null;
-  let updateStatus = 'checking'; // 'checking', 'up-to-date', 'available', 'error'
   
   // Window size presets
   const windowPresets = {
@@ -105,22 +103,7 @@
   
 
   
-  // Check for updates
-  async function checkForUpdates() {
-    updateStatus = 'checking';
-    try {
-      const result = await window.electron.invoke('check-for-updates');
-      if (result.success) {
-        latestVersion = result.latestVersion;
-        updateStatus = result.hasUpdate ? 'available' : 'up-to-date';
-      } else {
-        updateStatus = 'error';
-      }
-    } catch (error) {
-      console.error('Error checking for updates:', error);
-      updateStatus = 'error';
-    }
-  }
+
   
   // Handle escape key
   function handleKeydown(event) {
@@ -158,10 +141,9 @@
     previousFocus.focus();
   }
 
-  // Load current settings and app version when modal opens
+  // Load current settings when modal opens
   $: if (visible) {
     loadCurrentSettings();
-    loadAppVersion();
     // Don't call updateContentAreaOnOpen() here - it was causing size change bugs
   }
 
@@ -179,17 +161,6 @@
       }
     } catch (error) {
       console.error('Error loading app settings:', error);
-    }
-  }
-
-  async function loadAppVersion() {
-    try {
-      const result = await window.electron.invoke('get-app-version');
-      if (result.success) {
-        currentVersion = result.version;
-      }
-    } catch (error) {
-      console.error('Error loading app version:', error);
     }
   }
 </script>
@@ -230,40 +201,7 @@
       <div class="modal-body">
         <!-- App Updates Section -->
         <div class="settings-section">
-          <h4>
-            <span class="section-icon">🔄</span>
-            App Updates
-          </h4>
-          <div class="update-info">
-            <div class="version-info">
-              <span class="version-label">Current Version:</span>
-              <span class="version-number">{currentVersion}</span>
-            </div>
-            {#if updateStatus === 'checking'}
-              <div class="update-status checking">
-                <span class="status-icon">⏳</span>
-                Checking for updates...
-              </div>
-            {:else if updateStatus === 'up-to-date'}
-              <div class="update-status up-to-date">
-                <span class="status-icon">✅</span>
-                You have the latest version
-              </div>
-            {:else if updateStatus === 'available'}
-              <div class="update-status available">
-                <span class="status-icon">📦</span>
-                Update available: {latestVersion}
-              </div>
-            {:else if updateStatus === 'error'}
-              <div class="update-status error">
-                <span class="status-icon">❌</span>
-                Failed to check for updates
-              </div>
-            {/if}
-            <button class="update-button" on:click={checkForUpdates} disabled={updateStatus === 'checking'}>
-              {updateStatus === 'checking' ? 'Checking...' : 'Check for Updates'}
-            </button>
-          </div>
+          <UpdateChecker />
         </div>
 
         <!-- System Tray & Startup Settings -->
@@ -554,96 +492,7 @@
   
 
 
-  /* Update section styles */
-  .update-info {
-    background: rgba(31, 41, 55, 0.4);
-    border: 1px solid rgba(75, 85, 99, 0.3);
-    border-radius: 6px;
-    padding: 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
 
-  .version-info {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .version-label {
-    color: rgba(255, 255, 255, 0.7);
-    font-size: 0.9rem;
-  }
-
-  .version-number {
-    color: white;
-    font-weight: 600;
-    font-family: monospace;
-    background: rgba(59, 130, 246, 0.2);
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.9rem;
-  }
-
-  .update-status {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.9rem;
-    padding: 0.5rem;
-    border-radius: 4px;
-  }
-
-  .update-status.checking {
-    background: rgba(245, 158, 11, 0.1);
-    color: #f59e0b;
-    border: 1px solid rgba(245, 158, 11, 0.3);
-  }
-
-  .update-status.up-to-date {
-    background: rgba(16, 185, 129, 0.1);
-    color: #10b981;
-    border: 1px solid rgba(16, 185, 129, 0.3);
-  }
-
-  .update-status.available {
-    background: rgba(59, 130, 246, 0.1);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-  }
-
-  .update-status.error {
-    background: rgba(239, 68, 68, 0.1);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.3);
-  }
-
-  .status-icon {
-    font-size: 1rem;
-  }
-
-  .update-button {
-    background: #3b82f6;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    padding: 0.5rem 1rem;
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    align-self: flex-start;
-  }
-
-  .update-button:hover:not(:disabled) {
-    background: #2563eb;
-  }
-
-  .update-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
 
   /* Window size settings */
   .size-select {

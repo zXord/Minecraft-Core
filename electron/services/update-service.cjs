@@ -27,15 +27,22 @@ class UpdateService extends EventEmitter {
   // Check if we're in development mode or have invalid config
   isDevelopmentMode() {
     try {
-      // Check if running in development
+      // First check if we're running from source (npm run dev)
       if (process.env.NODE_ENV === 'development' || process.argv.includes('--dev')) {
         return true;
       }
 
-      // Check if repository config is placeholder/invalid
+      // Check if app is packaged - if not packaged, we're in development
+      const { app } = require('electron');
+      if (!app.isPackaged) {
+        return true;
+      }
+
+      // For packaged apps, check if repository config is valid
       const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
       const publishConfig = packageJson?.build?.publish;
       
+      // If no publish config or placeholder values, consider it development
       if (!publishConfig || 
           publishConfig.owner === 'GITHUB_USERNAME' || 
           publishConfig.repo === 'GITHUB_REPO_NAME' ||
@@ -44,6 +51,7 @@ class UpdateService extends EventEmitter {
         return true;
       }
 
+      // Packaged app with valid repository config = production
       return false;
     } catch (error) {
       console.log('Update service: Error checking development mode, assuming development');
