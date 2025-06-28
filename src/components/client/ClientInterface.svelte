@@ -1968,6 +1968,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         showCompatibilityDialog = true;
       }
     });
+    
+    // Listen for server version changes to re-check app compatibility
+    window.electron.on('server-version-changed', (data) => {
+      if (data && data.port && data.port.toString() === instance.serverPort) {
+        // This event is for our server, check app version compatibility
+        setTimeout(() => {
+          checkAppVersionCompatibility();
+        }, 1000); // Small delay to ensure server is ready
+      }
+    });
   }
   
   // Clean up event listeners
@@ -1987,7 +1997,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       'launcher-client-download-progress',
       'launcher-client-download-complete',
       'launcher-client-download-error',
-      'client-mod-compatibility-report'
+      'client-mod-compatibility-report',
+      'server-version-changed'
     ];
     
     events.forEach(event => {

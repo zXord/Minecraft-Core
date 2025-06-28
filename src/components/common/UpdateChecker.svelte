@@ -158,122 +158,253 @@
   });
 </script>
 
-<div class="bg-white dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700">
-  <div class="flex items-center justify-between mb-4">
-    <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Application Updates</h3>
-    <div class="flex items-center space-x-2">
-      {#if updateStatus.updateAvailable}
-        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
-          <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-          Update Available
-        </span>
-      {:else}
-        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
-          <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-          </svg>
-          Up to Date
-        </span>
+<!-- App Updates Section Header -->
+<h4>
+  <span class="section-icon">🔄</span>
+  App Updates
+</h4>
+
+<!-- Status -->
+<div class="update-status-row">
+  <div class="update-status-badge {updateStatus.updateAvailable ? 'available' : 'up-to-date'}">
+    {#if updateStatus.updateAvailable}
+      📦 Update Available
+    {:else}
+      ✅ Up to Date
+    {/if}
+  </div>
+</div>
+
+<!-- Version Info -->
+<div class="version-grid">
+  <div class="version-item">
+    <div class="version-label">Current Version</div>
+    <div class="version-value">{currentVersion}</div>
+  </div>
+  <div class="version-item">
+    <div class="version-label">Latest Version</div>
+    <div class="version-value">
+      {updateStatus.latestVersion || currentVersion}
+      {#if updateStatus.latestVersion && updateStatus.latestVersion !== currentVersion}
+        <span class="new-badge">New!</span>
       {/if}
     </div>
   </div>
+</div>
 
-  <!-- Version Information -->
-  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
-      <div class="text-sm text-gray-600 dark:text-gray-400 mb-1">Current Version</div>
-      <div class="text-lg font-semibold text-gray-900 dark:text-white">{currentVersion}</div>
-    </div>
-    
-    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
-      <div class="text-sm text-gray-600 dark:text-gray-400 mb-1">Latest Version</div>
-      <div class="text-lg font-semibold text-gray-900 dark:text-white">
-        {updateStatus.latestVersion || currentVersion}
-        {#if updateStatus.latestVersion && updateStatus.latestVersion !== currentVersion}
-          <span class="text-sm text-blue-600 dark:text-blue-400 ml-2">(New!)</span>
-        {/if}
-      </div>
-    </div>
-  </div>
+<!-- Last Checked -->
+<div class="last-checked">
+  Last checked: {formatLastChecked(lastChecked)}
+  {#if updateStatus.isCheckingForUpdates}
+    <span class="checking-indicator">
+      🔄 Checking...
+    </span>
+  {/if}
+</div>
 
-  <!-- Check Status -->
-  <div class="mb-4">
-    <div class="text-sm text-gray-600 dark:text-gray-400">
-      Last checked: {formatLastChecked(lastChecked)}
-    </div>
-    {#if updateStatus.isCheckingForUpdates}
-      <div class="text-sm text-blue-600 dark:text-blue-400 mt-1">
-        <svg class="w-4 h-4 inline mr-1 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-        </svg>
-        Checking for updates...
-      </div>
-    {/if}
-  </div>
-
-  <!-- Action Button -->
+<!-- Action Buttons -->
+<div class="action-buttons">
   <button 
     on:click={checkForUpdates}
     disabled={isChecking || updateStatus.isCheckingForUpdates}
-    class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
+    class="update-button"
   >
     {#if isChecking || updateStatus.isCheckingForUpdates}
-      <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-      </svg>
-      <span>Checking for Updates...</span>
+      🔄 Checking...
     {:else}
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-      </svg>
-      <span>{updateStatus.developmentMode ? 'Test Update Check' : 'Check for Updates'}</span>
+      {updateStatus.developmentMode ? '🧪 Test Update Check' : '🔄 Check for Updates'}
     {/if}
   </button>
-
-  <!-- Development Test Button -->
+  
   {#if updateStatus.developmentMode}
     <button 
       on:click={testUpdateNotification}
-      class="w-full mt-2 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2"
+      class="test-button"
     >
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4V2a1 1 0 011-1h4a1 1 0 011 1v2m-6 0h8m-8 0v1a3 3 0 003 3h2a3 3 0 003-3V4m-8 16V8m8 8V8" />
-      </svg>
-      <span>Test Update UI</span>
+      📋 Test Update UI
     </button>
   {/if}
+</div>
 
-  <!-- Update Note -->
-  {#if updateStatus.developmentMode}
-    <div class="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-      <div class="flex items-start space-x-2">
-        <svg class="w-5 h-5 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-        </svg>
-        <div class="text-sm">
-          <div class="font-medium text-blue-800 dark:text-blue-300 mb-1">Development Mode</div>
-          <div class="text-blue-700 dark:text-blue-400">
-            Update checking is disabled in development mode. Configure your GitHub repository in package.json to enable automatic updates.
-          </div>
-        </div>
-      </div>
+<!-- Note -->
+{#if updateStatus.developmentMode}
+  <div class="dev-note">
+    <div class="note-header">💡 Development Mode</div>
+    <div class="note-text">
+      Update checking is disabled in development mode. Configure your GitHub repository in package.json to enable automatic updates.
     </div>
-  {:else}
-    <div class="mt-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg border border-yellow-200 dark:border-yellow-800">
-      <div class="flex items-start space-x-2">
-        <svg class="w-5 h-5 text-yellow-600 dark:text-yellow-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-        <div class="text-sm">
-          <div class="font-medium text-yellow-800 dark:text-yellow-300 mb-1">Automatic Updates</div>
-          <div class="text-yellow-700 dark:text-yellow-400">
-            The app automatically checks for updates every 12 hours. 
-            Updates include bug fixes, new features, and security improvements.
-          </div>
-        </div>
-      </div>
+  </div>
+{:else}
+  <div class="info-note">
+    <div class="note-header">ℹ️ Automatic Updates</div>
+    <div class="note-text">
+      The app automatically checks for updates every 12 hours. Updates include bug fixes, new features, and security improvements.
     </div>
-  {/if}
-</div> 
+  </div>
+{/if}
+
+<style>
+  h4 {
+    margin: 0 0 1rem 0;
+    color: #3b82f6;
+    font-size: 1.1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid rgba(59, 130, 246, 0.2);
+  }
+  
+  .section-icon {
+    font-size: 1rem;
+  }
+
+  .update-status-row {
+    margin-bottom: 1rem;
+    display: flex;
+    justify-content: flex-start;
+  }
+
+  .update-status-badge {
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border: 1px solid transparent;
+  }
+
+  .update-status-badge.up-to-date {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+    border-color: rgba(16, 185, 129, 0.3);
+  }
+
+  .update-status-badge.available {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+
+  .version-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+
+  .version-item {
+    background: rgba(17, 24, 39, 0.4);
+    border: 1px solid rgba(75, 85, 99, 0.2);
+    border-radius: 4px;
+    padding: 0.5rem;
+  }
+
+  .version-label {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    margin-bottom: 0.25rem;
+  }
+
+  .version-value {
+    font-size: 0.85rem;
+    color: #e2e8f0;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .new-badge {
+    background: rgba(59, 130, 246, 0.2);
+    color: #3b82f6;
+    padding: 0.125rem 0.375rem;
+    border-radius: 8px;
+    font-size: 0.7rem;
+    font-weight: 500;
+  }
+
+  .last-checked {
+    font-size: 0.8rem;
+    color: #9ca3af;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .checking-indicator {
+    color: #3b82f6;
+    font-size: 0.75rem;
+  }
+
+  .action-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .update-button, .test-button {
+    background: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .update-button:hover:not(:disabled) {
+    background: #2563eb;
+  }
+
+  .update-button:disabled {
+    background: #6b7280;
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+
+  .test-button {
+    background: #7c3aed;
+  }
+
+  .test-button:hover {
+    background: #6d28d9;
+  }
+
+  .dev-note, .info-note {
+    background: rgba(17, 24, 39, 0.6);
+    border: 1px solid rgba(75, 85, 99, 0.3);
+    border-radius: 6px;
+    padding: 0.75rem;
+  }
+
+  .dev-note {
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+
+  .info-note {
+    border-color: rgba(245, 158, 11, 0.3);
+  }
+
+  .note-header {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #e2e8f0;
+    margin-bottom: 0.25rem;
+  }
+
+  .note-text {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.4;
+  }
+
+  @media (max-width: 600px) {
+    .version-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style> 

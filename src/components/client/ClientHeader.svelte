@@ -42,13 +42,14 @@
 <style>
   .client-header {
     background-color: #1f2937;
-    padding: 0.5rem 2rem 0 2rem;
+    padding: 0.5rem 0 0 0;
     display: flex;
     flex-direction: column;
     align-items: center;
     border-bottom: none;
     margin: 0;
     min-height: 120px; /* Same as server header */
+    width: 100%;
   }
 
   .header-title-row {
@@ -57,6 +58,8 @@
     justify-content: center;
     position: relative;
     width: 100%;
+    padding: 0 2rem;
+    box-sizing: border-box;
   }
 
   h1 {
@@ -140,9 +143,9 @@
 
   /* Responsive Design */
   @media (max-width: 768px) {
-    .client-header {
-      padding: 0.5rem 1rem 0 1rem;
-  }
+    .header-title-row {
+      padding: 0 1rem;
+    }
 
     .modern-client-tabs {
     flex-direction: column;
