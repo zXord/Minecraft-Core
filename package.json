@@ -81,7 +81,10 @@
       "warningsAsErrors": false,
       "artifactName": "Minecraft-Core-Setup-${version}.exe",
       "displayLanguageSelector": false,
-      "installerHeaderIcon": "icon.png"
+      "installerHeaderIcon": "icon.png",
+      "installerIcon": "icon.png",
+      "uninstallerIcon": "icon.png",
+      "deleteAppDataOnUninstall": false
     },
     "publish": {
       "provider": "github",
