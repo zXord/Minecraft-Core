@@ -11,7 +11,7 @@ const { rm } = require('fs/promises');
  */
 function createSettingsHandlers() {
   return {
-    'update-settings': async (_e, { port, maxRam, serverPath, autoStartMinecraft, autoStartManagement }) => {
+    'update-settings': async (_e, { port, maxRam, managementPort, serverPath, autoStartMinecraft, autoStartManagement }) => {
       try {
         // Validate parameters
         if (port !== undefined && (typeof port !== 'number' || port < 1 || port > 65535)) {
@@ -22,10 +22,15 @@ function createSettingsHandlers() {
           return { success: false, error: 'Invalid memory allocation' };
         }
         
+        if (managementPort !== undefined && (typeof managementPort !== 'number' || managementPort < 1025 || managementPort > 65535)) {
+          return { success: false, error: 'Invalid management port number' };
+        }
+        
         // Get current settings to merge with updates
         const currentSettings = appStore.get('serverSettings') || { 
           port: 25565, 
           maxRam: 4, 
+          managementPort: 8080,
           autoStartMinecraft: false, 
           autoStartManagement: false 
         };
@@ -35,6 +40,7 @@ function createSettingsHandlers() {
           ...currentSettings,
           port: port !== undefined ? port : currentSettings.port,
           maxRam: maxRam !== undefined ? maxRam : currentSettings.maxRam,
+          managementPort: managementPort !== undefined ? managementPort : currentSettings.managementPort,
           autoStartMinecraft: autoStartMinecraft !== undefined ? autoStartMinecraft : currentSettings.autoStartMinecraft,
           autoStartManagement: autoStartManagement !== undefined ? autoStartManagement : currentSettings.autoStartManagement
         };
@@ -85,6 +91,7 @@ function createSettingsHandlers() {
         const settings = appStore.get('serverSettings') || { 
           port: 25565, 
           maxRam: 4, 
+          managementPort: 8080,
           autoStartMinecraft: false, 
           autoStartManagement: false 
         };

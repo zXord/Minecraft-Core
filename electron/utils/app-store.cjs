@@ -57,6 +57,7 @@ const storeConfig = {
     serverSettings: {
       port: 25565,
       maxRam: 4,
+      managementPort: 8080,
       autoStartMinecraft: false,
       autoStartManagement: false
     },

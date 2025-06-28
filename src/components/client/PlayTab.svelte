@@ -220,7 +220,6 @@
               <div class="status-dot {$clientState.connectionStatus}"></div>
               <div class="status-info">
                 <span class="status-label">Management</span>
-                <code class="server-address">localhost:8080</code>
               </div>
               <span class="connection-text {$clientState.connectionStatus}">
                 {$clientState.connectionStatus === 'connected' ? 'Connected' : 'Disconnected'}

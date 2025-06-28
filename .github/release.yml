@@ -1,0 +1,42 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: 🚀 New Features
+      labels:
+        - feature
+        - enhancement
+        - new
+    - title: 🐛 Bug Fixes
+      labels:
+        - bug
+        - fix
+        - bugfix
+    - title: 🔧 Improvements
+      labels:
+        - improvement
+        - optimization
+        - performance
+    - title: 🎨 UI/UX Changes
+      labels:
+        - ui
+        - ux
+        - design
+        - styling
+    - title: 📚 Documentation
+      labels:
+        - documentation
+        - docs
+    - title: 🔨 Technical Changes
+      labels:
+        - refactor
+        - cleanup
+        - technical
+    - title: 📦 Dependencies
+      labels:
+        - dependencies
+        - deps
+    - title: Other Changes
+      labels:
+        - "*" 

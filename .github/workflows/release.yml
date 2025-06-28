@@ -76,14 +76,11 @@ jobs:
           name: Minecraft Core v${{ needs.check-version.outputs.version }}
           draft: false
           prerelease: false
+          generate_release_notes: true
           files: |
             dist/*.exe
             dist/latest.yml
           body: |
-            ## What's Changed
-            
-            Auto-release for version ${{ needs.check-version.outputs.version }}
-            
             ### Download
             - **Windows**: Download the `.exe` file below
             - **Auto-Updates**: Existing users will be notified of this update automatically
@@ -92,8 +89,5 @@ jobs:
             1. Download the `.exe` file
             2. Run the installer
             3. Follow the setup wizard
-            
-            ---
-            *This release was automatically generated when the version was bumped to ${{ needs.check-version.outputs.version }}*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

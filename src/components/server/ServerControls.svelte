@@ -88,9 +88,7 @@
     } catch (error) {
     }
   }
-  // Server status tracking  
-  $: port = $serverState?.port || 25565;
-  $: maxRam = $serverState?.maxRam || 4;
+  // Server status tracking - use reactive statements only for display, not for overriding loaded values
 
   // Management server state
   let managementServerStatus = 'stopped'; // stopped, starting, running, stopping
@@ -285,15 +283,18 @@
         if (settingsResult && settingsResult.success) {
           const { settings } = settingsResult;
           // Update local variables with settings
-          if (settings.port) port = settings.port;
-          if (settings.maxRam) maxRam = settings.maxRam;
+          if (settings.port !== undefined) port = settings.port;
+          if (settings.maxRam !== undefined) maxRam = settings.maxRam;
+          if (settings.managementPort !== undefined) managementPort = settings.managementPort;
           if (settings.autoStartMinecraft !== undefined) autoStartMinecraft = settings.autoStartMinecraft;
           if (settings.autoStartManagement !== undefined) autoStartManagement = settings.autoStartManagement;
-          // Update server state store
+          // Update server state store with loaded values
           serverState.update(state => ({
             ...state,
             port,
-            maxRam          }));        }
+            maxRam
+          }));
+        }
         // Initial status check
         await checkServerStatus();
 
@@ -301,12 +302,12 @@
         await refreshLatestVersions(get(settingsStore).mcVersion);
         updateChecked = true;
         
-        // Load management server status on mount
+        // Load management server status on mount (but don't override saved port setting)
         try {
           const result = await window.electron.invoke('get-management-server-status');
           if (result.success && result.status) {
             managementServerStatus = result.status.isRunning ? 'running' : 'stopped';
-            managementPort = result.status.port || 8080;
+            // Don't override managementPort - it was already loaded from saved settings above
             connectedClients = result.status.clientCount || 0;
           }
         } catch (error) {
@@ -357,7 +358,7 @@
     const handleManagementServerStatus = (data) => {
       if (data.isRunning) {
         managementServerStatus = 'running';
-        managementPort = data.port || 8080;
+        // Don't override managementPort here - user may have changed it from saved settings
       } else {
         managementServerStatus = 'stopped';
         connectedClients = 0;
@@ -394,8 +395,10 @@
       maxRam: maxRam
     }));
     // Save settings to electron store
-    window.electron.invoke('update-settings', {      port: port,
+    window.electron.invoke('update-settings', {
+      port: port,
       maxRam: maxRam,
+      managementPort: managementPort,
       autoStartMinecraft: autoStartMinecraft,
       autoStartManagement: autoStartManagement
     }).catch(() => {
@@ -609,7 +612,6 @@
         <div class="management-info-compact">
           <span>Port: {managementPort}</span>
           <span>Clients: {connectedClients}</span>
-          <span class="management-url">http://localhost:{managementPort}</span>
         </div>
       {/if}
       
@@ -623,6 +625,7 @@
             min="1025"
             max="65535"
             bind:value={managementPort}
+            on:change={updateSettings}
             disabled={managementServerStatus === 'running' || managementServerStatus === 'starting'}
             class="port-input"
           />
@@ -1024,13 +1027,7 @@
     color: #d1fae5;
   }
 
-  .management-url {
-    font-family: monospace;
-    color: #4299e1 !important;
-    background: rgba(66, 153, 225, 0.1);
-    padding: 0.125rem 0.25rem;
-    border-radius: 3px;
-  }
+
 
   .management-row {
     display: flex;

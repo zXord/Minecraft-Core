@@ -636,10 +636,7 @@ let updateServiceInstance = null;
 
 function getUpdateService() {
   if (!updateServiceInstance) {
-    console.log('Creating new UpdateService instance');
     updateServiceInstance = new UpdateService();
-  } else {
-    console.log('Returning existing UpdateService instance');
   }
   return updateServiceInstance;
 }
