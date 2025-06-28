@@ -7,6 +7,24 @@ const { app, BrowserWindow } = require('electron');
  */
 function createAppSettingsHandlers() {
   return {
+    'open-app-settings': async () => {
+      try {
+        // Send event to renderer to open the app settings modal
+        const { BrowserWindow } = require('electron');
+        const mainWindow = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+        
+        if (mainWindow) {
+          mainWindow.webContents.send('open-app-settings-modal');
+          return { success: true };
+        } else {
+          return { success: false, error: 'No main window found' };
+        }
+      } catch (error) {
+        console.error('Error opening app settings:', error);
+        return { success: false, error: error.message };
+      }
+    },
+
     'save-app-settings': async (_e, settings) => {
       try {
         if (!settings || typeof settings !== 'object') {

@@ -46,6 +46,25 @@ function createUpdateHandlers(win) {
     }
   });
 
+  // Forward specific version download events
+  updateService.on('specific-version-download-progress', (progress) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('specific-version-download-progress', progress);
+    }
+  });
+
+  updateService.on('specific-version-download-complete', (info) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('specific-version-download-complete', info);
+    }
+  });
+
+  updateService.on('specific-version-download-error', (error) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('specific-version-download-error', error);
+    }
+  });
+
   return {
     // Check for updates manually
     'check-for-updates': async () => {
@@ -154,6 +173,36 @@ function createUpdateHandlers(win) {
         return { success: true, version };
       } catch (error) {
         return { success: false, error: error.message, version: '1.0.0' };
+      }
+    },
+
+    // Download a specific version (for server compatibility)
+    'download-specific-version': async (_event, targetVersion) => {
+      try {
+        const result = await updateService.downloadSpecificVersion(targetVersion);
+        return result;
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Install a downloaded specific version
+    'install-specific-version': async (_event, filePath) => {
+      try {
+        const { shell } = require('electron');
+        const fs = require('fs');
+        
+        // Check if file exists
+        if (!fs.existsSync(filePath)) {
+          return { success: false, error: 'Installer file not found' };
+        }
+        
+        // Launch the installer
+        await shell.openPath(filePath);
+        
+        return { success: true, message: 'Installer launched. The app will close when installation begins.' };
+      } catch (error) {
+        return { success: false, error: error.message };
       }
     }
   };
