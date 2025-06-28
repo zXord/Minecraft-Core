@@ -73,19 +73,25 @@
     updateStatus = { ...updateStatus };
   }
 
-  // Handle update downloaded
+  // Handle update downloaded (prevent duplicate notifications)
+  let downloadNotificationShown = false;
+  
   function handleUpdateDownloaded(info) {
     isDownloading = false;
     isDownloaded = true;
     
-    toast.success('Update Downloaded', {
-      description: `Version ${info.version} is ready to install`,
-      duration: 10000,
-      action: {
-        label: 'Install Now',
-        onClick: installUpdate
-      }
-    });
+    // Only show notification once per download
+    if (!downloadNotificationShown) {
+      downloadNotificationShown = true;
+      toast.success('Update Downloaded', {
+        description: `Version ${info.version} is ready to install`,
+        duration: 10000,
+        action: {
+          label: 'Install Now',
+          onClick: installUpdate
+        }
+      });
+    }
   }
 
   // Handle errors
@@ -116,9 +122,30 @@
     }
   }
 
+  // Check if server is running before install
+  async function checkServerStatus() {
+    try {
+      const result = await window.electron.invoke('get-server-status');
+      return result.isRunning || false;
+    } catch (error) {
+      return false;
+    }
+  }
+
   // Install update
   async function installUpdate() {
     try {
+      // Check if server is running
+      const serverRunning = await checkServerStatus();
+      
+      if (serverRunning) {
+        toast.error('Cannot Install Update', {
+          description: 'Please stop the Minecraft server before installing the update to prevent data corruption.',
+          duration: 10000
+        });
+        return;
+      }
+
       const result = await window.electron.invoke('install-update');
       
       if (result.success) {
@@ -223,6 +250,11 @@
     window.electron.on('update-checking-for-update', () => {
       updateStatus.isCheckingForUpdates = true;
       updateStatus = { ...updateStatus };
+    });
+    
+    // Reset notification flag when new update is available
+    window.electron.on('update-available', () => {
+      downloadNotificationShown = false;
     });
   });
 
@@ -533,6 +565,23 @@
     background: #2563eb;
   }
 
+  .install-button {
+    flex: 1;
+    background: #dc2626;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .install-button:hover {
+    background: #b91c1c;
+  }
+
   .disabled-button {
     flex: 1;
     background: #6b7280;
@@ -611,7 +660,7 @@
         {#if isDownloaded}
           <button 
             on:click={installUpdate}
-            class="primary-button"
+            class="install-button"
           >
             Install & Restart
           </button>

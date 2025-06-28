@@ -8,7 +8,7 @@
   let isDownloaded = false;
   let lastChecked = null;
   let downloadProgress = { percent: 0, bytesPerSecond: 0, total: 0, transferred: 0 };
-  let downloadNotificationShown = false; // Prevent duplicate notifications
+ // Prevent duplicate notifications
   let updateStatus = {
     updateAvailable: false,
     latestVersion: null,
@@ -255,7 +255,6 @@
       updateStatus.isCheckingForUpdates = false;
       updateStatus = { ...updateStatus };
       isDownloaded = false; // Reset download state for new update
-      downloadNotificationShown = false; // Reset notification flag for new update
     });
     
     window.electron.on('update-not-available', () => {
@@ -271,18 +270,11 @@
     });
     
     // Listen for download completion
-    window.electron.on('update-downloaded', (info) => {
+    window.electron.on('update-downloaded', () => {
       isDownloading = false;
       isDownloaded = true;
       
-      // Only show notification once per download
-      if (!downloadNotificationShown) {
-        downloadNotificationShown = true;
-        toast.success('Update Downloaded', {
-          description: `Version ${info.version} is ready to install`,
-          duration: 8000
-        });
-      }
+      // Don't show notification here since UpdateNotification component handles it
     });
     
     // Handle update errors with friendly messages
@@ -567,11 +559,11 @@
   }
 
   .install-button {
-    background: #dc2626;
+    background: #7c3aed;
   }
 
   .install-button:hover {
-    background: #b91c1c;
+    background: #6d28d9;
   }
 
   .downloading-status {
