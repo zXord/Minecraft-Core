@@ -1,7 +1,9 @@
 {
   "name": "minecraft-core",
   "private": true,
-  "version": "1.0.11",
+  "version": "1.0.13",
+  "description": "Minecraft Server Management Tool with Auto-Updates",
+  "author": "zXord",
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
@@ -61,6 +63,10 @@
       "output": "dist",
       "buildResources": "build"
     },
+    "extraMetadata": {
+      "name": "minecraft-core",
+      "productName": "Minecraft Core"
+    },
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -70,7 +76,9 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "icon.png"
+      "requestedExecutionLevel": "asInvoker",
+      "verifyUpdateCodeSignature": false,
+      "executableName": "Minecraft Core"
     },
     "nsis": {
       "oneClick": false,
@@ -81,10 +89,9 @@
       "warningsAsErrors": false,
       "artifactName": "Minecraft-Core-Setup-${version}.exe",
       "displayLanguageSelector": false,
-      "installerHeaderIcon": "icon.png",
-      "installerIcon": "icon.png",
-      "uninstallerIcon": "icon.png",
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "shortcutName": "Minecraft Core",
+      "uninstallDisplayName": "Minecraft Core"
     },
     "publish": {
       "provider": "github",

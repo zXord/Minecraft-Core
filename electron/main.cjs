@@ -206,6 +206,7 @@ function createWindow() {
     height: windowHeight,
     resizable: isResizable,
     icon: windowIcon, // Set the window icon
+    title: 'Minecraft Core', // Set explicit title without version
     webPreferences: {
       contextIsolation: true,
       preload: preloadPath,
@@ -337,6 +338,9 @@ function createWindow() {
     win = null;
   });
 }
+
+// Set app name explicitly to avoid version display
+app.setName('Minecraft Core');
 
 // Initialize app when ready
 app.whenReady().then(() => {
