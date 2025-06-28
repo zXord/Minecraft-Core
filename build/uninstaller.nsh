@@ -50,23 +50,26 @@ FunctionEnd
         ${If} $Checkbox_State == 1
             SetShellVarContext current
             
-            # Delete AppData folder for this app
+            # Delete AppData folder for this app (try both possible names)
             RMDir /r "$APPDATA\minecraft-core"
+            RMDir /r "$APPDATA\Minecraft Core"
             
             # Delete LocalAppData folder for this app  
             RMDir /r "$LOCALAPPDATA\minecraft-core"
+            RMDir /r "$LOCALAPPDATA\Minecraft Core"
             
             # Delete any data in Documents (if app stores data there)
             RMDir /r "$DOCUMENTS\Minecraft Core"
             
             # Delete any temporary files
             RMDir /r "$TEMP\minecraft-core"
+            RMDir /r "$TEMP\Minecraft Core"
             
-            # Optional: Show confirmation that data was deleted
-            # MessageBox MB_OK "All Minecraft Core user data has been removed."
+            # Show confirmation that data was deleted
+            MessageBox MB_OK "All Minecraft Core user data has been removed."
         ${Else}
-            # Optional: Show message that data was preserved
-            # MessageBox MB_OK "Your Minecraft Core data has been preserved and will be available if you reinstall."
+            # Show message that data was preserved
+            MessageBox MB_OK "Your Minecraft Core data has been preserved and will be available if you reinstall."
         ${EndIf}
     ${endIf}
 !macroend 
