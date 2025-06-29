@@ -164,12 +164,13 @@
   padding: 0 !important; /* Remove padding, let content handle it */
 }
 
-.client-header {
-  width: var(--content-area-width) !important;
-  max-width: var(--content-area-width) !important;
-  margin: 0 auto !important;
+.client-interface .client-header {
+  width: 100vw !important; /* Full viewport width */
+  max-width: none !important;
+  margin-left: calc(-50vw + 50%) !important; /* Center content but span full width */
   box-sizing: border-box !important;
-  padding-top: 0.25rem !important; /* Reduce top padding */
+  padding: 0.5rem 0 0 0 !important; /* Override the component padding to prevent off-screen issues */
+  position: relative !important;
 }
 
 /* =============================================================================
