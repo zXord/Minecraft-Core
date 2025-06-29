@@ -17,7 +17,9 @@
   export let downloadClient;
   export let onDownloadModsClick;
   export let onAcknowledgeAllDependencies;
-  export let maxMemory;
+  // Memory/RAM settings - handled internally with localStorage persistence
+  let maxMemory = 2; // Default 2GB
+  let memoryLoaded = false; // Flag to prevent saving before loading
   export let isLaunching;
   export let launchStatus;
   export let launchMinecraft;
@@ -57,9 +59,14 @@
     localStorage.setItem('minecraft-debug-terminal', showDebugTerminal.toString());
   }
   
-  // Modified launch function that passes debug terminal setting
+  // Memory persistence - save when maxMemory changes (but only after initial load)
+  $: if (typeof window !== 'undefined' && window.localStorage && maxMemory && memoryLoaded) {
+    localStorage.setItem('minecraft-client-max-memory', maxMemory.toString());
+  }
+  
+  // Modified launch function that passes debug terminal setting and memory allocation
   function launchMinecraftWithDebug() {
-    launchMinecraft(showDebugTerminal);
+    launchMinecraft(showDebugTerminal, maxMemory);
   }
 
   // Download specific server version
@@ -173,6 +180,20 @@
 
   // Set up event listeners for specific version download events
   onMount(() => {
+    // Load maxMemory from localStorage
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const savedMaxMemory = localStorage.getItem('minecraft-client-max-memory');
+      if (savedMaxMemory) {
+        const parsed = parseFloat(savedMaxMemory);
+        if (!isNaN(parsed) && parsed > 0 && parsed <= 32) {
+          maxMemory = parsed;
+        }
+      }
+    }
+    
+    // Enable saving after loading is complete
+    memoryLoaded = true;
+    
     if (typeof window !== 'undefined' && window.electron) {
       // Listen for specific version download progress
       window.electron.on('specific-version-download-progress', (progress) => {
@@ -583,14 +604,16 @@
                   title="Amount of RAM to allocate to Minecraft"
                 />
                 <span class="memory-info">
-                  {#if maxMemory < 1}
-                    {maxMemory}GB (Low - may cause lag)
-                  {:else if maxMemory >= 1 && maxMemory < 2}
-                    {maxMemory}GB (Recommended for most users)
-                  {:else if maxMemory >= 2 && maxMemory < 4}
-                    {maxMemory}GB (Good for modded Minecraft)
+                  {#if requiredMods && requiredMods.length > 50}
+                    {maxMemory}GB (Heavy modpack - 6-8GB recommended)
+                  {:else if requiredMods && requiredMods.length > 20}
+                    {maxMemory}GB (Medium modpack - 4-6GB recommended)
+                  {:else if requiredMods && requiredMods.length > 5}
+                    {maxMemory}GB (Light modpack - 3-4GB recommended)
+                  {:else if requiredMods && requiredMods.length > 0}
+                    {maxMemory}GB (Few mods - 2-3GB recommended)
                   {:else}
-                    {maxMemory}GB (High - ensure enough system RAM)
+                    {maxMemory}GB (Vanilla - 2GB sufficient)
                   {/if}
                 </span>
               </div>

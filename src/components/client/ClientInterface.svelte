@@ -170,7 +170,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   // Connection check interval
   let connectionCheckInterval;
   let statusCheckInterval;
-  let authRefreshInterval;
   
   // Active tab tracking
   const tabs = ['play', 'mods', 'settings'];
@@ -185,8 +184,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Acknowledged dependencies tracking comes from the shared store
   
-  // Memory/RAM settings
-  let maxMemory = 2; // Default 2GB (in GB instead of MB)
+  // Memory/RAM settings - moved to PlayTab.svelte for proper persistence
   
   // Launch progress tracking
   let isLaunching = false;
@@ -1735,7 +1733,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
     // Launch Minecraft client
-  async function launchMinecraft(showDebugTerminal = false) {
+  async function launchMinecraft(showDebugTerminal = false, maxMemoryGB = 2) {
     if (authStatus !== 'authenticated') {
       errorMessage.set('Please authenticate with Microsoft first');
       setTimeout(() => errorMessage.set(''), 5000);
@@ -1766,7 +1764,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     try {
       const minecraftPort = serverInfo?.minecraftPort || '25565';
-        const result = await window.electron.invoke('minecraft-launch', {
+      const memoryInMB = Math.round(maxMemoryGB * 1024);
+      
+      const result = await window.electron.invoke('minecraft-launch', {
         clientPath: instance.path,
         minecraftVersion: serverInfo?.minecraftVersion || '1.20.1',
         serverIp: instance.serverIp,
@@ -1775,7 +1775,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientName: instance.clientName,
         requiredMods,
         serverInfo,
-        maxMemory: Math.round(maxMemory * 1024), // Convert GB to MB for launcher
+        maxMemory: memoryInMB, // Convert GB to MB for launcher
         showDebugTerminal // Add debug terminal setting
       });
       
@@ -1791,8 +1791,12 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         // Handle specific error types
         let errorMsg = result.error || 'Unknown launch error';
         
-        if (errorMsg.includes('Authentication expired') || errorMsg.includes('authserver.mojang.com')) {
-          errorMsg = 'Your Microsoft authentication has expired. Please click "🔄 Re-authenticate" in Settings and try again.';
+        if (errorMsg.includes('Authentication expired') || errorMsg.includes('authserver.mojang.com') || errorMsg.includes('Invalid session') || errorMsg.includes('invalid session')) {
+          if (errorMsg.includes('Please authenticate again through the Settings page')) {
+            errorMsg = 'Your Microsoft authentication has expired or failed to refresh. Please login again in Settings tab.';
+          } else {
+            errorMsg = 'Your Microsoft authentication is invalid. Please login again in Settings tab.';
+          }
         } else if (errorMsg.includes('EMFILE') || errorMsg.includes('too many files')) {
           errorMsg = 'Too many files are open. Please close other applications and try again.';
         } else if (errorMsg.includes('ENOENT') || errorMsg.includes('not found')) {
@@ -1813,8 +1817,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       // Handle network errors
       if (errorMsg.includes('ENOTFOUND') || errorMsg.includes('network')) {
         errorMsg = 'Network connection error. Please check your internet connection and try again.';
-      } else if (errorMsg.includes('Authentication')) {
-        errorMsg = 'Authentication error. Please re-authenticate with Microsoft in Settings.';
+      } else if (errorMsg.includes('Authentication') || errorMsg.includes('Invalid session') || errorMsg.includes('invalid session')) {
+        errorMsg = 'Authentication error. Please login with Microsoft in Settings.';
       }
       
       errorMessage.set('Launch error: ' + errorMsg);
@@ -2032,13 +2036,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       }
     }, 60000); // Every 60 seconds
 
-    // Set up periodic authentication refresh - ONLY when authenticated
-    authRefreshInterval = setInterval(() => {
-      // Only refresh if we're actually authenticated and connected
-      if (authStatus === 'authenticated' && $clientState.connectionStatus === 'connected') {
-        refreshAuthToken();
-      }
-    }, 30 * 60 * 1000); // Every 30 minutes
+    // Note: Removed periodic authentication refresh as it was too aggressive
+    // Authentication will be checked/refreshed automatically when launching Minecraft
+    // This matches the behavior of other Minecraft launchers like ATLauncher
     
     // Set up periodic launcher status check - ONLY when Minecraft is running
     const launcherStatusInterval = setInterval(async () => {
@@ -2056,13 +2056,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       // Store intervals for cleanup
     connectionCheckInterval = connectionCheckInterval;
     statusCheckInterval = statusCheckInterval;
-    authRefreshInterval = authRefreshInterval;
     
     // Return cleanup function
     return () => {
       if (connectionCheckInterval) clearInterval(connectionCheckInterval);
       if (statusCheckInterval) clearInterval(statusCheckInterval);
-      if (authRefreshInterval) clearInterval(authRefreshInterval);
       if (launcherStatusInterval) clearInterval(launcherStatusInterval);
       if (modCheckInterval) clearInterval(modCheckInterval);    };
   }    // Reactive statement to refresh mod sync when switching to Play tab
@@ -2075,7 +2073,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }, 100);  }
   
   onMount(() => {
-    
     // Initialize client functionality
     setupLauncherEvents();
     
@@ -2372,7 +2369,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {downloadClient}
         {onDownloadModsClick}
         {onAcknowledgeAllDependencies}
-        {maxMemory}
+
         {isLaunching}
         {launchStatus}
         {launchMinecraft}
