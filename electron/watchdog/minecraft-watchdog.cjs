@@ -196,7 +196,7 @@ function checkProcess() {
   }
   
   // Check less frequently since we're using lightweight method
-  setTimeout(checkProcess, 30000); // Check every 30 seconds - much lighter check
+  setTimeout(checkProcess, 5000); // Check every 5 seconds - much lighter check
 }
 log("Starting process monitoring loop");
 checkProcess();
