@@ -202,7 +202,7 @@ function checkProcess() {
       process.exit(0);
     }
     
-    setTimeout(checkProcess, 45000); // Check every 45 seconds when server not running
+    setTimeout(checkProcess, 10000); // Check every 10 seconds when server not running
     return;
   }
 
@@ -224,7 +224,7 @@ function checkProcess() {
     log('Cleanup complete, exiting app watchdog');
     process.exit(0);
   }
-  setTimeout(checkProcess, 30000); // Check every 30 seconds when server running (lightweight check)
+  setTimeout(checkProcess, 5000); // Check every 5 seconds when server running (lightweight check)
 }
 
 log("Starting Electron app monitoring loop");
