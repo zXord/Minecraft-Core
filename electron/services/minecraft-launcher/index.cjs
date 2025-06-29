@@ -83,8 +83,13 @@ class MinecraftLauncher extends EventEmitter {
   }
 
   // Check if authentication is valid and refresh if needed
-  async checkAndRefreshAuth() {
-    return this.authHandler.checkAndRefreshAuth();
+  async checkAndRefreshAuth(forceRefresh = false) {
+    return this.authHandler.checkAndRefreshAuth(forceRefresh);
+  }
+  
+  // Clear authentication data (for force re-authentication)
+  clearAuthData() {
+    return this.authHandler.clearAuthData();
   }
   
   
@@ -348,9 +353,9 @@ class MinecraftLauncher extends EventEmitter {
         throw new Error('No authentication data available. Please authenticate first.');
       }
       
-      const refreshResult = await this.checkAndRefreshAuth();
+      const refreshResult = await this.checkAndRefreshAuth(true); // Force refresh on every launch
+      
       if (refreshResult.success && refreshResult.refreshed) {
-        console.log('✅ Token refreshed successfully - proceeding with launch');
         // Save the refreshed token immediately
         await this.saveAuthData(clientPath).catch(() => {});
       } else if (!refreshResult.success) {
@@ -361,7 +366,7 @@ class MinecraftLauncher extends EventEmitter {
           throw new Error(`Authentication failed: ${refreshResult.error}`);
         }
       } else {
-        console.log('✅ Token still valid - proceeding with launch');
+        console.log('✅ Authentication valid - proceeding with launch');
       }
       
       const authData = this.authHandler.authData;

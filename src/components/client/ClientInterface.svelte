@@ -1077,10 +1077,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   
   // Authenticate with Microsoft
-  async function authenticateWithMicrosoft() {
+  async function authenticateWithMicrosoft(forceAuth = false) {
     
-    // Check if already authenticated
-    if (authStatus === 'authenticated' && username && authData) {
+    // Check if already authenticated (but allow forced re-auth when forceAuth is true)
+    if (authStatus === 'authenticated' && username && authData && !forceAuth) {
       successMessage.set(`Already authenticated as ${username}`);
       setTimeout(() => successMessage.set(''), 3000);
       return;
@@ -1110,9 +1110,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }, 30000); // Increased to 30 second timeout
     
     try {
-      const result = await window.electron.invoke('minecraft-auth', {
-        clientPath: instance.path
-      });
+          const result = await window.electron.invoke('minecraft-auth', {
+      clientPath: instance.path,
+      forceAuth: forceAuth
+    });
       
       // Clear the timeout since we got a response
       clearTimeout(authTimeout);
@@ -2134,6 +2135,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   function promptDelete() {
     showDeleteConfirmation = true;
   }
+
+  // Handle authentication state changes from child components
+  function handleAuthStateChanged(event) {
+    const { authStatus: newAuthStatus, username: newUsername, authData: newAuthData } = event.detail;
+    authStatus = newAuthStatus;
+    username = newUsername;
+    authData = newAuthData;
+  }
   
   async function confirmDelete() {
     try {
@@ -2411,6 +2420,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {checkClientSynchronization}
         {redownloadClient}
         {redownloadClientFull}
+        on:auth-state-changed={handleAuthStateChanged}
       />
     {/if}
   </div>
