@@ -54,6 +54,11 @@
       return;
     }
     
+    // Prevent duplicate notifications for the same version
+    if (updateInfo && updateInfo.version === info.version && showNotification) {
+      return;
+    }
+    
     updateInfo = info;
     showNotification = true;
     
@@ -106,11 +111,17 @@
 
   // Download update
   async function downloadUpdate() {
+    // Prevent multiple simultaneous downloads
+    if (isDownloading) {
+      return;
+    }
+    
     try {
       isDownloading = true;
       const result = await window.electron.invoke('download-update');
       
       if (!result.success) {
+        isDownloading = false;
         throw new Error(result.error);
       }
     } catch (error) {
