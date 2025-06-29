@@ -172,15 +172,18 @@
 
   // Download update
   async function downloadUpdate() {
+    // Prevent multiple simultaneous downloads
+    if (isDownloading) {
+      return;
+    }
+    
     try {
       isDownloading = true;
       const result = await window.electron.invoke('download-update');
       
       if (result.success) {
-        toast.success('Download Started', {
-          description: 'Update download started. You will be notified when it completes.',
-          duration: 5000
-        });
+        // Don't show notification here - UpdateNotification component handles it
+        // This prevents duplicate notifications
       } else {
         isDownloading = false;
         throw new Error(result.error);
