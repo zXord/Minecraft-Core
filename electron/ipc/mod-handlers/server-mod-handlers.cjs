@@ -146,65 +146,12 @@ function createServerModHandlers(win) {
           continue;
         }
         
-        try {          // NEW: Check backend-extracted metadata first (most reliable)
-          let currentVersionCompatible = false;
+        try {
+          // FIXED: Check if ANY versions exist for target MC version FIRST (most important)
+          const availableVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
           
-          if (mod.minecraftVersion) {
-            currentVersionCompatible = checkMinecraftVersionCompatibility(mod.minecraftVersion, mcVersion);
-          }
-          
-          // Fallback to Modrinth API if backend metadata unavailable
-          if (!currentVersionCompatible && !mod.minecraftVersion) {
-            const allVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
-            currentVersionCompatible = allVersions && allVersions.some(v => {
-              const versionMatches = v.versionNumber === currentVersion;
-              const supportsTargetMC = v.gameVersions && v.gameVersions.includes(mcVersion);
-              return versionMatches && supportsTargetMC;
-            });
-          }
-          
-          const latestVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
-          const latest = latestVersions && latestVersions[0];
-          
-          if (currentVersionCompatible) {
-            results.push({
-              projectId,
-              fileName,
-              name,
-              currentVersion,
-              latestVersion: latest ? latest.versionNumber : currentVersion,
-              compatible: true,
-              dependencies: latest ? (latest.dependencies || []) : []
-            });
-          } else if (latest) {
-            // Check if the LATEST version would be compatible with target MC version
-            const latestVersionCompatible = latest.gameVersions && latest.gameVersions.includes(mcVersion);
-            
-            if (latestVersionCompatible) {
-              // Latest version IS compatible - show as update available
-              results.push({
-                projectId,
-                fileName,
-                name,
-                currentVersion,
-                latestVersion: latest.versionNumber,
-                compatible: true,
-                hasUpdate: true,
-                dependencies: latest.dependencies || []
-              });
-            } else {
-              // Latest version is ALSO incompatible - show as incompatible
-              results.push({
-                projectId,
-                fileName,
-                name,
-                currentVersion,
-                latestVersion: latest.versionNumber,
-                compatible: false,
-                dependencies: []
-              });
-            }
-          } else {
+          // If NO versions are available for the target MC version, mark as incompatible immediately
+          if (!availableVersions || availableVersions.length === 0) {
             results.push({
               projectId,
               fileName,
@@ -212,6 +159,75 @@ function createServerModHandlers(win) {
               currentVersion,
               latestVersion: currentVersion,
               compatible: false,
+              reason: `No versions available for Minecraft ${mcVersion}`,
+              dependencies: []
+            });
+            continue;
+          }
+          
+          // Get the latest available version for the target MC version
+          const latestVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
+          const latest = latestVersions && latestVersions[0];
+          
+          // Check if current version is among the available versions for target MC
+          let currentVersionCompatible = false;
+          
+          if (mod.minecraftVersion) {
+            // Use backend-extracted metadata if available
+            currentVersionCompatible = checkMinecraftVersionCompatibility(mod.minecraftVersion, mcVersion);
+            // BUT also verify the version actually exists in the available versions list
+            if (currentVersionCompatible) {
+              const currentVersionExists = availableVersions.some(v => 
+                v.versionNumber === currentVersion && 
+                v.gameVersions && 
+                v.gameVersions.includes(mcVersion)
+              );
+              currentVersionCompatible = currentVersionExists;
+            }
+          } else {
+            // Check if current version exists in the available versions for target MC
+            currentVersionCompatible = availableVersions.some(v => {
+              const versionMatches = v.versionNumber === currentVersion;
+              const supportsTargetMC = v.gameVersions && v.gameVersions.includes(mcVersion);
+              return versionMatches && supportsTargetMC;
+            });
+          }
+          
+          if (currentVersionCompatible) {
+            // Current version is compatible AND actually available for target MC
+            results.push({
+              projectId,
+              fileName,
+              name,
+              currentVersion,
+              latestVersion: latest ? latest.versionNumber : currentVersion,
+              compatible: true,
+              hasUpdate: latest && latest.versionNumber !== currentVersion,
+              dependencies: latest ? (latest.dependencies || []) : []
+            });
+          } else if (latest) {
+            // Current version is not compatible, but there IS a latest version available
+            results.push({
+              projectId,
+              fileName,
+              name,
+              currentVersion,
+              latestVersion: latest.versionNumber,
+              compatible: true, // Mark as compatible since there's an update available
+              hasUpdate: true,
+              reason: `Current version incompatible, update available: ${currentVersion} → ${latest.versionNumber}`,
+              dependencies: latest.dependencies || []
+            });
+          } else {
+            // This shouldn't happen since we checked availableVersions.length > 0 above
+            results.push({
+              projectId,
+              fileName,
+              name,
+              currentVersion,
+              latestVersion: currentVersion,
+              compatible: false,
+              reason: `No compatible versions found for Minecraft ${mcVersion}`,
               dependencies: []
             });
           }
@@ -443,13 +459,39 @@ function createServerModHandlers(win) {
               currentVersionCompatible = checkMinecraftVersionCompatibility(mod.minecraftVersion, mcVersion);
             }
             
-            // If current version is not compatible, check for compatible updates
-            if (!currentVersionCompatible) {
-              const latestVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
-              const latest = latestVersions && latestVersions[0];
-              
+            // FIXED: Check if ANY versions exist for target MC version FIRST
+            const availableVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
+            
+            if (!availableVersions || availableVersions.length === 0) {
+              // No versions available for target MC version
+              results.push({
+                projectId,
+                fileName,
+                name,
+                currentVersion,
+                hasUpdate: false,
+                updateAvailable: false,
+                isCompatibleUpdate: false,
+                reason: `No versions available for Minecraft ${mcVersion}`
+              });
+              continue;
+            }
+            
+            // Get the latest available version for the target MC version
+            const latestVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
+            const latest = latestVersions && latestVersions[0];
+            
+            // Check if current version actually exists in available versions for target MC
+            const currentVersionExists = availableVersions.some(v => 
+              v.versionNumber === currentVersion && 
+              v.gameVersions && 
+              v.gameVersions.includes(mcVersion)
+            );
+            
+            if (currentVersionExists) {
+              // Current version is available for target MC version
               if (latest && latest.versionNumber !== currentVersion) {
-                // There's a newer version compatible with current MC version
+                // There's a newer version available
                 results.push({
                   projectId,
                   fileName,
@@ -463,6 +505,7 @@ function createServerModHandlers(win) {
                   reason: `Update available: ${currentVersion} → ${latest.versionNumber} (compatible with MC ${mcVersion})`
                 });
               } else {
+                // Current version is the latest for target MC
                 results.push({
                   projectId,
                   fileName,
@@ -471,11 +514,25 @@ function createServerModHandlers(win) {
                   hasUpdate: false,
                   updateAvailable: false,
                   isCompatibleUpdate: false,
-                  reason: latest ? 'Current version is latest' : 'No compatible versions found'
+                  reason: `Current version is compatible with MC ${mcVersion}`
                 });
               }
+            } else if (latest) {
+              // Current version doesn't exist for target MC, but there's a compatible version available
+              results.push({
+                projectId,
+                fileName,
+                name,
+                currentVersion,
+                hasUpdate: true,
+                updateAvailable: true,
+                isCompatibleUpdate: true,
+                latestVersion: latest.versionNumber,
+                latestVersionId: latest.id,
+                reason: `Update required: ${currentVersion} not available for MC ${mcVersion}, compatible version: ${latest.versionNumber}`
+              });
             } else {
-              // Current version is already compatible
+              // This shouldn't happen since we checked availableVersions.length > 0 above
               results.push({
                 projectId,
                 fileName,
@@ -484,7 +541,7 @@ function createServerModHandlers(win) {
                 hasUpdate: false,
                 updateAvailable: false,
                 isCompatibleUpdate: false,
-                reason: `Current version is compatible with MC ${mcVersion}`
+                reason: `No compatible versions found for Minecraft ${mcVersion}`
               });
             }
             

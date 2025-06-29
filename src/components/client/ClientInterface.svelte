@@ -543,12 +543,12 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       
       for (const mod of clientOnlyMods) {
         if (!mod.projectId) {
-          // No project ID, can't check for updates - assume compatible
+          // No project ID, can't check for updates - be conservative and suggest manual check
           compatible.push({
             name: mod.name || mod.fileName,
             fileName: mod.fileName,
             currentVersion: mod.versionNumber || 'Unknown',
-            status: 'compatible',
+            status: 'unknown',
             reason: 'No project ID - manual verification recommended'
           });
           continue;
@@ -785,7 +785,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
                 }
               }
             } else {
-              // No compatible versions found
+              // No compatible versions found for target MC version
               disables.push({
                 name: mod.name || mod.fileName,
                 fileName: mod.fileName,
@@ -795,24 +795,24 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               });
             }
           } else {
-            // No versions found at all
+            // No versions found at all from API
             disables.push({
               name: mod.name || mod.fileName,
               fileName: mod.fileName,
               currentVersion: mod.versionNumber || 'Unknown',
               status: 'incompatible',
-              reason: 'No version information available'
+              reason: 'No version information available from mod repository'
             });
           }
         } catch (error) {
           console.warn(`Failed to check compatibility for mod ${mod.name}:`, error);
-          // If we can't check versions, assume compatible
-          compatible.push({
+          // FIXED: If we can't check versions, be conservative and suggest disabling
+          disables.push({
             name: mod.name || mod.fileName,
             fileName: mod.fileName,
             currentVersion: mod.versionNumber || 'Unknown',
-            status: 'compatible',
-            reason: 'Could not verify compatibility - manual check recommended'
+            status: 'incompatible',
+            reason: 'Could not verify compatibility - disabled for safety. Manual check recommended.'
           });
         }      }
           const versionUpdates = {
