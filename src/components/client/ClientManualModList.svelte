@@ -257,6 +257,9 @@
         // Restore the mod if removal failed
         mods = originalMods;
         error = result.error || 'Failed to remove mod';
+      } else {
+        // Mod successfully removed - dispatch event to refresh parent state
+        dispatch('mod-removed', { fileName: mod.fileName });
       }
     } catch (err) {
       // Restore the mod if an error occurred

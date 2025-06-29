@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import { get } from 'svelte/store';
   import {
     errorMessage, 
@@ -68,6 +68,9 @@
   // Props
   export let instance: Instance | null = null; // Client instance
   export let clientModVersionUpdates = null; // Client mod version updates from server
+  
+  // Event dispatcher
+  const dispatch = createEventDispatcher();
   // Listen for refresh events from parent
   async function handleRefreshFromParent() {
     await refreshMods();
@@ -622,6 +625,17 @@
       }
     }
   }
+
+  // Handle mod removal event - refresh state to clear outdated mod data
+  function handleModRemoved(event) {
+    const { fileName } = event.detail;
+    
+    // Refresh mod data to update the UI state
+    refreshMods();
+    
+    // Dispatch event to parent to trigger comprehensive state refresh
+    dispatch('mod-removed', { fileName });
+  }
 </script>
 
 <div class="client-mod-manager">
@@ -763,6 +777,7 @@
               on:toggle={(e) => handleModToggleWrapper(instance, e.detail.fileName, e.detail.enabled)}
               on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
               on:install={handleInstallMod}
+              on:mod-removed={handleModRemoved}
             />
           </div>
         </div>
