@@ -58,8 +58,6 @@
     justify-content: center;
     position: relative;
     width: 100%;
-    padding: 0 2rem;
-    box-sizing: border-box;
   }
 
   h1 {
@@ -70,7 +68,7 @@
 
   .app-settings-button {
     position: absolute;
-    right: 0;
+    right: 2rem;
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.2);
     color: rgba(255, 255, 255, 0.8);
