@@ -446,7 +446,8 @@
                 <div class="detail-section">
                   <!-- Show mod sync details when needed -->
                   {#if modSyncStatus}
-                    {@const totalUpdatesNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0) + (modSyncStatus.clientModUpdates?.length || 0)}
+                    {@const validClientUpdates = modSyncStatus.clientModUpdates?.filter(update => update && update.fileName && update.name) || []}
+                    {@const totalUpdatesNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0) + validClientUpdates.length}
                     {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
                     {@const acknowledgments = filteredAcknowledgments || []}
                     
@@ -481,11 +482,11 @@
                       </div>
                     {/if}
 
-                    {#if modSyncStatus.clientModUpdates && modSyncStatus.clientModUpdates.length > 0}
+                    {#if validClientUpdates.length > 0}
                       <div class="compact-mod-section">
                         <h4>📱 Client Mod Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each modSyncStatus.clientModUpdates as update, index (update.name || update.fileName || `client-update-${index}`)}
+                          {#each validClientUpdates as update, index (update.name || update.fileName || `client-update-${index}`)}
                             <div class="compact-mod-item client-mod">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
                               <span class="version-badge">v{update.currentVersion} → v{update.newVersion}</span>

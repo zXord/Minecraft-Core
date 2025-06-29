@@ -1,6 +1,6 @@
 <script>
   import ClientModManager from './ClientModManager.svelte';
-  import { clientState } from '../../stores/clientStore.js';
+  import { clientState, setClientModVersionUpdates } from '../../stores/clientStore.js';
 
   export let instance;
   export let clientModManagerComponent;
@@ -10,6 +10,33 @@
   export let refreshMods;
   export let filteredAcknowledgments;
   export let clientModVersionUpdates = null;
+
+  // Handle mod removal - clear client version updates and refresh state
+  function handleModRemoved(event) {
+    const { fileName } = event.detail;
+    
+    // Clear any client mod version updates for the removed mod
+    if (clientModVersionUpdates && clientModVersionUpdates.updates) {
+      const filteredUpdates = clientModVersionUpdates.updates.filter(
+        update => update.fileName.toLowerCase() !== fileName.toLowerCase()
+      );
+      
+      if (filteredUpdates.length === 0) {
+        // No more client mod updates - clear the entire state
+        setClientModVersionUpdates(null);
+      } else {
+        // Update with filtered list
+        setClientModVersionUpdates({
+          ...clientModVersionUpdates,
+          updates: filteredUpdates,
+          hasChanges: filteredUpdates.length > 0
+        });
+      }
+    }
+    
+    // Trigger comprehensive refresh
+    refreshMods();
+  }
 </script>
 
 <div class="mods-container">
@@ -68,6 +95,7 @@
       }
     }}
     on:refresh-mods={refreshMods}
+    on:mod-removed={handleModRemoved}
   />
 </div>
 
