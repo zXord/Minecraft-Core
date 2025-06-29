@@ -1,4 +1,5 @@
 <script>
+  import { createEventDispatcher } from 'svelte';
   import { clientState } from '../../stores/clientStore.js';
 
   export let instance;
@@ -16,6 +17,9 @@
   export let redownloadClient;
   export let redownloadClientFull;
 
+  // Create event dispatcher for communicating state changes to parent
+  const dispatch = createEventDispatcher();
+
   // Enhanced state management
   let isAuthenticating = false;
   let isCheckingClient = false;
@@ -29,12 +33,25 @@
   async function handleAuthenticate() {
     isAuthenticating = true;
     try {
-      await authenticateWithMicrosoft();
+      // Clear existing auth and force fresh login
+      if (authStatus === 'authenticated') {
+        // Dispatch auth state clear to parent component
+        dispatch('auth-state-changed', {
+          authStatus: 'needs-auth',
+          username: '',
+          authData: null
+        });
+      }
+      
+      // Call authentication with force flag
+      await authenticateWithMicrosoft(true);
       lastAuthDate = new Date().toISOString();
     } finally {
       isAuthenticating = false;
     }
   }
+
+
 
   async function handleCheckClient() {
     isCheckingClient = true;
@@ -155,14 +172,15 @@
                 {#if lastAuthDate}
                   <p class="auth-date">Last login: {new Date(lastAuthDate).toLocaleDateString()}</p>
                 {/if}
+                <p class="auth-note">Authentication is managed automatically. Click below only if you need to refresh your login.</p>
                 <button 
                   class="modern-btn secondary sm" 
                   on:click={handleAuthenticate} 
                   disabled={isAuthenticating}
-                  title="Re-authenticate"
+                  title="Get fresh authentication token"
                 >
-                  {isAuthenticating ? '⏳ Authenticating...' : '🔄 Re-authenticate'}
-              </button>
+                  {isAuthenticating ? '⏳ Authenticating...' : '🔄 Refresh Login'}
+                </button>
             {:else}
                 <p class="auth-description">Microsoft authentication required</p>
                 <button 
@@ -615,6 +633,13 @@
   .auth-date {
     color: #9ca3af;
     margin: 0;
+    font-size: 0.7rem;
+    font-style: italic;
+  }
+
+  .auth-note {
+    color: #10b981;
+    margin: 0.5rem 0;
     font-size: 0.7rem;
     font-style: italic;
   }

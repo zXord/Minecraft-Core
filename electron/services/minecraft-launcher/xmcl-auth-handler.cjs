@@ -113,6 +113,8 @@ class XMCLAuthHandler {
       };
 
 
+
+
       
       this.emitter.emit('auth-success', { 
         username: originalToken.profile.name, 
@@ -144,6 +146,8 @@ class XMCLAuthHandler {
     try {
       const authFile = path.join(clientPath, 'xmcl-auth.json');
       
+
+
       // Prepare data to save (excluding non-serializable parts)
       const authDataToSave = {
         access_token: this.authData.access_token,
@@ -159,12 +163,25 @@ class XMCLAuthHandler {
           // Don't store the full Xbox objects as they're not serializable
           // We'll regenerate them from the Microsoft token on load
         } : null,
-        // Store serializable parts of MSMC metadata for refresh
-        msmc_refresh_data: this.authData.msmc_meta ? {
-          cache: this.authData.msmc_meta.cache,
-          // Store other serializable refresh data if available
-        } : null
+              // Store serializable parts of MSMC metadata for refresh
+      msmc_refresh_data: this.authData.msmc_meta ? {
+        // Save just the essential token data (these are serializable)
+        msToken: this.authData.msmc_meta.msToken,
+        xblToken: this.authData.msmc_meta.xblToken,
+        exp: this.authData.msmc_meta.exp,
+        // Don't save parent - it contains non-serializable methods
+        // We'll recreate refresh capability using the tokens
+        refreshCapable: true
+      } : this.authData.msmc_refresh_tokens ? {
+        // If we don't have msmc_meta but have refresh tokens, save those
+        msToken: this.authData.msmc_refresh_tokens.msToken,
+        xblToken: this.authData.msmc_refresh_tokens.xblToken,
+        exp: this.authData.msmc_refresh_tokens.exp,
+        refreshCapable: true
+      } : null
       };
+
+
 
       fs.writeFileSync(authFile, JSON.stringify(authDataToSave, null, 2));
 
@@ -204,18 +221,14 @@ class XMCLAuthHandler {
       };
 
       // Try to restore MSMC metadata for refresh capability
-      if (savedAuthData.msmc_refresh_data) {
-        try {
-          // Reconstruct MSMC object with cached data
-          const { Auth } = require('msmc');
-          const authManager = new Auth("select_account");
-          
-          if (savedAuthData.msmc_refresh_data.cache && 'cache' in authManager) {
-            authManager['cache'] = savedAuthData.msmc_refresh_data.cache;
-            this.authData.msmc_meta = authManager;
-          }
-        } catch (error) {
-
+      if (savedAuthData.msmc_refresh_data && savedAuthData.msmc_refresh_data.refreshCapable) {
+        const refreshData = savedAuthData.msmc_refresh_data;
+        
+        // Create a simple refresh-capable object using the saved tokens
+        // This won't do automatic refresh but will allow manual refresh via the existing logic
+        if (refreshData.msToken && refreshData.refreshCapable) {
+          // Store the refresh data for potential use in refresh operations
+          this.authData.msmc_refresh_tokens = refreshData;
         }
       }
 
@@ -237,7 +250,7 @@ class XMCLAuthHandler {
    * Check if authentication is valid and refresh if needed
    * This is the core method that ensures tokens are always fresh
    */
-  async checkAndRefreshAuth() {
+  async checkAndRefreshAuth(forceRefresh = false) {
     if (!this.authData) {
       return { success: false, error: 'No authentication data', requiresAuth: true };
     }
@@ -258,50 +271,54 @@ class XMCLAuthHandler {
       const now = new Date();
       const minutesSinceRefresh = (now.getTime() - lastRefreshDate.getTime()) / (1000 * 60);
       const hoursSinceRefresh = minutesSinceRefresh / 60;
-
       
-
-      // Be much more lenient - if token is less than 48 hours old, just use it
-      if (hoursSinceRefresh < 48) {
-
-        return { success: true, refreshed: false };
-      }
-
-      // Only try to refresh if token is very old (over 48 hours) and we have refresh capability
-      if (this.authData.msmc_meta || (this.authData.xmcl_tokens && this.authData.xmcl_tokens.microsoft)) {
-
-        
-        // Start refresh (store promise to prevent concurrent refreshes)
-        this.refreshPromise = this.performTokenRefresh();
-        
-        try {
-          const result = await this.refreshPromise;
-          this.refreshPromise = null;
-          return result;
-        } catch (error) {
-          this.refreshPromise = null;
-          // If refresh fails, still allow using the old token for another 24 hours
-          if (hoursSinceRefresh < 72) {
-
-            return { success: true, refreshed: false, error: error.message };
-          }
-          throw error;
+      // ATLauncher-style authentication: Silent refresh with graceful fallbacks
+      // Try to keep tokens fresh, but don't bother users unless absolutely necessary
+      
+      // If forceRefresh is true (like on launch), always attempt refresh
+      if (!forceRefresh) {
+        // If token is less than 1 hour old, use it immediately (for background checks)
+        if (hoursSinceRefresh < 1) {
+          return { success: true, refreshed: false };
         }
       }
 
-      // If token is older than 72 hours and we can't refresh, require re-auth
-      if (hoursSinceRefresh > 72) {
+      // For tokens 1+ hours old, try silent refresh but don't fail if it doesn't work
+      if (this.authData.msmc_meta || (this.authData.xmcl_tokens && this.authData.xmcl_tokens.microsoft)) {
+        try {
+          // Attempt silent refresh in background
+          console.log(`🔄 Attempting silent token refresh (${hoursSinceRefresh.toFixed(1)}h old)`);
+          this.refreshPromise = this.performTokenRefresh();
+          const result = await this.refreshPromise;
+          this.refreshPromise = null;
+          
+          if (result.success && result.refreshed) {
+            // Great! We got a fresh token silently
+            console.log(`✅ Silent token refresh successful`);
+            return result;
+          }
+        } catch (error) {
+          // Silent refresh failed, but that's OK - we'll use the cached token if it's not too old
+          console.log(`⚠️ Silent refresh failed: ${error.message}`);
+          this.refreshPromise = null;
+        }
+      }
 
+      // After failed refresh, decide whether to use cached token or require re-auth
+      // If refresh failed and token is older than 3 days, Minecraft servers will likely reject it
+      if (hoursSinceRefresh > 72) { // 3 days = 72 hours
+        console.log(`❌ Refresh failed and token too old (${(hoursSinceRefresh/24).toFixed(1)} days), requiring re-auth`);
         this.authData = null;
         return { 
           success: false, 
-          error: `Token expired (${hoursSinceRefresh.toFixed(1)} hours old). Please authenticate again.`,
+          error: `Token refresh failed and token is ${(hoursSinceRefresh/24).toFixed(1)} days old. Please re-authenticate.`,
           requiresAuth: true 
         };
       }
 
-      // Token is old but still usable
-
+      // For tokens 1-72 hours old: Use cached token even if refresh failed
+      // These should still work with Minecraft servers
+      console.log(`⚠️ Using cached token despite refresh failure (${hoursSinceRefresh.toFixed(1)} hours old)`);
       return { success: true, refreshed: false };
 
     } catch (error) {
@@ -325,30 +342,69 @@ class XMCLAuthHandler {
   async performTokenRefresh() {
     try {
 
-
       // Use MSMC to refresh the Microsoft token first
       const msmc_meta = this.authData.msmc_meta;
-      if (!msmc_meta) {
-        // Instead of throwing error, handle gracefully
-
-        
+      const msmc_refresh_tokens = this.authData.msmc_refresh_tokens;
+      
+      if (!msmc_meta && !msmc_refresh_tokens) {
         // Check if the token is still relatively fresh
         const savedDate = new Date(this.authData.savedAt || 0);
         const now = new Date();
         const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
         
-        if (hoursSinceSaved < 8) {
-          // Token is less than 8 hours old, still usable
-
+        if (hoursSinceSaved < 72) { // 3 days = 72 hours
+          // Token is less than 3 days old, should still work with Minecraft servers
           return { success: true, refreshed: false, usedCache: true };
         } else {
-          // Token is too old, need fresh authentication
+          // Token is too old for Minecraft servers, require re-auth
           this.authData = null;
           return { 
             success: false, 
-            error: 'Authentication token expired and cannot be refreshed. Please authenticate again.',
-            requiresAuth: true 
+            error: 'Authentication token expired and cannot be refreshed. Please re-authenticate.',
+            requiresAuth: true
           };
+        }
+      }
+      
+      // Try to use saved refresh tokens if we have them but no full MSMC object
+      if (!msmc_meta && msmc_refresh_tokens && msmc_refresh_tokens.msToken) {
+        try {
+          // Use the saved Microsoft token to get fresh Xbox/Minecraft tokens
+          const xboxLiveToken = await this.authenticator.authenticateXboxLive(msmc_refresh_tokens.msToken.access_token);
+          
+          if (!xboxLiveToken) {
+            throw new Error('Xbox Live authentication failed during token refresh');
+          }
+          
+          const xboxProfile = await this.authenticator.authorizeXboxLive(xboxLiveToken.Token);
+          
+          if (!xboxProfile) {
+            throw new Error('Xbox Live authorization failed during token refresh');
+          }
+          
+          const minecraftProfile = await this.authenticator.loginMinecraftWithXBox(
+            xboxProfile.DisplayClaims.xui[0].uhs, 
+            xboxProfile.Token
+          );
+          
+          if (!minecraftProfile || !minecraftProfile.access_token) {
+            throw new Error('Minecraft authentication failed during token refresh');
+          }
+          
+          // Update auth data with refreshed tokens but preserve refresh capability
+          this.authData.access_token = minecraftProfile.access_token;
+          this.authData.lastRefresh = new Date().toISOString();
+          
+          // CRITICAL: Preserve the refresh tokens for future refreshes
+          // Keep the existing msmc_refresh_tokens so we can refresh again next time
+          if (!this.authData.msmc_refresh_tokens) {
+            this.authData.msmc_refresh_tokens = msmc_refresh_tokens;
+          }
+          
+          return { success: true, refreshed: true };
+          
+        } catch (refreshError) {
+          // Fall through to original refresh logic or use cached token
         }
       }
 
@@ -356,58 +412,63 @@ class XMCLAuthHandler {
       let refreshedXboxManager = null;
       
       if (typeof msmc_meta.refresh === 'function') {
-        refreshedXboxManager = await msmc_meta.refresh();
+        try {
+          refreshedXboxManager = await msmc_meta.refresh();
+        } catch (refreshError) {
+          throw refreshError;
+        }
       } else if (typeof msmc_meta.launch === 'function') {
         // Alternative refresh method
         refreshedXboxManager = msmc_meta;
       } else {
-        // Similar graceful handling for missing refresh methods
-
-        
         const savedDate = new Date(this.authData.savedAt || 0);
         const now = new Date();
         const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
         
-        if (hoursSinceSaved < 8) {
-
+        if (hoursSinceSaved < 72) { // 3 days = 72 hours
           return { success: true, refreshed: false, usedCache: true };
         } else {
           this.authData = null;
           return { 
             success: false, 
-            error: 'Authentication token expired and refresh method unavailable. Please authenticate again.',
-            requiresAuth: true 
+            error: 'Authentication token expired and refresh method unavailable. Please re-authenticate.',
+            requiresAuth: true
           };
         }
       }
 
       if (!refreshedXboxManager || !refreshedXboxManager.msToken) {
-        throw new Error('Failed to refresh Microsoft token');
+        throw new Error('Failed to refresh Microsoft token - no valid Xbox manager or msToken');
       }
 
 
 
       // Now use @xmcl/user to get fresh Xbox and Minecraft tokens
-      const xboxLiveToken = await this.authenticator.authenticateXboxLive(refreshedXboxManager.msToken.access_token);
+      let xboxLiveToken, xboxProfile, minecraftProfile;
       
-      if (!xboxLiveToken) {
-        throw new Error('Xbox Live authentication failed during refresh');
-      }
+      try {
+        xboxLiveToken = await this.authenticator.authenticateXboxLive(refreshedXboxManager.msToken.access_token);
+        
+        if (!xboxLiveToken) {
+          throw new Error('Xbox Live authentication failed during refresh - no token returned');
+        }
 
-      const xboxProfile = await this.authenticator.authorizeXboxLive(xboxLiveToken.Token);
-      
-      if (!xboxProfile) {
-        throw new Error('Xbox Live authorization failed during refresh');
-      }
+        xboxProfile = await this.authenticator.authorizeXboxLive(xboxLiveToken.Token);
+        
+        if (!xboxProfile) {
+          throw new Error('Xbox Live authorization failed during refresh - no profile returned');
+        }
 
-      // Use the xboxProfile to get the Minecraft access token
-      const minecraftProfile = await this.authenticator.loginMinecraftWithXBox(
-        xboxProfile.DisplayClaims.xui[0].uhs, 
-        xboxProfile.Token
-      );
-      
-      if (!minecraftProfile || !minecraftProfile.access_token) {
-        throw new Error('Minecraft authentication failed during refresh');
+        minecraftProfile = await this.authenticator.loginMinecraftWithXBox(
+          xboxProfile.DisplayClaims.xui[0].uhs, 
+          xboxProfile.Token
+        );
+        
+        if (!minecraftProfile || !minecraftProfile.access_token) {
+          throw new Error('Minecraft authentication failed during refresh - no access token');
+        }
+      } catch (authError) {
+        throw authError;
       }
 
       // Get updated profile information
@@ -443,44 +504,35 @@ class XMCLAuthHandler {
         lastRefresh: new Date().toISOString()
       };
 
-      this.lastRefreshTime = new Date();
-
-
+            this.lastRefreshTime = new Date();
 
       return { success: true, refreshed: true };
 
     } catch (error) {
 
       
-      // Handle specific error cases
-      if (error.message.includes('invalid_grant') || error.message.includes('expired')) {
-        // Refresh token is expired, need full re-authentication
-        this.authData = null;
-        return { 
-          success: false, 
-          error: 'Refresh token expired. Please authenticate again.',
-          requiresAuth: true 
-        };
-      }
-
-      // For network errors or temporary issues, allow using cached token
-      if (error.message.includes('ENOTFOUND') || 
-          error.message.includes('timeout') || 
-          error.message.includes('network')) {
-
-        return { success: true, refreshed: false, networkError: true };
-      }
-
-      // For other errors, check if we can use cached token
+            // ATLauncher-style error handling: prefer cached tokens over re-authentication
+      const errorMessage = error?.message || error?.toString() || 'Unknown error';
+      
+      // For ANY error, try to use cached token if it's not extremely old
       const savedDate = new Date(this.authData.savedAt || 0);
       const now = new Date();
       const hoursSinceSaved = (now.getTime() - savedDate.getTime()) / (1000 * 60 * 60);
       
-      if (hoursSinceSaved < 6) {
-        return { success: true, refreshed: false, error: error.message };
+      // If explicit auth errors OR token older than 3 days, require re-auth
+      if ((errorMessage && (errorMessage.includes('invalid_grant') || errorMessage.includes('expired'))) || hoursSinceSaved > 72) {
+        // Either explicit auth failure OR token too old for Minecraft servers
+        this.authData = null;
+        return { 
+          success: false, 
+          error: `Token refresh failed: ${errorMessage}. Please re-authenticate.`,
+          requiresAuth: true 
+        };
       }
 
-      throw error;
+      // For all other errors or newer cached tokens: use cached token
+      // This includes network errors, temporary auth service issues, etc.
+      return { success: true, refreshed: false, error: errorMessage, usedCache: true };
     }
   }
 

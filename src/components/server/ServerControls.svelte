@@ -313,8 +313,11 @@
         } catch (error) {
         }
         
-        // Handle auto-start servers if enabled
-        await handleAutoStart();
+        // Handle auto-start servers if enabled (only on actual app startup, not tab switches)
+        if (!(window as any).appStartupCompleted) {
+          await handleAutoStart();
+          (window as any).appStartupCompleted = true;
+        }
       } catch (err) {
         // Failed to get settings or server status
       }

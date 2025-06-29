@@ -539,8 +539,14 @@ function createMinecraftLauncherHandlers(win) {
   });
   
   return {
-    'minecraft-auth': async (_e, { clientPath }) => {
+    'minecraft-auth': async (_e, { clientPath, forceAuth = false }) => {
       try {
+        // If forcing fresh auth, clear existing auth data first
+        if (forceAuth) {
+          console.log('🔄 Force auth requested - clearing existing auth data');
+          launcher.clearAuthData();
+        }
+        
         const result = await launcher.authenticateWithMicrosoft();
         if (result.success && clientPath) {
           await launcher.saveAuthData(clientPath).catch(() => {});
@@ -578,6 +584,27 @@ function createMinecraftLauncherHandlers(win) {
         }
 
         return result;
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    'minecraft-clear-auth': async (_e, { clientPath }) => {
+      try {
+        // Clear authentication data from memory
+        launcher.clearAuthData();
+        
+        // Clear authentication file from disk
+        if (clientPath) {
+          const fs = require('fs');
+          const path = require('path');
+          const authFile = path.join(clientPath, 'xmcl-auth.json');
+          if (fs.existsSync(authFile)) {
+            fs.unlinkSync(authFile);
+          }
+        }
+        
+        return { success: true };
       } catch (error) {
         return { success: false, error: error.message };
       }
