@@ -245,6 +245,8 @@ contextBridge.exposeInMainWorld('electron', {
       'specific-version-download-progress',
       'specific-version-download-complete',
       'specific-version-download-error',
+      // Debug console events
+      'debug-log',
     ];
     if (validChannels.includes(channel)) {
       // Wrap the listener so we can remove it later
@@ -308,6 +310,8 @@ contextBridge.exposeInMainWorld('electron', {
       'specific-version-download-progress',
       'specific-version-download-complete',
       'specific-version-download-error',
+      // Debug console events
+      'debug-log',
     ];
     if (validChannels.includes(channel)) {
       const map = listenerMap.get(channel);
@@ -373,6 +377,8 @@ contextBridge.exposeInMainWorld('electron', {
       'specific-version-download-progress',
       'specific-version-download-complete',
       'specific-version-download-error',
+      // Debug console events
+      'debug-log',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.removeAllListeners(channel);

@@ -508,27 +508,139 @@ class MinecraftLauncher extends EventEmitter {
       
       this.isLaunching = true;      // Configure stdio based on debug terminal setting      // Launch Minecraft with the configured arguments
       try {
-        // If debug terminal is enabled, show the console window
+        // Configure spawn options for debug terminal
         const spawnOptions = {
           cwd: clientPath,
           detached: true  // Allow Minecraft to continue running after app closes
         };
       
-      if (showDebugTerminal) {
+      // Declare variables for debug mode outside the if block to fix scope
+      let debugJavaPath = javaPath;
+      let debugWindow = null;
+      
+      // Configure spawn options for debug vs normal launch
+      if (showDebugTerminal && process.platform === 'win32') {
+        // For debug mode, use java.exe instead of javaw.exe to get console output
+        debugJavaPath = javaPath.replace('javaw.exe', 'java.exe');
+        
+        // Create debug window and capture output
+        const { BrowserWindow } = require('electron');
+        debugWindow = new BrowserWindow({
+          width: 800,
+          height: 500,
+          title: `Minecraft Debug Console - ${launchVersion}`,
+          backgroundColor: '#1a1a1a',
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            preload: path.join(__dirname, '../../preload.cjs')
+          },
+          icon: path.join(__dirname, '../../icon.png'),
+          show: false,
+          resizable: true,
+          minimizable: true,
+          maximizable: true
+        });
+        
+        // Load debug console HTML
+        debugWindow.loadFile(path.join(__dirname, '../../debug-console.html'));
+        
+        // Show window when ready
+        debugWindow.once('ready-to-show', () => {
+          debugWindow.show();
+          
+          // Wait for the window to be fully loaded before sending messages
+          debugWindow.webContents.once('did-finish-load', () => {
+            setTimeout(() => {
+              if (debugWindow && !debugWindow.isDestroyed()) {
+                debugWindow.webContents.send('debug-log', {
+                  type: 'header',
+                  message: `========================================
+    MINECRAFT DEBUG CONSOLE
+========================================
+
+Java Executable: ${debugJavaPath}
+Working Directory: ${clientPath}
+Launch Version: ${launchVersion}
+
+========================================
+Starting Minecraft with console output...
+========================================
+`
+                });
+              }
+            }, 1000);
+          });
+        });
+        
+        // Launch Java with captured output
+        spawnOptions.stdio = ['pipe', 'pipe', 'pipe'];
+        spawnOptions.windowsHide = true;
+      } else if (showDebugTerminal) {
+        // On Unix-like systems, inherit stdio for terminal output
         spawnOptions.stdio = 'inherit';
       } else {
+        // Normal launch without debug terminal
         spawnOptions.stdio = ['ignore', 'pipe', 'pipe'];
+        if (process.platform === 'win32') {
+          spawnOptions.windowsHide = true;
+        }
       }
       
-      // On Windows, add windowsHide option based on debug setting
-      if (process.platform === 'win32') {
-        spawnOptions.windowsHide = !showDebugTerminal;
-      }
-      
-      const child = spawn(javaPath, allArgs, spawnOptions);
-      
-      // Properly detach the process so it continues running after app closes
-      child.unref();
+       // Continue with normal launch process (this ensures Fabric still works!)
+       const child = spawn(showDebugTerminal ? debugJavaPath : javaPath, allArgs, spawnOptions);
+       
+       // If debug terminal is enabled, capture and forward output
+       if (showDebugTerminal && debugWindow) {
+         // Store reference to debug window for cleanup
+         this.debugWindow = debugWindow;
+         
+         // Capture stdout
+         if (child.stdout) {
+           child.stdout.on('data', (data) => {
+             const output = data.toString();
+             if (debugWindow && !debugWindow.isDestroyed()) {
+               debugWindow.webContents.send('debug-log', {
+                 type: 'info',
+                 message: output
+               });
+             }
+           });
+         }
+         
+         // Capture stderr (errors)
+         if (child.stderr) {
+           child.stderr.on('data', (data) => {
+             const output = data.toString();
+             if (debugWindow && !debugWindow.isDestroyed()) {
+               debugWindow.webContents.send('debug-log', {
+                 type: 'error',
+                 message: output
+               });
+             }
+           });
+         }
+         
+         // Handle process close
+         child.on('close', (code) => {
+           if (debugWindow && !debugWindow.isDestroyed()) {
+             debugWindow.webContents.send('debug-log', {
+               type: code === 0 ? 'success' : 'error',
+               message: `\n========================================\nMinecraft process ended with code: ${code}\n${code === 0 ? '✅ SUCCESS: Minecraft closed normally' : '❌ ERROR: Minecraft crashed or failed to start!'}\n========================================\n`
+             });
+           }
+         });
+         
+         // Clean up debug window reference when it's closed
+         debugWindow.on('closed', () => {
+           this.debugWindow = null;
+         });
+       }
+       
+       // Properly detach the process so it continues running after app closes
+       if (!showDebugTerminal) {
+         child.unref();
+       }
       
       this.client = { child };
       
