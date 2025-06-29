@@ -268,7 +268,9 @@
         currentStep++;
         currentTask = 'Disabling incompatible mods...';
         updateProgress = Math.round((currentStep / totalSteps) * 100);
-        await safeInvoke('save-disabled-mods', resolvedPath, incompatibleMods);
+        // Extract just the filenames from incompatible mods for the disable operation
+        const modFilesToDisable = incompatibleMods.map(mod => mod.fileName);
+        await safeInvoke('save-disabled-mods', resolvedPath, modFilesToDisable);
       }        // Step 7: Update version state
       updateVersions(selectedMC, selectedFabric);
       compatChecked = false;

@@ -90,12 +90,16 @@ function createAppSettingsHandlers() {
 
         const settings = appStore.get('appSettings') || defaultSettings;
 
-        // Verify startup setting with system
-        try {
-          const loginItemSettings = app.getLoginItemSettings();
-          settings.startOnStartup = loginItemSettings.openAtLogin;
-        } catch (err) {
-          console.warn('Failed to get login item settings:', err.message);
+        // Only verify startup setting with system if we don't have a stored value
+        // This prevents overriding user changes that haven't been reflected by the system yet
+        if (settings.startOnStartup === undefined || settings.startOnStartup === null) {
+          try {
+            const loginItemSettings = app.getLoginItemSettings();
+            settings.startOnStartup = loginItemSettings.openAtLogin;
+          } catch (err) {
+            console.warn('Failed to get login item settings:', err.message);
+            settings.startOnStartup = false; // Default to false if we can't check
+          }
         }
 
         return { success: true, settings };
