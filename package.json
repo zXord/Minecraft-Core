@@ -1,7 +1,7 @@
 {
   "name": "minecraft-core",
   "private": true,
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Minecraft Server Management Tool with Auto-Updates",
   "author": "zXord",
   "main": "electron/main.cjs",
