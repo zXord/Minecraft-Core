@@ -43,6 +43,9 @@
   let modToDelete = null;
 
   let updateAllInProgress = false;
+  let checkingCompatibility = false;
+  let compatibilityResults = null; // eslint-disable-line
+  
   // Initialize drop zone state from localStorage
   let dropZoneCollapsed = localStorage.getItem('minecraft-core-drop-zone-collapsed') === 'true';
   
@@ -175,6 +178,11 @@
   }
 
   async function checkAllModsCompatibility() {
+    if (checkingCompatibility) return;
+    
+    checkingCompatibility = true;
+    compatibilityResults = null;
+    
     try {
       const modsWithInfo = $installedModInfo.filter(mod => 
         mod.projectId && 
@@ -183,7 +191,7 @@
       );
       
       if (modsWithInfo.length === 0) {
-        successMessage.set('No mods with project information found');
+        successMessage.set('No enabled mods with project information found');
         return;
       }
       
@@ -218,13 +226,23 @@
         }
       }
       
+      // Store results for display
+      compatibilityResults = {
+        totalChecked: checkedCount,
+        totalIssues: allIssues.flatMap(i => i.issues).length,
+        modsWithIssues: allIssues.length,
+        issues: allIssues
+      };
+      
       if (allIssues.length > 0) {
-        successMessage.set(`Found ${allIssues.flatMap(i => i.issues).length} compatibility issues in ${allIssues.length} mods`);
+        successMessage.set(`Found ${allIssues.flatMap(i => i.issues).length} compatibility issues in ${allIssues.length} mods - see details below`);
       } else {
-        successMessage.set(`All mods compatible! Checked ${checkedCount} mods.`);
+        successMessage.set(`All mods compatible! Checked ${checkedCount} enabled mods.`);
       }
     } catch (error) {
       errorMessage.set(`Failed to check compatibility: ${error.message}`);
+    } finally {
+      checkingCompatibility = false;
     }
   }
 
@@ -571,8 +589,8 @@
       <button class="icon-btn" on:click={handleCheckUpdates} disabled={$isCheckingUpdates} title={$isCheckingUpdates ? 'Checking...' : 'Check for Updates'}>
         🔄
       </button>
-      <button class="icon-btn" on:click={checkAllModsCompatibility} title="Check Compatibility">
-        ✅
+      <button class="icon-btn" on:click={checkAllModsCompatibility} disabled={checkingCompatibility} title={checkingCompatibility ? 'Checking compatibility...' : 'Check Compatibility'}>
+        {#if checkingCompatibility}⏳{:else}✅{/if}
       </button>
       
       <!-- Search box -->
@@ -635,6 +653,72 @@
     </div>
   {/if}
 </div>
+
+<!-- Compatibility Results Display -->
+{#if compatibilityResults}
+  <div class="compatibility-results">
+    <div class="results-header">
+      <h4>🔍 Compatibility Check Results</h4>
+      <button class="close-results" on:click={() => compatibilityResults = null} title="Close results">×</button>
+    </div>
+    
+    <div class="results-summary">
+      <span class="summary-stat">
+        <strong>{compatibilityResults.totalChecked}</strong> mods checked
+      </span>
+      <span class="summary-stat">
+        <strong>{compatibilityResults.totalIssues}</strong> issues found
+      </span>
+      <span class="summary-stat">
+        <strong>{compatibilityResults.modsWithIssues}</strong> mods affected
+      </span>
+    </div>
+    
+    {#if compatibilityResults.issues.length > 0}
+      <div class="issues-list">
+        {#each compatibilityResults.issues as modIssue (modIssue.mod)}
+          <div class="mod-issues">
+            <div class="mod-issues-header">
+              <strong>{modIssue.modName}</strong>
+              <span class="issue-count">({modIssue.issues.length} issue{modIssue.issues.length > 1 ? 's' : ''})</span>
+            </div>
+            <ul class="issues">
+              {#each modIssue.issues as issue (issue.dependency?.projectId + issue.type)}
+                <li class="issue-item {issue.type}">
+                  <span class="issue-type">
+                    {#if issue.type === 'missing'}
+                      ❌ Missing Dependency
+                    {:else if issue.type === 'disabled'}
+                      ⚠️ Disabled Dependency
+                    {:else if issue.type === 'version_mismatch'}
+                      🔄 Version Mismatch
+                    {:else if issue.type === 'update_available'}
+                      ⬆️ Update Available
+                    {:else}
+                      ℹ️ {issue.type}
+                    {/if}
+                  </span>
+                  <span class="issue-details">
+                    <strong>{issue.dependency?.name || 'Unknown'}</strong>
+                    {#if issue.versionInfo}
+                      <span class="version-info">({issue.versionInfo})</span>
+                    {/if}
+                    <br>
+                    <span class="issue-message">{issue.message}</span>
+                  </span>
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="no-issues">
+        <p>✅ All checked mods are compatible with no dependency issues!</p>
+      </div>
+    {/if}
+  </div>
+{/if}
 
 <!-- Optional expanded drop zone (only shown when button is clicked) -->
 {#if !dropZoneCollapsed}
@@ -909,6 +993,159 @@
     padding: 3px 8px; 
     border-radius: 6px;
     margin-bottom: 4px;
+  }
+  
+  /* Compatibility Results Styling */
+  .compatibility-results {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 12px;
+    font-size: 0.9rem;
+  }
+  
+  .results-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  
+  .results-header h4 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1rem;
+  }
+  
+  .close-results {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 1.2rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+    transition: all 0.15s;
+  }
+  
+  .close-results:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+  }
+  
+  .results-summary {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+    padding: 8px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    flex-wrap: wrap;
+  }
+  
+  .summary-stat {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+  }
+  
+  .summary-stat strong {
+    color: var(--text-primary);
+  }
+  
+  .issues-list {
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  
+  .mod-issues {
+    margin-bottom: 12px;
+    border-left: 3px solid var(--col-warn);
+    padding-left: 8px;
+  }
+  
+  .mod-issues-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  
+  .mod-issues-header strong {
+    color: var(--text-primary);
+  }
+  
+  .issue-count {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+  }
+  
+  .issues {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  
+  .issue-item {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 6px;
+    padding: 6px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    font-size: 0.85rem;
+  }
+  
+  .issue-item.missing {
+    border-left: 3px solid var(--col-danger);
+  }
+  
+  .issue-item.disabled {
+    border-left: 3px solid var(--col-warn);
+  }
+  
+  .issue-item.version_mismatch {
+    border-left: 3px solid var(--col-primary);
+  }
+  
+  .issue-item.update_available {
+    border-left: 3px solid var(--col-ok);
+  }
+  
+  .issue-type {
+    flex-shrink: 0;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+  
+  .issue-details {
+    flex: 1;
+    color: var(--text-secondary);
+  }
+  
+  .issue-details strong {
+    color: var(--text-primary);
+  }
+  
+  .version-info {
+    color: var(--col-primary);
+    font-weight: 500;
+  }
+  
+  .issue-message {
+    font-style: italic;
+    color: var(--text-secondary);
+  }
+  
+  .no-issues {
+    text-align: center;
+    padding: 16px;
+    color: var(--col-ok);
+  }
+  
+  .no-issues p {
+    margin: 0;
+    font-size: 0.9rem;
   }
   
   /* Table container - ensure no width constraints */

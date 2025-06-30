@@ -101,7 +101,16 @@
         fabricVersion: selectedFabric
       });
       
+      // Get disabled mods to filter them out from frontend processing as well
+      const disabledModsList = await safeInvoke('get-disabled-mods', resolvedPath);
+      const disabledModsSet = new Set(disabledModsList || []);
+      
       for (const mod of results) {
+        // Skip disabled mods in frontend processing too (double safety)
+        if (disabledModsSet.has(mod.fileName)) {
+          continue;
+        }
+        
         let incompatible = !mod.compatible;
         let modInfo = {
           name: mod.displayName || mod.fileName || mod.name || mod.projectId,
@@ -343,6 +352,10 @@
   <button class="check-btn" on:click={checkCompatibility} disabled={!selectedFabric || checking}>
     {checking ? 'Checking...' : 'Check Compatibility'}
   </button>
+  
+  <div class="check-info">
+    <p>Note: Only enabled mods are checked for compatibility. Disabled mods will remain disabled and unchanged.</p>
+  </div>
   {#if compatChecked}
     <div class="compat-results-container">
       <!-- Mod Updates Available -->
@@ -1175,5 +1188,24 @@
     background-color: #45a049;
     transform: translateY(-1px);
     box-shadow: 0 4px 8px rgba(76, 175, 80, 0.3);
+  }
+
+  .check-btn:disabled {
+    background-color: #444 !important;
+    cursor: not-allowed;
+  }
+  
+  .check-info {
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: rgba(52, 213, 138, 0.1);
+    border: 1px solid rgba(52, 213, 138, 0.3);
+    border-radius: 4px;
+    font-size: 0.85rem;
+  }
+  
+  .check-info p {
+    margin: 0;
+    color: #34d58a;
   }
 </style>

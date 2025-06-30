@@ -1226,7 +1226,17 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           // Remove from the server managed files store
           removeServerManagedFiles(result.removed);
           
-          // Refresh the mod sync status
+          // Clear modSyncStatus removal arrays immediately to prevent UI showing empty state
+          if (modSyncStatus) {
+            modSyncStatus = {
+              ...modSyncStatus,
+              requiredRemovals: [],
+              optionalRemovals: [],
+              synchronized: true // Mark as synchronized since removals are complete
+            };
+          }
+          
+          // Refresh the mod sync status after a short delay
           setTimeout(async () => {
             await checkModSynchronization();
           }, 1500);
@@ -1646,17 +1656,19 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       isDownloadingClient = false;
       // Trigger a sync check after download completes without disrupting ready status
       setTimeout(async () => {
-        // Only show checking if we're not already ready
-        const wasReady = downloadStatus === 'ready';
-        if (!wasReady) {
-          downloadStatus = 'checking-updates';
-        }
-        
-        await checkSyncStatus();
-        
-        // If we were ready before and still checking, restore ready status
-        if (wasReady && downloadStatus === 'checking-updates') {
-          downloadStatus = 'ready';
+        // Only perform sync check if we haven't already cleared the server info
+        if (serverInfo && serverInfo.allClientMods && serverInfo.allClientMods.length > 0) {
+          const wasReady = downloadStatus === 'ready';
+          if (!wasReady) {
+            downloadStatus = 'checking-updates';
+          }
+          
+          await checkSyncStatus();
+          
+          // If we were ready before and still checking, restore ready status
+          if (wasReady && downloadStatus === 'checking-updates') {
+            downloadStatus = 'ready';
+          }
         }
       }, 1000);
     }
@@ -1952,7 +1964,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         successMessage.set(`Client download complete: ${data.message || 'Minecraft client files downloaded successfully'}`);
         setTimeout(() => successMessage.set(''), 5000);
         
-        // Sync check is already handled by the download function's finally block
+        // Preserve server info and mod lists during client download completion
+        // Don't trigger aggressive refresh that might clear mod information
       } else {
         errorMessage.set(`Client download failed: ${data.error || 'Unknown error'}`);
         setTimeout(() => errorMessage.set(''), 5000);
