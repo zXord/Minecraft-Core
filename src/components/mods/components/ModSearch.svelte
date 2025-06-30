@@ -36,7 +36,7 @@
   let visibleMods = []; // Mods to display on current page
   let hasLoadedOnce = false;
   let pageDebounceTimer = null;
-  const PAGE_DEBOUNCE_MS = 350;
+  const PAGE_DEBOUNCE_MS = 100;
   let sortBy = 'relevance';
   let sortAppliedMessage = '';
   let sortMessageTimer = null;
@@ -210,19 +210,21 @@
     // Update the current page state
     currentPage.set(page);
     
-    // Make a new API call with the updated page
-    isSearching.set(true);
-    searchResults.set([]);
-    
+    // Clear any existing debounce timer
     if (pageDebounceTimer) clearTimeout(pageDebounceTimer);
+    
+    // Make a new API call with the updated page immediately
     pageDebounceTimer = setTimeout(async () => {
-      // Include both the current sort option and environment filter
-      await handleSearch(null, { 
-        sortBy, 
-        environmentType: filterType
-      });
-      window.scrollTo(0, 0);
-      isSearching.set(false);
+      try {
+        // Include both the current sort option and environment filter
+        await handleSearch(null, { 
+          sortBy, 
+          environmentType: filterType
+        });
+        window.scrollTo(0, 0);
+      } catch (error) {
+        console.error('Error during page change search:', error);
+      }
     }, PAGE_DEBOUNCE_MS);
   }
   
