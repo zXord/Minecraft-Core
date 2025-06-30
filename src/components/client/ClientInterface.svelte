@@ -1773,9 +1773,45 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     isLaunching = true;
     launchStatus = 'launching';
-    launchProgress = { type: 'Preparing', task: 'Initializing launcher...', total: 0 };
+    launchProgress = { type: 'Preparing', task: 'Refreshing authentication...', total: 0 };
     
     try {
+      // CRITICAL FIX: Proactively refresh authentication before every launch
+      // This ensures we never launch with stale/expired tokens
+      console.log('🔐 Refreshing authentication before launch...');
+      
+      const refreshResult = await window.electron.invoke('minecraft-check-refresh-auth', {
+        clientPath: instance.path
+      });
+      
+      if (!refreshResult.success) {
+        // Authentication refresh failed - require re-authentication
+        isLaunching = false;
+        launchStatus = 'ready';
+        
+        if (refreshResult.requiresAuth || refreshResult.error?.includes('re-authenticate')) {
+          authStatus = 'needs-auth';
+          username = '';
+          authData = null;
+          errorMessage.set('Your Microsoft authentication has expired. Please re-authenticate in the Settings tab.');
+        } else {
+          errorMessage.set(`Authentication refresh failed: ${refreshResult.error || 'Unknown error'}. Please try re-authenticating in Settings.`);
+        }
+        setTimeout(() => errorMessage.set(''), 8000);
+        return;
+      }
+      
+      if (refreshResult.refreshed) {
+        console.log('✅ Authentication refreshed successfully before launch');
+        successMessage.set('Authentication refreshed successfully');
+        setTimeout(() => successMessage.set(''), 2000);
+      } else {
+        console.log('✅ Authentication is still valid');
+      }
+      
+      // Update launch progress after auth refresh
+      launchProgress = { type: 'Preparing', task: 'Initializing launcher...', total: 0 };
+      
       const minecraftPort = serverInfo?.minecraftPort || '25565';
       const memoryInMB = Math.round(maxMemoryGB * 1024);
       
@@ -1805,11 +1841,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         let errorMsg = result.error || 'Unknown launch error';
         
         if (errorMsg.includes('Authentication expired') || errorMsg.includes('authserver.mojang.com') || errorMsg.includes('Invalid session') || errorMsg.includes('invalid session')) {
-          if (errorMsg.includes('Please authenticate again through the Settings page')) {
-            errorMsg = 'Your Microsoft authentication has expired or failed to refresh. Please login again in Settings tab.';
-          } else {
-            errorMsg = 'Your Microsoft authentication is invalid. Please login again in Settings tab.';
-          }
+          // Even though we refreshed, if we still get auth errors, require re-authentication
+          authStatus = 'needs-auth';
+          username = '';
+          authData = null;
+          errorMsg = 'Authentication failed after refresh. Please re-authenticate in the Settings tab.';
         } else if (errorMsg.includes('EMFILE') || errorMsg.includes('too many files')) {
           errorMsg = 'Too many files are open. Please close other applications and try again.';
         } else if (errorMsg.includes('ENOENT') || errorMsg.includes('not found')) {
@@ -1831,7 +1867,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       if (errorMsg.includes('ENOTFOUND') || errorMsg.includes('network')) {
         errorMsg = 'Network connection error. Please check your internet connection and try again.';
       } else if (errorMsg.includes('Authentication') || errorMsg.includes('Invalid session') || errorMsg.includes('invalid session')) {
-        errorMsg = 'Authentication error. Please login with Microsoft in Settings.';
+        authStatus = 'needs-auth';
+        username = '';
+        authData = null;
+        errorMsg = 'Authentication error. Please re-authenticate in the Settings tab.';
       }
       
       errorMessage.set('Launch error: ' + errorMsg);
