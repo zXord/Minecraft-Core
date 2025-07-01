@@ -110,6 +110,111 @@
     }
   }
   
+  // Maintenance section state
+  let maintenanceExpanded = false;
+  let healthReport = [];
+  let repairing = false;
+  let repairProgress = 0;
+  let repairSpeed = '0 MB/s';
+  let repairLogs = [];
+  let selectedMC;
+  let selectedFabric;
+  
+  // Toggle maintenance section
+  function toggleMaintenance() {
+    maintenanceExpanded = !maintenanceExpanded;
+    // Auto-check health when opened
+    if (maintenanceExpanded && healthReport.length === 0) {
+      checkHealth();
+    }
+  }
+  
+  // Maintenance functions
+  async function checkHealth() {
+    try {
+      healthReport = (await window.electron.invoke('check-health', serverPath)) || [];
+    } catch (err) {
+      healthReport = [];
+    }
+  }
+
+  async function startRepair() {
+    try {
+      repairing = true;
+      repairLogs = ['Starting repair process...'];
+      repairProgress = 0;
+      
+      setupRepairListeners();
+      
+      if (!selectedMC || !selectedFabric) {
+        repairLogs = [...repairLogs, 'Looking for server configuration...'];
+        
+        try {
+          const config = await window.electron.invoke('read-config', serverPath);
+          
+          if (config && config.version) {
+            selectedMC = config.version;
+            selectedFabric = config.fabric || 'latest';
+            repairLogs = [...repairLogs, `Found Minecraft version: ${selectedMC}`];
+            repairLogs = [...repairLogs, `Found Fabric version: ${selectedFabric}`];
+          } else {
+            repairLogs = [...repairLogs, 'Error: Missing version information in server configuration.'];
+            throw new Error('Missing version information. Please configure server settings first.');
+          }
+        } catch (configErr) {
+          repairLogs = [...repairLogs, `Error: ${configErr.message || 'Failed to load server configuration'}`];
+          throw configErr;
+        }
+      }
+      
+      repairLogs = [...repairLogs, `Repairing server with Minecraft ${selectedMC} and Fabric ${selectedFabric}`];
+      
+      try {
+        repairLogs = [...repairLogs, 'Sending repair request to server...'];
+        
+        await window.electron.invoke('repair-health', {
+          targetPath: serverPath,
+          mcVersion: selectedMC,
+          fabricVersion: selectedFabric
+        });
+        
+      } catch (repairErr) {
+        repairLogs = [...repairLogs, `Error from server: ${repairErr.message || 'Unknown error during repair'}`];
+        repairing = false;
+      }
+    } catch (err) {
+      repairLogs = [...repairLogs, `Error: ${err.message || 'Unknown error during repair'}`];
+      repairing = false;
+    }
+  }
+  
+  function setupRepairListeners() {
+    window.electron.removeAllListeners('repair-progress');
+    window.electron.removeAllListeners('repair-log');
+    window.electron.removeAllListeners('repair-status');
+    
+    window.electron.on('repair-progress', (data) => {
+      if (data && typeof data.percent === 'number') {
+        repairProgress = data.percent;
+        repairSpeed = data.speed || '0.00 MB/s';
+      }
+    });
+    
+    window.electron.on('repair-log', msg => {
+      repairLogs = [...repairLogs, msg];
+    });
+    
+    window.electron.on('repair-status', status => {
+      if (status === 'done') {
+        repairProgress = 100;
+        setTimeout(() => {
+          repairing = false;
+          checkHealth();
+        }, 1000);
+      }
+    });
+  }
+  
   // Version update tracking
   $: currentMcVersion = $settingsStore.mcVersion;
   $: currentFabricVersion = $settingsStore.fabricVersion;
@@ -275,6 +380,9 @@
       }
     }, 30000); // Check every 30 seconds when visible
 
+    // Initialize maintenance repair listeners
+    setupRepairListeners();
+
     // Load settings first, then check server status
     (async () => {
       try {
@@ -311,6 +419,18 @@
             connectedClients = result.status.clientCount || 0;
           }
         } catch (error) {
+        }
+        
+        // Load configuration for maintenance
+        if (serverPath) {
+          try {
+            const config = await window.electron.invoke('read-config', serverPath);
+            if (config) {
+              selectedMC = config.version;
+              selectedFabric = config.fabric || 'latest';
+            }
+          } catch (error) {
+          }
         }
         
         // Handle auto-start servers if enabled (only on actual app startup, not tab switches)
@@ -387,6 +507,10 @@
     if (metricsHandler) {
       window.electron.removeListener('metrics-update', metricsHandler);
     }
+    // Clean up maintenance repair listeners
+    window.electron.removeAllListeners('repair-progress');
+    window.electron.removeAllListeners('repair-log');
+    window.electron.removeAllListeners('repair-status');
   });
 
   // Update server state when port or ram is changed
@@ -670,6 +794,73 @@
         </div>
       {/if}
     </div>
+  </div>
+  
+  <!-- MAINTENANCE SECTION - Collapsible -->
+  <div class="maintenance-compact">
+    <div class="maintenance-header" role="button" tabindex="0" on:click={toggleMaintenance} on:keydown={(e) => e.key === 'Enter' && toggleMaintenance()}>
+      <h4>🔧 Server Maintenance</h4>
+      <div class="maintenance-toggle">
+        <span class="toggle-icon" class:expanded={maintenanceExpanded}>
+          {maintenanceExpanded ? '▼' : '▶'}
+        </span>
+        {#if healthReport.length > 0 && !maintenanceExpanded}
+          <span class="issue-indicator">⚠️ {healthReport.length} issues</span>
+        {:else if !maintenanceExpanded}
+          <span class="status-indicator-small">Check components</span>
+        {/if}
+      </div>
+    </div>
+    
+    {#if maintenanceExpanded}
+      <div class="maintenance-content">
+        <p class="maintenance-description">Check and repair essential server components: Java runtime, server jar, and Fabric (not world data or mods)</p>
+        
+        <div class="maintenance-actions">
+          <button class="btn-compact check-button" on:click={checkHealth}>
+            🔍 Check Components
+          </button>
+          
+          {#if healthReport.length > 0}
+            <span class="issues-found">⚠️ {healthReport.length} missing components</span>
+            <button class="btn-compact repair-button" on:click={startRepair} disabled={repairing}>
+              {repairing ? '🔄 Repairing...' : '🔧 Install Missing'}
+            </button>
+          {:else if healthReport.length === 0 && selectedMC}
+            <span class="all-good">✅ All components ready</span>
+          {/if}
+        </div>
+        
+        {#if healthReport.length > 0}
+          <div class="missing-files">
+            <h5>Missing Components:</h5>
+            <ul class="file-list">
+              {#each healthReport as component (component)}
+                <li class="missing-file">❌ {component}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+        
+        {#if repairing}
+          <div class="repair-progress">
+            <div class="progress-info">
+              <span class="progress-percentage">{repairProgress}%</span>
+              <span class="progress-speed">{repairSpeed}</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: {repairProgress}%"></div>
+            </div>
+          </div>
+          
+          <div class="repair-logs">
+            {#each repairLogs as log, index (index)}
+              <div class="log-line">{log}</div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
   
   <!-- COMPACT PLAYERS - One line -->
@@ -1141,6 +1332,211 @@
     opacity: 0.7;
   }
 
+  /* Maintenance section styles */
+  .maintenance-compact {
+    background: rgba(30, 30, 30, 0.6);
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .maintenance-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    padding-bottom: 0.375rem;
+    border-bottom: 1px solid #f59e0b;
+    transition: all 0.2s ease;
+  }
+
+  .maintenance-header:hover {
+    background: rgba(245, 158, 11, 0.05);
+    border-radius: 4px;
+    margin: -0.25rem;
+    padding: 0.625rem 0.25rem;
+  }
+
+  .maintenance-header h4 {
+    margin: 0;
+    font-size: 0.95rem;
+    color: #f59e0b;
+  }
+
+  .maintenance-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .toggle-icon {
+    color: #f59e0b;
+    font-size: 0.7rem;
+    transition: transform 0.2s ease;
+  }
+
+  .toggle-icon.expanded {
+    transform: rotate(0deg);
+  }
+
+  .issue-indicator {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    padding: 0.125rem 0.375rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 600;
+  }
+
+  .status-indicator-small {
+    color: #9ca3af;
+    font-size: 0.65rem;
+  }
+
+  .maintenance-content {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+  }
+
+  .maintenance-description {
+    color: #9ca3af;
+    font-size: 0.75rem;
+    margin: 0 0 0.75rem 0;
+    line-height: 1.4;
+  }
+
+  .maintenance-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .check-button {
+    background-color: #3b82f6 !important;
+    color: white !important;
+    width: auto !important;
+    min-width: 100px !important;
+  }
+
+  .check-button:hover:not(:disabled) {
+    background-color: #2563eb !important;
+  }
+
+  .repair-button {
+    background-color: #f59e0b !important;
+    color: white !important;
+    width: auto !important;
+    min-width: 110px !important;
+  }
+
+  .repair-button:hover:not(:disabled) {
+    background-color: #d97706 !important;
+  }
+
+  .issues-found {
+    color: #ef4444;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .all-good {
+    color: #10b981;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .missing-files {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    border-radius: 4px;
+    padding: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .missing-files h5 {
+    margin: 0 0 0.375rem 0;
+    color: #ef4444;
+    font-size: 0.8rem;
+  }
+
+  .file-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-family: monospace;
+    font-size: 0.7rem;
+  }
+
+  .missing-file {
+    color: #ef4444;
+    margin-bottom: 0.25rem;
+    padding: 0.125rem 0;
+  }
+
+  .repair-progress {
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+    border-radius: 4px;
+    padding: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .progress-info {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 0.375rem;
+    font-size: 0.75rem;
+  }
+
+  .progress-percentage {
+    color: #10b981;
+    font-weight: 600;
+  }
+
+  .progress-speed {
+    color: #9ca3af;
+  }
+
+  .progress-bar {
+    width: 100%;
+    height: 8px;
+    background: rgba(17, 24, 39, 0.8);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: #10b981;
+    transition: width 0.3s ease;
+    border-radius: 4px;
+  }
+
+  .repair-logs {
+    background: rgba(17, 24, 39, 0.8);
+    border: 1px solid #374151;
+    border-radius: 4px;
+    padding: 0.5rem;
+    max-height: 150px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 0.65rem;
+  }
+
+  .log-line {
+    color: #d1d5db;
+    padding: 0.125rem 0;
+    border-bottom: 1px solid rgba(55, 65, 81, 0.5);
+  }
+
+  .log-line:last-child {
+    border-bottom: none;
+  }
+
   /* Responsive adjustments */
   @media (max-width: 768px) {
     .main-controls {
@@ -1162,6 +1558,17 @@
       flex-direction: column;
       align-items: stretch;
       gap: 0.5rem;
+    }
+
+    .maintenance-actions {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.5rem;
+    }
+
+    .maintenance-header:hover {
+      margin: -0.125rem;
+      padding: 0.5rem 0.125rem;
     }
   }
 </style>
