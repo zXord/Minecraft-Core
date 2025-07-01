@@ -22,7 +22,7 @@ let listInterval = null;
 // Add a buffer to store the last log line
 let lastLine = '';
 let lastListCommandTime = 0;
-const LIST_COMMAND_THROTTLE = 10000; // Only send list command every 10 seconds by default
+const LIST_COMMAND_THROTTLE = 30000; // Only send list command every 30 seconds by default
 
 // Add a variable to track if we need more frequent player list checks
 let intensivePlayerCheckMode = false;
@@ -578,7 +578,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         // Only send list commands occasionally to reduce log spam
         sendListCommand();
       }
-    }, 30000); // Check only every 30 seconds by default
+    }, 120000); // Check only every 2 minutes by default
 
     safeSend('server-status', 'running');
     
