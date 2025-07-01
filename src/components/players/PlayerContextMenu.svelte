@@ -1,7 +1,7 @@
 <!-- @ts-ignore -->
 <script>
   /// <reference path="../../electron.d.ts" />
-  import { playerState, hideContextMenu } from '../../stores/playerState.js';
+  import { playerState, hideContextMenu, refreshPlayerLists } from '../../stores/playerState.js';
   
   // Access the context menu state from the store
   $: contextMenu = $playerState.contextMenu;
@@ -22,14 +22,47 @@
   $: canUnban = isBanned && !isOnline;
   $: canKick = isOnline;
   
-  
+  // Track if an action is in progress
+  let actionInProgress = false;
   
   // Handle context menu actions
   async function performContextAction(action) {
-    if (!player) return;
+    if (!player || actionInProgress) return;
     
-    await handlePlayerAction(player, action);
-    hideContextMenu();
+    actionInProgress = true;
+    
+    try {
+      await handlePlayerAction(player, action);
+      
+      // Get server path for refreshing lists
+      let serverPath = '';
+      if (window.serverPath) {
+        try {
+          const pathResult = await window.serverPath.get();
+          if (pathResult) {
+            if (typeof pathResult === 'object' && pathResult && 'path' in pathResult) {
+              serverPath = /** @type {any} */ (pathResult).path;
+            } else {
+              serverPath = String(pathResult);
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to get server path:', err);
+        }
+      }
+      
+      // Refresh all player lists to ensure UI is up to date
+      if (serverPath) {
+        await refreshPlayerLists(serverPath);
+      }
+      
+      // Small delay to ensure state updates have propagated
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+    } finally {
+      actionInProgress = false;
+      hideContextMenu();
+    }
   }
   async function handlePlayerAction(player, action) {
     if (!action) return;
@@ -103,19 +136,6 @@
             // Add the IP with the special formatted string to save player name
             await window.electron.invoke('add-player', listName, serverPath, formattedEntry);
             
-            // Reload the list to show all banned IPs
-            const updatedList = await window.electron.invoke('read-players', listName, serverPath) || [];
-            
-            // Update the UI
-            playerState.update(state => {
-              const lists = { ...state.lists };
-              lists[listName] = updatedList.map(item => {
-                if (typeof item === 'string') return item;
-                return item.ip || item;
-              });
-              return { ...state, lists };
-            });
-            
             // Send ban-ip command if server is running
             const statusResult = await window.electron.invoke('get-server-status');
             const serverStatus = statusResult?.status || statusResult || 'stopped';
@@ -140,20 +160,6 @@
             // Error handled silently
           }
         }
-        
-        // Reload list
-        const updatedList = await window.electron.invoke('read-players', listName, serverPath) || [];
-        playerState.update(state => {
-          const lists = { ...state.lists };
-          lists[listName] = updatedList.map(item => {
-            if (listName === 'banned-ips' && item && typeof item === 'object' && item.ip) {
-              // Format banned IPs to include player name in parentheses if available
-              return item.playerName ? `${item.ip} (${item.playerName})` : item.ip;
-            }
-            return item.name || item.ip || item;
-          });
-          return { ...state, lists };
-        });
         
         // Send command if server is running
         const statusResult = await window.electron.invoke('get-server-status');
@@ -203,9 +209,10 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('op')}
             >
-              Op
+              {actionInProgress ? '⏳ Op' : 'Op'}
             </button>
           </li>
         {/if}
@@ -214,9 +221,10 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('deop')}
             >
-              Deop
+              {actionInProgress ? '⏳ Deop' : 'Deop'}
             </button>
           </li>
         {/if}
@@ -225,9 +233,10 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('whitelist add')}
             >
-              Whitelist
+              {actionInProgress ? '⏳ Whitelist' : 'Whitelist'}
             </button>
           </li>
         {/if}
@@ -236,9 +245,10 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('whitelist remove')}
             >
-              Remove from Whitelist
+              {actionInProgress ? '⏳ Remove from Whitelist' : 'Remove from Whitelist'}
             </button>
           </li>
         {/if}
@@ -247,9 +257,10 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('ban')}
             >
-              Ban
+              {actionInProgress ? '⏳ Ban' : 'Ban'}
             </button>
           </li>
         {/if}
@@ -258,9 +269,10 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('kick')}
             >
-              Kick
+              {actionInProgress ? '⏳ Kick' : 'Kick'}
             </button>
           </li>
         {/if}
@@ -269,9 +281,11 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('unban')}
             >
-              Unban        </button>
+              {actionInProgress ? '⏳ Unban' : 'Unban'}
+            </button>
           </li>
         {/if}
         
@@ -279,9 +293,10 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('ban-ip')}
             >
-              Ban IP
+              {actionInProgress ? '⏳ Ban IP' : 'Ban IP'}
             </button>
           </li>
         {/if}
@@ -290,9 +305,10 @@
           <li role="menuitem">
             <button
               type="button"
+              disabled={actionInProgress}
               on:click={() => performContextAction('unban-ip')}
             >
-              Unban IP
+              {actionInProgress ? '⏳ Unban IP' : 'Unban IP'}
             </button>
           </li>
         {/if}
@@ -344,7 +360,17 @@
     transition: background-color 0.2s;
   }
   
-    .context-menu li button:hover {    background-color: #f0f0f0;    color: #000;  }
+    .context-menu li button:hover:not(:disabled) {
+    background-color: #f0f0f0;
+    color: #000;
+  }
+  
+  .context-menu li button:disabled {
+    background-color: #f5f5f5;
+    color: #999;
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
   
   /* Empty menu fallback */
   .context-menu ul:empty::after {

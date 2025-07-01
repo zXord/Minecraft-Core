@@ -155,3 +155,51 @@ export function hideContextMenu() {
     contextMenu: { ...state.contextMenu, visible: false }
   }));
 }
+
+// Function to refresh all player lists from the backend
+export async function refreshPlayerLists(serverPath) {
+  if (!serverPath || typeof serverPath !== 'string') {
+    return;
+  }
+  
+  try {
+    const listNames = ['whitelist', 'ops', 'banned-players', 'banned-ips'];
+    const updatedLists = {};
+    
+    // Load all lists concurrently
+    const listPromises = listNames.map(async (listName) => {
+      try {
+        const list = await window.electron.invoke('read-players', listName, serverPath) || [];
+        return [listName, list];
+      } catch (error) {
+        console.warn(`Failed to load ${listName}:`, error);
+        return [listName, []];
+      }
+    });
+    
+    const results = await Promise.allSettled(listPromises);
+    
+    // Process results
+    results.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        const [listName, list] = result.value;
+        updatedLists[listName] = list.map(item => {
+          if (listName === 'banned-ips' && item && typeof item === 'object' && item.ip) {
+            // Format banned IPs to include player name in parentheses if available
+            return item.playerName ? `${item.ip} (${item.playerName})` : item.ip;
+          }
+          return item.name || item.ip || item;
+        });
+      }
+    });
+    
+    // Update the store with all new lists at once
+    playerState.update(state => ({
+      ...state,
+      lists: { ...state.lists, ...updatedLists }
+    }));
+    
+  } catch (error) {
+    console.warn('Failed to refresh player lists:', error);
+  }
+}
