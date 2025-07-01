@@ -15,14 +15,16 @@ const zlib = require('zlib');
  * @param {number|string} [minecraftPortOverride] - Optional Minecraft server port
  *   If not provided, the function will attempt to retrieve it from the
  *   management server's /api/server/info endpoint.
- * @returns {Promise<{success: boolean, error?: string}>}
+ * @param {boolean} [preserveExistingServers] - If true, only creates server entry if it doesn't exist, preserving user modifications
+ * @returns {Promise<{success: boolean, error?: string, preserved?: boolean}>}
  */
 async function ensureServersDat(
   clientDir,
   serverIp,
   managementPort,
   serverName = 'Minecraft Server',
-  minecraftPortOverride = null
+  minecraftPortOverride = null,
+  preserveExistingServers = false
 ) {
   try {
     let minecraftPort = minecraftPortOverride || 25565;
@@ -48,7 +50,8 @@ async function ensureServersDat(
     const serverAddress =
       minecraftPort === 25565 ? serverIp : `${serverIp}:${minecraftPort}`;
 
-  const optionsFile = path.join(clientDir, 'options.txt');
+    // Always update options.txt with the current server as lastServer
+    const optionsFile = path.join(clientDir, 'options.txt');
     let optionsContent = '';
     if (fs.existsSync(optionsFile)) {
       optionsContent = fs.readFileSync(optionsFile, 'utf8');
@@ -57,14 +60,34 @@ async function ensureServersDat(
     lines.push(`lastServer:${serverAddress}`);
     fs.writeFileSync(optionsFile, lines.join('\n'), 'utf8');
 
-  const serversDatPath = path.join(clientDir, 'servers.dat');
+    const serversDatPath = path.join(clientDir, 'servers.dat');
+    
+    // If preserveExistingServers is true, check if servers.dat exists and has any server entries
+    if (preserveExistingServers && fs.existsSync(serversDatPath)) {
+      try {
+        const buf = fs.readFileSync(serversDatPath);
+        const uncompressed = zlib.gunzipSync(buf);
+        const parsed = await nbt.parse(uncompressed);
+        const list = (parsed.parsed.value.servers?.value || []);
+        
+        // If there are any existing servers, don't modify servers.dat
+        // This preserves user modifications including changed ports
+        if (Array.isArray(list) && list.length > 0) {
+          return { success: true, preserved: true };
+        }
+      } catch {
+        // If we can't read the existing file, fall through to create a new one
+      }
+    }
+
+    // Create or update servers.dat (only when preserveExistingServers is false, or no existing servers found)
     let existingServers = [];
     if (fs.existsSync(serversDatPath)) {
       try {
         const buf = fs.readFileSync(serversDatPath);
         const uncompressed = zlib.gunzipSync(buf);
         const parsed = await nbt.parse(uncompressed);
-        const list = (parsed.parsed.value.servers?.value || []) ;
+        const list = (parsed.parsed.value.servers?.value || []);
         existingServers = /** @type {any[]} */(list).map(entry =>
           entry.value
             ? {

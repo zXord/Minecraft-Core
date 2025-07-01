@@ -953,7 +953,8 @@ function createMinecraftLauncherHandlers(win) {
           serverIp,
           managementPort,
           clientName || 'Minecraft Server',
-          serverPort
+          serverPort,
+          true // preserveExistingServers - only create server entry first time, preserve user modifications
         );
         
         if (useProperLauncher) {
