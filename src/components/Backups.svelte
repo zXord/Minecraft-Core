@@ -549,9 +549,17 @@
           <td>{(b.size/1024/1024).toFixed(2)} MB</td>
           <td>{b.metadata?.timestamp || b.created}</td>
           <td>
-            <button on:click={() => confirmRestore(b)} disabled={loading || isServerRunning}>Restore</button>
-            <button on:click={() => confirmDelete(b)} disabled={loading}>Delete</button>
-            <button on:click={() => promptRename(b)} disabled={loading}>Rename</button>
+            <div class="action-buttons">
+              <button class="action-btn restore-btn" on:click={() => confirmRestore(b)} disabled={loading || isServerRunning} title="Restore this backup">
+                ↻
+              </button>
+              <button class="action-btn delete-btn" on:click={() => confirmDelete(b)} disabled={loading} title="Delete this backup">
+                🗑️
+              </button>
+              <button class="action-btn rename-btn" on:click={() => promptRename(b)} disabled={loading} title="Rename this backup">
+                ✏️
+              </button>
+            </div>
           </td>
         </tr>
       {/each}
@@ -631,11 +639,68 @@
   }
   
   .backups-table th:nth-child(1) { width: 40px; } /* Checkbox */
-  .backups-table th:nth-child(2) { width: 35%; } /* Name */
+  .backups-table th:nth-child(2) { width: 30%; } /* Name */
   .backups-table th:nth-child(3) { width: 10%; } /* Type */
-  .backups-table th:nth-child(4) { width: 15%; } /* Size */
+  .backups-table th:nth-child(4) { width: 12%; } /* Size */
   .backups-table th:nth-child(5) { width: 25%; } /* Timestamp */
-  .backups-table th:nth-child(6) { width: 15%; } /* Actions */
+  .backups-table th:nth-child(6) { width: 23%; } /* Actions */
+  
+  /* Action buttons styling */
+  .action-buttons {
+    display: flex;
+    gap: 0.25rem;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: nowrap;
+  }
+  
+  .action-btn {
+    min-width: 28px;
+    height: 28px;
+    padding: 0.2rem;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #2a2e36;
+    color: #d9eef7;
+    cursor: pointer;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+  }
+  
+  .action-btn:hover:not(:disabled) {
+    background: #3a3e46;
+    border-color: #666;
+    transform: translateY(-1px);
+  }
+  
+  .action-btn:disabled {
+    background: #1a1e26;
+    color: #777;
+    cursor: not-allowed;
+    border-color: #333;
+  }
+  
+  .restore-btn:hover:not(:disabled) {
+    background: #27ae60;
+    border-color: #2ecc71;
+    color: white;
+  }
+  
+  .delete-btn:hover:not(:disabled) {
+    background: #e74c3c;
+    border-color: #c0392b;
+    color: white;
+  }
+  
+  .rename-btn:hover:not(:disabled) {
+    background: #3498db;
+    border-color: #2980b9;
+    color: white;
+  }
 
   .rename-dialog-modal {
     position: fixed;
