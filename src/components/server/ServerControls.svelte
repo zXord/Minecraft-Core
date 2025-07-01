@@ -661,7 +661,7 @@
           id="ram-input"
           type="number"
           min="1" 
-          max="16" 
+          max="128" 
           bind:value={maxRam}
           on:change={updateSettings}
           disabled={isServerRunning}
