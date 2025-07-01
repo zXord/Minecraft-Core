@@ -5,6 +5,7 @@ const {
   downloadMinecraftServer,
   installFabric
 } = require('../services/download-manager.cjs');
+const { ServerJavaManager } = require('../services/server-java-manager.cjs');
 
 /**
  * Create installation and download IPC handlers
@@ -77,7 +78,8 @@ function createInstallHandlers(win) {
         return { success: false, error: err.message };
       }
     },
-      'check-health': (_e, targetPath) => {
+    
+    'check-health': async (_e, targetPath) => {
       if (!targetPath || !fs.existsSync(targetPath)) {
         throw new Error('Invalid target directory');
       }
@@ -85,11 +87,32 @@ function createInstallHandlers(win) {
       const missing = [];
       const files = ['server.jar', 'fabric-installer.jar', 'fabric-server-launch.jar'];
       
+      // Check for missing server files
       files.forEach(file => {
         if (!fs.existsSync(path.join(targetPath, file))) {
           missing.push(file);
         }
       });
+      
+      // Check Java requirements
+      try {
+        // Read server configuration to get Minecraft version
+        const configPath = path.join(targetPath, '.minecraft-core.json');
+        if (fs.existsSync(configPath)) {
+          const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+          if (config.version) {
+            const serverJavaManager = new ServerJavaManager(targetPath);
+            const javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(config.version);
+            
+            if (javaRequirements.needsDownload) {
+              missing.push(`Java ${javaRequirements.requiredJavaVersion} (for Minecraft ${config.version})`);
+            }
+          }
+        }
+      } catch (error) {
+        // If we can't check Java requirements, don't fail the whole health check
+        console.warn('Could not check Java requirements:', error.message);
+      }
       
       return missing;
     },
@@ -111,14 +134,58 @@ function createInstallHandlers(win) {
         
         const files = ['server.jar', 'fabric-installer.jar', 'fabric-server-launch.jar'];
         const toRepair = files.filter(f => !fs.existsSync(path.join(targetPath, f)));
-
-        if (toRepair.length === 0) {
+        
+        // Check Java requirements
+        const serverJavaManager = new ServerJavaManager(targetPath);
+        const javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
+        const needsJava = javaRequirements.needsDownload;
+        
+        if (toRepair.length === 0 && !needsJava) {
           if (win && win.webContents) {
             win.webContents.send('repair-status', 'done');
           }
           return [];
         }
 
+        // Repair Java first if needed
+        if (needsJava) {
+          if (win && win.webContents) {
+            win.webContents.send('repair-log', `🔧 Installing Java ${javaRequirements.requiredJavaVersion}...`);
+          }
+          
+          try {
+            const javaResult = await serverJavaManager.ensureJavaForMinecraft(
+              mcVersion,
+              (progress) => {
+                // Send progress updates
+                if (win && win.webContents) {
+                  win.webContents.send('repair-progress', {
+                    percent: progress.progress || 0,
+                    speed: progress.speed || '0 MB/s'
+                  });
+                }
+              }
+            );
+            
+            if (javaResult.success) {
+              if (win && win.webContents) {
+                win.webContents.send('repair-log', `✔ Java ${javaRequirements.requiredJavaVersion} installed`);
+              }
+            } else {
+              if (win && win.webContents) {
+                win.webContents.send('repair-log', `❌ Error installing Java: ${javaResult.error}`);
+              }
+              throw new Error(`Java installation failed: ${javaResult.error}`);
+            }
+          } catch (javaErr) {
+            if (win && win.webContents) {
+              win.webContents.send('repair-log', `❌ Error installing Java: ${javaErr.message}`);
+            }
+            throw javaErr;
+          }
+        }
+
+        // Repair server files
         for (const file of toRepair) {
           if (win && win.webContents) {
             win.webContents.send('repair-log', `🔧 Repairing ${file}...`);
@@ -163,7 +230,12 @@ function createInstallHandlers(win) {
           win.webContents.send('repair-status', 'done');
         }
         
-        return toRepair;
+        const repairedItems = [...toRepair];
+        if (needsJava) {
+          repairedItems.push(`Java ${javaRequirements.requiredJavaVersion}`);
+        }
+        
+        return repairedItems;
       } catch (err) {
         if (win && win.webContents) {
           win.webContents.send('repair-log', `❌ Error: ${err.message}`);
