@@ -591,24 +591,21 @@ function createMinecraftLauncherHandlers(win) {
 
     'minecraft-clear-auth': async (_e, { clientPath }) => {
       try {
-        // Clear authentication data from memory
         launcher.clearAuthData();
         
-        // Clear authentication file from disk
-        if (clientPath) {
-          const fs = require('fs');
-          const path = require('path');
-          const authFile = path.join(clientPath, 'xmcl-auth.json');
-          if (fs.existsSync(authFile)) {
-            fs.unlinkSync(authFile);
-          }
+        // Also delete the saved auth file
+        const authFile = path.join(clientPath, 'xmcl-auth.json');
+        if (fs.existsSync(authFile)) {
+          fs.unlinkSync(authFile);
         }
         
         return { success: true };
       } catch (error) {
         return { success: false, error: error.message };
       }
-    },    'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [] }) => {
+    },
+
+    'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [] }) => {
       try {
         if (!clientPath) {
           return { success: false, error: 'Invalid client path' };
@@ -928,20 +925,15 @@ function createMinecraftLauncherHandlers(win) {
 
         // CRITICAL FIX: Load authentication data for this client path before launching
         // This ensures the launcher has access to auth data even if it wasn't previously loaded
-        console.log('🔐 Loading authentication data for client path:', clientPath);
         try {
           const loadAuthResult = await launcher.loadAuthData(clientPath);
-          if (loadAuthResult.success) {
-            console.log('✅ Authentication data loaded successfully for:', loadAuthResult.username);
-          } else {
-            console.warn('⚠️ No authentication data found for this client path');
+          if (!loadAuthResult.success) {
             return { 
               success: false, 
               error: 'No authentication data available. Please authenticate first in the Settings tab.' 
             };
           }
         } catch (authError) {
-          console.error('❌ Failed to load authentication data:', authError.message);
           return { 
             success: false, 
             error: 'Failed to load authentication data. Please re-authenticate in the Settings tab.' 
@@ -2199,7 +2191,8 @@ function createMinecraftLauncherHandlers(win) {
         if (!clientPath) {
           return { success: false, error: 'Client path is required' };
         }
-        return await clearExpectedModState(clientPath);      } catch (error) {
+        return await clearExpectedModState(clientPath);
+      } catch (error) {
         console.error('Failed to clear expected mod state:', error);
         return { success: false, error: error.message };
       }

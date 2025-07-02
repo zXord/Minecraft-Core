@@ -173,14 +173,16 @@
                   <p class="auth-date">Last login: {new Date(lastAuthDate).toLocaleDateString()}</p>
                 {/if}
                 <p class="auth-note">Authentication is managed automatically. Click below only if you need to refresh your login.</p>
-                <button 
-                  class="modern-btn secondary sm" 
-                  on:click={handleAuthenticate} 
-                  disabled={isAuthenticating}
-                  title="Get fresh authentication token"
-                >
-                  {isAuthenticating ? '⏳ Authenticating...' : '🔄 Refresh Login'}
-                </button>
+                <div class="auth-buttons">
+                  <button 
+                    class="modern-btn secondary sm" 
+                    on:click={handleAuthenticate} 
+                    disabled={isAuthenticating}
+                    title="Get fresh authentication token"
+                  >
+                    {isAuthenticating ? '⏳ Authenticating...' : '🔄 Refresh Login'}
+                  </button>
+                </div>
             {:else}
                 <p class="auth-description">Microsoft authentication required</p>
                 <button 
@@ -703,11 +705,21 @@
   }
 
   .help-text {
+    font-size: 0.7rem;
     color: #9ca3af;
-    font-size: 0.75rem;
     line-height: 1.4;
-    margin: 0;
+    margin-top: 0.5rem;
   }
+
+  /* Auth buttons container */
+  .auth-buttons {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.5rem;
+  }
+
+
 
   .no-connection {
     text-align: center;

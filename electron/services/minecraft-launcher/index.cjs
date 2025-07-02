@@ -92,8 +92,6 @@ class MinecraftLauncher extends EventEmitter {
     return this.authHandler.clearAuthData();
   }
   
-  
-  
   // Check Java installation 
   async checkJavaInstallation() {
     try {
@@ -365,8 +363,6 @@ class MinecraftLauncher extends EventEmitter {
         } else {
           throw new Error(`Authentication failed: ${refreshResult.error}`);
         }
-      } else {
-        console.log('✅ Authentication valid - proceeding with launch');
       }
       
       const authData = this.authHandler.authData;

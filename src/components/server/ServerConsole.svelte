@@ -24,6 +24,9 @@
   $: bottomSpacerHeight = Math.max(0, (totalLogs - endIndex) * itemHeight);
   
   function onConsoleScroll() {
+    // Add null check to prevent error
+    if (!consoleEl) return;
+    
     // If user scrolls up, disable autoScroll
     autoScroll = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 5;
     
