@@ -248,14 +248,17 @@
   }
 
   async function updateAllMods() {
-    const modsWithUpdatesList = [];
+    const enabledModsToUpdate = [];
+    const disabledModsToUpdate = [];
+    
+    // Collect enabled mods with updates
     for (const [modName, updateInfo] of $modsWithUpdates.entries()) {
       if (modName.startsWith('project:')) continue;
-      if ($disabledMods.has(modName)) continue;
+      if ($disabledMods.has(modName)) continue; // Skip disabled mods here, we'll handle them separately
       
       const modInfo = $installedModInfo.find(m => m.fileName === modName);
       if (modInfo && modInfo.projectId) {
-        modsWithUpdatesList.push({
+        enabledModsToUpdate.push({
           modName,
           projectId: modInfo.projectId,
           versionId: updateInfo.id,
@@ -264,23 +267,57 @@
       }
     }
     
-    if (modsWithUpdatesList.length === 0) return;
+    // Collect disabled mods with updates
+    for (const [modName, updateInfo] of $disabledModUpdates.entries()) {
+      disabledModsToUpdate.push({
+        modName,
+        projectId: updateInfo.projectId,
+        targetVersion: updateInfo.latestVersion,
+        targetVersionId: updateInfo.latestVersionId
+      });
+    }
+    
+    const totalMods = enabledModsToUpdate.length + disabledModsToUpdate.length;
+    if (totalMods === 0) return;
     
     updateAllInProgress = true;
     
     try {
-      for (const mod of modsWithUpdatesList) {
+      let updatedCount = 0;
+      
+      // Update enabled mods
+      for (const mod of enabledModsToUpdate) {
         await dispatch('updateMod', {
           modName: mod.modName,
           projectId: mod.projectId,
           versionId: mod.versionId
         });
+        updatedCount++;
+      }
+      
+      // Enable and update disabled mods
+      for (const mod of disabledModsToUpdate) {
+        const success = await enableAndUpdateMod(
+          serverPath,
+          mod.modName,
+          mod.projectId,
+          mod.targetVersion,
+          mod.targetVersionId
+        );
+        if (success) {
+          updatedCount++;
+        }
       }
       
       // Force refresh mod list and update checks to ensure UI is current
       await loadMods(serverPath);
       await checkForUpdates(serverPath, true);
-      successMessage.set(`Updated ${modsWithUpdatesList.length} mods successfully!`);
+      
+      const enabledText = enabledModsToUpdate.length > 0 ? `${enabledModsToUpdate.length} updated` : '';
+      const disabledText = disabledModsToUpdate.length > 0 ? `${disabledModsToUpdate.length} enabled and updated` : '';
+      const combinedText = [enabledText, disabledText].filter(Boolean).join(', ');
+      
+      successMessage.set(`Successfully processed ${updatedCount} mods (${combinedText})!`);
     } catch (error) {
       errorMessage.set(`Failed to update all mods: ${error.message}`);
     } finally {
