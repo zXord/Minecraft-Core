@@ -168,7 +168,8 @@
   // Mod management functions
   async function handleCheckUpdates() {
     try {
-      await checkForUpdates(serverPath);
+      // Force fresh data when user explicitly clicks "Check for Updates"
+      await checkForUpdates(serverPath, true);
       await loadMods(serverPath);
       successMessage.set('Update check completed successfully!');
       setTimeout(() => successMessage.set(''), 3000);
@@ -278,7 +279,7 @@
       
       // Force refresh mod list and update checks to ensure UI is current
       await loadMods(serverPath);
-      await checkForUpdates(serverPath);
+      await checkForUpdates(serverPath, true);
       successMessage.set(`Updated ${modsWithUpdatesList.length} mods successfully!`);
     } catch (error) {
       errorMessage.set(`Failed to update all mods: ${error.message}`);
