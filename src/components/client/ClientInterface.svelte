@@ -1260,7 +1260,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     const hasClientUpdates = modSyncStatus?.clientModUpdates && modSyncStatus.clientModUpdates.length > 0;
     
     if (!hasServerMods && !hasClientUpdates) {
-      console.log('❌ EARLY EXIT: No server mods or client updates, returning');      downloadStatus = 'ready';
+      downloadStatus = 'ready';
       return;
     }
     
@@ -1778,7 +1778,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     try {
       // CRITICAL FIX: Proactively refresh authentication before every launch
       // This ensures we never launch with stale/expired tokens
-      console.log('🔐 Refreshing authentication before launch...');
+
       
       const refreshResult = await window.electron.invoke('minecraft-check-refresh-auth', {
         clientPath: instance.path
@@ -1802,11 +1802,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       }
       
       if (refreshResult.refreshed) {
-        console.log('✅ Authentication refreshed successfully before launch');
+
         successMessage.set('Authentication refreshed successfully');
         setTimeout(() => successMessage.set(''), 2000);
       } else {
-        console.log('✅ Authentication is still valid');
+
       }
       
       // Update launch progress after auth refresh
@@ -2384,6 +2384,19 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }  }
 
   // ...existing code...
+
+  // Handle show-message events from child components
+  function handleShowMessage(event) {
+    const { type, message } = event.detail;
+    
+    if (type === 'success' || type === 'info') {
+      successMessage.set(message);
+      setTimeout(() => successMessage.set(''), 5000);
+    } else if (type === 'error') {
+      errorMessage.set(message);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  }
 </script>
 
 <style>
@@ -2473,6 +2486,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {redownloadClient}
         {redownloadClientFull}
         on:auth-state-changed={handleAuthStateChanged}
+        on:show-message={handleShowMessage}
       />
     {/if}
   </div>
