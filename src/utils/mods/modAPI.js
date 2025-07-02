@@ -365,19 +365,22 @@ export async function searchMods(options = {}) {
  * @param {string} modId - Mod ID
  * @param {string} source - Source ('modrinth' or 'curseforge')
  * @param {boolean} loadLatestOnly - Whether to only load the latest version
+ * @param {boolean} forceRefresh - Whether to bypass cache and fetch fresh data
  * @returns {Promise<Array>} - Array of version objects
 */
-export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false) {
+export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false, forceRefresh = false) {
   // Cache key
   const loader = get(loaderType);
   const gameVersion = get(minecraftVersion);
-  const cacheKey = `${modId}:${loader}:${gameVersion}:${loadLatestOnly}`;
+  const cacheKey = `${modId}:${loader}:${gameVersion}:${loadLatestOnly}:${forceRefresh}`;
   
-  // Check if we already have this version information cached
-  const versionCache = get(modVersionsCache);
-  if (versionCache[cacheKey] && versionCache[cacheKey].length > 0) {
-    return versionCache[cacheKey];
+  // Check if we already have this version information cached (unless forcing refresh)
+  if (!forceRefresh) {
+    const versionCache = get(modVersionsCache);
+    if (versionCache[cacheKey] && versionCache[cacheKey].length > 0) {
+      return versionCache[cacheKey];
     }
+  }
     
   // Apply rate limiting to avoid hitting API limits
   const now = Date.now();
@@ -392,7 +395,8 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
       source,
       loader,
       mcVersion: gameVersion,
-      loadLatestOnly: loadLatestOnly
+      loadLatestOnly: loadLatestOnly,
+      forceRefresh: forceRefresh
     };
     
     // Invoke the IPC method to get versions
@@ -557,9 +561,10 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
 /**
  * Check for updates for installed mods
  * @param {string} serverPath - Server path
+ * @param {boolean} forceRefresh - Whether to bypass cache and fetch fresh data
  * @returns {Promise<Map<string, Object>>} - Map of mod names to update info
  */
-export async function checkForUpdates(serverPath) {
+export async function checkForUpdates(serverPath, forceRefresh = false) {
   // Prevent concurrent update checks
   if (get(isCheckingUpdates)) {
     return new Map();
@@ -574,6 +579,11 @@ export async function checkForUpdates(serverPath) {
     if (!serverPath) {
       isCheckingUpdates.set(false);
       return updatesMap;
+    }
+    
+    // If forcing refresh, clear the version cache
+    if (forceRefresh) {
+      modVersionsCache.set({});
     }
     
     // Skip update check if no mods have project IDs
@@ -598,7 +608,7 @@ export async function checkForUpdates(serverPath) {
         try {
           // Always fetch fresh versions to check for updates
           // This ensures we detect if a user has installed an older version
-          const versions = await fetchModVersions(modInfo.projectId);
+          const versions = await fetchModVersions(modInfo.projectId, 'modrinth', false, forceRefresh);
           
           // Update cache
           installedModVersionsCache.update(cache => {
