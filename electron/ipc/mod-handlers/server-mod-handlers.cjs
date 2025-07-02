@@ -313,7 +313,7 @@ function createServerModHandlers(win) {
           throw new Error(`Mod ${modFileName} is not disabled`);
         }
 
-        // Remove the old disabled file FIRST, before installing new version
+        // Determine the original category/location by checking where disabled files exist
         const fs = require('fs');
         const path = require('path');
         
@@ -321,13 +321,34 @@ function createServerModHandlers(win) {
         const clientModsDir = path.join(serverPath, 'client', 'mods');
         const disabledFilePath = path.join(modsDir, modFileName + '.disabled');
         const clientDisabledFilePath = path.join(clientModsDir, modFileName + '.disabled');
+        const legacyDisabledPath = path.join(serverPath, 'mods_disabled', modFileName);
         
-        // Delete the old disabled files (both server and client)
-        if (fs.existsSync(disabledFilePath)) {
+        // Determine original category based on where disabled files exist
+        const serverDisabledExists = fs.existsSync(disabledFilePath);
+        const clientDisabledExists = fs.existsSync(clientDisabledFilePath);
+        const legacyDisabledExists = fs.existsSync(legacyDisabledPath);
+        
+        let originalCategory = 'server-only'; // Default fallback
+        
+        if (serverDisabledExists && clientDisabledExists) {
+          originalCategory = 'both';
+        } else if (clientDisabledExists && !serverDisabledExists) {
+          originalCategory = 'client-only';
+        } else if (serverDisabledExists && !clientDisabledExists) {
+          originalCategory = 'server-only';
+        } else if (legacyDisabledExists) {
+          originalCategory = 'server-only'; // Legacy defaults to server-only
+        }
+
+        // Remove the old disabled files BEFORE installing new version
+        if (serverDisabledExists) {
           fs.unlinkSync(disabledFilePath);
         }
-        if (fs.existsSync(clientDisabledFilePath)) {
+        if (clientDisabledExists) {
           fs.unlinkSync(clientDisabledFilePath);
+        }
+        if (legacyDisabledExists) {
+          fs.unlinkSync(legacyDisabledPath);
         }
         
         // Also remove old manifests for the disabled files to prevent stale metadata
@@ -352,7 +373,7 @@ function createServerModHandlers(win) {
           throw new Error(`Target version ${targetVersion} not found or has no files`);
         }
 
-        // Prepare mod details for installation (install with the original filename, not .disabled)
+        // Prepare mod details for installation with original category preserved
         const modDetails = {
           id: projectId,
           selectedVersionId: targetVersionId,
@@ -361,10 +382,9 @@ function createServerModHandlers(win) {
           downloadUrl: targetVersionInfo.files[0]?.url,
           version: targetVersion,
           source: 'modrinth',
-          forceReinstall: true // This will overwrite any existing file
+          forceReinstall: true, // This will overwrite any existing file
+          category: originalCategory // Pass the original category to preserve location
         };
-
-
 
         // Install the new version (this will download to the correct enabled location)
         const installResult = await modInstallService.installModToServer(win, serverPath, modDetails);
@@ -372,6 +392,13 @@ function createServerModHandlers(win) {
         if (!installResult || !installResult.success) {
           throw new Error(`Failed to install updated version: ${installResult?.error || 'Unknown error'}`);
         }
+
+        // After successful installation, ensure the mod is in the correct location based on original category
+        await modFileManager.moveModFile({ 
+          fileName: modFileName, 
+          newCategory: originalCategory, 
+          serverPath 
+        });
 
         // Update the disabled mods list to remove this mod
         const updatedDisabledMods = disabledMods.filter(mod => mod !== modFileName);
@@ -399,10 +426,11 @@ function createServerModHandlers(win) {
 
         return {
           success: true,
-          message: `Mod ${modFileName} successfully enabled and updated to version ${targetVersion}`,
+          message: `Mod ${modFileName} successfully enabled and updated to version ${targetVersion} in ${originalCategory} location`,
           newFileName: modFileName, // Keep the same filename structure
           oldFileName: modFileName,
-          version: targetVersion
+          version: targetVersion,
+          category: originalCategory // Return the preserved category for confirmation
         };
 
       } catch (error) {
@@ -450,15 +478,6 @@ function createServerModHandlers(win) {
           }
           
           try {
-            // Check if current version is compatible with target MC version
-            let currentVersionCompatible = false;
-            
-            if (mod.minecraftVersion) {
-              // Use backend-extracted metadata if available
-              const checkMinecraftVersionCompatibility = require('./mod-handler-utils.cjs').checkMinecraftVersionCompatibility;
-              currentVersionCompatible = checkMinecraftVersionCompatibility(mod.minecraftVersion, mcVersion);
-            }
-            
             // FIXED: Check if ANY versions exist for target MC version FIRST
             const availableVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
             
