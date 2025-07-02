@@ -940,14 +940,29 @@ function createMinecraftLauncherHandlers(win) {
           };
         }
 
-        await ensureServersDat(
-          clientPath,
-          serverIp,
-          managementPort,
-          clientName || 'Minecraft Server',
-          serverPort,
-          true // preserveExistingServers - only create server entry first time, preserve user modifications
-        );
+        // CRITICAL FIX: Only add server to servers.dat on FIRST launch ever
+        // After that, never touch servers.dat or options.txt again so user modifications are preserved
+        const serversInitializedFile = path.join(clientPath, '.servers-initialized');
+        if (!fs.existsSync(serversInitializedFile)) {
+          // First time launch - add server entry
+          await ensureServersDat(
+            clientPath,
+            serverIp,
+            managementPort,
+            clientName || 'Minecraft Server',
+            serverPort,
+            false // Don't preserve - we want to add our server on first launch
+          );
+          
+          // Create flag file to indicate servers.dat has been initialized
+          fs.writeFileSync(serversInitializedFile, JSON.stringify({
+            initializedAt: new Date().toISOString(),
+            serverIp,
+            serverPort,
+            clientName: clientName || 'Minecraft Server'
+          }), 'utf8');
+        }
+        // If flag file exists, never touch servers.dat again - user modifications are preserved
         
         if (useProperLauncher) {
           

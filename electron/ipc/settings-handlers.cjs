@@ -338,8 +338,19 @@ function createSettingsHandlers() {
         
         await fsPromises.writeFile(configFile, JSON.stringify(config, null, 2));
 
-        // Create servers.dat so the server appears in multiplayer list
-        await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
+        // Create servers.dat so the server appears in multiplayer list (only if not already initialized)
+        const serversInitializedFile = path.join(clientPath, '.servers-initialized');
+        if (!fs.existsSync(serversInitializedFile)) {
+          await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
+          
+          // Create flag file to indicate servers.dat has been initialized
+          fs.writeFileSync(serversInitializedFile, JSON.stringify({
+            initializedAt: new Date().toISOString(),
+            serverIp,
+            serverPort: config.serverPort,
+            clientName: config.clientName
+          }), 'utf8');
+        }
         
         // ALSO update the instance in the app store so it persists across app restarts
         const instances = appStore.get('instances') || [];
