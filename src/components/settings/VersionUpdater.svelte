@@ -28,11 +28,7 @@
   $: serverStatus = $serverState.status;
   $: serverRunning = serverStatus === 'Running';
 
-  $: resolvedPath = serverPath || get(settingsStore).path;
-  
-  // Debug completed updates
-  $: if (completedUpdates.length > 0) {
-  }
+      $: resolvedPath = serverPath || get(settingsStore).path;
   onMount(() => {
     fetchMinecraftVersions();
       // Set up progress listeners

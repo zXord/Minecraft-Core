@@ -136,7 +136,7 @@ export function clearAppVersions() {
   });
 }
 
-// Debug function to clear persisted state (for testing)
+// Function to clear persisted state
 export function clearPersistedClientState() {
   try {
     localStorage.removeItem('clientState');

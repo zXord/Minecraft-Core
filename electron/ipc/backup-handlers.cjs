@@ -3,8 +3,10 @@ const appStore = require('../utils/app-store.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
 const path = require('path');
 
-// Interval ID for automated backup scheduler
-let autoBackupIntervalId = null;
+// Timeout ID for automated backup scheduler
+let autoBackupTimeoutId = null;
+// Flag to prevent double initialization
+let backupManagerInitialized = false;
 
 // Helper to format error messages in a user-friendly way
 function formatErrorMessage(err) {
@@ -81,7 +83,6 @@ function createBackupHandlers() {
         
         return result;
       } catch (err) {
-        
         // Show an error notification with user-friendly message
         safeSend('backup-notification', {
           success: false,
@@ -94,16 +95,15 @@ function createBackupHandlers() {
     'backups:configure-automation': (_e, { enabled, frequency, type, retentionCount, runOnLaunch, serverPath, hour, minute, day }) => {
       try {
         // Stop existing scheduler if running
-        if (autoBackupIntervalId) {
-          clearInterval(autoBackupIntervalId);
-          autoBackupIntervalId = null;
+        if (autoBackupTimeoutId) {
+          clearTimeout(autoBackupTimeoutId);
+          autoBackupTimeoutId = null;
         }
         
-        // Get previous settings to check if this is a new activation vs just settings update
+        // Get previous settings
         const previousSettings = appStore.get('backupSettings') || {};
-        // const isNewActivation = !previousSettings.enabled && enabled;
         
-        // Save the settings
+        // Save the settings (create new object to avoid mutation issues)
         const backupSettings = {
           enabled,
           frequency,
@@ -113,7 +113,7 @@ function createBackupHandlers() {
           hour: hour || 3,
           minute: minute || 0,
           day: day !== undefined ? day : 0, // Default to Sunday (0)
-          lastRun: previousSettings.lastRun || new Date().toISOString()
+          lastRun: previousSettings.lastRun || null
         };
         appStore.set('backupSettings', backupSettings);
         
@@ -133,14 +133,69 @@ function createBackupHandlers() {
           enabled: false,
           frequency: 86400000, // 24 hours in milliseconds (default)
           type: 'world',       // default to world-only backups
-          retentionCount: 7,   // keep last 7 automated backups
+          retentionCount: 14,  // keep last 14 automated backups (about 2 weeks for daily)
           runOnLaunch: false,  // don't run on app launch by default
           hour: 3,             // default to 3 AM
           minute: 0,           // default to 00 minutes
           day: 0,              // default to Sunday
           lastRun: null        // never run yet
         };
-        return { success: true, settings };
+        
+        // Calculate next scheduled backup time if enabled
+        let nextBackupTime = null;
+        if (settings.enabled && settings.frequency >= 86400000) {
+          const now = new Date();
+          const scheduledHour = settings.hour !== undefined ? settings.hour : 3;
+          const scheduledMinute = settings.minute !== undefined ? settings.minute : 0;
+          
+          // Create next run time for today
+          nextBackupTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), scheduledHour, scheduledMinute, 0, 0);
+          
+          // If the time has already passed today, schedule for tomorrow
+          if (nextBackupTime <= now) {
+            nextBackupTime.setDate(nextBackupTime.getDate() + 1);
+          }
+          
+          // For weekly backups, adjust to the correct day
+          if (settings.frequency >= 604800000) { // Weekly
+            const targetDay = settings.day !== undefined ? settings.day : 0;
+            const currentDay = nextBackupTime.getDay();
+            const daysUntilTarget = (targetDay - currentDay + 7) % 7;
+            
+            if (daysUntilTarget > 0) {
+              nextBackupTime.setDate(nextBackupTime.getDate() + daysUntilTarget);
+            } else if (daysUntilTarget === 0 && nextBackupTime <= now) {
+              nextBackupTime.setDate(nextBackupTime.getDate() + 7);
+            }
+          }
+          
+          // Check if we already ran today/this week and adjust
+          const lastRun = settings.lastRun ? new Date(settings.lastRun) : null;
+          if (lastRun) {
+            if (settings.frequency < 604800000) { // Daily
+              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+              const lastRunDay = new Date(lastRun.getFullYear(), lastRun.getMonth(), lastRun.getDate());
+              
+              if (lastRunDay.getTime() === today.getTime()) {
+                nextBackupTime.setDate(nextBackupTime.getDate() + 1);
+              }
+            } else { // Weekly
+              const daysSinceLastRun = Math.floor((now.getTime() - lastRun.getTime()) / (1000 * 60 * 60 * 24));
+              if (daysSinceLastRun < 6) {
+                const daysToAdd = 7 - (daysSinceLastRun % 7);
+                nextBackupTime.setDate(nextBackupTime.getDate() + daysToAdd);
+              }
+            }
+          }
+        }
+        
+        return { 
+          success: true, 
+          settings: {
+            ...settings,
+            nextBackupTime: nextBackupTime ? nextBackupTime.toISOString() : null
+          }
+        };
       } catch (err) {
         return { success: false, error: formatErrorMessage(err) };
       }
@@ -155,9 +210,9 @@ function createBackupHandlers() {
           trigger: 'manual-auto'  // Mark as manually triggered auto backup
         });
         
-        // Update last run time
-        settings.lastRun = new Date().toISOString();
-        appStore.set('backupSettings', settings);
+        // Update last run time in settings
+        const updatedSettings = { ...settings, lastRun: new Date().toISOString() };
+        appStore.set('backupSettings', updatedSettings);
         
         // Apply retention policy
         if (settings.retentionCount) {
@@ -187,224 +242,223 @@ function startAutomatedBackups(settings, serverPath) {
     return;
   }
 
-  // Convert frequency to milliseconds if it's a string option
-  let intervalMs = settings.frequency;
-
-  // Set up the interval for regular backups
-  if (autoBackupIntervalId) {
-    clearInterval(autoBackupIntervalId);
+  // Clear any existing timeout
+  if (autoBackupTimeoutId) {
+    clearTimeout(autoBackupTimeoutId);
+    autoBackupTimeoutId = null;
   }
 
-  autoBackupIntervalId = setInterval(async () => {
-    try {
-      // Check if it's been at least frequency ms since last backup
-      const lastRun = settings.lastRun ? new Date(settings.lastRun) : null;
-      const now = new Date();
+  // Calculate when the next backup should run
+  function scheduleNextBackup() {
+    const now = new Date();
+    let nextRunTime;
 
-      // For daily and weekly backups, check the time of day too
-      if (settings.frequency >= 86400000) { // Daily or weekly
-        const hour = settings.hour !== undefined ? settings.hour : 3; // Default to 3 AM
-        const minute = settings.minute !== undefined ? settings.minute : 0; // Default to 00 minutes
-        const currentHour = now.getHours();
-        const currentMinute = now.getMinutes();
-        const isRightTime = (currentHour === hour && currentMinute >= minute) || (currentHour > hour);
-        // For weekly backups, also check the day of week
-        if (settings.frequency >= 604800000) { // Weekly
-          const dayOfWeek = settings.day !== undefined ? settings.day : 0; // Default to Sunday (0)
-          const currentDay = now.getDay(); // 0 = Sunday, 6 = Saturday
-          if (currentDay !== dayOfWeek) {
-            return;
+    if (settings.frequency >= 86400000) { // Daily or weekly
+      const scheduledHour = settings.hour !== undefined ? settings.hour : 3;
+      const scheduledMinute = settings.minute !== undefined ? settings.minute : 0;
+      
+      // Create next run time for today
+      nextRunTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), scheduledHour, scheduledMinute, 0, 0);
+      
+      // If the time has already passed today, schedule for tomorrow
+      if (nextRunTime <= now) {
+        nextRunTime.setDate(nextRunTime.getDate() + 1);
+      }
+      
+      // For weekly backups, adjust to the correct day
+      if (settings.frequency >= 604800000) { // Weekly
+        const targetDay = settings.day !== undefined ? settings.day : 0; // Sunday = 0
+        const currentDay = nextRunTime.getDay();
+        const daysUntilTarget = (targetDay - currentDay + 7) % 7;
+        
+        if (daysUntilTarget > 0) {
+          nextRunTime.setDate(nextRunTime.getDate() + daysUntilTarget);
+        } else if (daysUntilTarget === 0 && nextRunTime <= now) {
+          // If today is the target day but time has passed, schedule for next week
+          nextRunTime.setDate(nextRunTime.getDate() + 7);
+        }
+      }
+      
+      // Check if we already ran today (for daily) or this week (for weekly)
+      const lastRun = settings.lastRun ? new Date(settings.lastRun) : null;
+      if (lastRun) {
+        if (settings.frequency < 604800000) { // Daily
+          const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          const lastRunDay = new Date(lastRun.getFullYear(), lastRun.getMonth(), lastRun.getDate());
+          
+          if (lastRunDay.getTime() === today.getTime()) {
+            // Already ran today, schedule for tomorrow
+            nextRunTime.setDate(nextRunTime.getDate() + 1);
+          }
+        } else { // Weekly
+          const daysSinceLastRun = Math.floor((now.getTime() - lastRun.getTime()) / (1000 * 60 * 60 * 24));
+          if (daysSinceLastRun < 6) {
+            // Already ran this week, schedule for next week
+            const daysToAdd = 7 - (daysSinceLastRun % 7);
+            nextRunTime.setDate(nextRunTime.getDate() + daysToAdd);
           }
         }
-        if (lastRun) {
-          const lastRunDate = new Date(lastRun);
-          const sameDay = lastRunDate.getDate() === now.getDate() && lastRunDate.getMonth() === now.getMonth() && lastRunDate.getFullYear() === now.getFullYear();
-          if (sameDay && (lastRunDate.getHours() > hour || (lastRunDate.getHours() === hour && lastRunDate.getMinutes() >= minute))) {
-            return;
-          }
-          if (settings.frequency >= 604800000) { // Weekly
-            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-            const lastRunDay = new Date(lastRunDate.getFullYear(), lastRunDate.getMonth(), lastRunDate.getDate());
-            const selectedDayThisWeek = new Date(today);
-            const currentDayOfWeek = today.getDay();
-            const selectedDay = settings.day !== undefined ? settings.day : 0;
-            selectedDayThisWeek.setDate(today.getDate() - currentDayOfWeek + selectedDay);
-            if (selectedDayThisWeek > today) {
-              selectedDayThisWeek.setDate(selectedDayThisWeek.getDate() - 7);
-            }
-            if (lastRunDay >= selectedDayThisWeek) {
-              return;
-            }
-          }
-        }
-        if (!isRightTime) {
+      }
+    } else {
+      // For shorter intervals (hourly, etc.), schedule based on interval
+      const lastRun = settings.lastRun ? new Date(settings.lastRun) : null;
+      if (lastRun) {
+        nextRunTime = new Date(lastRun.getTime() + settings.frequency);
+      } else {
+        nextRunTime = new Date(now.getTime() + settings.frequency);
+      }
+    }
+
+    const msUntilNextRun = nextRunTime.getTime() - now.getTime();
+
+    // Schedule the backup to run at the exact time
+    autoBackupTimeoutId = setTimeout(async () => {
+      try {
+        const currentSettings = appStore.get('backupSettings') || settings;
+        
+        // Double-check that backups are still enabled
+        if (!currentSettings.enabled) {
           return;
         }
-      } else if (lastRun && (now.getTime() - lastRun.getTime() < intervalMs)) {
-        return; // Not time for a backup yet
-      }
-      await backupService.safeCreateBackup({
-        serverPath,
-        type: settings.type || 'world',
-        trigger: 'auto'
-      });
-      settings.lastRun = now.toISOString();
-      appStore.set('backupSettings', settings);
-      if (settings.retentionCount) {
-        await backupService.cleanupAutomaticBackups(serverPath, settings.retentionCount);
-      }
-      safeSend('backup-notification', {
-        success: true,
-        message: `✅ ${settings.type === 'full' ? 'Full' : 'World-only'} auto-backup created at ${now.toLocaleTimeString()}`
-      });
-    } catch (err) {
-      safeSend('backup-notification', {
-        success: false,
-        message: `⚠️ Failed to create scheduled backup: ${formatErrorMessage(err)}`
-      });
-    }
-  }, 60000); // Check every minute if a backup should run
-}
 
-function initializeAutomatedBackups() {
-  // Load the settings and start the scheduler if enabled
-  const settings = appStore.get('backupSettings');
-    
-  if (settings && settings.enabled) {
-    // Need to retrieve the server path from app settings
-    const serverSettings = appStore.get('serverSettings') || {};
-    const lastServerPath = appStore.get('lastServerPath');
-    const serverPath = serverSettings.path || lastServerPath;
-    
-    
-    if (serverPath) {
-      
-      // If runOnLaunch is enabled, force a backup now
-      if (settings.runOnLaunch) {
-        // Run a backup immediately (after a short delay to let app initialize)
-        setTimeout(async () => {
-          try {
-            await backupService.safeCreateBackup({
-              serverPath,
-              type: settings.type || 'world',
-              trigger: 'app-launch'
-            });
-            
-            
-            // Update last run time
-            settings.lastRun = new Date().toISOString();
-            appStore.set('backupSettings', settings);
-            
-            // Apply retention policy
-            if (settings.retentionCount) {
-              await backupService.cleanupAutomaticBackups(serverPath, settings.retentionCount);
-            }
-            
-            // Notify the user
-            safeSend('backup-notification', {
-              success: true,
-              message: `✅ ${settings.type === 'full' ? 'Full' : 'World-only'} app-launch backup created at ${new Date().toLocaleTimeString()}`
-            });
-          } catch (err) {
-            safeSend('backup-notification', {
-              success: false, 
-              message: `⚠️ Failed to create app-launch backup: ${formatErrorMessage(err)}`
-            });
-          }
-        }, 5000);
+        const now = new Date();
+        
+        await backupService.safeCreateBackup({
+          serverPath,
+          type: currentSettings.type || 'world',
+          trigger: 'auto'
+        });
+        
+        // Update last run time
+        const updatedSettings = { ...currentSettings, lastRun: now.toISOString() };
+        appStore.set('backupSettings', updatedSettings);
+        
+        // Apply retention policy
+        if (currentSettings.retentionCount) {
+          await backupService.cleanupAutomaticBackups(serverPath, currentSettings.retentionCount);
+        }
+        
+        safeSend('backup-notification', {
+          success: true,
+          message: `✅ ${currentSettings.type === 'full' ? 'Full' : 'World-only'} auto-backup created at ${now.toLocaleString()}`
+        });
+
+        // Schedule the next backup
+        scheduleNextBackup();
+        
+      } catch (err) {
+        console.error('Failed to create scheduled backup:', err);
+        safeSend('backup-notification', {
+          success: false,
+          message: `⚠️ Failed to create scheduled backup: ${formatErrorMessage(err)}`
+        });
+        
+        // Schedule the next backup even if this one failed
+        scheduleNextBackup();
       }
-        // Always start the scheduler regardless
-      startAutomatedBackups(settings, serverPath);
-    }
+    }, msUntilNextRun);
   }
+
+  // Start the scheduling
+  scheduleNextBackup();
 }
 
 /**
- * Initializes the backup manager and starts automated backups if configured
+ * Unified function to initialize the backup manager
+ * This replaces both initializeAutomatedBackups and loadBackupManager
  */
 function loadBackupManager() {
+  // Prevent double initialization
+  if (backupManagerInitialized) {
+    return;
+  }
+  backupManagerInitialized = true;
+  
+  // Load backup settings
+  const settings = appStore.get('backupSettings') || {
+    enabled: false,
+    frequency: 86400000, // 24 hours in milliseconds (default)
+    type: 'world',       // default to world-only backups
+    retentionCount: 14,  // keep last 14 automated backups (about 2 weeks for daily)
+    runOnLaunch: false,  // don't run on app launch by default
+    hour: 3,             // default to 3 AM
+    minute: 0,           // default to 00 minutes
+    day: 0,              // default to Sunday
+    lastRun: null        // never run yet
+  };
+  
+  // Get server path
+  const serverSettings = appStore.get('serverSettings') || {};
+  const lastServerPath = appStore.get('lastServerPath');
+  const serverPath = serverSettings.path || lastServerPath;
+  
+  if (!serverPath) {
+    return; // No server path available
+  }
+  
+  // Start automated backups if enabled
+  if (settings.enabled) {
+    startAutomatedBackups(settings, serverPath);
+  }
+  
+  // Handle app-launch backup if enabled
+  if (settings.runOnLaunch) {
+    // Get the getWorldDirs function to check valid worlds
+    const getWorldDirs = require('../services/backup-service.cjs').getWorldDirs;
     
-    // Load backup settings
-    const settings = appStore.get('backupSettings') || {
-      enabled: false,
-      frequency: 86400000, // 24 hours in milliseconds (default)
-      type: 'world',       // default to world-only backups
-      retentionCount: 7,   // keep last 7 automated backups
-      runOnLaunch: false,  // don't run on app launch by default
-      hour: 3,             // default to 3 AM
-      minute: 0,           // default to 00 minutes
-      day: 0,              // default to Sunday
-      lastRun: null        // never run yet
-    };
-    
-    // Get server path
-    const serverPath = appStore.get('lastServerPath');
-    
-    // Start automated backups if enabled
-    if (settings.enabled && serverPath) {
-      startAutomatedBackups(settings, serverPath);
-    }
-    
-    // Check if we should run a backup on launch
-    if (settings.runOnLaunch && serverPath) {
-      
-      // Get the getWorldDirs function to check valid worlds
-      const getWorldDirs = require('../services/backup-service.cjs').getWorldDirs;
-      
-      // Check if we have valid world directories
-      const worldDirs = getWorldDirs(serverPath);
-      if (worldDirs && worldDirs.length > 0) {
-        
-        // Run the backup with a slight delay to ensure app is fully loaded
-        setTimeout(async () => {
-          try {
-            await backupService.safeCreateBackup({
-              serverPath,
-              type: settings.type || 'world',
-              trigger: 'app-launch'
-            });
-            
-            // Update last run time
-            settings.lastRun = new Date().toISOString();
-            appStore.set('backupSettings', settings);
-            
-            // Apply retention policy
-            if (settings.retentionCount) {
-              await backupService.cleanupAutomaticBackups(serverPath, settings.retentionCount);
-            }
-            
-            // Send notification
-            safeSend('backup-notification', {
-              success: true,
-              message: `✅ Auto-backup on application launch completed at ${new Date().toLocaleTimeString()}`
-            });
-          } catch (err) {
-            
-            // Send notification
-            safeSend('backup-notification', {
-              success: false,
-              message: `⚠️ Auto-backup on launch failed: ${formatErrorMessage(err)}`
-            });
+    // Check if we have valid world directories
+    const worldDirs = getWorldDirs(serverPath);
+    if (worldDirs && worldDirs.length > 0) {
+      // Run the backup with a delay to ensure app is fully loaded
+      setTimeout(async () => {
+        try {
+          await backupService.safeCreateBackup({
+            serverPath,
+            type: settings.type || 'world',
+            trigger: 'app-launch'
+          });
+          
+          // Update last run time
+          const updatedSettings = { ...settings, lastRun: new Date().toISOString() };
+          appStore.set('backupSettings', updatedSettings);
+          
+          // Apply retention policy
+          if (settings.retentionCount) {
+            await backupService.cleanupAutomaticBackups(serverPath, settings.retentionCount);
           }
-        }, 3000);
-      } else {
-        safeSend('backup-notification', {
-          success: false,
-          message: `⚠️ Auto-backup on launch skipped: No valid world directories found`
-        });
-      }
+          
+          // Send notification
+          safeSend('backup-notification', {
+            success: true,
+            message: `✅ Auto-backup on application launch completed at ${new Date().toLocaleTimeString()}`
+          });
+        } catch (err) {
+          // Send notification
+          safeSend('backup-notification', {
+            success: false,
+            message: `⚠️ Auto-backup on launch failed: ${formatErrorMessage(err)}`
+          });
+        }
+      }, 3000);
+    } else {
+      safeSend('backup-notification', {
+        success: false,
+        message: `⚠️ Auto-backup on launch skipped: No valid world directories found`
+      });
     }
+  }
 }
 
 /**
  * Clear backup intervals for app shutdown
  */
 function clearBackupIntervals() {
-  if (autoBackupIntervalId) {
-    clearInterval(autoBackupIntervalId);
-    autoBackupIntervalId = null;
-    
+  if (autoBackupTimeoutId) {
+    clearTimeout(autoBackupTimeoutId);
+    autoBackupTimeoutId = null;
   }
+  // Reset initialization flag
+  backupManagerInitialized = false;
 }
 
-module.exports = { createBackupHandlers, loadBackupManager, initializeAutomatedBackups, clearBackupIntervals };
+module.exports = { createBackupHandlers, loadBackupManager, clearBackupIntervals };

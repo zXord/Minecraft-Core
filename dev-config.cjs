@@ -19,7 +19,7 @@ module.exports = {
   // Enable/disable detailed logging
   enableVerboseLogging: false, // DISABLED FOR PRODUCTION
   
-  // Enable/disable development shortcuts/debugging
+  // Enable/disable development features
   enableDevShortcuts: false, // DISABLED FOR PRODUCTION
   
   // Add more dev features here as needed...
