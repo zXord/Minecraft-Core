@@ -1,7 +1,6 @@
 <script>
   import { onMount, tick } from 'svelte';
   import ConfirmationDialog from './common/ConfirmationDialog.svelte';
-  import StatusMessage from './common/StatusMessage.svelte';
   import { serverState } from '../stores/serverState.js';
   import { writable } from 'svelte/store';
 
@@ -298,6 +297,7 @@
       status = 'Selected backups deleted.';
       $selectedBackups = new Set();
       showBulkDeleteDialog = false;
+      setTimeout(() => status = '', 2000);
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Bulk delete failed';
     }
@@ -365,354 +365,740 @@
   }
 </script>
 
-<div class="backups-tab">
-  <!-- Automation Settings Section moved to top -->
-  <div class="automation-section">
-    <div class="section-header">
-      <h3>Backup Automation</h3>
-      <div class="run-now-controls">
-        <select bind:value={manualBackupType} class="manual-type-select" title="Backup content">
-          <option value="full">Full</option>
+<div class="backups-container">
+  <!-- Modern Header -->
+  <div class="backups-header">
+    <h1 class="backups-title">Backup Automation</h1>
+    <div class="header-controls">
+      <div class="backup-type-selector">
+        <select bind:value={manualBackupType} class="type-select">
           <option value="world">World-only</option>
+          <option value="full">Full</option>
         </select>
-        <button
-          class="run-now-button"
-          on:click={runAutoBackupNow}
-          disabled={loading}
-          title="Run a backup now with the selected content"
-        >
-          Run Backup Now
-        </button>
+        <span class="select-arrow">▼</span>
+      </div>
+      <button
+        class="run-backup-btn"
+        on:click={runAutoBackupNow}
+        disabled={loading}
+      >
+        Run Backup Now
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Settings Card -->
+  <div class="settings-card">
+    <!-- Enable Toggle -->
+    <div class="enable-section">
+      <div class="toggle-container">
+        <input
+          type="checkbox"
+          id="enable-automation"
+          bind:checked={autoBackupEnabled}
+          on:change={saveAutomationSettings}
+          class="modern-checkbox"
+        />
+        <label for="enable-automation" class="enable-label">
+          Enable Automatic Backups
+        </label>
       </div>
     </div>
-    
-    <!-- Backup Status Info -->
-    {#if autoBackupEnabled}
-      <div class="backup-status-info">
-        <div class="status-row">
-          <span class="status-label">🕓 Last:</span>
-          <span class="status-value">{lastAutoBackup || 'Never'} (local time)</span>
-        </div>
-        <div class="status-row">
-          <span class="status-label">📅 Schedule:</span>
-          <span class="status-value">
-            {#if backupFrequency >= 604800000}
-              {dayNames[backupDay]} at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')} (local time)
-            {:else if backupFrequency >= 86400000}
-              Daily at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')} (local time)
-            {:else}
-              Every {Math.floor(backupFrequency / 3600000)}h {Math.floor((backupFrequency % 3600000) / 60000)}m
-            {/if}
-          </span>
-        </div>
-        <div class="status-row">
-          <span class="status-label">📊 Retention:</span>
-          <span class="status-value">Keep last {retentionCount} automated backups</span>
-        </div>
-        {#if nextBackupTime}
-          <div class="status-row">
-            <span class="status-label">⏰ Next:</span>
-            <span class="status-value">{formatTimestamp(nextBackupTime)} (local time)</span>
-          </div>
-        {/if}
-      </div>
-    {/if}
-    
-    <div class="automation-controls">
-      <div class="enable-row">
-        <label class="toggle-label">
-          <input 
-            type="checkbox" 
-            bind:checked={autoBackupEnabled} 
-            on:change={saveAutomationSettings}
-          />
-          <span>🕒 Enable Automatic Backups</span>
-        </label>
-        
-        {#if lastAutoBackup}
-          <div class="last-backup-info">
-            🕓 Last: {lastAutoBackup}
-          </div>
-        {/if}
-      </div>
-      
-      <div class="settings-grid" class:disabled={!autoBackupEnabled}>
-        <!-- More horizontal layout with 3 columns -->
-        <div class="grid-item">
-          <label for="backup-frequency">Frequency:</label>
+
+    <!-- Settings Grid -->
+    <div class="settings-grid" class:disabled={!autoBackupEnabled}>
+      <!-- Frequency -->
+      <div class="setting-group">
+        <label class="setting-label" for="frequency-select">Frequency</label>
+        <div class="select-wrapper">
           <select 
-            id="backup-frequency"
+            id="frequency-select"
             bind:value={backupFrequency} 
             on:change={saveAutomationSettings}
-            disabled={!autoBackupEnabled}          >
-            {#each frequencyOptions as option (option.value)}
+            disabled={!autoBackupEnabled}
+            class="modern-select"
+          >
+            {#each frequencyOptions as option}
               <option value={option.value}>{option.label}</option>
             {/each}
           </select>
+          <span class="select-arrow">▼</span>
         </div>
-          <div class="grid-item">
-          <label for="backup-content">Content:</label>
-          <div class="radio-group horizontal" id="backup-content" role="group" aria-labelledby="backup-content-label">
-            <span id="backup-content-label" class="sr-only">Backup content type</span>
-            <label class="radio-label">
-              <input 
-                type="radio" 
-                name="backup-type" 
-                value="full" 
-                bind:group={backupType} 
-                on:change={saveAutomationSettings}
-                disabled={!autoBackupEnabled}
-              />
-              <span>Full</span>
-            </label>
-            <label class="radio-label">
-              <input 
-                type="radio" 
-                name="backup-type" 
-                value="world" 
-                bind:group={backupType} 
-                on:change={saveAutomationSettings}
-                disabled={!autoBackupEnabled}
-              />
-              <span>World-only</span>
-            </label>
-          </div>
-        </div>
-        
-        <div class="grid-item">
-          <label for="retention-count">Keep last:</label>
-          <div class="retention-input">
-            <input 
-              id="retention-count"
-              type="number" 
-              min="1" 
-              max="100" 
-              bind:value={retentionCount} 
-              on:change={saveAutomationSettings}
-              disabled={!autoBackupEnabled}
-            />
-            <span>backups</span>
-          </div>
-        </div>
-          {#if showTimeSelector}
-          <div class="grid-item schedule-item">
-            <label for="schedule-controls">Schedule at:</label>
-            <div class="time-selectors" id="schedule-controls" role="group" aria-labelledby="schedule-controls-label">
-              <span id="schedule-controls-label" class="sr-only">Schedule time controls</span>
-              {#if showDaySelector}
+      </div>
+
+      <!-- Schedule Time -->
+      {#if showTimeSelector}
+        <div class="setting-group">
+          <label class="setting-label" for="hour-select">Schedule at</label>
+          <div class="time-controls">
+            {#if showDaySelector}
+              <div class="select-wrapper small">
                 <select 
-                  id="backup-day"
-                  bind:value={backupDay} 
+                  id="day-select"
+                  bind:value={backupDay}
                   on:change={saveAutomationSettings}
                   disabled={!autoBackupEnabled}
-                  title="Day of the week"                >
-                  {#each dayNames as day, index (index)}
+                  class="modern-select small"
+                >
+                  {#each dayNames as day, index}
                     <option value={index}>{day.slice(0,3)}</option>
                   {/each}
                 </select>
-              {/if}
-              
+                <span class="select-arrow">▼</span>
+              </div>
+            {/if}
+            <div class="select-wrapper small">
               <select 
-                bind:value={backupHour} 
+                id="hour-select"
+                bind:value={backupHour}
                 on:change={saveAutomationSettings}
                 disabled={!autoBackupEnabled}
-                title="Hour"              >
-                {#each Array(24).fill().map((_, i) => i) as hour (hour)}
+                class="modern-select small"
+              >
+                {#each Array(24).fill().map((_, i) => i) as hour}
                   <option value={hour}>{hour.toString().padStart(2, '0')}</option>
                 {/each}
               </select>
-              <span>:</span>
+              <span class="select-arrow">▼</span>
+            </div>
+            <span class="time-separator">:</span>
+            <div class="select-wrapper small">
               <select 
-                bind:value={backupMinute} 
+                id="minute-select"
+                bind:value={backupMinute}
                 on:change={saveAutomationSettings}
                 disabled={!autoBackupEnabled}
-                title="Minute"              >
-                {#each [0, 15, 30, 45] as minute (minute)}
+                class="modern-select small"
+              >
+                {#each [0, 15, 30, 45] as minute}
                   <option value={minute}>{minute.toString().padStart(2, '0')}</option>
                 {/each}
               </select>
+              <span class="select-arrow">▼</span>
             </div>
           </div>
-        {/if}
-        
-        <div class="grid-item">
-          <label class="toggle-label">
-            <input 
-              type="checkbox" 
-              bind:checked={runOnLaunch} 
-              on:change={saveAutomationSettings}
-              disabled={!autoBackupEnabled}
-            />
-            <span>Run on app launch</span>
-          </label>
-        </div>
-      </div>
-      
-      {#if showTimeSelector}
-        <div class="time-explanation">
-          {#if showDaySelector}
-            Backup will run on {dayNames[backupDay]} at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')}.
-          {:else if backupFrequency >= 86400000}
-            Backup will run daily at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')}.
-          {:else}
-            First backup at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')}, then repeats at the selected frequency.
-          {/if}
         </div>
       {/if}
-    </div>
-  </div>
-  
-  {#if status}
-    <StatusMessage message={status} type="info" />
-  {/if}
-  {#if error}
-    <StatusMessage message={error} type="error" />
-  {/if}
-  {#if loading}
-    <p>Loading...</p>
-  {/if}
-  
-  <div class="backups-list-header">
-    <h3>Backup List</h3>
-    {#if $selectedBackups.size > 0}
-      <button class="bulk-delete" on:click={() => showBulkDeleteDialog = true} disabled={loading}>
-        🗑️ Delete Selected ({$selectedBackups.size})
-      </button>
-    {/if}
-  </div>
-  
-  <table class="backups-table">
-    <thead>
-      <tr>
-        <th><input type="checkbox" checked={selectAll} on:change={toggleSelectAll} /></th>
-        <th>Name</th>
-        <th>Type</th>
-        <th>Size</th>
-        <th>Timestamp</th>
-        <th>Actions</th>
-      </tr>
-    </thead>    <tbody>
-      {#each backups as b (b.name)}
-        <tr class:world-delete-backup={b.metadata?.type === 'world-delete'} class:auto-backup={b.metadata?.automated}>
-          <td><input type="checkbox" checked={$selectedBackups.has(b.name)} on:change={() => toggleSelect(b.name)} /></td>
-          <td>
-            {b.name} 
-            {#if b.metadata?.type === 'world-delete'}
-              <span title="Created automatically before world deletion">🗑️</span>
-            {/if}
-            {#if b.metadata?.automated}
-              <span title="Created by automation">🤖</span>
-            {/if}
-          </td>
-          <td>{b.metadata?.type || '-'}</td>
-          <td>{(b.size/1024/1024).toFixed(2)} MB</td>
-          <td>{formatTimestamp(b.metadata?.timestamp || b.created)}</td>
-          <td>
-            <div class="action-buttons">
-              <button class="action-btn restore-btn" on:click={() => confirmRestore(b)} disabled={loading || isServerRunning} title="Restore this backup">
-                ↻
-              </button>
-              <button class="action-btn delete-btn" on:click={() => confirmDelete(b)} disabled={loading} title="Delete this backup">
-                🗑️
-              </button>
-              <button class="action-btn rename-btn" on:click={() => promptRename(b)} disabled={loading} title="Rename this backup">
-                ✏️
-              </button>
-            </div>
-          </td>
-        </tr>
-      {/each}
-    </tbody>
-  </table>
 
-  {#if showDeleteDialog}
-    <ConfirmationDialog
-      visible={showDeleteDialog}
-      message={`Delete backup ${backupToDelete?.name}?`}
-      on:confirm={deleteBackup}
-      on:cancel={() => { showDeleteDialog = false; backupToDelete = null; }}
-    />
-  {/if}
+      <!-- Retention -->
+      <div class="setting-group">
+        <label class="setting-label" for="retention-input">Retention</label>
+        <div class="retention-control">
+          <input
+            id="retention-input"
+            type="number"
+            min="1"
+            max="100"
+            bind:value={retentionCount}
+            on:change={saveAutomationSettings}
+            disabled={!autoBackupEnabled}
+            class="retention-input"
+          />
+          <span class="retention-suffix">backups</span>
+        </div>
+      </div>
 
-  {#if showRenameDialog}
-    <div class="rename-dialog-modal">
-      <div class="rename-dialog-content">
-        <h3>Rename Backup</h3>
-        <label for="rename-input">New name:</label>
-        <input
-          id="rename-input"
-          bind:value={newName}
-          bind:this={renameInputEl}
-          class="rename-input"
-          on:keydown={(e) => { if (e.key === 'Enter') renameBackup(); }}
-        />
-        <div class="rename-dialog-actions">
-          <button class="rename-confirm" on:click={renameBackup} disabled={loading}>Rename</button>
-          <button class="rename-cancel" on:click={() => { showRenameDialog = false; backupToRename = null; }}>Cancel</button>
+      <!-- Backup Type -->
+      <div class="setting-group">
+        <span class="setting-label">Content</span>
+        <div class="radio-group">
+          <div class="radio-option">
+            <input
+              type="radio"
+              id="type-full"
+              name="backup-type"
+              value="full"
+              bind:group={backupType}
+              on:change={saveAutomationSettings}
+              disabled={!autoBackupEnabled}
+              class="modern-radio"
+            />
+            <label for="type-full" class="radio-label">Full</label>
+          </div>
+          <div class="radio-option">
+            <input
+              type="radio"
+              id="type-world"
+              name="backup-type"
+              value="world"
+              bind:group={backupType}
+              on:change={saveAutomationSettings}
+              disabled={!autoBackupEnabled}
+              class="modern-radio"
+            />
+            <label for="type-world" class="radio-label">World-only</label>
+          </div>
         </div>
       </div>
     </div>
+
+    <!-- Status Footer -->
+    {#if autoBackupEnabled}
+      <div class="status-footer">
+        <div class="next-backup">
+          {#if backupFrequency >= 604800000}
+            Next backup: {dayNames[backupDay]} at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')}
+          {:else if backupFrequency >= 86400000}
+            Next backup: daily at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')}
+          {:else}
+            Next backup: every {Math.floor(backupFrequency / 3600000)}h {Math.floor((backupFrequency % 3600000) / 60000)}m
+          {/if}
+        </div>
+        <div class="last-backup">
+          <span class="status-icon">✓</span>
+          <span>Last backup: {lastAutoBackup || 'Never'}</span>
+        </div>
+      </div>
+    {/if}
+  </div>
+
+  <!-- Status Messages -->
+  {#if status}
+    <div class="status-message success">{status}</div>
+  {/if}
+  {#if error}
+    <div class="status-message error">{error}</div>
   {/if}
 
-  {#if showRestoreDialog}
-    <ConfirmationDialog
-      visible={showRestoreDialog}
-      message={`Restore backup ${backupToRestore?.name}? This will overwrite your current server/world data.`}
-      on:confirm={doRestoreBackup}
-      on:cancel={() => { showRestoreDialog = false; backupToRestore = null; }}
-    />
-  {/if}
+  <!-- Backup List -->
+  <div class="backup-list-section">
+    <div class="list-header">
+      <h2 class="list-title">Backup List</h2>
+      {#if $selectedBackups.size > 0}
+        <button class="bulk-delete-btn" on:click={() => showBulkDeleteDialog = true} disabled={loading}>
+          🗑️ Delete Selected ({$selectedBackups.size})
+        </button>
+      {/if}
+    </div>
 
-  {#if showBulkDeleteDialog}
-    <ConfirmationDialog
-      visible={showBulkDeleteDialog}
-      message={`Delete ${$selectedBackups.size} selected backups? This cannot be undone.`}
-      on:confirm={bulkDeleteBackups}
-      on:cancel={() => showBulkDeleteDialog = false}
-    />
-  {/if}
+    <div class="table-container">
+      <table class="modern-table">
+        <thead>
+          <tr>
+            <th class="checkbox-col">
+              <input 
+                type="checkbox" 
+                checked={selectAll} 
+                on:change={toggleSelectAll}
+                class="modern-checkbox small"
+              />
+            </th>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Size</th>
+            <th>Timestamp</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each backups as backup}
+            <tr>
+              <td class="checkbox-col">
+                <input 
+                  type="checkbox" 
+                  checked={$selectedBackups.has(backup.name)} 
+                  on:change={() => toggleSelect(backup.name)}
+                  class="modern-checkbox small"
+                />
+              </td>
+              <td class="backup-name">
+                {backup.name}
+                {#if backup.metadata?.automated}
+                  <span class="backup-badge">🤖</span>
+                {/if}
+              </td>
+              <td>{backup.metadata?.type || '-'}</td>
+              <td>{(backup.size/1024/1024).toFixed(2)} MB</td>
+              <td>{formatTimestamp(backup.metadata?.timestamp || backup.created)}</td>
+              <td>
+                <div class="action-buttons">
+                  <button 
+                    class="action-btn restore" 
+                    on:click={() => confirmRestore(backup)} 
+                    disabled={loading || isServerRunning}
+                    title="Restore"
+                  >
+                    ↻
+                  </button>
+                  <button 
+                    class="action-btn rename" 
+                    on:click={() => promptRename(backup)} 
+                    disabled={loading}
+                    title="Rename"
+                  >
+                    ✏️
+                  </button>
+                  <button 
+                    class="action-btn delete" 
+                    on:click={() => confirmDelete(backup)} 
+                    disabled={loading}
+                    title="Delete"
+                  >
+                    🗑️
+                  </button>
+                </div>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
+{#if showDeleteDialog}
+  <ConfirmationDialog
+    visible={showDeleteDialog}
+    message={`Delete backup ${backupToDelete?.name}?`}
+    on:confirm={deleteBackup}
+    on:cancel={() => { showDeleteDialog = false; backupToDelete = null; }}
+  />
+{/if}
+
+{#if showRenameDialog}
+  <div class="rename-dialog-modal">
+    <div class="rename-dialog-content">
+      <h3>Rename Backup</h3>
+      <label for="rename-input">New name:</label>
+      <input
+        id="rename-input"
+        bind:value={newName}
+        bind:this={renameInputEl}
+        class="rename-input"
+        on:keydown={(e) => { if (e.key === 'Enter') renameBackup(); }}
+      />
+      <div class="rename-dialog-actions">
+        <button class="rename-confirm" on:click={renameBackup} disabled={loading}>Rename</button>
+        <button class="rename-cancel" on:click={() => { showRenameDialog = false; backupToRename = null; }}>Cancel</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showRestoreDialog}
+  <ConfirmationDialog
+    visible={showRestoreDialog}
+    message={`Restore backup ${backupToRestore?.name}? This will overwrite your current server/world data.`}
+    on:confirm={doRestoreBackup}
+    on:cancel={() => { showRestoreDialog = false; backupToRestore = null; }}
+  />
+{/if}
+
+{#if showBulkDeleteDialog}
+  <ConfirmationDialog
+    visible={showBulkDeleteDialog}
+    message={`Delete ${$selectedBackups.size} selected backups? This cannot be undone.`}
+    on:confirm={bulkDeleteBackups}
+    on:cancel={() => showBulkDeleteDialog = false}
+  />
+{/if}
+
 <style>
-  .backups-tab { 
-    padding: 1rem; 
+  .backups-container {
+    padding: 1rem;
     box-sizing: border-box;
     max-width: 100%;
     overflow-x: auto;
   }
-  
-  .backups-table { 
-    width: 100%; 
-    border-collapse: collapse; 
+
+  .backups-header {
+    background: #2a2e36;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+    border: 1px solid #444;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .backups-title {
+    margin: 0;
+    color: #d9eef7;
+    font-size: 1.8rem;
+  }
+
+  .header-controls {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .backup-type-selector {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: #2a2e36;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+    color: #d9eef7;
+    font-size: 0.95rem;
+  }
+
+  .type-select {
+    background: transparent;
+    border: none;
+    color: #d9eef7;
+    font-size: 0.95rem;
+    padding: 0.2rem 1.5rem 0.2rem 0.5rem; /* Add right padding so text doesn't overlap arrow */
+    cursor: pointer;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    width: 100%;
+  }
+
+  .select-arrow {
+    position: absolute;
+    right: 0.5rem;
+    pointer-events: none;
+    color: #555;
+  }
+
+  .run-backup-btn {
+    background: #3498db;
+    border: none;
+    border-radius: 4px;
+    padding: 0.6rem 1.2rem;
+    color: white;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .run-backup-btn:hover:not(:disabled) {
+    background: #2980b9;
+  }
+
+  .run-backup-btn:disabled {
+    background: #95a5a6;
+    cursor: not-allowed;
+  }
+
+  .settings-card {
+    background: #2a2e36;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.25rem;
+    border: 1px solid #444;
+    max-width: 100%;
+    overflow-x: auto;
+    box-sizing: border-box;
+  }
+
+  .enable-section {
+    margin-bottom: 1.5rem;
+    /* Only one separator - remove bottom border, rely on settings-grid top border */
+    padding-bottom: 0.5rem;
+  }
+
+  .toggle-container {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    margin-bottom: 0.8rem;
+  }
+
+  .enable-label {
+    color: #bbb;
+    font-size: 1rem;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .modern-checkbox {
+    width: 1.25rem;
+    height: 1.25rem;
+    accent-color: #3498db;
+  }
+
+  .modern-checkbox:checked {
+    background-color: #3498db;
+    border-color: #3498db;
+  }
+
+  .modern-checkbox:focus {
+    outline: 2px solid #3498db;
+    outline-offset: 2px;
+  }
+
+     .settings-grid {
+     display: grid;
+     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+     gap: 1rem;
+     margin-top: 1rem;
+     padding-top: 1rem;
+     border-top: 1px solid #444;
+     max-width: 100%;
+     overflow-x: auto;
+     align-items: end; /* Align items for better vertical alignment */
+   }
+
+   .settings-grid.disabled {
+     opacity: 0.7;
+     pointer-events: none;
+   }
+
+  .setting-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .setting-label {
+    color: #bbb;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .select-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: #1e2228;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 0.4rem 0.8rem;
+    color: #eee;
+    font-size: 0.95rem;
+    width: 100%;
+    max-width: 200px; /* Limit width for select */
+  }
+
+  .select-wrapper.small {
+    max-width: 100px; /* Smaller select for time */
+  }
+
+  .modern-select {
+    background: transparent;
+    border: none;
+    color: #eee;
+    font-size: 0.95rem;
+    padding: 0.2rem 0.5rem;
+    cursor: pointer;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    width: 100%;
+  }
+
+  .modern-select:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px #3498db;
+  }
+
+  .time-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .time-separator {
+    color: #555;
+    font-size: 1.1rem;
+    font-weight: bold;
+  }
+
+  .retention-control {
+     display: flex;
+     align-items: center;
+     gap: 0.25rem;
+     background: #1e2228;
+     border: 1px solid #444;
+     border-radius: 4px;
+     padding: 0.32rem 0.6rem; /* match select vertical padding for equal height */
+     color: #eee;
+     font-size: 0.9rem;
+     width: fit-content; /* shrink to content */
+     max-width: 160px;
+   }
+
+  .retention-input {
+    background: transparent;
+    border: none;
+    color: #eee;
+    font-size: 0.95rem;
+    width: 38px;
+    text-align: right;
+  }
+
+  .retention-input:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px #3498db;
+  }
+
+  .retention-suffix {
+    color: #bbb;
+    font-size: 0.8rem;
+  }
+
+  .radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .radio-option {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+  }
+
+  .modern-radio {
+    width: 1.25rem;
+    height: 1.25rem;
+    accent-color: #3498db;
+  }
+
+  .modern-radio:checked {
+    background-color: #3498db;
+    border-color: #3498db;
+  }
+
+  .modern-radio:focus {
+    outline: 2px solid #3498db;
+    outline-offset: 2px;
+  }
+
+  .radio-label {
+    color: #bbb;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+
+  .status-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #444;
+    color: #999;
+    font-size: 0.9rem;
+  }
+
+  .next-backup {
+    color: #d9eef7;
+    font-weight: 500;
+  }
+
+  .last-backup {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .status-icon {
+    color: #2ecc71;
+    font-size: 1rem;
+  }
+
+  .backup-list-section {
+    margin-top: 1.25rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid #444;
+  }
+
+  .list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.8rem;
+  }
+
+  .list-title {
+    margin: 0;
+    color: #d9eef7;
+    font-size: 1.2rem;
+  }
+
+  .bulk-delete-btn {
+    background: #f44336;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 0.4rem 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .bulk-delete-btn:hover:not(:disabled) {
+    background: #c62828;
+  }
+
+     .bulk-delete-btn:disabled {
+     background: #e57373;
+     cursor: not-allowed;
+   }
+
+   .table-container {
+     background: #2a2e36;
+     border-radius: 8px;
+     overflow: hidden;
+     border: 1px solid #444;
+   }
+
+   .modern-table {
+    width: 100%;
+    border-collapse: collapse;
     margin-top: 0.5rem;
     table-layout: fixed;
     max-width: 100%;
   }
-  
-  .backups-table th, .backups-table td { 
-    border: 1px solid #ccc; 
-    padding: 0.5rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+
+     .modern-table th {
+     background: #3a3e46;
+     color: #d9eef7;
+     font-weight: 500;
+     text-transform: uppercase;
+     font-size: 0.8rem;
+     letter-spacing: 0.05em;
+     padding: 0.75rem 1rem;
+     border-bottom: 1px solid #444;
+     text-align: left;
+   }
+
+   .modern-table td {
+     padding: 0.55rem 0.8rem;
+     border-bottom: 1px solid #444;
+     color: #bbb;
+     overflow: hidden;
+     text-overflow: ellipsis;
+     white-space: nowrap;
+   }
+
+   .modern-table tbody tr:hover {
+     background: #32383f;
+   }
+
+  .checkbox-col {
+    width: 40px; /* Checkbox column */
   }
-  
-  .backups-table th:nth-child(1) { width: 40px; } /* Checkbox */
-  .backups-table th:nth-child(2) { width: 30%; } /* Name */
-  .backups-table th:nth-child(3) { width: 10%; } /* Type */
-  .backups-table th:nth-child(4) { width: 12%; } /* Size */
-  .backups-table th:nth-child(5) { width: 25%; } /* Timestamp */
-  .backups-table th:nth-child(6) { width: 23%; } /* Actions */
-  
-  /* Action buttons styling */
+
+     .backup-name {
+     width: 30%; /* Name column */
+     color: #d9eef7;
+     font-weight: 500;
+   }
+
+   .backup-badge {
+     margin-left: 0.5rem;
+     font-size: 0.8rem;
+     color: #3498db;
+   }
+
   .action-buttons {
     display: flex;
-    gap: 0.25rem;
+    gap: 0.3rem;
     justify-content: center;
     align-items: center;
     flex-wrap: nowrap;
   }
-  
+
   .action-btn {
     min-width: 28px;
     height: 28px;
@@ -729,35 +1115,35 @@
     transition: all 0.2s ease;
     flex-shrink: 0;
   }
-  
+
   .action-btn:hover:not(:disabled) {
     background: #3a3e46;
     border-color: #666;
     transform: translateY(-1px);
   }
-  
+
   .action-btn:disabled {
     background: #1a1e26;
     color: #777;
     cursor: not-allowed;
     border-color: #333;
   }
-  
-  .restore-btn:hover:not(:disabled) {
+
+  .restore:hover:not(:disabled) {
     background: #27ae60;
     border-color: #2ecc71;
     color: white;
   }
-  
-  .delete-btn:hover:not(:disabled) {
-    background: #e74c3c;
-    border-color: #c0392b;
-    color: white;
-  }
-  
-  .rename-btn:hover:not(:disabled) {
+
+  .rename:hover:not(:disabled) {
     background: #3498db;
     border-color: #2980b9;
+    color: white;
+  }
+
+  .delete:hover:not(:disabled) {
+    background: #e74c3c;
+    border-color: #c0392b;
     color: white;
   }
 
@@ -770,271 +1156,111 @@
     align-items: center;
     justify-content: center;
   }
-  
-  /* Automation Section Styles - More compact horizontally */
-  .automation-section {
+
+  .rename-dialog-content {
     background: #2a2e36;
     border-radius: 8px;
-    padding: 1rem;
-    margin-bottom: 1rem;
+    padding: 2rem;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    max-width: 400px;
+    width: 90%;
+    text-align: center;
+  }
+
+  .rename-dialog-content h3 {
+    margin-top: 0;
+    margin-bottom: 1.5rem;
+    color: #d9eef7;
+  }
+
+  .rename-dialog-content label {
+    display: block;
+    margin-bottom: 0.8rem;
+    color: #bbb;
+    font-size: 0.95rem;
+  }
+
+  .rename-input {
+    width: 100%;
+    padding: 0.6rem 1rem;
     border: 1px solid #444;
-    max-width: 100%;
-    overflow-x: auto;
+    border-radius: 4px;
+    background: #1e2228;
+    color: #eee;
+    font-size: 1rem;
     box-sizing: border-box;
   }
-  
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.8rem;
-  }
-  
-  .section-header h3 {
-    margin: 0;
-    color: #d9eef7;
-    font-size: 1.2rem;
+
+  .rename-input:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 2px #3498db;
   }
 
-  .run-now-controls {
+  .rename-dialog-actions {
     display: flex;
-    align-items: center;
-    gap: 0.5rem;
+    justify-content: space-around;
+    margin-top: 1.5rem;
   }
 
-  .manual-type-select {
-    padding: 0.3rem;
-    border-radius: 4px;
-    background: #2a2e36;
-    color: #d9eef7;
-    border: 1px solid #555;
-  }
-  
-  .automation-controls {
-    display: flex;
-    flex-direction: column;
-    gap: 0.8rem;
-  }
-  
-  .enable-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.5rem;
-  }
-  
-  .toggle-label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 500;
-    cursor: pointer;
-  }
-  
-  .run-now-button {
-    background: #3498db;
+  .rename-confirm, .rename-cancel {
+    padding: 0.6rem 1.2rem;
     border: none;
     border-radius: 4px;
-    padding: 0.4rem 0.8rem;
-    color: white;
-    font-weight: 500;
     cursor: pointer;
+    font-weight: 500;
+    transition: background 0.2s;
   }
-  
-  .run-now-button:hover:not(:disabled) {
+
+  .rename-confirm {
+    background: #3498db;
+    color: white;
+  }
+
+  .rename-confirm:hover:not(:disabled) {
     background: #2980b9;
   }
-  
-  .run-now-button:disabled {
+
+  .rename-confirm:disabled {
     background: #95a5a6;
     cursor: not-allowed;
   }
-  
-  .settings-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 1rem;
-    margin-top: 0.5rem;
-    padding-top: 0.8rem;
-    border-top: 1px solid #444;
-    max-width: 100%;
-    overflow-x: auto;
+
+  .rename-cancel {
+    background: #e74c3c;
+    color: white;
   }
-  
-  .schedule-item {
-    grid-column: span 2;
+
+  .rename-cancel:hover:not(:disabled) {
+    background: #c0392b;
   }
-  
-  .settings-grid.disabled {
-    opacity: 0.7;
-    pointer-events: none;
-  }
-  
-  .grid-item {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-  
-  .grid-item label {
-    color: #bbb;
-    font-size: 0.9rem;
-  }
-  
-  .radio-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-  
-  .radio-group.horizontal {
-    flex-direction: row;
-    gap: 1rem;
-  }
-  
-  .radio-label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    cursor: pointer;
-  }
-  
-  select, input[type="number"] {
-    background: #1e2228;
-    border: 1px solid #444;
-    border-radius: 4px;
-    padding: 0.4rem;
-    color: #eee;
-    font-size: 0.95rem;
-  }
-  
-  select:disabled, input:disabled {
-    background: #2c3037;
-    color: #aaa;
-    cursor: not-allowed;
-  }
-  
-  .retention-input {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  
-  .retention-input input {
-    width: 50px;
-  }
-  
-  .last-backup-info {
-    background: #32383f;
-    border-radius: 4px;
-    padding: 0.3rem 0.6rem;
-    font-size: 0.9rem;
-    color: #2ecc71;
-    white-space: nowrap;
-  }
-  
-  .time-explanation {
-    font-size: 0.85rem;
-    color: #999;
-    padding: 0.4rem 0.8rem;
-    background: #222;
-    border-radius: 4px;
-    border-left: 3px solid #3498db;
-  }
-  
-  .time-selectors {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-  }
-  
-  .time-selectors select {
-    width: auto;
-    min-width: 50px;
-    max-width: 70px;
-    text-align: center;
-    flex-shrink: 0;
-  }
-  
-  .bulk-delete {
-    background: #f44336;
-    color: #fff;
-    border: none;
-    border-radius: 4px;
-    padding: 0.4rem 1rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s;
-  }
-  
-  .bulk-delete:disabled {
+
+  .rename-cancel:disabled {
     background: #e57373;
     cursor: not-allowed;
   }
-  
-  .world-delete-backup td {
-    background: rgba(255, 0, 0, 0.08);
-    color: #ff5555;
-  }
-  
-  .auto-backup td {
-    background: rgba(46, 204, 113, 0.08);
-  }
-  
-  .backups-list-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-top: 1.5rem;
-    margin-bottom: 0.5rem;
-    border-top: 1px solid #444;
-    padding-top: 1rem;
-  }
-    .backups-list-header h3 {
-    margin: 0;
-  }
-  
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
 
-  /* New styles for backup status info */
-  .backup-status-info {
-    background: #2a2e36;
+  .status-message {
+    padding: 0.8rem 1rem;
     border-radius: 4px;
-    padding: 0.8rem;
-    margin-bottom: 1rem;
-    border: 1px solid #444;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    max-width: 100%;
-    overflow-x: auto;
-  }
-
-  .status-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .status-label {
-    color: #bbb;
-    font-size: 0.9rem;
+    margin-bottom: 0.8rem;
     font-weight: 500;
+    font-size: 0.95rem;
   }
 
-  .status-value {
-    color: #d9eef7;
-    font-weight: 600;
-    font-size: 1rem;
+  .status-message.success {
+    background-color: #2ecc71;
+    color: white;
+  }
+
+  .status-message.error {
+    background-color: #e74c3c;
+    color: white;
+  }
+
+  .modern-select option,
+  .type-select option { /* ensure header dropdown too */
+    color: #000;
+    background: #fff;
   }
 </style>
