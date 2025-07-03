@@ -30,7 +30,14 @@ async function createBackup({ serverPath, type, trigger }) {
   if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
 
   const now = new Date();
-  const timestamp = now.toISOString().replace(/:/g, '-').replace('T', '_').slice(0, 19);
+  // Use local time for filename to match UI display
+  const year = now.getFullYear();
+  const month = (now.getMonth() + 1).toString().padStart(2, '0');
+  const day = now.getDate().toString().padStart(2, '0');
+  const hour = now.getHours().toString().padStart(2, '0');
+  const minute = now.getMinutes().toString().padStart(2, '0');
+  const second = now.getSeconds().toString().padStart(2, '0');
+  const timestamp = `${year}-${month}-${day}_${hour}-${minute}-${second}`;
   const name = `backup-${type}-${timestamp}.zip`;
   const zipPath = path.join(backupDir, name);
 
@@ -45,7 +52,7 @@ async function createBackup({ serverPath, type, trigger }) {
   const stats = fs.statSync(zipPath);
   const metadata = {
     type,
-    timestamp: now.toISOString(),
+    timestamp: now.toISOString(), // Keep ISO format for internal use but filename uses local time
     size: stats.size,
     trigger,
     // Optionally add MC/Fabric version here
@@ -59,7 +66,14 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
 
   const now = new Date();
-  const timestamp = now.toISOString().replace(/:/g, '-').replace('T', '_').slice(0, 19);
+  // Use local time for filename to match UI display
+  const year = now.getFullYear();
+  const month = (now.getMonth() + 1).toString().padStart(2, '0');
+  const day = now.getDate().toString().padStart(2, '0');
+  const hour = now.getHours().toString().padStart(2, '0');
+  const minute = now.getMinutes().toString().padStart(2, '0');
+  const second = now.getSeconds().toString().padStart(2, '0');
+  const timestamp = `${year}-${month}-${day}_${hour}-${minute}-${second}`;
   const name = `backup-${type}-${timestamp}.zip`;
   const zipPath = path.join(backupDir, name);
   const metaPath = zipPath.replace('.zip', '.json');
@@ -78,7 +92,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   // Create metadata first to ensure it's saved even if the zip has issues
   const metadata = {
     type,
-    timestamp: now.toISOString(),
+    timestamp: now.toISOString(), // Keep ISO format for internal use
     size: 0, // Will be updated after ZIP creation
     trigger,
     automated: trigger === 'auto' || trigger === 'app-launch',
@@ -265,7 +279,14 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
     const isWorldType = (type === 'world' || type === 'world-delete');
     // Before restoring, backup the current world (or everything for full)
     const now = new Date();
-    const timestamp = now.toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    // Use local time for filename consistency
+    const year = now.getFullYear();
+    const month = (now.getMonth() + 1).toString().padStart(2, '0');
+    const day = now.getDate().toString().padStart(2, '0');
+    const hour = now.getHours().toString().padStart(2, '0');
+    const minute = now.getMinutes().toString().padStart(2, '0');
+    const second = now.getSeconds().toString().padStart(2, '0');
+    const timestamp = `${year}-${month}-${day}_${hour}-${minute}-${second}`;
     let preRestoreBackupName = `pre-restore-${type}-${timestamp}.zip`;
     let preRestoreBackupPath = path.join(backupDir, preRestoreBackupName);
     // Choose folders to backup before restore
@@ -309,39 +330,59 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
 // Function to clean up old automatic backups based on retention policy
 async function cleanupAutomaticBackups(serverPath, maxCount) {
   try {
-    if (!maxCount || maxCount <= 0) return { success: true, message: 'No cleanup needed' };
+    if (!maxCount || maxCount <= 0) {
+      return { success: true, message: 'No cleanup needed' };
+    }
     
     const backups = await listBackupsWithMetadata(serverPath);
     
-    // Filter to only get automated backups
+    // Filter to only get automated backups (including app-launch)
     const autoBackups = backups.filter(b => 
-      b.metadata && b.metadata.automated === true
+      b.metadata && 
+      (b.metadata.automated === true || 
+       b.metadata.trigger === 'auto' || 
+       b.metadata.trigger === 'app-launch' ||
+       b.metadata.trigger === 'manual-auto')
     );
     
-    // Sort by timestamp (newest first)
+    if (autoBackups.length === 0) {
+      return { success: true, deleted: 0, message: 'No automated backups to clean up' };
+    }
+    
+    // Sort by timestamp (newest first) - use both metadata timestamp and file created time as fallback
     autoBackups.sort((a, b) => {
-      const timeA = a.metadata?.timestamp ? new Date(a.metadata.timestamp) : new Date(a.created);
-      const timeB = b.metadata?.timestamp ? new Date(b.metadata.timestamp) : new Date(b.created);
-      return timeB.getTime() - timeA.getTime();
+      const timeA = a.metadata?.timestamp ? new Date(a.metadata.timestamp).getTime() : new Date(a.created).getTime();
+      const timeB = b.metadata?.timestamp ? new Date(b.metadata.timestamp).getTime() : new Date(b.created).getTime();
+      return timeB - timeA;
     });
     
     // If we have more than the max, delete the oldest ones
     if (autoBackups.length > maxCount) {
       const backupsToDelete = autoBackups.slice(maxCount);
       
+      let deletedCount = 0;
       for (const backup of backupsToDelete) {
-        await deleteBackup({ serverPath, name: backup.name });
+        try {
+          const result = await deleteBackup({ serverPath, name: backup.name });
+          if (result.success) {
+            deletedCount++;
+          }
+        } catch (err) {
+          // Log errors but continue cleanup
+          console.error('Error deleting backup during cleanup:', backup.name, err.message);
+        }
       }
       
       return { 
         success: true, 
-        deleted: backupsToDelete.length,
-        message: `Deleted ${backupsToDelete.length} old automated backups`
+        deleted: deletedCount,
+        message: `Deleted ${deletedCount} old automated backups`
       };
     }
     
-    return { success: true, deleted: 0 };
+    return { success: true, deleted: 0, message: 'No cleanup needed' };
   } catch (err) {
+    console.error('Error during backup cleanup:', err.message);
     return { success: false, error: err.message };
   }
 }

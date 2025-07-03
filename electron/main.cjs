@@ -250,9 +250,7 @@ function createWindow() {
     setupIpcHandlers(win);
     handlersInitialized = true;
     
-    // Initialize automated backups system
-    const { loadBackupManager } = require('./ipc/backup-handlers.cjs');
-    loadBackupManager();
+    // Backup manager initialization is handled in setupIpcHandlers
     
     // Add direct handlers for critical functions to ensure they work
     const fsPromises = require('fs/promises');

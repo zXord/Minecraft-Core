@@ -218,7 +218,7 @@
         throw new Error('Server path is not set');
       }
       
-      // Get latest data from store
+      // Get data from store
       const properties = get(propertiesMap);
       
       // Show saving indicator

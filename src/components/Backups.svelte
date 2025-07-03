@@ -29,12 +29,13 @@
   let autoBackupEnabled = false;
   let backupFrequency = 86400000; // Default to daily (24 hours in ms)
   let backupType = 'world';
-  let retentionCount = 7;
+  let retentionCount = 14;
   let runOnLaunch = false;
   let backupHour = 3; // Default to 3 AM
   let backupMinute = 0; // Default to 00 minutes
   let backupDay = 0; // Default to Sunday (0-based, 0=Sunday, 6=Saturday)
   let manualBackupType = 'world';
+  let nextBackupTime = null;
   
   // Define frequency options (in milliseconds)
   const frequencyOptions = [
@@ -108,6 +109,7 @@
         backupHour = settings.hour || 3;
         backupMinute = settings.minute || 0;
         backupDay = settings.day !== undefined ? settings.day : 0;
+        nextBackupTime = settings.nextBackupTime || null;
         
         // If we have a last run time, update the UI
         if (settings.lastRun) {
@@ -134,6 +136,9 @@
       });
       status = 'Backup automation settings saved';
       setTimeout(() => status = '', 2000);
+      
+      // Refresh automation settings to get updated next backup time
+      loadAutomationSettings();
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Failed to save automation settings';
     }
@@ -142,16 +147,23 @@
   // Run backup now
   async function runAutoBackupNow() {
     loading = true;
-    status = 'Running backup now...';
     error = '';
     try {
-      await window.electron.invoke('backups:run-immediate-auto', { serverPath, type: manualBackupType });
-      await fetchBackups(); // Refresh the list
-      status = 'Backup completed!';
+      const result = await window.electron.invoke('backups:run-immediate-auto', {
+        serverPath,
+        type: manualBackupType
+      });
+      
+      if (result && !result.error) {
+        status = `Manual ${manualBackupType === 'full' ? 'full' : 'world-only'} backup created successfully`;
+        await fetchBackups(); // Refresh the backup list
+      } else {
+        error = result?.error || 'Failed to create manual backup';
+      }
     } catch (e) {
-      error = cleanErrorMessage(e.message) || 'Backup failed';
-    }    loading = false;
-    setTimeout(() => status = '', 2000);
+      error = cleanErrorMessage(e.message) || 'Failed to create manual backup';
+    }
+    loading = false;
   }
   // Handle rename dialog focus without reactive loop
   function handleRenameDialogFocus(dialogVisible, inputElement, justOpened) {
@@ -336,6 +348,21 @@
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   });
+
+  // Helper function to format timestamps consistently
+  function formatTimestamp(timestamp) {
+    if (!timestamp) return '-';
+    
+    try {
+      // Handle both ISO strings and Date objects
+      const date = new Date(timestamp);
+      if (isNaN(date.getTime())) return timestamp; // Return original if invalid
+      
+      return date.toLocaleString(); // Convert to local time
+    } catch (e) {
+      return timestamp; // Return original if conversion fails
+    }
+  }
 </script>
 
 <div class="backups-tab">
@@ -358,6 +385,38 @@
         </button>
       </div>
     </div>
+    
+    <!-- Backup Status Info -->
+    {#if autoBackupEnabled}
+      <div class="backup-status-info">
+        <div class="status-row">
+          <span class="status-label">🕓 Last:</span>
+          <span class="status-value">{lastAutoBackup || 'Never'} (local time)</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">📅 Schedule:</span>
+          <span class="status-value">
+            {#if backupFrequency >= 604800000}
+              {dayNames[backupDay]} at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')} (local time)
+            {:else if backupFrequency >= 86400000}
+              Daily at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')} (local time)
+            {:else}
+              Every {Math.floor(backupFrequency / 3600000)}h {Math.floor((backupFrequency % 3600000) / 60000)}m
+            {/if}
+          </span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">📊 Retention:</span>
+          <span class="status-value">Keep last {retentionCount} automated backups</span>
+        </div>
+        {#if nextBackupTime}
+          <div class="status-row">
+            <span class="status-label">⏰ Next:</span>
+            <span class="status-value">{formatTimestamp(nextBackupTime)} (local time)</span>
+          </div>
+        {/if}
+      </div>
+    {/if}
     
     <div class="automation-controls">
       <div class="enable-row">
@@ -547,7 +606,7 @@
           </td>
           <td>{b.metadata?.type || '-'}</td>
           <td>{(b.size/1024/1024).toFixed(2)} MB</td>
-          <td>{b.metadata?.timestamp || b.created}</td>
+          <td>{formatTimestamp(b.metadata?.timestamp || b.created)}</td>
           <td>
             <div class="action-buttons">
               <button class="action-btn restore-btn" on:click={() => confirmRestore(b)} disabled={loading || isServerRunning} title="Restore this backup">
@@ -945,5 +1004,37 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+  }
+
+  /* New styles for backup status info */
+  .backup-status-info {
+    background: #2a2e36;
+    border-radius: 4px;
+    padding: 0.8rem;
+    margin-bottom: 1rem;
+    border: 1px solid #444;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .status-label {
+    color: #bbb;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .status-value {
+    color: #d9eef7;
+    font-weight: 600;
+    font-size: 1rem;
   }
 </style>

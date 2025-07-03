@@ -456,7 +456,7 @@ async function filterAndResolveDependencies(dependencies) {
     return [];
   }
   
-  // Debug logging
+  
   
   // Resolve dependency names and versions
   const resolvedDeps = await Promise.all(requiredDeps.map(async (dep) => {
