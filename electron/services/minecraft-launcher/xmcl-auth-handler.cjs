@@ -165,22 +165,22 @@ class XMCLAuthHandler {
           // Don't store the full Xbox objects as they're not serializable
           // We'll regenerate them from the Microsoft token on load
         } : null,
-        // Store serializable parts of MSMC metadata for refresh
-        msmc_refresh_data: this.authData.msmc_meta ? {
-          // Save just the essential token data (these are serializable)
-          msToken: this.authData.msmc_meta.msToken,
-          xblToken: this.authData.msmc_meta.xblToken,
-          exp: this.authData.msmc_meta.exp,
-          // Don't save parent - it contains non-serializable methods
-          // We'll recreate refresh capability using the tokens
-          refreshCapable: true
-        } : this.authData.msmc_refresh_tokens ? {
-          // If we don't have msmc_meta but have refresh tokens, save those
-          msToken: this.authData.msmc_refresh_tokens.msToken,
-          xblToken: this.authData.msmc_refresh_tokens.xblToken,
-          exp: this.authData.msmc_refresh_tokens.exp,
-          refreshCapable: true
-        } : null
+              // Store serializable parts of MSMC metadata for refresh
+      msmc_refresh_data: this.authData.msmc_meta ? {
+        // Save just the essential token data (these are serializable)
+        msToken: this.authData.msmc_meta.msToken,
+        xblToken: this.authData.msmc_meta.xblToken,
+        exp: this.authData.msmc_meta.exp,
+        // Don't save parent - it contains non-serializable methods
+        // We'll recreate refresh capability using the tokens
+        refreshCapable: true
+      } : this.authData.msmc_refresh_tokens ? {
+        // If we don't have msmc_meta but have refresh tokens, save those
+        msToken: this.authData.msmc_refresh_tokens.msToken,
+        xblToken: this.authData.msmc_refresh_tokens.xblToken,
+        exp: this.authData.msmc_refresh_tokens.exp,
+        refreshCapable: true
+      } : null
       };
 
       fs.writeFileSync(authFile, JSON.stringify(authDataToSave, null, 2));
@@ -325,7 +325,7 @@ class XMCLAuthHandler {
       return { success: true, refreshed: false, usedCache: true };
 
     } catch (error) {
-      
+
 
       // On any error, if token isn't extremely old, use it anyway
       const savedDate = new Date(this.authData.savedAt || 0);
@@ -340,7 +340,7 @@ class XMCLAuthHandler {
 
       // Use cached token for anything newer than 3 months
       return { success: true, refreshed: false, error: error.message, usedCache: true };
-    }
+      }
   }
   /**
    * Refresh Microsoft access token using refresh token
@@ -561,12 +561,12 @@ class XMCLAuthHandler {
           if (refreshError.message && (refreshError.message.includes('401') || refreshError.message.includes('unauthorized') || refreshError.message.includes('invalid_grant'))) {
             // Microsoft token is definitely expired - require fresh auth
             if (daysSinceSaved > 7) { // Only clear if also more than a week old
-              this.authData = null;
-              return { 
-                success: false, 
-                error: 'Microsoft authentication token has expired. Please re-authenticate.',
-                requiresAuth: true 
-              };
+            this.authData = null;
+            return { 
+              success: false, 
+              error: 'Microsoft authentication token has expired. Please re-authenticate.',
+              requiresAuth: true 
+            };
             }
           }
           
@@ -688,7 +688,7 @@ class XMCLAuthHandler {
         lastRefresh: new Date().toISOString()
       };
 
-      this.lastRefreshTime = new Date();
+            this.lastRefreshTime = new Date();
 
       return { success: true, refreshed: true };
 
@@ -718,7 +718,7 @@ class XMCLAuthHandler {
           requiresAuth: true 
         };
       }
-      
+
       // For tokens older than 3 months, require re-auth even without explicit errors
       if (daysSinceSaved > 90) {
         this.authData = null;

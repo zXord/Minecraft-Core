@@ -341,7 +341,7 @@ function createSettingsHandlers() {
         // Create servers.dat so the server appears in multiplayer list (only if not already initialized)
         const serversInitializedFile = path.join(clientPath, '.servers-initialized');
         if (!fs.existsSync(serversInitializedFile)) {
-          await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
+        await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
           
           // Create flag file to indicate servers.dat has been initialized
           fs.writeFileSync(serversInitializedFile, JSON.stringify({

@@ -594,9 +594,9 @@ function createMinecraftLauncherHandlers(win) {
         launcher.clearAuthData();
         
         // Also delete the saved auth file
-        const authFile = path.join(clientPath, 'xmcl-auth.json');
-        if (fs.existsSync(authFile)) {
-          fs.unlinkSync(authFile);
+          const authFile = path.join(clientPath, 'xmcl-auth.json');
+          if (fs.existsSync(authFile)) {
+            fs.unlinkSync(authFile);
         }
         
         return { success: true };
@@ -945,12 +945,12 @@ function createMinecraftLauncherHandlers(win) {
         const serversInitializedFile = path.join(clientPath, '.servers-initialized');
         if (!fs.existsSync(serversInitializedFile)) {
           // First time launch - add server entry
-          await ensureServersDat(
-            clientPath,
-            serverIp,
-            managementPort,
-            clientName || 'Minecraft Server',
-            serverPort,
+        await ensureServersDat(
+          clientPath,
+          serverIp,
+          managementPort,
+          clientName || 'Minecraft Server',
+          serverPort,
             false // Don't preserve - we want to add our server on first launch
           );
           
