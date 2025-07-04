@@ -173,17 +173,14 @@ function createBackupHandlers() {
           const lastRun = settings.lastRun ? new Date(settings.lastRun) : null;
           if (lastRun) {
             if (settings.frequency < 604800000) { // Daily
-              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-              const lastRunDay = new Date(lastRun.getFullYear(), lastRun.getMonth(), lastRun.getDate());
-              
-              if (lastRunDay.getTime() === today.getTime()) {
+              // Only skip today if the last run occurred *after* the upcoming scheduled time.
+              if (lastRun >= nextBackupTime) {
                 nextBackupTime.setDate(nextBackupTime.getDate() + 1);
               }
             } else { // Weekly
-              const daysSinceLastRun = Math.floor((now.getTime() - lastRun.getTime()) / (1000 * 60 * 60 * 24));
-              if (daysSinceLastRun < 6) {
-                const daysToAdd = 7 - (daysSinceLastRun % 7);
-                nextBackupTime.setDate(nextBackupTime.getDate() + daysToAdd);
+              // Skip this week only if the last run happened after the upcoming scheduled time this week
+              if (lastRun >= nextBackupTime) {
+                nextBackupTime.setDate(nextBackupTime.getDate() + 7);
               }
             }
           }
@@ -251,11 +248,14 @@ function startAutomatedBackups(settings, serverPath) {
   // Calculate when the next backup should run
   function scheduleNextBackup() {
     const now = new Date();
+    // Always use the latest settings from the store (in case they changed since the last run)
+    const currentSettings = appStore.get('backupSettings') || settings;
+
     let nextRunTime;
 
-    if (settings.frequency >= 86400000) { // Daily or weekly
-      const scheduledHour = settings.hour !== undefined ? settings.hour : 3;
-      const scheduledMinute = settings.minute !== undefined ? settings.minute : 0;
+    if (currentSettings.frequency >= 86400000) { // Daily or weekly
+      const scheduledHour = currentSettings.hour !== undefined ? currentSettings.hour : 3;
+      const scheduledMinute = currentSettings.minute !== undefined ? currentSettings.minute : 0;
       
       // Create next run time for today
       nextRunTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), scheduledHour, scheduledMinute, 0, 0);
@@ -266,8 +266,8 @@ function startAutomatedBackups(settings, serverPath) {
       }
       
       // For weekly backups, adjust to the correct day
-      if (settings.frequency >= 604800000) { // Weekly
-        const targetDay = settings.day !== undefined ? settings.day : 0; // Sunday = 0
+      if (currentSettings.frequency >= 604800000) { // Weekly
+        const targetDay = currentSettings.day !== undefined ? currentSettings.day : 0; // Sunday = 0
         const currentDay = nextRunTime.getDay();
         const daysUntilTarget = (targetDay - currentDay + 7) % 7;
         
@@ -280,32 +280,27 @@ function startAutomatedBackups(settings, serverPath) {
       }
       
       // Check if we already ran today (for daily) or this week (for weekly)
-      const lastRun = settings.lastRun ? new Date(settings.lastRun) : null;
+      const lastRun = currentSettings.lastRun ? new Date(currentSettings.lastRun) : null;
       if (lastRun) {
-        if (settings.frequency < 604800000) { // Daily
-          const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-          const lastRunDay = new Date(lastRun.getFullYear(), lastRun.getMonth(), lastRun.getDate());
-          
-          if (lastRunDay.getTime() === today.getTime()) {
-            // Already ran today, schedule for tomorrow
+        if (currentSettings.frequency < 604800000) { // Daily
+          // Only defer to tomorrow if the last run occurred after the upcoming scheduled time.
+          if (lastRun >= nextRunTime) {
             nextRunTime.setDate(nextRunTime.getDate() + 1);
           }
         } else { // Weekly
-          const daysSinceLastRun = Math.floor((now.getTime() - lastRun.getTime()) / (1000 * 60 * 60 * 24));
-          if (daysSinceLastRun < 6) {
-            // Already ran this week, schedule for next week
-            const daysToAdd = 7 - (daysSinceLastRun % 7);
-            nextRunTime.setDate(nextRunTime.getDate() + daysToAdd);
+          // Only skip this week if the last run happened after the upcoming scheduled time this week
+          if (lastRun >= nextRunTime) {
+            nextRunTime.setDate(nextRunTime.getDate() + 7);
           }
         }
       }
     } else {
       // For shorter intervals (hourly, etc.), schedule based on interval
-      const lastRun = settings.lastRun ? new Date(settings.lastRun) : null;
+      const lastRun = currentSettings.lastRun ? new Date(currentSettings.lastRun) : null;
       if (lastRun) {
-        nextRunTime = new Date(lastRun.getTime() + settings.frequency);
+        nextRunTime = new Date(lastRun.getTime() + currentSettings.frequency);
       } else {
-        nextRunTime = new Date(now.getTime() + settings.frequency);
+        nextRunTime = new Date(now.getTime() + currentSettings.frequency);
       }
     }
 

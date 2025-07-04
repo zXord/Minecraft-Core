@@ -34,6 +34,8 @@
   let backupMinute = 0; // Default to 00 minutes
   let backupDay = 0; // Default to Sunday (0-based, 0=Sunday, 6=Saturday)
   let manualBackupType = 'world';
+  let nextBackupTimeIso = null;
+  let remainingTime = '';
   
   // Define frequency options (in milliseconds)
   const frequencyOptions = [
@@ -107,6 +109,8 @@
         backupHour = settings.hour || 3;
         backupMinute = settings.minute || 0;
         backupDay = settings.day !== undefined ? settings.day : 0;
+        nextBackupTimeIso = settings.nextBackupTime || null;
+        updateRemainingTime();
         
         // If we have a last run time, update the UI
         if (settings.lastRun) {
@@ -154,6 +158,7 @@
       if (result && !result.error) {
         status = `Manual ${manualBackupType === 'full' ? 'full' : 'world-only'} backup created successfully`;
         await fetchBackups(); // Refresh the backup list
+        loadAutomationSettings(); // Refresh next-backup timer
         setTimeout(() => status = '', 2000);
       } else {
         error = result?.error || 'Failed to create manual backup';
@@ -303,6 +308,33 @@
     loading = false;
   }
 
+  function updateRemainingTime() {
+    if (!nextBackupTimeIso) {
+      remainingTime = '';
+      return;
+    }
+    const now = new Date();
+    const next = new Date(nextBackupTimeIso);
+    if (isNaN(next.getTime())) {
+      remainingTime = '';
+      return;
+    }
+    const diffMs = next.getTime() - now.getTime();
+    if (diffMs <= 0) {
+      remainingTime = 'due now';
+      return;
+    }
+    const totalMinutes = Math.floor(diffMs / 60000);
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    const minutes = totalMinutes % 60;
+    const parts = [];
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0 || days > 0) parts.push(`${hours}h`);
+    parts.push(`${minutes}m`);
+    remainingTime = parts.join(' ');
+  }
+
   // Add notification event listener
   onMount(() => {
     // Set up event listener for backup notifications
@@ -310,9 +342,10 @@
       if (notification && notification.message) {
         if (notification.success) {
           status = notification.message;
-          // If it's an automatic backup notification, refresh the backup list
-          if (notification.message.includes('auto-backup')) {
+          // Refresh backup list and automation settings whenever a backup succeeds
+          if (notification.message.includes('auto-backup') || notification.message.includes('backup created')) {
             fetchBackups();
+            loadAutomationSettings();
           }
         } else {
           error = notification.message;
@@ -342,9 +375,13 @@
     document.addEventListener('visibilitychange', handleVisibilityChange);
     
     // Clean up on destroy
+    let remainingInterval;
+    remainingInterval = setInterval(updateRemainingTime, 60000);
+    updateRemainingTime();
     return () => {
       window.electron.removeListener('backup-notification', notificationHandler);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (remainingInterval) clearInterval(remainingInterval);
     };
   });
 
@@ -446,34 +483,31 @@
                 <span class="select-arrow">▼</span>
               </div>
             {/if}
-            <div class="select-wrapper small">
-              <select 
-                id="hour-select"
+            <div class="number-wrapper small">
+              <input
+                id="hour-input"
+                type="number"
+                min="0"
+                max="23"
                 bind:value={backupHour}
                 on:change={saveAutomationSettings}
                 disabled={!autoBackupEnabled}
-                class="modern-select small"
-              >
-                {#each Array(24).fill().map((_, i) => i) as hour}
-                  <option value={hour}>{hour.toString().padStart(2, '0')}</option>
-                {/each}
-              </select>
-              <span class="select-arrow">▼</span>
+                class="number-input small"
+              />
             </div>
             <span class="time-separator">:</span>
-            <div class="select-wrapper small">
-              <select 
-                id="minute-select"
+            <div class="number-wrapper small">
+              <input
+                id="minute-input"
+                type="number"
+                min="0"
+                max="59"
+                step="1"
                 bind:value={backupMinute}
                 on:change={saveAutomationSettings}
                 disabled={!autoBackupEnabled}
-                class="modern-select small"
-              >
-                {#each [0, 15, 30, 45] as minute}
-                  <option value={minute}>{minute.toString().padStart(2, '0')}</option>
-                {/each}
-              </select>
-              <span class="select-arrow">▼</span>
+                class="number-input small"
+              />
             </div>
           </div>
         </div>
@@ -541,6 +575,9 @@
             Next backup: daily at {backupHour.toString().padStart(2, '0')}:{backupMinute.toString().padStart(2, '0')}
           {:else}
             Next backup: every {Math.floor(backupFrequency / 3600000)}h {Math.floor((backupFrequency % 3600000) / 60000)}m
+          {/if}
+          {#if remainingTime}
+            &nbsp;(<span class="remaining-time">in {remainingTime}</span>)
           {/if}
         </div>
         <div class="last-backup">
@@ -1261,5 +1298,36 @@
   .type-select option { /* ensure header dropdown too */
     color: #000;
     background: #fff;
+  }
+
+  .remaining-time {
+    color: #aaa;
+    font-style: italic;
+  }
+
+  /* Add styles for new numeric inputs */
+  .number-wrapper {
+    background: #1e2228;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 0.32rem 0.6rem;
+    color: #eee;
+    display: flex;
+    align-items: center;
+  }
+  .number-wrapper.small {
+    max-width: 80px;
+  }
+  .number-input {
+    background: transparent;
+    border: none;
+    color: #eee;
+    font-size: 0.95rem;
+    width: 48px;
+    text-align: right;
+  }
+  .number-input:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px #3498db;
   }
 </style>
