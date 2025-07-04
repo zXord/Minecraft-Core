@@ -39,6 +39,33 @@
             gap: 8px;
         }
 
+        /* Search box */
+        .search-container {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .search-input {
+            padding: 3px 6px;
+            font-size: 10px;
+            border: 1px solid #555;
+            border-radius: 3px;
+            background: #2d2d2d;
+            color: #fff;
+            width: 120px;
+        }
+
+        .btn.search-next, .btn.search-prev {
+            padding: 3px 6px;
+            font-size: 10px;
+        }
+
+        .highlight {
+            background: #ffff00;
+            color: #000;
+        }
+        
         .btn {
             background: #444;
             color: #fff;
@@ -130,6 +157,11 @@
             <button class="btn" onclick="toggleAutoscroll()">Auto-scroll: ON</button>
             <button class="btn clear" onclick="clearConsole()">Clear</button>
             <button class="btn" onclick="saveLog()">Save Log</button>
+            <div class="search-container">
+                <input id="searchInput" class="search-input" type="text" placeholder="Search..." onkeydown="handleSearchKey(event)" />
+                <button class="btn search-prev" onclick="navigateSearch(-1)">⬆</button>
+                <button class="btn search-next" onclick="navigateSearch(1)">⬇</button>
+            </div>
         </div>
     </div>
     <div class="console" id="console"></div>
@@ -213,6 +245,53 @@
                 message: 'Debug console is ready and listening for Java output...'
             });
         }, 1000);
+
+        /* Search functionality */
+        let searchResults = [];
+        let currentSearchIndex = -1;
+
+        function handleSearchKey(e) {
+            if (e.key === 'Enter') {
+                performSearch();
+            }
+        }
+
+        function performSearch() {
+            const term = document.getElementById('searchInput').value.trim().toLowerCase();
+            clearHighlights();
+            searchResults = [];
+            currentSearchIndex = -1;
+            if (!term) return;
+            const entries = document.querySelectorAll('.log-entry');
+            entries.forEach((el) => {
+                const text = el.textContent.toLowerCase();
+                if (text.includes(term)) {
+                    el.classList.add('highlight');
+                    searchResults.push(el);
+                }
+            });
+            if (searchResults.length) {
+                currentSearchIndex = 0;
+                scrollToSearchResult();
+            }
+        }
+
+        function clearHighlights() {
+            document.querySelectorAll('.highlight').forEach(el => el.classList.remove('highlight'));
+        }
+
+        function navigateSearch(direction) {
+            if (searchResults.length === 0) return;
+            currentSearchIndex = (currentSearchIndex + direction + searchResults.length) % searchResults.length;
+            scrollToSearchResult();
+        }
+
+        function scrollToSearchResult() {
+            const el = searchResults[currentSearchIndex];
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
     </script>
 </body>
 </html> 
