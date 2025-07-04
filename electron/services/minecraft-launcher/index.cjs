@@ -35,6 +35,17 @@ class MinecraftLauncher extends EventEmitter {
     this.clientPath = null;
     this.javaManager = new JavaManager(); // Initialize without client path initially
     this.authHandler = new XMCLAuthHandler(this); // Use new XMCL auth handler
+
+    // NEW: buffered auth logs which are emitted before debug console is ready
+    this.pendingAuthLogs = [];
+    this.on('auth-log', (entry) => {
+      if (this.debugWindow && !this.debugWindow.isDestroyed()) {
+        this.debugWindow.webContents.send('debug-log', entry);
+      } else {
+        // Store for later flush when debug console opens
+        this.pendingAuthLogs.push(entry);
+      }
+    });
     
     // Hybrid approach: Use XMCL downloader with legacy fallback during migration
     this.legacyClientDownloader = new ClientDownloader(this.javaManager, this);
@@ -544,14 +555,20 @@ class MinecraftLauncher extends EventEmitter {
         // Show window when ready
         debugWindow.once('ready-to-show', () => {
           debugWindow.show();
-          
-          // Wait for the window to be fully loaded before sending messages
-          debugWindow.webContents.once('did-finish-load', () => {
-            setTimeout(() => {
-              if (debugWindow && !debugWindow.isDestroyed()) {
-                debugWindow.webContents.send('debug-log', {
-                  type: 'header',
-                  message: `========================================
+
+          // Immediately send header + flush; if content not yet ready it queues automatically
+          if (debugWindow && !debugWindow.isDestroyed()) {
+            // Flush any auth logs captured before console was visible
+            if (this.pendingAuthLogs && this.pendingAuthLogs.length > 0) {
+              for (const logEntry of this.pendingAuthLogs) {
+                debugWindow.webContents.send('debug-log', logEntry);
+              }
+              this.pendingAuthLogs.length = 0;
+            }
+
+            debugWindow.webContents.send('debug-log', {
+              type: 'header',
+              message: `========================================
     MINECRAFT DEBUG CONSOLE
 ========================================
 
@@ -563,10 +580,8 @@ Launch Version: ${launchVersion}
 Starting Minecraft with console output...
 ========================================
 `
-                });
-              }
-            }, 1000);
-          });
+            });
+          }
         });
         
         // Launch Java with captured output
