@@ -104,6 +104,31 @@ function convertSortToModrinthFormat(sortBy) {
 }
 
 /**
+ * Helper function to filter mods by environment type (client, server, both).
+ * @param {Array<Object>} mods - Array of mod objects
+ * @param {string} environmentType - 'all' | 'client' | 'server' | 'both'
+ * @returns {Array<Object>} Filtered mods array
+ */
+function filterModsByEnvironment(mods, environmentType = 'all') {
+  if (!Array.isArray(mods) || environmentType === 'all') {
+    return mods;
+  }
+  switch (environmentType) {
+    case 'client':
+      // Accept any mod that can run on the client (required OR optional)
+      return mods.filter(m => m.clientSide);
+    case 'server':
+      // Accept any mod that can run on the server (required OR optional)
+      return mods.filter(m => m.serverSide);
+    case 'both':
+      // Only mods explicitly supporting both sides
+      return mods.filter(m => m.clientSide && m.serverSide);
+    default:
+      return mods;
+  }
+}
+
+/**
  * Get popular mods from Modrinth
  * 
  * @param {Object} options - Search options
@@ -112,9 +137,10 @@ function convertSortToModrinthFormat(sortBy) {
  * @param {number} options.page - Page number (1-based)
  * @param {number} options.limit - Results per page
  * @param {string} options.sortBy - Sort method (popular, recent, downloads, name)
+ * @param {string} [options.environmentType='all'] - Filter by environment type ('all', 'client', 'server', 'both')
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortBy = 'relevance' }) {
+async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
   await rateLimit();
   
   
@@ -127,6 +153,27 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
   }
   if (version) {
     facets.push(["versions:" + version]);
+  }
+  // Add environment facet filters based on environmentType
+  if (environmentType === 'client') {
+    facets.push([
+      'client_side:required',
+      'client_side:optional'
+    ]);
+  } else if (environmentType === 'server') {
+    facets.push([
+      'server_side:required',
+      'server_side:optional'
+    ]);
+  } else if (environmentType === 'both') {
+    facets.push([
+      'client_side:required',
+      'client_side:optional'
+    ]);
+    facets.push([
+      'server_side:required',
+      'server_side:optional'
+    ]);
   }
   
 
@@ -185,16 +232,15 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
       clientSide: mod.client_side === 'required' || mod.client_side === 'optional',
       serverSide: mod.server_side === 'required' || mod.server_side === 'optional'
     }));
-    
-  return {
-    mods,
-    pagination: {
-      currentPage: page,
-      totalResults: data.total_hits,
-      totalPages: Math.ceil(data.total_hits / limit),
-      limit
-    }
-  };
+    return {
+      mods,
+      pagination: {
+        currentPage: page,
+        totalResults: data.total_hits,
+        totalPages: Math.ceil(data.total_hits / limit),
+        limit
+      }
+    };
 }
 
 /**
@@ -207,9 +253,10 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
  * @param {number} options.page - Page number (1-based)
  * @param {number} options.limit - Number of results per page
  * @param {string} [options.sortBy='relevance'] - Sort by option
+ * @param {string} [options.environmentType='all'] - Filter by environment type ('all', 'client', 'server', 'both')
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function searchModrinthMods({ query, loader, version, page = 1, limit = 20, sortBy = 'relevance' }) {
+async function searchModrinthMods({ query, loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
   
   await rateLimit();
   
@@ -223,6 +270,27 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   }
   if (version) {
     facets.push(["versions:" + version]);
+  }
+  // Add environment facet filters based on environmentType
+  if (environmentType === 'client') {
+    facets.push([
+      'client_side:required',
+      'client_side:optional'
+    ]);
+  } else if (environmentType === 'server') {
+    facets.push([
+      'server_side:required',
+      'server_side:optional'
+    ]);
+  } else if (environmentType === 'both') {
+    facets.push([
+      'client_side:required',
+      'client_side:optional'
+    ]);
+    facets.push([
+      'server_side:required',
+      'server_side:optional'
+    ]);
   }
   
 
@@ -283,15 +351,14 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
       lastUpdated: project.date_modified,
       source: 'modrinth'
     }));
-
-  return {
-    mods,
-    pagination: {
-      totalResults: data.total_hits,
-      totalPages: Math.ceil(data.total_hits / limit),
-      currentPage: page
-    }
-  };
+    return {
+      mods,
+      pagination: {
+        totalResults: data.total_hits,
+        totalPages: Math.ceil(data.total_hits / limit),
+        currentPage: page
+      }
+    };
 }
 
 /**
@@ -711,9 +778,11 @@ async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
  * @param {string} options.version - Minecraft version
  * @param {number} options.page - Page number (1-based)
  * @param {number} options.limit - Results per page
+ * @param {string} [options.environmentType='all'] - Filter by environment type ('all', 'client', 'server', 'both')
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function getCurseForgePopular({ page = 1, limit = 20 }) {
+async function getCurseForgePopular({ page = 1, limit = 20, environmentType = 'all' }) {
+  void environmentType; // silence unused parameter warning
   // Return an empty result set
   return {
     mods: [],
@@ -735,9 +804,11 @@ async function getCurseForgePopular({ page = 1, limit = 20 }) {
  * @param {string} options.version - Minecraft version
  * @param {number} options.page - Page number (1-based)
  * @param {number} options.limit - Results per page
+ * @param {string} [options.environmentType='all'] - Filter by environment type ('all', 'client', 'server', 'both')
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
-async function searchCurseForgeMods({ page = 1, limit = 20 }) {
+async function searchCurseForgeMods({ page = 1, limit = 20, environmentType = 'all' }) {
+  void environmentType; // silence unused parameter warning
   // Return an empty result set
   return {
     mods: [],
@@ -763,6 +834,7 @@ module.exports = {
   rateLimit,
   clearVersionCache,
   convertSortToModrinthFormat,
+  filterModsByEnvironment,
   getModrinthPopular,
   searchModrinthMods,
   formatModVersions,

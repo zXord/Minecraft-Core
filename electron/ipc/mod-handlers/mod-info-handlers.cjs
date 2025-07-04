@@ -3,17 +3,17 @@ const modAnalysisUtils = require('../mod-utils/mod-analysis-utils.cjs');
 
 function createModInfoHandlers() {
   return {
-    'search-mods': async (_e, { keyword, loader, version, source, page = 1, limit = 20, sortBy = 'popular' }) => {
+    'search-mods': async (_e, { keyword, loader, version, source, page = 1, limit = 20, sortBy = 'popular', environmentType = 'all' }) => {
       if (source === 'modrinth') {
         if (!keyword || keyword.trim() === '') {
-          return await modApiService.getModrinthPopular({ loader, version, page, limit, sortBy });
+          return await modApiService.getModrinthPopular({ loader, version, page, limit, sortBy, environmentType });
         }
-        return await modApiService.searchModrinthMods({ query: keyword, loader, version, page, limit, sortBy });
+        return await modApiService.searchModrinthMods({ query: keyword, loader, version, page, limit, sortBy, environmentType });
       } else if (source === 'curseforge') {
         if (!keyword || keyword.trim() === '') {
-          return await modApiService.getCurseForgePopular({ loader, version, page, limit });
+          return await modApiService.getCurseForgePopular({ loader, version, page, limit, environmentType });
         }
-        return await modApiService.searchCurseForgeMods({ query: keyword, loader, version, page, limit });
+        return await modApiService.searchCurseForgeMods({ query: keyword, loader, version, page, limit, environmentType });
       }
       throw new Error(`Invalid source: ${source}`);
     },
