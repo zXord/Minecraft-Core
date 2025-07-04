@@ -34,7 +34,6 @@
   let backupMinute = 0; // Default to 00 minutes
   let backupDay = 0; // Default to Sunday (0-based, 0=Sunday, 6=Saturday)
   let manualBackupType = 'world';
-  let nextBackupTime = null;
   
   // Define frequency options (in milliseconds)
   const frequencyOptions = [
@@ -108,7 +107,6 @@
         backupHour = settings.hour || 3;
         backupMinute = settings.minute || 0;
         backupDay = settings.day !== undefined ? settings.day : 0;
-        nextBackupTime = settings.nextBackupTime || null;
         
         // If we have a last run time, update the UI
         if (settings.lastRun) {
@@ -156,6 +154,7 @@
       if (result && !result.error) {
         status = `Manual ${manualBackupType === 'full' ? 'full' : 'world-only'} backup created successfully`;
         await fetchBackups(); // Refresh the backup list
+        setTimeout(() => status = '', 2000);
       } else {
         error = result?.error || 'Failed to create manual backup';
       }
