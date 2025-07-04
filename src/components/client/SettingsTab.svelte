@@ -174,14 +174,14 @@
                 {/if}
                 <p class="auth-note">Authentication is managed automatically. Click below only if you need to refresh your login.</p>
                 <div class="auth-buttons">
-                  <button 
-                    class="modern-btn secondary sm" 
-                    on:click={handleAuthenticate} 
-                    disabled={isAuthenticating}
-                    title="Get fresh authentication token"
-                  >
-                    {isAuthenticating ? '⏳ Authenticating...' : '🔄 Refresh Login'}
-                  </button>
+                <button 
+                  class="modern-btn secondary sm" 
+                  on:click={handleAuthenticate} 
+                  disabled={isAuthenticating}
+                  title="Get fresh authentication token"
+                >
+                  {isAuthenticating ? '⏳ Authenticating...' : '🔄 Refresh Login'}
+                </button>
                 </div>
             {:else}
                 <p class="auth-description">Microsoft authentication required</p>

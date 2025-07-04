@@ -376,11 +376,11 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
   
   // Check if we already have this version information cached (unless forcing refresh)
   if (!forceRefresh) {
-    const versionCache = get(modVersionsCache);
-    if (versionCache[cacheKey] && versionCache[cacheKey].length > 0) {
-      return versionCache[cacheKey];
+  const versionCache = get(modVersionsCache);
+  if (versionCache[cacheKey] && versionCache[cacheKey].length > 0) {
+    return versionCache[cacheKey];
     }
-  }
+    }
     
   // Apply rate limiting to avoid hitting API limits
   const now = Date.now();
