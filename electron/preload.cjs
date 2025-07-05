@@ -152,6 +152,7 @@ contextBridge.exposeInMainWorld('electron', {
       'download-specific-version',
       'get-current-version',
       'install-specific-version',
+      'check-file-exists',
       // Application lifecycle
       'app-close-response',
       // Management server events
