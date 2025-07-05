@@ -31,6 +31,11 @@ class UpdateService extends EventEmitter {
   // Check if we're in development mode or have invalid config
   isDevelopmentMode() {
     try {
+      // Allow forcing updates in development with environment variable
+      if (process.env.FORCE_UPDATES === 'true') {
+        return false;
+      }
+      
       // First check if we're running from source (npm run dev)
       if (process.env.NODE_ENV === 'development' || process.argv.includes('--dev')) {
         return true;

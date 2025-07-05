@@ -193,8 +193,6 @@ function createUpdateHandlers(win) {
         const fs = require('fs');
         const path = require('path');
         
-        console.log('Install attempt for:', filePath);
-        
         // Wait a moment to ensure file system has synced
         await new Promise(resolve => setTimeout(resolve, 1000));
         
@@ -203,13 +201,9 @@ function createUpdateHandlers(win) {
           // Log additional debugging info
           const dirPath = path.dirname(filePath);
           
-          console.log('File not found!');
-          console.log('Directory exists:', fs.existsSync(dirPath));
-          
           let dirContents = [];
           if (fs.existsSync(dirPath)) {
             dirContents = fs.readdirSync(dirPath);
-            console.log('Directory contents:', dirContents);
           }
           
           return { 
@@ -218,9 +212,8 @@ function createUpdateHandlers(win) {
           };
         }
         
-        // Check file permissions and size
+        // Check file size
         const stats = fs.statSync(filePath);
-        console.log('File size:', stats.size);
         
         if (stats.size === 0) {
           return { 
@@ -234,7 +227,6 @@ function createUpdateHandlers(win) {
         
         return { success: true, message: 'Installer launched. The app will close when installation begins.' };
       } catch (error) {
-        console.error('Install error:', error);
         return { success: false, error: error.message };
       }
     },
