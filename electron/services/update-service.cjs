@@ -19,6 +19,10 @@ class UpdateService extends EventEmitter {
     this.currentVersion = null;
     this.latestVersion = null;
     this.updateAvailable = false;
+    this.isDownloadingSpecificVersion = false; // Flag to prevent conflicts
+    this.lastSpecificVersionProgress = 0; // Track progress to prevent backwards movement
+    this.lastEmittedProgress = 0; // Track last emitted progress
+    this.lastProgressTime = 0; // Track last progress emission time
 
     this.setupAutoUpdater();
     this.loadIgnoredVersion();
@@ -91,6 +95,11 @@ class UpdateService extends EventEmitter {
     });
 
     autoUpdater.on('download-progress', (progress) => {
+      // Don't emit auto-updater progress if we're downloading a specific version
+      if (this.isDownloadingSpecificVersion) {
+        return;
+      }
+      
       this.downloadProgress = {
         percent: Math.round(progress.percent),
         bytesPerSecond: progress.bytesPerSecond,
@@ -418,10 +427,19 @@ class UpdateService extends EventEmitter {
         };
       }
 
+      // Set flag to prevent auto-updater progress conflicts
+      this.isDownloadingSpecificVersion = true;
+      
+      // Reset progress tracking
+      this.lastSpecificVersionProgress = 0;
+      this.lastEmittedProgress = 0;
+      this.lastProgressTime = 0;
+
       const currentVersion = this.getCurrentVersion();
       
       // If we already have the target version, no download needed
       if (currentVersion === targetVersion) {
+        this.isDownloadingSpecificVersion = false; // Clear flag before returning
         return {
           success: true,
           message: `Already on version ${targetVersion}`,
@@ -432,6 +450,7 @@ class UpdateService extends EventEmitter {
       // First check if the version exists
       const versionCheck = await this.checkForSpecificVersion(targetVersion);
       if (!versionCheck.success || !versionCheck.needsUpdate) {
+        this.isDownloadingSpecificVersion = false; // Clear flag before returning
         return {
           success: false,
           error: versionCheck.error || `Version ${targetVersion} not available`
@@ -441,6 +460,7 @@ class UpdateService extends EventEmitter {
       // Get the release info
       const releaseInfo = versionCheck.releaseInfo;
       if (!releaseInfo || !releaseInfo.assets || releaseInfo.assets.length === 0) {
+        this.isDownloadingSpecificVersion = false; // Clear flag before returning
         return {
           success: false,
           error: `No downloadable assets found for version ${targetVersion}`
@@ -454,6 +474,7 @@ class UpdateService extends EventEmitter {
       );
 
       if (!windowsAsset) {
+        this.isDownloadingSpecificVersion = false; // Clear flag before returning
         return {
           success: false,
           error: `No Windows installer found for version ${targetVersion}`
@@ -533,6 +554,9 @@ class UpdateService extends EventEmitter {
         success: false, 
         error: `Failed to download version ${targetVersion}: ${error.message}` 
       };
+    } finally {
+      // Clear flag regardless of success or failure
+      this.isDownloadingSpecificVersion = false;
     }
   }
 
@@ -567,24 +591,37 @@ class UpdateService extends EventEmitter {
             downloadedSize += chunk.length;
             fileStream.write(chunk);
 
-            // Calculate progress - if no content-length, show indeterminate progress
+            // Calculate progress - ensure it only increases, never decreases
             let progress = 0;
             if (totalSize > 0) {
               progress = Math.round((downloadedSize / totalSize) * 100);
+              // Ensure progress never goes backwards
+              progress = Math.max(progress, this.lastSpecificVersionProgress || 0);
             } else {
               // Indeterminate progress - show that download is happening
               progress = Math.min(99, Math.floor(downloadedSize / (1024 * 1024))); // 1% per MB downloaded, max 99%
+              // For indeterminate, also ensure it doesn't go backwards
+              progress = Math.max(progress, this.lastSpecificVersionProgress || 0);
             }
             
-            // Emit progress event
-            this.emit('specific-version-download-progress', {
-              version: version,
-              progress: progress,
-              downloadedSize: downloadedSize,
-              totalSize: totalSize,
-              downloadedMB: (downloadedSize / 1024 / 1024).toFixed(2),
-              totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(2) : 'Unknown'
-            });
+            // Store last progress to prevent backwards movement
+            this.lastSpecificVersionProgress = progress;
+            
+            // Only emit progress if it actually increased or is significant
+            if (!this.lastEmittedProgress || progress > this.lastEmittedProgress || (Date.now() - this.lastProgressTime) > 1000) {
+              this.lastEmittedProgress = progress;
+              this.lastProgressTime = Date.now();
+              
+              // Emit progress event
+              this.emit('specific-version-download-progress', {
+                version: version,
+                progress: progress,
+                downloadedSize: downloadedSize,
+                totalSize: totalSize,
+                downloadedMB: (downloadedSize / 1024 / 1024).toFixed(2),
+                totalMB: totalSize > 0 ? (totalSize / 1024 / 1024).toFixed(2) : 'Unknown'
+              });
+            }
           });
 
           response.on('end', () => {
