@@ -191,6 +191,22 @@
         throw new Error('No installation file available');
       }
       
+      // Double-check if file still exists before attempting install
+      const fileCheck = await window.electron.invoke('check-file-exists', specificVersionDownload.filePath);
+      if (!fileCheck.exists) {
+        // Try to re-download if file is missing
+        toast.error('Installation File Missing', {
+          description: 'The installation file appears to have been removed. Please try downloading again.',
+          duration: 8000
+        });
+        
+        // Reset download state to allow re-download
+        specificVersionDownload.isComplete = false;
+        specificVersionDownload.filePath = null;
+        specificVersionDownload = { ...specificVersionDownload };
+        return;
+      }
+      
       const result = await window.electron.invoke('install-specific-version', specificVersionDownload.filePath);
       
       if (result.success) {

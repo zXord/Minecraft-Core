@@ -40,7 +40,7 @@ class UpdateService extends EventEmitter {
 
       // For packaged apps, assume production mode
       return false;
-    } catch (error) {
+    } catch {
       // If we can't determine, assume development for safety
       return true;
     }
@@ -473,11 +473,21 @@ class UpdateService extends EventEmitter {
       }
       
       const fileName = windowsAsset.name;
-      const filePath = path.join(tempDir, fileName);
+      let filePath = path.join(tempDir, fileName);
       
       // Check if file already exists and remove it to force fresh download
       if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+        try {
+          fs.unlinkSync(filePath);
+        } catch (unlinkError) {
+          console.warn('Could not remove existing file:', unlinkError.message);
+          // Try with a new filename
+          const timestamp = Date.now();
+          const ext = path.extname(fileName);
+          const nameWithoutExt = path.basename(fileName, ext);
+          const newFileName = `${nameWithoutExt}_${timestamp}${ext}`;
+          filePath = path.join(tempDir, newFileName);
+        }
       }
       
       // Emit initial progress to show download started
@@ -502,7 +512,7 @@ class UpdateService extends EventEmitter {
           success: true,
           message: `Version ${targetVersion} downloaded successfully`,
           filePath: filePath,
-          fileName: fileName,
+          fileName: path.basename(filePath),
           version: targetVersion,
           downloadComplete: true
         };
@@ -580,14 +590,39 @@ class UpdateService extends EventEmitter {
           response.on('end', () => {
             fileStream.end();
             
-            // Emit completion event
-            this.emit('specific-version-download-complete', {
-              version: version,
-              filePath: filePath,
-              success: true
-            });
-            
-            resolve({ success: true, filePath: filePath });
+            // Wait a moment for file system to sync
+            setTimeout(() => {
+              // Verify file exists and has content
+              if (fs.existsSync(filePath)) {
+                const stats = fs.statSync(filePath);
+                if (stats.size > 0) {
+                  // Emit completion event
+                  this.emit('specific-version-download-complete', {
+                    version: version,
+                    filePath: filePath,
+                    success: true
+                  });
+                  
+                  resolve({ success: true, filePath: filePath });
+                } else {
+                  // File exists but is empty
+                  const error = new Error('Downloaded file is empty');
+                  this.emit('specific-version-download-error', {
+                    version: version,
+                    error: error.message
+                  });
+                  reject(error);
+                }
+              } else {
+                // File doesn't exist after download
+                const error = new Error('Downloaded file not found after completion');
+                this.emit('specific-version-download-error', {
+                  version: version,
+                  error: error.message
+                });
+                reject(error);
+              }
+            }, 500); // Wait 500ms for file system sync
           });
 
           response.on('error', (error) => {

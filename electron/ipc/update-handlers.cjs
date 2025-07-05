@@ -191,10 +191,42 @@ function createUpdateHandlers(win) {
       try {
         const { shell } = require('electron');
         const fs = require('fs');
+        const path = require('path');
+        
+        console.log('Install attempt for:', filePath);
+        
+        // Wait a moment to ensure file system has synced
+        await new Promise(resolve => setTimeout(resolve, 1000));
         
         // Check if file exists
         if (!fs.existsSync(filePath)) {
-          return { success: false, error: 'Installer file not found' };
+          // Log additional debugging info
+          const dirPath = path.dirname(filePath);
+          
+          console.log('File not found!');
+          console.log('Directory exists:', fs.existsSync(dirPath));
+          
+          let dirContents = [];
+          if (fs.existsSync(dirPath)) {
+            dirContents = fs.readdirSync(dirPath);
+            console.log('Directory contents:', dirContents);
+          }
+          
+          return { 
+            success: false, 
+            error: `Installer file not found at ${filePath}. Directory exists: ${fs.existsSync(dirPath)}${dirContents.length > 0 ? ', Files: ' + dirContents.join(', ') : ', Directory is empty'}` 
+          };
+        }
+        
+        // Check file permissions and size
+        const stats = fs.statSync(filePath);
+        console.log('File size:', stats.size);
+        
+        if (stats.size === 0) {
+          return { 
+            success: false, 
+            error: 'Installer file is empty or corrupted' 
+          };
         }
         
         // Launch the installer
@@ -202,7 +234,34 @@ function createUpdateHandlers(win) {
         
         return { success: true, message: 'Installer launched. The app will close when installation begins.' };
       } catch (error) {
+        console.error('Install error:', error);
         return { success: false, error: error.message };
+      }
+    },
+
+    // Check if a file exists
+    'check-file-exists': async (_event, filePath) => {
+      try {
+        const fs = require('fs');
+        const exists = fs.existsSync(filePath);
+        let size = 0;
+        
+        if (exists) {
+          const stats = fs.statSync(filePath);
+          size = stats.size;
+        }
+        
+        return { 
+          success: true, 
+          exists: exists,
+          size: size
+        };
+      } catch (error) {
+        return { 
+          success: false, 
+          exists: false,
+          error: error.message 
+        };
       }
     }
   };
