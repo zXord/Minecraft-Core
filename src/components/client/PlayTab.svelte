@@ -2,6 +2,8 @@
   import { clientState } from '../../stores/clientStore.js';
   import { toast } from 'svelte-sonner';
   import { onMount } from 'svelte';
+  import DownloadProgress from '../mods/components/DownloadProgress.svelte';
+  import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
   export let authStatus;
   export let authenticateWithMicrosoft;
   export let checkAuthentication;
@@ -258,8 +260,13 @@
         });
       });
     }
+    downloadManagerCleanup = initDownloadManager();
+    return () => {
+      if (downloadManagerCleanup) downloadManagerCleanup();
+    };
   });
 
+  let downloadManagerCleanup = null;
 </script>
 
       <div class="client-main">
@@ -2136,3 +2143,6 @@
     }
   }
 </style>
+
+<!-- add after <div class="client-main"> line -->
+<DownloadProgress />
