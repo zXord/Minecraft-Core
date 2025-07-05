@@ -644,10 +644,7 @@ function createMinecraftLauncherHandlers(win) {
     },
 
     'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [] }) => {
-      console.log(`🔄 Starting mod download process...`);
-      console.log(`📁 Client path: ${clientPath}`);
-      console.log(`📦 Required mods: ${requiredMods?.length || 0}`);
-      console.log(`🔧 Optional mods: ${optionalMods?.length || 0}`);
+      // (Download process started)
       
       try {
         if (!clientPath) {
@@ -745,7 +742,7 @@ function createMinecraftLauncherHandlers(win) {
             }
 
             if (mod.downloadUrl) {
-              console.log(`⬇️  Downloading ${mod.fileName} from: ${mod.downloadUrl}`);
+              // (⬇️  Downloading ${mod.fileName} from: ${mod.downloadUrl})
               await new Promise((resolve, reject) => {
                 const protocol = mod.downloadUrl.startsWith('https:') ? https : http;
                 const file = fs.createWriteStream(modPath);

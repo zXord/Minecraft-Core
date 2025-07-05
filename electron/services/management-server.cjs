@@ -558,10 +558,10 @@ class ManagementServer {
     
     // Download mod file
     this.app.get('/api/mods/download/:fileName', (req, res) => {
-      console.log(`📥 Mod download request: ${req.params.fileName} from ${req.ip} (host: ${req.get('host')})`);
+      // console.log(`📥 Mod download request: ${req.params.fileName} from ${req.ip} (host: ${req.get('host')})`);
       
       if (!this.serverPath) {
-        console.log(`❌ Mod download failed: No server configured`);
+        // console.log(`❌ Mod download failed: No server configured`);
         return res.status(404).json({ error: 'No server configured' });
       }
       
@@ -569,7 +569,7 @@ class ManagementServer {
       const { location = 'server' } = req.query;
       
       if (!fileName || !fileName.endsWith('.jar')) {
-        console.log(`❌ Mod download failed: Invalid file name: ${fileName}`);
+        // console.log(`❌ Mod download failed: Invalid file name: ${fileName}`);
         return res.status(400).json({ error: 'Invalid file name' });
       }
       
@@ -581,14 +581,14 @@ class ManagementServer {
           modPath = path.join(this.serverPath, 'mods', fileName);
         }
         
-        console.log(`📁 Looking for mod at: ${modPath}`);
+        // console.log(`📁 Looking for mod at: ${modPath}`);
         
         if (!fs.existsSync(modPath)) {
-          console.log(`❌ Mod download failed: File not found at ${modPath}`);
+          // console.log(`❌ Mod download failed: File not found at ${modPath}`);
           return res.status(404).json({ error: 'Mod file not found' });
         }
         
-        console.log(`✅ Mod found, starting download: ${fileName}`);
+        // console.log(`✅ Mod found, starting download: ${fileName}`);
         
         // Set appropriate headers for file download
         res.setHeader('Content-Type', 'application/java-archive');
@@ -598,20 +598,20 @@ class ManagementServer {
         const fileStream = fs.createReadStream(modPath);
         
         fileStream.on('error', (error) => {
-          console.log(`❌ File stream error: ${error.message}`);
+          // console.log(`❌ File stream error: ${error.message}`);
           if (!res.headersSent) {
             res.status(500).json({ error: 'Failed to serve mod file' });
           }
         });
         
         fileStream.on('end', () => {
-          console.log(`✅ Mod download completed: ${fileName}`);
+          // console.log(`✅ Mod download completed: ${fileName}`);
         });
         
         fileStream.pipe(res);
         
       } catch (error) {
-        console.log(`❌ Mod download exception: ${error.message}`);
+        // console.log(`❌ Mod download exception: ${error.message}`);
         res.status(500).json({ error: 'Failed to serve mod file' });
       }
     });
@@ -687,10 +687,8 @@ class ManagementServer {
 
         // Detect external IP for mod downloads
         this.externalHost = this.detectExternalIP();
-        console.log(`🌐 Management server started on port ${port}`);
-        console.log(`📡 Local IP detected: ${this.externalHost || 'none'}`);
-        console.log(`📦 Mod download URLs will auto-detect from client connections (priority: configured > client host > local IP > localhost)`);
-        console.log(`ℹ️  When external clients connect, their connection host will be used for mod download URLs`);
+        // Startup info (reduced)
+        console.log(`Management server started on port ${port}. Download host: ${this.getModDownloadHost()}`);
         
         const currentDownloadHost = this.getModDownloadHost();
         if (currentDownloadHost === 'localhost') {
@@ -846,7 +844,7 @@ class ManagementServer {
       return [];
     }
     
-    console.log(`📋 Getting required mods list, download host: ${this.getModDownloadHost()}`);
+    // console.log(`📋 Getting required mods list, download host: ${this.getModDownloadHost()}`);
     
     try {
       const clientModsDir = path.join(this.serverPath, 'client', 'mods');
