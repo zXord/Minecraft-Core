@@ -329,19 +329,79 @@ function createClientModHandlers(win) {
             
             const currentModPath = path.join(modsDir, oldFileName);
             const newModPath = path.join(modsDir, newFileName);
-            // Download new version
+            // Download new version with progress tracking
+            const downloadId = `client-update-${update.projectId || update.name}-${Date.now()}`;
+            const modName = update.name || oldFileName;
+            
+            // Send initial progress
+            if (win && win.webContents) {
+              win.webContents.send('download-progress', { 
+                id: downloadId, 
+                name: modName, 
+                progress: 0, 
+                speed: 0, 
+                completed: false, 
+                error: null 
+              });
+            }
+            
             const response = await require('axios')({
               url: update.downloadUrl,
               method: 'GET',
               responseType: 'stream',
-              timeout: 60000
+              timeout: 60000,
+              onDownloadProgress: (progressEvent) => {
+                const progress = progressEvent.loaded / progressEvent.total;
+                const speed = progressEvent.rate || 0;
+                
+                if (win && win.webContents) {
+                  win.webContents.send('download-progress', { 
+                    id: downloadId, 
+                    name: modName, 
+                    progress: progress * 100, 
+                    size: progressEvent.total,
+                    downloaded: progressEvent.loaded,
+                    speed: speed, 
+                    completed: false, 
+                    error: null 
+                  });
+                }
+              }
             });            // Create temporary file for download (use new filename)
             const tempPath = newModPath + '.tmp';
             const writer = fs.createWriteStream(tempPath);
               await new Promise((resolve, reject) => {
               response.data.pipe(writer);
-              writer.on('finish', () => resolve());
-              writer.on('error', reject);
+              writer.on('finish', () => {
+                // Send completion progress
+                if (win && win.webContents) {
+                  win.webContents.send('download-progress', { 
+                    id: downloadId, 
+                    name: modName, 
+                    progress: 100, 
+                    speed: 0, 
+                    completed: true, 
+                    completedTime: Date.now(),
+                    error: null 
+                  });
+                }
+                resolve();
+              });
+              writer.on('error', (err) => {
+                // Send error progress
+                if (win && win.webContents) {
+                  win.webContents.send('download-progress', { 
+                    id: downloadId, 
+                    name: modName, 
+                    progress: 0, 
+                    speed: 0, 
+                    completed: false, 
+                    error: err.message,
+                    completedTime: Date.now()
+                  });
+                }
+                reject(err);
+              });
             });            // Remove old file if it exists before downloading new version
             if (fs.existsSync(currentModPath)) {
               await fs.promises.unlink(currentModPath);
@@ -387,6 +447,22 @@ function createClientModHandlers(win) {
                 status: 'downloading'
               });
             }          } catch (modError) {
+            // Send error progress for failed mod updates
+            const downloadId = `client-update-${update.projectId || update.name}-${Date.now()}`;
+            const modName = update.name || update.fileName;
+            
+            if (win && win.webContents) {
+              win.webContents.send('download-progress', { 
+                id: downloadId, 
+                name: modName, 
+                progress: 0, 
+                speed: 0, 
+                completed: false, 
+                error: modError.message,
+                completedTime: Date.now()
+              });
+            }
+            
             const error = `${update.name}: ${modError.message}`;
             errors.push(error);
           }
