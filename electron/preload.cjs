@@ -89,10 +89,12 @@ contextBridge.exposeInMainWorld('electron', {
       'check-disabled-mod-updates',
       'enable-and-update-mod',
       // Management server channels
-      'start-management-server',
-      'stop-management-server',
-      'get-management-server-status',
-      'update-management-server-path',
+          'start-management-server',
+    'stop-management-server',
+    'get-management-server-status',
+    'update-management-server-path',
+    'set-management-server-external-host',
+    'get-management-server-host-info',
       // Minecraft launcher channels
       'minecraft-auth',
       'minecraft-load-auth',

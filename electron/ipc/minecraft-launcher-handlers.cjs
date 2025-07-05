@@ -421,6 +421,44 @@ function checkModDependencyByFilename(fileName, dependencies) {
   return false;
 }
 
+// Add helper function near top of handler scope
+async function getModrinthDownloadUrl(projectId, versionId, minecraftVersion, loader) {
+  const https = require('https');
+  const fetchJson = (url) => new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+
+  try {
+    if (versionId) {
+      const versionData = await fetchJson(`https://api.modrinth.com/v2/version/${versionId}`);
+      const primary = versionData.files?.find(f => f.primary) || versionData.files?.[0];
+      return primary?.url || null;
+    }
+
+    if (!projectId) return null;
+    const versions = await fetchJson(`https://api.modrinth.com/v2/project/${projectId}/version`);
+    if (!Array.isArray(versions) || versions.length === 0) return null;
+
+    // Filter by MC version & loader if provided
+    const filtered = versions.filter(v => {
+      const mcOk = minecraftVersion ? (v.game_versions || []).includes(minecraftVersion) : true;
+      const loaderOk = loader ? (v.loaders || []).includes(loader) : true;
+      return mcOk && loaderOk;
+    });
+    const chosen = (filtered.length > 0 ? filtered : versions)[0];
+    const primary = chosen.files?.find(f => f.primary) || chosen.files?.[0];
+    return primary?.url || null;
+  } catch {
+    return null;
+  }
+}
+
 function createMinecraftLauncherHandlers(win) {
   const launcher = getMinecraftLauncher();
   
@@ -606,8 +644,14 @@ function createMinecraftLauncherHandlers(win) {
     },
 
     'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [] }) => {
+      console.log(`🔄 Starting mod download process...`);
+      console.log(`📁 Client path: ${clientPath}`);
+      console.log(`📦 Required mods: ${requiredMods?.length || 0}`);
+      console.log(`🔧 Optional mods: ${optionalMods?.length || 0}`);
+      
       try {
         if (!clientPath) {
+          console.log(`❌ Mod download failed: Invalid client path`);
           return { success: false, error: 'Invalid client path' };
         }
         
@@ -690,7 +734,18 @@ function createMinecraftLauncherHandlers(win) {
               }
             }
             
+            // Ensure we have a Modrinth URL (not server URL)
+            let downloadUrl = mod.downloadUrl;
+            if (!downloadUrl || downloadUrl.includes('/api/mods/download/')) {
+              // Try to get from Modrinth
+              downloadUrl = await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
+              if (downloadUrl) {
+                mod.downloadUrl = downloadUrl;
+              }
+            }
+
             if (mod.downloadUrl) {
+              console.log(`⬇️  Downloading ${mod.fileName} from: ${mod.downloadUrl}`);
               await new Promise((resolve, reject) => {
                 const protocol = mod.downloadUrl.startsWith('https:') ? https : http;
                 const file = fs.createWriteStream(modPath);
@@ -813,6 +868,7 @@ function createMinecraftLauncherHandlers(win) {
             }
             
           } catch (error) {
+            console.log(`❌ Download failed for ${mod.fileName}: ${error.message}`);
             failures.push({
               fileName: mod.fileName,
               error: error.message

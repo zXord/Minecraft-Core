@@ -197,8 +197,14 @@ export async function downloadRequiredMods(instance: Instance) {
         await refreshInstalledMods(instance);
       }, 1500);
     } else {
-      errorMessage.set(`Failed to download mods: ${result.error || 'Unknown error'}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      // Enhanced error message with more details
+      let detailedError = `Failed to download mods: ${result.error || 'Unknown error'}`;
+      if (result.failures && result.failures.length > 0) {
+        const firstFailure = result.failures[0];
+        detailedError += ` | First failure: ${firstFailure.fileName} - ${firstFailure.error}`;
+      }
+      errorMessage.set(detailedError);
+      setTimeout(() => errorMessage.set(''), 8000);
     }
   } catch (err: any) {
     errorMessage.set('Error downloading mods: ' + err.message);

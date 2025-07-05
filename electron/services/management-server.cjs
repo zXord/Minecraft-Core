@@ -8,6 +8,7 @@ const { createHash } = require('crypto');
 const { wmicExecAsync } = require('../utils/wmic-utils.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const process = require('process');
+const os = require('os');
 
 class ManagementServer {
   /** @type {ReturnType<typeof express>} */
@@ -25,6 +26,9 @@ class ManagementServer {
     this.versionWatcher = null;
     this.sseClients = [];
     this.appVersion = this.getAppVersion(); // Get current app version
+    this.externalHost = null; // External host IP for mod downloads
+    this.configuredHost = null; // Manually configured host override
+    this.detectedPublicHost = null; // Public host detected from client connections
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -40,6 +44,77 @@ class ManagementServer {
       return '1.0.0'; // Fallback version
     }
   }
+
+  // Detect external IP address for mod downloads
+  detectExternalIP() {
+    try {
+      const interfaces = os.networkInterfaces();
+      
+      // Priority order: Ethernet, WiFi, then others
+      const interfaceNames = Object.keys(interfaces);
+      const priorityOrder = ['Ethernet', 'Wi-Fi', 'WiFi', 'en0', 'eth0', 'wlan0'];
+      
+      // First, try priority interfaces
+      for (const priority of priorityOrder) {
+        const interfaceAddresses = interfaces[priority];
+        if (interfaceAddresses) {
+          const ipv4 = interfaceAddresses.find(addr => 
+            addr.family === 'IPv4' && 
+            !addr.internal && 
+            addr.address !== '127.0.0.1'
+          );
+          if (ipv4) {
+            return ipv4.address;
+          }
+        }
+      }
+      
+      // Fallback: find any external IPv4 address
+      for (const interfaceName of interfaceNames) {
+        const interfaceAddresses = interfaces[interfaceName];
+        if (interfaceAddresses) {
+          const ipv4 = interfaceAddresses.find(addr => 
+            addr.family === 'IPv4' && 
+            !addr.internal && 
+            addr.address !== '127.0.0.1'
+          );
+          if (ipv4) {
+            return ipv4.address;
+          }
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      console.error('Failed to detect external IP:', error);
+      return null;
+    }
+  }
+
+  // Get the host to use for mod download URLs
+  getModDownloadHost() {
+    // Priority: manually configured > detected from client connections > detected external IP > localhost fallback
+    if (this.configuredHost) {
+      return this.configuredHost;
+    }
+    
+    // If we have clients connected, use the host they connected to
+    if (this.detectedPublicHost) {
+      return this.detectedPublicHost;
+    }
+    
+    if (!this.externalHost) {
+      this.externalHost = this.detectExternalIP();
+    }
+    
+    return this.externalHost || 'localhost';
+  }
+
+  // Set a manual host override for external clients
+  setExternalHost(host) {
+    this.configuredHost = host;
+    console.log(`🌐 Management server external host set to: ${host}`);
+  }
   
   setupMiddleware() {
     // Enable CORS for client connections
@@ -50,6 +125,22 @@ class ManagementServer {
     
     // Parse JSON requests
     this.app.use(express.json({ limit: '50mb' }));
+    
+    // Middleware to detect public host from client connections
+    this.app.use((req, _, next) => {
+      // Extract host from request headers (what clients used to connect)
+      const hostHeader = req.get('host');
+      if (hostHeader && !this.detectedPublicHost) {
+        // Extract IP/hostname without port
+        const host = hostHeader.split(':')[0];
+        // Only set if it's not localhost/127.0.0.1 (means it's external)
+        if (host !== 'localhost' && host !== '127.0.0.1') {
+          this.detectedPublicHost = host;
+          console.log(`🌐 Detected public host from client connection: ${host}`);
+        }
+      }
+      next();
+    });
     
     // Logging middleware
     this.app.use((_, __, next) => {
@@ -467,7 +558,10 @@ class ManagementServer {
     
     // Download mod file
     this.app.get('/api/mods/download/:fileName', (req, res) => {
+      console.log(`📥 Mod download request: ${req.params.fileName} from ${req.ip} (host: ${req.get('host')})`);
+      
       if (!this.serverPath) {
+        console.log(`❌ Mod download failed: No server configured`);
         return res.status(404).json({ error: 'No server configured' });
       }
       
@@ -475,6 +569,7 @@ class ManagementServer {
       const { location = 'server' } = req.query;
       
       if (!fileName || !fileName.endsWith('.jar')) {
+        console.log(`❌ Mod download failed: Invalid file name: ${fileName}`);
         return res.status(400).json({ error: 'Invalid file name' });
       }
       
@@ -486,9 +581,14 @@ class ManagementServer {
           modPath = path.join(this.serverPath, 'mods', fileName);
         }
         
+        console.log(`📁 Looking for mod at: ${modPath}`);
+        
         if (!fs.existsSync(modPath)) {
+          console.log(`❌ Mod download failed: File not found at ${modPath}`);
           return res.status(404).json({ error: 'Mod file not found' });
         }
+        
+        console.log(`✅ Mod found, starting download: ${fileName}`);
         
         // Set appropriate headers for file download
         res.setHeader('Content-Type', 'application/java-archive');
@@ -496,9 +596,22 @@ class ManagementServer {
         
         // Stream the file
         const fileStream = fs.createReadStream(modPath);
+        
+        fileStream.on('error', (error) => {
+          console.log(`❌ File stream error: ${error.message}`);
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Failed to serve mod file' });
+          }
+        });
+        
+        fileStream.on('end', () => {
+          console.log(`✅ Mod download completed: ${fileName}`);
+        });
+        
         fileStream.pipe(res);
         
-      } catch {
+      } catch (error) {
+        console.log(`❌ Mod download exception: ${error.message}`);
         res.status(500).json({ error: 'Failed to serve mod file' });
       }
     });
@@ -526,6 +639,20 @@ class ManagementServer {
         message: 'Management server is running',
         timestamp: new Date().toISOString(),
         clients: this.clients.size
+      });
+    });
+
+    // Debug endpoint to check host detection and mod URLs
+    this.app.get('/api/debug/host-info', (req, res) => {
+      res.json({
+        success: true,
+        requestHost: req.get('host'),
+        requestIP: req.ip,
+        detectedPublicHost: this.detectedPublicHost,
+        externalHost: this.externalHost,
+        configuredHost: this.configuredHost,
+        currentDownloadHost: this.getModDownloadHost(),
+        sampleModURL: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/example.jar?location=client`
       });
     });
     
@@ -558,13 +685,31 @@ class ManagementServer {
       this.server = this.app.listen(port, () => {
         this.isRunning = true;
 
+        // Detect external IP for mod downloads
+        this.externalHost = this.detectExternalIP();
+        console.log(`🌐 Management server started on port ${port}`);
+        console.log(`📡 Local IP detected: ${this.externalHost || 'none'}`);
+        console.log(`📦 Mod download URLs will auto-detect from client connections (priority: configured > client host > local IP > localhost)`);
+        console.log(`ℹ️  When external clients connect, their connection host will be used for mod download URLs`);
+        
+        const currentDownloadHost = this.getModDownloadHost();
+        if (currentDownloadHost === 'localhost') {
+          console.log(`⚠️  Currently using localhost - will switch to public IP when external clients connect`);
+        }
+
         // Start version watcher and check versions
         this.startVersionWatcher();
         this.checkVersionChange();
         
         // DON'T start cleanup interval automatically - only when clients connect
 
-        resolve({ success: true, port });
+        resolve({ 
+          success: true, 
+          port, 
+          externalHost: this.externalHost, 
+          detectedPublicHost: this.detectedPublicHost,
+          downloadHost: this.getModDownloadHost()
+        });
       });
       
       this.server.on('error', (error) => {
@@ -701,6 +846,8 @@ class ManagementServer {
       return [];
     }
     
+    console.log(`📋 Getting required mods list, download host: ${this.getModDownloadHost()}`);
+    
     try {
       const clientModsDir = path.join(this.serverPath, 'client', 'mods');
       const serverModsDir = path.join(this.serverPath, 'mods');
@@ -762,7 +909,7 @@ class ManagementServer {
               lastModified: stats.mtime,
               required: isRequired,
               checksum: this.calculateFileChecksum(modPath),
-              downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
+              downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
               projectId: projectId,
               versionId: versionId,
               versionNumber: versionNumber,
@@ -814,7 +961,7 @@ class ManagementServer {
                 lastModified: stats.mtime,
                 required: isRequired,
                 checksum: this.calculateFileChecksum(modPath),
-                downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
+                downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
                 projectId: projectId,
                 versionId: versionId,
                 versionNumber: versionNumber,
@@ -899,7 +1046,7 @@ class ManagementServer {
               lastModified: stats.mtime,
               required: isRequired,
               checksum: this.calculateFileChecksum(modPath),
-              downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
+              downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
               projectId: projectId,
               versionId: versionId,
               versionNumber: versionNumber,
@@ -951,7 +1098,7 @@ class ManagementServer {
                 lastModified: stats.mtime,
                 required: isRequired,
                 checksum: this.calculateFileChecksum(modPath),
-                downloadUrl: `http://localhost:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
+                downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
                 projectId: projectId,
                 versionId: versionId,
                 versionNumber: versionNumber,
@@ -1147,7 +1294,11 @@ class ManagementServer {
       serverPath: this.serverPath,
       clientCount: this.clients.size,
       version: this.versionInfo,
-      appVersion: this.appVersion // Include app version in status
+      appVersion: this.appVersion, // Include app version in status
+      downloadHost: this.getModDownloadHost(),
+      externalHost: this.externalHost,
+      detectedPublicHost: this.detectedPublicHost,
+      configuredHost: this.configuredHost
     };
   }
 }
