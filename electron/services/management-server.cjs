@@ -301,7 +301,7 @@ class ManagementServer {
               if (coreConfig.version) {
                 minecraftVersion = coreConfig.version;
               }
-            } catch (err) {
+            } catch {
               // Config file exists but is invalid, continue with other detection methods
             }
           }
@@ -597,7 +597,7 @@ class ManagementServer {
         // Stream the file
         const fileStream = fs.createReadStream(modPath);
         
-        fileStream.on('error', (error) => {
+        fileStream.on('error', () => {
           // console.log(`❌ File stream error: ${error.message}`);
           if (!res.headersSent) {
             res.status(500).json({ error: 'Failed to serve mod file' });
@@ -610,7 +610,7 @@ class ManagementServer {
         
         fileStream.pipe(res);
         
-      } catch (error) {
+      } catch {
         // console.log(`❌ Mod download exception: ${error.message}`);
         res.status(500).json({ error: 'Failed to serve mod file' });
       }
@@ -639,20 +639,6 @@ class ManagementServer {
         message: 'Management server is running',
         timestamp: new Date().toISOString(),
         clients: this.clients.size
-      });
-    });
-
-    // Debug endpoint to check host detection and mod URLs
-    this.app.get('/api/debug/host-info', (req, res) => {
-      res.json({
-        success: true,
-        requestHost: req.get('host'),
-        requestIP: req.ip,
-        detectedPublicHost: this.detectedPublicHost,
-        externalHost: this.externalHost,
-        configuredHost: this.configuredHost,
-        currentDownloadHost: this.getModDownloadHost(),
-        sampleModURL: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/example.jar?location=client`
       });
     });
     
