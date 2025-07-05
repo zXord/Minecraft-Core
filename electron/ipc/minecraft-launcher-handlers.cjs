@@ -742,10 +742,30 @@ function createMinecraftLauncherHandlers(win) {
             }
 
             if (mod.downloadUrl) {
+              // Create download progress tracking
+              const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
+              const modName = mod.name || mod.fileName;
+              
+              // Send initial progress
+              if (win && win.webContents) {
+                win.webContents.send('download-progress', { 
+                  id: downloadId, 
+                  name: modName, 
+                  progress: 0, 
+                  speed: 0, 
+                  completed: false, 
+                  error: null 
+                });
+              }
+              
               // (⬇️  Downloading ${mod.fileName} from: ${mod.downloadUrl})
               await new Promise((resolve, reject) => {
                 const protocol = mod.downloadUrl.startsWith('https:') ? https : http;
                 const file = fs.createWriteStream(modPath);
+                
+                let downloadedBytes = 0;
+                let totalBytes = 0;
+                let lastProgressUpdate = Date.now();
                 
                 const request = protocol.get(mod.downloadUrl, (response) => {
                   if (response.statusCode === 302 || response.statusCode === 301) {
@@ -758,10 +778,53 @@ function createMinecraftLauncherHandlers(win) {
                     redirectProtocol.get(redirectUrl, (redirectResponse) => {
                       if (redirectResponse.statusCode === 200) {
                         const file2 = fs.createWriteStream(modPath);
+                        
+                        // Set up progress tracking for redirect
+                        totalBytes = parseInt(redirectResponse.headers['content-length'], 10) || 0;
+                        downloadedBytes = 0;
+                        
+                        redirectResponse.on('data', (chunk) => {
+                          downloadedBytes += chunk.length;
+                          
+                          // Throttle progress updates to every 200ms
+                          const now = Date.now();
+                          if (now - lastProgressUpdate >= 200) {
+                            const progress = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
+                            const speed = totalBytes > 0 ? downloadedBytes / ((now - (lastProgressUpdate - 200)) / 1000) : 0;
+                            
+                            if (win && win.webContents) {
+                              win.webContents.send('download-progress', { 
+                                id: downloadId, 
+                                name: modName, 
+                                progress: progress, 
+                                size: totalBytes,
+                                downloaded: downloadedBytes,
+                                speed: speed, 
+                                completed: false, 
+                                error: null 
+                              });
+                            }
+                            lastProgressUpdate = now;
+                          }
+                        });
+                        
                         redirectResponse.pipe(file2);
                         
                         file2.on('finish', async () => {
                           file2.close();
+                          
+                          // Send completion progress
+                          if (win && win.webContents) {
+                            win.webContents.send('download-progress', { 
+                              id: downloadId, 
+                              name: modName, 
+                              progress: 100, 
+                              speed: 0, 
+                              completed: true, 
+                              completedTime: Date.now(),
+                              error: null 
+                            });
+                          }
                           
                           if (mod.checksum) {
                             const downloadedChecksum = utils.calculateFileChecksum(modPath);
@@ -793,6 +856,18 @@ function createMinecraftLauncherHandlers(win) {
                     });
                         
                         file2.on('error', (err) => {
+                          // Send error progress
+                          if (win && win.webContents) {
+                            win.webContents.send('download-progress', { 
+                              id: downloadId, 
+                              name: modName, 
+                              progress: 0, 
+                              speed: 0, 
+                              completed: false, 
+                              error: err.message,
+                              completedTime: Date.now()
+                            });
+                          }
                           fs.unlinkSync(modPath);
                           reject(err);
                         });
@@ -801,10 +876,52 @@ function createMinecraftLauncherHandlers(win) {
                       }
                     }).on('error', reject);
                   } else if (response.statusCode === 200) {
+                    // Set up progress tracking for direct download
+                    totalBytes = parseInt(response.headers['content-length'], 10) || 0;
+                    downloadedBytes = 0;
+                    
+                    response.on('data', (chunk) => {
+                      downloadedBytes += chunk.length;
+                      
+                      // Throttle progress updates to every 200ms
+                      const now = Date.now();
+                      if (now - lastProgressUpdate >= 200) {
+                        const progress = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
+                        const speed = totalBytes > 0 ? downloadedBytes / ((now - (lastProgressUpdate - 200)) / 1000) : 0;
+                        
+                        if (win && win.webContents) {
+                          win.webContents.send('download-progress', { 
+                            id: downloadId, 
+                            name: modName, 
+                            progress: progress, 
+                            size: totalBytes,
+                            downloaded: downloadedBytes,
+                            speed: speed, 
+                            completed: false, 
+                            error: null 
+                          });
+                        }
+                        lastProgressUpdate = now;
+                      }
+                    });
+                    
                     response.pipe(file);
                     
                     file.on('finish', async () => {
                       file.close();
+                      
+                      // Send completion progress
+                      if (win && win.webContents) {
+                        win.webContents.send('download-progress', { 
+                          id: downloadId, 
+                          name: modName, 
+                          progress: 100, 
+                          speed: 0, 
+                          completed: true, 
+                          completedTime: Date.now(),
+                          error: null 
+                        });
+                      }
                       
                       if (mod.checksum) {
                         const downloadedChecksum = utils.calculateFileChecksum(modPath);
@@ -836,6 +953,18 @@ function createMinecraftLauncherHandlers(win) {
                     });
                     
                     file.on('error', (err) => {
+                      // Send error progress
+                      if (win && win.webContents) {
+                        win.webContents.send('download-progress', { 
+                          id: downloadId, 
+                          name: modName, 
+                          progress: 0, 
+                          speed: 0, 
+                          completed: false, 
+                          error: err.message,
+                          completedTime: Date.now()
+                        });
+                      }
                       fs.unlinkSync(modPath);
                       reject(err);
                     });
@@ -858,6 +987,22 @@ function createMinecraftLauncherHandlers(win) {
                 });
               });
             } else {
+              // Send error progress for no download URL
+              const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
+              const modName = mod.name || mod.fileName;
+              
+              if (win && win.webContents) {
+                win.webContents.send('download-progress', { 
+                  id: downloadId, 
+                  name: modName, 
+                  progress: 0, 
+                  speed: 0, 
+                  completed: false, 
+                  error: 'No download URL provided',
+                  completedTime: Date.now()
+                });
+              }
+              
               failures.push({
                 fileName: mod.fileName,
                 error: 'No download URL provided'
@@ -866,6 +1011,23 @@ function createMinecraftLauncherHandlers(win) {
             
           } catch (error) {
             console.log(`❌ Download failed for ${mod.fileName}: ${error.message}`);
+            
+            // Send error progress for caught exceptions
+            const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
+            const modName = mod.name || mod.fileName;
+            
+            if (win && win.webContents) {
+              win.webContents.send('download-progress', { 
+                id: downloadId, 
+                name: modName, 
+                progress: 0, 
+                speed: 0, 
+                completed: false, 
+                error: error.message,
+                completedTime: Date.now()
+              });
+            }
+            
             failures.push({
               fileName: mod.fileName,
               error: error.message
@@ -989,7 +1151,7 @@ function createMinecraftLauncherHandlers(win) {
         } catch (authError) {
           return { 
             success: false, 
-            error: 'Failed to load authentication data. Please re-authenticate in the Settings tab.' 
+            error: `Failed to load authentication data: ${authError.message}. Please re-authenticate in the Settings tab.` 
           };
         }
 
