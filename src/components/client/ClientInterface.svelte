@@ -181,6 +181,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let isDownloadingClient = false;
   let isDownloadingMods = false;
   let isCheckingSync = false;
+
   
   // Acknowledged dependencies tracking comes from the shared store
   
@@ -355,7 +356,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       clearAppVersions();
     }
   }
-  
+
+
   // Check both management server and minecraft server status
   async function checkServerStatus(silentRefresh = false) {
     if ($clientState.connectionStatus !== 'connected') {
@@ -1268,7 +1270,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     isDownloadingMods = true;
       // Validate that each server mod has necessary properties (only if we have server mods)
     if (hasServerMods) {
-      const invalidMods = requiredMods.filter(mod => !mod.fileName || !mod.downloadUrl);
+      const invalidMods = requiredMods.filter(mod => !mod.fileName);
       if (invalidMods.length > 0) {
         errorMessage.set(`Invalid mod data: ${invalidMods.length} mods missing required properties`);
         setTimeout(() => errorMessage.set(''), 5000);
@@ -1568,20 +1570,28 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         if (result.failures && result.failures.length > 0) {
           failureMsg = `Failed to download ${result.failures.length} mods`;
           
-          // Show details of first few failures
-          const firstFailures = result.failures.slice(0, 3);
-          const failureDetails = firstFailures.map(f => `${f.fileName}: ${f.error}`).join('; ');
-          if (result.failures.length > 3) {
-            failureMsg += ` (${failureDetails}... and ${result.failures.length - 3} more)`;
+          // Show details of first few failures with more context
+          const firstFailures = result.failures.slice(0, 2);
+          const failureDetails = firstFailures.map(f => {
+            let detail = `${f.fileName}: ${f.error}`;
+            // Add URL info if it's a network error
+            if (f.error.includes('ENOTFOUND') || f.error.includes('ECONNREFUSED') || f.error.includes('timeout')) {
+              detail += ' (network/connection issue)';
+            }
+            return detail;
+          }).join('; ');
+          
+          if (result.failures.length > 2) {
+            failureMsg += ` | Details: ${failureDetails}... and ${result.failures.length - 2} more`;
           } else {
-            failureMsg += ` (${failureDetails})`;
+            failureMsg += ` | Details: ${failureDetails}`;
           }
         } else if (result.error) {
           failureMsg += `: ${result.error}`;
         }
         
         errorMessage.set(failureMsg);
-        setTimeout(() => errorMessage.set(''), 8000);
+        setTimeout(() => errorMessage.set(''), 10000); // Longer timeout for detailed errors
       }
     } catch (err) {
       downloadStatus = 'needed';

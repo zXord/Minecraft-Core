@@ -79,6 +79,36 @@ function createManagementServerHandlers(win) {
       } catch (error) {
         return { success: false, error: error.message };
       }
+    },
+
+    // Set external host for mod downloads
+    'set-management-server-external-host': async (_event, hostIP) => {
+      try {
+        managementServer.setExternalHost(hostIP);
+        
+        return { 
+          success: true, 
+          externalHost: hostIP,
+          downloadHost: managementServer.getModDownloadHost()
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Get current external host info
+    'get-management-server-host-info': async () => {
+      try {
+        return { 
+          success: true, 
+          downloadHost: managementServer.getModDownloadHost(),
+          externalHost: managementServer.externalHost,
+          configuredHost: managementServer.configuredHost,
+          detectedPublicHost: managementServer.detectedPublicHost
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
     }
   };
 }

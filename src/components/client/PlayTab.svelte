@@ -33,6 +33,35 @@
   export let handleRefreshFromDashboard;  export let lastCheck;
   export let isChecking;
   
+  // Debug info for troubleshooting mod downloads
+  let showDebugInfo = false;
+  let debugHostInfo = null;
+  
+  // Get debug host information from the server
+  async function fetchDebugHostInfo() {
+    if ($clientState.connectionStatus !== 'connected') return;
+    
+    try {
+      // Get connection details from client state
+      const serverIp = $clientState.instance?.serverIp || 'localhost';
+      const serverPort = $clientState.instance?.serverPort || '8080';
+      const debugUrl = `http://${serverIp}:${serverPort}/api/debug/host-info`;
+      
+      const response = await fetch(debugUrl, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000)
+      });
+      
+      if (response.ok) {
+        debugHostInfo = await response.json();
+      } else {
+        debugHostInfo = { error: `Server responded with ${response.status}` };
+      }
+    } catch (err) {
+      debugHostInfo = { error: err.message };
+    }
+  }
+  
   // State for specific version downloads
   let specificVersionDownload = {
     isDownloading: false,
@@ -802,7 +831,62 @@
               Refresh
             </button>
           {/if}
+          
+          <!-- Debug section for troubleshooting -->
+          <button class="debug-button" on:click={() => showDebugInfo = !showDebugInfo}>
+            🔧 Debug Info
+          </button>
         </div>
+        
+        <!-- Debug Info Panel -->
+        {#if showDebugInfo}
+          <div class="debug-panel">
+            <div class="debug-header">
+              <h3>🔧 Connection & Mod Download Debug Info</h3>
+              <button class="debug-close" on:click={() => showDebugInfo = false}>✕</button>
+            </div>
+            
+            {#if debugHostInfo}
+              <div class="debug-content">
+                <div class="debug-section">
+                  <h4>Connection Details</h4>
+                  <p><strong>Your Connection Host:</strong> <code>{debugHostInfo.requestHost || 'Unknown'}</code></p>
+                  <p><strong>Your IP (as seen by server):</strong> <code>{debugHostInfo.requestIP || 'Unknown'}</code></p>
+                </div>
+                
+                <div class="debug-section">
+                  <h4>Server Host Detection</h4>
+                  <p><strong>Server's Detected Public Host:</strong> <code>{debugHostInfo.detectedPublicHost || 'None detected yet'}</code></p>
+                  <p><strong>Server's Local IP:</strong> <code>{debugHostInfo.externalHost || 'None detected'}</code></p>
+                  <p><strong>Current Download Host Used:</strong> <code>{debugHostInfo.currentDownloadHost || 'Unknown'}</code></p>
+                </div>
+                
+                <div class="debug-section">
+                  <h4>Sample Mod Download URL</h4>
+                  <code class="url-code">{debugHostInfo.sampleModURL || 'No URL generated'}</code>
+                  {#if debugHostInfo.sampleModURL}
+                    <p class="debug-note">
+                      ℹ️ This is what mod download URLs look like for your connection.
+                      If this shows "localhost", that's why external clients can't download mods.
+                    </p>
+                  {/if}
+                </div>
+                
+                {#if debugHostInfo.error}
+                  <div class="debug-section error">
+                    <h4>Error</h4>
+                    <p><strong>Error:</strong> {debugHostInfo.error}</p>
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <div class="debug-content">
+                <p>Click the button below to fetch debug information from the server:</p>
+                <button class="debug-fetch-btn" on:click={fetchDebugHostInfo}>Get Debug Info</button>
+              </div>
+            {/if}
+          </div>
+        {/if}
       </div>
 
 <style>
@@ -1876,6 +1960,139 @@
     color: #2563eb;
   }
 
+  /* Debug styles */
+  .debug-button {
+    background: rgba(99, 102, 241, 0.15);
+    color: #6366f1;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+  }
+
+  .debug-button:hover {
+    background: rgba(99, 102, 241, 0.25);
+    border-color: rgba(99, 102, 241, 0.5);
+  }
+
+  .debug-panel {
+    background: rgba(31, 41, 55, 0.6);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 6px;
+    margin-top: 0.5rem;
+    overflow: hidden;
+  }
+
+  .debug-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: rgba(99, 102, 241, 0.1);
+    border-bottom: 1px solid rgba(99, 102, 241, 0.2);
+  }
+
+  .debug-header h3 {
+    margin: 0;
+    font-size: 1rem;
+    color: #e5e7eb;
+  }
+
+  .debug-close {
+    background: transparent;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    font-size: 1.2rem;
+    padding: 0.25rem;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+  }
+
+  .debug-close:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+  }
+
+  .debug-content {
+    padding: 1rem;
+  }
+
+  .debug-section {
+    margin-bottom: 1rem;
+    padding: 0.75rem;
+    background: rgba(17, 24, 39, 0.4);
+    border-radius: 4px;
+    border-left: 3px solid #6366f1;
+  }
+
+  .debug-section.error {
+    border-left-color: #ef4444;
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  .debug-section h4 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.9rem;
+    color: #e5e7eb;
+    font-weight: 600;
+  }
+
+  .debug-section p {
+    margin: 0.25rem 0;
+    font-size: 0.85rem;
+    color: #9ca3af;
+  }
+
+  .debug-section code {
+    background: rgba(17, 24, 39, 0.8);
+    color: #60a5fa;
+    padding: 0.2rem 0.4rem;
+    border-radius: 3px;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 0.8rem;
+  }
+
+  .url-code {
+    display: block;
+    background: rgba(17, 24, 39, 0.8);
+    color: #34d399;
+    padding: 0.5rem;
+    border-radius: 4px;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 0.8rem;
+    word-break: break-all;
+    margin: 0.5rem 0;
+  }
+
+  .debug-note {
+    font-size: 0.8rem;
+    color: #6366f1;
+    font-style: italic;
+    margin-top: 0.5rem;
+  }
+
+  .debug-fetch-btn {
+    background: rgba(99, 102, 241, 0.15);
+    color: #6366f1;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 4px;
+    padding: 0.5rem 1rem;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .debug-fetch-btn:hover {
+    background: rgba(99, 102, 241, 0.25);
+    border-color: rgba(99, 102, 241, 0.5);
+  }
+
   /* Responsive Design */
   @media (max-width: 768px) {
     .status-header-container {
@@ -1906,6 +2123,16 @@
     .mod-action-btn {
       width: 100%;
       justify-content: center;
+    }
+
+    .last-check {
+      flex-direction: column;
+      gap: 0.5rem;
+      align-items: stretch;
+    }
+
+    .debug-button {
+      align-self: center;
     }
   }
 </style>
