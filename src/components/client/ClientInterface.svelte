@@ -2077,27 +2077,33 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Check connection immediately
     connectToServer();
 
-    // Set up periodic connection check with backoff - ONLY if disconnected
+    // Set up periodic connection check with backoff - ONLY if disconnected AND component is visible
     connectionCheckInterval = setInterval(() => {
-      if ($clientState.connectionStatus === 'disconnected') {
+      if ($clientState.connectionStatus === 'disconnected' && 
+          $clientState.activeTab === 'play' && 
+          document.visibilityState === 'visible') {
         connectToServer();
       }
     }, 60000); // Every 60 seconds
       
-    // Set up periodic server status check - ONLY if connected
+    // Set up periodic server status check - ONLY if connected AND component is visible (reduced frequency)
     statusCheckInterval = setInterval(() => {
-      if ($clientState.connectionStatus === 'connected') {
+      if ($clientState.connectionStatus === 'connected' && 
+          $clientState.activeTab === 'play' && 
+          document.visibilityState === 'visible') {
         checkServerStatus(true); // Silent refresh
       }
-    }, 120000); // Every 2 minutes
+    }, 300000); // Every 5 minutes (reduced from 2 minutes)
 
-    // Set up periodic mod synchronization check - ONLY if connected and not busy
+    // Set up periodic mod synchronization check - ONLY if connected and not busy AND component is visible (reduced frequency)
     const modCheckInterval = setInterval(() => {
       if ($clientState.connectionStatus === 'connected' && 
-          !isDownloadingClient && !isDownloadingMods && !isCheckingSync) {
+          !isDownloadingClient && !isDownloadingMods && !isCheckingSync &&
+          $clientState.activeTab === 'play' && 
+          document.visibilityState === 'visible') {
         checkModSynchronization(true); // Silent refresh
       }
-    }, 60000); // Every 60 seconds
+    }, 300000); // Every 5 minutes (reduced from 1 minute)
 
     // Note: Removed periodic authentication refresh as it was too aggressive
     // Authentication will be checked/refreshed automatically when launching Minecraft

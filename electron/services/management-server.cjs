@@ -29,6 +29,10 @@ class ManagementServer {
     this.externalHost = null; // External host IP for mod downloads
     this.configuredHost = null; // Manually configured host override
     this.detectedPublicHost = null; // Public host detected from client connections
+    
+    // Rate limiting for status checks
+    this._lastStatusCheck = null;
+    this._cachedStatus = null;
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -737,6 +741,12 @@ class ManagementServer {
     }
   }  // Check if Minecraft server is running
   async checkMinecraftServerStatus() {
+    // Rate limiting - cache status for 30 seconds to prevent excessive checks
+    const now = Date.now();
+    if (this._lastStatusCheck && (now - this._lastStatusCheck) < 30000 && this._cachedStatus) {
+      return this._cachedStatus;
+    }
+
     try {
       // First check if we have an active server process through the server manager
       const serverManager = require('./server-manager.cjs');
@@ -746,9 +756,13 @@ class ManagementServer {
         try {
           // Verify the process is actually still alive
           process.kill(serverState.serverProcess.pid, 0); // Signal 0 just tests if process exists
+          this._cachedStatus = 'running';
+          this._lastStatusCheck = now;
           return 'running';
         } catch {
           // Process doesn't exist anymore
+          this._cachedStatus = 'stopped';
+          this._lastStatusCheck = now;
           return 'stopped';
         }
       }
@@ -800,26 +814,40 @@ class ManagementServer {
             return hasMinecraftServerIndicators && isNotDevProcess;
           });          
           if (minecraftProcesses.length > 0) {
+            this._cachedStatus = 'running';
+            this._lastStatusCheck = now;
             return 'running';
           } else {
+            this._cachedStatus = 'stopped';
+            this._lastStatusCheck = now;
             return 'stopped';
           }
         } catch {
+          this._cachedStatus = 'unknown';
+          this._lastStatusCheck = now;
           return 'unknown';        }
       } else {
         // On Linux/Mac, use ps to check for java processes
         try {
           const { stdout } = await execAsync('ps aux | grep java | grep -E "(fabric-server|minecraft|server\\.jar)" | grep -v grep', { timeout: 5000 });
           if (stdout.trim()) {
+            this._cachedStatus = 'running';
+            this._lastStatusCheck = now;
             return 'running';
           } else {
+            this._cachedStatus = 'stopped';
+            this._lastStatusCheck = now;
             return 'stopped';
           }
         } catch {
+          this._cachedStatus = 'stopped';
+          this._lastStatusCheck = now;
           return 'stopped';
         }
       }
     } catch {
+      this._cachedStatus = 'unknown';
+      this._lastStatusCheck = now;
       return 'unknown';
     }
   }
