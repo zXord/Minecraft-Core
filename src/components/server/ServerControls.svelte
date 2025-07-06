@@ -378,7 +378,7 @@
         checkServerStatus();
         checkManagementServerStatus();
       }
-    }, 30000); // Check every 30 seconds when visible
+    }, 120000); // Check every 2 minutes when visible (reduced from 30 seconds)
 
     // Initialize maintenance repair listeners
     setupRepairListeners();

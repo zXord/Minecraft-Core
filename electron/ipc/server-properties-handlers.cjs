@@ -222,10 +222,10 @@ function getDefaultProperties() {
     'online-mode': 'true',
     'level-seed': '',
     'use-native-transport': 'true',
-    'prevent-proxy-connections': 'false',
+    'prevent-proxy-connections': 'true',
     'enable-jmx-monitoring': 'false',
     'enable-rcon': 'false',
-    'rate-limit': '0',
+    'rate-limit': '600',
     'motd': 'A Minecraft Server'
   };
 }

@@ -285,7 +285,7 @@ async function detectMinecraftVersion(serverPath) {
     }
     
     return 'unknown';
-  } catch (error) {
+  } catch {
     return 'unknown';
   }
 }
