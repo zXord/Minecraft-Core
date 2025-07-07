@@ -123,10 +123,7 @@
       </div>
       <div class="card-content">
         <VersionUpdater serverPath={serverPath} />
-      </div>
-    </div>
-
-
+      </div>    </div>
 
     <!-- Instance Management Card -->
     {#if currentInstance}

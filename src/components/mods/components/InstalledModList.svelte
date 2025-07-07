@@ -44,7 +44,7 @@
 
   let updateAllInProgress = false;
   let checkingCompatibility = false;
-  let compatibilityResults = null; // eslint-disable-line
+  let compatibilityResults = null;  
   
   // Initialize drop zone state from localStorage
   let dropZoneCollapsed = localStorage.getItem('minecraft-core-drop-zone-collapsed') === 'true';
@@ -106,7 +106,21 @@
   function handleDrop(event) {
     event.preventDefault();
     isDragover = false;
-    // Existing drop handling logic would go here
+    
+    const files = event.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    
+    // Filter for JAR files
+    const jarFiles = Array.from(files).filter(file => 
+      file.name.toLowerCase().endsWith('.jar')
+    );
+    
+    if (jarFiles.length === 0) {
+      errorMessage.set('No valid JAR files found.');
+      return;
+    }
+    
+    installModFiles(jarFiles);
   }
 
   // Handle drag enter on the add mods button
@@ -133,8 +147,48 @@
     input.type = 'file';
     input.multiple = true;
     input.accept = '.jar';
+    
+    input.onchange = (event) => {
+      const target = event.target;
+      const files = target && target['files'];
+      if (!files || files.length === 0) return;
+      
+      // Filter for JAR files
+      const jarFiles = Array.from(files).filter(file => 
+        file.name.toLowerCase().endsWith('.jar')
+      );
+      
+      if (jarFiles.length === 0) {
+        errorMessage.set('No valid JAR files found.');
+        return;
+      }
+      
+      installModFiles(jarFiles);
+    };
+    
     input.click();
-    // File handling will be done via drag-and-drop for now
+  }
+
+  // Install mod files (used by both drag&drop and browse)
+  async function installModFiles(files) {
+    try {
+      successMessage.set(`Installing ${files.length} mod file(s)...`);
+      
+      for (const file of files) {
+        await safeInvoke('add-mod', serverPath, file.path);
+      }
+      
+      // Refresh the mod list
+      await loadMods(serverPath);
+      dispatch('modAdded');
+      successMessage.set(`Successfully installed ${files.length} mod(s)!`);
+      
+      // Collapse the drop zone after successful installation
+      dropZoneCollapsed = true;
+      localStorage.setItem('minecraft-core-drop-zone-collapsed', 'true');
+    } catch (error) {
+      errorMessage.set(`Error installing mod files: ${error.message || 'Unknown error'}`);
+    }
   }
 
   // Helper functions
@@ -763,6 +817,13 @@
 <div class="drop-zone-container">
     <div class="drop-zone-full" 
          class:drag-highlight={isDragover}
+         on:dragenter={handleAddButtonDragEnter}
+         on:dragover={handleDragOver}
+         on:dragleave={handleDragLeave}
+         on:drop={handleDrop}
+         role="button"
+         tabindex="0"
+         aria-label="Drop zone for mod files"
          transition:fly="{{ y: -20, duration: 300 }}">
       <div class="drop-zone-content">
         <div class="drop-icon">📦</div>
@@ -948,7 +1009,7 @@
               {:else if installedModVersionsCache[modInfo?.projectId]?.length === 0}
                 <span class="err">No versions available</span>
               {:else}
-                {#each installedModVersionsCache[modInfo?.projectId] || [] as version}
+                {#each installedModVersionsCache[modInfo?.projectId] || [] as version (version.id)}
                   {@const isCurrentVersion = modInfo && modInfo.versionId === version.id}
                   <button
                     class:sel={isCurrentVersion}
