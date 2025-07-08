@@ -155,7 +155,7 @@ async function listMods(serverPath) {
     clientModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));
     clientDisabledModFiles = clientFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
       .map(file => file.replace('.disabled', '')); // Remove .disabled extension for display
-  } catch (err) {
+  } catch {
     // Ignore client directory read errors
   }
   
@@ -695,13 +695,20 @@ async function addMod(serverPath, modPath) {
   } catch (copyErr) {
     throw new Error(`Failed to copy mod file: ${copyErr.message}`);
   }
-    try {
+  
+  try {
     await fs.stat(targetPath);
   } catch (verifyErr) {
     throw new Error(`Failed to verify copied file: ${verifyErr.message}`);
   }
   
-  return true;
+  // Return details for potential Modrinth matching
+  return {
+    success: true,
+    fileName,
+    targetPath,
+    originalPath: modPath
+  };
 }
 
 async function deleteMod(serverPath, modName) {
