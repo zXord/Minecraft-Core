@@ -4,6 +4,7 @@ const { createServerModHandlers } = require('./mod-handlers/server-mod-handlers.
 const { createClientModHandlers } = require('./mod-handlers/client-mod-handlers.cjs');
 const { createModInfoHandlers } = require('./mod-handlers/mod-info-handlers.cjs');
 const { createManualModHandlers } = require('./mod-handlers/manual-mod-handlers.cjs');
+const { createModrinthMatchingHandlers } = require('./mod-handlers/modrinth-matching-handlers.cjs');
 
 function createModHandlers(win) {
   const generalHandlers = {
@@ -55,6 +56,7 @@ function createModHandlers(win) {
     ...createServerModHandlers(win),
     ...createClientModHandlers(win),
     ...createManualModHandlers(),
+    ...createModrinthMatchingHandlers(),
   };
 }
 

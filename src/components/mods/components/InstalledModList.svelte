@@ -30,6 +30,16 @@
   // Import confirmation dialog
   import ConfirmationDialog from '../../common/ConfirmationDialog.svelte';
 
+  // Import Modrinth matching components
+  import ModrinthMatchConfirmation from './ModrinthMatchConfirmation.svelte';
+  import ModrinthManualMatchingModal from './ModrinthManualMatchingModal.svelte';
+  import { 
+    modrinthMatchingActions, 
+    confirmedModrinthMatches,
+    pendingModrinthConfirmations
+  } from '../../../stores/modrinthMatchingStore.js';
+  import { clientState } from '../../../stores/clientStore.js';
+
   // Props
   export let serverPath = '';
 
@@ -174,13 +184,28 @@
     try {
       successMessage.set(`Installing ${files.length} mod file(s)...`);
       
+      const installedMods = [];
+      
       for (const file of files) {
-        await safeInvoke('add-mod', serverPath, file.path);
+        const result = await safeInvoke('add-mod', serverPath, file.path);
+        if (result && result.success) {
+          installedMods.push({
+            fileName: result.fileName,
+            targetPath: result.targetPath,
+            originalPath: file.path
+          });
+        }
       }
       
       // Refresh the mod list
       await loadMods(serverPath);
       dispatch('modAdded');
+      
+      // Trigger Modrinth matching for each installed mod
+      for (const mod of installedMods) {
+        await triggerModrinthMatching(mod.fileName, mod.targetPath);
+      }
+      
       successMessage.set(`Successfully installed ${files.length} mod(s)!`);
       
       // Collapse the drop zone after successful installation
@@ -188,6 +213,143 @@
       localStorage.setItem('minecraft-core-drop-zone-collapsed', 'true');
     } catch (error) {
       errorMessage.set(`Error installing mod files: ${error.message || 'Unknown error'}`);
+    }
+  }
+
+  // Trigger Modrinth matching for a newly added mod
+  async function triggerModrinthMatching(fileName, modPath) {
+    try {
+      // Set checking state
+      modrinthMatchingActions.setSearchState(fileName, 'checking');
+      
+      const result = await safeInvoke('search-modrinth-matches', {
+        modPath,
+        modName: fileName.replace(/\.jar$/i, ''),
+        modVersion: null
+      });
+
+      if (result && result.success && result.matches && result.matches.length > 0) {
+        const topMatch = result.matches[0];
+        
+        // If we have any reasonable match, set up a pending confirmation
+        if (topMatch.matchScore > 0.3) {
+          const setPendingResult = await safeInvoke('set-mod-pending-confirmation', {
+            fileName,
+            matches: result.matches,
+            metadata: result.metadata,
+            searchedName: result.searchedName,
+            searchedVersion: result.searchedVersion
+          });
+          
+          if (setPendingResult && setPendingResult.success) {
+            // Immediately refresh pending confirmations to show UI
+            await modrinthMatchingActions.loadPendingConfirmations();
+          }
+          
+          // Set found state and clear search state after a short delay to show the result
+          modrinthMatchingActions.setSearchState(fileName, 'found');
+          setTimeout(() => {
+            modrinthMatchingActions.clearSearchState(fileName);
+          }, 1000);
+        } else {
+          // Low confidence matches - show as no matches
+          modrinthMatchingActions.setSearchState(fileName, 'no-matches');
+        }
+      } else {
+        modrinthMatchingActions.setSearchState(fileName, 'no-matches');
+      }
+    } catch (error) {
+      console.error(`Error searching Modrinth matches for ${fileName}:`, error);
+      modrinthMatchingActions.setSearchState(fileName, 'failed', { error: error.message });
+    }
+  }
+
+  // Modrinth matching event handlers
+  async function handleMatchConfirmed(event) {
+    const { fileName, match } = event.detail;
+    
+    try {
+      const result = await modrinthMatchingActions.confirmMatch(fileName, match.project_id, match);
+      if (result) {        
+        // Clear all related states immediately
+        modrinthMatchingActions.clearSearchState(fileName);
+        
+        // Refresh both stores to update UI immediately
+        await Promise.all([
+          modrinthMatchingActions.loadPendingConfirmations(),
+          modrinthMatchingActions.loadConfirmedMatches()
+        ]);
+      }
+    } catch (error) {
+      console.error(`Error confirming match for ${fileName}:`, error);
+    }
+  }
+
+  async function handleMatchRejected(event) {
+    const { fileName } = event.detail;
+    
+    try {
+      const result = await modrinthMatchingActions.rejectMatch(fileName);
+      if (result) {
+        // Clear the pending confirmation from UI
+        await modrinthMatchingActions.loadPendingConfirmations();
+      }
+    } catch (error) {
+      console.error(`Error rejecting match for ${fileName}:`, error);
+    }
+  }
+
+  // Handle auto search trigger
+  async function handleTriggerAutoSearch(event) {
+    const { fileName } = event.detail;
+    
+    const modPath = `${serverPath}/mods/${fileName}`;
+    await triggerModrinthMatching(fileName, modPath);
+  }
+
+  // Handle manual search trigger
+  function handleTriggerManualSearch(event) {
+    const { fileName } = event.detail;
+    
+    // Find the mod data for this fileName
+    const modData = findModData(fileName);
+    
+    modrinthMatchingActions.showManualMatchingModal(modData || { fileName });
+  }
+
+  function findModData(fileName) {
+    // Check in installed mods first
+    if ($clientState.installedMods) {
+      const found = $clientState.installedMods.find(mod => mod.fileName === fileName);
+      if (found) {
+        return { fileName, ...found };
+      }
+    }
+    
+    // Check pending match data
+    const pendingData = $pendingModrinthConfirmations.get(fileName);
+    if (pendingData) {
+      return { fileName, pendingData };
+    }
+    
+    // Return basic structure
+    return { fileName };
+  }
+
+  // Function to reset a confirmed match and re-trigger matching
+  async function resetModMatch(fileName) {
+    try {
+      const success = await modrinthMatchingActions.resetMatchingDecision(fileName);
+      if (success) {
+        // Refresh confirmed matches
+        await modrinthMatchingActions.loadConfirmedMatches();
+        
+        // Re-trigger Modrinth matching for this mod
+        const modPath = `${serverPath}/mods/${fileName}`;
+        await triggerModrinthMatching(fileName, modPath);
+      }
+    } catch (error) {
+      console.error(`Error resetting match for ${fileName}:`, error);
     }
   }
 
@@ -480,16 +642,38 @@
     expandedInstalledMod.set(modName);
     
     const modInfo = $installedModInfo.find(m => m.fileName === modName);
-    if (modInfo && modInfo.projectId) {
+    const confirmedMatch = $confirmedModrinthMatches.get(modName);
+    
+    // Determine which project ID to use - prefer confirmed Modrinth match
+    let projectId = null;
+    if (confirmedMatch && confirmedMatch.projectId) {
+      projectId = confirmedMatch.projectId;
+    } else if (modInfo && modInfo.projectId) {
+      projectId = modInfo.projectId;
+    }
+    
+    if (projectId) {
       try {
-        const versions = await fetchModVersions(modInfo.projectId);
+        const versions = await fetchModVersions(projectId);
         installedModVersionsCache = { 
           ...installedModVersionsCache, 
-          [modInfo.projectId]: versions 
+          [projectId]: versions 
         };
       } catch (error) {
         console.warn('Failed to fetch versions:', error);
+        // Set empty array to stop loading state
+        installedModVersionsCache = { 
+          ...installedModVersionsCache, 
+          [projectId]: [] 
+        };
       }
+    } else {
+      console.warn(`No project ID available for ${modName}`);
+      // For mods without project ID, set empty array to stop loading
+      installedModVersionsCache = { 
+        ...installedModVersionsCache, 
+        ['no-project']: [] 
+      };
     }
   }
 
@@ -656,6 +840,14 @@
           }
         } catch (error) {
           console.warn('Failed to load disabled mods:', error);
+        }
+
+        // Load Modrinth matching data
+        try {
+          await modrinthMatchingActions.loadPendingConfirmations();
+          await modrinthMatchingActions.loadConfirmedMatches();
+        } catch (error) {
+          console.warn('Failed to load Modrinth matching data:', error);
         }
       }
     } catch (error) {
@@ -892,7 +1084,16 @@
 
         <!-- name + MC version tag -->
         <td>
-          <strong>{modCategoryInfo?.name || mod}</strong>
+          {#each [mod] as modKey (modKey)}
+            {@const confirmedMatch = $confirmedModrinthMatches.get(mod)}
+            <strong>
+              {#if confirmedMatch}
+                {confirmedMatch.modrinthData.title}
+              {:else}
+                {modCategoryInfo?.name || mod}
+              {/if}
+            </strong>
+          {/each}
           {#if modInfo && modInfo.mcVersion}
             <span class="mc-tag">MC {modInfo.mcVersion}</span>
           {/if}
@@ -922,9 +1123,62 @@
 
         <!-- current version -->
         <td class="ver">
-          {#if modInfo && modInfo.versionNumber}
-            <code title={modInfo.versionNumber}>{modInfo.versionNumber}</code>
-          {/if}
+          {#each [mod] as modKey (modKey)}
+            {@const confirmedMatch = $confirmedModrinthMatches.get(mod)}
+            
+            {#if confirmedMatch}
+              <!-- Show just the version like other mods -->
+              {#if confirmedMatch.modrinthData.selectedVersion}
+                <code title="Modrinth version: {confirmedMatch.modrinthData.selectedVersion.versionNumber || confirmedMatch.modrinthData.selectedVersion.version_number}">
+                  {confirmedMatch.modrinthData.selectedVersion.versionNumber || confirmedMatch.modrinthData.selectedVersion.version_number}
+                </code>
+                <button 
+                  class="reset-match-btn" 
+                  title="Reset Modrinth match and search again"
+                  on:click={() => resetModMatch(mod)}
+                >
+                  🔄
+                </button>
+              {:else if modInfo && modInfo.versionNumber}
+                <code title="Installed version: {modInfo.versionNumber}">{modInfo.versionNumber}</code>
+                <button 
+                  class="reset-match-btn" 
+                  title="Reset Modrinth match and search again"
+                  on:click={() => resetModMatch(mod)}
+                >
+                  🔄
+                </button>
+              {:else}
+                <div class="no-version-info">
+                  <span>No version info</span>
+                  <button 
+                    class="reset-match-btn" 
+                    title="Reset Modrinth match and search again"
+                    on:click={() => resetModMatch(mod)}
+                  >
+                    🔄
+                  </button>
+                </div>
+              {/if}
+            {:else if modInfo && modInfo.versionNumber}
+              <!-- Show basic version info when no confirmed match but mod has version info -->
+              <code title="Installed version: {modInfo.versionNumber}">{modInfo.versionNumber}</code>
+            {:else}
+              <!-- No version info and no confirmed match - show matching options -->
+              <div class="no-version-info">
+                <span>No version info</span>
+              </div>
+              
+              <!-- Modrinth matching UI for unmatched mods without version info -->
+              <ModrinthMatchConfirmation 
+                fileName={mod}
+                on:matchConfirmed={handleMatchConfirmed}
+                on:matchRejected={handleMatchRejected}
+                on:triggerAutoSearch={handleTriggerAutoSearch}
+                on:triggerManualSearch={handleTriggerManualSearch}
+              />
+            {/if}
+          {/each}
         </td>
 
           <!-- warning/error column -->
@@ -1001,20 +1255,25 @@
       </tr>
 
         {#if !isDisabled && $expandedInstalledMod === mod}
+          {@const confirmedMatch = $confirmedModrinthMatches.get(mod)}
+          {@const projectId = confirmedMatch?.projectId || modInfo?.projectId}
+          
         <tr transition:fly="{{ x: 10, duration: 100 }}">
             <td colspan="8">
             <div class="versions">
-              {#if !installedModVersionsCache[modInfo?.projectId]}
+              {#if !projectId}
+                <span class="err">No project information available</span>
+              {:else if !installedModVersionsCache[projectId]}
                 <span class="loading">Loading versions...</span>
-              {:else if installedModVersionsCache[modInfo?.projectId]?.length === 0}
+              {:else if installedModVersionsCache[projectId]?.length === 0}
                 <span class="err">No versions available</span>
               {:else}
-                {#each installedModVersionsCache[modInfo?.projectId] || [] as version (version.id)}
+                {#each installedModVersionsCache[projectId] || [] as version (version.id)}
                   {@const isCurrentVersion = modInfo && modInfo.versionId === version.id}
                   <button
                     class:sel={isCurrentVersion}
                     disabled={isCurrentVersion}
-                    on:click={() => switchToVersion(mod, modInfo.projectId, version.id)}>
+                    on:click={() => switchToVersion(mod, projectId, version.id)}>
                     {version.versionNumber || version.name}
                     {#if isCurrentVersion} (current){/if}
                   </button>
@@ -1042,6 +1301,11 @@
   confirmType="danger"
   on:confirm={confirmDeleteMod}
   on:cancel={() => { confirmDeleteVisible = false; }}
+/>
+
+<!-- Modrinth Manual Matching Modal -->
+<ModrinthManualMatchingModal
+  on:matchConfirmed={handleMatchConfirmed}
 />
 
 
@@ -1299,7 +1563,7 @@
   .mods-table th.chk, .mods-table td:nth-child(1) { width: 5%; min-width: 40px; }
   .mods-table th:nth-child(2), .mods-table td:nth-child(2) { width: 25%; min-width: 150px; } /* Mod name */
   .mods-table th.loc, .mods-table td:nth-child(3) { width: 20%; min-width: 120px; } /* Location */
-  .mods-table th.ver, .mods-table td:nth-child(4) { width: 15%; min-width: 100px; } /* Current */
+  .mods-table th.ver, .mods-table td:nth-child(4) { width: 20%; min-width: 200px; } /* Current */
   .mods-table th.alert, .mods-table td:nth-child(5) { width: 4%; min-width: 28px; } /* Alert */
   .mods-table th.status, .mods-table td:nth-child(6) { width: 10%; min-width: 70px; } /* Status */
   .mods-table th.upd, .mods-table td:nth-child(7) { width: 10%; min-width: 70px; } /* Update */
@@ -1361,6 +1625,26 @@
     background: rgba(255, 255, 255, 0.1);
     border-radius: 2px;
     cursor: help; /* Show it's hoverable */
+  }
+
+  .reset-match-btn {
+    background: none;
+    border: none;
+    font-size: 0.6rem;
+    cursor: pointer;
+    opacity: 0.5;
+    padding: 1px 2px;
+    border-radius: 2px;
+    transition: opacity 0.2s, background-color 0.2s;
+    margin-left: 4px;
+    color: #94a3b8;
+    vertical-align: middle;
+  }
+
+  .reset-match-btn:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.1);
+    color: #f1f5f9;
   }
   
   /* Hover tooltip for version */
@@ -1731,20 +2015,19 @@
     .mods-header .left { justify-content: center; }
     .bulk { justify-content: center; }
     .loc { display: none; }
-    .act { text-align: center; }
-  }
-
+    .act { text-align: center; }  }
+  
   /* Exception columns that need wrapping */
   .mods-table td:nth-child(3), /* Location column */
+  .mods-table td:nth-child(4), /* Current version (now allows wrapping for confirmation UI) */
   .mods-table td:nth-child(8) { /* Actions column */
     white-space: normal; /* Allow wrapping for these columns */
   }
   
-  /* Version and current columns should stay nowrap */
-  .mods-table td:nth-child(4), /* Current version */
+  /* Update column should stay nowrap */
   .mods-table td:nth-child(7) { /* Update */
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-</style> 
+</style>
