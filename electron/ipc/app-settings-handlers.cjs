@@ -20,7 +20,7 @@ function createAppSettingsHandlers() {
           return { success: false, error: 'No main window found' };
         }
       } catch (error) {
-        console.error('Error opening app settings:', error);
+        // TODO: Add proper logging - Error opening app settings
         return { success: false, error: error.message };
       }
     },
@@ -62,7 +62,7 @@ function createAppSettingsHandlers() {
               });
             }
           } catch (err) {
-            console.warn('Failed to update startup settings:', err.message);
+            // TODO: Add proper logging - Failed to update startup settings
             // Don't fail the entire operation for this
           }
         }
@@ -72,7 +72,7 @@ function createAppSettingsHandlers() {
 
         return { success: true, settings: updatedSettings };
       } catch (err) {
-        console.error('Error saving app settings:', err);
+        // TODO: Add proper logging - Error saving app settings
         return { success: false, error: err.message };
       }
     },
@@ -97,14 +97,14 @@ function createAppSettingsHandlers() {
             const loginItemSettings = app.getLoginItemSettings();
             settings.startOnStartup = loginItemSettings.openAtLogin;
           } catch (err) {
-            console.warn('Failed to get login item settings:', err.message);
+            // TODO: Add proper logging - Failed to get login item settings
             settings.startOnStartup = false; // Default to false if we can't check
           }
         }
 
         return { success: true, settings };
       } catch (err) {
-        console.error('Error loading app settings:', err);
+        // TODO: Add proper logging - Error loading app settings
         return { success: false, error: err.message };
       }
     },
@@ -114,7 +114,7 @@ function createAppSettingsHandlers() {
         const version = app.getVersion();
         return { success: true, version };
       } catch (err) {
-        console.error('Error getting app version:', err);
+        // TODO: Add proper logging - Error getting app version
         return { success: false, error: err.message };
       }
     },
@@ -154,7 +154,7 @@ function createAppSettingsHandlers() {
 
         return { success: true, width: validWidth, height: validHeight, resizable };
       } catch (err) {
-        console.error('Error setting window size:', err);
+        // TODO: Add proper logging - Error setting window size
         return { success: false, error: err.message };
       }
     }

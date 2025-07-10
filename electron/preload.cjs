@@ -188,6 +188,20 @@ contextBridge.exposeInMainWorld('electron', {
       'launcher-client-download-error',
       // Application lifecycle events
       'app-close-request',
+      // Logger channels
+      'logger-get-logs',
+      'logger-get-stats',
+      'logger-clear-logs',
+      'logger-export-logs',
+      'logger-update-config',
+      'logger-get-config',
+      'logger-export-crash-report',
+      'logger-add-log',
+      'logger-search-logs',
+      'logger-get-instances',
+      'logger-get-categories',
+      'logger-open-window',
+      'logger-close-window',
     ];
 
     if (!ipcChannelsLogged) {

@@ -51,10 +51,10 @@
         // Apply window settings immediately
         await applyWindowSettings();
       } else {
-        console.error('Failed to save app settings:', result.error);
+        // TODO: Add proper logging - Failed to save app settings
       }
     } catch (error) {
-      console.error('Error saving app settings:', error);
+      // TODO: Add proper logging - Error saving app settings
     }
     
     closeModal();
@@ -83,7 +83,7 @@
       // Update content area width to match window size
       updateContentAreaWidth(width);
     } catch (error) {
-      console.error('Error applying window settings:', error);
+      // TODO: Add proper logging - Error applying window settings
     }
   }
   
@@ -160,7 +160,21 @@
         customHeight = result.settings.customHeight || 800;
       }
     } catch (error) {
-      console.error('Error loading app settings:', error);
+      // TODO: Add proper logging - Error loading app settings
+    }
+  }
+
+  async function openLogger() {
+    try {
+      // Import logger dynamically to avoid circular dependencies
+      const { default: logger } = await import('../../utils/logger.js');
+      const result = await logger.openWindow();
+      
+      if (!result.success) {
+        // TODO: Add proper logging - Failed to open logger
+      }
+    } catch (error) {
+      // TODO: Add proper logging - Error opening logger
     }
   }
 </script>
@@ -252,6 +266,35 @@
                 <small>Launch app in system tray instead of showing main window</small>
               </span>
             </label>
+          </div>
+        </div>
+
+        <!-- Logging & Debugging Section -->
+        <div class="settings-section">
+          <h4>
+            <span class="section-icon">📋</span>
+            Logging & Debugging
+          </h4>
+          
+          <div class="setting-item">
+            <div class="setting-description">
+              <span class="setting-text">
+                <strong>Application Logger</strong>
+                <small>View real-time application logs for troubleshooting and debugging. The logger captures system events, errors, and performance metrics from all application components.</small>
+              </span>
+            </div>
+            <button 
+              class="logger-button"
+              on:click={openLogger}
+              type="button"
+            >
+              <span class="logger-icon">📊</span>
+              Open Logger
+            </button>
+          </div>
+          
+          <div class="setting-info">
+            <small>💡 The logger opens in a separate window and provides real-time log streaming, filtering, search, and export capabilities.</small>
           </div>
         </div>
 
@@ -534,6 +577,42 @@
     outline: none;
     border-color: #3b82f6;
     box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+  }
+
+  /* Logger section styles */
+  .setting-description {
+    margin-bottom: 1rem;
+  }
+
+  .logger-button {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1.25rem;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    box-shadow: 0 2px 4px rgba(59, 130, 246, 0.3);
+  }
+
+  .logger-button:hover {
+    background: linear-gradient(135deg, #2563eb, #1e40af);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(59, 130, 246, 0.4);
+  }
+
+  .logger-button:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(59, 130, 246, 0.3);
+  }
+
+  .logger-icon {
+    font-size: 1.1rem;
   }
   
   .modal-footer {

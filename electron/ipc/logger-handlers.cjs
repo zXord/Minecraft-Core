@@ -1,0 +1,290 @@
+const { ipcMain, BrowserWindow } = require('electron');
+const { getLogger } = require('../services/logger-service.cjs');
+
+class LoggerHandlers {
+  constructor() {
+    this.logger = getLogger();
+    this.setupHandlers();
+    this.setupRealTimeStreaming();
+  }
+  
+  setupHandlers() {
+    // Get logs with filtering
+    ipcMain.handle('logger-get-logs', async (_, options = {}) => {
+      try {
+        const logs = this.logger.getLogs(options);
+        return {
+          success: true,
+          logs,
+          total: this.logger.memoryLogs.length
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Get logger statistics
+    ipcMain.handle('logger-get-stats', async (_) => {
+      try {
+        const stats = this.logger.getStats();
+        return {
+          success: true,
+          stats
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Clear memory logs
+    ipcMain.handle('logger-clear-logs', async (_) => {
+      try {
+        this.logger.clearMemoryLogs();
+        return {
+          success: true
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Export logs
+    ipcMain.handle('logger-export-logs', async (_, options = {}) => {
+      try {
+        const result = this.logger.exportLogs(options);
+        return result;
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Update logger configuration
+    ipcMain.handle('logger-update-config', async (_, config) => {
+      try {
+        this.logger.updateConfig(config);
+        return {
+          success: true,
+          config: this.logger.config
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Get current configuration
+    ipcMain.handle('logger-get-config', async (_) => {
+      try {
+        return {
+          success: true,
+          config: this.logger.config
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Export crash report manually
+    ipcMain.handle('logger-export-crash-report', async (_) => {
+      try {
+        const crashFile = this.logger.exportCrashReport();
+        return {
+          success: true,
+          crashFile
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Add a log entry manually (for testing)
+    ipcMain.handle('logger-add-log', async (_, level, message, options = {}) => {
+      try {
+        const logEntry = this.logger.log(level, message, options);
+        return {
+          success: true,
+          logEntry
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Search logs
+    ipcMain.handle('logger-search-logs', async (_, searchOptions) => {
+      try {
+        const logs = this.logger.getLogs(searchOptions);
+        return {
+          success: true,
+          logs,
+          count: logs.length
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Get available instances for filtering
+    ipcMain.handle('logger-get-instances', async (_) => {
+      try {
+        const stats = this.logger.getStats();
+        const instances = Object.keys(stats.instances).sort();
+        return {
+          success: true,
+          instances
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+    
+    // Get available categories for filtering
+    ipcMain.handle('logger-get-categories', async (_) => {
+      try {
+        const stats = this.logger.getStats();
+        const categories = Object.keys(stats.categories).sort();
+        return {
+          success: true,
+          categories
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+
+    // Open logger window
+    ipcMain.handle('logger-open-window', async () => {
+      try {
+        const window = this.logger.openLoggerWindow();
+        return {
+          success: true,
+          windowId: window ? window.id : null
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+
+    // Close logger window
+    ipcMain.handle('logger-close-window', async () => {
+      try {
+        this.logger.closeLoggerWindow();
+        return {
+          success: true
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message
+        };
+      }
+    });
+  }
+  
+  setupRealTimeStreaming() {
+    // Listen for new log entries and broadcast to logger windows
+    this.logger.on('log', (logEntry) => {
+      this.broadcastToLoggerWindows('logger-new-log', logEntry);
+    });
+    
+    // Listen for logs cleared event
+    this.logger.on('logsCleared', () => {
+      this.broadcastToLoggerWindows('logger-logs-cleared');
+    });
+  }
+  
+  broadcastToLoggerWindows(channel, data) {
+    // Send to all windows that are listening for logger events
+    const allWindows = BrowserWindow.getAllWindows();
+    
+    for (const window of allWindows) {
+      if (window && !window.isDestroyed()) {
+        try {
+          window.webContents.send(channel, data);
+        } catch (error) {
+          // Window might be destroyed, ignore
+        }
+      }
+    }
+  }
+  
+  // Utility method to log from the main process
+  logFromMain(level, message, options = {}) {
+    return this.logger.log(level, message, {
+      ...options,
+      instanceId: options.instanceId || 'system',
+      category: options.category || 'core'
+    });
+  }
+  
+  // Convenience methods for main process logging
+  debug(message, options = {}) {
+    return this.logFromMain('debug', message, options);
+  }
+  
+  info(message, options = {}) {
+    return this.logFromMain('info', message, options);
+  }
+  
+  warn(message, options = {}) {
+    return this.logFromMain('warn', message, options);
+  }
+  
+  error(message, options = {}) {
+    return this.logFromMain('error', message, options);
+  }
+  
+  fatal(message, options = {}) {
+    return this.logFromMain('fatal', message, options);
+  }
+}
+
+// Singleton instance
+let loggerHandlersInstance = null;
+
+function getLoggerHandlers() {
+  if (!loggerHandlersInstance) {
+    loggerHandlersInstance = new LoggerHandlers();
+  }
+  return loggerHandlersInstance;
+}
+
+module.exports = {
+  getLoggerHandlers,
+  LoggerHandlers
+}; 

@@ -9,6 +9,10 @@ export default defineConfig({
     outDir: 'dist',
     assetsDir: 'assets',
     rollupOptions: {
+      input: {
+        main: 'src/main.js',
+        logger: 'src/logger.js'
+      },
       output: {
         format: 'es'
       }

@@ -25,9 +25,9 @@
         setTimeout(() => {
           showCopyConfirmation = false;
         }, 2000);
-      } catch (err) {
-        console.error('Failed to copy path:', err);
-      }
+          } catch (err) {
+      // TODO: Add proper logging - Failed to copy path
+    }
     }
   }
   

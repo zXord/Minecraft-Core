@@ -52,7 +52,7 @@ export const modrinthMatchingActions = {
         pendingModrinthConfirmations.set(pendingMap);
       }
     } catch (error) {
-      console.error('Error loading pending confirmations:', error);
+      // TODO: Add proper logging - Error loading pending confirmations
     }
   },
 
@@ -69,7 +69,7 @@ export const modrinthMatchingActions = {
         confirmedModrinthMatches.set(confirmedMap);
       }
     } catch (error) {
-      console.error('Error loading confirmed matches:', error);
+      // TODO: Add proper logging - Error loading confirmed matches
     }
   },
 
@@ -81,7 +81,7 @@ export const modrinthMatchingActions = {
         return result;
       }
     } catch (error) {
-      console.error(`Error getting matching status for ${fileName}:`, error);
+      // TODO: Add proper logging - Error getting matching status for mod
     }
     return null;
   },
@@ -112,7 +112,7 @@ export const modrinthMatchingActions = {
         return true;
       }
     } catch (error) {
-      console.error(`Error confirming match for ${fileName}:`, error);
+      // TODO: Add proper logging - Error confirming match for mod
     }
     return false;
   },
@@ -136,7 +136,7 @@ export const modrinthMatchingActions = {
         return true;
       }
     } catch (error) {
-      console.error(`Error rejecting match for ${fileName}:`, error);
+      // TODO: Add proper logging - Error rejecting match for mod
     }
     return false;
   },
@@ -186,7 +186,7 @@ export const modrinthMatchingActions = {
         return result.results;
       }
     } catch (error) {
-      console.error('Error in manual Modrinth search:', error);
+      // TODO: Add proper logging - Error in manual Modrinth search
     }
     return [];
   },
@@ -199,7 +199,7 @@ export const modrinthMatchingActions = {
         return result;
       }
     } catch (error) {
-      console.error(`Error getting project details for ${projectId}:`, error);
+      // TODO: Add proper logging - Error getting project details
     }
     return null;
   },
@@ -225,7 +225,7 @@ export const modrinthMatchingActions = {
       // Clear search state
       this.clearSearchState(fileName);
     } catch (error) {
-      console.error(`Error clearing matching data for ${fileName}:`, error);
+      // TODO: Add proper logging - Error clearing matching data for mod
     }
   },
 
@@ -253,7 +253,7 @@ export const modrinthMatchingActions = {
         return true;
       }
     } catch (error) {
-      console.error(`Error resetting matching decision for ${fileName}:`, error);
+      // TODO: Add proper logging - Error resetting matching decision for mod
     }
     return false;
   }

@@ -266,7 +266,7 @@ class ClientDownloader {
           if (cleanupResult.success) {
             
           } else {
-            console.warn(`⚠️ Cleanup warning: ${cleanupResult.error}`);
+            // TODO: Add proper logging - Cleanup warning
           }
           
           this.emitter.emit('client-download-complete', { 
@@ -1570,9 +1570,9 @@ Specification-Vendor: FabricMC
         try {
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
-          console.log(`🗑️ Cleaned up old version: ${versionDir}`);
+          // TODO: Add proper logging - Cleaned up old version
         } catch (error) {
-          console.error(`❌ Failed to remove ${versionDir}:`, error.message);
+          // TODO: Add proper logging - Failed to remove version directory
         }
       }
 
@@ -1591,7 +1591,7 @@ Specification-Vendor: FabricMC
       };
 
     } catch (error) {
-      console.error('❌ Cleanup failed:', error);
+      // TODO: Add proper logging - Cleanup failed
       return {
         success: false,
         error: error.message
@@ -1640,7 +1640,7 @@ Specification-Vendor: FabricMC
       
       return false;
     } catch (error) {
-      console.error('Failed to check version change:', error);
+      // TODO: Add proper logging - Failed to check version change
       return false;
     }
   }
@@ -1677,9 +1677,9 @@ Specification-Vendor: FabricMC
         try {
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
-          console.log(`🗑️ Cleaned up old version: ${versionDir}`);
+          // TODO: Add proper logging - Cleaned up old version
         } catch (error) {
-          console.error(`❌ Failed to remove ${versionDir}:`, error.message);
+          // TODO: Add proper logging - Failed to remove version directory
         }
       }
 
@@ -1692,7 +1692,7 @@ Specification-Vendor: FabricMC
       };
 
     } catch (error) {
-      console.error('❌ Version change cleanup failed:', error);
+      // TODO: Add proper logging - Version change cleanup failed
       return {
         success: false,
         error: error.message

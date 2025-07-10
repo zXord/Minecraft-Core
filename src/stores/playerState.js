@@ -172,7 +172,7 @@ export async function refreshPlayerLists(serverPath) {
         const list = await window.electron.invoke('read-players', listName, serverPath) || [];
         return [listName, list];
       } catch (error) {
-        console.warn(`Failed to load ${listName}:`, error);
+        // TODO: Add proper logging - Failed to load player list
         return [listName, []];
       }
     });
@@ -200,6 +200,6 @@ export async function refreshPlayerLists(serverPath) {
     }));
     
   } catch (error) {
-    console.warn('Failed to refresh player lists:', error);
+    // TODO: Add proper logging - Failed to refresh player lists
   }
 }

@@ -197,7 +197,7 @@ async function installModToServer(win, serverPath, modDetails) {
           try {
             versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId);
           } catch (err) {
-            console.warn(`Could not fetch version info for ${modDetails.id}: ${err.message}`);
+            // TODO: Add proper logging - Could not fetch version info
           }
         }
           // Create manifest with available information

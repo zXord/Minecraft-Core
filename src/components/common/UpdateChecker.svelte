@@ -129,7 +129,7 @@
         };
       }
     } catch (error) {
-      console.error('Failed to load initial update data:', error);
+      // TODO: Add proper logging - Failed to load initial update data
     }
   }
 

@@ -600,7 +600,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
     
     return true;
   } catch (err) {
-    console.error(err);
+    // TODO: Add proper logging
     return false;
   }
 }

@@ -15,7 +15,7 @@ function safeSend(channel, data) {
   } catch (error) {
     // Silently ignore errors when trying to send to destroyed windows
     // This can happen during app shutdown or window transitions
-    console.warn(`Failed to send message to channel '${channel}':`, error.message);
+    // TODO: Add proper logging - Failed to send message to channel
   }
 }
 

@@ -44,7 +44,7 @@ function saveConfirmedMatches() {
     const filePath = getPersistencePath();
     fs.writeFileSync(filePath, JSON.stringify(dataToSave, null, 2), 'utf8');
   } catch (error) {
-    console.error('Error saving confirmed matches:', error);
+    // TODO: Add proper logging - Error saving confirmed matches
   }
 }
 
@@ -65,7 +65,7 @@ function loadConfirmedMatches() {
       });
     }
   } catch (error) {
-    console.error('Error loading confirmed matches:', error);
+    // TODO: Add proper logging - Error loading confirmed matches
   }
 }
 

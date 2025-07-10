@@ -20,6 +20,7 @@ const { createMinecraftLauncherHandlers } = require('./ipc/minecraft-launcher-ha
 const { createServerJavaHandlers } = require('./ipc/server-java-handlers.cjs');
 const { createAppSettingsHandlers } = require('./ipc/app-settings-handlers.cjs');
 const { createUpdateHandlers } = require('./ipc/update-handlers.cjs');
+const { getLoggerHandlers } = require('./ipc/logger-handlers.cjs');
 
 // Import auto-restart services for the one remaining handler
 const {
@@ -57,6 +58,25 @@ function setupIpcHandlers(win) {
     const appSettingsHandlers = createAppSettingsHandlers();
     const updateHandlers = createUpdateHandlers(win);
     
+    // Initialize logger handlers (singleton, no creation needed)
+    const loggerHandlers = getLoggerHandlers();
+    
+    // Log system startup
+    loggerHandlers.info('Application IPC handlers initialized', {
+      category: 'core',
+      data: { handlersLoaded: registeredHandlers.size }
+    });
+
+    // Add test logs to verify logger functionality
+    setTimeout(() => {
+      loggerHandlers.debug('Logger system fully operational', { category: 'core' });
+      loggerHandlers.warn('This is a test warning message', { category: 'ui' });
+      loggerHandlers.error('This is a test error message', { 
+        category: 'network',
+        data: { testData: 'Sample error context' }
+      });
+    }, 2000);
+    
 
     
     // Initialize backup manager
@@ -75,7 +95,8 @@ function setupIpcHandlers(win) {
       managementServerHandlers,
       minecraftLauncherHandlers,
       serverJavaHandlers,
-      updateHandlers
+      updateHandlers,
+      loggerHandlers
     ].forEach((handlers) => {
       if (!handlers) {
         return;

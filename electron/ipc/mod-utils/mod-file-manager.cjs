@@ -573,8 +573,7 @@ async function saveDisabledMods(serverPath, disabledMods) {
             disabledMods.push(oldFile);
           }
         } catch (migrationErr) {
-          // Log migration error but don't fail the entire operation
-          console.warn(`Warning: Failed to migrate disabled mod ${oldFile}: ${migrationErr.message}`);
+          // TODO: Add proper logging - Warning: Failed to migrate disabled mod
         }
       }
     }
@@ -939,8 +938,7 @@ async function processModsDirectory(modsDir, disabledMods) {
         try {
           await fs.rename(sourcePath, destPath);
         } catch (moveErr) {
-          // Only log error, don't fail entirely (directory might not be accessible)
-          console.warn(`Warning: Failed to disable mod ${modFile} in ${modsDir}: ${moveErr.message}`);
+          // TODO: Add proper logging - Warning: Failed to disable mod
         }
       }
     }
@@ -954,14 +952,12 @@ async function processModsDirectory(modsDir, disabledMods) {
         try {
           await fs.rename(sourcePath, destPath);
         } catch (moveErr) {
-          // Only log error, don't fail entirely (directory might not be accessible)
-          console.warn(`Warning: Failed to enable mod ${modFile} in ${modsDir}: ${moveErr.message}`);
+          // TODO: Add proper logging - Warning: Failed to enable mod
         }
       }
     }
   } catch (readErr) {
-    // If we can't read the directory, just log a warning (client directory might not exist)
-    console.warn(`Warning: Could not process mods directory ${modsDir}: ${readErr.message}`);
+    // TODO: Add proper logging - Warning: Could not process mods directory
   }
 }
 

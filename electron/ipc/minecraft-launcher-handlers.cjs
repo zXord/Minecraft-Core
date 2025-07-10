@@ -60,7 +60,7 @@ async function saveExpectedModState(clientPath, requiredMods, optionalMods, win 
       resolver();
       return { success: true };
     } catch (error) {
-      console.error('Failed to save expected mod state:', error);
+      // TODO: Add proper logging - Failed to save expected mod state
       
       // Surface error to UI if window reference is available
       if (win && !win.isDestroyed()) {
@@ -107,12 +107,12 @@ async function loadExpectedModState(clientPath, win = null) {
     try {
       state = JSON.parse(data);
     } catch (parseError) {
-      console.error('Corrupted state file, resetting:', parseError);
+      // TODO: Add proper logging - Corrupted state file, resetting
       // Delete corrupted file and start fresh
       try {
         await fsPromises.unlink(stateFile);
       } catch (unlinkError) {
-        console.warn('Could not delete corrupted state file:', unlinkError);
+        // TODO: Add proper logging - Could not delete corrupted state file
       }
       return { success: true, requiredMods: new Set(), optionalMods: new Set(), acknowledgedDeps: new Set() };
     }
@@ -141,13 +141,13 @@ async function loadExpectedModState(clientPath, win = null) {
       }
       
       // Save migrated format to new schema
-      console.log('[STATE-MIGRATION] Migrating state to new schema version 1');
+      // TODO: Add proper logging - [STATE-MIGRATION] Migrating state to new schema version 1
       await saveExpectedModState(clientPath, requiredMods, optionalMods, win, acknowledgedDeps);
     }
 
     return { success: true, requiredMods, optionalMods, acknowledgedDeps };
   } catch (error) {
-    console.error('Failed to load expected mod state:', error);
+    // TODO: Add proper logging - Failed to load expected mod state
     
     // Surface error to UI if window reference is available
     if (win && !win.isDestroyed()) {
@@ -178,7 +178,7 @@ async function clearExpectedModState(clientPath) {
       return { success: true, message: 'No state file found' };
     }
   } catch (error) {
-    console.error('Failed to clear persistent mod state:', error);
+    // TODO: Add proper logging - Failed to clear persistent mod state
     return { success: false, error: error.message };
   }
 }
@@ -332,7 +332,7 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
           }
         }
       } catch (error) {
-        console.warn(`Failed to analyze dependencies for ${modFile}:`, error.message);
+        // TODO: Add proper logging - Failed to analyze dependencies
       }    }
       // Add common Fabric API variants that client mods might reference
     const fabricApiVariants = new Set();
@@ -379,7 +379,7 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
     
 
   } catch (error) {
-    console.error('Error analyzing client-side dependencies:', error);
+    // TODO: Add proper logging - Error analyzing client-side dependencies
   }
     return dependencies;
 }
@@ -581,7 +581,7 @@ function createMinecraftLauncherHandlers(win) {
       try {
         // If forcing fresh auth, clear existing auth data first
         if (forceAuth) {
-          console.log('🔄 Force auth requested - clearing existing auth data');
+          // TODO: Add proper logging - Force auth requested
           launcher.clearAuthData();
         }
         
@@ -648,7 +648,7 @@ function createMinecraftLauncherHandlers(win) {
       
       try {
         if (!clientPath) {
-          console.log(`❌ Mod download failed: Invalid client path`);
+          // TODO: Add proper logging - Mod download failed: Invalid client path
           return { success: false, error: 'Invalid client path' };
         }
         
@@ -1010,7 +1010,7 @@ function createMinecraftLauncherHandlers(win) {
             }
             
           } catch (error) {
-            console.log(`❌ Download failed for ${mod.fileName}: ${error.message}`);
+            // TODO: Add proper logging - Download failed
             
             // Send error progress for caught exceptions
             const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
@@ -1096,7 +1096,7 @@ function createMinecraftLauncherHandlers(win) {
               }
             }
           } catch (stateError) {
-            console.error('Failed to update persistent state after download:', stateError);
+            // TODO: Add proper logging - Failed to update persistent state after download
             // Don't fail the download operation just because state update failed
           }
         }

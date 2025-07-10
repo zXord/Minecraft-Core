@@ -295,7 +295,7 @@ export async function loadModCategories() {
     
     return true;
   } catch (error) {
-    console.error('Error loading categories:', error);
+    // TODO: Add proper logging - Error loading categories
     return false;
   }
 }

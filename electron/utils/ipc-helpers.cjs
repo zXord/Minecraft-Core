@@ -22,7 +22,7 @@ function safeIpcHandle(channel, handler) {
     try {
       ipcMain.removeHandler(channel);
     } catch (error) {
-      console.error(error);
+      // TODO: Add proper logging - IPC handler removal error
     }
     
     // Register handler
@@ -30,7 +30,7 @@ function safeIpcHandle(channel, handler) {
     registeredHandlers.add(channel);
     return true;
   } catch (error) {
-    console.error(error);
+    // TODO: Add proper logging - IPC handler registration error
     return false;
   }
 }

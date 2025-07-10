@@ -222,9 +222,9 @@
           environmentType: filterType
         });
         window.scrollTo(0, 0);
-      } catch (error) {
-        console.error('Error during page change search:', error);
-      }
+          } catch (error) {
+      // TODO: Add proper logging - Error during page change search
+    }
     }, PAGE_DEBOUNCE_MS);
   }
   

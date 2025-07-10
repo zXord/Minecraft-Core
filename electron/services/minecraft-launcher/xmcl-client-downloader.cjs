@@ -223,7 +223,7 @@ class XMCLClientDownloader {
           }
           
           if (this.isDownloadStuck()) {
-            console.warn('⚠️ Download appears stuck, will timeout soon...');
+            // TODO: Add proper logging - Download appears stuck
             this.emitter.emit('client-download-progress', {
               type: 'Warning',
               task: 'Download seems slow, please wait or try "Clear All & Re-download"...',
@@ -267,9 +267,9 @@ class XMCLClientDownloader {
                 phase: phaseInfo
               });
             },
-            onFailed: (task, error) => {
+            onFailed: (_, __) => {
               if (!isCancelled) {
-                console.warn(`⚠️ Task failed [${task.path}], will retry: ${error.message}`);
+                // TODO: Add proper logging - Task failed, will retry
               }
             },
             onSucceed: (task) => {
@@ -372,7 +372,7 @@ class XMCLClientDownloader {
                 throw new Error(`Legacy Fabric installation failed: ${legacyFabricResult.error}`);
               }
             } catch (legacyFabricError) {
-              console.error('❌ Both XMCL and legacy Fabric installation failed:', legacyFabricError);
+              // TODO: Add proper logging - Both XMCL and legacy Fabric installation failed
               
               const hasRequiredMods = requiredMods && requiredMods.length > 0;
               
@@ -433,7 +433,7 @@ class XMCLClientDownloader {
         if (cleanupResult.success) {
           
         } else {
-          console.warn(`⚠️ Cleanup warning: ${cleanupResult.error}`);
+          // TODO: Add proper logging - Cleanup warning
         }
 
         // Clean up progress monitor
@@ -457,7 +457,7 @@ class XMCLClientDownloader {
         };
 
       } catch (error) {
-        console.error(`❌ Download attempt ${retryCount + 1} failed:`, error);
+        // TODO: Add proper logging - Download attempt failed
         
         retryCount++;
         if (retryCount >= maxRetries) {
@@ -694,7 +694,7 @@ class XMCLClientDownloader {
       
       return false;
     } catch (error) {
-      console.error('Failed to check version change:', error);
+      // TODO: Add proper logging - Failed to check version change
       return false;
     }
   }
@@ -731,9 +731,9 @@ class XMCLClientDownloader {
         try {
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
-          console.log(`🗑️ Cleaned up old version: ${versionDir}`);
+          // TODO: Add proper logging - Cleaned up old version
         } catch (error) {
-          console.error(`❌ Failed to remove ${versionDir}:`, error.message);
+          // TODO: Add proper logging - Failed to remove version directory
         }
       }
 
@@ -746,7 +746,7 @@ class XMCLClientDownloader {
       };
 
     } catch (error) {
-      console.error('❌ Version change cleanup failed:', error);
+      // TODO: Add proper logging - Version change cleanup failed
       return {
         success: false,
         error: error.message
@@ -784,9 +784,9 @@ class XMCLClientDownloader {
         try {
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
-          console.log(`🗑️ Cleaned up old version: ${versionDir}`);
+          // TODO: Add proper logging - Cleaned up old version
         } catch (error) {
-          console.error(`❌ Failed to remove ${versionDir}:`, error.message);
+          // TODO: Add proper logging - Failed to remove version directory
         }
       }
 
@@ -805,7 +805,7 @@ class XMCLClientDownloader {
       };
 
     } catch (error) {
-      console.error('❌ Cleanup failed:', error);
+      // TODO: Add proper logging - Cleanup failed
       return {
         success: false,
         error: error.message

@@ -55,8 +55,7 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
       
       // Calculate delay with exponential backoff
       const delay = baseDelay * Math.pow(2, attempt);
-      console.warn(`🔄 API request failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${error.message}`);
-      
+      // TODO: Add proper logging - API request failed, retrying
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
@@ -494,6 +493,10 @@ async function getModrinthProjectInfo(projectId) {
       if (error.name === 'AbortError') {
         throw new Error(`API timeout for project ${projectId} - network may be slow or API unavailable`);
       }
+      if (error.response && error.response.status === 404) {
+        // TODO: Add proper logging - Project ID not found (404)
+        return null;
+      }
       throw error;
     }
   });
@@ -589,14 +592,7 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
       if (!response.ok) {
         // Add specific diagnostics for 404 errors
         if (response.status === 404) {
-          console.warn(`🔍 Mod API Diagnostic: Project ID "${projectId}" not found (404)`);
-          console.warn(`   This could mean:`);
-          console.warn(`   - The mod was removed from Modrinth`);
-          console.warn(`   - The project ID is incorrect or outdated`);
-          console.warn(`   - The mod might have been renamed or transferred`);
-          console.warn(`   💡 User action: Try searching for this mod manually and re-installing it`);
-          console.warn(`   🔗 Search URL: https://modrinth.com/mods?q=${encodeURIComponent(projectId)}`);
-          
+          // TODO: Add proper logging - Project ID not found
           // Return a user-friendly error message
           throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
         }

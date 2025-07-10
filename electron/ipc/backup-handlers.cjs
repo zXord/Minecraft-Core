@@ -342,7 +342,7 @@ function startAutomatedBackups(settings, serverPath) {
         scheduleNextBackup();
         
       } catch (err) {
-        console.error('Failed to create scheduled backup:', err);
+        // TODO: Add proper logging - Failed to create scheduled backup
         safeSend('backup-notification', {
           success: false,
           message: `⚠️ Failed to create scheduled backup: ${formatErrorMessage(err)}`

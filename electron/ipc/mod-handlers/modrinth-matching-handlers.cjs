@@ -15,7 +15,7 @@ function createModrinthMatchingHandlers() {
           try {
             metadata = await readModMetadata(modPath);
           } catch (error) {
-            console.warn('Failed to read mod metadata:', error.message);
+            // TODO: Add proper logging - Failed to read mod metadata
           }
         }
 
@@ -80,7 +80,7 @@ function createModrinthMatchingHandlers() {
                     checkVersionMatch(searchVersion, versions || []) : false
                 };
               } catch (error) {
-                console.warn(`⚠️ Failed to fetch versions for ${match.title}:`, error.message);
+                // TODO: Add proper logging - Failed to fetch versions for match
                 return {
                   ...match,
                   availableVersions: [],
@@ -187,7 +187,7 @@ function createModrinthMatchingHandlers() {
         };
 
       } catch (error) {
-        console.error('Error searching Modrinth matches:', error);
+        // TODO: Add proper logging - Error searching Modrinth matches
         return {
           success: false,
           error: error.message,
@@ -208,7 +208,7 @@ function createModrinthMatchingHandlers() {
           versions: versions.slice(0, 10) // Return latest 10 versions
         };
       } catch (error) {
-        console.error('Error getting Modrinth project details:', error);
+        // TODO: Add proper logging - Error getting Modrinth project details
         return {
           success: false,
           error: error.message
@@ -250,7 +250,7 @@ function createModrinthMatchingHandlers() {
           total: results.pagination.totalResults
         };
       } catch (error) {
-        console.error('Error in manual Modrinth search:', error);
+        // TODO: Add proper logging - Error in manual Modrinth search
         return {
           success: false,
           error: error.message,
@@ -271,7 +271,7 @@ function createModrinthMatchingHandlers() {
 
         return { success: true };
       } catch (error) {
-        console.error('Error setting pending confirmation:', error);
+        // TODO: Add proper logging - Error setting pending confirmation
         return { success: false, error: error.message };
       }
     },
@@ -282,7 +282,7 @@ function createModrinthMatchingHandlers() {
         const pending = modMatchingManager.getPendingConfirmation(fileName);
         return { success: true, pending };
       } catch (error) {
-        console.error('Error getting pending confirmation:', error);
+        // TODO: Add proper logging - Error getting pending confirmation
         return { success: false, error: error.message, pending: null };
       }
     },
@@ -293,7 +293,7 @@ function createModrinthMatchingHandlers() {
         const pending = modMatchingManager.getAllPendingConfirmations();
         return { success: true, pending };
       } catch (error) {
-        console.error('Error getting all pending confirmations:', error);
+        // TODO: Add proper logging - Error getting all pending confirmations
         return { success: false, error: error.message, pending: [] };
       }
     },
@@ -304,7 +304,7 @@ function createModrinthMatchingHandlers() {
         const confirmed = modMatchingManager.getAllConfirmedMatches();
         return { success: true, confirmed };
       } catch (error) {
-        console.error('Error getting all confirmed matches:', error);
+        // TODO: Add proper logging - Error getting all confirmed matches
         return { success: false, error: error.message, confirmed: [] };
       }
     },
@@ -315,7 +315,7 @@ function createModrinthMatchingHandlers() {
         modMatchingManager.confirmMatch(fileName, projectId, modrinthData);
         return { success: true };
       } catch (error) {
-        console.error('Error confirming Modrinth match:', error);
+        // TODO: Add proper logging - Error confirming Modrinth match
         return { success: false, error: error.message };
       }
     },
@@ -326,7 +326,7 @@ function createModrinthMatchingHandlers() {
         modMatchingManager.rejectMatch(fileName, reason);
         return { success: true };
       } catch (error) {
-        console.error('Error rejecting Modrinth match:', error);
+        // TODO: Add proper logging - Error rejecting Modrinth match
         return { success: false, error: error.message };
       }
     },
@@ -345,7 +345,7 @@ function createModrinthMatchingHandlers() {
           pendingConfirmation
         };
       } catch (error) {
-        console.error('Error getting mod matching status:', error);
+        // TODO: Add proper logging - Error getting mod matching status
         return {
           success: false,
           error: error.message,
@@ -360,7 +360,7 @@ function createModrinthMatchingHandlers() {
         modMatchingManager.clearModData(fileName);
         return { success: true };
       } catch (error) {
-        console.error('Error clearing mod matching data:', error);
+        // TODO: Add proper logging - Error clearing mod matching data
         return { success: false, error: error.message };
       }
     },
@@ -371,7 +371,7 @@ function createModrinthMatchingHandlers() {
         modMatchingManager.clearModData(fileName);
         return { success: true };
       } catch (error) {
-        console.error('Error resetting matching decision:', error);
+        // TODO: Add proper logging - Error resetting matching decision
         return { success: false, error: error.message };
       }
     }

@@ -199,11 +199,11 @@ async function cleanupOldServerVersions(serverPath, oldConfig) {
           fs.unlinkSync(filePath);
         }
       } catch (error) {
-        console.warn(`⚠️ Failed to delete ${file}: ${error.message}`);
+        // TODO: Add proper logging - Failed to delete file
       }    }
     
   } catch (error) {
-    console.error('❌ Error during server version cleanup:', error);
+    // TODO: Add proper logging - Error during server version cleanup
     // Don't throw - cleanup is not critical for functionality
   }
 }

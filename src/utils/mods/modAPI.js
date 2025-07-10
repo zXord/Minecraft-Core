@@ -105,7 +105,7 @@ export async function loadMods(serverPath) {
         // Small delay before retry
         await new Promise(resolve => setTimeout(resolve, 100));
       } catch (error) {
-        console.warn(`Category loading attempt ${attempt + 1} failed:`, error);
+        // TODO: Add proper logging - Category loading attempt failed
       }
     }
     
@@ -114,7 +114,7 @@ export async function loadMods(serverPath) {
     
     // If we have mod data but no categories loaded, this indicates a persistence issue
     if (!categoriesLoaded && result.mods && result.mods.length > 0) {
-      console.warn('Failed to load saved categories, initializing from scan results');
+      // TODO: Add proper logging - Failed to load saved categories, initializing from scan results
       currentCategories = new Map();
     }
     
@@ -165,7 +165,7 @@ export async function loadMods(serverPath) {
       const { saveModCategories } = await import('../../stores/modStore.js');
       await saveModCategories();
     } catch (error) {
-      console.warn('Failed to save updated mod categories:', error);
+      // TODO: Add proper logging - Failed to save updated mod categories
     }
 
     // Get installed mod IDs and version info
@@ -216,12 +216,12 @@ export async function loadMods(serverPath) {
       }, 500);
         return true;
     } catch (err) {
-      console.error('Error getting mod info:', err);
+      // TODO: Add proper logging - Error getting mod info
       // Continue without installed mod IDs, still consider this a success
       return true;
     }
   } catch (err) {
-    console.error('Fatal error in loadMods:', err);
+    // TODO: Add proper logging - Fatal error in loadMods
     errorMessage.set(`Failed to load mods: ${err.message || 'Unknown error'}`);
     return false;
   } finally {
@@ -472,7 +472,7 @@ export async function installMod(mod, serverPath) {
       throw new Error(result.error || 'Unknown error during installation');
     }
   } catch (error) {
-    // Handle error
+    // TODO: Add proper logging
     errorMessage.set(`Failed to install mod: ${error.message}`);
     return false;
   } finally {
@@ -685,7 +685,7 @@ export async function checkDisabledModUpdates(serverPath) {
     disabledModUpdates.set(disabledUpdatesMap);
     
   } catch (error) {
-    console.error('Failed to check disabled mod updates:', error);
+    // TODO: Add proper logging - Failed to check disabled mod updates
     disabledModUpdates.set(new Map());
   }
 }

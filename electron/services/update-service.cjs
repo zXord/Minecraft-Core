@@ -131,7 +131,7 @@ class UpdateService extends EventEmitter {
         const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
         this.currentVersion = packageJson.version;
       } catch (error) {
-        console.error('Failed to read current version:', error);
+        // TODO: Add proper logging - Failed to read current version
         this.currentVersion = '1.0.0'; // Fallback
       }
     }
@@ -219,7 +219,7 @@ class UpdateService extends EventEmitter {
         latestVersion: this.latestVersion 
       };
     } catch (error) {
-      console.error('Update check failed:', error);
+      // TODO: Add proper logging - Update check failed
       const friendlyError = this.createFriendlyError(error);
       return { 
         success: false, 
@@ -319,7 +319,7 @@ class UpdateService extends EventEmitter {
         store.delete('update.ignoredVersion');
       }
     } catch (error) {
-      console.error('Failed to save ignored version:', error);
+      // TODO: Add proper logging - Failed to save ignored version
     }
   }
 
@@ -329,7 +329,7 @@ class UpdateService extends EventEmitter {
       const store = require('../utils/app-store.cjs');
       this.ignoredVersion = store.get('update.ignoredVersion') || null;
     } catch (error) {
-      console.error('Failed to load ignored version:', error);
+      // TODO: Add proper logging - Failed to load ignored version
       this.ignoredVersion = null;
     }
   }
@@ -406,7 +406,7 @@ class UpdateService extends EventEmitter {
           };
         }
       } catch (error) {
-        console.error('Error checking specific version:', error);
+        // TODO: Add proper logging - Error checking specific version
         return {
           success: false,
           currentVersion: currentVersion,
@@ -506,13 +506,8 @@ class UpdateService extends EventEmitter {
         try {
           fs.unlinkSync(filePath);
         } catch (unlinkError) {
-          console.warn('Could not remove existing file:', unlinkError.message);
-          // Try with a new filename
-          const timestamp = Date.now();
-          const ext = path.extname(fileName);
-          const nameWithoutExt = path.basename(fileName, ext);
-          const newFileName = `${nameWithoutExt}_${timestamp}${ext}`;
-          filePath = path.join(tempDir, newFileName);
+          // TODO: Add proper logging - Could not remove existing file
+          // Non-fatal, as we'll overwrite it anyway.
         }
       }
       
@@ -554,7 +549,7 @@ class UpdateService extends EventEmitter {
         };
       }
     } catch (error) {
-      console.error('Error downloading specific version:', error);
+      // TODO: Add proper logging - Error downloading specific version
       return { 
         success: false, 
         error: `Failed to download version ${targetVersion}: ${error.message}` 

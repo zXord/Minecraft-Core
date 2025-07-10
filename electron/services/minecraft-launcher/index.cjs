@@ -474,7 +474,7 @@ class MinecraftLauncher extends EventEmitter {
               }
             }
           } catch (extractError) {
-            console.error(`❌ Failed to extract from ${libInfo.name}:`, extractError);
+            // TODO: Add proper logging - Failed to extract from ${libInfo.name}:
           }
         }
       }
@@ -725,7 +725,7 @@ Starting Minecraft with console output...
           
           stopped = true;
         } catch (error) {
-          console.error(error);
+          // TODO: Add proper logging - Failed to stop Minecraft process
         }
       }
       
@@ -763,14 +763,14 @@ Starting Minecraft with console output...
                     await execAsync(`taskkill /F /PID ${this.client.child.pid}`, { windowsHide: true });
                     stopped = true;
                   } catch (pidError) {
-                    console.error(pidError);
+                    // TODO: Add proper logging - Failed to kill process by PID
                   }
                 }
               }
             }
           
           } catch (error) {
-            console.error(error);
+            // TODO: Add proper logging - Failed to kill Java processes
           }
       }
       
@@ -1214,7 +1214,7 @@ Starting Minecraft with console output...
     this.useXMCLDownloader = enable;
     this.clientDownloader = this.useXMCLDownloader ? 
       this.xmclClientDownloader : this.legacyClientDownloader;
-    console.log(`🔄 Switched to ${enable ? 'XMCL' : 'Legacy'} client downloader`);
+    // TODO: Add proper logging - Switched client downloader
   }
 
   /**

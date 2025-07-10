@@ -33,7 +33,7 @@ function startMetricsReporting() {
       try {
         await publishSystemMetrics();
       } catch (error) {
-        console.error('Metrics error:', error);
+        // TODO: Add proper logging - Metrics error
       }
     } else {
       // NO SERVER RUNNING - STOP WASTING CPU
@@ -57,7 +57,7 @@ function startMetricsReporting() {
     try {
       await publishSystemMetrics();
     } catch (error) {
-      console.error('Initial metrics error:', error);
+      // TODO: Add proper logging - Initial metrics error
     }
   });
   
@@ -250,7 +250,7 @@ async function publishSystemMetrics() {
       names: playersInfo.names
     });
   } catch (err) {
-    console.error('Metrics publishing error:', err);
+    // TODO: Add proper logging - Metrics publishing error
   }
 }
 

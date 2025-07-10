@@ -32,7 +32,7 @@
     try {
       searchResults = await modrinthMatchingActions.searchModrinthManual(searchQuery.trim(), 'fabric', 20);
     } catch (error) {
-      console.error('Search error:', error);
+      // TODO: Add proper logging - Search error
       searchResults = [];
     } finally {
       isSearching = false;
@@ -63,7 +63,7 @@
         availableVersions = [];
       }
     } catch (error) {
-      console.error('Error loading versions:', error);
+      // TODO: Add proper logging - Error loading versions
       availableVersions = [];
     } finally {
       isLoadingVersions = false;
@@ -107,7 +107,7 @@
         closeModal();
       }
     } catch (error) {
-      console.error('Error confirming manual selection:', error);
+      // TODO: Add proper logging - Error confirming manual selection
     }
   }
 
