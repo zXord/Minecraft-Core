@@ -1652,9 +1652,7 @@ function createMinecraftLauncherHandlers(win) {
               if (dependsOnExcluded) {
                 dependentMods.push(modFile);
               }
-              
             } catch (error) {
-              console.warn(`Failed to analyze ${modFile}:`, error.message);
             }
           }
           
@@ -2041,8 +2039,7 @@ function createMinecraftLauncherHandlers(win) {
           await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
 
         } catch (stateError) {
-          console.error('[IPC HANDLER] Failed to update persistent state:', stateError);
-        }// log.info(`[IPC HANDLER] Removal arrays: Required=${requiredRemovals.length}, Optional=${optionalRemovals.length}, Acknowledgments=${acknowledgments.length}`);        // Determine overall sync status
+        }
       const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && 
                              requiredRemovals.length === 0 && // No required mods need removal
                              optionalRemovals.length === 0 && // No optional mods need removal
@@ -2081,14 +2078,11 @@ function createMinecraftLauncherHandlers(win) {
           clientModChanges,
           successfullyRemovedMods // Should be empty
         };
-          
         return result;
       } catch (error) {
-        console.error('>>> ERROR in minecraft-check-mods:', error);
         return { success: false, error: error.message };
       }
     },
-    
     'minecraft-check-client': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
       try {
         const result = await launcher.checkMinecraftClient(clientPath, minecraftVersion, { requiredMods, serverInfo });
@@ -2310,10 +2304,7 @@ function createMinecraftLauncherHandlers(win) {
                 successfullyRemovedMods.push(modFileName);
             }
           } catch (error) {
-            console.error(`Failed to remove mod ${modFileName}:`, error);
-            // For file not found errors, still consider it successfully removed
             if (error.code === 'ENOENT') {
-
               successfullyRemovedMods.push(modFileName);
             }
             // Continue with other mods even if one fails
@@ -2344,8 +2335,6 @@ function createMinecraftLauncherHandlers(win) {
               await saveExpectedModState(clientPath, requiredMods, optionalMods, win, acknowledgedDeps);
               }
             } catch (stateError) {
-              console.error('Failed to update persistent state after mod removal:', stateError);
-              // Don't fail the removal operation just because state update failed
             }
           }          return {
             success: true,
@@ -2356,7 +2345,6 @@ function createMinecraftLauncherHandlers(win) {
               'No mods were found to remove (may have been already removed)'
           };
         } catch (error) {
-          console.error('Error in minecraft-remove-server-managed-mods:', error);
           return { success: false, error: error.message };
       }
     },    'minecraft-acknowledge-dependency': async (_e, { clientPath, modFileName }) => {
@@ -2394,10 +2382,9 @@ function createMinecraftLauncherHandlers(win) {
         
         return { 
           success: true,
-          removedFromServerTracking: true // Signal that mod is now client-only
+          removedFromServerTracking: true
         };
       } catch (error) {
-        console.error('Failed to acknowledge dependency:', error);
         return { success: false, error: error.message };
       }
     },
@@ -2423,7 +2410,6 @@ function createMinecraftLauncherHandlers(win) {
         }
         return await clearExpectedModState(clientPath);
       } catch (error) {
-        console.error('Failed to clear expected mod state:', error);
         return { success: false, error: error.message };
       }
     },

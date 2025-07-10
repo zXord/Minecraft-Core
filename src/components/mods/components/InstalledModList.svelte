@@ -259,7 +259,6 @@
         modrinthMatchingActions.setSearchState(fileName, 'no-matches');
       }
     } catch (error) {
-      console.error(`Error searching Modrinth matches for ${fileName}:`, error);
       modrinthMatchingActions.setSearchState(fileName, 'failed', { error: error.message });
     }
   }
@@ -281,7 +280,6 @@
         ]);
       }
     } catch (error) {
-      console.error(`Error confirming match for ${fileName}:`, error);
     }
   }
 
@@ -295,7 +293,7 @@
         await modrinthMatchingActions.loadPendingConfirmations();
       }
     } catch (error) {
-      console.error(`Error rejecting match for ${fileName}:`, error);
+      // do nothing
     }
   }
 
@@ -349,7 +347,6 @@
         await triggerModrinthMatching(fileName, modPath);
       }
     } catch (error) {
-      console.error(`Error resetting match for ${fileName}:`, error);
     }
   }
 
@@ -439,7 +436,6 @@
             }
           }
         } catch (error) {
-          console.warn(`Error checking compatibility for mod ${mod.fileName}:`, error);
         }
       }
       
@@ -660,16 +656,12 @@
           [projectId]: versions 
         };
       } catch (error) {
-        console.warn('Failed to fetch versions:', error);
-        // Set empty array to stop loading state
         installedModVersionsCache = { 
           ...installedModVersionsCache, 
           [projectId]: [] 
         };
       }
     } else {
-      console.warn(`No project ID available for ${modName}`);
-      // For mods without project ID, set empty array to stop loading
       installedModVersionsCache = { 
         ...installedModVersionsCache, 
         ['no-project']: [] 
@@ -839,7 +831,6 @@
             disabledMods.set(new Set(disabledModsList));
           }
         } catch (error) {
-          console.warn('Failed to load disabled mods:', error);
         }
 
         // Load Modrinth matching data
@@ -847,17 +838,14 @@
           await modrinthMatchingActions.loadPendingConfirmations();
           await modrinthMatchingActions.loadConfirmedMatches();
         } catch (error) {
-          console.warn('Failed to load Modrinth matching data:', error);
         }
       }
     } catch (error) {
-      console.warn('Failed to load mod settings:', error);
     }
     };
     
     // Start async initialization
     initAsync();
-    
     // Return cleanup function
     return () => {
       document.removeEventListener('keydown', handleGlobalKeyDown);

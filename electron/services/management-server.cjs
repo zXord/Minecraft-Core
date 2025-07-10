@@ -843,9 +843,7 @@ class ManagementServer {
     if (!this.serverPath) {
       return [];
     }
-    
-    // console.log(`📋 Getting required mods list, download host: ${this.getModDownloadHost()}`);
-    
+        
     try {
       const clientModsDir = path.join(this.serverPath, 'client', 'mods');
       const serverModsDir = path.join(this.serverPath, 'mods');
