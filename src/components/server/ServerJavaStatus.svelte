@@ -1,7 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { checkServerJavaRequirements, ensureServerJava, getAvailableServerJavaVersions, onServerJavaDownloadProgress } from '../../utils/serverJava.js';
-  import { serverState } from '../../stores/serverState.js';
   
   export let minecraftVersion = '';
   
@@ -67,12 +66,20 @@
       } else {
         javaStatus = {
           loading: false,
+          requiredJavaVersion: null,
+          isAvailable: false,
+          needsDownload: false,
+          javaPath: null,
           error: result.error || 'Failed to check Java requirements'
         };
       }
     } catch (error) {
       javaStatus = {
         loading: false,
+        requiredJavaVersion: null,
+        isAvailable: false,
+        needsDownload: false,
+        javaPath: null,
         error: error.message
       };
     }
@@ -85,7 +92,7 @@
         availableVersions = result.versions;
       }
     } catch (error) {
-      console.error('Error loading available Java versions:', error);
+      // TODO: Add proper logging - Error loading available Java versions
     }
   }
   

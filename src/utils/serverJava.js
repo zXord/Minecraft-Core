@@ -18,7 +18,7 @@ export async function checkServerJavaRequirements(minecraftVersion, serverPath =
     
     return result;
   } catch (error) {
-    console.error('Error checking server Java requirements:', error);
+    // TODO: Add proper logging - Error checking server Java requirements
     return {
       success: false,
       error: error.message,
@@ -43,7 +43,7 @@ export async function ensureServerJava(minecraftVersion, serverPath = null) {
     
     return result;
   } catch (error) {
-    console.error('Error ensuring server Java:', error);
+    // TODO: Add proper logging - Error ensuring server Java
     return {
       success: false,
       error: error.message
@@ -64,7 +64,7 @@ export async function getServerJavaPath(minecraftVersion) {
     
     return result;
   } catch (error) {
-    console.error('Error getting server Java path:', error);
+    // TODO: Add proper logging - Error getting server Java path
     return {
       success: false,
       error: error.message,
@@ -87,7 +87,7 @@ export async function isServerJavaAvailable(minecraftVersion) {
     
     return result;
   } catch (error) {
-    console.error('Error checking server Java availability:', error);
+    // TODO: Add proper logging - Error checking server Java availability
     return {
       success: false,
       error: error.message,
@@ -106,7 +106,7 @@ export async function getAvailableServerJavaVersions() {
     
     return result;
   } catch (error) {
-    console.error('Error getting available server Java versions:', error);
+    // TODO: Add proper logging - Error getting available server Java versions
     return {
       success: false,
       error: error.message,

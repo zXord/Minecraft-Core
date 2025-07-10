@@ -206,7 +206,7 @@ async function extractDependenciesFromJar(jarPath) {
       return result;
     }
   } catch (error) {
-    console.error(`[ERROR] Failed to extract dependencies from ${jarPath}:`, error.message);
+    // TODO: Add proper logging - Failed to extract dependencies from ${jarPath}:
     result = null;
     metadataCache.set(cacheKey, result);
     return result;
@@ -265,7 +265,7 @@ async function analyzeModFromUrl(url, modId) {
       }
     };
   } catch (error) {
-    console.error(`[ERROR] Failed to analyze mod from URL ${url}:`, error.message);
+    // TODO: Add proper logging - Failed to analyze mod from URL ${url}:
     return { 
       success: false, 
       error: error.message || 'Failed to analyze mod from URL' 

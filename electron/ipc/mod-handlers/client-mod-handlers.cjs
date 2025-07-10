@@ -510,11 +510,8 @@ function createClientModHandlers(win) {
 
         return { success: true };
       } catch (error) {
-        console.error('Error clearing client mod cache:', error);
-        return {
-          success: false,
-          error: error.message
-        };
+        // TODO: Add proper logging - Error clearing client mod cache
+        return { success: false, error: error.message };
       }
     }
   };

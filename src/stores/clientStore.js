@@ -25,7 +25,7 @@ function loadInitialState() {
       return { ...defaultState, ...parsedState };
     }
   } catch (error) {
-    console.warn('Failed to load client state from localStorage:', error);
+    // TODO: Add proper logging - Failed to load client state from localStorage
   }
 
   return defaultState;
@@ -38,7 +38,7 @@ function persistState(state) {
   try {
     localStorage.setItem('clientState', JSON.stringify(state));
   } catch (error) {
-    console.warn('Failed to persist client state to localStorage:', error);
+    // TODO: Add proper logging - Failed to persist client state to localStorage
   }
 }
 
@@ -141,6 +141,6 @@ export function clearPersistedClientState() {
   try {
     localStorage.removeItem('clientState');
   } catch (error) {
-    console.warn('Failed to clear persisted client state:', error);
+    // TODO: Add proper logging - Failed to clear persisted client state
   }
 }

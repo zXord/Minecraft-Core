@@ -240,7 +240,7 @@
         updateStatus = { ...updateStatus, ...result };
       }
     } catch (error) {
-      console.error('Failed to get update status:', error);
+      // TODO: Add proper logging - Failed to get update status
     }
   }
 

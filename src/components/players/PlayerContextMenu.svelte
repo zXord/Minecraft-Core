@@ -46,9 +46,9 @@
               serverPath = String(pathResult);
             }
           }
-        } catch (err) {
-          console.warn('Failed to get server path:', err);
-        }
+            } catch (err) {
+      // TODO: Add proper logging - Failed to get server path
+    }
       }
       
       // Refresh all player lists to ensure UI is up to date

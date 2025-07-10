@@ -44,7 +44,7 @@ class ManagementServer {
       const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
       return packageJson.version || '1.0.0';
     } catch (error) {
-      console.error('Failed to read app version from package.json:', error);
+      // TODO: Add proper logging - Failed to read app version
       return '1.0.0'; // Fallback version
     }
   }
@@ -90,7 +90,7 @@ class ManagementServer {
       
       return null;
     } catch (error) {
-      console.error('Failed to detect external IP:', error);
+      // TODO: Add proper logging - Failed to detect external IP
       return null;
     }
   }
@@ -117,7 +117,7 @@ class ManagementServer {
   // Set a manual host override for external clients
   setExternalHost(host) {
     this.configuredHost = host;
-    console.log(`🌐 Management server external host set to: ${host}`);
+    // TODO: Add proper logging - Management server external host set
   }
   
   setupMiddleware() {
@@ -140,7 +140,7 @@ class ManagementServer {
         // Only set if it's not localhost/127.0.0.1 (means it's external)
         if (host !== 'localhost' && host !== '127.0.0.1') {
           this.detectedPublicHost = host;
-          console.log(`🌐 Detected public host from client connection: ${host}`);
+          // TODO: Add proper logging - Detected public host from client connection
         }
       }
       next();
@@ -562,10 +562,7 @@ class ManagementServer {
     
     // Download mod file
     this.app.get('/api/mods/download/:fileName', (req, res) => {
-      // console.log(`📥 Mod download request: ${req.params.fileName} from ${req.ip} (host: ${req.get('host')})`);
-      
       if (!this.serverPath) {
-        // console.log(`❌ Mod download failed: No server configured`);
         return res.status(404).json({ error: 'No server configured' });
       }
       
@@ -573,7 +570,6 @@ class ManagementServer {
       const { location = 'server' } = req.query;
       
       if (!fileName || !fileName.endsWith('.jar')) {
-        // console.log(`❌ Mod download failed: Invalid file name: ${fileName}`);
         return res.status(400).json({ error: 'Invalid file name' });
       }
       
@@ -585,37 +581,27 @@ class ManagementServer {
           modPath = path.join(this.serverPath, 'mods', fileName);
         }
         
-        // console.log(`📁 Looking for mod at: ${modPath}`);
-        
         if (!fs.existsSync(modPath)) {
-          // console.log(`❌ Mod download failed: File not found at ${modPath}`);
           return res.status(404).json({ error: 'Mod file not found' });
         }
         
-        // console.log(`✅ Mod found, starting download: ${fileName}`);
-        
-        // Set appropriate headers for file download
         res.setHeader('Content-Type', 'application/java-archive');
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
         
-        // Stream the file
         const fileStream = fs.createReadStream(modPath);
         
         fileStream.on('error', () => {
-          // console.log(`❌ File stream error: ${error.message}`);
           if (!res.headersSent) {
             res.status(500).json({ error: 'Failed to serve mod file' });
           }
         });
         
         fileStream.on('end', () => {
-          // console.log(`✅ Mod download completed: ${fileName}`);
         });
         
         fileStream.pipe(res);
         
       } catch {
-        // console.log(`❌ Mod download exception: ${error.message}`);
         res.status(500).json({ error: 'Failed to serve mod file' });
       }
     });
@@ -678,11 +664,11 @@ class ManagementServer {
         // Detect external IP for mod downloads
         this.externalHost = this.detectExternalIP();
         // Startup info (reduced)
-        console.log(`Management server started on port ${port}. Download host: ${this.getModDownloadHost()}`);
+        // TODO: Add proper logging - Management server started
         
         const currentDownloadHost = this.getModDownloadHost();
         if (currentDownloadHost === 'localhost') {
-          console.log(`⚠️  Currently using localhost - will switch to public IP when external clients connect`);
+          // TODO: Add proper logging - Currently using localhost
         }
 
         // Start version watcher and check versions
@@ -1122,7 +1108,7 @@ class ManagementServer {
       
       return allClientMods;
     } catch (error) {
-      console.error('❌ [ERROR] getAllClientMods failed:', error);
+      // TODO: Add proper logging - getAllClientMods failed
       return [];
     }
   }
@@ -1213,11 +1199,10 @@ class ManagementServer {
       
       // Handle watcher errors (like EPERM when directory is deleted)
       this.versionWatcher.on('error', (err) => {
-        console.warn('Version watcher error:', err.message);
-        this.stopVersionWatcher();
+        // TODO: Add proper logging - Version watcher error
       });
     } catch (err) {
-      console.warn('Failed to start version watcher:', err.message);
+      // TODO: Add proper logging - Failed to start version watcher
     }
   }
   stopVersionWatcher() {
@@ -1226,7 +1211,7 @@ class ManagementServer {
         this.versionWatcher.close();
       } catch (err) {
         // Ignore close errors - watcher might already be closed
-        console.warn('Version watcher close error:', err.message);
+        // TODO: Add proper logging - Version watcher close error
       }
       this.versionWatcher = null;
     }

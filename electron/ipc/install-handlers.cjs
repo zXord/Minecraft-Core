@@ -110,8 +110,7 @@ function createInstallHandlers(win) {
           }
         }
       } catch (error) {
-        // If we can't check Java requirements, don't fail the whole health check
-        console.warn('Could not check Java requirements:', error.message);
+        // TODO: Add proper logging - Could not check Java requirements
       }
       
       return missing;

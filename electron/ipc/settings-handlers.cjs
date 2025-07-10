@@ -264,8 +264,7 @@ function createSettingsHandlers() {
               managementServer.updateServerPath(null);
             }
           } catch (err) {
-            // Log but don't fail - continue with deletion
-            console.warn('Failed to cleanup management server watchers:', err.message);
+            // TODO: Add proper logging - Failed to cleanup management server watchers
           }
           
           // Also stop any server processes that might be using this directory
@@ -278,7 +277,7 @@ function createSettingsHandlers() {
               await new Promise(resolve => setTimeout(resolve, 1000));
             }
           } catch (err) {
-            console.warn('Failed to cleanup server process:', err.message);
+            // TODO: Add proper logging - Failed to cleanup server process
           }
         }
         

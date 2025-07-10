@@ -35,7 +35,7 @@ if (typeof window !== 'undefined') {
         configurable: true
       });
     } catch (defineError) {
-      console.warn('Could not set window.serverPath:', defineError);
+      // TODO: Add proper logging - Could not set window.serverPath
     }
   }
 }
@@ -54,8 +54,8 @@ window.electron.invoke('get-instances')
     initialInstanceStore.instances = initialInstances;
     initialInstanceStore.loaded = true;
   })
-  .catch(error => {
-    console.error('Error fetching initial instances:', error);
+  .catch(() => {
+    // TODO: Add proper logging - Error fetching initial instances
     // Mark as loaded anyway
     initialInstanceStore.loaded = true;
   });

@@ -304,7 +304,7 @@ function createWindow() {
             if (fs.existsSync(distPath)) {
               win.loadFile(distPath);
             } else {
-              console.error('No dev server and no production build found');
+              // TODO: Add proper logging - No dev server and no production build found
             }
           });
         }
@@ -318,7 +318,7 @@ function createWindow() {
     if (fs.existsSync(distPath)) {
       win.loadFile(distPath);
     } else {
-      console.error('Production build not found at:', distPath);
+              // TODO: Add proper logging - Production build not found
     }
   }
   

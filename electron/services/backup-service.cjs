@@ -103,7 +103,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   try {
     fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
   } catch (err) {
-    console.error('Metadata write failed', err);
+    // TODO: Add proper logging - Metadata write failed
   }
 
   // Verify we have valid directories to backup
@@ -368,8 +368,7 @@ async function cleanupAutomaticBackups(serverPath, maxCount) {
             deletedCount++;
           }
         } catch (err) {
-          // Log errors but continue cleanup
-          console.error('Error deleting backup during cleanup:', backup.name, err.message);
+          // TODO: Add proper logging - Error deleting backup during cleanup
         }
       }
       
@@ -382,7 +381,7 @@ async function cleanupAutomaticBackups(serverPath, maxCount) {
     
     return { success: true, deleted: 0, message: 'No cleanup needed' };
   } catch (err) {
-    console.error('Error during backup cleanup:', err.message);
+    // TODO: Add proper logging - Error during backup cleanup
     return { success: false, error: err.message };
   }
 }
