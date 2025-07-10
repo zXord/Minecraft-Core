@@ -232,7 +232,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       } else {
       }
     } catch (error) {
-      console.warn('[ClientInterface] Failed to load acknowledged dependencies:', error);
     }
   }
 
@@ -351,8 +350,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         setAppVersions(clientVersion, clientVersion);
       }
     } catch (err) {
-      console.warn('Failed to check app version compatibility:', err);
-      // On error, assume compatible to avoid blocking users
       clearAppVersions();
     }
   }
@@ -455,9 +452,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               }
             }
           } catch (modsErr) {
-            console.warn('Failed to fetch complete mod list:', modsErr);
           }
-            
             // Track server info changes for UI updates only (no console spam)
             if (!previousServerInfo || 
                 previousServerInfo.minecraftVersion !== serverInfo.minecraftVersion || 
@@ -628,8 +623,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
                       reason: `Current version not compatible with Minecraft ${serverInfo.minecraftVersion}`
                     });
                   } else {
-                    console.warn(`${mod.name}: Current version ${mod.versionNumber} is incompatible with MC ${serverInfo.minecraftVersion}, but no different compatible version found`);
-                    // Mark as incompatible rather than suggesting a non-update
                     disables.push({
                       name: mod.name || mod.fileName,
                       fileName: mod.fileName,
@@ -807,8 +800,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             });
           }
         } catch (error) {
-          console.warn(`Failed to check compatibility for mod ${mod.name}:`, error);
-          // FIXED: If we can't check versions, be conservative and suggest disabling
           disables.push({
             name: mod.name || mod.fileName,
             fileName: mod.fileName,
@@ -829,7 +820,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       setClientModVersionUpdates(versionUpdates);
       
     } catch (error) {
-      console.error('Failed to check client mod version compatibility:', error);
       setClientModVersionUpdates(null);
     } finally {
       isVersionCheckRunning = false;
@@ -1009,8 +999,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           await clientModManagerComponent.refreshFromDashboard();
         }
       }
-    } catch (err) {
-      console.error('Error refreshing dashboard:', err);
     } finally {
       isChecking = false;
     }
@@ -1384,7 +1372,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         const clientUpdatesWithUrls = await Promise.all(allClientUpdates.map(async (update) => {
           try {
             if (!update.versionId) {
-              console.error(`No version ID for client mod update: ${update.name}`);
               errorMessage.set(`No version ID found for ${update.name}. Cannot download update.`);
               return null;
             }
@@ -1392,8 +1379,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             // Fetch version details from Modrinth API to get download URL
             const versionResponse = await fetch(`https://api.modrinth.com/v2/version/${update.versionId}`);
             if (!versionResponse.ok) {
-              const errorText = await versionResponse.text();
-              console.error(`Failed to fetch version details for ${update.name}: ${versionResponse.status} ${versionResponse.statusText}`, errorText);
               errorMessage.set(`API Error: Failed to fetch version details for ${update.name} (${versionResponse.status})`);
               return null;
             }
@@ -1402,7 +1387,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             
             const primaryFile = versionData.files?.find(f => f.primary) || versionData.files?.[0];
             if (!primaryFile || !primaryFile.url) {
-              console.error(`No download URL found for ${update.name}`);
               errorMessage.set(`No download file found for ${update.name}. Version may be invalid.`);
               return null;
             }          return {
@@ -1412,7 +1396,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             oldFileName: update.fileName // Keep track of original filename for backend consistency
           };
           } catch (error) {
-            console.error(`Error fetching download URL for ${update.name}:`, error);
             errorMessage.set(`Network error fetching download info for ${update.name}: ${error.message}`);
             return null;
           }
@@ -1438,27 +1421,23 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
                   fileName: update.fileName
                 });
 
-                // Also force refresh the client mod info to bypass any caching
-                await window.electron.invoke('get-client-installed-mod-info', instance.path);                setTimeout(async () => {
+                await window.electron.invoke('get-client-installed-mod-info', instance.path);
+                setTimeout(async () => {
                   try {
                     await window.electron.invoke('get-client-installed-mod-info', instance.path);
                   } catch (error) {
-                    console.warn(`Failed to check post-download metadata for ${update.fileName}:`, error);
                   }
                 }, 500);
               } catch (error) {
-                console.warn(`Failed to clear cache for ${update.fileName}:`, error);
               }
             }
           } else {
             totalResults.success = false;
             totalResults.error = (totalResults.error ? totalResults.error + '; ' : '') + clientResult.error;
           }        } else {
-          console.warn('❌ No valid client mod updates with download URLs found');
           if (allClientUpdates.length > 0) {
             const failedUpdates = allClientUpdates.filter((_, index) => !clientUpdatesWithUrls[index] || !clientUpdatesWithUrls[index].downloadUrl);
             const failureReasons = failedUpdates.map(update => `${update.name}: Missing download URL`).join(', ');
-            console.error('❌ Failed to process client updates:', failureReasons);
             errorMessage.set(`Failed to download ${failedUpdates.length} client mod update${failedUpdates.length !== 1 ? 's' : ''}: ${failureReasons}`);
             setTimeout(() => errorMessage.set(''), 15000);
           }
@@ -1475,14 +1454,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             
             if (disableResult.success) {
               totalResults.disabled = (totalResults.disabled || 0) + 1;
-            } else {
-              console.warn(`Failed to disable ${modToDisable.name}:`, disableResult.error);
             }
           } catch (error) {
-            console.error(`Error disabling ${modToDisable.name}:`, error);
           }
         }
-        
         // Clear client version updates after disabling incompatible mods
         setClientModVersionUpdates(null);
         localStorage.removeItem('clientModVersionUpdates');
@@ -1547,10 +1522,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           setTimeout(async () => {
             // Force fresh client mod info load before checking compatibility
             try {
-              // Force fresh reload of all client mod info (cache already cleared above)
               await window.electron.invoke('get-client-installed-mod-info', instance.path);
             } catch (error) {
-              console.warn('Failed to refresh client mod info:', error);
             }
             await checkClientModVersionCompatibility(true);
             
@@ -2161,7 +2134,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           );
         }
       } catch (err) {
-        console.warn('Failed to load persisted mod state:', err);
       }
     })();
 
@@ -2179,7 +2151,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       if (errorData && errorData.message) {
         errorMessage.set(`Mod State Error: ${errorData.message}`);
         setTimeout(() => errorMessage.set(''), 8000);
-        console.error('Mod state persistence error:', errorData);      }
+      }
     });    // Initial client mod version check (run after server state loads)
     const checkForClientUpdates = () => {
       if (instance?.path && serverInfo?.minecraftVersion) {        checkClientModVersionCompatibility(true); // Skip throttling for initial check
@@ -2375,7 +2347,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       await checkModSynchronization();
       successMessage.set('Client mods updated successfully');
     } catch (error) {
-      console.error('Failed to update client mods:', error);
       errorMessage.set('Failed to update client mods: ' + error.message);
     }
   }
@@ -2395,7 +2366,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       await checkModSynchronization();
       successMessage.set('Incompatible client mods disabled successfully');
     } catch (error) {
-      console.error('Failed to disable incompatible mods:', error);
       errorMessage.set('Failed to disable incompatible mods: ' + error.message);
     }  }
 
