@@ -77,6 +77,12 @@ function startMetricsReporting() {
     // STOP the interval when server stops
     stopMetricsReporting();
   });
+
+  const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+  try {
+    const logHandlers = getLoggerHandlers();
+    logHandlers.info('System metrics reporting started', { category: 'server' });
+  } catch {}
 }
 
 /**
@@ -206,8 +212,8 @@ async function publishSystemMetrics() {
         // Get memory usage
         memUsedMB = await getServerMemoryUsage(serverProcess);
         
-        // For CPU, use minimal system impact
-        cpuPct = 0.1; // Just show it's running without expensive CPU calculation
+        // Get actual CPU usage
+        cpuPct = getSystemCpuPct();
         
         // Ensure non-zero state to indicate running server
         if (memUsedMB <= 0) memUsedMB = 1; // Minimal value to show it's actually running
@@ -239,8 +245,8 @@ async function publishSystemMetrics() {
       uptime = `${h}h ${m}m ${s}s`;
     }
 
-    // Send metrics to renderer
-    sendMetricsUpdate({
+    // Debug logging for metrics
+    const metrics = {
       cpuPct,
       memUsedMB,
       systemTotalRamMB: parseFloat((os.totalmem() / 1024 / 1024).toFixed(1)),
@@ -248,7 +254,23 @@ async function publishSystemMetrics() {
       uptime,
       players: playersInfo.count,
       names: playersInfo.names
-    });
+    };
+    
+    // Log metrics for debugging
+    try {
+      const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+      const loggerHandlers = getLoggerHandlers();
+      
+      loggerHandlers.debug(`Server metrics: CPU ${cpuPct}%, Memory ${memUsedMB}MB/${maxRamMB}MB, Uptime ${uptime}, Players ${playersInfo.count}`, {
+        category: 'server',
+        data: { metrics }
+      });
+    } catch (logErr) {
+      // Ignore logging errors
+    }
+    
+    // Send metrics to renderer
+    sendMetricsUpdate(metrics);
   } catch (err) {
     // TODO: Add proper logging - Metrics publishing error
   }

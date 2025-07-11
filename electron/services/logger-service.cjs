@@ -50,6 +50,13 @@ class LoggerService extends EventEmitter {
     ];
     
     this.setupLogRotation();
+
+    // Close logger window when Electron app is quitting
+    app.on('before-quit', () => {
+      if (this.loggerWindow && !this.loggerWindow.isDestroyed()) {
+        this.loggerWindow.destroy();
+      }
+    });
   }
   
   initializeStorage() {
