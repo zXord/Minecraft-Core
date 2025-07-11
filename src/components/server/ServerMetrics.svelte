@@ -26,20 +26,24 @@
     return Math.min(Math.max(Number(((usedMem/maxMem)*100).toFixed(1)), 0), 100);
   })();
 
-  // Reset metrics when server stops
-  $: if (!isServerRunning && $serverState.cpuLoad !== 0) {
-    serverState.update(state => ({
-      ...state,
-      cpuLoad: 0,
-      memUsedMB: 0,
-      uptime: '0h 0m 0s'
-    }));
+  // Reset metrics when server stops - simplified logic
+  $: if (!isServerRunning && ($serverState.cpuLoad !== 0 || $serverState.memUsedMB !== 0)) {
+    // Only reset if values are non-zero to avoid infinite loops
+    setTimeout(() => {
+      serverState.update(state => ({
+        ...state,
+        cpuLoad: 0,
+        memUsedMB: 0,
+        uptime: '0h 0m 0s'
+      }));
+    }, 100);
   }
   
   // Add mount/unmount handling to make sure we refresh our state
   onMount(() => {
     // Add a listener specifically for server status changes
     const statusHandler = (status) => {
+      console.log('ServerMetrics: Received status update:', status);
       if (status !== 'running') {
         // Force reset metrics when server stops
         serverState.update(state => ({
@@ -52,12 +56,37 @@
       }
     };
     
-    // Listen for status updates
+    // Listen for metrics updates
+    const metricsHandler = (metrics) => {
+      console.log('ServerMetrics: Received metrics update:', metrics);
+      if (metrics) {
+        serverState.update(state => ({
+          ...state,
+          cpuLoad: metrics.cpuPct || 0,
+          memUsedMB: metrics.memUsedMB || 0,
+          maxRamMB: metrics.maxRamMB || state.maxRamMB,
+          uptime: metrics.uptime || '0h 0m 0s'
+        }));
+      }
+    };
+    
+    // Listen for status and metrics updates
     window.electron.on('server-status', statusHandler);
+    window.electron.on('metrics-update', metricsHandler);
+    
+    // Debug current metrics state
+    console.log('ServerMetrics: Current state on mount:', {
+      isServerRunning,
+      cpuLoad,
+      memUsedMB,
+      maxRamMB,
+      uptime
+    });
     
     // Cleanup
     return () => {
       window.electron.removeListener('server-status', statusHandler);
+      window.electron.removeListener('metrics-update', metricsHandler);
     };
   });
 </script>

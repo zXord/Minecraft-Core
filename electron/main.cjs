@@ -229,12 +229,15 @@ function createWindow() {
     }
   });
   
-  // Handle close button - should NOT minimize to tray, let normal close behavior happen
-  // The minimize to tray feature should ONLY work for the minimize button, not the close button
+  const { getLogger } = require('./services/logger-service.cjs');
   win.on('close', () => {
-    // Always allow normal close behavior for X button
-    // Do NOT prevent close or hide to tray here
-    // This ensures X button always closes the app normally
+    // Close logger window if open
+    try {
+      const logger = getLogger();
+      if (logger) {
+        logger.closeLoggerWindow();
+      }
+    } catch {}
   });
   
   // Show window after load unless starting minimized

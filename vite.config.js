@@ -8,6 +8,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
+    manifest: true, // Generate manifest.json
     rollupOptions: {
       input: {
         main: 'src/main.js',

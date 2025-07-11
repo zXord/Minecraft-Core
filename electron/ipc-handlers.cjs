@@ -66,16 +66,10 @@ function setupIpcHandlers(win) {
       category: 'core',
       data: { handlersLoaded: registeredHandlers.size }
     });
+    
+    // Test logs removed after initial development testing
+    
 
-    // Add test logs to verify logger functionality
-    setTimeout(() => {
-      loggerHandlers.debug('Logger system fully operational', { category: 'core' });
-      loggerHandlers.warn('This is a test warning message', { category: 'ui' });
-      loggerHandlers.error('This is a test error message', { 
-        category: 'network',
-        data: { testData: 'Sample error context' }
-      });
-    }, 2000);
     
 
     
