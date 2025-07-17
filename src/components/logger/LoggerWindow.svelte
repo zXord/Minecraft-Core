@@ -8,29 +8,28 @@
   import LoggerStatistics from './LoggerStatistics.svelte';
   import LoggerSettings from './LoggerSettings.svelte';
   import ExportSuccessModal from './ExportSuccessModal.svelte';
+  import ConfirmationModal from './ConfirmationModal.svelte';
 
   // State variables
   let logs = [];
-  let filteredLogs = [];
+  let filteredLogs = []; // Always initialized as empty array
   let selectedLog = null;
   let loading = true;
   let searchTerm = '';
   let autoScroll = true;
   let stats = {};
   let showStatistics = false;
-  let showSettings = false;
   let showExportModal = false;
   let exportFilePath = '';
   let exportCount = 0;
+  let showSettings = false;
+  let showClearConfirmation = false;
   let loggerSettings = {
     autoScroll: true,
     maxLogs: 1000,
     logLevel: 'all',
     exportFormat: 'json',
-    realTimeStreaming: true,
-    showTimestamps: true,
-    showCategories: true,
-    showInstances: true
+    realTimeStreaming: true
   };
   
   // Filter states
@@ -69,10 +68,11 @@
 
   async function initializeLogger() {
     try {
-      // Load initial logs
-      const logsResult = await logger.getLogs({ limit: 100 });
+      // Load initial logs - increased limit to get more logs
+      const logsResult = await logger.getLogs({ limit: 1000 });
       if (logsResult.success) {
         logs = logsResult.logs || [];
+        // Explicitly apply initial filters
         applyFilters();
       }
 
@@ -106,15 +106,14 @@
     // Listen for new log entries
     if (window.electron && window.electron.on) {
       unsubscribeNewLog = window.electron.on('logger-new-log', (logEntry) => {
-        logs = [logEntry, ...logs].slice(0, 1000); // Keep last 1000 in UI
-        applyFilters();
+        logs = [logEntry, ...logs].slice(0, loggerSettings.maxLogs);
         
-        // Auto-scroll to top if enabled and showing recent logs
-        if (autoScroll && isShowingRecentLogs()) {
+        // Auto-scroll to top only if enabled, showing recent logs, and user is near the top
+        if (autoScroll && isShowingRecentLogs() && isUserNearTop()) {
           setTimeout(() => {
-            const tableContainer = document.querySelector('.log-table-container');
-            if (tableContainer) {
-              tableContainer.scrollTop = 0;
+            const tableWrapper = document.querySelector('.table-wrapper');
+            if (tableWrapper) {
+              tableWrapper.scrollTop = 0;
             }
           }, 50);
         }
@@ -137,78 +136,105 @@
            !searchTerm.trim();
   }
 
-      // Filter and search functionality - reactive to all filter changes
-  $: levelFilter, instanceFilter, categoryFilter, startDate, endDate, searchTerm, logs, applyFilters();
-
-  function applyFilters() {
-    console.log('ApplyFilters called with:', {
-      logs: logs.length,
-      levelFilter,
-      instanceFilter,
-      categoryFilter,
-      startDate,
-      endDate,
-      searchTerm
-    });
+  function isUserNearTop() {
+    // Check if user is near the top of the table (within 100px)
+    const tableWrapper = document.querySelector('.table-wrapper');
+    if (!tableWrapper) return true; // Default to true if can't check
     
-    if (!logs || logs.length === 0) {
+    return tableWrapper.scrollTop < 100;
+  }
+
+  // Separate reactive statements for different types of changes
+  $: if (logs) {
+    // Only trigger when logs array changes (data updates)
+    applyFiltersDebounced();
+  }
+  
+  $: if (searchTerm !== undefined) {
+    // Debounce search changes
+    applyFiltersDebounced();
+  }
+  
+  $: if (levelFilter || instanceFilter || categoryFilter || startDate || endDate) {
+    // Immediate update for filter changes
+    applyFilters();
+  }
+  
+  let filterTimeout;
+  
+  function handleSearchKeydown(event) {
+    if (event.key === 'Escape') {
+      searchTerm = '';
+      event.target.blur();
+    }
+  }
+  
+  // React to settings changes - removed reactive statement that was causing issues
+
+  function applyFiltersDebounced() {
+    clearTimeout(filterTimeout);
+    filterTimeout = setTimeout(applyFilters, 150);
+  }
+  
+  function applyFilters() {
+    // Ensure we have valid logs array
+    if (!logs || !Array.isArray(logs)) {
       filteredLogs = [];
       return;
     }
-    
-    let filtered = [...logs];
+
+    let result = [...logs];
 
     // Apply search filter
-    if (searchTerm.trim()) {
-      const search = searchTerm.toLowerCase();
-      filtered = filtered.filter(log => 
-        log.message.toLowerCase().includes(search) ||
-        log.instanceId.toLowerCase().includes(search) ||
-        log.category.toLowerCase().includes(search) ||
-        log.level.toLowerCase().includes(search)
-      );
+    if (searchTerm && searchTerm.trim()) {
+      const search = searchTerm.trim().toLowerCase();
+      result = result.filter(log => {
+        if (!log) return false;
+        return (
+          (log.message || '').toLowerCase().includes(search) ||
+          (log.instanceId || '').toLowerCase().includes(search) ||
+          (log.category || '').toLowerCase().includes(search) ||
+          (log.level || '').toLowerCase().includes(search)
+        );
+      });
     }
 
     // Apply level filter
-    if (levelFilter !== 'all') {
-      filtered = filtered.filter(log => log.level === levelFilter);
+    if (levelFilter && levelFilter !== 'all') {
+      result = result.filter(log => log && log.level === levelFilter);
     }
 
     // Apply instance filter
-    if (instanceFilter !== 'all') {
-      filtered = filtered.filter(log => log.instanceId === instanceFilter);
+    if (instanceFilter && instanceFilter !== 'all') {
+      result = result.filter(log => log && log.instanceId === instanceFilter);
     }
 
-    // Apply category filter  
-    if (categoryFilter !== 'all') {
-      filtered = filtered.filter(log => log.category === categoryFilter);
+    // Apply category filter
+    if (categoryFilter && categoryFilter !== 'all') {
+      result = result.filter(log => log && log.category === categoryFilter);
     }
 
     // Apply date range filter
     if (startDate || endDate) {
-      filtered = filtered.filter(log => {
+      result = result.filter(log => {
+        if (!log || !log.timestamp) return false;
+        
         const logTime = new Date(log.timestamp).getTime();
+        if (isNaN(logTime)) return false;
         
-        // Check if log timestamp is valid
-        if (isNaN(logTime)) {
-          return false;
-        }
-        
-        // Handle start date
         let startTime = 0;
         if (startDate && startDate.trim()) {
-          const startDateObj = new Date(startDate);
-          if (!isNaN(startDateObj.getTime())) {
-            startTime = startDateObj.getTime();
+          const start = new Date(startDate);
+          if (!isNaN(start.getTime())) {
+            startTime = start.getTime();
           }
         }
         
-        // Handle end date
         let endTime = Date.now();
         if (endDate && endDate.trim()) {
-          const endDateObj = new Date(endDate);
-          if (!isNaN(endDateObj.getTime())) {
-            endTime = endDateObj.getTime();
+          const end = new Date(endDate);
+          if (!isNaN(end.getTime())) {
+            endTime = end.getTime();
           }
         }
         
@@ -216,13 +242,8 @@
       });
     }
 
-    filteredLogs = filtered;
-    
-    console.log('ApplyFilters result:', {
-      originalCount: logs.length,
-      filteredCount: filtered.length,
-      filters: { levelFilter, instanceFilter, categoryFilter, startDate, endDate, searchTerm }
-    });
+    // Set filtered results
+    filteredLogs = result;
   }
 
   // Log selection
@@ -240,7 +261,7 @@
         category: categoryFilter !== 'all' ? categoryFilter : undefined,
         startTime: startDate || undefined,
         endTime: endDate || undefined,
-        format: 'json' // TODO: Make this configurable
+        format: loggerSettings.exportFormat
       };
 
       const result = await logger.exportLogs(filters);
@@ -259,36 +280,26 @@
 
   // Clear logs
   async function clearLogs() {
-    if (confirm('Are you sure you want to clear all logs from memory? This cannot be undone.')) {
-      try {
-        const result = await logger.clearLogs();
-        if (result.success) {
-          logs = [];
-          filteredLogs = [];
-          selectedLog = null;
-        } else {
-          alert(`Failed to clear logs: ${result.error}`);
-        }
-      } catch (error) {
-        alert(`Clear error: ${error.message}`);
+    showClearConfirmation = true;
+  }
+
+  async function handleClearConfirm() {
+    try {
+      const result = await logger.clearLogs();
+      if (result.success) {
+        logs = [];
+        filteredLogs = [];
+        selectedLog = null;
+      } else {
+        alert(`Failed to clear logs: ${result.error}`);
       }
+    } catch (error) {
+      alert(`Clear error: ${error.message}`);
     }
   }
 
-  // Show settings modal
-  function openSettings() {
-    showSettings = true;
-  }
-  
-  function closeSettings() {
-    showSettings = false;
-  }
-  
-  function saveLoggerSettings(event) {
-    loggerSettings = { ...event.detail };
-    // Apply settings immediately
-    autoScroll = loggerSettings.autoScroll;
-    // Could add more settings application logic here
+  function handleClearCancel() {
+    showClearConfirmation = false;
   }
 
   // Show statistics modal
@@ -298,6 +309,45 @@
   
   function closeStatistics() {
     showStatistics = false;
+  }
+
+  // Settings functionality
+  function showSettingsModal() {
+    showSettings = true;
+  }
+  
+  function handleSettingsSave(event) {
+    const newSettings = { ...event.detail };
+    
+    // If maxLogs changed, trim current logs
+    if (newSettings.maxLogs !== loggerSettings.maxLogs) {
+      logs = logs.slice(0, newSettings.maxLogs);
+    }
+    
+    // Handle real-time streaming toggle
+    if (newSettings.realTimeStreaming !== loggerSettings.realTimeStreaming) {
+      if (newSettings.realTimeStreaming && !unsubscribeNewLog) {
+        setupRealTimeStreaming();
+      } else if (!newSettings.realTimeStreaming && unsubscribeNewLog) {
+        unsubscribeNewLog();
+        unsubscribeNewLog = null;
+        if (unsubscribeLogsCleared) {
+          unsubscribeLogsCleared();
+          unsubscribeLogsCleared = null;
+        }
+      }
+    }
+    
+    loggerSettings = newSettings;
+    
+    // Apply settings immediately
+    autoScroll = loggerSettings.autoScroll;
+    levelFilter = loggerSettings.logLevel;
+    showSettings = false;
+  }
+  
+  function closeSettings() {
+    showSettings = false;
   }
 
   // Format timestamp for display
@@ -324,9 +374,14 @@
     </div>
     
     <div class="header-right">
-      <button class="header-button" on:click={openSettings} aria-label="Open logger settings">
-        <svg xmlns="http://www.w3.org/2000/svg" width="20px" height="20px" fill="currentColor" viewBox="0 0 256 256">
-          <path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm88-29.84q.06-2.16,0-4.32l14.92-18.64a8,8,0,0,0,1.48-7.06,107.21,107.21,0,0,0-10.88-26.25,8,8,0,0,0-6-3.93l-23.72-2.64q-1.48-1.56-3-3L186,40.54a8,8,0,0,0-3.94-6,107.71,107.71,0,0,0-26.25-10.87,8,8,0,0,0-7.06,1.49L130.16,40Q128,40,125.84,40L107.2,25.11a8,8,0,0,0-7.06-1.48A107.6,107.6,0,0,0,73.89,34.51a8,8,0,0,0-3.93,6L67.32,64.27q-1.56,1.49-3,3L40.54,70a8,8,0,0,0-6,3.94,107.71,107.71,0,0,0-10.87,26.25,8,8,0,0,0,1.49,7.06L40,125.84Q40,128,40,130.16L25.11,148.8a8,8,0,0,0-1.48,7.06,107.21,107.21,0,0,0,10.88,26.25,8,8,0,0,0,6,3.93l23.72,2.64q1.49,1.56,3,3L70,215.46a8,8,0,0,0,3.94,6,107.71,107.71,0,0,0,26.25,10.87,8,8,0,0,0,7.06-1.49L125.84,216q2.16.06,4.32,0l18.64,14.92a8,8,0,0,0,7.06,1.48,107.21,107.21,0,0,0,26.25-10.88,8,8,0,0,0,3.93-6l2.64-23.72q1.56-1.48,3-3L215.46,186a8,8,0,0,0,6-3.94,107.71,107.71,0,0,0,10.87-26.25,8,8,0,0,0-1.49-7.06Zm-16.1-6.5a73.93,73.93,0,0,1,0,8.68,8,8,0,0,0,1.74,5.48l14.19,17.73a91.57,91.57,0,0,1-6.23,15L187,173.11a8,8,0,0,0-5.1,2.64,74.11,74.11,0,0,1-6.14,6.14,8,8,0,0,0-2.64,5.1l-2.51,22.58a91.32,91.32,0,0,1-15,6.23l-17.74-14.19a8,8,0,0,0-5-1.75h-.48a73.93,73.93,0,0,1-8.68,0,8,8,0,0,0-5.48,1.74L100.45,215.8a91.57,91.57,0,0,1-15-6.23L82.89,187a8,8,0,0,0-2.64-5.1,74.11,74.11,0,0,1-6.14-6.14,8,8,0,0,0-5.1-2.64L46.43,170.6a91.32,91.32,0,0,1-6.23-15l14.19-17.74a8,8,0,0,0,1.74-5.48,73.93,73.93,0,0,1,0-8.68,8,8,0,0,0-1.74-5.48L40.2,100.45a91.57,91.57,0,0,1,6.23-15L69,82.89a8,8,0,0,0,5.1-2.64,74.11,74.11,0,0,1,6.14-6.14A8,8,0,0,0,82.89,69L85.4,46.43a91.32,91.32,0,0,1,15-6.23l17.74,14.19a8,8,0,0,0,5.48,1.74,73.93,73.93,0,0,1,8.68,0,8,8,0,0,0,5.48-1.74L155.55,40.2a91.57,91.57,0,0,1,15,6.23L173.11,69a8,8,0,0,0,2.64,5.1,74.11,74.11,0,0,1,6.14,6.14,8,8,0,0,0,5.1,2.64l22.58,2.51a91.32,91.32,0,0,1,6.23,15l-14.19,17.74A8,8,0,0,0,199.87,123.66Z"></path>
+      <button 
+        class="settings-button"
+        on:click={showSettingsModal}
+        title="Logger Settings"
+        aria-label="Open logger settings"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 256 256">
+          <path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm88-29.84q.06-2.16,0-4.32l14.92-18.64a8,8,0,0,0,1.48-7.06,107.6,107.6,0,0,0-10.88-26.25,8,8,0,0,0-6-3.93l-23.72-2.64q-1.48-1.56-3.18-3.18L186,40.54a8,8,0,0,0-3.94-6,107.29,107.29,0,0,0-26.25-10.87,8,8,0,0,0-7.06,1.49L130.16,40Q128,40,125.84,40L107.2,25.11a8,8,0,0,0-7.06-1.48A107.6,107.6,0,0,0,73.89,34.51a8,8,0,0,0-3.93,6L67.32,64.27q-1.56,1.49-3.18,3.18L40.54,70a8,8,0,0,0-6,3.94,107.71,107.71,0,0,0-10.87,26.25,8,8,0,0,0,1.49,7.06L40,125.84Q40,128,40,130.16L25.11,148.8a8,8,0,0,0-1.48,7.06,107.6,107.6,0,0,0,10.88,26.25,8,8,0,0,0,6,3.93l23.72,2.64q1.49,1.56,3.18,3.18L70,215.46a8,8,0,0,0,3.94,6,107.71,107.71,0,0,0,26.25,10.87,8,8,0,0,0,7.06-1.49L125.84,216q2.16.06,4.32,0l18.64,14.92a8,8,0,0,0,7.06,1.48,107.21,107.21,0,0,0,26.25-10.88,8,8,0,0,0,3.93-6l2.64-23.72q1.56-1.48,3.18-3.18L215.46,186a8,8,0,0,0,6-3.94,107.71,107.71,0,0,0,10.87-26.25,8,8,0,0,0-1.49-7.06ZM128,168a40,40,0,1,1,40-40A40,40,0,0,1,128,168Z"></path>
         </svg>
       </button>
     </div>
@@ -361,34 +416,48 @@
             type="text"
             placeholder="Search logs"
             bind:value={searchTerm}
+            on:keydown={handleSearchKeydown}
             class="search-input"
           />
         </div>
       </div>
 
-      <!-- Auto Scroll Toggle -->
-      <div class="auto-scroll-container">
-        <span class="auto-scroll-label">Auto Scroll</span>
-        <label class="toggle-switch">
-          <input type="checkbox" bind:checked={autoScroll} />
-          <span class="toggle-slider"></span>
-        </label>
+
+
+      <!-- Main Content Area -->
+      <div class="main-content-area">
+        <!-- Log Table -->
+        <div class="log-table-section" class:compressed={selectedLog}>
+          <LogTable 
+            logs={filteredLogs}
+            {selectedLog}
+            {formatTimestamp}
+            {getLevelColor}
+            on:selectLog={(e) => selectLog(e.detail)}
+            {loading}
+          />
+        </div>
+
+        <!-- Log Details -->
+        {#if selectedLog}
+          <div class="log-details-section">
+            <div class="details-header-bar">
+              <h3>Log Details</h3>
+              <button 
+                class="close-details-button"
+                on:click={() => selectedLog = null}
+                title="Close details"
+                aria-label="Close log details"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 256 256">
+                  <path d="M205.66,194.34a8,8,0,0,1-11.32,11.32L128,139.31,61.66,205.66a8,8,0,0,1-11.32-11.32L116.69,128,50.34,61.66A8,8,0,0,1,61.66,50.34L128,116.69l66.34-66.35a8,8,0,0,1,11.32,11.32L139.31,128Z"></path>
+                </svg>
+              </button>
+            </div>
+            <LogDetails log={selectedLog} />
+          </div>
+        {/if}
       </div>
-
-      <!-- Log Table -->
-      <LogTable 
-        logs={filteredLogs}
-        {selectedLog}
-        {formatTimestamp}
-        {getLevelColor}
-        on:selectLog={(e) => selectLog(e.detail)}
-        {loading}
-      />
-
-      <!-- Log Details -->
-      {#if selectedLog}
-        <LogDetails log={selectedLog} />
-      {/if}
 
       <!-- Footer -->
       <LoggerFooter 
@@ -412,16 +481,30 @@
   on:close={closeStatistics}
 />
 
+
+
 <!-- Settings Modal -->
 <LoggerSettings 
   bind:visible={showSettings}
   bind:settings={loggerSettings}
+  on:save={handleSettingsSave}
   on:close={closeSettings}
-  on:save={saveLoggerSettings}
 />
 
 <!-- Export Success Modal -->
 <ExportSuccessModal bind:visible={showExportModal} filePath={exportFilePath} count={exportCount} />
+
+<!-- Clear Logs Confirmation Modal -->
+<ConfirmationModal
+  bind:visible={showClearConfirmation}
+  title="Clear All Logs"
+  message="Are you sure you want to clear all logs from memory? This action cannot be undone."
+  confirmText="Clear All"
+  cancelText="Cancel"
+  type="danger"
+  on:confirm={handleClearConfirm}
+  on:cancel={handleClearCancel}
+/>
 
 <style>
   .logger-window {
@@ -498,22 +581,25 @@
     color: #90adcb;
   }
 
-  .header-button {
+  .settings-button {
+    background: none;
+    border: none;
+    color: #90adcb;
+    cursor: pointer;
+    padding: 0.5rem;
+    border-radius: 0.375rem;
+    transition: all 0.2s;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #223649;
-    border: none;
-    border-radius: 0.5rem;
-    padding: 0.625rem;
-    color: white;
-    cursor: pointer;
-    transition: background-color 0.2s;
   }
 
-  .header-button:hover {
-    background: #314d68;
+  .settings-button:hover {
+    background: #223649;
+    color: white;
   }
+
+
 
   /* Main Content */
   .logger-main {
@@ -530,73 +616,83 @@
     max-width: 60rem;
     width: 100%;
     gap: 1rem;
+    height: 100%;
+    min-height: 0;
   }
 
   .search-bar-row {
     padding: 0 1rem;
   }
 
+  .main-content-area {
+    display: flex;
+    flex-direction: row;
+    gap: 1rem;
+    flex: 1;
+    min-height: 0;
+  }
 
-  /* Auto Scroll */
-  .auto-scroll-container {
+  .log-table-section {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    transition: flex 0.3s ease;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .log-table-section.compressed {
+    flex: 0.6;
+  }
+
+  .log-details-section {
+    flex: 0.4;
+    min-width: 300px;
+    background: #182634;
+    border-radius: 0.5rem;
+    border: 1px solid #314d68;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    max-height: 100%;
+  }
+
+  .details-header-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 1rem;
-    background: #101a23;
-    min-height: 3.5rem;
+    border-bottom: 1px solid #314d68;
+    background: #223649;
   }
 
-  .auto-scroll-label {
+  .details-header-bar h3 {
+    margin: 0;
+    color: white;
     font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .close-details-button {
+    background: none;
+    border: none;
+    color: #90adcb;
+    cursor: pointer;
+    padding: 0.25rem;
+    border-radius: 0.25rem;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .close-details-button:hover {
+    background: #314d68;
     color: white;
   }
 
-  .toggle-switch {
-    position: relative;
-    display: inline-block;
-    width: 51px;
-    height: 31px;
-    cursor: pointer;
-  }
 
-  .toggle-switch input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
 
-  .toggle-slider {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: #223649;
-    border-radius: 31px;
-    transition: 0.3s;
-    display: flex;
-    align-items: center;
-    padding: 2px;
-  }
-
-  .toggle-slider:before {
-    content: "";
-    height: 27px;
-    width: 27px;
-    background-color: white;
-    border-radius: 50%;
-    transition: 0.3s;
-    box-shadow: rgba(0, 0, 0, 0.15) 0px 3px 8px, rgba(0, 0, 0, 0.06) 0px 3px 1px;
-  }
-
-  input:checked + .toggle-slider {
-    background-color: #0c7ff2;
-  }
-
-  input:checked + .toggle-slider:before {
-    transform: translateX(20px);
-  }
 
   /* Responsive Design */
   @media (max-width: 1200px) {
@@ -616,6 +712,38 @@
     
     .logger-main {
       padding: 1rem;
+    }
+
+    .main-content-area {
+      flex-direction: column;
+    }
+
+    .log-table-section.compressed {
+      flex: 1;
+    }
+
+    .log-details-section {
+      flex: none;
+      min-width: auto;
+      max-height: 40vh;
+      overflow-y: auto;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    .main-content-area {
+      flex-direction: column;
+    }
+
+    .log-table-section.compressed {
+      flex: 1;
+    }
+
+    .log-details-section {
+      flex: none;
+      min-width: auto;
+      max-height: 50vh;
+      overflow-y: auto;
     }
   }
 </style> 

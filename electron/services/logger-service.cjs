@@ -79,7 +79,7 @@ class LoggerService extends EventEmitter {
       // Clean up old logs on startup
       this.cleanupOldLogs();
       
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to initialize logger storage
     }
   }
@@ -107,7 +107,7 @@ class LoggerService extends EventEmitter {
       // Clean up old rotated files
       this.cleanupRotatedFiles();
       
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to rotate log file
     }
   }
@@ -129,7 +129,7 @@ class LoggerService extends EventEmitter {
           }
         }
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to cleanup old logs
     }
   }
@@ -152,7 +152,7 @@ class LoggerService extends EventEmitter {
           fs.unlinkSync(file.path);
         }
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to cleanup rotated files
     }
   }
@@ -217,7 +217,7 @@ class LoggerService extends EventEmitter {
       // Append to current log file
       fs.appendFileSync(this.currentLogFile, logLine);
       
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to write log to file
     }
   }
@@ -233,7 +233,7 @@ class LoggerService extends EventEmitter {
   
   log(level, message, options = {}) {
     // Validate log level
-    if (!this.logLevels.hasOwnProperty(level)) {
+    if (!Object.prototype.hasOwnProperty.call(this.logLevels, level)) {
       level = 'info';
     }
     
@@ -301,7 +301,7 @@ class LoggerService extends EventEmitter {
       fs.writeFileSync(crashFile, JSON.stringify(crashReport, null, 2));
       
       return crashFile;
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to export crash report
       return null;
     }
@@ -467,8 +467,14 @@ class LoggerService extends EventEmitter {
     });
 
     // Load the logger window HTML
-    const loggerHtmlPath = path.join(__dirname, '../logger-window.html');
-    this.loggerWindow.loadFile(loggerHtmlPath);
+    if (process.env.NODE_ENV === 'development') {
+      // In development, load from the dev server
+      this.loggerWindow.loadURL('http://localhost:5173/logger-window.html');
+    } else {
+      // In production, load from file
+      const loggerHtmlPath = path.join(__dirname, '../logger-window.html');
+      this.loggerWindow.loadFile(loggerHtmlPath);
+    }
 
     // Show window when ready
     this.loggerWindow.once('ready-to-show', () => {

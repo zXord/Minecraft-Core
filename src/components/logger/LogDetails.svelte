@@ -149,8 +149,10 @@
     background: #182634;
     border-radius: 0.5rem;
     border: 1px solid #314d68;
-    margin-top: 1rem;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
   }
 
   .details-header {
@@ -192,6 +194,8 @@
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
+    overflow-y: auto;
+    flex: 1;
   }
 
   .detail-section {
@@ -318,22 +322,33 @@
   }
 
   /* Scrollbar Styling */
+  .details-content::-webkit-scrollbar,
   .message-text::-webkit-scrollbar,
   .stacktrace-text::-webkit-scrollbar,
   .context-text::-webkit-scrollbar {
+    width: 6px;
     height: 6px;
   }
 
+  .details-content::-webkit-scrollbar-track,
   .message-text::-webkit-scrollbar-track,
   .stacktrace-text::-webkit-scrollbar-track,
   .context-text::-webkit-scrollbar-track {
     background: #223649;
   }
 
+  .details-content::-webkit-scrollbar-thumb,
   .message-text::-webkit-scrollbar-thumb,
   .stacktrace-text::-webkit-scrollbar-thumb,
   .context-text::-webkit-scrollbar-thumb {
     background: #314d68;
     border-radius: 3px;
+  }
+
+  .details-content::-webkit-scrollbar-thumb:hover,
+  .message-text::-webkit-scrollbar-thumb:hover,
+  .stacktrace-text::-webkit-scrollbar-thumb:hover,
+  .context-text::-webkit-scrollbar-thumb:hover {
+    background: #475569;
   }
 </style> 
