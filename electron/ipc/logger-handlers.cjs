@@ -1,11 +1,11 @@
-const { ipcMain, BrowserWindow } = require('electron');
+const { ipcMain } = require('electron');
 const { getLogger } = require('../services/logger-service.cjs');
 
 class LoggerHandlers {
   constructor() {
     this.logger = getLogger();
     this.setupHandlers();
-    this.setupRealTimeStreaming();
+    // Removed setupRealTimeStreaming() - using window-specific streaming instead
   }
   
   setupHandlers() {
@@ -27,7 +27,7 @@ class LoggerHandlers {
     });
     
     // Get logger statistics
-    ipcMain.handle('logger-get-stats', async (_) => {
+    ipcMain.handle('logger-get-stats', async () => {
       try {
         const stats = this.logger.getStats();
         return {
@@ -43,7 +43,7 @@ class LoggerHandlers {
     });
     
     // Clear memory logs
-    ipcMain.handle('logger-clear-logs', async (_) => {
+    ipcMain.handle('logger-clear-logs', async () => {
       try {
         this.logger.clearMemoryLogs();
         return {
@@ -87,7 +87,7 @@ class LoggerHandlers {
     });
     
     // Get current configuration
-    ipcMain.handle('logger-get-config', async (_) => {
+    ipcMain.handle('logger-get-config', async () => {
       try {
         return {
           success: true,
@@ -102,7 +102,7 @@ class LoggerHandlers {
     });
     
     // Export crash report manually
-    ipcMain.handle('logger-export-crash-report', async (_) => {
+    ipcMain.handle('logger-export-crash-report', async () => {
       try {
         const crashFile = this.logger.exportCrashReport();
         return {
@@ -151,7 +151,7 @@ class LoggerHandlers {
     });
     
     // Get available instances for filtering
-    ipcMain.handle('logger-get-instances', async (_) => {
+    ipcMain.handle('logger-get-instances', async () => {
       try {
         const stats = this.logger.getStats();
         const instances = Object.keys(stats.instances).sort();
@@ -168,7 +168,7 @@ class LoggerHandlers {
     });
     
     // Get available categories for filtering
-    ipcMain.handle('logger-get-categories', async (_) => {
+    ipcMain.handle('logger-get-categories', async () => {
       try {
         const stats = this.logger.getStats();
         const categories = Object.keys(stats.categories).sort();
@@ -214,33 +214,6 @@ class LoggerHandlers {
         };
       }
     });
-  }
-  
-  setupRealTimeStreaming() {
-    // Listen for new log entries and broadcast to logger windows
-    this.logger.on('log', (logEntry) => {
-      this.broadcastToLoggerWindows('logger-new-log', logEntry);
-    });
-    
-    // Listen for logs cleared event
-    this.logger.on('logsCleared', () => {
-      this.broadcastToLoggerWindows('logger-logs-cleared');
-    });
-  }
-  
-  broadcastToLoggerWindows(channel, data) {
-    // Send to all windows that are listening for logger events
-    const allWindows = BrowserWindow.getAllWindows();
-    
-    for (const window of allWindows) {
-      if (window && !window.isDestroyed()) {
-        try {
-          window.webContents.send(channel, data);
-        } catch (error) {
-          // Window might be destroyed, ignore
-        }
-      }
-    }
   }
   
   // Utility method to log from the main process

@@ -30,12 +30,12 @@
   $: if (!isServerRunning && ($serverState.cpuLoad !== 0 || $serverState.memUsedMB !== 0)) {
     // Only reset if values are non-zero to avoid infinite loops
     setTimeout(() => {
-      serverState.update(state => ({
-        ...state,
-        cpuLoad: 0,
-        memUsedMB: 0,
-        uptime: '0h 0m 0s'
-      }));
+    serverState.update(state => ({
+      ...state,
+      cpuLoad: 0,
+      memUsedMB: 0,
+      uptime: '0h 0m 0s'
+    }));
     }, 100);
   }
   

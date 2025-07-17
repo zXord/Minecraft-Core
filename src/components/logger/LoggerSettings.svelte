@@ -7,10 +7,7 @@
     maxLogs: 1000,
     logLevel: 'all',
     exportFormat: 'json',
-    realTimeStreaming: true,
-    showTimestamps: true,
-    showCategories: true,
-    showInstances: true
+    realTimeStreaming: true
   };
 
   const dispatch = createEventDispatcher();
@@ -31,10 +28,7 @@
       maxLogs: 1000,
       logLevel: 'all',
       exportFormat: 'json',
-      realTimeStreaming: true,
-      showTimestamps: true,
-      showCategories: true,
-      showInstances: true
+      realTimeStreaming: true
     };
   }
 
@@ -90,9 +84,9 @@
       </div>
 
       <div class="modal-body">
-        <!-- Display Settings -->
+        <!-- Performance Settings -->
         <div class="settings-section">
-          <h3>Display Settings</h3>
+          <h3>General Settings</h3>
           <div class="setting-group">
             <label class="setting-item">
               <input type="checkbox" bind:checked={settings.autoScroll} />
@@ -100,30 +94,6 @@
               <span class="setting-description">Automatically scroll to the newest log entries</span>
             </label>
             
-            <label class="setting-item">
-              <input type="checkbox" bind:checked={settings.showTimestamps} />
-              <span class="setting-label">Show timestamps</span>
-              <span class="setting-description">Display timestamp column in log table</span>
-            </label>
-            
-            <label class="setting-item">
-              <input type="checkbox" bind:checked={settings.showCategories} />
-              <span class="setting-label">Show categories</span>
-              <span class="setting-description">Display category column in log table</span>
-            </label>
-            
-            <label class="setting-item">
-              <input type="checkbox" bind:checked={settings.showInstances} />
-              <span class="setting-label">Show instances</span>
-              <span class="setting-description">Display instance column in log table</span>
-            </label>
-          </div>
-        </div>
-
-        <!-- Performance Settings -->
-        <div class="settings-section">
-          <h3>Performance Settings</h3>
-          <div class="setting-group">
             <label class="setting-item">
               <input type="checkbox" bind:checked={settings.realTimeStreaming} />
               <span class="setting-label">Real-time streaming</span>
@@ -134,7 +104,7 @@
               <span class="setting-label">Maximum logs in memory</span>
               <span class="setting-description">Limit the number of logs kept in memory for performance</span>
               <select bind:value={settings.maxLogs} class="setting-select">
-                {#each maxLogsOptions as option}
+                {#each maxLogsOptions as option (option.value)}
                   <option value={option.value}>{option.label}</option>
                 {/each}
               </select>
@@ -150,7 +120,7 @@
               <span class="setting-label">Default log level filter</span>
               <span class="setting-description">Default log level to show when opening logger</span>
               <select bind:value={settings.logLevel} class="setting-select">
-                {#each logLevels as level}
+                {#each logLevels as level (level.value)}
                   <option value={level.value}>{level.label}</option>
                 {/each}
               </select>
@@ -166,7 +136,7 @@
               <span class="setting-label">Default export format</span>
               <span class="setting-description">Default file format for log exports</span>
               <select bind:value={settings.exportFormat} class="setting-select">
-                {#each exportFormats as format}
+                {#each exportFormats as format (format.value)}
                   <option value={format.value}>{format.label}</option>
                 {/each}
               </select>
