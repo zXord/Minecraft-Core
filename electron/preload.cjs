@@ -202,6 +202,8 @@ contextBridge.exposeInMainWorld('electron', {
       'logger-get-categories',
       'logger-open-window',
       'logger-close-window',
+      'logger-save-settings',
+      'logger-get-settings',
       'logger-new-log',
       'logger-logs-cleared',
     ];

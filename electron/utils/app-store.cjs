@@ -65,6 +65,14 @@ const storeConfig = {
       minimizeToTray: false,
       startMinimized: false,
       startOnStartup: false
+    },
+    loggerSettings: {
+      maxLogs: 1000,
+      logLevel: 'all',
+      exportFormat: 'json',
+      maxFileSize: 50,
+      maxFiles: 5,
+      retentionDays: 7
     }
   }
 };
