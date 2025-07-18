@@ -1,5 +1,6 @@
 const { ipcMain } = require('electron');
 const { getLogger } = require('../services/logger-service.cjs');
+const appStore = require('../utils/app-store.cjs');
 
 class LoggerHandlers {
   constructor() {
@@ -200,6 +201,91 @@ class LoggerHandlers {
       }
     });
 
+    // Save logger settings
+    ipcMain.handle('logger-save-settings', async (_, settings) => {
+      try {
+        this.logger.log('debug', 'Saving logger settings', {
+          instanceId: 'system',
+          category: 'settings',
+          data: { settings }
+        });
+
+        if (!settings || typeof settings !== 'object') {
+          this.logger.log('error', 'Invalid logger settings data provided', {
+            instanceId: 'system',
+            category: 'settings'
+          });
+          return { success: false, error: 'Invalid settings data' };
+        }
+
+        // Get current settings
+        const currentSettings = appStore.get('loggerSettings') || {};
+
+        // Validate and merge settings
+        const updatedSettings = {
+          ...currentSettings,
+          maxLogs: Math.max(100, parseInt(settings.maxLogs) || 1000),
+          logLevel: settings.logLevel || 'all',
+          exportFormat: settings.exportFormat || 'json',
+          maxFileSize: Math.max(1, Math.min(1000, parseInt(settings.maxFileSize) || 50)),
+          maxFiles: Math.max(1, Math.min(50, parseInt(settings.maxFiles) || 5)),
+          retentionDays: Math.max(1, Math.min(365, parseInt(settings.retentionDays) || 7))
+        };
+
+        // Save settings to store
+        appStore.set('loggerSettings', updatedSettings);
+        
+        // Reload logger service configuration
+        this.logger.loadConfig();
+        
+        this.logger.log('info', 'Logger settings saved successfully', {
+          instanceId: 'system',
+          category: 'settings',
+          data: { updatedSettings }
+        });
+
+        return { success: true, settings: updatedSettings };
+      } catch (error) {
+        this.logger.log('error', 'Failed to save logger settings', {
+          instanceId: 'system',
+          category: 'settings',
+          data: { error: error.message }
+        });
+        return { success: false, error: error.message };
+      }
+    });
+
+    // Get logger settings
+    ipcMain.handle('logger-get-settings', async () => {
+      try {
+        const defaultSettings = {
+          maxLogs: 1000,
+          logLevel: 'all',
+          exportFormat: 'json',
+          maxFileSize: 50,
+          maxFiles: 5,
+          retentionDays: 7
+        };
+
+        const settings = appStore.get('loggerSettings') || defaultSettings;
+        
+        this.logger.log('debug', 'Loading logger settings', {
+          instanceId: 'system',
+          category: 'settings',
+          data: { settings, isDefault: !appStore.get('loggerSettings') }
+        });
+
+        return { success: true, settings };
+      } catch (error) {
+        this.logger.log('error', 'Failed to load logger settings', {
+          instanceId: 'system',
+          category: 'settings',
+          data: { error: error.message }
+        });
+        return { success: false, error: error.message };
+      }
+    });
+
     // Close logger window
     ipcMain.handle('logger-close-window', async () => {
       try {
@@ -213,6 +299,12 @@ class LoggerHandlers {
           error: error.message
         };
       }
+    });
+
+    // Test settings handlers are working
+    this.logger.log('debug', 'Logger settings IPC handlers registered', {
+      instanceId: 'system',
+      category: 'settings'
     });
   }
   

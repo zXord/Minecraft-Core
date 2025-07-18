@@ -3,11 +3,12 @@
 
   export let visible = false;
   export let settings = {
-    autoScroll: true,
     maxLogs: 1000,
     logLevel: 'all',
     exportFormat: 'json',
-    realTimeStreaming: true
+    maxFileSize: 50,
+    maxFiles: 5,
+    retentionDays: 7
   };
 
   const dispatch = createEventDispatcher();
@@ -24,11 +25,12 @@
 
   function resetSettings() {
     settings = {
-      autoScroll: true,
       maxLogs: 1000,
       logLevel: 'all',
       exportFormat: 'json',
-      realTimeStreaming: true
+      maxFileSize: 50,
+      maxFiles: 5,
+      retentionDays: 7
     };
   }
 
@@ -88,18 +90,6 @@
         <div class="settings-section">
           <h3>General Settings</h3>
           <div class="setting-group">
-            <label class="setting-item">
-              <input type="checkbox" bind:checked={settings.autoScroll} />
-              <span class="setting-label">Auto-scroll to new logs</span>
-              <span class="setting-description">Automatically scroll to the newest log entries</span>
-            </label>
-            
-            <label class="setting-item">
-              <input type="checkbox" bind:checked={settings.realTimeStreaming} />
-              <span class="setting-label">Real-time streaming</span>
-              <span class="setting-description">Receive new logs in real-time</span>
-            </label>
-            
             <div class="setting-item">
               <span class="setting-label">Maximum logs in memory</span>
               <span class="setting-description">Limit the number of logs kept in memory for performance</span>
@@ -139,6 +129,49 @@
                 {#each exportFormats as format (format.value)}
                   <option value={format.value}>{format.label}</option>
                 {/each}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Advanced Settings -->
+        <div class="settings-section">
+          <h3>File Management</h3>
+          <div class="setting-group">
+            <div class="setting-item">
+              <span class="setting-label">Max file size before rotation</span>
+              <span class="setting-description">Log file size limit in MB (automatic rotation)</span>
+              <select bind:value={settings.maxFileSize} class="setting-select">
+                <option value={10}>10 MB</option>
+                <option value={25}>25 MB</option>
+                <option value={50}>50 MB</option>
+                <option value={100}>100 MB</option>
+                <option value={250}>250 MB</option>
+              </select>
+            </div>
+
+            <div class="setting-item">
+              <span class="setting-label">Max log files to keep</span>
+              <span class="setting-description">Number of rotated log files to retain</span>
+              <select bind:value={settings.maxFiles} class="setting-select">
+                <option value={3}>3 files</option>
+                <option value={5}>5 files</option>
+                <option value={10}>10 files</option>
+                <option value={15}>15 files</option>
+                <option value={20}>20 files</option>
+              </select>
+            </div>
+
+            <div class="setting-item">
+              <span class="setting-label">Log retention period</span>
+              <span class="setting-description">Automatically delete logs older than this period</span>
+              <select bind:value={settings.retentionDays} class="setting-select">
+                <option value={3}>3 days</option>
+                <option value={7}>7 days</option>
+                <option value={14}>14 days</option>
+                <option value={30}>30 days</option>
+                <option value={90}>90 days</option>
+                <option value={365}>1 year</option>
               </select>
             </div>
           </div>
@@ -254,12 +287,6 @@
     background: #2a3f56;
   }
 
-  .setting-item input[type="checkbox"] {
-    width: 20px;
-    height: 20px;
-    margin-right: 0.75rem;
-    accent-color: #0c7ff2;
-  }
 
   .setting-label {
     color: white;

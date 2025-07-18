@@ -16,7 +16,6 @@
   let selectedLog = null;
   let loading = true;
   let searchTerm = '';
-  let autoScroll = true;
   let stats = {};
   let showStatistics = false;
   let showExportModal = false;
@@ -25,11 +24,12 @@
   let showSettings = false;
   let showClearConfirmation = false;
   let loggerSettings = {
-    autoScroll: true,
     maxLogs: 1000,
     logLevel: 'all',
     exportFormat: 'json',
-    realTimeStreaming: true
+    maxFileSize: 50,
+    maxFiles: 5,
+    retentionDays: 7
   };
   
   // Filter states
@@ -68,8 +68,15 @@
 
   async function initializeLogger() {
     try {
-      // Load initial logs - increased limit to get more logs
-      const logsResult = await logger.getLogs({ limit: 1000 });
+      // Load saved settings first
+      const settingsResult = await window.electron.invoke('logger-get-settings');
+      if (settingsResult.success) {
+        loggerSettings = settingsResult.settings;
+        levelFilter = loggerSettings.logLevel;
+      }
+
+      // Load initial logs - use saved maxLogs setting
+      const logsResult = await logger.getLogs({ limit: loggerSettings.maxLogs });
       if (logsResult.success) {
         logs = logsResult.logs || [];
         // Explicitly apply initial filters
@@ -108,8 +115,8 @@
       unsubscribeNewLog = window.electron.on('logger-new-log', (logEntry) => {
         logs = [logEntry, ...logs].slice(0, loggerSettings.maxLogs);
         
-        // Auto-scroll to top only if enabled, showing recent logs, and user is near the top
-        if (autoScroll && isShowingRecentLogs() && isUserNearTop()) {
+        // Auto-scroll to top if showing recent logs and user is near the top
+        if (isShowingRecentLogs() && isUserNearTop()) {
           setTimeout(() => {
             const tableWrapper = document.querySelector('.table-wrapper');
             if (tableWrapper) {
@@ -316,34 +323,30 @@
     showSettings = true;
   }
   
-  function handleSettingsSave(event) {
+  async function handleSettingsSave(event) {
     const newSettings = { ...event.detail };
     
-    // If maxLogs changed, trim current logs
-    if (newSettings.maxLogs !== loggerSettings.maxLogs) {
-      logs = logs.slice(0, newSettings.maxLogs);
-    }
-    
-    // Handle real-time streaming toggle
-    if (newSettings.realTimeStreaming !== loggerSettings.realTimeStreaming) {
-      if (newSettings.realTimeStreaming && !unsubscribeNewLog) {
-        setupRealTimeStreaming();
-      } else if (!newSettings.realTimeStreaming && unsubscribeNewLog) {
-        unsubscribeNewLog();
-        unsubscribeNewLog = null;
-        if (unsubscribeLogsCleared) {
-          unsubscribeLogsCleared();
-          unsubscribeLogsCleared = null;
+    try {
+      // Save settings via IPC
+      const result = await window.electron.invoke('logger-save-settings', newSettings);
+      
+      if (result.success) {
+        // If maxLogs changed, trim current logs
+        if (newSettings.maxLogs !== loggerSettings.maxLogs) {
+          logs = logs.slice(0, newSettings.maxLogs);
         }
+        
+        loggerSettings = result.settings;
+        
+        // Apply settings immediately
+        levelFilter = loggerSettings.logLevel;
+        showSettings = false;
+      } else {
+        console.error('Failed to save logger settings:', result.error);
       }
+    } catch (error) {
+      console.error('Error saving logger settings:', error);
     }
-    
-    loggerSettings = newSettings;
-    
-    // Apply settings immediately
-    autoScroll = loggerSettings.autoScroll;
-    levelFilter = loggerSettings.logLevel;
-    showSettings = false;
   }
   
   function closeSettings() {

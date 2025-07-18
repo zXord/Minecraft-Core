@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { app, BrowserWindow } = require('electron');
 const EventEmitter = require('events');
+const appStore = require('../utils/app-store.cjs');
 
 class LoggerService extends EventEmitter {
   constructor() {
@@ -23,13 +24,8 @@ class LoggerService extends EventEmitter {
       fatal: '#7f1d1d'    // dark red
     };
     
-    // Configuration
-    this.config = {
-      maxMemoryLogs: 10000,
-      maxFileSize: 50 * 1024 * 1024, // 50MB
-      maxFiles: 5,
-      retentionDays: 7
-    };
+    // Get configuration from app store
+    this.loadConfig();
     
     // Memory buffer for real-time display
     this.memoryLogs = [];
@@ -57,6 +53,28 @@ class LoggerService extends EventEmitter {
         this.loggerWindow.destroy();
       }
     });
+  }
+  
+  loadConfig() {
+    try {
+      const loggerSettings = appStore.get('loggerSettings') || {};
+      
+      // Set configuration with defaults fallback
+      this.config = {
+        maxMemoryLogs: 10000, // Keep this hardcoded for memory management
+        maxFileSize: (loggerSettings.maxFileSize || 50) * 1024 * 1024, // Convert MB to bytes
+        maxFiles: loggerSettings.maxFiles || 5,
+        retentionDays: loggerSettings.retentionDays || 7
+      };
+    } catch (error) {
+      // Fallback to defaults if settings can't be loaded
+      this.config = {
+        maxMemoryLogs: 10000,
+        maxFileSize: 50 * 1024 * 1024, // 50MB
+        maxFiles: 5,
+        retentionDays: 7
+      };
+    }
   }
   
   initializeStorage() {
