@@ -1,6 +1,8 @@
 <!-- @ts-ignore -->
 <script>
   import { createEventDispatcher } from 'svelte';
+  
+  import { SvelteSet, SvelteMap } from 'svelte/reactivity';
   import { dependencyModalOpen, modToInstall, currentDependencies, installingModIds } from '../../../stores/modStore.js';
   
   // Event dispatcher
@@ -18,8 +20,8 @@
   // Group dependencies by type and prevent duplicates
   $: {
     // Create a Set to track project IDs we've already processed
-    const processedIds = new Set();
-    const processedNames = new Map(); // Track names for better deduplication
+    const processedIds = new SvelteSet();
+    const processedNames = new SvelteMap(); // Track names for better deduplication
     
     // If we have a main mod, add its ID to the processed IDs to avoid showing as a dependency
     if ($modToInstall && $modToInstall.id) {

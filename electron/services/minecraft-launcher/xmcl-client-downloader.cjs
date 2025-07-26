@@ -267,7 +267,7 @@ class XMCLClientDownloader {
                 phase: phaseInfo
               });
             },
-            onFailed: (_, __) => {
+            onFailed: () => {
               if (!isCancelled) {
                 // TODO: Add proper logging - Task failed, will retry
               }
@@ -431,7 +431,7 @@ class XMCLClientDownloader {
 
         const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, needsFabric ? finalVersion : null);
         if (cleanupResult.success) {
-          
+          // Cleanup successful
         } else {
           // TODO: Add proper logging - Cleanup warning
         }
@@ -693,7 +693,7 @@ class XMCLClientDownloader {
       }
       
       return false;
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to check version change
       return false;
     }
@@ -732,7 +732,7 @@ class XMCLClientDownloader {
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
           // TODO: Add proper logging - Cleaned up old version
-        } catch (error) {
+        } catch {
           // TODO: Add proper logging - Failed to remove version directory
         }
       }
@@ -785,7 +785,7 @@ class XMCLClientDownloader {
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
           // TODO: Add proper logging - Cleaned up old version
-        } catch (error) {
+        } catch {
           // TODO: Add proper logging - Failed to remove version directory
         }
       }

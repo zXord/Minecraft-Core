@@ -9,21 +9,25 @@ const { XMCLAuthHandler } = require('./xmcl-auth-handler.cjs');
 const { ClientDownloader } = require('./client-downloader.cjs');
 const XMCLClientDownloader = require('./xmcl-client-downloader.cjs');
 const { ProperMinecraftLauncher } = require('./proper-launcher.cjs');
+const { getLoggerHandlers } = require('../../ipc/logger-handlers.cjs');
+
+// Initialize logger
+const logger = getLoggerHandlers();
 
 // Console hiding removed - fixing the root cause instead (using javaw.exe)
 
 // Add global error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason) => {
-  
+
   // Handle common authentication network errors gracefully
   if (reason instanceof Error) {
     if (reason.message.includes('ENOTFOUND') ||
-        reason.message.includes('authserver.mojang.com') ||
-        reason.message.includes('api.minecraftservices.com')) {
+      reason.message.includes('authserver.mojang.com') ||
+      reason.message.includes('api.minecraftservices.com')) {
       return; // Don't crash the app for authentication network issues
     }
   }
-  
+
   // For other critical errors, we might want to log them differently
 });
 
@@ -36,6 +40,15 @@ class MinecraftLauncher extends EventEmitter {
     this.javaManager = new JavaManager(); // Initialize without client path initially
     this.authHandler = new XMCLAuthHandler(this); // Use new XMCL auth handler
 
+    logger.info('Minecraft launcher service initialized', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        hasJavaManager: !!this.javaManager,
+        hasAuthHandler: !!this.authHandler
+      }
+    });
+
     // NEW: buffered auth logs which are emitted before debug console is ready
     this.pendingAuthLogs = [];
     this.on('auth-log', (entry) => {
@@ -46,71 +59,263 @@ class MinecraftLauncher extends EventEmitter {
         this.pendingAuthLogs.push(entry);
       }
     });
-    
+
     // Hybrid approach: Use XMCL downloader with legacy fallback during migration
     this.legacyClientDownloader = new ClientDownloader(this.javaManager, this);
     this.xmclClientDownloader = new XMCLClientDownloader(this.javaManager, this, this.legacyClientDownloader);
     this.useXMCLDownloader = true; // Using XMCL downloader (modern, efficient)
-    
+
     // Set the active downloader based on flag
-    this.clientDownloader = this.useXMCLDownloader ? 
+    this.clientDownloader = this.useXMCLDownloader ?
       this.xmclClientDownloader : this.legacyClientDownloader;
-    
+
     // Add proper launcher for fixing LogUtils issues
     this.properLauncher = new ProperMinecraftLauncher();
-    
+
     // Our new approach logs directly from the spawned Java process
-    
+
 
     // utils.logSystemInfo(); // Use util function
 
   }
-  
-  
-  
+
+
+
   // Get the correct Java version for a Minecraft version - MOVED to utils.cjs
   // getRequiredJavaVersion(minecraftVersion) { ... }
-  
+
   // Microsoft Authentication
   async authenticateWithMicrosoft() {
-    return this.authHandler.authenticateWithMicrosoft();
+    logger.info('Starting Microsoft authentication', {
+      category: 'auth',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'authenticateWithMicrosoft'
+      }
+    });
+
+    try {
+      const result = await this.authHandler.authenticateWithMicrosoft();
+
+      logger.info('Microsoft authentication completed', {
+        category: 'auth',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'authenticateWithMicrosoft',
+          success: !!result,
+          hasAccessToken: !!(result && result.access_token)
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Microsoft authentication failed: ${error.message}`, {
+        category: 'auth',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'authenticateWithMicrosoft',
+          errorType: error.constructor.name,
+          errorCode: error.code
+        }
+      });
+      throw error;
+    }
   }
-  
+
   // Save authentication data to file
   async saveAuthData(clientPath) {
-    // Pass clientPath, authData is now internal to authHandler
-    return this.authHandler.saveAuthData(clientPath);
+    logger.debug('Saving authentication data', {
+      category: 'auth',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'saveAuthData',
+        clientPath: clientPath ? path.basename(clientPath) : null
+      }
+    });
+
+    try {
+      const result = await this.authHandler.saveAuthData(clientPath);
+
+      logger.info('Authentication data saved successfully', {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'saveAuthData',
+          success: true
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Failed to save authentication data: ${error.message}`, {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'saveAuthData',
+          errorType: error.constructor.name,
+          clientPath: clientPath ? path.basename(clientPath) : null
+        }
+      });
+      throw error;
+    }
   }
-  
+
   // Load saved authentication data
   async loadAuthData(clientPath) {
-    return this.authHandler.loadAuthData(clientPath);
+    logger.debug('Loading authentication data', {
+      category: 'auth',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'loadAuthData',
+        clientPath: clientPath ? path.basename(clientPath) : null
+      }
+    });
+
+    try {
+      const result = await this.authHandler.loadAuthData(clientPath);
+
+      logger.info('Authentication data loaded', {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'loadAuthData',
+          success: !!result,
+          hasValidAuth: !!(result && result.access_token)
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Failed to load authentication data: ${error.message}`, {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'loadAuthData',
+          errorType: error.constructor.name,
+          clientPath: clientPath ? path.basename(clientPath) : null
+        }
+      });
+      throw error;
+    }
   }
-  
+
   // Reset launcher state - used when launcher gets stuck
   resetLauncherState() {
+    logger.warn('Resetting launcher state', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'resetLauncherState',
+        wasLaunching: this.isLaunching,
+        hadClient: !!this.client
+      }
+    });
+
     this.isLaunching = false;
     this.client = null;
+
+    logger.info('Launcher state reset completed', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'resetLauncherState'
+      }
+    });
   }
 
   // Check if authentication is valid and refresh if needed
   async checkAndRefreshAuth(forceRefresh = false) {
-    return this.authHandler.checkAndRefreshAuth(forceRefresh);
+    logger.debug('Checking and refreshing authentication', {
+      category: 'auth',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'checkAndRefreshAuth',
+        forceRefresh
+      }
+    });
+
+    try {
+      const result = await this.authHandler.checkAndRefreshAuth(forceRefresh);
+
+      logger.info('Authentication check completed', {
+        category: 'auth',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'checkAndRefreshAuth',
+          success: result.success,
+          refreshed: result.refreshed,
+          requiresAuth: result.requiresAuth
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Authentication check failed: ${error.message}`, {
+        category: 'auth',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'checkAndRefreshAuth',
+          errorType: error.constructor.name,
+          forceRefresh
+        }
+      });
+      throw error;
+    }
   }
-  
+
   // Clear authentication data (for force re-authentication)
   clearAuthData() {
-    return this.authHandler.clearAuthData();
+    logger.info('Clearing authentication data', {
+      category: 'auth',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'clearAuthData'
+      }
+    });
+
+    try {
+      const result = this.authHandler.clearAuthData();
+
+      logger.info('Authentication data cleared successfully', {
+        category: 'auth',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'clearAuthData',
+          success: true
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Failed to clear authentication data: ${error.message}`, {
+        category: 'auth',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'clearAuthData',
+          errorType: error.constructor.name
+        }
+      });
+      throw error;
+    }
   }
-  
+
   // Check Java installation 
   async checkJavaInstallation() {
+    logger.debug('Checking Java installation', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'checkJavaInstallation',
+        platform: process.platform
+      }
+    });
+
     try {
       const { exec } = require('child_process');
       const { promisify } = require('util');
       const execAsync = promisify(exec);
-      
-      
+
+
       // Try different Java commands - prioritize javaw on Windows to avoid console
       const javaCommands = process.platform === 'win32' ? [
         'javaw', // Windows java without console - PREFERRED
@@ -121,16 +326,16 @@ class MinecraftLauncher extends EventEmitter {
         'java', // Standard java command
         path.join(process.env.JAVA_HOME || '', 'bin', 'java') // JAVA_HOME
       ];
-      
+
       const validCommands = javaCommands.filter(cmd => cmd && cmd !== 'bin\\java' && cmd !== 'bin\\javaw'); // Filter out invalid paths
-      
+
       for (const javaCommand of validCommands) {
         try {
           const { stdout, stderr } = await execAsync(`"${javaCommand}" -version`, { timeout: 5000 });
           const output = stdout + stderr; // Java version info often goes to stderr
-          
+
           if (output.includes('version')) {
-            
+
             // Check Java architecture (32-bit vs 64-bit)
             let is64Bit = false;
             try {
@@ -139,28 +344,42 @@ class MinecraftLauncher extends EventEmitter {
             } catch {
               is64Bit = false;
             }
-            
+
             // Check if it's a reasonable Java version (8 or higher)
             const versionMatch = output.match(/version "?(\d+)\.?(\d*)/);
             if (versionMatch) {
               const majorVersion = parseInt(versionMatch[1]);
               const minorVersion = parseInt(versionMatch[2] || '0');
-              
+
               // Java 8 is version 1.8, Java 9+ is version 9+
               const isValidVersion = majorVersion >= 9 || (majorVersion === 1 && minorVersion >= 8);
-              
+
               if (isValidVersion) {
-                return { 
-                  success: true, 
+                const result = {
+                  success: true,
                   javaPath: javaCommand,
                   version: versionMatch[0],
                   is64Bit: is64Bit,
                   architecture: is64Bit ? '64-bit' : '32-bit'
                 };
+
+                logger.info('Java installation found', {
+                  category: 'client',
+                  data: {
+                    service: 'MinecraftLauncher',
+                    operation: 'checkJavaInstallation',
+                    javaPath: javaCommand,
+                    version: result.version,
+                    architecture: result.architecture,
+                    majorVersion
+                  }
+                });
+
+                return result;
               }
             } else {
-              return { 
-                success: true, 
+              return {
+                success: true,
                 javaPath: javaCommand,
                 version: 'unknown',
                 is64Bit: is64Bit,
@@ -172,27 +391,88 @@ class MinecraftLauncher extends EventEmitter {
           continue;
         }
       }
-      
+
       // If no Java found, provide helpful error message
-      return { 
-        success: false, 
+      const errorResult = {
+        success: false,
         error: 'Java not found. Please install Java 8 or higher from https://adoptopenjdk.net/ or https://www.oracle.com/java/technologies/downloads/'
       };
-      
+
+      logger.error('Java installation not found', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'checkJavaInstallation',
+          platform: process.platform,
+          testedCommands: validCommands.length
+        }
+      });
+
+      return errorResult;
+
     } catch (error) {
-      return { 
-        success: false, 
+      logger.error(`Java installation check failed: ${error.message}`, {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'checkJavaInstallation',
+          errorType: error.constructor.name,
+          platform: process.platform
+        }
+      });
+
+      return {
+        success: false,
         error: `Failed to check Java installation: ${error.message}`
       };
     }
   }
-  
+
   // Download Minecraft client files for a specific version (simplified approach)
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
-    return this.clientDownloader.downloadMinecraftClientSimple(clientPath, minecraftVersion, options);
+    logger.info('Starting Minecraft client download', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'downloadMinecraftClientSimple',
+        minecraftVersion,
+        clientPath: clientPath ? path.basename(clientPath) : null,
+        useXMCLDownloader: this.useXMCLDownloader,
+        options: Object.keys(options)
+      }
+    });
+
+    try {
+      const result = await this.clientDownloader.downloadMinecraftClientSimple(clientPath, minecraftVersion, options);
+
+      logger.info('Minecraft client download completed', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'downloadMinecraftClientSimple',
+          minecraftVersion,
+          success: result.success,
+          downloadedFiles: result.downloadedFiles || 0
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Minecraft client download failed: ${error.message}`, {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'downloadMinecraftClientSimple',
+          minecraftVersion,
+          errorType: error.constructor.name,
+          clientPath: clientPath ? path.basename(clientPath) : null
+        }
+      });
+      throw error;
+    }
   }
 
-    // Launch Minecraft client
+  // Launch Minecraft client
   async launchMinecraft(options) {
     const {
       clientPath,
@@ -204,56 +484,181 @@ class MinecraftLauncher extends EventEmitter {
       maxMemory = null, // Accept memory setting from client
       showDebugTerminal = false
     } = options;
-    
-    
+
+    logger.info('Starting Minecraft launch process', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'launchMinecraft',
+        minecraftVersion,
+        serverIp,
+        serverPort,
+        requiredModsCount: requiredMods.length,
+        loaderType: serverInfo?.loaderType,
+        maxMemory,
+        showDebugTerminal,
+        clientPath: clientPath ? path.basename(clientPath) : null
+      }
+    });
+
+
     // CRITICAL: Check vanilla JAR immediately for LogUtils issue
 
-    
+
     // PHASE 4 ENHANCEMENT: Continue with actual Minecraft launch
     try {
-      
+
       // Determine launch version and setup
       const needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
       const fabricVersion = serverInfo?.loaderVersion || 'latest';
       let launchVersion = minecraftVersion;
-      
+
+      logger.debug('Determining launch configuration', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'launchMinecraft',
+          needsFabric,
+          fabricVersion,
+          minecraftVersion
+        }
+      });
+
       if (needsFabric) {
         // Use latest Fabric version if needed
         let actualFabricVersion = fabricVersion;
         if (fabricVersion === 'latest') {
-         try {
+          try {
+            logger.debug('Fetching latest Fabric version', {
+              category: 'network',
+              data: {
+                service: 'MinecraftLauncher',
+                operation: 'fetchFabricVersion',
+                url: 'https://meta.fabricmc.net/v2/versions/loader'
+              }
+            });
+
             const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
             const loaders = await response.json();
             actualFabricVersion = loaders[0].version;
-          } catch {
+
+            logger.info('Latest Fabric version retrieved', {
+              category: 'network',
+              data: {
+                service: 'MinecraftLauncher',
+                operation: 'fetchFabricVersion',
+                fabricVersion: actualFabricVersion
+              }
+            });
+          } catch (error) {
             actualFabricVersion = '0.16.14';
-          }        }
+            logger.warn(`Failed to fetch latest Fabric version, using fallback: ${error.message}`, {
+              category: 'network',
+              data: {
+                service: 'MinecraftLauncher',
+                operation: 'fetchFabricVersion',
+                fallbackVersion: actualFabricVersion,
+                errorType: error.constructor.name
+              }
+            });
+          }
+        }
         launchVersion = `fabric-loader-${actualFabricVersion}-${minecraftVersion}`;
+
+        logger.info('Fabric launch configuration determined', {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'launchMinecraft',
+            launchVersion,
+            fabricVersion: actualFabricVersion
+          }
+        });
       }
 
       // Get Java path
       const requiredJavaVersion = require('./utils.cjs').getRequiredJavaVersion(minecraftVersion);
+
+      logger.debug('Ensuring Java availability', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'ensureJava',
+          requiredJavaVersion,
+          minecraftVersion
+        }
+      });
+
       const javaResult = await this.javaManager.ensureJava(requiredJavaVersion);
-      
+
       if (!javaResult.success) {
+        logger.error(`Java ${requiredJavaVersion} not available: ${javaResult.error}`, {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'ensureJava',
+            requiredJavaVersion,
+            error: javaResult.error
+          }
+        });
         throw new Error(`Java ${requiredJavaVersion} not available: ${javaResult.error}`);
       }
-      
+
       const javaPath = javaResult.javaPath;
-      
+
+      logger.info('Java path resolved', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'ensureJava',
+          javaPath: path.basename(javaPath),
+          requiredJavaVersion
+        }
+      });
+
       // Prepare launch arguments
       const versionsDir = path.join(clientPath, 'versions');
       const launchJsonPath = path.join(versionsDir, launchVersion, `${launchVersion}.json`);
-      
+
+      logger.debug('Loading launch profile', {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'loadLaunchProfile',
+          launchVersion,
+          launchJsonPath: path.basename(launchJsonPath)
+        }
+      });
+
       if (!fs.existsSync(launchJsonPath)) {
+        logger.error(`Launch profile not found: ${launchJsonPath}`, {
+          category: 'storage',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'loadLaunchProfile',
+            launchVersion,
+            launchJsonPath
+          }
+        });
         throw new Error(`Launch profile not found: ${launchJsonPath}`);
       }
-      
+
       const launchJson = JSON.parse(fs.readFileSync(launchJsonPath, 'utf8'));
-      
+
+      logger.info('Launch profile loaded successfully', {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'loadLaunchProfile',
+          launchVersion,
+          mainClass: launchJson.mainClass,
+          librariesCount: launchJson.libraries?.length || 0
+        }
+      });
+
       // Build classpath
-        const classpath = [];
-      
+      const classpath = [];
+
       // Add vanilla JAR first
       const vanillaJarPath = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
       if (fs.existsSync(vanillaJarPath)) {
@@ -261,7 +666,7 @@ class MinecraftLauncher extends EventEmitter {
       } else {
         throw new Error(`Vanilla JAR not found: ${vanillaJarPath}`);
       }
-      
+
       // Helper function to get library priority (higher number = higher priority)
       const getLibraryPriority = (name) => {
         if (name.includes('asm')) {
@@ -273,14 +678,14 @@ class MinecraftLauncher extends EventEmitter {
         }
         return 0;
       };
-      
+
       // Helper function to normalize library name for deduplication
       const normalizeLibraryName = (name) => {
         // Don't normalize native libraries - they're separate from their main libraries
         if (name.includes('-natives-')) {
           return name; // Keep full name for natives (e.g., "org.lwjgl:lwjgl:3.3.3:natives-windows")
         }
-        
+
         // Remove version to get base library name for non-natives
         const parts = name.split(':');
         if (parts.length >= 2) {
@@ -288,20 +693,20 @@ class MinecraftLauncher extends EventEmitter {
         }
         return name;
       };
-      
+
       // Process libraries with deduplication
       const libraryMap = new Map();
-        for (const lib of launchJson.libraries) {
+      for (const lib of launchJson.libraries) {
         if (!lib.name) continue;
-        
+
         // Handle regular libraries (downloads.artifact)
         if (lib.downloads?.artifact) {
           const libPath = path.join(clientPath, 'libraries', lib.downloads.artifact.path);
-          
+
           if (fs.existsSync(libPath)) {
             const normalizedName = normalizeLibraryName(lib.name);
             const priority = getLibraryPriority(lib.name);
-            
+
             // Check if we already have this library
             if (libraryMap.has(normalizedName)) {
               const existing = libraryMap.get(normalizedName);
@@ -314,14 +719,14 @@ class MinecraftLauncher extends EventEmitter {
           }
         }        // Handle native libraries (downloads.classifiers) - CRITICAL for LWJGL natives
         if (lib.downloads?.classifiers) {
-          const platform = process.platform === 'win32' ? 'windows' : 
-                         process.platform === 'darwin' ? 'osx' : 'linux';
-          
+          const platform = process.platform === 'win32' ? 'windows' :
+            process.platform === 'darwin' ? 'osx' : 'linux';
+
           // Look for platform-specific natives
           for (const [classifier, download] of Object.entries(lib.downloads.classifiers)) {
             if (classifier.includes(`natives-${platform}`)) {
               const nativeLibPath = path.join(clientPath, 'libraries', download.path);
-              
+
               if (fs.existsSync(nativeLibPath)) {
                 const nativeLibName = `${lib.name}:${classifier}`;
                 libraryMap.set(nativeLibName, {
@@ -333,15 +738,15 @@ class MinecraftLauncher extends EventEmitter {
             }
           }
         }
-          // Handle native libraries as separate entries (modern Minecraft format)
+        // Handle native libraries as separate entries (modern Minecraft format)
         if (lib.downloads?.artifact && lib.name.includes(':natives-')) {
-          const platform = process.platform === 'win32' ? 'windows' : 
-                         process.platform === 'darwin' ? 'macos' : 'linux';
-          
+          const platform = process.platform === 'win32' ? 'windows' :
+            process.platform === 'darwin' ? 'macos' : 'linux';
+
           // Check if this native library matches our platform
           if (lib.name.includes(`natives-${platform}`)) {
             const nativeLibPath = path.join(clientPath, 'libraries', lib.downloads.artifact.path);
-            
+
             if (fs.existsSync(nativeLibPath)) {
               libraryMap.set(lib.name, {
                 name: lib.name,
@@ -352,50 +757,118 @@ class MinecraftLauncher extends EventEmitter {
           }
         }
       }
-        // Add deduplicated libraries to classpath
+      // Add deduplicated libraries to classpath
       for (const [, libInfo] of libraryMap) {
         classpath.push(libInfo.path);
       }
-      
+
       // Setup authentication - Check and refresh token before launch
+      logger.debug('Setting up authentication for launch', {
+        category: 'auth',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'setupAuthentication',
+          hasAuthData: !!this.authHandler.authData
+        }
+      });
+
       if (!this.authHandler.authData) {
+        logger.error('No authentication data available for launch', {
+          category: 'auth',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'setupAuthentication'
+          }
+        });
         throw new Error('No authentication data available. Please authenticate first.');
       }
-      
+
       const refreshResult = await this.checkAndRefreshAuth(true); // Force refresh on every launch
-      
+
       if (refreshResult.success && refreshResult.refreshed) {
         // Save the refreshed token immediately
-        await this.saveAuthData(clientPath).catch(() => {});
+        logger.info('Authentication token refreshed, saving to disk', {
+          category: 'auth',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'setupAuthentication',
+            tokenRefreshed: true
+          }
+        });
+        await this.saveAuthData(clientPath).catch((error) => {
+          logger.warn(`Failed to save refreshed auth data: ${error.message}`, {
+            category: 'storage',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'saveRefreshedAuth',
+              errorType: error.constructor.name
+            }
+          });
+        });
       } else if (!refreshResult.success) {
         if (refreshResult.requiresAuth) {
           // Clear expired token and require fresh authentication
+          logger.error('Authentication expired, requires fresh authentication', {
+            category: 'auth',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'setupAuthentication',
+              requiresAuth: true
+            }
+          });
           throw new Error('Authentication expired. Please authenticate again through the Settings page.');
         } else {
+          logger.error(`Authentication failed: ${refreshResult.error}`, {
+            category: 'auth',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'setupAuthentication',
+              error: refreshResult.error
+            }
+          });
           throw new Error(`Authentication failed: ${refreshResult.error}`);
         }
       }
-      
+
       const authData = this.authHandler.authData;
-      
+
       // Verify we still have valid auth data after refresh check
       if (!authData) {
+        logger.error('Authentication data missing after refresh check', {
+          category: 'auth',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'setupAuthentication',
+            refreshSuccess: refreshResult.success
+          }
+        });
         throw new Error('Authentication data missing after refresh check. Please authenticate again.');
       }
-      
+
+      logger.info('Authentication setup completed successfully', {
+        category: 'auth',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'setupAuthentication',
+          playerName: authData.name,
+          hasAccessToken: !!authData.access_token,
+          hasUuid: !!authData.uuid
+        }
+      });
+
       // Try both UUID formats to see which one works
-      const uuidWithDashes = authData.uuid.includes('-') ? 
+      const uuidWithDashes = authData.uuid.includes('-') ?
         authData.uuid : // Already has dashes, use as-is
-        authData.uuid.length === 32 ? 
-          `${authData.uuid.substring(0,8)}-${authData.uuid.substring(8,12)}-${authData.uuid.substring(12,16)}-${authData.uuid.substring(16,20)}-${authData.uuid.substring(20)}` :
+        authData.uuid.length === 32 ?
+          `${authData.uuid.substring(0, 8)}-${authData.uuid.substring(8, 12)}-${authData.uuid.substring(12, 16)}-${authData.uuid.substring(16, 20)}-${authData.uuid.substring(20)}` :
           authData.uuid;
-      
+
       // Use the dashed UUID format as Minecraft expects it
       const minecraftUuid = uuidWithDashes;
-      
+
       // Build launch arguments
       const gameArgs = [];
-        // Process game arguments from profile
+      // Process game arguments from profile
       if (launchJson.arguments?.game) {
         for (const arg of launchJson.arguments.game) {
           if (typeof arg === 'string') {
@@ -412,20 +885,20 @@ class MinecraftLauncher extends EventEmitter {
               .replace(/\$\{assets_root\}/g, path.join(clientPath, 'assets'))
               .replace(/\$\{assets_index_name\}/g, launchJson.assetIndex?.id || minecraftVersion)
               .replace(/\$\{version_type\}/g, 'release');
-              
+
             gameArgs.push(processedArg);
           } else {
             gameArgs.push(arg);
           }
         }
       }
-      
+
       // Add server connection arguments if provided
       if (serverIp && serverPort) {
         gameArgs.push('--server', serverIp);
         gameArgs.push('--port', serverPort.toString());
       }
-      
+
       // Build JVM arguments
       const jvmArgs = [
         `-Xmx${maxMemory || 4096}M`,
@@ -449,10 +922,10 @@ class MinecraftLauncher extends EventEmitter {
         '-XX:+PerfDisableSharedMem',
         '-XX:MaxTenuringThreshold=1'
       ];
-      
+
       // Add native library paths - CRITICAL for LWJGL
       const nativesDir = path.join(clientPath, 'versions', launchVersion, 'natives');
-      
+
       // Ensure natives directory exists and extract natives if needed
       if (!fs.existsSync(nativesDir)) {
         fs.mkdirSync(nativesDir, { recursive: true });
@@ -473,12 +946,12 @@ class MinecraftLauncher extends EventEmitter {
                 }
               }
             }
-          } catch (extractError) {
+          } catch {
             // TODO: Add proper logging - Failed to extract from ${libInfo.name}:
           }
         }
       }
-        // Add native library system properties - MULTIPLE WAYS for maximum compatibility
+      // Add native library system properties - MULTIPLE WAYS for maximum compatibility
       jvmArgs.push(
         `-Djava.library.path=${nativesDir}`,
         `-Dorg.lwjgl.librarypath=${nativesDir}`,
@@ -486,10 +959,10 @@ class MinecraftLauncher extends EventEmitter {
         `-Dorg.lwjgl.system.SharedLibraryExtractPath=${nativesDir}`,
         `-Dio.netty.native.workdir=${nativesDir}`
       );
-      
+
       // Add classpath
       jvmArgs.push('-cp', classpath.join(process.platform === 'win32' ? ';' : ':'));
-      
+
       // Add additional JVM args from profile
       if (launchJson.arguments?.jvm) {
         for (const arg of launchJson.arguments.jvm) {
@@ -502,17 +975,32 @@ class MinecraftLauncher extends EventEmitter {
           }
         }
       }
-      
+
       // Final arguments
       const allArgs = [
         ...jvmArgs,
         launchJson.mainClass || 'net.minecraft.client.main.Main',
         ...gameArgs
       ];
-      
-        // Launch Minecraft
+
+      // Launch Minecraft
       const { spawn } = require('child_process');
-      
+
+      logger.info('Preparing to spawn Minecraft process', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'spawnMinecraft',
+          launchVersion,
+          javaPath: path.basename(javaPath),
+          showDebugTerminal,
+          maxMemory,
+          classpathEntries: classpath.length,
+          jvmArgsCount: jvmArgs.length,
+          gameArgsCount: gameArgs.length
+        }
+      });
+
       this.isLaunching = true;      // Configure stdio based on debug terminal setting      // Launch Minecraft with the configured arguments
       try {
         // Configure spawn options for debug terminal
@@ -520,55 +1008,55 @@ class MinecraftLauncher extends EventEmitter {
           cwd: clientPath,
           detached: true  // Allow Minecraft to continue running after app closes
         };
-      
-      // Declare variables for debug mode outside the if block to fix scope
-      let debugJavaPath = javaPath;
-      let debugWindow = null;
-      
-      // Configure spawn options for debug vs normal launch
-      if (showDebugTerminal && process.platform === 'win32') {
-        // For debug mode, use java.exe instead of javaw.exe to get console output
-        debugJavaPath = javaPath.replace('javaw.exe', 'java.exe');
-        
-        // Create debug window and capture output
-        const { BrowserWindow } = require('electron');
-        debugWindow = new BrowserWindow({
-          width: 800,
-          height: 500,
-          title: `Minecraft Debug Console - ${launchVersion}`,
-          backgroundColor: '#1a1a1a',
-          webPreferences: {
-            nodeIntegration: false,
-            contextIsolation: true,
-            preload: path.join(__dirname, '../../preload.cjs')
-          },
-          icon: path.join(__dirname, '../../icon.png'),
-          show: false,
-          resizable: true,
-          minimizable: true,
-          maximizable: true
-        });
-        
-        // Load debug console HTML
-        debugWindow.loadFile(path.join(__dirname, '../../debug-console.html'));
-        
-        // Show window when ready
-        debugWindow.once('ready-to-show', () => {
-          debugWindow.show();
 
-          // Immediately send header + flush; if content not yet ready it queues automatically
-          if (debugWindow && !debugWindow.isDestroyed()) {
-            // Flush any auth logs captured before console was visible
-            if (this.pendingAuthLogs && this.pendingAuthLogs.length > 0) {
-              for (const logEntry of this.pendingAuthLogs) {
-                debugWindow.webContents.send('debug-log', logEntry);
+        // Declare variables for debug mode outside the if block to fix scope
+        let debugJavaPath = javaPath;
+        let debugWindow = null;
+
+        // Configure spawn options for debug vs normal launch
+        if (showDebugTerminal && process.platform === 'win32') {
+          // For debug mode, use java.exe instead of javaw.exe to get console output
+          debugJavaPath = javaPath.replace('javaw.exe', 'java.exe');
+
+          // Create debug window and capture output
+          const { BrowserWindow } = require('electron');
+          debugWindow = new BrowserWindow({
+            width: 800,
+            height: 500,
+            title: `Minecraft Debug Console - ${launchVersion}`,
+            backgroundColor: '#1a1a1a',
+            webPreferences: {
+              nodeIntegration: false,
+              contextIsolation: true,
+              preload: path.join(__dirname, '../../preload.cjs')
+            },
+            icon: path.join(__dirname, '../../icon.png'),
+            show: false,
+            resizable: true,
+            minimizable: true,
+            maximizable: true
+          });
+
+          // Load debug console HTML
+          debugWindow.loadFile(path.join(__dirname, '../../debug-console.html'));
+
+          // Show window when ready
+          debugWindow.once('ready-to-show', () => {
+            debugWindow.show();
+
+            // Immediately send header + flush; if content not yet ready it queues automatically
+            if (debugWindow && !debugWindow.isDestroyed()) {
+              // Flush any auth logs captured before console was visible
+              if (this.pendingAuthLogs && this.pendingAuthLogs.length > 0) {
+                for (const logEntry of this.pendingAuthLogs) {
+                  debugWindow.webContents.send('debug-log', logEntry);
+                }
+                this.pendingAuthLogs.length = 0;
               }
-              this.pendingAuthLogs.length = 0;
-            }
 
-            debugWindow.webContents.send('debug-log', {
-              type: 'header',
-              message: `========================================
+              debugWindow.webContents.send('debug-log', {
+                type: 'header',
+                message: `========================================
     MINECRAFT DEBUG CONSOLE
 ========================================
 
@@ -580,122 +1068,224 @@ Launch Version: ${launchVersion}
 Starting Minecraft with console output...
 ========================================
 `
-            });
+              });
+            }
+          });
+
+          // Launch Java with captured output
+          spawnOptions.stdio = ['pipe', 'pipe', 'pipe'];
+          spawnOptions.windowsHide = true;
+        } else if (showDebugTerminal) {
+          // On Unix-like systems, inherit stdio for terminal output
+          spawnOptions.stdio = 'inherit';
+        } else {
+          // Normal launch without debug terminal
+          spawnOptions.stdio = ['ignore', 'pipe', 'pipe'];
+          if (process.platform === 'win32') {
+            spawnOptions.windowsHide = true;
+          }
+        }
+
+        // Continue with normal launch process (this ensures Fabric still works!)
+        logger.info('Spawning Minecraft process', {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'spawnProcess',
+            javaExecutable: showDebugTerminal ? path.basename(debugJavaPath) : path.basename(javaPath),
+            argumentsCount: allArgs.length,
+            workingDirectory: path.basename(clientPath),
+            detached: spawnOptions.detached
           }
         });
-        
-        // Launch Java with captured output
-        spawnOptions.stdio = ['pipe', 'pipe', 'pipe'];
-        spawnOptions.windowsHide = true;
-      } else if (showDebugTerminal) {
-        // On Unix-like systems, inherit stdio for terminal output
-        spawnOptions.stdio = 'inherit';
-      } else {
-        // Normal launch without debug terminal
-        spawnOptions.stdio = ['ignore', 'pipe', 'pipe'];
-        if (process.platform === 'win32') {
-          spawnOptions.windowsHide = true;
-        }
-      }
-      
-       // Continue with normal launch process (this ensures Fabric still works!)
-       const child = spawn(showDebugTerminal ? debugJavaPath : javaPath, allArgs, spawnOptions);
-       
-       // If debug terminal is enabled, capture and forward output
-       if (showDebugTerminal && debugWindow) {
-         // Store reference to debug window for cleanup
-         this.debugWindow = debugWindow;
-         
-         // Capture stdout
-         if (child.stdout) {
-           child.stdout.on('data', (data) => {
-             const output = data.toString();
-             if (debugWindow && !debugWindow.isDestroyed()) {
-               debugWindow.webContents.send('debug-log', {
-                 type: 'info',
-                 message: output
-               });
-             }
-           });
-         }
-         
-         // Capture stderr (errors)
-         if (child.stderr) {
-           child.stderr.on('data', (data) => {
-             const output = data.toString();
-             if (debugWindow && !debugWindow.isDestroyed()) {
-               debugWindow.webContents.send('debug-log', {
-                 type: 'error',
-                 message: output
-               });
-             }
-           });
-         }
-         
-         // Handle process close
-         child.on('close', (code) => {
-           if (debugWindow && !debugWindow.isDestroyed()) {
-             debugWindow.webContents.send('debug-log', {
-               type: code === 0 ? 'success' : 'error',
-               message: `\n========================================\nMinecraft process ended with code: ${code}\n${code === 0 ? '✅ SUCCESS: Minecraft closed normally' : '❌ ERROR: Minecraft crashed or failed to start!'}\n========================================\n`
-             });
-           }
-         });
-         
-         // Clean up debug window reference when it's closed
-         debugWindow.on('closed', () => {
-           this.debugWindow = null;
-         });
-       }
-       
-       // Properly detach the process so it continues running after app closes
-       if (!showDebugTerminal) {
-         child.unref();
-       }
-      
-      this.client = { child };
-      
 
-      
-      child.on('close', () => {
-        this.isLaunching = false;
-        this.client = null;
-        this.emit('minecraft-stopped');
-      });
-      
-      child.on('error', () => {
-        this.isLaunching = false;
-        this.client = null;
-        this.emit('minecraft-stopped');
-      });
-      
-      // Wait a moment to see if launch fails immediately
-      await new Promise(resolve => setTimeout(resolve, 3000));
+        const child = spawn(showDebugTerminal ? debugJavaPath : javaPath, allArgs, spawnOptions);
+
+        // If debug terminal is enabled, capture and forward output
+        if (showDebugTerminal && debugWindow) {
+          // Store reference to debug window for cleanup
+          this.debugWindow = debugWindow;
+
+          // Capture stdout
+          if (child.stdout) {
+            child.stdout.on('data', (data) => {
+              const output = data.toString();
+              if (debugWindow && !debugWindow.isDestroyed()) {
+                debugWindow.webContents.send('debug-log', {
+                  type: 'info',
+                  message: output
+                });
+              }
+            });
+          }
+
+          // Capture stderr (errors)
+          if (child.stderr) {
+            child.stderr.on('data', (data) => {
+              const output = data.toString();
+              if (debugWindow && !debugWindow.isDestroyed()) {
+                debugWindow.webContents.send('debug-log', {
+                  type: 'error',
+                  message: output
+                });
+              }
+            });
+          }
+
+          // Handle process close
+          child.on('close', (code) => {
+            if (debugWindow && !debugWindow.isDestroyed()) {
+              debugWindow.webContents.send('debug-log', {
+                type: code === 0 ? 'success' : 'error',
+                message: `\n========================================\nMinecraft process ended with code: ${code}\n${code === 0 ? '✅ SUCCESS: Minecraft closed normally' : '❌ ERROR: Minecraft crashed or failed to start!'}\n========================================\n`
+              });
+            }
+          });
+
+          // Clean up debug window reference when it's closed
+          debugWindow.on('closed', () => {
+            this.debugWindow = null;
+          });
+        }
+
+        // Properly detach the process so it continues running after app closes
+        if (!showDebugTerminal) {
+          child.unref();
+        }
+
+        this.client = { child };
+
+        logger.info('Minecraft process spawned successfully', {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'processSpawned',
+            pid: child.pid,
+            launchVersion
+          }
+        });
+
+        child.on('close', (code, signal) => {
+          logger.info('Minecraft process closed', {
+            category: 'client',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'processClose',
+              exitCode: code,
+              signal,
+              launchVersion
+            }
+          });
+
+          this.isLaunching = false;
+          this.client = null;
+          this.emit('minecraft-stopped');
+        });
+
+        child.on('error', (error) => {
+          logger.error(`Minecraft process error: ${error.message}`, {
+            category: 'client',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'processError',
+              errorType: error.constructor.name,
+              errorCode: 'code' in error ? error.code : 'unknown',
+              launchVersion
+            }
+          });
+
+          this.isLaunching = false;
+          this.client = null;
+          this.emit('minecraft-stopped');
+        });
+
+        // Wait a moment to see if launch fails immediately
+        logger.debug('Waiting for process stability check', {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'stabilityCheck',
+            pid: child.pid
+          }
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
         if (child.killed || child.exitCode !== null) {
-        throw new Error(`Minecraft failed to start. Exit code: ${child.exitCode}`);
+          logger.error(`Minecraft failed to start. Exit code: ${child.exitCode}`, {
+            category: 'client',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'launchFailure',
+              exitCode: child.exitCode,
+              killed: child.killed,
+              launchVersion
+            }
+          });
+          throw new Error(`Minecraft failed to start. Exit code: ${child.exitCode}`);
+        }
+
+        const result = {
+          success: true,
+          message: `Minecraft ${launchVersion} launched successfully`,
+          pid: child.pid,
+          version: launchVersion,
+          vanillaVersion: minecraftVersion,
+          needsFabric: needsFabric
+        };
+
+        logger.info('Minecraft launch completed successfully', {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'launchSuccess',
+            pid: child.pid,
+            launchVersion,
+            vanillaVersion: minecraftVersion,
+            needsFabric,
+            maxMemory,
+            showDebugTerminal
+          }
+        });
+
+        return result;
+      } catch (error) {
+        logger.error(`Minecraft launch failed: ${error.message}`, {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'launchMinecraft',
+            errorType: error.constructor.name,
+            minecraftVersion,
+            launchVersion: launchVersion || minecraftVersion,
+            errorStack: error.stack
+          }
+        });
+
+        this.isLaunching = false;
+        this.client = null;
+
+        return {
+          success: false,
+          error: error.message, message: `Failed to launch Minecraft: ${error.message}`
+        };
       }
-      
-      return {
-        success: true,
-        message: `Minecraft ${launchVersion} launched successfully`,
-        pid: child.pid,
-        version: launchVersion,
-        vanillaVersion: minecraftVersion,
-        needsFabric: needsFabric
-      };
-    } catch (error) {
-      this.isLaunching = false;
-      this.client = null;
-      
-      return {
-        success: false,
-        error: error.message,        message: `Failed to launch Minecraft: ${error.message}`
-      };
-    }
     } catch (mainError) {
+      logger.error(`Critical Minecraft launch failure: ${mainError.message}`, {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'launchMinecraft',
+          errorType: mainError.constructor.name,
+          minecraftVersion,
+          critical: true,
+          errorStack: mainError.stack
+        }
+      });
+
       this.isLaunching = false;
       this.client = null;
-      
+
       return {
         success: false,
         error: mainError.message,
@@ -703,89 +1293,219 @@ Starting Minecraft with console output...
       };
     }
   }
-  
+
   // Stop Minecraft if running
   async stopMinecraft() {
+    logger.info('Attempting to stop Minecraft', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'stopMinecraft',
+        hasClient: !!this.client,
+        isLaunching: this.isLaunching,
+        platform: process.platform
+      }
+    });
+
     try {
-      
+
       let stopped = false;
-      
+
       // Method 1: Stop via direct process if available
       if (this.client && this.client.child) {
         try {
+          logger.info('Stopping Minecraft via direct process', {
+            category: 'client',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'stopDirect',
+              pid: this.client.child.pid,
+              killed: this.client.child.killed
+            }
+          });
+
           // We have direct access to the child process from our spawn call
           this.client.child.kill('SIGTERM');
-          
+
           // Wait a moment, then force kill if necessary
           setTimeout(() => {
             if (this.client && this.client.child && !this.client.child.killed) {
+              logger.warn('Force killing Minecraft process after timeout', {
+                category: 'client',
+                data: {
+                  service: 'MinecraftLauncher',
+                  operation: 'forceKill',
+                  pid: this.client.child.pid
+                }
+              });
               this.client.child.kill('SIGKILL');
             }
           }, 3000);
-          
+
           stopped = true;
+
+          logger.info('Minecraft process termination signal sent', {
+            category: 'client',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'stopDirect',
+              success: true
+            }
+          });
         } catch (error) {
-          // TODO: Add proper logging - Failed to stop Minecraft process
+          logger.error(`Failed to stop Minecraft process directly: ${error.message}`, {
+            category: 'client',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'stopDirect',
+              errorType: error.constructor.name,
+              pid: this.client?.child?.pid
+            }
+          });
         }
       }
-      
+
       // Method 2: Targeted Java process killing (Windows-specific fallback)
       if (process.platform === 'win32') {
         try {
           const { exec } = require('child_process');
           const { promisify } = require('util');
           const execAsync = promisify(exec);
-          
+
+          logger.debug('Attempting Windows-specific process termination', {
+            category: 'client',
+            data: {
+              service: 'MinecraftLauncher',
+              operation: 'stopWindows',
+              clientPath: this.clientPath ? path.basename(this.clientPath) : null,
+              hasPid: !!(this.client?.child?.pid)
+            }
+          });
+
           // CRITICAL FIX: Only kill Java processes that are specifically related to this client
           // DO NOT kill all Java processes as this would stop the Minecraft server!
-          
+
           // Try to kill only processes running from our client directory
           if (this.clientPath) {
             const clientPathEscaped = this.clientPath.replace(/\\/g, '\\\\');
-            
-            try {
-              // Kill only Java processes with our client path in the command line
-                await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, {
-                  windowsHide: true,
-                  timeout: 5000
-                });
 
-                await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, {
-                  windowsHide: true,
-                  timeout: 5000
-                });
-              
+            try {
+              logger.debug('Terminating Java processes by client path', {
+                category: 'client',
+                data: {
+                  service: 'MinecraftLauncher',
+                  operation: 'terminateByPath',
+                  clientPath: path.basename(this.clientPath)
+                }
+              });
+
+              // Kill only Java processes with our client path in the command line
+              await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, {
+                windowsHide: true,
+                timeout: 5000
+              });
+
+              await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, {
+                windowsHide: true,
+                timeout: 5000
+              });
+
               stopped = true;
-              
-              } catch {
-                if (this.client && this.client.child && this.client.child.pid) {
-                  try {
-                    await execAsync(`taskkill /F /PID ${this.client.child.pid}`, { windowsHide: true });
-                    stopped = true;
-                  } catch (pidError) {
-                    // TODO: Add proper logging - Failed to kill process by PID
-                  }
+
+              logger.info('Java processes terminated by client path', {
+                category: 'client',
+                data: {
+                  service: 'MinecraftLauncher',
+                  operation: 'terminateByPath',
+                  success: true
+                }
+              });
+
+            } catch (pathError) {
+              logger.warn(`Failed to terminate by path, trying PID: ${pathError.message}`, {
+                category: 'client',
+                data: {
+                  service: 'MinecraftLauncher',
+                  operation: 'terminateByPath',
+                  errorType: pathError.constructor.name
+                }
+              });
+
+              if (this.client && this.client.child && this.client.child.pid) {
+                try {
+                  await execAsync(`taskkill /F /PID ${this.client.child.pid}`, { windowsHide: true });
+                  stopped = true;
+
+                  logger.info('Process terminated by PID', {
+                    category: 'client',
+                    data: {
+                      service: 'MinecraftLauncher',
+                      operation: 'terminateByPid',
+                      pid: this.client.child.pid,
+                      success: true
+                    }
+                  });
+                } catch (pidError) {
+                  logger.error(`Failed to terminate by PID: ${pidError.message}`, {
+                    category: 'client',
+                    data: {
+                      service: 'MinecraftLauncher',
+                      operation: 'terminateByPid',
+                      pid: this.client.child.pid,
+                      errorType: pidError.constructor.name
+                    }
+                  });
                 }
               }
             }
-          
-          } catch (error) {
-            // TODO: Add proper logging - Failed to kill Java processes
           }
+
+        } catch {
+          // TODO: Add proper logging - Failed to kill Java processes
+        }
       }
-      
+
       // Reset launcher state
       this.isLaunching = false;
       this.client = null;
       this.emit('minecraft-stopped');
-      
+
       if (stopped) {
+        logger.info('Minecraft stopped successfully', {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'stopMinecraft',
+            success: true,
+            stopped: true
+          }
+        });
         return { success: true, message: 'Minecraft stopped successfully' };
       } else {
+        logger.info('Minecraft process cleanup completed (no active process found)', {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'stopMinecraft',
+            success: true,
+            stopped: false,
+            reason: 'no_active_process'
+          }
+        });
         return { success: true, message: 'Minecraft process cleanup completed (no active process found)' };
       }
-      
+
     } catch (error) {
+      logger.error(`Failed to stop Minecraft: ${error.message}`, {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'stopMinecraft',
+          errorType: error.constructor.name,
+          errorStack: error.stack
+        }
+      });
+
       // Reset state even on error
       this.isLaunching = false;
       this.client = null;
@@ -793,14 +1513,25 @@ Starting Minecraft with console output...
       return { success: false, error: error.message };
     }
   }
-  
+
   // Calculate file checksum for mod verification - MOVED to utils.cjs
   // calculateFileChecksum(filePath) { ... }
-  
+
   // Get launcher status
   getStatus() {
+    logger.debug('Getting launcher status', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'getStatus',
+        isLaunching: this.isLaunching,
+        hasClient: !!this.client,
+        hasChildProcess: !!(this.client && this.client.child)
+      }
+    });
+
     let isRunning = false;
-    
+
     // Check if we actually have a running process
     if (this.client && this.client.child) {
       try {
@@ -811,8 +1542,29 @@ Starting Minecraft with console output...
           try {
             process.kill(pid, 0); // Signal 0 just tests if process exists
             isRunning = true;
+
+            logger.debug('Process status check: running', {
+              category: 'client',
+              data: {
+                service: 'MinecraftLauncher',
+                operation: 'processStatusCheck',
+                pid,
+                isRunning: true
+              }
+            });
           } catch {
             // Process doesn't exist anymore
+            logger.debug('Process status check: not running', {
+              category: 'client',
+              data: {
+                service: 'MinecraftLauncher',
+                operation: 'processStatusCheck',
+                pid,
+                isRunning: false,
+                reason: 'process_not_found'
+              }
+            });
+
             this.isLaunching = false;
             this.client = null;
             isRunning = false;
@@ -822,32 +1574,162 @@ Starting Minecraft with console output...
         isRunning = false;
       }
     }
-    
-    return {
+
+    const status = {
       isAuthenticated: !!this.authHandler.authData, // Changed to this.authHandler.authData
       isLaunching: this.isLaunching,
       isRunning: isRunning,
       username: this.authHandler.authData?.name || null, // Changed to this.authHandler.authData
       clientPath: this.clientPath
     };
+
+    logger.debug('Launcher status retrieved', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'getStatus',
+        isAuthenticated: status.isAuthenticated,
+        isLaunching: status.isLaunching,
+        isRunning: status.isRunning,
+        hasUsername: !!status.username,
+        hasClientPath: !!status.clientPath
+      }
+    });
+
+    return status;
   }
-  
+
   // Check if Minecraft client files are present and up to date
   async checkMinecraftClient(clientPath, requiredVersion, options = {}) {
-    // Use the active downloader (now XMCL has this method too)
-    return this.clientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
+    logger.debug('Checking Minecraft client files', {
+      category: 'client',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'checkMinecraftClient',
+        requiredVersion,
+        clientPath: clientPath ? path.basename(clientPath) : null,
+        options: Object.keys(options)
+      }
+    });
+
+    try {
+      const result = await this.clientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
+
+      logger.info('Minecraft client check completed', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'checkMinecraftClient',
+          requiredVersion,
+          success: result.success,
+          upToDate: result.upToDate,
+          missingFiles: result.missingFiles || 0
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Minecraft client check failed: ${error.message}`, {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'checkMinecraftClient',
+          requiredVersion,
+          errorType: error.constructor.name,
+          clientPath: clientPath ? path.basename(clientPath) : null
+        }
+      });
+      throw error;
+    }
   }
-  
+
   // Clear Minecraft client files for re-download (smart repair - only core files)
   async clearMinecraftClient(clientPath, minecraftVersion) {
-    // Use the active downloader (XMCL now has this method)
-    return this.clientDownloader.clearMinecraftClient(clientPath, minecraftVersion);
+    logger.info('Clearing Minecraft client files (smart repair)', {
+      category: 'storage',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'clearMinecraftClient',
+        minecraftVersion,
+        clientPath: clientPath ? path.basename(clientPath) : null,
+        repairType: 'smart'
+      }
+    });
+
+    try {
+      const result = await this.clientDownloader.clearMinecraftClient(clientPath, minecraftVersion);
+
+      logger.info('Minecraft client files cleared successfully', {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'clearMinecraftClient',
+          minecraftVersion,
+          success: result.success,
+          filesRemoved: result.filesRemoved || 0
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Failed to clear Minecraft client files: ${error.message}`, {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'clearMinecraftClient',
+          minecraftVersion,
+          errorType: error.constructor.name,
+          clientPath: clientPath ? path.basename(clientPath) : null
+        }
+      });
+      throw error;
+    }
   }
 
   // Full clear - removes EVERYTHING including libraries and assets
   async clearMinecraftClientFull(clientPath, minecraftVersion) {
-    // Use the active downloader (XMCL now has this method)
-    return this.clientDownloader.clearMinecraftClientFull(clientPath, minecraftVersion);
+    logger.warn('Clearing Minecraft client files (full clear)', {
+      category: 'storage',
+      data: {
+        service: 'MinecraftLauncher',
+        operation: 'clearMinecraftClientFull',
+        minecraftVersion,
+        clientPath: clientPath ? path.basename(clientPath) : null,
+        repairType: 'full',
+        warning: 'removes_everything'
+      }
+    });
+
+    try {
+      const result = await this.clientDownloader.clearMinecraftClientFull(clientPath, minecraftVersion);
+
+      logger.info('Minecraft client files fully cleared', {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'clearMinecraftClientFull',
+          minecraftVersion,
+          success: result.success,
+          filesRemoved: result.filesRemoved || 0,
+          includedLibraries: true,
+          includedAssets: true
+        }
+      });
+
+      return result;
+    } catch (error) {
+      logger.error(`Failed to fully clear Minecraft client files: ${error.message}`, {
+        category: 'storage',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'clearMinecraftClientFull',
+          minecraftVersion,
+          errorType: error.constructor.name,
+          clientPath: clientPath ? path.basename(clientPath) : null
+        }
+      });
+      throw error;
+    }
   }
 
   // Force clear just assets directory - useful when assets are corrupted
@@ -894,7 +1776,7 @@ Starting Minecraft with console output...
       if (Array.isArray(vanillaJson.libraries) && vanillaJson.libraries.length > 0) {
         // Initialize Fabric libraries array if it doesn't exist
         fabricJson.libraries = fabricJson.libraries || [];
-        
+
         // Function to detect ASM libraries that should be skipped
         const skipASM = lib => {
           if (!lib.name) return false;
@@ -910,17 +1792,17 @@ Starting Minecraft with console output...
           .filter(lib => {
             // Must have a name
             if (!lib.name) return false;
-            
+
             // Skip ASM libraries
             if (skipASM(lib)) {
               return false;
             }
-            
+
             // Skip if already exists
             if (existing.has(lib.name)) {
               return false;
             }
-            
+
             // Add to existing set to prevent future duplicates
             existing.add(lib.name);
             return true;
@@ -929,18 +1811,18 @@ Starting Minecraft with console output...
             // CRITICAL FIX: Copy natives metadata from vanilla libraries
             // This ensures LWJGL and other native libraries have proper download metadata
             const libCopy = { ...vanillaLib };
-            
+
             // If vanillaLib had a "natives" block, copy it verbatim
             if (vanillaLib.natives) {
               libCopy.natives = { ...vanillaLib.natives };
             }
-            
+
             // If vanillaLib already had download metadata for classifiers, copy it too
             if (vanillaLib.downloads && vanillaLib.downloads.classifiers) {
               libCopy.downloads = libCopy.downloads || {};
               libCopy.downloads.classifiers = { ...vanillaLib.downloads.classifiers };
             }
-            
+
             return libCopy;
           });
 
@@ -976,7 +1858,7 @@ Starting Minecraft with console output...
   async validateSessionToken(accessToken, uuid) {
     try {
       const fetch = require('node-fetch');
-      
+
       const payload = {
         accessToken: accessToken,
         selectedProfile: uuid,
@@ -1003,17 +1885,17 @@ Starting Minecraft with console output...
   // Validate Fabric version.json for authentication placeholders (from debugging guide)
   async verifyAndRepairLibraries(clientPath, fabricProfileName, vanillaVersion) {
     try {
-      
+
       const versionsDir = path.join(clientPath, 'versions');
       const fabricJsonPath = path.join(versionsDir, fabricProfileName, `${fabricProfileName}.json`);
       const vanillaJsonPath = path.join(versionsDir, vanillaVersion, `${vanillaVersion}.json`);
-      
+
       if (!fs.existsSync(fabricJsonPath)) {
         throw new Error(`Fabric profile JSON not found: ${fabricJsonPath}`);
       }
-      
+
       const fabricJson = JSON.parse(fs.readFileSync(fabricJsonPath, 'utf8'));
-      
+
       // List of critical libraries that must be present for Minecraft to launch
       const criticalLibraries = [
         'net.sf.jopt-simple:jopt-simple',
@@ -1023,10 +1905,10 @@ Starting Minecraft with console output...
         'com.google.guava:guava',
         'org.apache.commons:commons-lang3'
       ];
-      
+
       const missingLibraries = [];
       const presentLibraries = [];
-      
+
       // Check which critical libraries are missing from the Fabric profile
       for (const requiredLib of criticalLibraries) {
         const found = fabricJson.libraries?.find(lib => lib.name?.startsWith(requiredLib));
@@ -1039,7 +1921,7 @@ Starting Minecraft with console output...
             const version = parts[2];
             const libFileName = `${artifact}-${version}.jar`;
             const libPath = path.join(clientPath, 'libraries', groupPath, artifact, version, libFileName);
-            
+
             if (fs.existsSync(libPath)) {
               presentLibraries.push(found.name);
             } else {
@@ -1050,22 +1932,22 @@ Starting Minecraft with console output...
           missingLibraries.push(requiredLib);
         }
       }
-      
+
       if (missingLibraries.length === 0) {
         return { success: true, message: `All critical libraries present` };
       }
-      
-      
+
+
       // Try to repair by merging vanilla libraries if vanilla profile exists
       if (fs.existsSync(vanillaJsonPath)) {
-        
+
         const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
         let repairedCount = 0;
-        
+
         if (vanillaJson.libraries && Array.isArray(vanillaJson.libraries)) {
           // Create a map of existing Fabric libraries to avoid duplicates
           const fabricLibNames = new Set(fabricJson.libraries?.map(lib => lib.name) || []);
-          
+
           // Find missing libraries in vanilla profile
           for (const missingLib of missingLibraries) {
             const vanillaLib = vanillaJson.libraries.find(lib => lib.name?.startsWith(missingLib));
@@ -1076,11 +1958,11 @@ Starting Minecraft with console output...
               repairedCount++;
             }
           }
-          
+
           if (repairedCount > 0) {
             // Save the updated Fabric profile
             fs.writeFileSync(fabricJsonPath, JSON.stringify(fabricJson, null, 2), 'utf8');
-            
+
             // Re-verify after repair
             const stillMissing = [];
             for (const requiredLib of criticalLibraries) {
@@ -1089,42 +1971,42 @@ Starting Minecraft with console output...
                 stillMissing.push(requiredLib);
               }
             }
-            
+
             if (stillMissing.length === 0) {
               return { success: true, message: `Successfully repaired ${repairedCount} missing libraries` };
             } else {
-              return { 
-                success: false, 
+              return {
+                success: false,
                 error: `Still missing ${stillMissing.length} libraries after repair: ${stillMissing.join(', ')}`,
                 stillMissing: stillMissing
               };
             }
           } else {
-            return { 
-              success: false, 
+            return {
+              success: false,
               error: `Could not find ${missingLibraries.length} missing libraries in vanilla profile`,
               missingLibraries: missingLibraries
             };
           }
         } else {
-          return { 
-            success: false, 
+          return {
+            success: false,
             error: `Vanilla profile has no libraries to merge`,
             missingLibraries: missingLibraries
           };
         }
       } else {
-        return { 
-          success: false, 
+        return {
+          success: false,
           error: `Vanilla profile not found for library repair: ${vanillaJsonPath}`,
           missingLibraries: missingLibraries
         };
       }
-      
+
     } catch (error) {
-      return { 
-        success: false, 
-        error: `Library verification error: ${error.message}` 
+      return {
+        success: false,
+        error: `Library verification error: ${error.message}`
       };
     }
   }
@@ -1132,26 +2014,26 @@ Starting Minecraft with console output...
   validateFabricProfile(clientPath, profileName) {
     try {
       const profilePath = path.join(clientPath, 'versions', profileName, `${profileName}.json`);
-      
+
       if (!fs.existsSync(profilePath)) {
         return false;
       }
 
       const profileJson = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
-      
+
 
       // Check for required authentication placeholders in game arguments
       const gameArgs = profileJson.arguments?.game || [];
       const requiredPlaceholders = [
         '${auth_player_name}',
-        '${auth_uuid}', 
+        '${auth_uuid}',
         '${auth_access_token}',
         '${auth_user_type}'
       ];
 
       const missingPlaceholders = [];
       requiredPlaceholders.forEach(placeholder => {
-        const found = gameArgs.some(arg => 
+        const found = gameArgs.some(arg =>
           typeof arg === 'string' && arg.includes(placeholder)
         );
         if (!found) {
@@ -1162,7 +2044,7 @@ Starting Minecraft with console output...
       if (missingPlaceholders.length > 0) {
         // Don't fail validation - let the enrichment process fix this
         return true;
-      }      
+      }
       return true;
 
     } catch {
@@ -1173,34 +2055,34 @@ Starting Minecraft with console output...
   // New method: Use proper launcher for LogUtils fix
   async launchMinecraftProper(options) {
     try {
-      
+
       // Set authentication data
       if (this.authHandler.authData) {
         this.properLauncher.setAuthData(this.authHandler.authData);
       } else {
         throw new Error('No authentication data available. Please authenticate first.');
       }
-      
+
       // Forward the call to the proper launcher
       const result = await this.properLauncher.launchMinecraft(options);
-      
+
       // Update our state to match
       if (result.success) {
         this.isLaunching = this.properLauncher.isLaunching;
         this.client = this.properLauncher.client;
         this.clientPath = options.clientPath;
-        
+
         // Forward events
         this.properLauncher.on('minecraft-stopped', () => {
           this.emit('minecraft-stopped');
         });
       }
-      
+
       return result;
-      
+
     } catch (error) {
       return {
-        success: false,        error: error.message,
+        success: false, error: error.message,
         message: `Failed to launch with proper launcher: ${error.message}`
       };
     }
@@ -1212,7 +2094,7 @@ Starting Minecraft with console output...
    */
   enableXMCLDownloader(enable = true) {
     this.useXMCLDownloader = enable;
-    this.clientDownloader = this.useXMCLDownloader ? 
+    this.clientDownloader = this.useXMCLDownloader ?
       this.xmclClientDownloader : this.legacyClientDownloader;
     // TODO: Add proper logging - Switched client downloader
   }

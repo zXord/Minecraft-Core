@@ -1,73 +1,31 @@
 <script lang="ts">
-  import { onMount, createEventDispatcher } from 'svelte';
-  import { get } from 'svelte/store'; // Import get
+  import { onMount } from 'svelte';
+  
+  import { SvelteSet } from 'svelte/reactivity';import { get } from 'svelte/store'; // Import get
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { serverManagedFiles, minecraftVersion } from '../../stores/modStore';
 
   // Create event dispatcher
-  const dispatch = createEventDispatcher();
+  const dispatch = (name: string, detail?: any) => {
+    const event = new CustomEvent(name, { detail });
+    document.dispatchEvent(event);
+  };
 
-  interface DetailedMod {
-    fileName: string;
-    name?: string;
-    version?: string;
-    authors?: string[];
-    description?: string;
-    projectId?: string;
-    loaderType?: string;    gameVersions?: string[];
-    size: number;
-    lastModified: Date;
-    enabled: boolean;
-    hasUpdate?: boolean;
-    latestVersion?: string;
-    updateUrl?: string;
-  }
-
-  interface ModSyncStatus {
-    synchronized: boolean;
-    needsDownload?: number;
-    needsOptionalDownload?: number;
-    totalRequired?: number;
-    totalOptional?: number;
-    totalPresent?: number;
-    totalOptionalPresent?: number;
-    missingMods?: string[];
-    missingOptionalMods?: string[];
-    presentEnabledMods?: string[];
-    presentDisabledMods?: string[];
-    needsAcknowledgment?: number;
-    clientModChanges?: {
-      updates?: Array<{
-        name: string;
-        fileName: string;
-        currentVersion: string;
-        serverVersion: string;
-        action: string;
-      }>;      removals?: Array<{
-        name: string;
-        fileName: string;
-        reason: string;
-        action: string;
-        wasRequired?: boolean;
-      }>;
-      newDownloads?: string[];
-    };
-  }
-  export let clientPath: string = '';
-  export let refreshTrigger: number = 0; // Prop to trigger refresh when acknowledgments change  
-  export let modSyncStatus: ModSyncStatus | null = null;
+  export let clientPath = '';
+  export let refreshTrigger = 0; // Prop to trigger refresh when acknowledgments change  
+  export let modSyncStatus = null;
   export let clientModVersionUpdates = null; // Client mod version updates from server compatibility check
   
-  let mods: DetailedMod[] = [];
+  let mods = [];
   let loading = true;
   let error = '';
   let checkingUpdates = false;
-  let updatingMods: Set<string> = new Set();
+  let updatingMods= new SvelteSet();
   let showRemoveDialog = false;
-  let modToRemove: DetailedMod | null = null;
+  let modToRemove= null;
   
   // Track which mods are currently being toggled
-  let togglingMods: Set<string> = new Set();
+  let togglingMods= new SvelteSet();
 
   onMount(async () => {
     await loadManualMods();
@@ -106,17 +64,17 @@
       if (result.success) {
         // Filter out server-managed mods entirely
         // Also filter out mods that are awaiting acknowledgment (they should only appear in required mods section)
-        const pendingAckSet = new Set(
+        const pendingAckSet = new SvelteSet(
           (modSyncStatus?.clientModChanges?.removals || [])
-            .filter(r => r.action === 'acknowledge_dependency')
-            .map(r => r.fileName.toLowerCase())
+            .filter((r: any) => r.action === 'acknowledge_dependency')
+            .map((r: any) => r.fileName.toLowerCase())
         );        // Filter out mods that are pending removal from originally required mods
         // (they should only appear in required mods section with removal action)
         // But keep mods that were originally optional - they should appear in optional section
-        const pendingRemovalSet = new Set(
+        const pendingRemovalSet = new SvelteSet(
           (modSyncStatus?.clientModChanges?.removals || [])
-            .filter(r => r.action === 'remove_needed' && r.wasRequired === true)
-            .map(r => r.fileName.toLowerCase())
+            .filter((r: any) => r.action === 'remove_needed' && r.wasRequired === true)
+            .map((r: any) => r.fileName.toLowerCase())
         );mods = result.mods.filter(m => {
           const lower = m.fileName.toLowerCase();
           const isServerManaged = managedFilesSet.has(lower);
@@ -159,8 +117,8 @@
       });
       if (result.success) {
         // Update mods with update information
-        mods = mods.map(mod => {
-          const updateInfo = result.updates.find(u => u.fileName === mod.fileName);
+        mods = mods.map((mod: any) => {
+          const updateInfo = result.updates.find((u: any) => u.fileName === mod.fileName);
           if (updateInfo) {
             return {
               ...mod,
@@ -177,10 +135,10 @@
       checkingUpdates = false;
     }
   }
-  async function toggleMod(mod: DetailedMod) {
+  async function toggleMod(mod: any) {
     // Mark this mod as being toggled
     togglingMods.add(mod.fileName);
-    togglingMods = new Set(togglingMods); // Trigger reactivity
+    togglingMods = new SvelteSet(togglingMods); // Trigger reactivity
     
     // Dispatch to parent component for backend call
     dispatch('toggle', {
@@ -188,7 +146,7 @@
       enabled: !mod.enabled
       });
   }
-  async function updateMod(mod: DetailedMod) {
+  async function updateMod(mod) {
     if (!mod.hasUpdate || updatingMods.has(mod.fileName)) return;
     
     updatingMods.add(mod.fileName);
@@ -227,7 +185,7 @@
     }
   }
 
-  function promptRemove(mod: DetailedMod) {
+  function promptRemove(mod) {
     modToRemove = mod;
     showRemoveDialog = true;
   }
@@ -269,7 +227,7 @@
   }
 
   // Helper function to get client mod version update info for a mod
-  function getClientModVersionUpdate(mod: DetailedMod) {
+  function getClientModVersionUpdate(mod) {
     if (!clientModVersionUpdates?.updates) return null;
     
     return clientModVersionUpdates.updates.find(update => 
@@ -278,9 +236,9 @@
   }
 
   // Function to handle toggle completion (called from parent)
-  export function onToggleComplete(fileName: string) {
+  export function onToggleComplete(fileName) {
     togglingMods.delete(fileName);
-    togglingMods = new Set(togglingMods); // Trigger reactivity
+    togglingMods = new SvelteSet(togglingMods); // Trigger reactivity
     
     // Update the local mod state to reflect the successful toggle
     const modIndex = mods.findIndex(m => m.fileName === fileName);

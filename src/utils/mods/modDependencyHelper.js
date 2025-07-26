@@ -17,6 +17,7 @@ import {
 } from '../../stores/modStore.js';
 import { installMod } from './modAPI.js';
 import { checkVersionCompatibility } from './modCompatibility.js';
+import logger from '../logger.js';
 
 /**
  * Determine if the given project ID refers to Minecraft itself
@@ -76,13 +77,39 @@ function isBundledFabricModule(id) {
  * @returns {Promise<Array>} - Array of dependency objects
  */
 export async function checkModDependencies(mod, visited = new Set()) {
+  logger.info('Checking mod dependencies', {
+    category: 'mods',
+    data: {
+      function: 'checkModDependencies',
+      modId: mod?.id,
+      modName: mod?.name,
+      visitedCount: visited.size
+    }
+  });
+  
   try {
     if (!mod || !mod.id) {
+      logger.debug('Invalid mod or missing ID for dependency check', {
+        category: 'mods',
+        data: {
+          function: 'checkModDependencies',
+          mod,
+          hasId: !!(mod?.id)
+        }
+      });
       return [];
     }
     
     // Avoid infinite recursion by checking visited mods
     if (visited.has(mod.id)) {
+      logger.debug('Mod already visited, avoiding circular dependency', {
+        category: 'mods',
+        data: {
+          function: 'checkModDependencies',
+          modId: mod.id,
+          visitedMods: Array.from(visited)
+        }
+      });
       return [];
     }
     visited.add(mod.id);
@@ -225,8 +252,16 @@ export async function checkModDependencies(mod, visited = new Set()) {
         if (versionInfo.files && versionInfo.files.length > 0) {
           mod.downloadUrl = versionInfo.files[0].url;
         }
-        }    } catch {
-        void 0;
+        }    } catch (error) {
+        logger.debug('Failed to get version info from API', {
+          category: 'network',
+          data: {
+            function: 'checkModDependencies',
+            modId: mod.id,
+            errorType: error.constructor.name,
+            context: 'api_version_info'
+          }
+        });
       }
     
     // SECOND ATTEMPT: If we couldn't find dependencies through API, try to analyze installed file
@@ -238,6 +273,16 @@ export async function checkModDependencies(mod, visited = new Set()) {
         const installedMod = installedModsInfo.find(info => info.projectId === mod.id);
         
         if (installedMod && installedMod.fileName) {
+          
+          logger.debug('Analyzing installed JAR file for dependencies', {
+            category: 'mods',
+            data: {
+              function: 'checkModDependencies',
+              modId: mod.id,
+              fileName: installedMod.fileName,
+              filePath: installedMod.filePath
+            }
+          });
           
           // Ask the backend to analyze the installed JAR file
           const jarDeps = await safeInvoke('extract-jar-dependencies', installedMod.filePath);
@@ -251,8 +296,16 @@ export async function checkModDependencies(mod, visited = new Set()) {
                   const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
                   if (projectInfo?.id) pid = projectInfo.id;
                   if (projectInfo?.title) depName = projectInfo.title;
-                } catch {
-                  void 0;
+                } catch (error) {
+                  logger.debug('Failed to resolve JAR dependency project info', {
+                    category: 'network',
+                    data: {
+                      function: 'checkModDependencies',
+                      dependencyId: dep.id,
+                      errorType: error.constructor.name,
+                      context: 'installed_jar_analysis'
+                    }
+                  });
                 }
               allDependencies.push({
                 project_id: pid,
@@ -270,6 +323,15 @@ export async function checkModDependencies(mod, visited = new Set()) {
         }        // If mod isn't installed but we have a URL, ask backend to analyze it
         else if (mod.downloadUrl) {
           
+          logger.debug('Analyzing mod from URL for dependencies', {
+            category: 'mods',
+            data: {
+              function: 'checkModDependencies',
+              modId: mod.id,
+              downloadUrl: mod.downloadUrl
+            }
+          });
+          
           // Ask the backend to download and analyze the JAR
           const jarDeps = await safeInvoke('analyze-mod-from-url', {
             url: mod.downloadUrl,
@@ -285,8 +347,16 @@ export async function checkModDependencies(mod, visited = new Set()) {
                   const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
                   if (projectInfo?.id) pid = projectInfo.id;
                   if (projectInfo?.title) depName = projectInfo.title;
-                } catch {
-                  void 0;
+                } catch (error) {
+                  logger.debug('Failed to resolve URL dependency project info', {
+                    category: 'network',
+                    data: {
+                      function: 'checkModDependencies',
+                      dependencyId: dep.id,
+                      errorType: error.constructor.name,
+                      context: 'url_jar_analysis'
+                    }
+                  });
                 }
               allDependencies.push({
                 project_id: pid,
@@ -296,14 +366,31 @@ export async function checkModDependencies(mod, visited = new Set()) {
               });
             }
           }
-          }      } catch {
-        void 0;
+          }      } catch (error) {
+        logger.debug('Failed to analyze JAR file for dependencies', {
+          category: 'mods',
+          data: {
+            function: 'checkModDependencies',
+            modId: mod.id,
+            errorType: error.constructor.name,
+            context: 'jar_analysis_fallback'
+          }
+        });
         }
     }
     
     
     // SPECIAL CASE: If this is a Fabric mod, ensure Fabric API is included (unless installing Fabric API itself)
     if (isFabricMod) {
+      logger.debug('Detected Fabric mod, checking for Fabric API dependency', {
+        category: 'mods',
+        data: {
+          function: 'checkModDependencies',
+          modId: mod.id,
+          modName: mod.name
+        }
+      });
+      
       try {
         // Fetch real Fabric API project info by slug
         const fapiInfo = await safeInvoke('get-project-info', { projectId: 'fabric-api', source: 'modrinth' });
@@ -313,15 +400,33 @@ export async function checkModDependencies(mod, visited = new Set()) {
         if (mod.id !== fapiId) {
           const hasFapi = allDependencies.some(dep => dep.project_id === fapiId);
           if (!hasFapi) {
+            logger.debug('Adding Fabric API as required dependency', {
+              category: 'mods',
+              data: {
+                function: 'checkModDependencies',
+                modId: mod.id,
+                fabricApiId: fapiId,
+                fabricApiName: fapiName
+              }
+            });
+            
             allDependencies.push({
               project_id: fapiId,
               dependency_type: 'required',
               name: fapiName
             });
           }
-          }      } catch {
-        void 0;
         }
+      } catch (err) {
+        logger.warn('Failed to fetch Fabric API info for dependency injection', {
+          category: 'mods',
+          data: {
+            function: 'checkModDependencies',
+            modId: mod.id,
+            errorMessage: err.message
+          }
+        });
+      }
     }
     
     // Process the combined dependencies to normalize them
@@ -399,10 +504,30 @@ export async function checkModDependencies(mod, visited = new Set()) {
         }
       }
     }
+    logger.info('Mod dependency check completed', {
+      category: 'mods',
+      data: {
+        function: 'checkModDependencies',
+        modId: mod.id,
+        modName: mod.name,
+        totalDependencies: allDeps.length,
+        directDependencies: directDeps.length
+      }
+    });
+    
     return allDeps;
-    } catch {
-      return [];
-    }
+  } catch (err) {
+    logger.error('Failed to check mod dependencies', {
+      category: 'mods',
+      data: {
+        function: 'checkModDependencies',
+        modId: mod?.id,
+        modName: mod?.name,
+        errorMessage: err.message
+      }
+    });
+    return [];
+  }
 }
 
 /**
@@ -411,8 +536,15 @@ export async function checkModDependencies(mod, visited = new Set()) {
  * @returns {Promise<Array>} - Filtered and resolved dependencies
  */
 async function filterAndResolveDependencies(dependencies) {
-  const disabled = get(disabledMods); // Get the set of disabled mods
+  logger.debug('Filtering and resolving dependencies', {
+    category: 'mods',
+    data: {
+      function: 'filterAndResolveDependencies',
+      dependenciesCount: dependencies ? dependencies.length : 0
+    }
+  });
   
+  const disabled = get(disabledMods); // Get the set of disabled mods
   
   // Get the actual installed mod info to double-check physical installation
   const actualInstalledInfo = get(installedModInfo);
@@ -447,6 +579,18 @@ async function filterAndResolveDependencies(dependencies) {
     const isPhysicallyInstalled = !!installedMod;
     const isDisabled = installedMod && disabled.has(installedMod.fileName);
     const isInstalledAndEnabled = isPhysicallyInstalled && !isDisabled;
+    
+    logger.debug('Evaluating dependency requirement', {
+      category: 'mods',
+      data: {
+        function: 'filterAndResolveDependencies',
+        projectId: dep.project_id,
+        isRequired: isRequired,
+        isPhysicallyInstalled: isPhysicallyInstalled,
+        isDisabled: isDisabled,
+        needsInstallation: isRequired && !isInstalledAndEnabled
+      }
+    });
     
     return isRequired && !isInstalledAndEnabled;
   });
@@ -521,7 +665,17 @@ async function filterAndResolveDependencies(dependencies) {
           versionInfo = `Requirement: ${dep.version_requirement}`;
         }
       }
-      } catch {
+      } catch (error) {
+        logger.debug('Failed to resolve dependency info, using fallback', {
+          category: 'network',
+          data: {
+            function: 'filterAndResolveDependencies',
+            projectId: dep.project_id,
+            errorType: error.constructor.name,
+            context: 'dependency_resolution'
+          }
+        });
+        
         // Fall back to basic info if available
         if (!name && dep.project_id) {
           name = dep.project_id;
@@ -545,6 +699,17 @@ async function filterAndResolveDependencies(dependencies) {
     };
   }));
   
+  logger.debug('Dependencies filtered and resolved', {
+    category: 'mods',
+    data: {
+      function: 'filterAndResolveDependencies',
+      originalCount: dependencies.length,
+      normalizedCount: normalizedDeps.length,
+      requiredCount: requiredDeps.length,
+      resolvedCount: resolvedDeps.length
+    }
+  });
+  
   return resolvedDeps;
 }
 
@@ -554,6 +719,16 @@ async function filterAndResolveDependencies(dependencies) {
  * @param {Array} dependencies - Dependencies
  */
 export function showDependencyModal(mod, dependencies) {
+  logger.info('Showing dependency confirmation modal', {
+    category: 'mods',
+    data: {
+      function: 'showDependencyModal',
+      modId: mod?.id,
+      modName: mod?.name,
+      dependenciesCount: dependencies ? dependencies.length : 0
+    }
+  });
+  
   modToInstall.set(mod);
   currentDependencies.set(dependencies);
   dependencyModalOpen.set(true);
@@ -566,6 +741,17 @@ export function showDependencyModal(mod, dependencies) {
  */
 export async function installWithDependencies(serverPath, installFn = installMod) {
   const mod = get(modToInstall);
+  
+  logger.info('Starting installation with dependencies', {
+    category: 'mods',
+    data: {
+      function: 'installWithDependencies',
+      modId: mod?.id,
+      modName: mod?.name,
+      serverPath
+    }
+  });
+  
   // Get and dedupe dependencies by projectId to avoid duplicate downloads
   const allDeps = get(currentDependencies);
   const seen = new Set();
@@ -613,6 +799,16 @@ export async function installWithDependencies(serverPath, installFn = installMod
     
     // Install dependencies first
     for (const dependency of dependencies) {
+      logger.debug('Processing dependency for installation', {
+        category: 'mods',
+        data: {
+          function: 'installWithDependencies',
+          dependencyId: dependency.projectId,
+          dependencyName: dependency.name,
+          dependencyType: dependency.dependencyType
+        }
+      });
+      
       try {
         // Check if this dependency is actually installed (physically exists)
         const isPhysicallyInstalled = dependency.projectId && actualInstalledIds.has(dependency.projectId);
@@ -702,7 +898,16 @@ export async function installWithDependencies(serverPath, installFn = installMod
               // Skip dependencies without a proper name or ID
               continue;
             }
-            } catch {
+            } catch (error) {
+              logger.debug('Failed to get project info for dependency, skipping', {
+                category: 'network',
+                data: {
+                  function: 'installWithDependencies',
+                  dependencyId: dependency.projectId,
+                  errorType: error.constructor.name,
+                  context: 'dependency_name_resolution'
+                }
+              });
               continue;
             }
         }
@@ -777,7 +982,17 @@ export async function installWithDependencies(serverPath, installFn = installMod
         // Install the dependency
         await installFn(depMod, serverPath);
         installedCount++;
-        } catch {
+        } catch (error) {
+          logger.debug('Failed to install dependency, continuing with others', {
+            category: 'mods',
+            data: {
+              function: 'installWithDependencies',
+              dependencyId: dependency.projectId,
+              dependencyName: dependency.name,
+              errorType: error.constructor.name,
+              context: 'dependency_installation'
+            }
+          });
           continue;
         }
     }
@@ -792,9 +1007,31 @@ export async function installWithDependencies(serverPath, installFn = installMod
     modToInstall.set(null);
     currentDependencies.set([]);
     
+    logger.info('Installation with dependencies completed successfully', {
+      category: 'mods',
+      data: {
+        function: 'installWithDependencies',
+        modId: mod?.id,
+        modName: mod?.name,
+        dependenciesInstalled: installedCount,
+        serverPath
+      }
+    });
+    
     return true;
-  } catch (error) {
-    errorMessage.set(`Failed to install dependencies: ${error.message || 'Unknown error'}`);
+  } catch (err) {
+    logger.error('Failed to install with dependencies', {
+      category: 'mods',
+      data: {
+        function: 'installWithDependencies',
+        modId: mod?.id,
+        modName: mod?.name,
+        serverPath,
+        errorMessage: err.message
+      }
+    });
+    
+    errorMessage.set(`Failed to install dependencies: ${err.message || 'Unknown error'}`);
     
     // Clean up installing state for all dependencies and main mod
     if (mod) {

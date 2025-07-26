@@ -1,4 +1,5 @@
 import { get } from 'svelte/store';
+import { SvelteSet } from 'svelte/reactivity';
 import {
   installedModIds,
   installedModInfo,
@@ -44,18 +45,26 @@ export async function loadInstalledInfo(instance: Instance) {
         }
         return mod;
       });
-      const projectIds = new Set(enrichedInfo.map(i => i.projectId).filter(Boolean));
+      const projectIds = new SvelteSet(enrichedInfo.map(i => i.projectId).filter(Boolean));
       installedModIds.set(projectIds);
       installedModInfo.set(enrichedInfo);
     }
-  } catch (err) {
-    // ignore errors
+  } catch (err: any) {
+    // Log error but continue - mod enrichment is not critical
+    const logger = await import('./logger.js');
+    logger.default.error('Failed to enrich installed mod information', {
+      category: 'mods',
+      data: {
+        error: err.message,
+        context: 'enrichInstalledMods'
+      }
+    });
   }
 }
 
 export async function loadModsFromServer(instance: Instance) {
   if (!instance || !instance.serverIp || !instance.serverPort) {
-    serverManagedFiles.set(new Set());
+    serverManagedFiles.set(new SvelteSet());
     return;
   }
   isLoadingMods.set(true);
@@ -64,7 +73,7 @@ export async function loadModsFromServer(instance: Instance) {
     const testResponse = await fetch(testUrl, { method: 'GET', signal: AbortSignal.timeout(10000) }); // Increased timeout
     if (!testResponse.ok) {
       connectionStatus.set('disconnected');
-      serverManagedFiles.set(new Set());
+      serverManagedFiles.set(new SvelteSet());
       return;
     }
     connectionStatus.set('connected');
@@ -97,7 +106,7 @@ export async function loadModsFromServer(instance: Instance) {
           // ignore
         }
         serverManagedFiles.update(existing => {
-          const combined = new Set(existing);
+          const combined = new SvelteSet(existing);
           for (const mod of currentServerMods) combined.add(mod);
           return combined;
         });
@@ -119,7 +128,7 @@ export async function loadModsFromServer(instance: Instance) {
     lastModCheck.set(new Date());
   } catch (err: any) {
     connectionStatus.set('disconnected');
-    serverManagedFiles.set(new Set());
+    serverManagedFiles.set(new SvelteSet());
     errorMessage.set('Failed to connect to server: ' + err.message);
     setTimeout(() => errorMessage.set(''), 5000);
   } finally {
@@ -157,7 +166,17 @@ export async function checkModSynchronization(instance: Instance) {
             return newSet;
           });
         }
-      } catch {}
+      } catch (error: any) {
+        // Log error but continue - mod synchronization update is not critical
+        const logger = await import('./logger.js');
+        logger.default.debug('Failed to update mod synchronization state', {
+          category: 'mods',
+          data: {
+            error: error.message,
+            context: 'modSynchronizationUpdate'
+          }
+        });
+      }
       if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
         updateServerManagedFiles('remove', result.successfullyRemovedMods);
       }
@@ -224,7 +243,7 @@ export async function acknowledgeAllDependencies(instance: Instance) {
         modFileName: acknowledgment.fileName
       });
       if (result.success) {
-        acknowledgedDeps.update(set => new Set(set).add(acknowledgment.fileName.toLowerCase()));
+        acknowledgedDeps.update(set => new SvelteSet(set).add(acknowledgment.fileName.toLowerCase()));
         removeServerManagedFiles([acknowledgment.fileName]);
       } else {
         throw new Error(result.error || `Failed to acknowledge ${acknowledgment.fileName}`);
@@ -332,7 +351,7 @@ export async function handleModDelete(instance: Instance, modFileName: string) {
         if (removed && removed.projectId) {
           installedModIds.update(ids => {
             ids.delete(removed.projectId);
-            return new Set(ids);
+            return new SvelteSet(ids);
           });
         }
         return updated;
@@ -380,7 +399,7 @@ export async function handleDependencyAcknowledgment(instance: Instance, modFile
     if (result.success) {
       successMessage.set(`Acknowledged dependency: ${modFileName}`);
       setTimeout(() => successMessage.set(''), 2000);
-      acknowledgedDeps.update(set => new Set(set).add(lower));
+      acknowledgedDeps.update(set => new SvelteSet(set).add(lower));
       removeServerManagedFiles([modFileName]);
       setTimeout(async () => {
         await checkModSynchronization(instance);

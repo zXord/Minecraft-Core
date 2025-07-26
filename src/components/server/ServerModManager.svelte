@@ -1,5 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  
+  import { SvelteSet, SvelteMap } from 'svelte/reactivity';
   import { get } from 'svelte/store';
   import { createEventDispatcher } from 'svelte';
   import { safeInvoke } from '../../utils/ipcUtils.js';
@@ -146,7 +148,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       errorMessage.set(`Failed to install dependencies: ${error.message || 'Unknown error'}`);
       
       // Clean up all installing state
-      installingModIds.set(new Set());
+      installingModIds.set(new SvelteSet());
     }
   }
   
@@ -537,7 +539,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     // If switching to search tab, refresh search results and check for updates
     else if (tabName === 'search') {
       // Clear any stale update counts when switching away from installed tab
-      modsWithUpdates.set(new Map());
+      modsWithUpdates.set(new SvelteMap());
       
       // Always check for updates when switching to search tab to ensure update buttons are shown
       checkForUpdates(serverPath).then(() => {

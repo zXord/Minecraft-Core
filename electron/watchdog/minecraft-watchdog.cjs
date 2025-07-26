@@ -187,7 +187,7 @@ function checkProcess() {
     process.kill(mainPid, 0); // Signal 0 just tests if process exists, doesn't kill it
     
     log(`Process ${mainPid} is still running`);
-  } catch (e) {
+  } catch {
     // Process doesn't exist - this is the normal way this check works
     log(`Main process ${mainPid} terminated, killing Minecraft server Java processes...`);
     killJavaProcesses();

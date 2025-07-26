@@ -1,4 +1,6 @@
 <script>  import { onMount } from 'svelte';
+  
+  import { SvelteSet } from 'svelte/reactivity';
   import { get } from 'svelte/store';
   import { serverState } from '../../stores/serverState.js';
   import { settingsStore, updateVersions } from '../../stores/settingsStore.js';
@@ -99,7 +101,7 @@
       
       // Get disabled mods to filter them out from frontend processing as well
       const disabledModsList = await safeInvoke('get-disabled-mods', resolvedPath);
-      const disabledModsSet = new Set(disabledModsList || []);
+      const disabledModsSet = new SvelteSet(disabledModsList || []);
       
       for (const mod of results) {
         // Skip disabled mods in frontend processing too (double safety)

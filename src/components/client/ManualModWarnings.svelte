@@ -1,17 +1,11 @@
 <!-- ManualModWarnings.svelte - Component to show warnings about manual mods -->
-<script lang="ts">
+<script>
   import { onMount } from 'svelte';
   import { safeInvoke } from '../../utils/ipcUtils.js';
 
-  export let clientPath: string = '';
+  export let clientPath= '';
 
-  interface ManualModInfo {
-    manualMods: string[];
-    lastUpdated: string;
-    warning: string;
-  }
-
-  let manualModInfo: ManualModInfo | null = null;
+  let manualModInfo= null;
   let showWarning = false;
 
   onMount(async () => {

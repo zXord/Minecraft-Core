@@ -23,6 +23,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.kiro/*
 
 # Runtime files (should be in app data directory, not source code)
 *.pid

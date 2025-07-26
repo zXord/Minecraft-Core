@@ -5,28 +5,193 @@ const modInstallService = require('../mod-utils/mod-installation-service.cjs');
 const {
   extractVersionFromFilename
 } = require('./mod-handler-utils.cjs');
+const { getLoggerHandlers } = require('../logger-handlers.cjs');
 
 function createServerModHandlers(win) {
+  const logger = getLoggerHandlers();
+  
+  logger.info('Server mod handlers initialized', {
+    category: 'mods',
+    data: { 
+      handler: 'server-mod-handlers',
+      hasWindow: !!win
+    }
+  });
+
   return {
     'list-mods': async (_e, serverPath) => {
-      return await modFileManager.listMods(serverPath);
+      logger.debug('Listing server mods', {
+        category: 'mods',
+        data: {
+          handler: 'list-mods',
+          serverPath: serverPath,
+          pathExists: fs.existsSync(serverPath)
+        }
+      });
+
+      try {
+        const mods = await modFileManager.listMods(serverPath);
+        
+        logger.info('Server mods listed successfully', {
+          category: 'mods',
+          data: {
+            handler: 'list-mods',
+            serverPath: serverPath,
+            modCount: mods?.length || 0
+          }
+        });
+        
+        return mods;
+      } catch (error) {
+        logger.error(`Failed to list server mods: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'list-mods',
+            serverPath: serverPath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'get-installed-mod-info': async (_e, serverPath) => {
-      return await modFileManager.getInstalledModInfo(serverPath);
+      logger.debug('Getting server installed mod info', {
+        category: 'mods',
+        data: {
+          handler: 'get-installed-mod-info',
+          serverPath: serverPath,
+          pathExists: fs.existsSync(serverPath)
+        }
+      });
+
+      try {
+        const modInfo = await modFileManager.getInstalledModInfo(serverPath);
+        
+        logger.info('Retrieved server mod info', {
+          category: 'mods',
+          data: {
+            handler: 'get-installed-mod-info',
+            serverPath: serverPath,
+            modCount: modInfo?.length || 0
+          }
+        });
+        
+        return modInfo;
+      } catch (error) {
+        logger.error(`Failed to get server mod info: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'get-installed-mod-info',
+            serverPath: serverPath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'save-disabled-mods': async (_e, serverPath, disabledMods) => {
-      return await modFileManager.saveDisabledMods(serverPath, disabledMods);
+      logger.info('Saving disabled mods list', {
+        category: 'mods',
+        data: {
+          handler: 'save-disabled-mods',
+          serverPath: serverPath,
+          disabledCount: disabledMods?.length || 0
+        }
+      });
+
+      try {
+        const result = await modFileManager.saveDisabledMods(serverPath, disabledMods);
+        
+        logger.info('Disabled mods list saved successfully', {
+          category: 'mods',
+          data: {
+            handler: 'save-disabled-mods',
+            serverPath: serverPath,
+            disabledCount: disabledMods?.length || 0
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`Failed to save disabled mods: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'save-disabled-mods',
+            serverPath: serverPath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'get-disabled-mods': async (_e, serverPath) => {
-      return await modFileManager.getDisabledMods(serverPath);
+      logger.debug('Getting disabled mods list', {
+        category: 'mods',
+        data: {
+          handler: 'get-disabled-mods',
+          serverPath: serverPath
+        }
+      });
+
+      try {
+        const disabledMods = await modFileManager.getDisabledMods(serverPath);
+        
+        logger.debug('Retrieved disabled mods list', {
+          category: 'mods',
+          data: {
+            handler: 'get-disabled-mods',
+            serverPath: serverPath,
+            disabledCount: disabledMods?.length || 0
+          }
+        });
+        
+        return disabledMods;
+      } catch (error) {
+        logger.error(`Failed to get disabled mods: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'get-disabled-mods',
+            serverPath: serverPath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },    'check-mod-compatibility': async (_e, { serverPath, mcVersion, fabricVersion }) => {
+      logger.info('Checking server mod compatibility', {
+        category: 'mods',
+        data: {
+          handler: 'check-mod-compatibility',
+          serverPath: serverPath,
+          mcVersion: mcVersion,
+          fabricVersion: fabricVersion,
+          pathExists: fs.existsSync(serverPath)
+        }
+      });
+
       if (!serverPath || !fs.existsSync(serverPath)) {
+        logger.error('Invalid server path for compatibility check', {
+          category: 'mods',
+          data: {
+            handler: 'check-mod-compatibility',
+            serverPath: serverPath,
+            pathExists: fs.existsSync(serverPath)
+          }
+        });
         throw new Error('Invalid server path');
       }
       if (!mcVersion || !fabricVersion) {
+        logger.error('Version information missing for compatibility check', {
+          category: 'mods',
+          data: {
+            handler: 'check-mod-compatibility',
+            mcVersion: mcVersion,
+            fabricVersion: fabricVersion
+          }
+        });
         throw new Error('Version information missing');
       }      // Helper function for version compatibility checking
       function checkMinecraftVersionCompatibility(modVersion, targetVersion) {
@@ -115,14 +280,26 @@ function createServerModHandlers(win) {
         }
         
         return 0;
-      }      modApiService.clearVersionCache();
-      const installed = await modFileManager.getInstalledModInfo(serverPath);
-      const disabledMods = await modFileManager.getDisabledMods(serverPath);
-      const disabledModsSet = new Set(disabledMods);
-      
-      // Filter out disabled mods - only check compatibility for enabled mods
-      const enabledMods = installed.filter(mod => !disabledModsSet.has(mod.fileName));
-      const results = [];
+      }      try {
+        modApiService.clearVersionCache();
+        const installed = await modFileManager.getInstalledModInfo(serverPath);
+        const disabledMods = await modFileManager.getDisabledMods(serverPath);
+        const disabledModsSet = new Set(disabledMods);
+        
+        // Filter out disabled mods - only check compatibility for enabled mods
+        const enabledMods = installed.filter(mod => !disabledModsSet.has(mod.fileName));
+        const results = [];
+        
+        logger.debug('Processing mod compatibility checks', {
+          category: 'mods',
+          data: {
+            handler: 'check-mod-compatibility',
+            totalMods: installed.length,
+            enabledMods: enabledMods.length,
+            disabledMods: disabledMods.length,
+            mcVersion: mcVersion
+          }
+        });
       
       for (const mod of enabledMods) {
         const projectId = mod.projectId;
@@ -134,7 +311,26 @@ function createServerModHandlers(win) {
           currentVersion = extractVersionFromFilename(fileName) || 'Unknown';
         }
         
+        logger.debug('Processing individual mod compatibility', {
+          category: 'mods',
+          data: {
+            modName: name,
+            fileName: fileName,
+            projectId: projectId,
+            currentVersion: currentVersion,
+            hasProjectId: !!projectId
+          }
+        });
+        
         if (!projectId) {
+          logger.debug('Mod has no project ID, marking as compatible', {
+            category: 'mods',
+            data: {
+              modName: name,
+              fileName: fileName
+            }
+          });
+          
           results.push({
             projectId: null,
             fileName,
@@ -150,8 +346,28 @@ function createServerModHandlers(win) {
           // FIXED: Check if ANY versions exist for target MC version FIRST (most important)
           const availableVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
           
+          logger.debug('Retrieved available versions for mod', {
+            category: 'network',
+            data: {
+              modName: name,
+              projectId: projectId,
+              mcVersion: mcVersion,
+              availableVersionCount: availableVersions?.length || 0
+            }
+          });
+          
           // If NO versions are available for the target MC version, mark as incompatible immediately
           if (!availableVersions || availableVersions.length === 0) {
+            logger.debug('No versions available for target MC version', {
+              category: 'mods',
+              data: {
+                modName: name,
+                projectId: projectId,
+                mcVersion: mcVersion,
+                compatibilityStatus: 'incompatible'
+              }
+            });
+            
             results.push({
               projectId,
               fileName,
@@ -195,6 +411,16 @@ function createServerModHandlers(win) {
           
           if (currentVersionCompatible) {
             // Current version is compatible AND actually available for target MC
+            logger.debug('Current mod version is compatible', {
+              category: 'mods',
+              data: {
+                modName: name,
+                currentVersion: currentVersion,
+                latestVersion: latest?.versionNumber,
+                hasUpdate: latest && latest.versionNumber !== currentVersion
+              }
+            });
+            
             results.push({
               projectId,
               fileName,
@@ -207,6 +433,16 @@ function createServerModHandlers(win) {
             });
           } else if (latest) {
             // Current version is not compatible, but there IS a latest version available
+            logger.debug('Current mod version incompatible, but update available', {
+              category: 'mods',
+              data: {
+                modName: name,
+                currentVersion: currentVersion,
+                latestVersion: latest.versionNumber,
+                compatibilityStatus: 'update_available'
+              }
+            });
+            
             results.push({
               projectId,
               fileName,
@@ -220,6 +456,16 @@ function createServerModHandlers(win) {
             });
           } else {
             // This shouldn't happen since we checked availableVersions.length > 0 above
+            logger.warn('No compatible versions found despite available versions existing', {
+              category: 'mods',
+              data: {
+                modName: name,
+                projectId: projectId,
+                currentVersion: currentVersion,
+                mcVersion: mcVersion
+              }
+            });
+            
             results.push({
               projectId,
               fileName,
@@ -232,6 +478,16 @@ function createServerModHandlers(win) {
             });
           }
         } catch (err) {
+          logger.error(`Error checking mod compatibility: ${err.message}`, {
+            category: 'mods',
+            data: {
+              modName: name,
+              projectId: projectId,
+              fileName: fileName,
+              errorType: err.constructor.name
+            }
+          });
+          
           results.push({
             projectId,
             fileName,
@@ -242,27 +498,191 @@ function createServerModHandlers(win) {
           });
         }
       }
+      
+      logger.info('Server mod compatibility check completed', {
+        category: 'mods',
+        data: {
+          handler: 'check-mod-compatibility',
+          serverPath: serverPath,
+          mcVersion: mcVersion,
+          totalChecked: enabledMods.length,
+          compatibleCount: results.filter(r => r.compatible).length,
+          incompatibleCount: results.filter(r => !r.compatible).length,
+          updateAvailableCount: results.filter(r => r.hasUpdate).length
+        }
+      });
+      
       return results;
+      } catch (error) {
+        logger.error(`Server mod compatibility check failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'check-mod-compatibility',
+            serverPath: serverPath,
+            mcVersion: mcVersion,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'install-mod': async (_e, serverPath, modDetails) => {
-      return await modInstallService.installModToServer(win, serverPath, modDetails);
+      logger.info('Installing server mod', {
+        category: 'mods',
+        data: {
+          handler: 'install-mod',
+          serverPath: serverPath,
+          modName: modDetails?.name,
+          modId: modDetails?.id,
+          hasDownloadUrl: !!modDetails?.downloadUrl
+        }
+      });
+
+      try {
+        const result = await modInstallService.installModToServer(win, serverPath, modDetails);
+        
+        logger.info('Server mod installation completed', {
+          category: 'mods',
+          data: {
+            handler: 'install-mod',
+            serverPath: serverPath,
+            modName: modDetails?.name,
+            success: result?.success,
+            filePath: result?.filePath
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`Server mod installation failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'install-mod',
+            serverPath: serverPath,
+            modName: modDetails?.name,
+            modId: modDetails?.id,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'add-mod': async (_e, serverPath, modPath) => {
-      return await modFileManager.addMod(serverPath, modPath);
+      logger.info('Adding mod to server', {
+        category: 'mods',
+        data: {
+          handler: 'add-mod',
+          serverPath: serverPath,
+          modPath: modPath,
+          modExists: fs.existsSync(modPath)
+        }
+      });
+
+      try {
+        const result = await modFileManager.addMod(serverPath, modPath);
+        
+        logger.info('Mod added to server successfully', {
+          category: 'mods',
+          data: {
+            handler: 'add-mod',
+            serverPath: serverPath,
+            modPath: modPath,
+            success: result?.success
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`Failed to add mod to server: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'add-mod',
+            serverPath: serverPath,
+            modPath: modPath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'delete-mod': async (_e, serverPath, modName) => {
-      return await modFileManager.deleteMod(serverPath, modName);
+      logger.info('Deleting server mod', {
+        category: 'mods',
+        data: {
+          handler: 'delete-mod',
+          serverPath: serverPath,
+          modName: modName
+        }
+      });
+
+      try {
+        const result = await modFileManager.deleteMod(serverPath, modName);
+        
+        logger.info('Server mod deleted successfully', {
+          category: 'mods',
+          data: {
+            handler: 'delete-mod',
+            serverPath: serverPath,
+            modName: modName,
+            success: result?.success
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`Failed to delete server mod: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'delete-mod',
+            serverPath: serverPath,
+            modName: modName,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'update-mod': async (_e, { serverPath, projectId, targetVersion, fileName }) => {
-      const versions = await modApiService.getModrinthVersions(projectId, 'fabric', null, false);
-      const targetVersionInfo = versions.find(v => v.versionNumber === targetVersion);
-      if (!targetVersionInfo) {
-        throw new Error(`Target version ${targetVersion} not found for mod ${projectId}`);
-      }
+      logger.info('Updating server mod', {
+        category: 'mods',
+        data: {
+          handler: 'update-mod',
+          serverPath: serverPath,
+          projectId: projectId,
+          targetVersion: targetVersion,
+          fileName: fileName
+        }
+      });
+
+      try {
+        const versions = await modApiService.getModrinthVersions(projectId, 'fabric', null, false);
+        const targetVersionInfo = versions.find(v => v.versionNumber === targetVersion);
+        
+        if (!targetVersionInfo) {
+          logger.error('Target version not found for mod update', {
+            category: 'mods',
+            data: {
+              handler: 'update-mod',
+              projectId: projectId,
+              targetVersion: targetVersion,
+              availableVersions: versions?.length || 0
+            }
+          });
+          throw new Error(`Target version ${targetVersion} not found for mod ${projectId}`);
+        }
+        
+        logger.debug('Retrieved target version info for mod update', {
+          category: 'network',
+          data: {
+            projectId: projectId,
+            targetVersion: targetVersion,
+            versionId: targetVersionInfo.id
+          }
+        });
       const completeVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionInfo.id);
       const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
       const modDetails = {
@@ -277,6 +697,20 @@ function createServerModHandlers(win) {
         oldFileName: fileName
       };
       const result = await modInstallService.installModToServer(win, serverPath, modDetails);
+      
+      logger.info('Server mod update completed', {
+        category: 'mods',
+        data: {
+          handler: 'update-mod',
+          projectId: projectId,
+          modName: modDetails.name,
+          oldFileName: fileName,
+          newFileName: modDetails.fileName,
+          targetVersion: targetVersion,
+          success: result?.success
+        }
+      });
+      
       return {
         success: true,
         modName: modDetails.name,
@@ -285,33 +719,180 @@ function createServerModHandlers(win) {
         version: targetVersion,
         result
       };
+      } catch (error) {
+        logger.error(`Server mod update failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'update-mod',
+            serverPath: serverPath,
+            projectId: projectId,
+            targetVersion: targetVersion,
+            fileName: fileName,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'move-mod-file': async (_e, { fileName, newCategory, serverPath }) => {
-      return await modFileManager.moveModFile({ fileName, newCategory, serverPath });
+      logger.info('Moving mod file', {
+        category: 'mods',
+        data: {
+          handler: 'move-mod-file',
+          fileName: fileName,
+          newCategory: newCategory,
+          serverPath: serverPath
+        }
+      });
+
+      try {
+        const result = await modFileManager.moveModFile({ fileName, newCategory, serverPath });
+        
+        logger.info('Mod file moved successfully', {
+          category: 'storage',
+          data: {
+            handler: 'move-mod-file',
+            fileName: fileName,
+            newCategory: newCategory,
+            serverPath: serverPath,
+            success: result?.success
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`Failed to move mod file: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'move-mod-file',
+            fileName: fileName,
+            newCategory: newCategory,
+            serverPath: serverPath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'save-mod-categories': async (_e, categories) => {
-      modFileManager.modCategoriesStore.set(categories);
-      return { success: true };
+      logger.info('Saving mod categories', {
+        category: 'settings',
+        data: {
+          handler: 'save-mod-categories',
+          categoryCount: categories?.length || 0
+        }
+      });
+
+      try {
+        modFileManager.modCategoriesStore.set(categories);
+        
+        logger.info('Mod categories saved successfully', {
+          category: 'settings',
+          data: {
+            handler: 'save-mod-categories',
+            categoryCount: categories?.length || 0
+          }
+        });
+        
+        return { success: true };
+      } catch (error) {
+        logger.error(`Failed to save mod categories: ${error.message}`, {
+          category: 'settings',
+          data: {
+            handler: 'save-mod-categories',
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'get-mod-categories': async () => {
-      return modFileManager.modCategoriesStore.get() || [];
+      logger.debug('Getting mod categories', {
+        category: 'settings',
+        data: {
+          handler: 'get-mod-categories'
+        }
+      });
+
+      try {
+        const categories = modFileManager.modCategoriesStore.get() || [];
+        
+        logger.debug('Retrieved mod categories', {
+          category: 'settings',
+          data: {
+            handler: 'get-mod-categories',
+            categoryCount: categories.length
+          }
+        });
+        
+        return categories;
+      } catch (error) {
+        logger.error(`Failed to get mod categories: ${error.message}`, {
+          category: 'settings',
+          data: {
+            handler: 'get-mod-categories',
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     },
 
     'enable-and-update-mod': async (_e, { serverPath, modFileName, projectId, targetVersion, targetVersionId }) => {
+      logger.info('Enabling and updating server mod', {
+        category: 'mods',
+        data: {
+          handler: 'enable-and-update-mod',
+          serverPath: serverPath,
+          modFileName: modFileName,
+          projectId: projectId,
+          targetVersion: targetVersion,
+          targetVersionId: targetVersionId
+        }
+      });
+
       try {
         // First, validate inputs
         if (!serverPath || !modFileName || !projectId || !targetVersion || !targetVersionId) {
+          logger.error('Missing required parameters for enable and update operation', {
+            category: 'mods',
+            data: {
+              handler: 'enable-and-update-mod',
+              hasServerPath: !!serverPath,
+              hasModFileName: !!modFileName,
+              hasProjectId: !!projectId,
+              hasTargetVersion: !!targetVersion,
+              hasTargetVersionId: !!targetVersionId
+            }
+          });
           throw new Error('Missing required parameters for enable and update operation');
         }
 
         // Check if the mod is actually disabled
         const disabledMods = await modFileManager.getDisabledMods(serverPath);
         if (!disabledMods.includes(modFileName)) {
+          logger.error('Mod is not disabled, cannot enable and update', {
+            category: 'mods',
+            data: {
+              handler: 'enable-and-update-mod',
+              modFileName: modFileName,
+              isDisabled: disabledMods.includes(modFileName),
+              disabledModCount: disabledMods.length
+            }
+          });
           throw new Error(`Mod ${modFileName} is not disabled`);
         }
+        
+        logger.debug('Mod is disabled, proceeding with enable and update', {
+          category: 'mods',
+          data: {
+            modFileName: modFileName,
+            disabledModCount: disabledMods.length
+          }
+        });
 
         // Determine the original category/location by checking where disabled files exist
         const fs = require('fs');
@@ -339,17 +920,41 @@ function createServerModHandlers(win) {
         } else if (legacyDisabledExists) {
           originalCategory = 'server-only'; // Legacy defaults to server-only
         }
+        
+        logger.debug('Determined original mod category', {
+          category: 'mods',
+          data: {
+            modFileName: modFileName,
+            originalCategory: originalCategory,
+            serverDisabledExists: serverDisabledExists,
+            clientDisabledExists: clientDisabledExists,
+            legacyDisabledExists: legacyDisabledExists
+          }
+        });
 
         // Remove the old disabled files BEFORE installing new version
+        let removedFiles = [];
         if (serverDisabledExists) {
           fs.unlinkSync(disabledFilePath);
+          removedFiles.push('server');
         }
         if (clientDisabledExists) {
           fs.unlinkSync(clientDisabledFilePath);
+          removedFiles.push('client');
         }
         if (legacyDisabledExists) {
           fs.unlinkSync(legacyDisabledPath);
+          removedFiles.push('legacy');
         }
+        
+        logger.debug('Removed disabled mod files', {
+          category: 'storage',
+          data: {
+            modFileName: modFileName,
+            removedFiles: removedFiles,
+            removedCount: removedFiles.length
+          }
+        });
         
         // Also remove old manifests for the disabled files to prevent stale metadata
         const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
@@ -366,10 +971,29 @@ function createServerModHandlers(win) {
         }
 
         // Get the version info and project info for the target version
+        logger.debug('Retrieving target version and project info', {
+          category: 'network',
+          data: {
+            projectId: projectId,
+            targetVersionId: targetVersionId,
+            targetVersion: targetVersion
+          }
+        });
+        
         const targetVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionId);
         const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
 
         if (!targetVersionInfo || !targetVersionInfo.files || targetVersionInfo.files.length === 0) {
+          logger.error('Target version not found or has no files', {
+            category: 'mods',
+            data: {
+              projectId: projectId,
+              targetVersion: targetVersion,
+              targetVersionId: targetVersionId,
+              hasVersionInfo: !!targetVersionInfo,
+              hasFiles: !!(targetVersionInfo?.files?.length)
+            }
+          });
           throw new Error(`Target version ${targetVersion} not found or has no files`);
         }
 
@@ -387,11 +1011,39 @@ function createServerModHandlers(win) {
         };
 
         // Install the new version (this will download to the correct enabled location)
+        logger.debug('Installing updated mod version', {
+          category: 'mods',
+          data: {
+            modName: modDetails.name,
+            targetVersion: targetVersion,
+            originalCategory: originalCategory,
+            hasDownloadUrl: !!modDetails.downloadUrl
+          }
+        });
+        
         const installResult = await modInstallService.installModToServer(win, serverPath, modDetails);
 
         if (!installResult || !installResult.success) {
+          logger.error('Failed to install updated mod version', {
+            category: 'mods',
+            data: {
+              modFileName: modFileName,
+              projectId: projectId,
+              targetVersion: targetVersion,
+              installError: installResult?.error
+            }
+          });
           throw new Error(`Failed to install updated version: ${installResult?.error || 'Unknown error'}`);
         }
+        
+        logger.debug('Mod installation completed successfully', {
+          category: 'mods',
+          data: {
+            modFileName: modFileName,
+            targetVersion: targetVersion,
+            installSuccess: installResult.success
+          }
+        });
 
         // After successful installation, ensure the mod is in the correct location based on original category
         await modFileManager.moveModFile({ 
@@ -408,7 +1060,7 @@ function createServerModHandlers(win) {
         try {
           const modApiService = require('../../services/mod-api-service.cjs');
           modApiService.clearVersionCache();
-        } catch (cacheErr) {
+        } catch {
           // Cache clearing failed, but operation can continue
         }
 
@@ -424,6 +1076,18 @@ function createServerModHandlers(win) {
           fs.unlinkSync(finalClientDisabledCheck);
         }
 
+        logger.info('Mod enable and update completed successfully', {
+          category: 'mods',
+          data: {
+            handler: 'enable-and-update-mod',
+            modFileName: modFileName,
+            projectId: projectId,
+            targetVersion: targetVersion,
+            originalCategory: originalCategory,
+            success: true
+          }
+        });
+
         return {
           success: true,
           message: `Mod ${modFileName} successfully enabled and updated to version ${targetVersion} in ${originalCategory} location`,
@@ -434,6 +1098,17 @@ function createServerModHandlers(win) {
         };
 
       } catch (error) {
+        logger.error(`Mod enable and update failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'enable-and-update-mod',
+            modFileName: modFileName,
+            projectId: projectId,
+            targetVersion: targetVersion,
+            errorType: error.constructor.name
+          }
+        });
+        
         return {
           success: false,
           error: error.message
@@ -442,6 +1117,15 @@ function createServerModHandlers(win) {
     },
 
     'check-disabled-mod-updates': async (_e, { serverPath, mcVersion }) => {
+      logger.info('Checking disabled mod updates', {
+        category: 'mods',
+        data: {
+          handler: 'check-disabled-mod-updates',
+          serverPath: serverPath,
+          mcVersion: mcVersion
+        }
+      });
+
       try {
         // Get disabled mods
         const disabledMods = await modFileManager.getDisabledMods(serverPath);
@@ -449,6 +1133,16 @@ function createServerModHandlers(win) {
         
         const disabledModsSet = new Set(disabledMods);
         const disabledModsInfo = installed.filter(mod => disabledModsSet.has(mod.fileName));
+        
+        logger.debug('Processing disabled mod update checks', {
+          category: 'mods',
+          data: {
+            handler: 'check-disabled-mod-updates',
+            totalDisabledMods: disabledMods.length,
+            disabledModsWithInfo: disabledModsInfo.length,
+            mcVersion: mcVersion
+          }
+        });
         
         const results = [];
         
@@ -462,8 +1156,27 @@ function createServerModHandlers(win) {
             currentVersion = extractVersionFromFilename(fileName) || 'Unknown';
           }
           
+          logger.debug('Processing disabled mod update check', {
+            category: 'mods',
+            data: {
+              modName: name,
+              fileName: fileName,
+              projectId: projectId,
+              currentVersion: currentVersion,
+              hasProjectId: !!projectId
+            }
+          });
+          
           if (!projectId) {
             // No project ID means we can't check for updates
+            logger.debug('Disabled mod has no project ID, cannot check updates', {
+              category: 'mods',
+              data: {
+                modName: name,
+                fileName: fileName
+              }
+            });
+            
             results.push({
               projectId: null,
               fileName,
@@ -481,8 +1194,27 @@ function createServerModHandlers(win) {
             // FIXED: Check if ANY versions exist for target MC version FIRST
             const availableVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
             
+            logger.debug('Retrieved available versions for disabled mod', {
+              category: 'network',
+              data: {
+                modName: name,
+                projectId: projectId,
+                mcVersion: mcVersion,
+                availableVersionCount: availableVersions?.length || 0
+              }
+            });
+            
             if (!availableVersions || availableVersions.length === 0) {
               // No versions available for target MC version
+              logger.debug('No versions available for disabled mod', {
+                category: 'mods',
+                data: {
+                  modName: name,
+                  projectId: projectId,
+                  mcVersion: mcVersion
+                }
+              });
+              
               results.push({
                 projectId,
                 fileName,
@@ -511,6 +1243,16 @@ function createServerModHandlers(win) {
               // Current version is available for target MC version
               if (latest && latest.versionNumber !== currentVersion) {
                 // There's a newer version available
+                logger.debug('Update available for disabled mod', {
+                  category: 'mods',
+                  data: {
+                    modName: name,
+                    currentVersion: currentVersion,
+                    latestVersion: latest.versionNumber,
+                    updateType: 'newer_version'
+                  }
+                });
+                
                 results.push({
                   projectId,
                   fileName,
@@ -525,6 +1267,15 @@ function createServerModHandlers(win) {
                 });
               } else {
                 // Current version is the latest for target MC
+                logger.debug('Disabled mod current version is compatible and latest', {
+                  category: 'mods',
+                  data: {
+                    modName: name,
+                    currentVersion: currentVersion,
+                    mcVersion: mcVersion
+                  }
+                });
+                
                 results.push({
                   projectId,
                   fileName,
@@ -538,6 +1289,16 @@ function createServerModHandlers(win) {
               }
             } else if (latest) {
               // Current version doesn't exist for target MC, but there's a compatible version available
+              logger.debug('Disabled mod needs update for compatibility', {
+                category: 'mods',
+                data: {
+                  modName: name,
+                  currentVersion: currentVersion,
+                  latestVersion: latest.versionNumber,
+                  updateType: 'compatibility_required'
+                }
+              });
+              
               results.push({
                 projectId,
                 fileName,
@@ -552,6 +1313,16 @@ function createServerModHandlers(win) {
               });
             } else {
               // This shouldn't happen since we checked availableVersions.length > 0 above
+              logger.warn('No compatible versions found for disabled mod despite available versions', {
+                category: 'mods',
+                data: {
+                  modName: name,
+                  projectId: projectId,
+                  currentVersion: currentVersion,
+                  mcVersion: mcVersion
+                }
+              });
+              
               results.push({
                 projectId,
                 fileName,
@@ -565,6 +1336,16 @@ function createServerModHandlers(win) {
             }
             
           } catch (err) {
+            logger.error(`Error checking disabled mod update: ${err.message}`, {
+              category: 'mods',
+              data: {
+                modName: name,
+                projectId: projectId,
+                fileName: fileName,
+                errorType: err.constructor.name
+              }
+            });
+            
             results.push({
               projectId,
               fileName,
@@ -579,9 +1360,30 @@ function createServerModHandlers(win) {
           }
         }
         
+        logger.info('Disabled mod update check completed', {
+          category: 'mods',
+          data: {
+            handler: 'check-disabled-mod-updates',
+            serverPath: serverPath,
+            mcVersion: mcVersion,
+            totalChecked: disabledModsInfo.length,
+            updatesAvailable: results.filter(r => r.hasUpdate).length,
+            compatibleUpdates: results.filter(r => r.isCompatibleUpdate).length
+          }
+        });
+        
         return results;
         
       } catch (error) {
+        logger.error(`Failed to check disabled mod updates: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'check-disabled-mod-updates',
+            serverPath: serverPath,
+            mcVersion: mcVersion,
+            errorType: error.constructor.name
+          }
+        });
         throw new Error(`Failed to check disabled mod updates: ${error.message}`);
       }
     }

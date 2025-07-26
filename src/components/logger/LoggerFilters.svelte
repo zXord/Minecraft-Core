@@ -6,6 +6,11 @@
   export let endDate = null;
   export let availableInstances = [];
   export let availableCategories = [];
+  
+  // Multi-select support
+  let selectedLevels = [];
+  let selectedInstances = [];
+  let selectedCategories = [];
 
   const logLevels = [
     { value: 'all', label: 'All Levels' },
@@ -21,34 +26,70 @@
   let showCategoryDropdown = false;
 
   function selectLevel(level) {
-    levelFilter = level;
-    showLevelDropdown = false;
+    if (level === 'all') {
+      selectedLevels = [];
+      levelFilter = 'all';
+    } else {
+      if (selectedLevels.includes(level)) {
+        selectedLevels = selectedLevels.filter(l => l !== level);
+      } else {
+        selectedLevels = [...selectedLevels, level];
+      }
+      levelFilter = selectedLevels.length > 0 ? selectedLevels.join(',') : 'all';
+    }
+    // Don't close dropdown for multi-select
   }
 
   function selectInstance(instance) {
-    instanceFilter = instance;
-    showInstanceDropdown = false;
+    if (instance === 'all') {
+      selectedInstances = [];
+      instanceFilter = 'all';
+    } else {
+      if (selectedInstances.includes(instance)) {
+        selectedInstances = selectedInstances.filter(i => i !== instance);
+      } else {
+        selectedInstances = [...selectedInstances, instance];
+      }
+      instanceFilter = selectedInstances.length > 0 ? selectedInstances.join(',') : 'all';
+    }
+    // Don't close dropdown for multi-select
   }
 
   function selectCategory(category) {
-    categoryFilter = category;
-    showCategoryDropdown = false;
+    if (category === 'all') {
+      selectedCategories = [];
+      categoryFilter = 'all';
+    } else {
+      if (selectedCategories.includes(category)) {
+        selectedCategories = selectedCategories.filter(c => c !== category);
+      } else {
+        selectedCategories = [...selectedCategories, category];
+      }
+      categoryFilter = selectedCategories.length > 0 ? selectedCategories.join(',') : 'all';
+    }
+    // Don't close dropdown for multi-select
   }
 
-  function getCurrentLevelLabel() {
-    const level = logLevels.find(l => l.value === levelFilter);
-    return level ? level.label : 'All Levels';
-  }
+  $: currentLevelLabel = (() => {
+    if (selectedLevels.length === 0) return 'All Levels';
+    if (selectedLevels.length === 1) {
+      const level = logLevels.find(l => l.value === selectedLevels[0]);
+      return level ? level.label : selectedLevels[0];
+    }
+    return `${selectedLevels.length} Levels`;
+  })();
 
-  function getCurrentInstanceLabel() {
-    if (instanceFilter === 'all') return 'All Instances';
-    return instanceFilter;
-  }
+  $: currentInstanceLabel = (() => {
+    if (selectedInstances.length === 0) return 'All Instances';
+    if (selectedInstances.length === 1) return selectedInstances[0];
+    return `${selectedInstances.length} Instances`;
+  })();
 
-  function getCurrentCategoryLabel() {
-    if (categoryFilter === 'all') return 'All Categories';
-    return categoryFilter;
-  }
+  $: currentCategoryLabel = (() => {
+    if (selectedCategories.length === 0) return 'All Categories';
+    if (selectedCategories.length === 1) return selectedCategories[0];
+    return `${selectedCategories.length} Categories`;
+  })();
 
   // Close dropdowns when clicking outside
   function handleClickOutside(event) {
@@ -72,7 +113,7 @@
         class="filter-button" 
         on:click={() => showLevelDropdown = !showLevelDropdown}
       >
-        <span>{getCurrentLevelLabel()}</span>
+        <span>{currentLevelLabel}</span>
         <svg class="dropdown-icon" class:rotated={showLevelDropdown} xmlns="http://www.w3.org/2000/svg" width="20px" height="20px" fill="currentColor" viewBox="0 0 256 256">
           <path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"></path>
         </svg>
@@ -80,12 +121,17 @@
       
       {#if showLevelDropdown}
         <div class="dropdown-menu">
-          {#each logLevels as level}
+          {#each logLevels as level (level.value)}
             <button 
-              class="dropdown-item" 
-              class:active={levelFilter === level.value}
+              class="dropdown-item multi-select" 
+              class:active={level.value === 'all' ? selectedLevels.length === 0 : selectedLevels.includes(level.value)}
               on:click={() => selectLevel(level.value)}
             >
+              <span class="checkbox">
+                {#if level.value === 'all' ? selectedLevels.length === 0 : selectedLevels.includes(level.value)}
+                  ✓
+                {/if}
+              </span>
               {level.label}
             </button>
           {/each}
@@ -99,7 +145,7 @@
         class="filter-button" 
         on:click={() => showInstanceDropdown = !showInstanceDropdown}
       >
-        <span>{getCurrentInstanceLabel()}</span>
+        <span>{currentInstanceLabel}</span>
         <svg class="dropdown-icon" class:rotated={showInstanceDropdown} xmlns="http://www.w3.org/2000/svg" width="20px" height="20px" fill="currentColor" viewBox="0 0 256 256">
           <path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"></path>
         </svg>
@@ -108,18 +154,24 @@
       {#if showInstanceDropdown}
         <div class="dropdown-menu">
           <button 
-            class="dropdown-item" 
-            class:active={instanceFilter === 'all'}
+            class="dropdown-item multi-select" 
+            class:active={selectedInstances.length === 0}
             on:click={() => selectInstance('all')}
           >
+            <span class="checkbox">
+              {#if selectedInstances.length === 0}✓{/if}
+            </span>
             All Instances
           </button>
-          {#each availableInstances as instance}
+          {#each availableInstances as instance (instance)}
             <button 
-              class="dropdown-item" 
-              class:active={instanceFilter === instance}
+              class="dropdown-item multi-select" 
+              class:active={selectedInstances.includes(instance)}
               on:click={() => selectInstance(instance)}
             >
+              <span class="checkbox">
+                {#if selectedInstances.includes(instance)}✓{/if}
+              </span>
               {instance}
             </button>
           {/each}
@@ -133,7 +185,7 @@
         class="filter-button" 
         on:click={() => showCategoryDropdown = !showCategoryDropdown}
       >
-        <span>{getCurrentCategoryLabel()}</span>
+        <span>{currentCategoryLabel}</span>
         <svg class="dropdown-icon" class:rotated={showCategoryDropdown} xmlns="http://www.w3.org/2000/svg" width="20px" height="20px" fill="currentColor" viewBox="0 0 256 256">
           <path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"></path>
         </svg>
@@ -142,18 +194,24 @@
       {#if showCategoryDropdown}
         <div class="dropdown-menu">
           <button 
-            class="dropdown-item" 
-            class:active={categoryFilter === 'all'}
+            class="dropdown-item multi-select" 
+            class:active={selectedCategories.length === 0}
             on:click={() => selectCategory('all')}
           >
+            <span class="checkbox">
+              {#if selectedCategories.length === 0}✓{/if}
+            </span>
             All Categories
           </button>
-          {#each availableCategories as category}
+          {#each availableCategories as category (category)}
             <button 
-              class="dropdown-item" 
-              class:active={categoryFilter === category}
+              class="dropdown-item multi-select" 
+              class:active={selectedCategories.includes(category)}
               on:click={() => selectCategory(category)}
             >
+              <span class="checkbox">
+                {#if selectedCategories.includes(category)}✓{/if}
+              </span>
               {category}
             </button>
           {/each}
@@ -259,8 +317,33 @@
     border-radius: 0.5rem;
     margin-top: 0.25rem;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-    max-height: 200px;
+    max-height: 300px;
     overflow-y: auto;
+  }
+
+  /* Custom scrollbar styling */
+  .dropdown-menu::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .dropdown-menu::-webkit-scrollbar-track {
+    background: #1a2332;
+    border-radius: 3px;
+  }
+
+  .dropdown-menu::-webkit-scrollbar-thumb {
+    background: #314d68;
+    border-radius: 3px;
+  }
+
+  .dropdown-menu::-webkit-scrollbar-thumb:hover {
+    background: #4a6b8a;
+  }
+
+  /* Firefox scrollbar */
+  .dropdown-menu {
+    scrollbar-width: thin;
+    scrollbar-color: #314d68 #1a2332;
   }
 
   .dropdown-item {
@@ -291,6 +374,23 @@
 
   .dropdown-item:last-child {
     border-radius: 0 0 0.5rem 0.5rem;
+  }
+
+  .dropdown-item.multi-select {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .checkbox {
+    width: 1rem;
+    height: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: bold;
+    color: #0c7ff2;
   }
 
   /* Time Range */

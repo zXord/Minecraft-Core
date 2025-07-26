@@ -51,7 +51,7 @@ export const modrinthMatchingActions = {
         });
         pendingModrinthConfirmations.set(pendingMap);
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error loading pending confirmations
     }
   },
@@ -68,7 +68,7 @@ export const modrinthMatchingActions = {
         });
         confirmedModrinthMatches.set(confirmedMap);
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error loading confirmed matches
     }
   },
@@ -80,7 +80,7 @@ export const modrinthMatchingActions = {
       if (result && result.success) {
         return result;
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error getting matching status for mod
     }
     return null;
@@ -111,7 +111,7 @@ export const modrinthMatchingActions = {
 
         return true;
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error confirming match for mod
     }
     return false;
@@ -135,7 +135,7 @@ export const modrinthMatchingActions = {
 
         return true;
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error rejecting match for mod
     }
     return false;
@@ -185,7 +185,7 @@ export const modrinthMatchingActions = {
       if (result && result.success) {
         return result.results;
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error in manual Modrinth search
     }
     return [];
@@ -198,7 +198,7 @@ export const modrinthMatchingActions = {
       if (result && result.success) {
         return result;
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error getting project details
     }
     return null;
@@ -224,7 +224,7 @@ export const modrinthMatchingActions = {
 
       // Clear search state
       this.clearSearchState(fileName);
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error clearing matching data for mod
     }
   },
@@ -252,7 +252,7 @@ export const modrinthMatchingActions = {
         
         return true;
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Error resetting matching decision for mod
     }
     return false;

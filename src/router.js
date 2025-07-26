@@ -7,9 +7,14 @@ function getHash() {
 
 export const route = writable(getHash());
 
+/**
+ * Navigate to a specific route
+ * @param {string} path - The route path to navigate to
+ */
 export function navigate(path) {
-  window.location.hash = path;
-  route.set(path);
+  const routePath = typeof path === 'string' ? path : String(path);
+  window.location.hash = routePath;
+  route.set(routePath);
 }
 
 // Listen for hash changes

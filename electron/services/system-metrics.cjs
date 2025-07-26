@@ -32,7 +32,7 @@ function startMetricsReporting() {
     if (serverProcess && serverProcess.pid) {
       try {
         await publishSystemMetrics();
-      } catch (error) {
+      } catch {
         // TODO: Add proper logging - Metrics error
       }
     } else {
@@ -56,7 +56,7 @@ function startMetricsReporting() {
     
     try {
       await publishSystemMetrics();
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Initial metrics error
     }
   });
@@ -82,7 +82,9 @@ function startMetricsReporting() {
   try {
     const logHandlers = getLoggerHandlers();
     logHandlers.info('System metrics reporting started', { category: 'server' });
-  } catch {}
+  } catch {
+    // Metrics logging failed - non-critical
+  }
 }
 
 /**
@@ -150,7 +152,7 @@ async function getServerMemoryUsage(serverProcess) {
       try {
         const stats = await pidusage(serverProcess.pid);
         currentLookupMem = parseFloat((stats.memory / 1024 / 1024).toFixed(1));
-      } catch (pidError) {
+      } catch {
         // Fallback to WMIC if pidusage fails
         try {
           const filteredOutput = wmicExecSync(
@@ -169,11 +171,11 @@ async function getServerMemoryUsage(serverProcess) {
               }
             }
           }
-        } catch (wmicErr) {
+        } catch {
           // Silent fallback
         }
       }
-    } catch (err) {
+    } catch {
       // Silent fallback
     }
   } else {
@@ -181,7 +183,7 @@ async function getServerMemoryUsage(serverProcess) {
     try {
       const stats = await pidusage(serverProcess.pid);
       currentLookupMem = parseFloat((stats.memory / 1024 / 1024).toFixed(1));
-    } catch (err) {
+    } catch {
       // Silent fallback
     }
   }
@@ -217,7 +219,7 @@ async function publishSystemMetrics() {
         
         // Ensure non-zero state to indicate running server
         if (memUsedMB <= 0) memUsedMB = 1; // Minimal value to show it's actually running
-      } catch (error) {
+      } catch {
         // Fallback values if metrics collection fails
         cpuPct = 0.1;
         memUsedMB = publishSystemMetrics.lastMemUsedMB || 1;
@@ -265,13 +267,13 @@ async function publishSystemMetrics() {
         category: 'server',
         data: { metrics }
       });
-    } catch (logErr) {
+    } catch {
       // Ignore logging errors
     }
     
     // Send metrics to renderer
     sendMetricsUpdate(metrics);
-  } catch (err) {
+  } catch {
     // TODO: Add proper logging - Metrics publishing error
   }
 }

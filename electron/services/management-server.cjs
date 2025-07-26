@@ -43,7 +43,7 @@ class ManagementServer {
     try {
       const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
       return packageJson.version || '1.0.0';
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to read app version
       return '1.0.0'; // Fallback version
     }
@@ -89,7 +89,7 @@ class ManagementServer {
       }
       
       return null;
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to detect external IP
       return null;
     }
@@ -1105,7 +1105,7 @@ class ManagementServer {
       }
       
       return allClientMods;
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - getAllClientMods failed
       return [];
     }
@@ -1196,10 +1196,10 @@ class ManagementServer {
       });
       
       // Handle watcher errors (like EPERM when directory is deleted)
-      this.versionWatcher.on('error', (err) => {
+      this.versionWatcher.on('error', () => {
         // TODO: Add proper logging - Version watcher error
       });
-    } catch (err) {
+    } catch {
       // TODO: Add proper logging - Failed to start version watcher
     }
   }
@@ -1207,7 +1207,7 @@ class ManagementServer {
     if (this.versionWatcher) {
       try {
         this.versionWatcher.close();
-      } catch (err) {
+      } catch {
         // Ignore close errors - watcher might already be closed
         // TODO: Add proper logging - Version watcher close error
       }

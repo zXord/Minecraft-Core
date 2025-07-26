@@ -1,6 +1,27 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { toast } from 'svelte-sonner';
+  import logger from '../../utils/logger.js';
+  
+  onMount(() => {
+    logger.info('UpdateChecker component mounted', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        lifecycle: 'onMount'
+      }
+    });
+  });
+  
+  onDestroy(() => {
+    logger.debug('UpdateChecker component destroyed', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        lifecycle: 'onDestroy'
+      }
+    });
+  });
   
   let currentVersion = '1.0.0';
   let isChecking = false;
@@ -18,7 +39,26 @@
 
   // Check for updates manually
   async function checkForUpdates() {
-    if (isChecking) return;
+    logger.info('Manual update check initiated', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        function: 'checkForUpdates',
+        isAlreadyChecking: isChecking
+      }
+    });
+    
+    if (isChecking) {
+      logger.debug('Update check already in progress, skipping', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'checkForUpdates',
+          reason: 'already_checking'
+        }
+      });
+      return;
+    }
     
     try {
       isChecking = true;
@@ -31,6 +71,15 @@
       
       // Safety timeout to clear checking state after 10 seconds
       const timeoutId = setTimeout(() => {
+        logger.warn('Update check timed out after 10 seconds', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'checkForUpdates',
+            reason: 'timeout'
+          }
+        });
+        
         updateStatus = {
           ...updateStatus,
           isCheckingForUpdates: false
@@ -45,6 +94,17 @@
       
       if (result.success) {
         lastChecked = new Date();
+        
+        logger.info('Update check completed successfully', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'checkForUpdates',
+            updateAvailable: result.updateAvailable,
+            latestVersion: result.latestVersion,
+            developmentMode: result.developmentMode
+          }
+        });
         
         if (result.developmentMode) {
           toast.info('Development Mode', {
@@ -81,6 +141,17 @@
           }
         }
         
+        logger.error('Update check failed', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'checkForUpdates',
+            errorTitle,
+            errorDescription,
+            errorDetails: result.errorDetails
+          }
+        });
+        
         toast.error(errorTitle, {
           description: errorDescription,
           duration: 8000
@@ -93,6 +164,15 @@
         };
       }
     } catch (error) {
+      logger.error('Unexpected error during update check', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'checkForUpdates',
+          errorMessage: error.message
+        }
+      });
+      
       // Handle unexpected errors (network issues, etc.)
       toast.error('Connection Error', {
         description: 'Unable to connect to update server. Please check your internet connection and try again.',
@@ -111,11 +191,27 @@
 
   // Get current version and status
   async function loadInitialData() {
+    logger.debug('Loading initial update data', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        function: 'loadInitialData'
+      }
+    });
+    
     try {
       // Get current version
       const versionResult = await window.electron.invoke('get-current-version');
       if (versionResult.success) {
         currentVersion = versionResult.version;
+        logger.debug('Current version loaded', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'loadInitialData',
+            currentVersion
+          }
+        });
       }
       
       // Get current update status
@@ -127,9 +223,25 @@
           isCheckingForUpdates: statusResult.isCheckingForUpdates,
           developmentMode: statusResult.developmentMode || false
         };
+        
+        logger.debug('Update status loaded', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'loadInitialData',
+            updateStatus
+          }
+        });
       }
     } catch (error) {
-      // TODO: Add proper logging - Failed to load initial update data
+      logger.error('Failed to load initial update data', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'loadInitialData',
+          errorMessage: error.message
+        }
+      });
     }
   }
 
@@ -164,6 +276,15 @@
 
   // Test update notification (development only)
   function testUpdateNotification() {
+    logger.info('Testing update notification UI', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        function: 'testUpdateNotification',
+        developmentMode: true
+      }
+    });
+    
     toast.info('Development Mode Test', {
       description: 'In development mode, update notifications are disabled. Configure your GitHub repository to enable real update checking.',
       duration: 5000
@@ -172,8 +293,25 @@
 
   // Download update
   async function downloadUpdate() {
+    logger.info('Starting update download', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        function: 'downloadUpdate',
+        isAlreadyDownloading: isDownloading
+      }
+    });
+    
     // Prevent multiple simultaneous downloads
     if (isDownloading) {
+      logger.debug('Download already in progress, skipping', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'downloadUpdate',
+          reason: 'already_downloading'
+        }
+      });
       return;
     }
     
@@ -182,14 +320,39 @@
       const result = await window.electron.invoke('download-update');
       
       if (result.success) {
+        logger.info('Update download initiated successfully', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'downloadUpdate',
+            result: 'success'
+          }
+        });
         // Don't show notification here - UpdateNotification component handles it
         // This prevents duplicate notifications
       } else {
         isDownloading = false;
+        logger.error('Update download failed', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'downloadUpdate',
+            error: result.error
+          }
+        });
         throw new Error(result.error);
       }
     } catch (error) {
       isDownloading = false;
+      logger.error('Error during update download', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'downloadUpdate',
+          errorMessage: error.message
+        }
+      });
+      
       toast.error('Download Failed', {
         description: error.message,
         duration: 8000
@@ -199,21 +362,66 @@
 
   // Check if server is running before install
   async function checkServerStatus() {
+    logger.debug('Checking server status before update install', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        function: 'checkServerStatus'
+      }
+    });
+    
     try {
       const result = await window.electron.invoke('get-server-status');
-      return result.isRunning || false;
+      const isRunning = result.isRunning || false;
+      
+      logger.debug('Server status check completed', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'checkServerStatus',
+          isRunning
+        }
+      });
+      
+      return isRunning;
     } catch (error) {
+      logger.error('Error checking server status', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'checkServerStatus',
+          errorMessage: error.message,
+          fallback: false
+        }
+      });
       return false;
     }
   }
 
   // Install update
   async function installUpdate() {
+    logger.info('Starting update installation', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        function: 'installUpdate'
+      }
+    });
+    
     try {
       // Check if server is running
       const serverRunning = await checkServerStatus();
       
       if (serverRunning) {
+        logger.warn('Cannot install update - server is running', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'installUpdate',
+            reason: 'server_running'
+          }
+        });
+        
         toast.error('Cannot Install Update', {
           description: 'Please stop the Minecraft server before installing the update to prevent data corruption.',
           duration: 10000
@@ -221,17 +429,51 @@
         return;
       }
 
+      logger.debug('Server is not running, proceeding with installation', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'installUpdate'
+        }
+      });
+      
       const result = await window.electron.invoke('install-update');
       
       if (result.success) {
+        logger.info('Update installation initiated successfully', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'installUpdate',
+            result: 'success'
+          }
+        });
+        
         toast.info('Installing Update', {
           description: 'The app will restart to complete the installation',
           duration: 5000
         });
       } else {
+        logger.error('Update installation failed', {
+          category: 'ui',
+          data: {
+            component: 'UpdateChecker',
+            function: 'installUpdate',
+            error: result.error
+          }
+        });
         throw new Error(result.error);
       }
     } catch (error) {
+      logger.error('Error during update installation', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          function: 'installUpdate',
+          errorMessage: error.message
+        }
+      });
+      
       toast.error('Installation Failed', {
         description: error.message,
         duration: 8000
@@ -244,11 +486,28 @@
     
     // Listen for update status changes
     window.electron.on('update-checking-for-update', () => {
+      logger.debug('Update checking event received', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          event: 'update-checking-for-update'
+        }
+      });
+      
       updateStatus.isCheckingForUpdates = true;
       updateStatus = { ...updateStatus };
     });
     
     window.electron.on('update-available', (info) => {
+      logger.info('Update available event received', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          event: 'update-available',
+          version: info.version
+        }
+      });
+      
       updateStatus.updateAvailable = true;
       updateStatus.latestVersion = info.version;
       updateStatus.isCheckingForUpdates = false;
@@ -257,6 +516,14 @@
     });
     
     window.electron.on('update-not-available', () => {
+      logger.debug('Update not available event received', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          event: 'update-not-available'
+        }
+      });
+      
       updateStatus.updateAvailable = false;
       updateStatus.isCheckingForUpdates = false;
       updateStatus = { ...updateStatus };
@@ -264,12 +531,32 @@
     
     // Listen for download progress
     window.electron.on('update-download-progress', (progress) => {
+      logger.debug('Update download progress received', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          event: 'update-download-progress',
+          percent: progress.percent,
+          bytesPerSecond: progress.bytesPerSecond,
+          total: progress.total,
+          transferred: progress.transferred
+        }
+      });
+      
       downloadProgress = progress;
       isDownloading = true;
     });
     
     // Listen for download completion
     window.electron.on('update-downloaded', () => {
+      logger.info('Update download completed', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          event: 'update-downloaded'
+        }
+      });
+      
       isDownloading = false;
       isDownloaded = true;
       
@@ -278,6 +565,15 @@
     
     // Handle update errors with friendly messages
     window.electron.on('update-error', (errorData) => {
+      logger.error('Update error event received', {
+        category: 'ui',
+        data: {
+          component: 'UpdateChecker',
+          event: 'update-error',
+          errorData
+        }
+      });
+      
       updateStatus.isCheckingForUpdates = false;
       updateStatus = { ...updateStatus };
       

@@ -3,6 +3,8 @@
     "moduleResolution": "bundler",
     "target": "ESNext",
     "module": "ESNext",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
     /**
      * svelte-preprocess cannot figure out whether you have
      * a value or a type, so tell TypeScript to enforce using
@@ -16,7 +18,6 @@
      * correct position, enable source maps by default.
      */
     "sourceMap": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
     /**
      * Typecheck JS in `.svelte` and `.js` files by default.
