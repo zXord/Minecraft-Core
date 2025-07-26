@@ -12,7 +12,7 @@ function safeSend(channel, data) {
         !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send(channel, data);
     }
-  } catch (error) {
+  } catch {
     // Silently ignore errors when trying to send to destroyed windows
     // This can happen during app shutdown or window transitions
     // TODO: Add proper logging - Failed to send message to channel

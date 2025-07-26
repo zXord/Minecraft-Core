@@ -3,6 +3,7 @@
  */
 import { safeInvoke } from '../ipcUtils.js';
 import { get } from 'svelte/store';
+import { SvelteSet } from 'svelte/reactivity';
 import {
   installedMods,
   installedModInfo,
@@ -104,7 +105,7 @@ export async function loadMods(serverPath) {
         }
         // Small delay before retry
         await new Promise(resolve => setTimeout(resolve, 100));
-      } catch (error) {
+      } catch {
         // TODO: Add proper logging - Category loading attempt failed
       }
     }
@@ -129,7 +130,7 @@ export async function loadMods(serverPath) {
     }
     
     // Then update based on current file scan results
-    result.mods?.forEach(mod => {
+    result.mods?.forEach((mod) => {
       const existingCategoryInfo = updatedCategories.get(mod.fileName);
       
       if (existingCategoryInfo) {
@@ -164,7 +165,7 @@ export async function loadMods(serverPath) {
     try {
       const { saveModCategories } = await import('../../stores/modStore.js');
       await saveModCategories();
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to save updated mod categories
     }
 
@@ -181,7 +182,7 @@ export async function loadMods(serverPath) {
       }
         // Process installed mod info to ensure we have version IDs and proper data
       const modVersionsFromCache = get(installedModVersionsCache);
-      const updatedModInfo = modInfo.map(info => {
+      const updatedModInfo = modInfo.map((info) => {
         // Ensure we have a clean object with all necessary properties
         const cleanInfo = {
           fileName: info.fileName,
@@ -206,7 +207,7 @@ export async function loadMods(serverPath) {
       });
       
       // Update stores with clean, properly structured data
-      const validProjectIds = new Set(updatedModInfo.map(info => info.projectId).filter(Boolean));
+      const validProjectIds = new SvelteSet(updatedModInfo.map(info => info.projectId).filter(Boolean));
       installedModIds.set(validProjectIds);
       installedModInfo.set(updatedModInfo);
       
@@ -215,7 +216,7 @@ export async function loadMods(serverPath) {
         checkForUpdates(serverPath)
       }, 500);
         return true;
-    } catch (err) {
+    } catch {
       // TODO: Add proper logging - Error getting mod info
       // Continue without installed mod IDs, still consider this a success
       return true;
@@ -471,9 +472,9 @@ export async function installMod(mod, serverPath) {
       // Installation failed
       throw new Error(result.error || 'Unknown error during installation');
     }
-  } catch (error) {
+  } catch (err) {
     // TODO: Add proper logging
-    errorMessage.set(`Failed to install mod: ${error.message}`);
+    errorMessage.set(`Failed to install mod: ${err.message}`);
     return false;
   } finally {
     // Always update the installing state
@@ -552,8 +553,8 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
       errorMessage.set(`Failed to delete ${modName}: ${result?.error || 'Unknown error'}`);
       return false;
     }
-  } catch (err) {
-    errorMessage.set(`Failed to delete ${modName}: ${err.message || 'Unknown error'}`);
+  } catch (error) {
+    errorMessage.set(`Failed to delete ${modName}: ${error.message || 'Unknown error'}`);
     return false;
   }
 }
@@ -684,7 +685,7 @@ export async function checkDisabledModUpdates(serverPath) {
     }
     disabledModUpdates.set(disabledUpdatesMap);
     
-  } catch (error) {
+  } catch {
     // TODO: Add proper logging - Failed to check disabled mod updates
     disabledModUpdates.set(new Map());
   }
@@ -719,9 +720,8 @@ export async function enableAndUpdateMod(serverPath, modFileName, projectId, tar
       
       // Remove from disabled mods store
       disabledMods.update(mods => {
-        const newMods = new Set(mods);
-        newMods.delete(modFileName);
-        return newMods;
+        mods.delete(modFileName);
+        return mods;
       });
       
       // Force reload the mod list to get the latest information
@@ -737,8 +737,8 @@ export async function enableAndUpdateMod(serverPath, modFileName, projectId, tar
       return false;
     }
     
-  } catch (error) {
-    errorMessage.set(`Error enabling and updating mod: ${error.message}`);
+  } catch (err) {
+    errorMessage.set(`Error enabling and updating mod: ${err.message}`);
     setTimeout(() => errorMessage.set(''), 5000);
     return false;
   }

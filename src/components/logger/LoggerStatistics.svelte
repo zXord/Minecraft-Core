@@ -108,7 +108,7 @@
         <div class="stats-section">
           <h3>Log Levels</h3>
           <div class="levels-chart">
-            {#each getSortedLevels() as [level, count]}
+            {#each getSortedLevels() as [level, count] (level)}
               <div class="level-item">
                 <div class="level-info">
                   <div class="level-indicator" style="background-color: {getLevelColor(level)}"></div>
@@ -133,7 +133,7 @@
         <div class="stats-section">
           <h3>Top Categories</h3>
           <div class="category-list">
-            {#each getTopCategories() as [category, count]}
+            {#each getTopCategories() as [category, count] (category)}
               <div class="category-item">
                 <div class="category-name">{category}</div>
                 <div class="category-count">{count.toLocaleString()} logs</div>
@@ -146,7 +146,7 @@
         <div class="stats-section">
           <h3>Top Instances</h3>
           <div class="instance-list">
-            {#each getTopInstances() as [instance, count]}
+            {#each getTopInstances() as [instance, count] (instance)}
               <div class="instance-item">
                 <div class="instance-name">{instance}</div>
                 <div class="instance-count">{count.toLocaleString()} logs</div>

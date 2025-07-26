@@ -4,6 +4,7 @@
 import { get } from 'svelte/store';
 import { installedModInfo, modsWithUpdates, disabledMods } from '../../stores/modStore.js';
 import { safeInvoke } from '../ipcUtils.js';
+import logger from '../logger.js';
 
 /**
  * Check compatibility of dependencies with installed mods
@@ -12,10 +13,27 @@ import { safeInvoke } from '../ipcUtils.js';
  * @returns {Promise<Array>} - Array of compatibility issues
  */
 export async function checkDependencyCompatibility(dependencies, mainModId = null, freshInstalledInfo = null) {
+  logger.info('Checking dependency compatibility', {
+    category: 'mods',
+    data: {
+      function: 'checkDependencyCompatibility',
+      dependenciesCount: dependencies ? dependencies.length : 0,
+      mainModId,
+      hasFreshInstalledInfo: !!freshInstalledInfo
+    }
+  });
+  
   const issues = [];
   
   // Skip if no dependencies
   if (!dependencies || dependencies.length === 0) {
+    logger.debug('No dependencies to check', {
+      category: 'mods',
+      data: {
+        function: 'checkDependencyCompatibility',
+        dependencies
+      }
+    });
     return issues;
   }
   // Use fresh installed info if provided, otherwise get from store
@@ -24,6 +42,17 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
   const disabled = get(disabledMods); // Get the set of disabled mods
   const installedIds = new Set(installedInfo.map(info => info.projectId).filter(Boolean));
   
+  logger.debug('Retrieved mod information for compatibility check', {
+    category: 'mods',
+    data: {
+      function: 'checkDependencyCompatibility',
+      installedModCount: installedInfo.length,
+      updateCount: updates.size,
+      disabledModCount: disabled.size,
+      installedIdsCount: installedIds.size
+    }
+  });
+  
   // First deduplicate dependencies by project ID to avoid showing the same dependency multiple times
   const uniqueDependencies = [];
   const seenProjectIds = new Set();
@@ -31,6 +60,13 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
   // If we have a main mod ID, add it to seenProjectIds to avoid self-dependencies
   if (mainModId) {
     seenProjectIds.add(mainModId);
+    logger.debug('Added main mod ID to avoid self-dependencies', {
+      category: 'mods',
+      data: {
+        function: 'checkDependencyCompatibility',
+        mainModId: mainModId
+      }
+    });
   }
   
   for (const dep of dependencies) {
@@ -44,12 +80,32 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
     
     seenProjectIds.add(projectId);
     uniqueDependencies.push(dep);
-  }  
+  }
+  
+  logger.debug('Deduplicated dependencies', {
+    category: 'mods',
+    data: {
+      function: 'checkDependencyCompatibility',
+      originalCount: dependencies.length,
+      uniqueCount: uniqueDependencies.length,
+      duplicatesRemoved: dependencies.length - uniqueDependencies.length
+    }
+  });  
   // Process each unique dependency
   for (const dep of uniqueDependencies) {
     // Handle both project_id (from API) and projectId (from our normalized format)
     const projectId = dep.project_id || dep.projectId;
     const dependencyType = dep.dependency_type || dep.dependencyType;
+    
+    logger.debug('Processing dependency', {
+      category: 'mods',
+      data: {
+        function: 'checkDependencyCompatibility',
+        projectId: projectId,
+        dependencyType: dependencyType,
+        hasVersionRequirement: !!(dep.version_requirement || dep.versionRequirement)
+      }
+    });
     
     // Try to get a better name for the dependency if it doesn't have one
     let name = dep.name || null;
@@ -75,8 +131,18 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
             name = projectInfo.title;
           }
         }
-      } catch {
+      } catch (error) {
         // Ignore errors when fetching project info - fallback to other methods
+        logger.debug('Failed to fetch project info, using fallback methods', {
+          category: 'network',
+          data: {
+            function: 'checkDependencyCompatibility',
+            error: error.message,
+            context: 'projectInfoFallback',
+            projectId: projectId,
+            errorType: error.constructor.name
+          }
+        });
       }
     }
     
@@ -107,6 +173,16 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
       
       // If the mod is not installed, it's a missing dependency
       if (!isInstalled) {
+        logger.debug('Found missing required dependency', {
+          category: 'mods',
+          data: {
+            function: 'checkDependencyCompatibility',
+            projectId: projectId,
+            dependencyName: name,
+            versionRequirement: dep.version_requirement || dep.versionRequirement
+          }
+        });
+        
         // Handle missing dependency - create a dependency issue
         const missingIssue = {
           type: 'missing',
@@ -171,14 +247,34 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
               missingIssue.versionInfo = `v${latestVersion}`;
             }
           }
-        } catch {
+        } catch (error) {
           // Ignore errors when fetching version info - continue without version details
+          logger.debug('Failed to fetch version info, continuing without version details', {
+            category: 'network',
+            data: {
+              function: 'checkDependencyCompatibility',
+              error: error.message,
+              context: 'versionInfoFallback',
+              projectId: projectId,
+              errorType: error.constructor.name
+            }
+          });
         }
         
         issues.push(missingIssue);
       } 
       // If the mod IS installed but disabled, add a disabled issue
       else if (isDisabled) {
+        logger.debug('Found disabled required dependency', {
+          category: 'mods',
+          data: {
+            function: 'checkDependencyCompatibility',
+            projectId: projectId,
+            dependencyName: name,
+            fileName: installedMod?.fileName
+          }
+        });
+        
         const disabledIssue = {
           type: 'disabled',
           dependency: {
@@ -199,6 +295,18 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
         
         if (versionRequirement && installedMod.versionNumber) {
           const isCompatible = checkVersionCompatibility(installedMod.versionNumber, versionRequirement);
+          
+          logger.debug('Checked version compatibility for installed dependency', {
+            category: 'mods',
+            data: {
+              function: 'checkDependencyCompatibility',
+              projectId: projectId,
+              dependencyName: name,
+              installedVersion: installedMod.versionNumber,
+              versionRequirement: versionRequirement,
+              isCompatible: isCompatible
+            }
+          });
           
           if (!isCompatible) {
             // For version mismatch issues, ALWAYS use the installed mod's proper name
@@ -247,11 +355,33 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                   }
                 }
               }
-            } catch {
+            } catch (error) {
               // Ignore errors when fetching version info - continue with version mismatch detection
+              logger.debug('Failed to fetch version info for mismatch detection', {
+                category: 'network',
+                data: {
+                  function: 'checkDependencyCompatibility',
+                  error: error.message,
+                  context: 'versionMismatchDetection',
+                  projectId: projectId,
+                  errorType: error.constructor.name
+                }
+              });
             }
             
             // Version mismatch - the installed version doesn't meet requirements
+            logger.debug('Found version mismatch for dependency', {
+              category: 'mods',
+              data: {
+                function: 'checkDependencyCompatibility',
+                projectId: projectId,
+                dependencyName: displayName,
+                installedVersion: installedMod.versionNumber,
+                requiredVersion: versionRequirement,
+                compatibleVersion: compatibleVersion
+              }
+            });
+            
             issues.push({
               type: 'version_mismatch',
               dependency: {
@@ -277,7 +407,21 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
         
         if (updateInfo) {
           // Only suggest updates if they don't conflict with version requirements
-          if (!versionRequirement || checkVersionCompatibility(updateInfo.versionNumber, versionRequirement)) {
+          const updateCompatible = !versionRequirement || checkVersionCompatibility(updateInfo.versionNumber, versionRequirement);
+          
+          logger.debug('Checked update availability for dependency', {
+            category: 'mods',
+            data: {
+              function: 'checkDependencyCompatibility',
+              projectId: projectId,
+              dependencyName: name,
+              currentVersion: installedMod.versionNumber,
+              updateVersion: updateInfo.versionNumber,
+              updateCompatible: updateCompatible
+            }
+          });
+          
+          if (updateCompatible) {
             issues.push({
               type: 'update_available',
               dependency: {
@@ -297,6 +441,18 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
     }
   }
   
+  logger.info('Dependency compatibility check completed', {
+    category: 'mods',
+    data: {
+      function: 'checkDependencyCompatibility',
+      issuesFound: issues.length,
+      issueTypes: issues.reduce((acc, issue) => {
+        acc[issue.type] = (acc[issue.type] || 0) + 1;
+        return acc;
+      }, {})
+    }
+  });
+  
   return issues;
 }
 
@@ -307,31 +463,113 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
  * @returns {boolean} - Whether the version is compatible
  */
 export function checkVersionCompatibility(currentVersion, requirement) {
+  logger.debug('Checking version compatibility', {
+    category: 'mods',
+    data: {
+      function: 'checkVersionCompatibility',
+      currentVersion,
+      requirement
+    }
+  });
+  
   // No requirement means any version is fine
-  if (!requirement) return true;
+  if (!requirement) {
+    logger.debug('No requirement specified, version is compatible', {
+      category: 'mods',
+      data: {
+        function: 'checkVersionCompatibility',
+        currentVersion,
+        result: true
+      }
+    });
+    return true;
+  }
   
   // Exact match
-  if (currentVersion === requirement) return true;
+  if (currentVersion === requirement) {
+    logger.debug('Exact version match found', {
+      category: 'mods',
+      data: {
+        function: 'checkVersionCompatibility',
+        currentVersion,
+        requirement,
+        result: true
+      }
+    });
+    return true;
+  }
   
   // Handle version ranges
   if (requirement.startsWith('>=')) {
     const minVersion = requirement.substring(2);
-    return compareVersions(currentVersion, minVersion) >= 0;
+    const result = compareVersions(currentVersion, minVersion) >= 0;
+    
+    logger.debug('Version compatibility check: greater than or equal', {
+      category: 'mods',
+      data: {
+        function: 'checkVersionCompatibility',
+        currentVersion,
+        minVersion,
+        result,
+        operator: '>='
+      }
+    });
+    
+    return result;
   }
   
   if (requirement.startsWith('>')) {
     const minVersion = requirement.substring(1);
-    return compareVersions(currentVersion, minVersion) > 0;
+    const result = compareVersions(currentVersion, minVersion) > 0;
+    
+    logger.debug('Version compatibility check: greater than', {
+      category: 'mods',
+      data: {
+        function: 'checkVersionCompatibility',
+        currentVersion,
+        minVersion,
+        result,
+        operator: '>'
+      }
+    });
+    
+    return result;
   }
   
   if (requirement.startsWith('<=')) {
     const maxVersion = requirement.substring(2);
-    return compareVersions(currentVersion, maxVersion) <= 0;
+    const result = compareVersions(currentVersion, maxVersion) <= 0;
+    
+    logger.debug('Version compatibility check: less than or equal', {
+      category: 'mods',
+      data: {
+        function: 'checkVersionCompatibility',
+        currentVersion,
+        maxVersion,
+        result,
+        operator: '<='
+      }
+    });
+    
+    return result;
   }
   
   if (requirement.startsWith('<')) {
     const maxVersion = requirement.substring(1);
-    return compareVersions(currentVersion, maxVersion) < 0;
+    const result = compareVersions(currentVersion, maxVersion) < 0;
+    
+    logger.debug('Version compatibility check: less than', {
+      category: 'mods',
+      data: {
+        function: 'checkVersionCompatibility',
+        currentVersion,
+        maxVersion,
+        result,
+        operator: '<'
+      }
+    });
+    
+    return result;
   }
   
   // Handle version range with tilde (~)
@@ -347,12 +585,40 @@ export function checkVersionCompatibility(currentVersion, requirement) {
       maxParts[2] = '0';
       const maxVersion = maxParts.join('.');
       
-      return compareVersions(currentVersion, minVersion) >= 0 && 
-             compareVersions(currentVersion, maxVersion) < 0;
+      const result = compareVersions(currentVersion, minVersion) >= 0 && 
+                     compareVersions(currentVersion, maxVersion) < 0;
+      
+      logger.debug('Version compatibility check: tilde range', {
+        category: 'mods',
+        data: {
+          function: 'checkVersionCompatibility',
+          currentVersion,
+          baseVersion,
+          minVersion,
+          maxVersion,
+          result,
+          operator: '~'
+        }
+      });
+      
+      return result;
     }
     
     // Default to exact match if format not recognized
-    return currentVersion === baseVersion;
+    const result = currentVersion === baseVersion;
+    
+    logger.debug('Version compatibility check: tilde fallback to exact', {
+      category: 'mods',
+      data: {
+        function: 'checkVersionCompatibility',
+        currentVersion,
+        baseVersion,
+        result,
+        operator: '~ (fallback)'
+      }
+    });
+    
+    return result;
   }
   
   // Handle version range with caret (^)
@@ -369,16 +635,57 @@ export function checkVersionCompatibility(currentVersion, requirement) {
       maxParts[2] = '0';
       const maxVersion = maxParts.join('.');
       
-      return compareVersions(currentVersion, minVersion) >= 0 && 
-             compareVersions(currentVersion, maxVersion) < 0;
+      const result = compareVersions(currentVersion, minVersion) >= 0 && 
+                     compareVersions(currentVersion, maxVersion) < 0;
+      
+      logger.debug('Version compatibility check: caret range', {
+        category: 'mods',
+        data: {
+          function: 'checkVersionCompatibility',
+          currentVersion,
+          baseVersion,
+          minVersion,
+          maxVersion,
+          result,
+          operator: '^'
+        }
+      });
+      
+      return result;
     }
     
     // Default to exact match if format not recognized
-    return currentVersion === baseVersion;
+    const result = currentVersion === baseVersion;
+    
+    logger.debug('Version compatibility check: caret fallback to exact', {
+      category: 'mods',
+      data: {
+        function: 'checkVersionCompatibility',
+        currentVersion,
+        baseVersion,
+        result,
+        operator: '^ (fallback)'
+      }
+    });
+    
+    return result;
   }
   
   // Fallback - assume we need an exact match
-  return currentVersion === requirement;
+  const result = currentVersion === requirement;
+  
+  logger.debug('Version compatibility check completed', {
+    category: 'mods',
+    data: {
+      function: 'checkVersionCompatibility',
+      currentVersion,
+      requirement,
+      result,
+      method: 'exact_match_fallback'
+    }
+  });
+  
+  return result;
 }
 
 /**
@@ -412,6 +719,14 @@ function compareVersions(versionA, versionB) {
  * @returns {Promise<Object>} - Compatibility report with incompatible mods and suggestions
  */
 export async function checkClientModCompatibility(newMinecraftVersion, clientMods = []) {
+  logger.info('Checking client mod compatibility', {
+    category: 'mods',
+    data: {
+      function: 'checkClientModCompatibility',
+      newMinecraftVersion,
+      clientModsCount: clientMods ? clientMods.length : 0
+    }
+  });
   
   const compatibilityReport = {
     compatible: [],
@@ -423,12 +738,39 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
   };
   
   if (!clientMods || clientMods.length === 0) {
+    logger.debug('No client mods to check', {
+      category: 'mods',
+      data: {
+        function: 'checkClientModCompatibility',
+        newMinecraftVersion,
+        clientMods
+      }
+    });
     return compatibilityReport;
   }
   
   for (const mod of clientMods) {
-    try {      // Skip if mod is disabled
+    try {
+      logger.debug('Processing client mod for compatibility', {
+        category: 'mods',
+        data: {
+          function: 'checkClientModCompatibility',
+          modName: mod.name || mod.fileName,
+          modId: mod.projectId,
+          disabled: mod.disabled,
+          hasGameVersions: !!(mod.gameVersions?.length)
+        }
+      });
+      
+      // Skip if mod is disabled
       if (mod.disabled) {
+        logger.debug('Skipping disabled mod', {
+          category: 'mods',
+          data: {
+            function: 'checkClientModCompatibility',
+            modName: mod.name || mod.fileName
+          }
+        });
         continue;
       }
       
@@ -437,6 +779,16 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
         const isCompatible = mod.gameVersions.includes(newMinecraftVersion);
         
         if (isCompatible) {
+          logger.debug('Mod is compatible with new Minecraft version', {
+            category: 'mods',
+            data: {
+              function: 'checkClientModCompatibility',
+              modName: mod.name || mod.fileName,
+              newMinecraftVersion: newMinecraftVersion,
+              supportedVersions: mod.gameVersions
+            }
+          });
+          
           compatibilityReport.compatible.push({
             ...mod,
             compatibilityStatus: 'compatible'
@@ -464,12 +816,32 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
                 });
                 compatibilityReport.hasUpdatable = true;
               }
-            } catch {
+            } catch (error) {
               // Ignore errors when checking for mod updates - continue with compatibility analysis
+              logger.debug('Failed to check for mod updates during compatibility analysis', {
+                category: 'network',
+                data: {
+                  function: 'checkClientModCompatibility',
+                  error: error.message,
+                  context: 'modUpdateCheck',
+                  projectId: mod.projectId,
+                  errorType: error.constructor.name
+                }
+              });
             }
           }
           
           if (!hasUpdate) {
+            logger.debug('Mod is incompatible with new Minecraft version', {
+              category: 'mods',
+              data: {
+                function: 'checkClientModCompatibility',
+                modName: mod.name || mod.fileName,
+                newMinecraftVersion: newMinecraftVersion,
+                supportedVersions: mod.gameVersions
+              }
+            });
+            
             compatibilityReport.incompatible.push({
               ...mod,
               compatibilityStatus: 'incompatible',
@@ -481,6 +853,17 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
       } else {
         // No version information available - try filename-based checking
         const filenameCompatibility = checkModCompatibilityFromFilename(mod.fileName || '', newMinecraftVersion);
+        
+        logger.debug('Using filename-based compatibility check', {
+          category: 'mods',
+          data: {
+            function: 'checkClientModCompatibility',
+            modName: mod.name || mod.fileName,
+            fileName: mod.fileName,
+            isCompatible: filenameCompatibility.isCompatible,
+            confidence: filenameCompatibility.confidence
+          }
+        });
         
         if (filenameCompatibility.isCompatible) {
           compatibilityReport.compatible.push({
@@ -496,13 +879,38 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
           });
         }
       }
-    } catch (error) {
+    } catch (err) {
+      logger.error(`Error checking mod compatibility: ${err.message}`, {
+        category: 'mods',
+        data: {
+          function: 'checkClientModCompatibility',
+          modName: mod.name || mod.fileName,
+          modId: mod.projectId,
+          errorType: err.constructor.name
+        }
+      });
+      
       compatibilityReport.unknown.push({
         ...mod,
         compatibilityStatus: 'unknown',
-        reason: `Error checking compatibility: ${error.message}`
-      });    }
+        reason: `Error checking compatibility: ${err.message}`
+      });
+    }
   }
+  
+  logger.info('Client mod compatibility check completed', {
+    category: 'mods',
+    data: {
+      function: 'checkClientModCompatibility',
+      newMinecraftVersion,
+      compatibleCount: compatibilityReport.compatible.length,
+      incompatibleCount: compatibilityReport.incompatible.length,
+      needsUpdateCount: compatibilityReport.needsUpdate.length,
+      unknownCount: compatibilityReport.unknown.length,
+      hasIncompatible: compatibilityReport.hasIncompatible,
+      hasUpdatable: compatibilityReport.hasUpdatable
+    }
+  });
   
   return compatibilityReport;
 }
@@ -514,7 +922,25 @@ export async function checkClientModCompatibility(newMinecraftVersion, clientMod
  * @returns {Object} - Compatibility result
  */
 function checkModCompatibilityFromFilename(filename, minecraftVersion) {
+  logger.debug('Checking mod compatibility from filename', {
+    category: 'mods',
+    data: {
+      function: 'checkModCompatibilityFromFilename',
+      filename,
+      minecraftVersion
+    }
+  });
+  
   if (!filename || !minecraftVersion) {
+    logger.debug('Invalid filename or version for compatibility check', {
+      category: 'mods',
+      data: {
+        function: 'checkModCompatibilityFromFilename',
+        filename,
+        minecraftVersion,
+        result: { isCompatible: false, confidence: 'low' }
+      }
+    });
     return { isCompatible: false, confidence: 'low' };
   }
   
@@ -533,5 +959,18 @@ function checkModCompatibilityFromFilename(filename, minecraftVersion) {
     }
   }
   
-  return { isCompatible: false, confidence: 'medium' };
+  const result = { isCompatible: false, confidence: 'medium' };
+  
+  logger.debug('Filename compatibility check completed', {
+    category: 'mods',
+    data: {
+      function: 'checkModCompatibilityFromFilename',
+      filename,
+      minecraftVersion,
+      result,
+      foundMatches: matches
+    }
+  });
+  
+  return result;
 }

@@ -572,7 +572,7 @@ async function saveDisabledMods(serverPath, disabledMods) {
           if (!disabledMods.includes(oldFile)) {
             disabledMods.push(oldFile);
           }
-        } catch (migrationErr) {
+        } catch {
           // TODO: Add proper logging - Warning: Failed to migrate disabled mod
         }
       }
@@ -937,7 +937,7 @@ async function processModsDirectory(modsDir, disabledMods) {
         const destPath = path.join(modsDir, modFile + '.disabled');
         try {
           await fs.rename(sourcePath, destPath);
-        } catch (moveErr) {
+        } catch {
           // TODO: Add proper logging - Warning: Failed to disable mod
         }
       }
@@ -951,12 +951,12 @@ async function processModsDirectory(modsDir, disabledMods) {
         const destPath = path.join(modsDir, modFile);
         try {
           await fs.rename(sourcePath, destPath);
-        } catch (moveErr) {
+        } catch {
           // TODO: Add proper logging - Warning: Failed to enable mod
         }
       }
     }
-  } catch (readErr) {
+  } catch {
     // TODO: Add proper logging - Warning: Could not process mods directory
   }
 }

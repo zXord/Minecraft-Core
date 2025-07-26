@@ -1,42 +1,40 @@
-<script lang="ts">
-  import { createEventDispatcher } from 'svelte';  // Types
-  interface ModSyncStatus {
-    synchronized: boolean;
-    needsDownload?: number;
-    needsOptionalDownload?: number;
-    needsAcknowledgment?: number;
-    needsRemoval?: number;
-    totalRequired?: number;
-    totalOptional?: number;
-    totalPresent?: number;
-    totalOptionalPresent?: number;
-    missingMods?: string[];
-    missingOptionalMods?: string[];
-    presentEnabledMods?: string[];
-    presentDisabledMods?: string[];
-  }
+<script>
+  import { createEventDispatcher } from 'svelte';
+  
+  // Types
   // Props
-  export let modSyncStatus: ModSyncStatus | null = null;
-  export let requiredModsCount: number = 0;
-  export let optionalModsCount: number = 0;
-  export let pendingAcknowledgments: any[] = [];
+  /** @type {null | {
+   *   totalRequired?: number,
+   *   totalOptional?: number,
+   *   needsRemoval?: number,
+   *   needsDownload?: number,
+   *   needsOptionalDownload?: number,
+   *   needsAcknowledgment?: number,
+   *   synchronized?: boolean,
+   *   requiredRemovals?: any[],
+   *   optionalRemovals?: any[]
+   * }} */
+  export let modSyncStatus = null;
+  export let requiredModsCount = 0;
+  export let optionalModsCount = 0;
+  export let pendingAcknowledgments = [];
 
   // Create event dispatcher
   const dispatch = createEventDispatcher();
 
-  function downloadRequired(): void {
+  function downloadRequired() {
     dispatch('download-required');
   }
 
-  function downloadOptional(): void {
+  function downloadOptional() {
     dispatch('download-optional');
   }
 
-  function refresh(): void {
+  function refresh() {
     dispatch('refresh');
   }
 
-  function acknowledgeAllDependencies(): void {
+  function acknowledgeAllDependencies() {
     dispatch('acknowledge-all-dependencies');
   }
 </script>
@@ -142,7 +140,7 @@
             <p>You need to download {modSyncStatus.needsDownload} required mod{modSyncStatus.needsDownload > 1 ? 's' : ''} before you can play.</p>
           </div>
         </div>      {:else}
-        {@const actualRemovals = [...((modSyncStatus as any).requiredRemovals || []), ...((modSyncStatus as any).optionalRemovals || [])]}
+        {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
         {@const acknowledgments = pendingAcknowledgments || []}
         
         {#if actualRemovals.length > 0 || acknowledgments.length > 0}
@@ -187,7 +185,7 @@
           📥 Download Required ({modSyncStatus.needsDownload})
         </button>
       {:else}
-        {@const actualRemovals = [...((modSyncStatus as any).requiredRemovals || []), ...((modSyncStatus as any).optionalRemovals || [])]}
+        {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
         {@const acknowledgments = pendingAcknowledgments || []}
         
         {#if actualRemovals.length > 0}

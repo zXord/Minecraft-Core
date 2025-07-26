@@ -19,21 +19,20 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.28.0",
-    "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@typescript-eslint/eslint-plugin": "^8.34.0",
     "@typescript-eslint/parser": "^8.34.0",
     "concurrently": "^9.1.2",
     "electron": "^28.1.0",
     "electron-builder": "^26.0.12",
-    "eslint": "^9.28.0",
+    "eslint": "^9.31.0",
     "eslint-plugin-svelte": "^3.9.2",
     "globals": "^16.2.0",
-    "svelte": "^5.0.0",
     "typescript": "^5.8.3",
     "vite": "^6.0.0",
     "wait-on": "^7.2.0"
   },
   "dependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.1.0",
     "@xmcl/installer": "^6.1.0",
     "@xmcl/user": "^4.2.0",
     "adm-zip": "^0.5.16",
@@ -53,6 +52,7 @@
     "prismarine-nbt": "^2.7.0",
     "progress-stream": "^2.0.0",
     "rimraf": "^5.0.0",
+    "svelte": "^5.36.8",
     "svelte-sonner": "^1.0.1",
     "uuid": "^9.0.1"
   },

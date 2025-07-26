@@ -130,7 +130,7 @@ class UpdateService extends EventEmitter {
       try {
         const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
         this.currentVersion = packageJson.version;
-      } catch (error) {
+      } catch {
         // TODO: Add proper logging - Failed to read current version
         this.currentVersion = '1.0.0'; // Fallback
       }
@@ -318,7 +318,7 @@ class UpdateService extends EventEmitter {
       } else {
         store.delete('update.ignoredVersion');
       }
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to save ignored version
     }
   }
@@ -328,7 +328,7 @@ class UpdateService extends EventEmitter {
     try {
       const store = require('../utils/app-store.cjs');
       this.ignoredVersion = store.get('update.ignoredVersion') || null;
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to load ignored version
       this.ignoredVersion = null;
     }
@@ -505,7 +505,7 @@ class UpdateService extends EventEmitter {
       if (fs.existsSync(filePath)) {
         try {
           fs.unlinkSync(filePath);
-        } catch (unlinkError) {
+        } catch {
           // TODO: Add proper logging - Could not remove existing file
           // Non-fatal, as we'll overwrite it anyway.
         }

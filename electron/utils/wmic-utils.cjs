@@ -93,7 +93,7 @@ function wmicTerminate(command, options = {}) {
   
   try {
     return execSync(command, mergedOptions);
-  } catch (error) {
+  } catch {
     // Silently handle terminate errors as they're expected when no processes exist
     return null;
   }

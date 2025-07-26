@@ -652,11 +652,7 @@ class XMCLAuthHandler {
       }
       
       if (typeof msmc_meta.refresh === 'function') {
-        try {
-          refreshedXboxManager = await msmc_meta.refresh();
-        } catch (refreshError) {
-          throw refreshError;
-        }
+        refreshedXboxManager = await msmc_meta.refresh();
       } else if (typeof msmc_meta.launch === 'function') {
         // Alternative refresh method
         refreshedXboxManager = msmc_meta;
@@ -687,29 +683,25 @@ class XMCLAuthHandler {
       // Now use @xmcl/user to get fresh Xbox and Minecraft tokens
       let xboxLiveToken, xboxProfile, minecraftProfile;
       
-      try {
-        xboxLiveToken = await this.authenticator.authenticateXboxLive(refreshedXboxManager.msToken.access_token);
-        
-        if (!xboxLiveToken) {
-          throw new Error('Xbox Live authentication failed during refresh - no token returned');
-        }
+      xboxLiveToken = await this.authenticator.authenticateXboxLive(refreshedXboxManager.msToken.access_token);
+      
+      if (!xboxLiveToken) {
+        throw new Error('Xbox Live authentication failed during refresh - no token returned');
+      }
 
-        xboxProfile = await this.authenticator.authorizeXboxLive(xboxLiveToken.Token);
-        
-        if (!xboxProfile) {
-          throw new Error('Xbox Live authorization failed during refresh - no profile returned');
-        }
+      xboxProfile = await this.authenticator.authorizeXboxLive(xboxLiveToken.Token);
+      
+      if (!xboxProfile) {
+        throw new Error('Xbox Live authorization failed during refresh - no profile returned');
+      }
 
-        minecraftProfile = await this.authenticator.loginMinecraftWithXBox(
-          xboxProfile.DisplayClaims.xui[0].uhs, 
-          xboxProfile.Token
-        );
-        
-        if (!minecraftProfile || !minecraftProfile.access_token) {
-          throw new Error('Minecraft authentication failed during refresh - no access token');
-        }
-      } catch (authError) {
-        throw authError;
+      minecraftProfile = await this.authenticator.loginMinecraftWithXBox(
+        xboxProfile.DisplayClaims.xui[0].uhs, 
+        xboxProfile.Token
+      );
+      
+      if (!minecraftProfile || !minecraftProfile.access_token) {
+        throw new Error('Minecraft authentication failed during refresh - no access token');
       }
 
       // Get updated profile information

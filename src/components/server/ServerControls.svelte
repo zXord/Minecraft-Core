@@ -1,5 +1,5 @@
 <!-- @ts-ignore -->
-<script lang="ts">  /// <reference path="../../electron.d.ts" />
+<script>  /// <reference path="../../electron.d.ts" />
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';  import { serverState, updateServerMetrics } from '../../stores/serverState.js';
   import { playerState, updateOnlinePlayers, showContextMenu } from '../../stores/playerState.js';
@@ -8,6 +8,7 @@
   import { errorMessage } from '../../stores/modStore.js';
   import { settingsStore, loadSettings } from '../../stores/settingsStore.js';
   import { latestVersions, refreshLatestVersions } from '../../stores/versionUpdates.js';
+  import logger from '../../utils/logger.js';
   
   // Import compareVersions function for semantic version comparison
   function compareVersions(versionA, versionB) {
@@ -62,7 +63,7 @@
   $: isServerRunning = status === 'Running';
   $: playerNames = $playerState.onlinePlayers;
 
-  let statusCheckInterval: NodeJS.Timeout;
+  let statusCheckInterval;
   let isVisible = true;
   // Access global serverPath when local prop is empty
   $: {
@@ -131,9 +132,37 @@
   
   // Maintenance functions
   async function checkHealth() {
+    logger.info('Checking server health', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'checkHealth',
+        serverPath
+      }
+    });
+    
     try {
       healthReport = (await window.electron.invoke('check-health', serverPath)) || [];
+      
+      logger.info('Server health check completed', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'checkHealth',
+          issuesFound: healthReport.length,
+          healthReport
+        }
+      });
     } catch (err) {
+      logger.error('Failed to check server health', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'checkHealth',
+          serverPath,
+          errorMessage: err.message
+        }
+      });
       healthReport = [];
     }
   }
@@ -227,11 +256,40 @@
   let updateChecked = false;
   $: upToDate = updateChecked && !mcUpdateAvailable && !fabricUpdateAvailable && latestMcVersion && latestFabricVersion;
   async function checkVersionUpdates() {
+    logger.info('Checking for version updates', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'checkVersionUpdates',
+        currentMcVersion,
+        currentFabricVersion
+      }
+    });
     
-    await refreshLatestVersions(currentMcVersion);
-    
-    
-
+    try {
+      await refreshLatestVersions(currentMcVersion);
+      
+      logger.info('Version update check completed', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'checkVersionUpdates',
+          mcUpdateAvailable,
+          fabricUpdateAvailable,
+          latestMcVersion: $latestVersions.mc,
+          latestFabricVersion: $latestVersions.fabric
+        }
+      });
+    } catch (error) {
+      logger.error('Failed to check version updates', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'checkVersionUpdates',
+          errorMessage: error.message
+        }
+      });
+    }
     
     updateChecked = true;
   }
@@ -323,7 +381,18 @@
       }
     }
   }
-  function startServer() { 
+  function startServer() {
+    logger.info('Starting Minecraft server', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'startServer',
+        serverPath,
+        port,
+        maxRam
+      }
+    });
+    
     // Optimistic update: mark server as running immediately
     serverState.update(state => ({ ...state, status: 'Running' }));
     window.electron.invoke('start-server', { 
@@ -333,26 +402,78 @@
     }); 
   }
 
-  function stopServer() { 
+  function stopServer() {
+    logger.info('Stopping Minecraft server', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'stopServer'
+      }
+    });
+    
     window.electron.invoke('stop-server')
       .then(() => {
+        logger.debug('Server stop command sent successfully', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'stopServer'
+          }
+        });
+        
         // Force-enable inputs after the stop command is sent
         setTimeout(enableInputFields, 100);
         setTimeout(enableInputFields, 500);
+      })
+      .catch(error => {
+        logger.error('Failed to stop server', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'stopServer',
+            errorMessage: error.message
+          }
+        });
       });
   }
 
-  function killServer() { 
+  function killServer() {
+    logger.warn('Force killing Minecraft server', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'killServer'
+      }
+    });
+    
     window.electron.invoke('kill-server')
       .then(() => {
+        logger.debug('Server kill command sent successfully', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'killServer'
+          }
+        });
+        
         // Force-enable inputs after the kill command is sent
         setTimeout(enableInputFields, 100);
         setTimeout(enableInputFields, 500);
+      })
+      .catch(error => {
+        logger.error('Failed to kill server', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'killServer',
+            errorMessage: error.message
+          }
+        });
       });
   }
 
-  let statusHandler: (status: any) => void;
-  let metricsHandler: (metrics: any) => void;
+  let statusHandler;
+  let metricsHandler;
 
   // Handle visibility change
   function handleVisibilityChange() {
@@ -364,6 +485,17 @@
   }
 
   onMount(() => {
+    logger.info('ServerControls component mounted', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'onMount',
+        serverPath,
+        port,
+        maxRam
+      }
+    });
+    
     // Load dismissed help text state
     if (typeof window !== 'undefined' && window.localStorage) {
       helpTextDismissed = localStorage.getItem('managementHelpDismissed') === 'true';
@@ -434,9 +566,9 @@
         }
         
         // Handle auto-start servers if enabled (only on actual app startup, not tab switches)
-        if (!(window as any).appStartupCompleted) {
+        if (!window.appStartupCompleted) {
           await handleAutoStart();
-          (window as any).appStartupCompleted = true;
+          window.appStartupCompleted = true;
         }
       } catch (err) {
         // Failed to get settings or server status
@@ -515,6 +647,19 @@
 
   // Update server state when port or ram is changed
   function updateSettings() {
+    logger.debug('Updating server settings', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'updateSettings',
+        port,
+        maxRam,
+        managementPort,
+        autoStartMinecraft,
+        autoStartManagement
+      }
+    });
+    
     // Update local state
     serverState.update(state => ({
       ...state,
@@ -528,8 +673,15 @@
       managementPort: managementPort,
       autoStartMinecraft: autoStartMinecraft,
       autoStartManagement: autoStartManagement
-    }).catch(() => {
-      // Failed to save settings - silent fail
+    }).catch((error) => {
+      logger.error('Failed to save settings', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'updateSettings',
+          errorMessage: error.message
+        }
+      });
     });
   }
   
@@ -563,7 +715,27 @@
   
   // Management server functions
   async function startManagementServer() {
-    if (!validateServerPath(serverPath)) return;
+    if (!validateServerPath(serverPath)) {
+      logger.warn('Cannot start management server - invalid server path', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'startManagementServer',
+          serverPath
+        }
+      });
+      return;
+    }
+    
+    logger.info('Starting management server', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'startManagementServer',
+        managementPort,
+        serverPath
+      }
+    });
     
     managementServerStatus = 'starting';
     try {
@@ -574,19 +746,51 @@
       
       if (result.success) {
         managementServerStatus = 'running';
+        logger.info('Management server started successfully', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'startManagementServer',
+            managementPort
+          }
+        });
       } else {
         managementServerStatus = 'stopped';
+        logger.error('Failed to start management server', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'startManagementServer',
+            error: result.error
+          }
+        });
         errorMessage.set(`Failed to start management server: ${result.error}`);
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
       managementServerStatus = 'stopped';
+      logger.error('Error starting management server', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'startManagementServer',
+          errorMessage: error.message
+        }
+      });
       errorMessage.set(`Error starting management server: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
     }
   }
 
   async function stopManagementServer() {
+    logger.info('Stopping management server', {
+      category: 'ui',
+      data: {
+        component: 'ServerControls',
+        function: 'stopManagementServer'
+      }
+    });
+    
     managementServerStatus = 'stopping';
     try {
       const result = await window.electron.invoke('stop-management-server');
@@ -594,13 +798,36 @@
       if (result.success) {
         managementServerStatus = 'stopped';
         connectedClients = 0;
+        logger.info('Management server stopped successfully', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'stopManagementServer'
+          }
+        });
       } else {
         managementServerStatus = 'running';
+        logger.error('Failed to stop management server', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'stopManagementServer',
+            error: result.error
+          }
+        });
         errorMessage.set(`Failed to stop management server: ${result.error}`);
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
       managementServerStatus = 'running';
+      logger.error('Error stopping management server', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'stopManagementServer',
+          errorMessage: error.message
+        }
+      });
       errorMessage.set(`Error stopping management server: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
     }

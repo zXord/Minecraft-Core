@@ -42,8 +42,8 @@ async function injectBuildAssets() {
     await fs.writeFile(loggerTemplatePath, htmlContent, 'utf-8');
 
     console.log('Successfully injected assets into logger-window.html.');
-  } catch (error) {
-    console.error('Error injecting build assets:', error);
+  } catch (err) {
+    console.error('Error injecting build assets:', err);
     process.exit(1);
   }
 }

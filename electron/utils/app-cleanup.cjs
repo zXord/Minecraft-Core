@@ -18,7 +18,6 @@ function killDevelopmentProcesses() {
         'netstat -ano | findstr :5174'
       ];
       
-      let processesKilled = 0;
       let commandsCompleted = 0;
       
       killCommands.forEach((findCmd) => {
@@ -33,7 +32,7 @@ function killDevelopmentProcesses() {
                 const pid = match[1];
                 exec(`taskkill /PID ${pid} /F`, (killError) => {
                   if (!killError) {
-                    processesKilled++;
+                    // Process killed successfully
                   }
                 });
               }
@@ -63,7 +62,6 @@ function killDevelopmentProcesses() {
       ];
       
       let commandsCompleted = 0;
-      let processesKilled = 0;
       
       killCommands.forEach(cmd => {
         exec(cmd, (error, stdout) => {
@@ -75,7 +73,7 @@ function killDevelopmentProcesses() {
               if (pid) {
                 exec(`kill -9 ${pid}`, (killError) => {
                   if (!killError) {
-                    processesKilled++;
+                    // Process killed successfully
                   }
                 });
               }
@@ -117,8 +115,8 @@ function clearAllIntervals() {
     // Clear backup intervals
     const { clearBackupIntervals } = require('../ipc/backup-handlers.cjs');
     clearBackupIntervals();
-  } catch (error) {
-
+  } catch {
+    // Backup service cleanup failed - non-critical
   }
 }
 
@@ -146,8 +144,8 @@ async function performCompleteCleanup() {
     await killDevelopmentProcesses();
     
     
-  } catch (error) {
-
+  } catch {
+    // Cleanup failed - non-critical
   }
 }
 
@@ -178,8 +176,8 @@ function setupAppCleanup(app, win) {
               await performCompleteCleanup();
               isQuitting = true;
               win.close();
-            } catch (err) {
-
+            } catch {
+              // Cleanup failed, but still quit
               isQuitting = true;
               win.close();
             }
@@ -188,8 +186,8 @@ function setupAppCleanup(app, win) {
           // No server running, just do cleanup
           try {
             await performCompleteCleanup();
-          } catch (error) {
-
+          } catch {
+            // Cleanup failed - non-critical
           }
           
           isQuitting = true;
@@ -217,8 +215,8 @@ function setupAppCleanup(app, win) {
         setTimeout(() => {
           process.exit(0);
         }, 1500);
-      } catch (err) {
-
+      } catch {
+        // Exit with error code if cleanup fails
         process.exit(1);
       }
     });

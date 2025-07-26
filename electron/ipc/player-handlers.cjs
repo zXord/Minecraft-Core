@@ -1,24 +1,81 @@
 // Player management IPC handlers
 const path = require('path');
 const fs = require('fs');
+const { getLoggerHandlers } = require('./logger-handlers.cjs');
 
 // Keep track of player names associated with IPs
 const playerIpMap = new Map();
+
+// Initialize logger
+const logger = getLoggerHandlers();
 
 /**
  * Initialize the player-IP map from the persistent file
  * @param {string} serverPath Path to the server directory
  */
 function initializePlayerIpMap(serverPath) {
-  if (!serverPath || !fs.existsSync(serverPath)) return;
+  logger.debug('Initializing player-IP map', {
+    category: 'core',
+    data: {
+      handler: 'initializePlayerIpMap',
+      serverPath: serverPath || 'undefined',
+      serverPathExists: serverPath ? fs.existsSync(serverPath) : false
+    }
+  });
+
+  if (!serverPath || !fs.existsSync(serverPath)) {
+    logger.warn('Cannot initialize player-IP map: invalid server path', {
+      category: 'core',
+      data: {
+        handler: 'initializePlayerIpMap',
+        serverPath: serverPath || 'undefined',
+        reason: !serverPath ? 'no_path' : 'path_not_exists'
+      }
+    });
+    return;
+  }
   
   const playerMapFile = path.join(serverPath, 'player-ip-map.json');
-  if (fs.existsSync(playerMapFile)) {
-    const mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
+  
+  try {
+    if (fs.existsSync(playerMapFile)) {
+      const mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
+      const entryCount = Object.keys(mapData).length;
 
-    // Populate the in-memory map
-    Object.entries(mapData).forEach(([ip, playerName]) => {
-      playerIpMap.set(ip, playerName);
+      // Populate the in-memory map
+      Object.entries(mapData).forEach(([ip, playerName]) => {
+        playerIpMap.set(ip, playerName);
+      });
+
+      logger.info('Player-IP map initialized successfully', {
+        category: 'core',
+        data: {
+          handler: 'initializePlayerIpMap',
+          serverPath,
+          entryCount,
+          mapSize: playerIpMap.size
+        }
+      });
+    } else {
+      logger.debug('Player-IP map file does not exist, starting with empty map', {
+        category: 'core',
+        data: {
+          handler: 'initializePlayerIpMap',
+          serverPath,
+          playerMapFile
+        }
+      });
+    }
+  } catch (error) {
+    logger.error(`Failed to initialize player-IP map: ${error.message}`, {
+      category: 'core',
+      data: {
+        handler: 'initializePlayerIpMap',
+        serverPath,
+        playerMapFile,
+        errorType: error.constructor.name,
+        stack: error.stack
+      }
     });
   }
 }
@@ -31,11 +88,39 @@ function initializePlayerIpMap(serverPath) {
 function createPlayerHandlers() {
   return {
     'read-players': (_e, listName, serverPath) => {
+        logger.info('Reading player list', {
+          category: 'core',
+          data: {
+            handler: 'read-players',
+            listName,
+            serverPath: serverPath || 'undefined',
+            serverPathExists: serverPath ? fs.existsSync(serverPath) : false
+          }
+        });
+
         if (!serverPath || !fs.existsSync(serverPath)) {
+          logger.error('Failed to read players: invalid server path', {
+            category: 'core',
+            data: {
+              handler: 'read-players',
+              listName,
+              serverPath: serverPath || 'undefined',
+              reason: !serverPath ? 'no_path' : 'path_not_exists'
+            }
+          });
           throw new Error('Invalid server path');
         }
         
         if (!listName || typeof listName !== 'string') {
+          logger.error('Failed to read players: invalid list name', {
+            category: 'core',
+            data: {
+              handler: 'read-players',
+              listName: listName || 'undefined',
+              listNameType: typeof listName,
+              serverPath
+            }
+          });
           throw new Error('Invalid list name');
         }
         
@@ -43,17 +128,73 @@ function createPlayerHandlers() {
         if (listName === 'banned-players' || listName === 'banned') filename = 'banned-players';
         else if (listName === 'banned-ips' || listName === 'ips') filename = 'banned-ips';
         else if (!['ops', 'whitelist'].includes(filename)) {
+          logger.error('Failed to read players: unsupported list type', {
+            category: 'core',
+            data: {
+              handler: 'read-players',
+              listName,
+              filename,
+              serverPath,
+              supportedTypes: ['ops', 'whitelist', 'banned-players', 'banned-ips']
+            }
+          });
           throw new Error(`Unsupported list type: ${listName}`);
         }
         
         const file = path.join(serverPath, `${filename}.json`);
-        if (!fs.existsSync(file)) return [];
+        
+        logger.debug('Checking player list file', {
+          category: 'storage',
+          data: {
+            handler: 'read-players',
+            listName,
+            filename,
+            file,
+            fileExists: fs.existsSync(file)
+          }
+        });
+
+        if (!fs.existsSync(file)) {
+          logger.info('Player list file does not exist, returning empty list', {
+            category: 'storage',
+            data: {
+              handler: 'read-players',
+              listName,
+              filename,
+              file
+            }
+          });
+          return [];
+        }
         
         try {
-          const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+          const rawData = fs.readFileSync(file, 'utf-8');
+          const data = JSON.parse(rawData);
+          
+          logger.debug('Successfully read player list file', {
+            category: 'storage',
+            data: {
+              handler: 'read-players',
+              listName,
+              filename,
+              file,
+              dataLength: Array.isArray(data) ? data.length : 'not_array',
+              fileSize: rawData.length
+            }
+          });
           
           // Special handling for banned IPs to ensure player names are properly read
           if (filename === 'banned-ips') {
+            logger.debug('Processing banned IPs with special handling', {
+              category: 'core',
+              data: {
+                handler: 'read-players',
+                listName,
+                dataCount: Array.isArray(data) ? data.length : 0,
+                playerIpMapSize: playerIpMap.size
+              }
+            });
+
             // Initialize the player-IP map when reading banned IPs
             initializePlayerIpMap(serverPath);
             
@@ -139,6 +280,18 @@ function createPlayerHandlers() {
             
             // Save the processed data back to ensure format consistency
             fs.writeFileSync(file, JSON.stringify(processedData, null, 2));
+            
+            logger.info('Successfully processed banned IPs list', {
+              category: 'core',
+              data: {
+                handler: 'read-players',
+                listName,
+                originalCount: Array.isArray(data) ? data.length : 0,
+                processedCount: processedData.length,
+                playerIpMapSize: playerIpMap.size
+              }
+            });
+            
             return processedData;
           }
           

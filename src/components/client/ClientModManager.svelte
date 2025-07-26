@@ -1,6 +1,7 @@
-<script lang="ts">
+<script>
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-  import { get } from 'svelte/store';
+  
+  import { SvelteSet } from 'svelte/reactivity';import { get } from 'svelte/store';
   import {
     errorMessage, 
     successMessage,
@@ -56,17 +57,12 @@
   } from '../../utils/clientMods.js';
 
   // Types
-  interface Instance {
-    serverIp?: string;
-    serverPort?: string;
-    path?: string;
-    clientId?: string;
-    clientName?: string;
-  }
 
   // State and helpers moved to dedicated store
   // Props
-  export let instance: Instance | null = null; // Client instance
+  /** @type {null | {path: string, serverIp?: string, serverPort?: string, name?: string}} */
+  export let instance = null; // Client instance
+  /** @type {null | any} */
   export let clientModVersionUpdates = null; // Client mod version updates from server
   
   // Event dispatcher
@@ -94,7 +90,7 @@
   let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
   let downloadManagerCleanup;
   let unsubscribeInstalledInfo;
-  let previousPath: string | null = null;
+  let previousPath= null;
 
   let isCheckingModSync = false; // Guard to prevent reactive loops
   
@@ -274,7 +270,7 @@
       if (result.success && result.acknowledgedDeps) {
         // Merge with existing acknowledged deps instead of overwriting
         acknowledgedDeps.update(currentSet => {
-          const newSet = new Set(currentSet);
+          const newSet = new SvelteSet(currentSet);
           result.acknowledgedDeps.forEach(dep => {
             newSet.add(dep.toLowerCase());
           });
@@ -428,7 +424,7 @@
 
         installedModIds.update(ids => {
           ids.add(mod.id);
-          return new Set(ids);
+          return new SvelteSet(ids);
         });
         installedModInfo.update(info => {
           const filtered = info.filter(m => m.projectId !== mod.id);
@@ -508,7 +504,7 @@
       }
     } catch (error) {
       errorMessage.set(`Failed to install dependencies: ${error.message || 'Unknown error'}`);
-      installingModIds.set(new Set());
+      installingModIds.set(new SvelteSet());
     }
   }
   // Handle mod installation with dependency checks

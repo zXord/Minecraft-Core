@@ -1,5 +1,6 @@
 const { ipcMain } = require('electron');
 const { getLogger } = require('../services/logger-service.cjs');
+const instanceContext = require('../utils/instance-context.cjs');
 const appStore = require('../utils/app-store.cjs');
 
 class LoggerHandlers {
@@ -8,7 +9,7 @@ class LoggerHandlers {
     this.setupHandlers();
     // Removed setupRealTimeStreaming() - using window-specific streaming instead
   }
-  
+
   setupHandlers() {
     // Get logs with filtering
     ipcMain.handle('logger-get-logs', async (_, options = {}) => {
@@ -26,7 +27,7 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Get logger statistics
     ipcMain.handle('logger-get-stats', async () => {
       try {
@@ -42,7 +43,7 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Clear memory logs
     ipcMain.handle('logger-clear-logs', async () => {
       try {
@@ -57,7 +58,7 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Export logs
     ipcMain.handle('logger-export-logs', async (_, options = {}) => {
       try {
@@ -70,7 +71,7 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Update logger configuration
     ipcMain.handle('logger-update-config', async (_, config) => {
       try {
@@ -86,7 +87,7 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Get current configuration
     ipcMain.handle('logger-get-config', async () => {
       try {
@@ -101,7 +102,7 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Export crash report manually
     ipcMain.handle('logger-export-crash-report', async () => {
       try {
@@ -117,7 +118,7 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Add a log entry manually (for testing)
     ipcMain.handle('logger-add-log', async (_, level, message, options = {}) => {
       try {
@@ -133,7 +134,7 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Search logs
     ipcMain.handle('logger-search-logs', async (_, searchOptions) => {
       try {
@@ -150,24 +151,31 @@ class LoggerHandlers {
         };
       }
     });
-    
+
     // Get available instances for filtering
     ipcMain.handle('logger-get-instances', async () => {
       try {
+        // Get instances that have logged - these are the ones that actually matter for filtering
         const stats = this.logger.getStats();
-        const instances = Object.keys(stats.instances).sort();
+        const loggedInstances = Object.keys(stats.instances);
+
+        // Debug logging removed - instances working correctly
+
+        // Return all instances that have actually logged something
+        // This is the most reliable approach since these are the instances that will have logs to filter
         return {
           success: true,
-          instances
+          instances: loggedInstances.sort()
         };
       } catch (error) {
+        // Error logging removed to avoid console spam
         return {
           success: false,
           error: error.message
         };
       }
     });
-    
+
     // Get available categories for filtering
     ipcMain.handle('logger-get-categories', async () => {
       try {
@@ -205,14 +213,14 @@ class LoggerHandlers {
     ipcMain.handle('logger-save-settings', async (_, settings) => {
       try {
         this.logger.log('debug', 'Saving logger settings', {
-          instanceId: 'system',
+          instanceId: instanceContext.getCurrentInstance(),
           category: 'settings',
           data: { settings }
         });
 
         if (!settings || typeof settings !== 'object') {
           this.logger.log('error', 'Invalid logger settings data provided', {
-            instanceId: 'system',
+            instanceId: instanceContext.getCurrentInstance(),
             category: 'settings'
           });
           return { success: false, error: 'Invalid settings data' };
@@ -234,12 +242,12 @@ class LoggerHandlers {
 
         // Save settings to store
         appStore.set('loggerSettings', updatedSettings);
-        
+
         // Reload logger service configuration
         this.logger.loadConfig();
-        
+
         this.logger.log('info', 'Logger settings saved successfully', {
-          instanceId: 'system',
+          instanceId: instanceContext.getCurrentInstance(),
           category: 'settings',
           data: { updatedSettings }
         });
@@ -247,7 +255,7 @@ class LoggerHandlers {
         return { success: true, settings: updatedSettings };
       } catch (error) {
         this.logger.log('error', 'Failed to save logger settings', {
-          instanceId: 'system',
+          instanceId: instanceContext.getCurrentInstance(),
           category: 'settings',
           data: { error: error.message }
         });
@@ -267,18 +275,30 @@ class LoggerHandlers {
           retentionDays: 7
         };
 
-        const settings = appStore.get('loggerSettings') || defaultSettings;
-        
+        let settings;
+        let isDefault = true;
+
+        try {
+          settings = appStore.get('loggerSettings');
+          if (settings && typeof settings === 'object') {
+            isDefault = false;
+          } else {
+            settings = defaultSettings;
+          }
+        } catch {
+          settings = defaultSettings;
+        }
+
         this.logger.log('debug', 'Loading logger settings', {
-          instanceId: 'system',
+          instanceId: instanceContext.getCurrentInstance(),
           category: 'settings',
-          data: { settings, isDefault: !appStore.get('loggerSettings') }
+          data: { settings, isDefault }
         });
 
         return { success: true, settings };
       } catch (error) {
         this.logger.log('error', 'Failed to load logger settings', {
-          instanceId: 'system',
+          instanceId: instanceContext.getCurrentInstance(),
           category: 'settings',
           data: { error: error.message }
         });
@@ -301,39 +321,84 @@ class LoggerHandlers {
       }
     });
 
+    // Set current instance context
+    ipcMain.handle('set-current-instance', async (_, instanceData) => {
+      try {
+        if (instanceData && instanceData.name) {
+          instanceContext.setCurrentInstance(instanceData.name);
+
+          // Also register the instance if we have path info
+          if (instanceData.path) {
+            instanceContext.registerInstance(
+              instanceData.path,
+              instanceData.name,
+              instanceData.type || 'server'
+            );
+          }
+
+          this.logger.log('debug', 'Current instance context updated', {
+            instanceId: instanceData.name,
+            category: 'core',
+            data: {
+              instanceName: instanceData.name,
+              instancePath: instanceData.path,
+              instanceType: instanceData.type
+            }
+          });
+        } else {
+          instanceContext.setCurrentInstance('system');
+
+          this.logger.log('debug', 'Instance context reset to system', {
+            instanceId: 'system',
+            category: 'core'
+          });
+        }
+
+        return { success: true };
+      } catch (error) {
+        this.logger.log('error', 'Failed to set current instance context', {
+          instanceId: instanceContext.getCurrentInstance(),
+          category: 'core',
+          data: { error: error.message }
+        });
+
+        return { success: false, error: error.message };
+      }
+    });
+
     // Test settings handlers are working
     this.logger.log('debug', 'Logger settings IPC handlers registered', {
-      instanceId: 'system',
+      instanceId: instanceContext.getCurrentInstance(),
       category: 'settings'
     });
   }
-  
+
   // Utility method to log from the main process
   logFromMain(level, message, options = {}) {
     return this.logger.log(level, message, {
       ...options,
-      instanceId: options.instanceId || 'system',
+      instanceId: options.instanceId || instanceContext.getCurrentInstance(),
       category: options.category || 'core'
     });
   }
-  
+
   // Convenience methods for main process logging
   debug(message, options = {}) {
     return this.logFromMain('debug', message, options);
   }
-  
+
   info(message, options = {}) {
     return this.logFromMain('info', message, options);
   }
-  
+
   warn(message, options = {}) {
     return this.logFromMain('warn', message, options);
   }
-  
+
   error(message, options = {}) {
     return this.logFromMain('error', message, options);
   }
-  
+
   fatal(message, options = {}) {
     return this.logFromMain('fatal', message, options);
   }

@@ -11,7 +11,7 @@ export default defineConfig({
     manifest: true, // Generate manifest.json
     rollupOptions: {
       input: {
-        main: 'src/main.js',
+        main: 'index.html',
         logger: 'src/logger.js'
       },
       output: {

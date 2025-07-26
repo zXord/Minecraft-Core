@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { serverState } from '../../stores/serverState.js';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
+  import logger from '../../utils/logger.js';
   
   export let instance;
   
@@ -12,10 +13,36 @@
   const dispatch = createEventDispatcher();
 
   function promptDelete() {
+    logger.info('Prompting instance deletion confirmation', {
+      category: 'ui',
+      data: {
+        component: 'InstanceSettings',
+        function: 'promptDelete',
+        instanceId: instance?.id,
+        instanceName: instance?.name,
+        instanceType: instance?.type,
+        deleteFiles,
+        serverRunning: $serverState.status === 'Running'
+      }
+    });
+    
     showDeleteConfirmation = true;
   }
 
   async function confirmDelete() {
+    logger.info('Confirming instance deletion', {
+      category: 'ui',
+      data: {
+        component: 'InstanceSettings',
+        function: 'confirmDelete',
+        instanceId: instance?.id,
+        instanceName: instance?.name,
+        instanceType: instance?.type,
+        deleteFiles,
+        instancePath: instance?.path
+      }
+    });
+    
     try {
       showDeleteConfirmation = false;
       
@@ -25,14 +52,51 @@
       });
       
       if (res.success) {
+        logger.info('Instance deleted successfully', {
+          category: 'ui',
+          data: {
+            component: 'InstanceSettings',
+            function: 'confirmDelete',
+            instanceId: instance.id,
+            deleteFiles,
+            hasWarning: !!res.warning
+          }
+        });
+        
         if (res.warning) {
+          logger.warn('Instance deletion completed with warning', {
+            category: 'ui',
+            data: {
+              component: 'InstanceSettings',
+              function: 'confirmDelete',
+              warning: res.warning
+            }
+          });
           alert(res.warning);
         }
         dispatch('deleted', { id: instance.id });
       } else {
+        logger.error('Instance deletion failed', {
+          category: 'ui',
+          data: {
+            component: 'InstanceSettings',
+            function: 'confirmDelete',
+            instanceId: instance.id,
+            error: res.error
+          }
+        });
         alert('Delete failed: ' + (res.error || 'Unknown error'));
       }
     } catch (err) {
+      logger.error('Error during instance deletion', {
+        category: 'ui',
+        data: {
+          component: 'InstanceSettings',
+          function: 'confirmDelete',
+          instanceId: instance.id,
+          errorMessage: err.message
+        }
+      });
       alert('Error deleting instance: ' + (err.message || 'Unknown error'));
     }
   }

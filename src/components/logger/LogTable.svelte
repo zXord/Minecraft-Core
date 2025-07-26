@@ -1,7 +1,9 @@
-<script lang="ts">
+<script>
   import { createEventDispatcher } from 'svelte';
 
-  export let logs: Array<{id: number, timestamp: string, level: string, instanceId: string, category: string, message: string}> = [];
+  /** @type {Array<{id: string, timestamp: string, level: string, instanceId: string, category: string, message: string}>} */
+  export let logs = [];
+  /** @type {null | {id: string, timestamp: string, level: string, instanceId: string, category: string, message: string}} */
   export let selectedLog = null;
   export let formatTimestamp;
   export let getLevelColor;

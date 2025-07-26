@@ -14,7 +14,7 @@ function createModrinthMatchingHandlers() {
         if (modPath && fs.existsSync(modPath)) {
           try {
             metadata = await readModMetadata(modPath);
-          } catch (error) {
+          } catch {
             // TODO: Add proper logging - Failed to read mod metadata
           }
         }
@@ -79,7 +79,7 @@ function createModrinthMatchingHandlers() {
                   hasMatchingVersion: searchVersion ? 
                     checkVersionMatch(searchVersion, versions || []) : false
                 };
-              } catch (error) {
+              } catch {
                 // TODO: Add proper logging - Failed to fetch versions for match
                 return {
                   ...match,

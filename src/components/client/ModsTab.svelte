@@ -1,6 +1,7 @@
 <script>
   import ClientModManager from './ClientModManager.svelte';
   import { clientState, setClientModVersionUpdates } from '../../stores/clientStore.js';
+  import logger from '../../utils/logger.js';
 
   export let instance;
   export let clientModManagerComponent;
@@ -15,21 +16,56 @@
   function handleModRemoved(event) {
     const { fileName } = event.detail;
     
+    logger.info('Handling client mod removal', {
+      category: 'ui',
+      data: {
+        component: 'ModsTab',
+        function: 'handleModRemoved',
+        fileName,
+        hasClientModVersionUpdates: !!(clientModVersionUpdates && clientModVersionUpdates.updates)
+      }
+    });
+    
     // Clear any client mod version updates for the removed mod
     if (clientModVersionUpdates && clientModVersionUpdates.updates) {
       const filteredUpdates = clientModVersionUpdates.updates.filter(
         update => update.fileName.toLowerCase() !== fileName.toLowerCase()
       );
       
+      logger.debug('Filtered client mod version updates after removal', {
+        category: 'ui',
+        data: {
+          component: 'ModsTab',
+          function: 'handleModRemoved',
+          originalUpdatesCount: clientModVersionUpdates.updates.length,
+          filteredUpdatesCount: filteredUpdates.length
+        }
+      });
+      
       if (filteredUpdates.length === 0) {
         // No more client mod updates - clear the entire state
         setClientModVersionUpdates(null);
+        logger.debug('Cleared all client mod version updates', {
+          category: 'ui',
+          data: {
+            component: 'ModsTab',
+            function: 'handleModRemoved'
+          }
+        });
       } else {
         // Update with filtered list
         setClientModVersionUpdates({
           ...clientModVersionUpdates,
           updates: filteredUpdates,
           hasChanges: filteredUpdates.length > 0
+        });
+        logger.debug('Updated client mod version updates with filtered list', {
+          category: 'ui',
+          data: {
+            component: 'ModsTab',
+            function: 'handleModRemoved',
+            remainingUpdatesCount: filteredUpdates.length
+          }
         });
       }
     }
@@ -72,6 +108,16 @@
     {instance}
     {clientModVersionUpdates}
     on:mod-sync-status={async (e) => {
+      logger.debug('Received mod sync status update', {
+        category: 'ui',
+        data: {
+          component: 'ModsTab',
+          function: 'mod-sync-status',
+          synchronized: e.detail.synchronized,
+          hasFullSyncResult: !!e.detail.fullSyncResult
+        }
+      });
+      
       if (e.detail.fullSyncResult) {
         modSyncStatus = e.detail.fullSyncResult;
       } else {
@@ -82,6 +128,14 @@
 
       if (e.detail.synchronized) {
         downloadStatus = 'ready';
+        logger.info('Client mods are synchronized', {
+          category: 'ui',
+          data: {
+            component: 'ModsTab',
+            function: 'mod-sync-status',
+            downloadStatus: 'ready'
+          }
+        });
       } else {
         const hasDownloads = ((e.detail.missingMods?.length || 0) + (e.detail.outdatedMods?.length || 0) + (e.detail.missingOptionalMods?.length || 0) + (e.detail.outdatedOptionalMods?.length || 0)) > 0;
         const hasRemovals = ((e.detail.fullSyncResult?.requiredRemovals?.length || 0) + (e.detail.fullSyncResult?.optionalRemovals?.length || 0)) > 0;
@@ -89,12 +143,42 @@
         
         if (hasDownloads || hasRemovals || hasUnacknowledgedDeps) {
           downloadStatus = 'needed';
+          logger.info('Client mods need synchronization', {
+            category: 'ui',
+            data: {
+              component: 'ModsTab',
+              function: 'mod-sync-status',
+              downloadStatus: 'needed',
+              hasDownloads,
+              hasRemovals,
+              hasUnacknowledgedDeps,
+              missingMods: e.detail.missingMods?.length || 0,
+              outdatedMods: e.detail.outdatedMods?.length || 0
+            }
+          });
         } else {
           downloadStatus = 'ready';
+          logger.debug('Client mods status ready despite not synchronized', {
+            category: 'ui',
+            data: {
+              component: 'ModsTab',
+              function: 'mod-sync-status',
+              downloadStatus: 'ready'
+            }
+          });
         }
       }
     }}
-    on:refresh-mods={refreshMods}
+    on:refresh-mods={() => {
+      logger.debug('Refreshing mods from ModsTab', {
+        category: 'ui',
+        data: {
+          component: 'ModsTab',
+          function: 'refresh-mods'
+        }
+      });
+      refreshMods();
+    }}
     on:mod-removed={handleModRemoved}
   />
 </div>

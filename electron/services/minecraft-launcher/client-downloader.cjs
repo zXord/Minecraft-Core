@@ -264,7 +264,7 @@ class ClientDownloader {
 
           const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, needsFabric ? resolvedFabricVersion : null);
           if (cleanupResult.success) {
-            
+            // Cleanup successful
           } else {
             // TODO: Add proper logging - Cleanup warning
           }
@@ -1571,7 +1571,7 @@ Specification-Vendor: FabricMC
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
           // TODO: Add proper logging - Cleaned up old version
-        } catch (error) {
+        } catch {
           // TODO: Add proper logging - Failed to remove version directory
         }
       }
@@ -1639,7 +1639,7 @@ Specification-Vendor: FabricMC
       }
       
       return false;
-    } catch (error) {
+    } catch {
       // TODO: Add proper logging - Failed to check version change
       return false;
     }
@@ -1678,7 +1678,7 @@ Specification-Vendor: FabricMC
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
           // TODO: Add proper logging - Cleaned up old version
-        } catch (error) {
+        } catch {
           // TODO: Add proper logging - Failed to remove version directory
         }
       }

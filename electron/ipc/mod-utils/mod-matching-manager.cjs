@@ -19,6 +19,7 @@ const path = require('path');
 const fs = require('fs');
 const { app } = require('electron');
 const os = require('os');
+const { getLoggerHandlers } = require('../logger-handlers.cjs');
 
 // Get persistent storage path
 function getPersistencePath() {
@@ -35,6 +36,8 @@ function getPersistencePath() {
 
 // Save confirmed matches to disk
 function saveConfirmedMatches() {
+  const logger = getLoggerHandlers();
+  
   try {
     const dataToSave = {
       confirmed: Array.from(confirmedMatches.entries()),
@@ -43,17 +46,44 @@ function saveConfirmedMatches() {
     
     const filePath = getPersistencePath();
     fs.writeFileSync(filePath, JSON.stringify(dataToSave, null, 2), 'utf8');
+    
+    logger.debug('Saved confirmed mod matches to disk', {
+      category: 'storage',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'saveConfirmedMatches',
+        filePath: filePath,
+        matchCount: confirmedMatches.size
+      }
+    });
   } catch (error) {
-    // TODO: Add proper logging - Error saving confirmed matches
+    logger.error(`Error saving confirmed matches: ${error.message}`, {
+      category: 'storage',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'saveConfirmedMatches',
+        errorType: error.constructor.name
+      }
+    });
   }
 }
 
 // Load confirmed matches from disk
 function loadConfirmedMatches() {
+  const logger = getLoggerHandlers();
+  
   try {
     const filePath = getPersistencePath();
     
     if (!fs.existsSync(filePath)) {
+      logger.debug('No confirmed matches file found, starting fresh', {
+        category: 'storage',
+        data: {
+          service: 'mod-matching-manager',
+          operation: 'loadConfirmedMatches',
+          filePath: filePath
+        }
+      });
       return;
     }
     
@@ -63,31 +93,84 @@ function loadConfirmedMatches() {
       data.confirmed.forEach(([fileName, matchData]) => {
         confirmedMatches.set(fileName, matchData);
       });
+      
+      logger.debug('Loaded confirmed mod matches from disk', {
+        category: 'storage',
+        data: {
+          service: 'mod-matching-manager',
+          operation: 'loadConfirmedMatches',
+          filePath: filePath,
+          matchCount: data.confirmed.length
+        }
+      });
     }
   } catch (error) {
-    // TODO: Add proper logging - Error loading confirmed matches
+    logger.error(`Error loading confirmed matches: ${error.message}`, {
+      category: 'storage',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'loadConfirmedMatches',
+        errorType: error.constructor.name
+      }
+    });
   }
 }
 
 class ModMatchingManager {
   
   constructor() {
+    this.logger = getLoggerHandlers();
+    
+    this.logger.info('Mod matching manager initialized', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'constructor'
+      }
+    });
+    
     // Load saved matches on initialization
     this.loadFromDisk();
   }
   
   // Load confirmed matches from disk
   loadFromDisk() {
+    this.logger.debug('Loading mod matches from disk', {
+      category: 'storage',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'loadFromDisk'
+      }
+    });
     loadConfirmedMatches();
   }
   
   // Save confirmed matches to disk
   saveToDisk() {
+    this.logger.debug('Saving mod matches to disk', {
+      category: 'storage',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'saveToDisk',
+        confirmedMatchCount: confirmedMatches.size
+      }
+    });
     saveConfirmedMatches();
   }
   
   // Set matching data for a mod
   setModMatchingData(fileName, data) {
+    this.logger.debug('Setting mod matching data', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'setModMatchingData',
+        fileName: fileName,
+        hasMatches: !!(data?.matches?.length),
+        matchCount: data?.matches?.length || 0
+      }
+    });
+    
     modMatchingStore.set(fileName, {
       ...data,
       lastUpdated: Date.now()
@@ -96,11 +179,36 @@ class ModMatchingManager {
 
   // Get matching data for a mod
   getModMatchingData(fileName) {
-    return modMatchingStore.get(fileName) || null;
+    const data = modMatchingStore.get(fileName) || null;
+    
+    this.logger.debug('Retrieved mod matching data', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'getModMatchingData',
+        fileName: fileName,
+        hasData: !!data,
+        matchCount: data?.matches?.length || 0
+      }
+    });
+    
+    return data;
   }
 
   // Set pending confirmation for a mod
   setPendingConfirmation(fileName, confirmationData) {
+    this.logger.info('Setting pending mod match confirmation', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'setPendingConfirmation',
+        fileName: fileName,
+        hasMatches: !!(confirmationData?.matches?.length),
+        matchCount: confirmationData?.matches?.length || 0,
+        searchedName: confirmationData?.searchedName
+      }
+    });
+    
     pendingConfirmations.set(fileName, {
       ...confirmationData,
       createdAt: Date.now()
@@ -109,24 +217,74 @@ class ModMatchingManager {
 
   // Get pending confirmation for a mod
   getPendingConfirmation(fileName) {
-    return pendingConfirmations.get(fileName) || null;
+    const data = pendingConfirmations.get(fileName) || null;
+    
+    this.logger.debug('Retrieved pending mod confirmation', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'getPendingConfirmation',
+        fileName: fileName,
+        hasPending: !!data
+      }
+    });
+    
+    return data;
   }
 
   // Remove pending confirmation
   removePendingConfirmation(fileName) {
-    return pendingConfirmations.delete(fileName);
+    const existed = pendingConfirmations.has(fileName);
+    const result = pendingConfirmations.delete(fileName);
+    
+    if (existed) {
+      this.logger.debug('Removed pending mod confirmation', {
+        category: 'mods',
+        data: {
+          service: 'mod-matching-manager',
+          operation: 'removePendingConfirmation',
+          fileName: fileName,
+          removed: result
+        }
+      });
+    }
+    
+    return result;
   }
 
   // Get all pending confirmations
   getAllPendingConfirmations() {
-    return Array.from(pendingConfirmations.entries()).map(([fileName, data]) => ({
+    const confirmations = Array.from(pendingConfirmations.entries()).map(([fileName, data]) => ({
       fileName,
       ...data
     }));
+    
+    this.logger.debug('Retrieved all pending confirmations', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'getAllPendingConfirmations',
+        pendingCount: confirmations.length
+      }
+    });
+    
+    return confirmations;
   }
 
   // Confirm a match
   confirmMatch(fileName, projectId, modrinthData) {
+    this.logger.info('Confirming mod match', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'confirmMatch',
+        fileName: fileName,
+        projectId: projectId,
+        modTitle: modrinthData?.title,
+        modSlug: modrinthData?.slug
+      }
+    });
+    
     confirmedMatches.set(fileName, {
       projectId,
       modrinthData,
@@ -140,19 +298,53 @@ class ModMatchingManager {
 
   // Get confirmed match
   getConfirmedMatch(fileName) {
-    return confirmedMatches.get(fileName) || null;
+    const match = confirmedMatches.get(fileName) || null;
+    
+    this.logger.debug('Retrieved confirmed mod match', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'getConfirmedMatch',
+        fileName: fileName,
+        hasMatch: !!match,
+        projectId: match?.projectId
+      }
+    });
+    
+    return match;
   }
 
   // Get all confirmed matches
   getAllConfirmedMatches() {
-    return Array.from(confirmedMatches.entries()).map(([fileName, data]) => ({
+    const matches = Array.from(confirmedMatches.entries()).map(([fileName, data]) => ({
       fileName,
       ...data
     }));
+    
+    this.logger.debug('Retrieved all confirmed matches', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'getAllConfirmedMatches',
+        confirmedCount: matches.length
+      }
+    });
+    
+    return matches;
   }
 
   // Reject a match
   rejectMatch(fileName, reason = 'User rejected') {
+    this.logger.info('Rejecting mod match', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'rejectMatch',
+        fileName: fileName,
+        reason: reason
+      }
+    });
+    
     rejectedMatches.set(fileName, {
       rejectedAt: Date.now(),
       reason
@@ -162,11 +354,36 @@ class ModMatchingManager {
 
   // Check if a match was rejected
   isMatchRejected(fileName) {
-    return rejectedMatches.has(fileName);
+    const isRejected = rejectedMatches.has(fileName);
+    
+    this.logger.debug('Checked if mod match was rejected', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'isMatchRejected',
+        fileName: fileName,
+        isRejected: isRejected
+      }
+    });
+    
+    return isRejected;
   }
 
   // Clear all data for a mod (when mod is deleted)
   clearModData(fileName) {
+    this.logger.info('Clearing all mod data', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'clearModData',
+        fileName: fileName,
+        hadMatching: modMatchingStore.has(fileName),
+        hadPending: pendingConfirmations.has(fileName),
+        hadConfirmed: confirmedMatches.has(fileName),
+        hadRejected: rejectedMatches.has(fileName)
+      }
+    });
+    
     modMatchingStore.delete(fileName);
     pendingConfirmations.delete(fileName);
     const hadConfirmedMatch = confirmedMatches.has(fileName);
@@ -181,39 +398,92 @@ class ModMatchingManager {
 
   // Check if mod has Modrinth data
   hasModrinthData(fileName) {
-    return confirmedMatches.has(fileName);
+    const hasData = confirmedMatches.has(fileName);
+    
+    this.logger.debug('Checked if mod has Modrinth data', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'hasModrinthData',
+        fileName: fileName,
+        hasData: hasData
+      }
+    });
+    
+    return hasData;
   }
 
   // Get mod status
   getModStatus(fileName) {
+    let status;
     if (confirmedMatches.has(fileName)) {
-      return 'confirmed';
+      status = 'confirmed';
+    } else if (pendingConfirmations.has(fileName)) {
+      status = 'pending';
+    } else if (rejectedMatches.has(fileName)) {
+      status = 'rejected';
+    } else if (modMatchingStore.has(fileName)) {
+      status = 'searched';
+    } else {
+      status = 'unknown';
     }
-    if (pendingConfirmations.has(fileName)) {
-      return 'pending';
-    }
-    if (rejectedMatches.has(fileName)) {
-      return 'rejected';
-    }
-    if (modMatchingStore.has(fileName)) {
-      return 'searched';
-    }
-    return 'unknown';
+    
+    this.logger.debug('Retrieved mod status', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'getModStatus',
+        fileName: fileName,
+        status: status
+      }
+    });
+    
+    return status;
   }
 
   // Export data for persistence (if needed later)
   exportData() {
-    return {
+    const data = {
       matching: Array.from(modMatchingStore.entries()),
       pending: Array.from(pendingConfirmations.entries()),
       confirmed: Array.from(confirmedMatches.entries()),
       rejected: Array.from(rejectedMatches.entries()),
       exportedAt: Date.now()
     };
+    
+    this.logger.debug('Exported mod matching data', {
+      category: 'storage',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'exportData',
+        matchingCount: data.matching.length,
+        pendingCount: data.pending.length,
+        confirmedCount: data.confirmed.length,
+        rejectedCount: data.rejected.length
+      }
+    });
+    
+    return data;
   }
 
   // Import data from persistence (if needed later)
   importData(data) {
+    this.logger.info('Importing mod matching data', {
+      category: 'storage',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'importData',
+        hasMatching: !!(data?.matching?.length),
+        hasPending: !!(data?.pending?.length),
+        hasConfirmed: !!(data?.confirmed?.length),
+        hasRejected: !!(data?.rejected?.length),
+        matchingCount: data?.matching?.length || 0,
+        pendingCount: data?.pending?.length || 0,
+        confirmedCount: data?.confirmed?.length || 0,
+        rejectedCount: data?.rejected?.length || 0
+      }
+    });
+    
     if (data.matching) {
       data.matching.forEach(([key, value]) => modMatchingStore.set(key, value));
     }
@@ -231,11 +501,24 @@ class ModMatchingManager {
   // Clean old data (remove entries older than specified time)
   cleanOldData(maxAgeMs = 24 * 60 * 60 * 1000) { // Default: 24 hours
     const now = Date.now();
+    let cleanedMatching = 0;
+    let cleanedPending = 0;
+    
+    this.logger.debug('Starting old data cleanup', {
+      category: 'mods',
+      data: {
+        service: 'mod-matching-manager',
+        operation: 'cleanOldData',
+        maxAgeMs: maxAgeMs,
+        maxAgeHours: maxAgeMs / (60 * 60 * 1000)
+      }
+    });
     
     // Clean old matching data
     for (const [key, value] of modMatchingStore.entries()) {
       if (value.lastUpdated && (now - value.lastUpdated) > maxAgeMs) {
         modMatchingStore.delete(key);
+        cleanedMatching++;
       }
     }
 
@@ -243,7 +526,30 @@ class ModMatchingManager {
     for (const [key, value] of pendingConfirmations.entries()) {
       if (value.createdAt && (now - value.createdAt) > maxAgeMs) {
         pendingConfirmations.delete(key);
+        cleanedPending++;
       }
+    }
+    
+    if (cleanedMatching > 0 || cleanedPending > 0) {
+      this.logger.info('Cleaned old mod matching data', {
+        category: 'mods',
+        data: {
+          service: 'mod-matching-manager',
+          operation: 'cleanOldData',
+          cleanedMatching: cleanedMatching,
+          cleanedPending: cleanedPending,
+          remainingMatching: modMatchingStore.size,
+          remainingPending: pendingConfirmations.size
+        }
+      });
+    } else {
+      this.logger.debug('No old data to clean', {
+        category: 'mods',
+        data: {
+          service: 'mod-matching-manager',
+          operation: 'cleanOldData'
+        }
+      });
     }
   }
 }

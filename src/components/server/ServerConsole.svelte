@@ -3,6 +3,7 @@
   /// <reference path="../../electron.d.ts" />
   import { onMount, afterUpdate } from 'svelte';
   import { serverState, addServerLog } from '../../stores/serverState.js';
+  import logger from '../../utils/logger.js';
   
   // Local state
   let consoleEl;
@@ -25,7 +26,19 @@
   
   function onConsoleScroll() {
     // Add null check to prevent error
-    if (!consoleEl) return;
+    if (!consoleEl) {
+      logger.warn('Console scroll event with null console element', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'onConsoleScroll',
+          consoleElExists: !!consoleEl
+        }
+      });
+      return;
+    }
+    
+    const wasAutoScroll = autoScroll;
     
     // If user scrolls up, disable autoScroll
     autoScroll = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 5;
@@ -33,39 +46,165 @@
     // Update virtual scrolling indices based on scroll position
     if (!autoScroll) {
       const scrollTop = consoleEl.scrollTop;
-      startIndex = Math.floor(scrollTop / itemHeight);
-      startIndex = Math.max(0, Math.min(startIndex, Math.max(0, totalLogs - visibleCount)));
+      const newStartIndex = Math.floor(scrollTop / itemHeight);
+      startIndex = Math.max(0, Math.min(newStartIndex, Math.max(0, totalLogs - visibleCount)));
+      
+      if (wasAutoScroll !== autoScroll) {
+        logger.debug('Auto-scroll disabled by user interaction', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'onConsoleScroll',
+            scrollTop,
+            startIndex,
+            totalLogs
+          }
+        });
+      }
     }
   }
   
   afterUpdate(() => {
     if (autoScroll && consoleEl) {
       // When auto-scrolling, show the most recent logs
-      startIndex = Math.max(0, totalLogs - visibleCount);
+      const newStartIndex = Math.max(0, totalLogs - visibleCount);
+      
+      if (newStartIndex !== startIndex) {
+        // Disabled debug logging to prevent excessive logs
+        // logger.debug('Auto-scrolling to latest logs', {
+        //   category: 'ui',
+        //   data: {
+        //     component: 'ServerConsole',
+        //     function: 'afterUpdate',
+        //     oldStartIndex: startIndex,
+        //     newStartIndex,
+        //     totalLogs
+        //   }
+        // });
+      }
+      
+      startIndex = newStartIndex;
       consoleEl.scrollTop = consoleEl.scrollHeight;
     }
   });
   
   async function sendCommand() {
-    if (!command.trim()) return;
-    const ok = await window.electron.invoke('send-command', { command });
-    addServerLog(ok ? `[SENT] ${command}` : '[ERR] Failed to send command');
+    if (!command.trim()) {
+      logger.debug('Empty command ignored', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'sendCommand',
+          command
+        }
+      });
+      return;
+    }
+    
+    logger.info('Sending server command', {
+      category: 'ui',
+      data: {
+        component: 'ServerConsole',
+        function: 'sendCommand',
+        command: command.trim(),
+        commandLength: command.trim().length
+      }
+    });
+    
+    try {
+      const ok = await window.electron.invoke('send-command', { command });
+      
+      if (ok) {
+        logger.info('Server command sent successfully', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'sendCommand',
+            command: command.trim(),
+            success: true
+          }
+        });
+        addServerLog(`[SENT] ${command}`);
+      } else {
+        logger.error('Failed to send server command', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'sendCommand',
+            command: command.trim(),
+            success: false
+          }
+        });
+        addServerLog('[ERR] Failed to send command');
+      }
+    } catch (error) {
+      logger.error('Error sending server command', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'sendCommand',
+          command: command.trim(),
+          errorMessage: error.message
+        }
+      });
+      addServerLog(`[ERR] Command failed: ${error.message}`);
+    }
+    
     command = '';
   }
 
   // Handle server log events
   const logHandler = (line) => {
+    // Disabled debug logging to prevent excessive logs
+    // logger.debug('Received server log line', {
+    //   category: 'ui',
+    //   data: {
+    //     component: 'ServerConsole',
+    //     function: 'logHandler',
+    //     lineLength: line ? line.length : 0,
+    //     hasLine: !!line
+    //   }
+    // });
+    
     addServerLog(line);
   };
 
   onMount(() => {
+    logger.info('ServerConsole component mounted', {
+      category: 'ui',
+      data: {
+        component: 'ServerConsole',
+        function: 'onMount',
+        autoScroll,
+        visibleCount
+      }
+    });
+    
     // Remove any existing listeners to prevent duplicates
     window.electron.removeAllListeners('server-log');
 
     // Set up event listener for server logs
     window.electron.on('server-log', logHandler);
+    
+    // Disabled debug logging to prevent excessive logs
+    // logger.debug('Server log listener registered', {
+    //   category: 'ui',
+    //   data: {
+    //     component: 'ServerConsole',
+    //     function: 'onMount',
+    //     event: 'server-log'
+    //   }
+    // });
 
     return () => {
+      logger.debug('ServerConsole component unmounting', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'onMount.cleanup'
+        }
+      });
+      
       // Clean up event listeners when component is unmounted
       window.electron.removeListener('server-log', logHandler);
     };

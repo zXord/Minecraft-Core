@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { SvelteSet } from 'svelte/reactivity';
 import { serverManagedFiles } from './modStore.js';
 
 export const connectionStatus = writable('disconnected');
@@ -14,7 +15,7 @@ export const acknowledgedDeps = writable(new Set<string>());
 
 export function updateServerManagedFiles(action: 'add' | 'remove', mods: any[]) {
   serverManagedFiles.update(currentSet => {
-    const newSet = new Set(currentSet);
+    const newSet = new SvelteSet(currentSet);
     if (action === 'remove') {
       mods.forEach(mod => {
         const modName = typeof mod === 'string' ? mod : mod.fileName || mod.name;

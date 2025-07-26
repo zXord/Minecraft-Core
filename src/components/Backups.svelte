@@ -1,8 +1,33 @@
 <script>
-  import { onMount, tick } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
+  
+  import { SvelteSet } from 'svelte/reactivity';
   import ConfirmationDialog from './common/ConfirmationDialog.svelte';
   import { serverState } from '../stores/serverState.js';
   import { writable } from 'svelte/store';
+  import logger from '../utils/logger.js';
+  
+  onMount(() => {
+    logger.info('Backups component mounted', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        lifecycle: 'onMount',
+        serverPath,
+        hasServerPath: !!serverPath
+      }
+    });
+  });
+  
+  onDestroy(() => {
+    logger.debug('Backups component destroyed', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        lifecycle: 'onDestroy'
+      }
+    });
+  });
 
   export let serverPath = '';
   let backups = [];
@@ -19,7 +44,7 @@
   let renameDialogJustOpened = false;
   let showRestoreDialog = false;
   let backupToRestore = null;
-  let selectedBackups = writable(new Set());
+  let selectedBackups = writable(new SvelteSet());
   let selectAll = false;
   let showBulkDeleteDialog = false;
   let lastAutoBackup = '';
@@ -59,12 +84,33 @@
   // Only show day selector for weekly backups
   $: showDaySelector = backupFrequency >= 604800000; // Weekly
 
-  // Assume window.electronAPI is exposed via preload for IPC
+  // Fetch backups from server
   async function fetchBackups() {
+    logger.info('Fetching backups list', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'fetchBackups',
+        serverPath,
+        hasServerPath: !!serverPath
+      }
+    });
+    
     loading = true;
     error = '';
     try {
       backups = await window.electron.invoke('backups:list', { serverPath });
+      
+      logger.info('Backups list fetched successfully', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'fetchBackups',
+          backupsCount: backups.length,
+          serverPath
+        }
+      });
+      
       // Update last auto backup time if available
       const autoBackups = backups.filter(b => 
         b.metadata && (b.metadata.trigger === 'auto' || b.metadata.trigger === 'app-launch')
@@ -79,16 +125,45 @@
         if (autoBackups[0]?.metadata?.timestamp) {
           const date = new Date(autoBackups[0].metadata.timestamp);
           lastAutoBackup = date.toLocaleString();
+          
+          logger.debug('Last auto backup time updated', {
+            category: 'ui',
+            data: {
+              component: 'Backups',
+              function: 'fetchBackups',
+              lastAutoBackup,
+              autoBackupsCount: autoBackups.length
+            }
+          });
         }
       }
     } catch (e) {
       error = e.message || 'Failed to load backups';
+      logger.error('Failed to fetch backups', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'fetchBackups',
+          errorMessage: e.message,
+          serverPath
+        }
+      });
     }
     loading = false;
   }
 
   // Only fetch backups when serverPath is set, valid, and changes
   $: if (serverPath && serverPath.trim() !== '' && serverPath !== lastServerPath) {
+    logger.debug('Server path changed, loading backups and settings', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        event: 'serverPathChanged',
+        oldPath: lastServerPath,
+        newPath: serverPath
+      }
+    });
+    
     lastServerPath = serverPath;
     fetchBackups();
     loadAutomationSettings();
@@ -96,6 +171,14 @@
 
   // Load automation settings from electron store
   async function loadAutomationSettings() {
+    logger.debug('Loading automation settings', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'loadAutomationSettings'
+      }
+    });
+    
     try {
       const result = await window.electron.invoke('backups:get-automation-settings');
       if (result && result.success && result.settings) {
@@ -112,17 +195,62 @@
         nextBackupTimeIso = settings.nextBackupTime || null;
         updateRemainingTime();
         
+        logger.info('Automation settings loaded successfully', {
+          category: 'ui',
+          data: {
+            component: 'Backups',
+            function: 'loadAutomationSettings',
+            settings: {
+              enabled: autoBackupEnabled,
+              frequency: backupFrequency,
+              type: backupType,
+              retentionCount,
+              runOnLaunch,
+              hour: backupHour,
+              minute: backupMinute,
+              day: backupDay
+            }
+          }
+        });
+        
         // If we have a last run time, update the UI
         if (settings.lastRun) {
           lastAutoBackup = new Date(settings.lastRun).toLocaleString();
         }
       }
     } catch (e) {
+      logger.error('Failed to load automation settings', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'loadAutomationSettings',
+          errorMessage: e.message
+        }
+      });
     }
   }
   
   // Save automation settings
   async function saveAutomationSettings() {
+    logger.info('Saving automation settings', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'saveAutomationSettings',
+        settings: {
+          enabled: autoBackupEnabled,
+          frequency: backupFrequency,
+          type: backupType,
+          retentionCount,
+          runOnLaunch,
+          hour: backupHour,
+          minute: backupMinute,
+          day: backupDay
+        },
+        serverPath
+      }
+    });
+    
     try {
       await window.electron.invoke('backups:configure-automation', {
         enabled: autoBackupEnabled,
@@ -135,6 +263,15 @@
         day: backupDay,
         serverPath: serverPath
       });
+      
+      logger.info('Automation settings saved successfully', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'saveAutomationSettings'
+        }
+      });
+      
       status = 'Backup automation settings saved';
       setTimeout(() => status = '', 2000);
       
@@ -142,11 +279,29 @@
       loadAutomationSettings();
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Failed to save automation settings';
+      logger.error('Failed to save automation settings', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'saveAutomationSettings',
+          errorMessage: e.message
+        }
+      });
     }
   }
   
   // Run backup now
   async function runAutoBackupNow() {
+    logger.info('Running manual backup', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'runAutoBackupNow',
+        serverPath,
+        type: manualBackupType
+      }
+    });
+    
     loading = true;
     error = '';
     try {
@@ -156,15 +311,42 @@
       });
       
       if (result && !result.error) {
+        logger.info('Manual backup completed successfully', {
+          category: 'ui',
+          data: {
+            component: 'Backups',
+            function: 'runAutoBackupNow',
+            type: manualBackupType,
+            result
+          }
+        });
+        
         status = `Manual ${manualBackupType === 'full' ? 'full' : 'world-only'} backup created successfully`;
         await fetchBackups(); // Refresh the backup list
         loadAutomationSettings(); // Refresh next-backup timer
         setTimeout(() => status = '', 2000);
       } else {
         error = result?.error || 'Failed to create manual backup';
+        logger.error('Manual backup failed', {
+          category: 'ui',
+          data: {
+            component: 'Backups',
+            function: 'runAutoBackupNow',
+            type: manualBackupType,
+            error: result?.error
+          }
+        });
       }
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Failed to create manual backup';
+      logger.error('Error during manual backup', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'runAutoBackupNow',
+          errorMessage: e.message
+        }
+      });
     }
     loading = false;
   }
@@ -191,11 +373,31 @@
   }
 
   function confirmDelete(backup) {
+    logger.info('Confirming backup deletion', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'confirmDelete',
+        backupName: backup.name,
+        backupSize: backup.size
+      }
+    });
+    
     backupToDelete = backup;
     showDeleteDialog = true;
   }
 
   async function deleteBackup() {
+    logger.info('Deleting backup', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'deleteBackup',
+        backupName: backupToDelete?.name,
+        serverPath
+      }
+    });
+    
     loading = true;
     error = '';
     try {
@@ -203,17 +405,46 @@
       if (!result || result.success !== true) {
         throw new Error(result && result.error ? result.error : 'Delete failed');
       }
+      
+      logger.info('Backup deleted successfully', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'deleteBackup',
+          backupName: backupToDelete.name
+        }
+      });
+      
       await fetchBackups();
       status = 'Backup deleted.';
       showDeleteDialog = false;
       backupToDelete = null;
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Delete failed';
+      logger.error('Failed to delete backup', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'deleteBackup',
+          backupName: backupToDelete?.name,
+          errorMessage: e.message
+        }
+      });
     }
     loading = false;
   }
 
   function promptRename(backup) {
+    logger.info('Prompting backup rename', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'promptRename',
+        backupName: backup.name,
+        backupSize: backup.size
+      }
+    });
+    
     backupToRename = backup;
     newName = backup.name;
     showRenameDialog = true;
@@ -221,17 +452,50 @@
   }
 
   async function renameBackup() {
+    let finalName = newName.trim();
+    if (!finalName.toLowerCase().endsWith('.zip')) {
+      finalName += '.zip';
+    }
+    
+    logger.info('Renaming backup', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'renameBackup',
+        oldName: backupToRename?.name,
+        newName: finalName,
+        serverPath
+      }
+    });
+    
     loading = true;
     error = '';
     try {
-      let finalName = newName.trim();
-      if (!finalName.toLowerCase().endsWith('.zip')) {
-        finalName += '.zip';
-      }
       await window.electron.invoke('backups:rename', { serverPath, oldName: backupToRename.name, newName: finalName });
+      
+      logger.info('Backup renamed successfully', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'renameBackup',
+          oldName: backupToRename.name,
+          newName: finalName
+        }
+      });
+      
       await fetchBackups();
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Rename failed';
+      logger.error('Failed to rename backup', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'renameBackup',
+          oldName: backupToRename?.name,
+          newName: finalName,
+          errorMessage: e.message
+        }
+      });
     }
     loading = false;
     showRenameDialog = false;
@@ -239,16 +503,49 @@
   }
 
   function confirmRestore(backup) {
+    logger.info('Confirming backup restore', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'confirmRestore',
+        backupName: backup.name,
+        backupSize: backup.size,
+        serverStatus: $serverState.status
+      }
+    });
+    
     backupToRestore = backup;
     showRestoreDialog = true;
   }
 
   async function doRestoreBackup() {
+    logger.info('Starting backup restore', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'doRestoreBackup',
+        backupName: backupToRestore?.name,
+        serverPath,
+        serverStatus: $serverState.status
+      }
+    });
+    
     loading = true;
     error = '';
     try {
       const result = await window.electron.invoke('backups:restore', { serverPath, name: backupToRestore.name, serverStatus: $serverState.status });
       if (result && result.success) {
+        logger.info('Backup restored successfully', {
+          category: 'ui',
+          data: {
+            component: 'Backups',
+            function: 'doRestoreBackup',
+            backupName: backupToRestore.name,
+            preRestoreBackup: result.preRestoreBackup,
+            message: result.message
+          }
+        });
+        
         status = result.message || 'Backup restored successfully.';
         if (result.preRestoreBackup) {
           status += ` (Previous state saved as ${result.preRestoreBackup})`;
@@ -256,6 +553,15 @@
         await fetchBackups();
       } else {
         error = cleanErrorMessage(result && result.error ? result.error : 'Restore failed');
+        logger.error('Backup restore failed', {
+          category: 'ui',
+          data: {
+            component: 'Backups',
+            function: 'doRestoreBackup',
+            backupName: backupToRestore?.name,
+            error: result?.error
+          }
+        });
         showRestoreDialog = false;
         backupToRestore = null;
         loading = false;
@@ -265,6 +571,15 @@
       backupToRestore = null;
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Restore failed';
+      logger.error('Error during backup restore', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'doRestoreBackup',
+          backupName: backupToRestore?.name,
+          errorMessage: e.message
+        }
+      });
     }
     loading = false;
   }
@@ -274,14 +589,14 @@
 
   function toggleSelectAll() {
     if (!selectAll) {
-      $selectedBackups = new Set(backups.map(b => b.name));
+      $selectedBackups = new SvelteSet(backups.map(b => b.name));
     } else {
-      $selectedBackups = new Set();
+      $selectedBackups = new SvelteSet();
     }
   }
 
   function toggleSelect(name) {
-    const newSet = new Set($selectedBackups);
+    const newSet = new SvelteSet($selectedBackups);
     if (newSet.has(name)) {
       newSet.delete(name);
     } else {
@@ -291,19 +606,49 @@
   }
 
   async function bulkDeleteBackups() {
+    logger.info('Starting bulk backup deletion', {
+      category: 'ui',
+      data: {
+        component: 'Backups',
+        function: 'bulkDeleteBackups',
+        selectedCount: $selectedBackups.size,
+        selectedBackups: Array.from($selectedBackups),
+        serverPath
+      }
+    });
+    
     loading = true;
     error = '';
     try {
       for (const name of $selectedBackups) {
         await window.electron.invoke('backups:delete', { serverPath, name });
       }
+      
+      logger.info('Bulk backup deletion completed successfully', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'bulkDeleteBackups',
+          deletedCount: $selectedBackups.size
+        }
+      });
+      
       await fetchBackups();
       status = 'Selected backups deleted.';
-      $selectedBackups = new Set();
+      $selectedBackups = new SvelteSet();
       showBulkDeleteDialog = false;
       setTimeout(() => status = '', 2000);
     } catch (e) {
       error = cleanErrorMessage(e.message) || 'Bulk delete failed';
+      logger.error('Bulk backup deletion failed', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          function: 'bulkDeleteBackups',
+          selectedCount: $selectedBackups.size,
+          errorMessage: e.message
+        }
+      });
     }
     loading = false;
   }
@@ -339,6 +684,18 @@
   onMount(() => {
     // Set up event listener for backup notifications
     const notificationHandler = (notification) => {
+      logger.debug('Backup notification received', {
+        category: 'ui',
+        data: {
+          component: 'Backups',
+          event: 'backup-notification',
+          notification: {
+            message: notification?.message,
+            success: notification?.success
+          }
+        }
+      });
+      
       if (notification && notification.message) {
         if (notification.success) {
           status = notification.message;
@@ -367,6 +724,13 @@
     // Add a visibility change handler to refresh backups when tab becomes active
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
+        logger.debug('Tab became visible, refreshing backups', {
+          category: 'ui',
+          data: {
+            component: 'Backups',
+            event: 'visibilityChange'
+          }
+        });
         fetchBackups();
       }
     };
@@ -454,7 +818,7 @@
             disabled={!autoBackupEnabled}
             class="modern-select"
           >
-            {#each frequencyOptions as option}
+            {#each frequencyOptions as option (option.value)}
               <option value={option.value}>{option.label}</option>
             {/each}
           </select>
@@ -476,7 +840,7 @@
                   disabled={!autoBackupEnabled}
                   class="modern-select small"
                 >
-                  {#each dayNames as day, index}
+                  {#each dayNames as day, index (index)}
                     <option value={index}>{day.slice(0,3)}</option>
                   {/each}
                 </select>
@@ -627,7 +991,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each backups as backup}
+          {#each backups as backup (backup.name)}
             <tr>
               <td class="checkbox-col">
                 <input 

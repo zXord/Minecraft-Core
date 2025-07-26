@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
-  import { fly } from 'svelte/transition';
+  
+  import { SvelteSet } from 'svelte/reactivity';import { fly } from 'svelte/transition';
   
   // Import existing stores
   import {
@@ -47,7 +48,7 @@
   const dispatch = createEventDispatcher();
 
   // Local state
-  let selectedMods = new Set();
+  let selectedMods = new SvelteSet();
   let installedModVersionsCache = {};
   let confirmDeleteVisible = false;
   let modToDelete = null;
@@ -363,16 +364,16 @@
     } else {
       selectedMods.add(modName);
     }
-    selectedMods = new Set(selectedMods);
+    selectedMods = new SvelteSet(selectedMods);
   }
 
 
 
   function toggleSelectAll() {
     if (selectedMods.size === filteredMods.length) {
-      selectedMods = new Set();
+      selectedMods = new SvelteSet();
     } else {
-      selectedMods = new Set(filteredMods);
+      selectedMods = new SvelteSet(filteredMods);
     }
   }
 
@@ -544,7 +545,7 @@
       for (const modName of selectedMods) {
         await deleteMod(modName, serverPath, true);
       }
-      selectedMods = new Set();
+      selectedMods = new SvelteSet();
       await loadMods(serverPath);
       dispatch('modRemoved');
     } catch (error) {
@@ -577,7 +578,7 @@
     
     try {
       disabledMods.update(mods => {
-        const newMods = new Set(mods);
+        const newMods = new SvelteSet(mods);
         
         if (isMixedSelection) {
           // For mixed selections, toggle each mod individually
@@ -605,7 +606,7 @@
       });
       
       await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
-      selectedMods = new Set();
+      selectedMods = new SvelteSet();
       
       const count = selectedModsArray.length;
       let actionText;
@@ -704,7 +705,7 @@
       
       if (deleteSuccess && wasDisabled) {
         disabledMods.update(mods => {
-          const newMods = new Set(mods);
+          const newMods = new SvelteSet(mods);
           newMods.delete(modToDelete);
           return newMods;
         });
@@ -723,7 +724,7 @@
   async function confirmToggleModStatus(modName, isDisabled) {
     try {
         disabledMods.update(mods => {
-          const newMods = new Set(mods);
+          const newMods = new SvelteSet(mods);
         if (isDisabled) {
           newMods.delete(modName);
       } else {
@@ -828,7 +829,7 @@
         try {
           const disabledModsList = await safeInvoke('get-disabled-mods', serverPath);
           if (Array.isArray(disabledModsList)) {
-            disabledMods.set(new Set(disabledModsList));
+            disabledMods.set(new SvelteSet(disabledModsList));
           }
         } catch (error) {
         }

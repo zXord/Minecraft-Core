@@ -2,6 +2,7 @@
  * Server Java Management Utilities
  * Frontend interface for server Java version management
  */
+import logger from './logger.js';
 
 /**
  * Check Java requirements for a specific Minecraft version
@@ -10,18 +11,46 @@
  * @returns {Promise<Object>} - Java requirement information
  */
 export async function checkServerJavaRequirements(minecraftVersion, serverPath = null) {
+  logger.info('Checking server Java requirements', {
+    category: 'utils',
+    data: {
+      function: 'checkServerJavaRequirements',
+      minecraftVersion,
+      hasServerPath: !!serverPath
+    }
+  });
+  
   try {
     const result = await window.electron.invoke('server-java-check-requirements', {
       minecraftVersion,
       serverPath
     });
     
+    logger.info('Server Java requirements check completed', {
+      category: 'utils',
+      data: {
+        function: 'checkServerJavaRequirements',
+        minecraftVersion,
+        success: result.success,
+        needsDownload: result.needsDownload,
+        isAvailable: result.isAvailable
+      }
+    });
+    
     return result;
-  } catch (error) {
-    // TODO: Add proper logging - Error checking server Java requirements
+  } catch (err) {
+    logger.error('Error checking server Java requirements', {
+      category: 'utils',
+      data: {
+        function: 'checkServerJavaRequirements',
+        minecraftVersion,
+        serverPath,
+        errorMessage: err.message
+      }
+    });
     return {
       success: false,
-      error: error.message,
+      error: err.message,
       needsDownload: false,
       isAvailable: false
     };
@@ -35,18 +64,46 @@ export async function checkServerJavaRequirements(minecraftVersion, serverPath =
  * @returns {Promise<Object>} - Result of Java ensure operation
  */
 export async function ensureServerJava(minecraftVersion, serverPath = null) {
+  logger.info('Ensuring server Java availability', {
+    category: 'utils',
+    data: {
+      function: 'ensureServerJava',
+      minecraftVersion,
+      hasServerPath: !!serverPath
+    }
+  });
+  
   try {
     const result = await window.electron.invoke('server-java-ensure', {
       minecraftVersion,
       serverPath
     });
     
+    logger.info('Server Java ensure operation completed', {
+      category: 'utils',
+      data: {
+        function: 'ensureServerJava',
+        minecraftVersion,
+        success: result.success,
+        wasDownloaded: result.downloaded,
+        javaPath: result.javaPath
+      }
+    });
+    
     return result;
-  } catch (error) {
-    // TODO: Add proper logging - Error ensuring server Java
+  } catch (err) {
+    logger.error('Error ensuring server Java', {
+      category: 'utils',
+      data: {
+        function: 'ensureServerJava',
+        minecraftVersion,
+        serverPath,
+        errorMessage: err.message
+      }
+    });
     return {
       success: false,
-      error: error.message
+      error: err.message
     };
   }
 }
@@ -57,17 +114,43 @@ export async function ensureServerJava(minecraftVersion, serverPath = null) {
  * @returns {Promise<Object>} - Java path information
  */
 export async function getServerJavaPath(minecraftVersion) {
+  logger.debug('Getting server Java path', {
+    category: 'utils',
+    data: {
+      function: 'getServerJavaPath',
+      minecraftVersion
+    }
+  });
+  
   try {
     const result = await window.electron.invoke('server-java-get-path', {
       minecraftVersion
     });
     
+    logger.debug('Server Java path retrieved', {
+      category: 'utils',
+      data: {
+        function: 'getServerJavaPath',
+        minecraftVersion,
+        success: result.success,
+        available: result.available,
+        hasJavaPath: !!result.javaPath
+      }
+    });
+    
     return result;
-  } catch (error) {
-    // TODO: Add proper logging - Error getting server Java path
+  } catch (err) {
+    logger.error('Error getting server Java path', {
+      category: 'utils',
+      data: {
+        function: 'getServerJavaPath',
+        minecraftVersion,
+        errorMessage: err.message
+      }
+    });
     return {
       success: false,
-      error: error.message,
+      error: err.message,
       available: false,
       javaPath: null
     };
@@ -80,17 +163,42 @@ export async function getServerJavaPath(minecraftVersion) {
  * @returns {Promise<Object>} - Availability check result
  */
 export async function isServerJavaAvailable(minecraftVersion) {
+  logger.debug('Checking if server Java is available', {
+    category: 'utils',
+    data: {
+      function: 'isServerJavaAvailable',
+      minecraftVersion
+    }
+  });
+  
   try {
     const result = await window.electron.invoke('server-java-is-available', {
       minecraftVersion
     });
     
+    logger.debug('Server Java availability check completed', {
+      category: 'utils',
+      data: {
+        function: 'isServerJavaAvailable',
+        minecraftVersion,
+        success: result.success,
+        available: result.available
+      }
+    });
+    
     return result;
-  } catch (error) {
-    // TODO: Add proper logging - Error checking server Java availability
+  } catch (err) {
+    logger.error('Error checking server Java availability', {
+      category: 'utils',
+      data: {
+        function: 'isServerJavaAvailable',
+        minecraftVersion,
+        errorMessage: err.message
+      }
+    });
     return {
       success: false,
-      error: error.message,
+      error: err.message,
       available: false
     };
   }
@@ -101,15 +209,37 @@ export async function isServerJavaAvailable(minecraftVersion) {
  * @returns {Promise<Object>} - Available Java versions
  */
 export async function getAvailableServerJavaVersions() {
+  logger.debug('Getting available server Java versions', {
+    category: 'utils',
+    data: {
+      function: 'getAvailableServerJavaVersions'
+    }
+  });
+  
   try {
     const result = await window.electron.invoke('server-java-get-available-versions');
     
+    logger.debug('Available server Java versions retrieved', {
+      category: 'utils',
+      data: {
+        function: 'getAvailableServerJavaVersions',
+        success: result.success,
+        versionsCount: result.versions ? result.versions.length : 0
+      }
+    });
+    
     return result;
-  } catch (error) {
-    // TODO: Add proper logging - Error getting available server Java versions
+  } catch (err) {
+    logger.error('Error getting available server Java versions', {
+      category: 'utils',
+      data: {
+        function: 'getAvailableServerJavaVersions',
+        errorMessage: err.message
+      }
+    });
     return {
       success: false,
-      error: error.message,
+      error: err.message,
       versions: []
     };
   }
@@ -121,7 +251,35 @@ export async function getAvailableServerJavaVersions() {
  * @returns {Function} - Cleanup function to remove the listener
  */
 export function onServerJavaDownloadProgress(callback) {
+  logger.debug('Setting up server Java download progress listener', {
+    category: 'utils',
+    data: {
+      function: 'onServerJavaDownloadProgress',
+      hasCallback: typeof callback === 'function'
+    }
+  });
+  
+  if (typeof callback !== 'function') {
+    logger.warn('Invalid callback provided to onServerJavaDownloadProgress', {
+      category: 'utils',
+      data: {
+        function: 'onServerJavaDownloadProgress',
+        callback,
+        callbackType: typeof callback
+      }
+    });
+    return () => {}; // Return empty cleanup function
+  }
+  
   const handleProgress = (data) => {
+    logger.debug('Server Java download progress received', {
+      category: 'utils',
+      data: {
+        function: 'onServerJavaDownloadProgress',
+        progress: data.progress,
+        phase: data.phase
+      }
+    });
     callback(data);
   };
   
@@ -129,6 +287,12 @@ export function onServerJavaDownloadProgress(callback) {
   
   // Return cleanup function
   return () => {
+    logger.debug('Removing server Java download progress listener', {
+      category: 'utils',
+      data: {
+        function: 'onServerJavaDownloadProgress'
+      }
+    });
     window.electron.removeListener('server-java-download-progress', handleProgress);
   };
 } 

@@ -1,73 +1,12 @@
-<script lang="ts">  import { createEventDispatcher } from 'svelte';  // Types
-  interface Mod {
-    fileName: string;
-    size?: number;
-    lastModified?: string;
-    location?: string;
-    name?: string;
-    versionNumber?: string;
-    projectId?: string;
-    needsRemoval?: boolean;
-    removalReason?: string;
-    removalAction?: string;
-  }  interface ModSyncStatus {
-    synchronized: boolean;
-    missingMods?: string[];
-    missingOptionalMods?: string[];
-    needsOptionalDownload?: number;
-    outdatedMods?: Array<{
-      fileName: string;
-      name: string;
-      currentVersion: string;
-      newVersion: string;
-    }>;
-    outdatedOptionalMods?: Array<{
-      fileName: string;
-      name: string;
-      currentVersion: string;
-      newVersion: string;
-    }>;
-    totalRequired?: number;
-    totalOptional?: number;totalPresent?: number;
-    totalOptionalPresent?: number;
-    presentEnabledMods?: string[];
-    presentDisabledMods?: string[];
-    // New response structure
-    requiredRemovals?: Array<{
-      fileName: string;
-      reason: string;
-    }>;
-    optionalRemovals?: Array<{
-      fileName: string;
-      reason: string;
-    }>;
-    acknowledgments?: Array<{
-      fileName: string;
-      reason: string;
-    }>;
-    // Legacy structure (temporary)
-    clientModChanges?: {
-      updates?: Array<{
-        name: string;
-        fileName: string;
-        currentVersion: string;
-        serverVersion: string;
-        action: string;
-      }>;
-      removals?: Array<{
-        name: string;
-        fileName: string;
-        reason: string;
-        action: string;
-      }>;
-      newDownloads?: string[];
-    };
-  }
-    // Props  
-  export let mods: Mod[] = [];
-  export let type: 'required' | 'optional' = 'required';
-  export let modSyncStatus: ModSyncStatus | null = null;
-  export let serverManagedFiles: Set<string> = new Set();
+<script lang="ts">
+  // Import removed - using custom event dispatcher
+  
+    
+  import { SvelteSet } from 'svelte/reactivity';// Props  
+  export let mods= [];
+  export let type= 'required';
+  export let modSyncStatus= null;
+  export let serverManagedFiles= new SvelteSet();
   
   // Section titles and descriptions
   const sectionInfo = {
@@ -81,13 +20,16 @@
     }
   };
   // Create event dispatcher
-  const dispatch = createEventDispatcher();
+  const dispatch = (name: string, detail?: any) => {
+    const event = new CustomEvent(name, { detail });
+    document.dispatchEvent(event);
+  };
 
   // Track which mods are currently being toggled
-  let togglingMods: Set<string> = new Set();
+  let togglingMods= new SvelteSet();
 
   // Get mod status from sync status
-  function getModStatus(mod: Mod): string {
+  function getModStatus(mod: any): 'unknown' | 'disabled' | 'installed' | 'server mod' | 'missing' {
     if (!modSyncStatus) return 'unknown';
     
     // Check the appropriate missing mods list based on mod type
@@ -120,19 +62,19 @@
   }
 
   // Check if a mod needs to be removed
-  function needsRemoval(mod: Mod): boolean {
+  function needsRemoval(mod: any) {
     // Check if the mod object itself has the needsRemoval property
     if (mod.needsRemoval) return true;
     
     // Check in the new response structure
     if (type === 'required' && modSyncStatus?.requiredRemovals) {
-      return modSyncStatus.requiredRemovals.some(removal => 
+      return modSyncStatus.requiredRemovals.some((removal: any) => 
         removal.fileName.toLowerCase() === mod.fileName.toLowerCase()
       );
     }
     
     if (type === 'optional' && modSyncStatus?.optionalRemovals) {
-      return modSyncStatus.optionalRemovals.some(removal => 
+      return modSyncStatus.optionalRemovals.some((removal: any) => 
         removal.fileName.toLowerCase() === mod.fileName.toLowerCase()
       );
     }
@@ -141,30 +83,30 @@
   }
 
   // Check if a mod is kept due to dependency
-  function needsAcknowledgment(mod: Mod): boolean {
+  function needsAcknowledgment(mod: any) {
     if (!modSyncStatus?.acknowledgments) return false;
     
-    return modSyncStatus.acknowledgments.some(ack => 
+    return modSyncStatus.acknowledgments.some((ack: any) => 
       ack.fileName.toLowerCase() === mod.fileName.toLowerCase()
     );
   }
 
   // Get dependency acknowledgment info for a mod
-  function getAcknowledgmentInfo(mod: Mod) {
+  function getAcknowledgmentInfo(mod: any) {
     if (!modSyncStatus?.acknowledgments) return null;
     
-    return modSyncStatus.acknowledgments.find(ack => 
+    return modSyncStatus.acknowledgments.find((ack: any) => 
       ack.fileName.toLowerCase() === mod.fileName.toLowerCase()
     );
   }
 
   // Handle mod toggle for optional mods
-  function handleToggle(mod: Mod, enabled: boolean): void {
+  function handleToggle(mod: any, enabled: boolean) {
     if (type === 'required') return; // Required mods cannot be toggled
 
     // Mark this mod as being toggled
     togglingMods.add(mod.fileName);
-    togglingMods = new Set(togglingMods); // Trigger reactivity
+    togglingMods = new SvelteSet(togglingMods); // Trigger reactivity
 
     // Dispatch to parent component for backend call
     dispatch('toggle', {
@@ -176,7 +118,7 @@
   // Function to handle toggle completion (called from parent)
   export function onToggleComplete(fileName: string) {
     togglingMods.delete(fileName);
-    togglingMods = new Set(togglingMods); // Trigger reactivity
+    togglingMods = new SvelteSet(togglingMods); // Trigger reactivity
     
     // Update the local mod sync status to reflect the successful toggle
     if (modSyncStatus && type === 'optional') {
@@ -184,7 +126,7 @@
       
       if (isCurrentlyDisabled) {
         // Mod was disabled, now enabled - remove from disabled list
-        modSyncStatus.presentDisabledMods = modSyncStatus.presentDisabledMods.filter(m => m !== fileName);
+        modSyncStatus.presentDisabledMods = modSyncStatus.presentDisabledMods.filter((m: string) => m !== fileName);
       } else {
         // Mod was enabled, now disabled - add to disabled list
         if (!modSyncStatus.presentDisabledMods) {
@@ -199,32 +141,32 @@
   }
 
   // Handle mod deletion
-  function handleDelete(mod: Mod): void {
+  function handleDelete(mod) {
     dispatch('delete', { fileName: mod.fileName });
   }
 
   // Handle mod removal (for server-managed mods no longer required)
-  function handleRemove(mod: Mod): void {
+  function handleRemove(mod) {
     dispatch('remove', { fileName: mod.fileName });
   }
 
   // Handle dependency acknowledgment
-  function handleAcknowledge(mod: Mod): void {
+  function handleAcknowledge(mod) {
     dispatch('acknowledge', { fileName: mod.fileName });
   }
 
   // Handle download for missing mods
-  function handleDownload(): void {
+  function handleDownload() {
     dispatch('download');
   }
 
   // Handle download for single optional mod
-  function handleDownloadSingle(mod: Mod): void {
+  function handleDownloadSingle(mod) {
     dispatch('downloadSingle', { mod });
   }
 
   // Check if a mod needs an update
-  function needsUpdate(mod: Mod): boolean {
+  function needsUpdate(mod) {
     if (!modSyncStatus) return false;
     
     // Check if this mod is in the outdated lists
@@ -244,7 +186,7 @@
   }
 
   // Get update information for a mod
-  function getUpdateInfo(mod: Mod) {
+  function getUpdateInfo(mod) {
     if (!modSyncStatus) return null;
     
     // Check if this mod is in the outdated lists
@@ -264,7 +206,7 @@
   }
 
   // Handle individual mod update
-  function handleUpdate(mod: Mod): void {
+  function handleUpdate(mod) {
     const updateInfo = getUpdateInfo(mod);
     if (!updateInfo) return;
     
@@ -415,11 +357,9 @@
                         {modStatus === 'installed' ? 'Disable' : 'Enable'}
                       </button>
                       {/if}
-                      {#if modStatus !== 'missing'}
-                        <button class="danger sm" on:click={() => handleDelete(mod)} title="Remove mod">
-                          🗑️
-                        </button>
-                      {/if}
+                      <button class="danger sm" on:click={() => handleDelete(mod)} title="Remove mod">
+                        🗑️
+                      </button>
                     </div>
                   {/if}
                 {/if}

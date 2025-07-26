@@ -18,12 +18,15 @@ class FrontendLogger {
       const storedInstance = localStorage.getItem('currentInstance');
       if (storedInstance) {
         const instance = JSON.parse(storedInstance);
-        if (instance && instance.path) {
-          // Convert path to instance ID
+        if (instance && instance.name) {
+          // Use the instance name directly
+          this.currentInstance = instance.name;
+        } else if (instance && instance.path) {
+          // Convert path to instance ID as fallback
           this.currentInstance = this.pathToInstanceId(instance.path, instance.type);
         }
       }
-    } catch (error) {
+    } catch {
       // Fallback to system
       this.currentInstance = 'system';
     }
@@ -43,13 +46,17 @@ class FrontendLogger {
       
       // Fallback to type-based naming
       return type === 'server' ? 'server-1' : type === 'client' ? 'client-1' : 'system';
-    } catch (error) {
+    } catch {
       return 'system';
     }
   }
   
   setInstance(instanceId) {
     this.currentInstance = instanceId;
+  }
+  
+  refreshInstanceDetection() {
+    this.setupInstanceDetection();
   }
   
   async log(level, message, options = {}) {
@@ -66,9 +73,9 @@ class FrontendLogger {
       const result = await window.electron.invoke('logger-add-log', level, message, logOptions);
       
       return result;
-    } catch (error) {
+    } catch (err) {
       // TODO: Add proper logging - Logger failed
-      return { success: false, error: error.message };
+      return { success: false, error: err.message };
     }
   }
   
@@ -169,10 +176,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-get-logs', options);
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message,
+        error: err.message,
         logs: []
       };
     }
@@ -183,10 +190,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-search-logs', searchOptions);
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message,
+        error: err.message,
         logs: []
       };
     }
@@ -197,10 +204,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-get-stats');
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message,
+        error: err.message,
         stats: {}
       };
     }
@@ -211,10 +218,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-export-logs', options);
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message
+        error: err.message
       };
     }
   }
@@ -224,10 +231,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-clear-logs');
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message
+        error: err.message
       };
     }
   }
@@ -237,10 +244,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-update-config', config);
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message
+        error: err.message
       };
     }
   }
@@ -250,10 +257,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-get-config');
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message,
+        error: err.message,
         config: {}
       };
     }
@@ -264,10 +271,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-get-instances');
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message,
+        error: err.message,
         instances: []
       };
     }
@@ -278,10 +285,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-get-categories');
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message,
+        error: err.message,
         categories: []
       };
     }
@@ -292,10 +299,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-open-window');
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message
+        error: err.message
       };
     }
   }
@@ -304,10 +311,10 @@ class FrontendLogger {
     try {
       const result = await window.electron.invoke('logger-close-window');
       return result;
-    } catch (error) {
+    } catch (err) {
       return {
         success: false,
-        error: error.message
+        error: err.message
       };
     }
   }

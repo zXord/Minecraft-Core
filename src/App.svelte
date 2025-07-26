@@ -1,7 +1,7 @@
 <!-- @ts-ignore -->
 <script>
   /// <reference path="./electron.d.ts" />
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy, setContext } from 'svelte';
   import { serverState } from './stores/serverState.js';
   import { errorMessage } from './stores/modStore.js';
   import { route, navigate } from './router.js';
@@ -10,6 +10,7 @@
   import SettingsPage from './routes/SettingsPage.svelte';
   import { setupIpcListeners } from './modules/serverListeners.js';
   import { saveInstances } from './modules/instanceUtils.js';
+  import logger from './utils/logger.js';
   
   // Components
   import SetupWizard from './components/setup/SetupWizard.svelte';
@@ -43,10 +44,61 @@
 
   // App settings modal state
   let showAppSettings = false;
+  
+  // Error boundary state
+  let hasError = false;
+  let errorInfo = null; // Used for storing error details for potential debugging display
+  
+  // Session tracking
+  const sessionId = Date.now().toString();
+  
+  // Create error boundary handler
+  function handleError(error, componentInfo) {
+    hasError = true;
+    errorInfo = { error, componentInfo };
+    
+    logger.error(`Error boundary activated: ${error.message}`, {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        errorType: error.constructor.name,
+        componentInfo,
+        stack: error.stack
+      }
+    });
+    
+    // Log global state change for error boundary activation
+    logger.info('Global state change: error boundary activated', {
+      category: 'core',
+      data: {
+        component: 'App',
+        stateChange: 'errorBoundary',
+        previousValue: false,
+        newValue: true,
+        trigger: 'component-error'
+      }
+    });
+    
+    return true; // Indicates error was handled
+  }
+  
+  // Set error boundary handler in context for child components
+  setContext('errorBoundary', handleError);
 
   function startRenaming(instance, event) {
     // Prevent triggering the instance selection
     event.stopPropagation();
+    
+    logger.debug('Instance renaming started', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        action: 'startRenaming',
+        instanceId: instance.id,
+        currentName: instance.name,
+        instanceType: instance.type
+      }
+    });
     
     editId = instance.id;
     editName = instance.name;
@@ -56,22 +108,63 @@
     // Prevent triggering the instance selection
     event.stopPropagation();
     
-    const result = await window.electron.invoke('rename-instance', {
-      id: editId,
-      newName: editName.trim()
-    });
-
-    if (result.success) {
-      instances = result.instances;
-
-      // If we're renaming the current instance, update it
-      if (currentInstance && currentInstance.id === editId) {
-        currentInstance = instances.find(i => i.id === editId);
+    logger.info('Instance rename confirmed', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        action: 'confirmRename',
+        instanceId: editId,
+        newName: editName.trim(),
+        oldName: instances.find(i => i.id === editId)?.name
       }
+    });
+    
+    try {
+      const result = await window.electron.invoke('rename-instance', {
+        id: editId,
+        newName: editName.trim()
+      });
 
-      // Explicitly save instances to ensure persistence
-      await saveInstances(instances);
-      saveInstancesIfNeeded();
+      if (result.success) {
+        logger.info('Instance renamed successfully', {
+          category: 'core',
+          data: { 
+            component: 'App',
+            instanceId: editId,
+            newName: editName.trim()
+          }
+        });
+
+        instances = result.instances;
+
+        // If we're renaming the current instance, update it
+        if (currentInstance && currentInstance.id === editId) {
+          currentInstance = instances.find(i => i.id === editId);
+          storeCurrentInstance(currentInstance);
+        }
+
+        // Explicitly save instances to ensure persistence
+        await saveInstances(instances);
+        saveInstancesIfNeeded();
+      } else {
+        logger.error('Instance rename failed', {
+          category: 'core',
+          data: { 
+            component: 'App',
+            instanceId: editId,
+            error: result.error
+          }
+        });
+      }
+    } catch (error) {
+      logger.error(`Instance rename error: ${error.message}`, {
+        category: 'core',
+        data: { 
+          component: 'App',
+          instanceId: editId,
+          errorType: error.constructor.name
+        }
+      });
     }
     
     // Reset edit state
@@ -83,6 +176,15 @@
     // Prevent triggering the instance selection
     event.stopPropagation();
     
+    logger.debug('Instance rename cancelled', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        action: 'cancelRename',
+        instanceId: editId
+      }
+    });
+    
     // Just reset the edit state
     editId = null;
     editName = '';
@@ -91,10 +193,82 @@
   // Save instances to persistent storage
   
   onMount(() => {
+    // Enhanced component lifecycle logging
+    logger.debug('App component mounted', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        initialStep: step,
+        initialInstanceType: instanceType,
+        instanceCount: instances.length,
+        windowSize: {
+          width: window.innerWidth,
+          height: window.innerHeight
+        },
+        devicePixelRatio: window.devicePixelRatio
+      }
+    });
+
+    // Initialize logger instance detection
+    logger.refreshInstanceDetection();
+    
+    // Enhanced user session logging
+    logger.info('User session started', {
+      category: 'core',
+      data: {
+        component: 'App',
+        sessionId,
+        userAgent: navigator.userAgent,
+        timestamp: new Date().toISOString(),
+        language: navigator.language,
+        platform: (() => {
+          try {
+            // Check if userAgentData exists (experimental API)
+            const nav = navigator;
+            if ('userAgentData' in nav && nav.userAgentData) {
+              const userAgentData = nav.userAgentData;
+              if (userAgentData && typeof userAgentData === 'object' && 'platform' in userAgentData) {
+                return String(userAgentData.platform);
+              }
+            }
+            return navigator.platform;
+          } catch {
+            return navigator.platform;
+          }
+        })(),
+        screenSize: {
+          width: window.screen.width,
+          height: window.screen.height
+        }
+      }
+    });
+    
+    // Make session ID available to other components
+    setContext('sessionId', sessionId);
+    
+    // Set up navigation tracking
+    const unsubscribeRoute = route.subscribe(currentRoute => {
+      if (currentRoute) {
+        logger.info('Navigation occurred', {
+          category: 'ui',
+          data: {
+            component: 'App',
+            route: currentRoute,
+            sessionId,
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    });
+
     setupIpcListeners();
     
     // Start periodic update checks
     setTimeout(() => {
+      logger.debug('Starting periodic update checks', {
+        category: 'core',
+        data: { component: 'App', delay: 2000 }
+      });
       window.electron.invoke('start-periodic-checks');
     }, 2000); // Start checking 2 seconds after app loads
     
@@ -102,6 +276,15 @@
     
     // 1) First, set up the restoration listeners BEFORE anything else
     window.electron.on('update-server-path', (newPath) => {
+      logger.info('Server path update received', {
+        category: 'core',
+        data: { 
+          component: 'App',
+          newPath,
+          hasPath: !!newPath
+        }
+      });
+
       if (newPath) {
         path = newPath;
         
@@ -111,36 +294,118 @@
         );
         
         if (matchingInstance) {
+          logger.info('Matching server instance found and selected', {
+            category: 'core',
+            data: { 
+              component: 'App',
+              instanceId: matchingInstance.id,
+              instanceName: matchingInstance.name
+            }
+          });
           currentInstance = matchingInstance;
+          storeCurrentInstance(matchingInstance);
           instanceType = 'server';
           step = 'done';
+        } else {
+          logger.warn('No matching server instance found for path', {
+            category: 'core',
+            data: { 
+              component: 'App',
+              newPath,
+              availableInstances: instances.length
+            }
+          });
         }
       }
     });
     
     window.electron.on('restore-server-settings', (settings) => {
+      logger.info('Server settings restoration received', {
+        category: 'settings',
+        data: { 
+          component: 'App',
+          hasSettings: !!settings,
+          settingsKeys: settings ? Object.keys(settings) : []
+        }
+      });
+
       if (settings) {
         // Update the serverState store with restored settings
-        serverState.update(state => ({
-          ...state,
-          port: settings.port || state.port,
-          maxRam: settings.maxRam || state.maxRam
-        }));
+        serverState.update(state => {
+          const newState = {
+            ...state,
+            port: settings.port || state.port,
+            maxRam: settings.maxRam || state.maxRam
+          };
+          
+          logger.info('Global state change: serverState updated with restored settings', {
+            category: 'core',
+            data: { 
+              component: 'App',
+              stateChange: 'serverState',
+              previousPort: state.port,
+              newPort: newState.port,
+              previousMaxRam: state.maxRam,
+              newMaxRam: newState.maxRam,
+              source: 'restored-settings'
+            }
+          });
+          
+          return newState;
+        });
+
+        logger.debug('Server state updated with restored settings', {
+          category: 'settings',
+          data: { 
+            component: 'App',
+            port: settings.port,
+            maxRam: settings.maxRam
+          }
+        });
       }
     });
 
     // Show exit confirmation when main process requests it
     window.electron.on('app-close-request', () => {
+      logger.info('App close request received', {
+        category: 'core',
+        data: { 
+          component: 'App',
+          currentStep: step,
+          hasCurrentInstance: !!currentInstance
+        }
+      });
+      
+      logger.info('Global state change: showExitConfirmation set to true', {
+        category: 'core',
+        data: {
+          component: 'App',
+          stateChange: 'showExitConfirmation',
+          previousValue: false,
+          newValue: true,
+          trigger: 'app-close-request'
+        }
+      });
+      
       showExitConfirmation.set(true);
     });
 
     // Show app settings modal when requested from client
     window.electron.on('open-app-settings-modal', () => {
+      logger.info('App settings modal open request received', {
+        category: 'ui',
+        data: { component: 'App' }
+      });
       showAppSettings = true;
     });
     
     // 2) Check for initial instances loaded by main.js
     const checkExistingSetup = async () => {
+      logger.debug('Checking existing setup', {
+        category: 'core',
+        data: { component: 'App', function: 'checkExistingSetup' }
+      });
+
       try {
         // Finish loading immediately to prevent "Loading" screen
         isLoading = false;
@@ -163,11 +428,21 @@
         }
         
         if (initialInstances.length > 0) {
+          logger.info('Valid instances found during setup check', {
+            category: 'core',
+            data: { 
+              component: 'App',
+              instanceCount: initialInstances.length,
+              instanceTypes: initialInstances.map(i => i.type)
+            }
+          });
+
           // Valid instances found
           instances = initialInstances;
           
           // Find the server instance to use as current (if exists)
           currentInstance = instances.find(i => i.type === 'server') || instances[0];
+          storeCurrentInstance(currentInstance);
           
           // Set path and type based on current instance
           if (currentInstance) {
@@ -186,11 +461,28 @@
                 
                 // Update server state with settings
                 if (settings.port || settings.maxRam) {
-                  serverState.update(state => ({
-                    ...state,
-                    port: settings.port || state.port,
-                    maxRam: settings.maxRam || state.maxRam
-                  }));
+                  serverState.update(state => {
+                    const newState = {
+                      ...state,
+                      port: settings.port || state.port,
+                      maxRam: settings.maxRam || state.maxRam
+                    };
+                    
+                    logger.info('Global state change: serverState updated during setup check', {
+                      category: 'core',
+                      data: {
+                        component: 'App',
+                        stateChange: 'serverState',
+                        previousPort: state.port,
+                        newPort: newState.port,
+                        previousMaxRam: state.maxRam,
+                        newMaxRam: newState.maxRam,
+                        source: 'setup-check-settings'
+                      }
+                    });
+                    
+                    return newState;
+                  });
                 }
               }
             }
@@ -198,6 +490,10 @@
             step = 'done';
           }
         } else {
+          logger.info('No valid instances found during setup check', {
+            category: 'core',
+            data: { component: 'App', showingEmptyState: true }
+          });
           // No valid instances found - but don't show instance selector automatically
           // User can manually open it via the sidebar button
           step = 'done'; // Show the main UI with empty state
@@ -206,6 +502,14 @@
         // Don't open sidebar automatically - let user open it manually if needed
         // isSidebarOpen = instances.length > 0;
       } catch (error) {
+        logger.error(`Setup check failed: ${error.message}`, {
+          category: 'core',
+          data: { 
+            component: 'App',
+            function: 'checkExistingSetup',
+            errorType: error.constructor.name
+          }
+        });
         // If any error occurs, don't show the instance selector automatically
         step = 'done';
         isLoading = false;
@@ -224,19 +528,82 @@
     
     // Cleanup on component destroy
     return () => {
+      logger.debug('App component cleanup', {
+        category: 'ui',
+        data: { 
+          component: 'App',
+          finalStep: step,
+          finalInstanceCount: instances.length,
+          sessionDuration: Date.now() - parseInt(sessionId)
+        }
+      });
+      
+      // Clean up event listeners and subscriptions
       window.removeEventListener('resize', updateContentAreaWidth);
+      if (unsubscribeRoute) unsubscribeRoute();
+      
+      logger.debug('Event listeners and subscriptions removed', {
+        category: 'ui',
+        data: { 
+          component: 'App',
+          cleanupItems: ['resize', 'route']
+        }
+      });
     };
+  });
+
+  onDestroy(() => {
+    // Enhanced component lifecycle logging for unmount
+    logger.debug('App component unmounted', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        finalInstanceCount: instances.length,
+        currentInstanceType: instanceType,
+        finalStep: step,
+        sessionDuration: Date.now() - parseInt(sessionId)
+      }
+    });
+    
+    // Log user session end
+    logger.info('User session ended', {
+      category: 'core',
+      data: {
+        component: 'App',
+        sessionId,
+        sessionDuration: Date.now() - parseInt(sessionId),
+        timestamp: new Date().toISOString()
+      }
+    });
   });
   
   // Helper functions to handle reactive behavior manually
   function saveInstancesIfNeeded() {
     if (step === 'done' && instances) {
+      logger.debug('Auto-saving instances', {
+        category: 'storage',
+        data: { 
+          component: 'App',
+          function: 'saveInstancesIfNeeded',
+          instanceCount: instances.length,
+          trigger: 'reactive-update'
+        }
+      });
       saveInstances(instances);
     }
   }
   
   function updateServerPath() {
     if (path && instanceType === 'server' && window.serverPath) {
+      logger.debug('Updating server path in global context', {
+        category: 'core',
+        data: { 
+          component: 'App',
+          function: 'updateServerPath',
+          path,
+          instanceType
+        }
+      });
       window.serverPath.set(path);
     }
   }
@@ -244,6 +611,17 @@
   // Handle setup completion
   function handleSetupComplete(event) {
     const newPath = event.detail.path;
+    logger.info('Setup completed', {
+      category: 'core',
+      data: { 
+        component: 'App',
+        action: 'handleSetupComplete',
+        newPath,
+        instanceType,
+        existingInstanceCount: instances.length
+      }
+    });
+
     // Update path to the selected folder for the new instance
     path = newPath;
     updateServerPath();
@@ -258,14 +636,40 @@
       };
       instances = [inst];
       currentInstance = inst;
+      storeCurrentInstance(inst);
       saveInstancesIfNeeded();
     } else if (instanceType === 'server') {
       // Check if a server instance already exists
       const hasServer = instances.some(i => i.type === 'server');
       
       if (hasServer) {
-        errorMessage.set('You can only have one server instance. Please delete the existing server instance first.');
-        setTimeout(() => errorMessage.set(''), 5000);
+        const errorMsg = 'You can only have one server instance. Please delete the existing server instance first.';
+        
+        logger.info('Global state change: errorMessage set for duplicate server', {
+          category: 'core',
+          data: {
+            component: 'App',
+            stateChange: 'errorMessage',
+            previousValue: '',
+            newValue: errorMsg,
+            trigger: 'duplicate-server-attempt'
+          }
+        });
+        
+        errorMessage.set(errorMsg);
+        setTimeout(() => {
+          logger.debug('Global state change: errorMessage cleared after timeout', {
+            category: 'core',
+            data: {
+              component: 'App',
+              stateChange: 'errorMessage',
+              previousValue: errorMsg,
+              newValue: '',
+              trigger: 'timeout-clear'
+            }
+          });
+          errorMessage.set('');
+        }, 5000);
         step = 'done';
         return;
       }
@@ -279,6 +683,7 @@
       };
       instances = [...instances, inst];
       currentInstance = inst;
+      storeCurrentInstance(inst);
       saveInstancesIfNeeded();
     }
     
@@ -291,12 +696,35 @@
     window.electron.invoke('save-instances', instances)
       .then(result => {
         if (!result || !result.success) {
+          logger.error('Failed to save instances after setup', {
+            category: 'storage',
+            data: { 
+              component: 'App',
+              instanceCount: instances.length,
+              error: result?.error
+            }
+          });
         } else {
+          logger.info('Instances saved successfully after setup', {
+            category: 'storage',
+            data: { 
+              component: 'App',
+              instanceCount: instances.length
+            }
+          });
         }
         // Return to main view
         step = 'done';
       })
-      .catch(() => {
+      .catch((error) => {
+        logger.error(`Failed to save instances: ${error.message}`, {
+          category: 'storage',
+          data: { 
+            component: 'App',
+            errorType: error.constructor.name,
+            instanceCount: instances.length
+          }
+        });
         // Return to main view anyway
         step = 'done';
       });
@@ -304,18 +732,87 @@
 
   // Toggle sidebar visibility
   function toggleSidebar() {
+    // Enhanced UI interaction logging
+    logger.debug('Sidebar toggled', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        action: 'toggleSidebar',
+        newState: !isSidebarOpen,
+        instanceCount: instances.length,
+        currentStep: step,
+        timestamp: new Date().toISOString()
+      }
+    });
+    
     isSidebarOpen = !isSidebarOpen;
+    
+    // Log global state change
+    logger.info('Global state change: sidebar visibility', {
+      category: 'ui',
+      data: {
+        component: 'App',
+        stateChange: 'isSidebarOpen',
+        previousValue: !isSidebarOpen,
+        newValue: isSidebarOpen,
+        trigger: 'user-interaction'
+      }
+    });
   }
 
   // Show instance selection screen
   function showAddInstanceScreen() {
+    logger.info('Add instance screen requested', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        action: 'showAddInstanceScreen',
+        currentInstanceCount: instances.length
+      }
+    });
+
     // Check if we already have both types of instances
     const hasServer = instances.some(i => i.type === 'server');
     const hasClient = instances.some(i => i.type === 'client');
     
     if (hasServer && hasClient) {
-      errorMessage.set('You can only have one server instance and one client instance. Please delete an existing instance first.');
-      setTimeout(() => errorMessage.set(''), 5000);
+      logger.warn('Cannot add instance - both types already exist', {
+        category: 'ui',
+        data: { 
+          component: 'App',
+          hasServer,
+          hasClient,
+          totalInstances: instances.length
+        }
+      });
+      
+      const errorMsg = 'You can only have one server instance and one client instance. Please delete an existing instance first.';
+      
+      logger.info('Global state change: errorMessage set for instance limit', {
+        category: 'core',
+        data: {
+          component: 'App',
+          stateChange: 'errorMessage',
+          previousValue: '',
+          newValue: errorMsg,
+          trigger: 'instance-limit-reached'
+        }
+      });
+      
+      errorMessage.set(errorMsg);
+      setTimeout(() => {
+        logger.debug('Global state change: errorMessage cleared after timeout', {
+          category: 'core',
+          data: {
+            component: 'App',
+            stateChange: 'errorMessage',
+            previousValue: errorMsg,
+            newValue: '',
+            trigger: 'timeout-clear'
+          }
+        });
+        errorMessage.set('');
+      }, 5000);
       return;
     }
     
@@ -324,10 +821,28 @@
 
   // Select instance type and proceed to setup
   function selectInstanceType(type) {
+    logger.info('Instance type selected', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        action: 'selectInstanceType',
+        selectedType: type,
+        currentInstances: instances.map(i => i.type)
+      }
+    });
+
     // Check if an instance of this type already exists
     const hasInstanceOfType = instances.some(i => i.type === type);
     
     if (hasInstanceOfType) {
+      logger.warn('Cannot create instance - type already exists', {
+        category: 'ui',
+        data: { 
+          component: 'App',
+          requestedType: type,
+          existingInstances: instances.filter(i => i.type === type).length
+        }
+      });
       // Show error notification instead of alert
       errorMessage.set(`You can only have one ${type} instance. Please delete the existing ${type} instance first.`);
       // Clear the error after 5 seconds
@@ -349,6 +864,7 @@
       // For client instances, don't create the instance until setup is complete
       // This prevents incomplete instances from being created
       currentInstance = null;
+      storeCurrentInstance(null);
       
       // Set step to chooseFolder to show the client setup wizard
       setTimeout(() => {
@@ -361,6 +877,17 @@
   // Handle client setup completion
   function handleClientSetupComplete(event) {
     const { path, serverIp, serverPort } = event.detail;
+    
+    logger.info('Client setup completed', {
+      category: 'core',
+      data: { 
+        component: 'App',
+        action: 'handleClientSetupComplete',
+        hasPath: !!path,
+        hasServerIp: !!serverIp,
+        serverPort
+      }
+    });
     
     // Create a new fully configured client instance
     const newInstance = {
@@ -375,23 +902,109 @@
     // Add to instances array and set as current
     instances = [...instances, newInstance];
     currentInstance = newInstance;
+    storeCurrentInstance(newInstance);
       
       // Save instances to persistent storage
       window.electron.invoke('save-instances', instances)
         .then(result => {
           if (!result || !result.success) {
+            logger.error('Failed to save client instance', {
+              category: 'storage',
+              data: { 
+                component: 'App',
+                instanceId: newInstance.id,
+                error: result?.error
+              }
+            });
           } else {
+            logger.info('Client instance saved successfully', {
+              category: 'storage',
+              data: { 
+                component: 'App',
+                instanceId: newInstance.id,
+                instanceName: newInstance.name
+              }
+            });
           }
           step = 'done';
         })
-        .catch(() => {
+        .catch((error) => {
+          logger.error(`Failed to save client instance: ${error.message}`, {
+            category: 'storage',
+            data: { 
+              component: 'App',
+              instanceId: newInstance.id,
+              errorType: error.constructor.name
+            }
+          });
           step = 'done';
         });
   }
 
+  // Store current instance in localStorage for logger
+  function storeCurrentInstance(instance) {
+    try {
+      if (instance && typeof window !== 'undefined') {
+        localStorage.setItem('currentInstance', JSON.stringify({
+          id: instance.id,
+          name: instance.name,
+          type: instance.type,
+          path: instance.path
+        }));
+        
+        // Update logger instance
+        logger.setInstance(instance.name || `${instance.type}-${instance.id}`);
+        
+        // Notify backend about instance change
+        try {
+          window.electron.invoke('set-current-instance', {
+            name: instance.name,
+            path: instance.path,
+            type: instance.type,
+            id: instance.id
+          });
+        } catch (error) {
+          console.warn('Failed to notify backend about instance change:', error);
+        }
+      } else {
+        localStorage.removeItem('currentInstance');
+        logger.setInstance('system');
+        
+        // Notify backend about instance change
+        try {
+          window.electron.invoke('set-current-instance', null);
+        } catch (error) {
+          console.warn('Failed to notify backend about instance change:', error);
+        }
+      }
+    } catch (error) {
+      logger.warn('Failed to store current instance in localStorage', {
+        category: 'storage',
+        data: {
+          component: 'App',
+          error: error.message,
+          instanceId: instance?.id
+        }
+      });
+    }
+  }
+
   // Switch between instances
   function switchInstance(instance) {
+    logger.info('Switching to instance', {
+      category: 'ui',
+      data: { 
+        component: 'App',
+        action: 'switchInstance',
+        newInstanceId: instance.id,
+        newInstanceType: instance.type,
+        previousInstanceId: currentInstance?.id,
+        previousInstanceType: currentInstance?.type
+      }
+    });
+
     // Clean up any incomplete client instances before switching
+    const originalCount = instances.length;
     instances = instances.filter(inst => {
       if (inst.type === 'client' && (!inst.path || !inst.serverIp)) {
         // This is an incomplete client instance, remove it
@@ -400,7 +1013,19 @@
       return true;
     });
     
+    if (instances.length !== originalCount) {
+      logger.debug('Cleaned up incomplete client instances', {
+        category: 'core',
+        data: { 
+          component: 'App',
+          removedCount: originalCount - instances.length
+        }
+      });
+    }
+    
     currentInstance = instance;
+    storeCurrentInstance(instance);
+    
     if (instance.type === 'server') {
       path = instance.path;
       instanceType = 'server';
@@ -430,13 +1055,54 @@
       // Also ensure no horizontal scrolling on body/html
       document.documentElement.style.overflowX = 'hidden';
       document.body.style.overflowX = 'hidden';
+      
+      // Log layout adjustment for performance tracking
+      logger.debug('Layout adjusted for window size', {
+        category: 'performance',
+        data: { 
+          component: 'App',
+          function: 'updateContentAreaWidth',
+          windowWidth,
+          contentWidth,
+          timestamp: new Date().toISOString()
+        }
+      });
     }
   }
+  
+
   
 
 </script>
 
 <main class="app-container">
+  {#if hasError}
+    <!-- Error boundary UI -->
+    <div class="error-boundary">
+      <h2>Something went wrong</h2>
+      <p>The application encountered an error. Please try refreshing the page.</p>
+      {#if errorInfo && errorInfo.error}
+        <details style="margin: 10px 0; font-family: monospace; font-size: 12px;">
+          <summary>Error Details (for debugging)</summary>
+          <pre>{errorInfo.error.message}</pre>
+        </details>
+      {/if}
+      <button on:click={() => {
+        hasError = false;
+        errorInfo = null;
+        logger.info('Error boundary reset by user', {
+          category: 'ui',
+          data: {
+            component: 'App',
+            action: 'resetErrorBoundary',
+            sessionId
+          }
+        });
+      }}>
+        Try Again
+      </button>
+    </div>
+  {:else}
   <!-- Sidebar toggle button -->
   <button class="sidebar-toggle" on:click={toggleSidebar}>
     ☰
@@ -571,7 +1237,16 @@
             <h1>Minecraft Core</h1>
             <button 
               class="app-settings-button" 
-              on:click={() => showAppSettings = true}
+              on:click={() => {
+                logger.info('App settings button clicked', {
+                  category: 'ui',
+                  data: { 
+                    component: 'App',
+                    action: 'openAppSettings'
+                  }
+                });
+                showAppSettings = true;
+              }}
               title="App Settings"
               aria-label="Open app settings"
             >
@@ -582,7 +1257,19 @@
             {#each tabs as t (t)}
               <button
                 class="server-tab-button {$route === '/' + t ? 'active' : ''}"
-                on:click={() => navigate('/' + t)}
+                on:click={() => {
+                  logger.info('Tab navigation', {
+                    category: 'ui',
+                    data: { 
+                      component: 'App',
+                      action: 'navigate',
+                      fromRoute: $route,
+                      toRoute: '/' + t,
+                      tab: t
+                    }
+                  });
+                  navigate('/' + t);
+                }}
               >
                 {#if t === 'dashboard'}
                   📊 Dashboard
@@ -624,12 +1311,30 @@
                 serverPath={path} 
                 currentInstance={currentInstance} 
                 on:deleted={(e) => {
+                  logger.info('Instance deleted from settings', {
+                    category: 'core',
+                    data: { 
+                      component: 'App',
+                      deletedInstanceId: e.detail.id,
+                      remainingInstances: instances.length - 1
+                    }
+                  });
+
                   // Remove the instance from the list
                   instances = instances.filter(i => i.id !== e.detail.id);
                   
                   // Switch to a different instance if available, otherwise show empty state
                   if (instances.length > 0) {
                     currentInstance = instances[0];
+                    storeCurrentInstance(instances[0]);
+                    logger.info('Switched to remaining instance after deletion', {
+                      category: 'core',
+                      data: { 
+                        component: 'App',
+                        newInstanceId: currentInstance.id,
+                        newInstanceType: currentInstance.type
+                      }
+                    });
                     if (currentInstance.type === 'server') {
                       path = currentInstance.path;
                       instanceType = 'server';
@@ -637,8 +1342,13 @@
                       instanceType = 'client';
                     }
                   } else {
+                    logger.info('No instances remaining after deletion, showing empty state', {
+                      category: 'core',
+                      data: { component: 'App' }
+                    });
                     // Show empty state instead of forcing instance selector
                     currentInstance = null;
+                    storeCurrentInstance(null);
                     step = 'done';
                   }
                 }}
@@ -652,12 +1362,30 @@
           instance={currentInstance} 
           onOpenAppSettings={() => showAppSettings = true}
           on:deleted={(e) => {
+            logger.info('Client instance deleted', {
+              category: 'core',
+              data: { 
+                component: 'App',
+                deletedInstanceId: e.detail.id,
+                remainingInstances: instances.length - 1
+              }
+            });
+
             // Remove the instance from the list
             instances = instances.filter(i => i.id !== e.detail.id);
             
             // Switch to a different instance if available, otherwise show empty state
             if (instances.length > 0) {
               currentInstance = instances[0];
+              storeCurrentInstance(instances[0]);
+              logger.info('Switched to remaining instance after client deletion', {
+                category: 'core',
+                data: { 
+                  component: 'App',
+                  newInstanceId: currentInstance.id,
+                  newInstanceType: currentInstance.type
+                }
+              });
               if (currentInstance.type === 'server') {
                 path = currentInstance.path;
                 instanceType = 'server';
@@ -665,8 +1393,13 @@
                 instanceType = 'client';
               }
             } else {
+              logger.info('No instances remaining after client deletion, showing empty state', {
+                category: 'core',
+                data: { component: 'App' }
+              });
               // Show empty state instead of forcing instance selector
               currentInstance = null;
+              storeCurrentInstance(null);
               step = 'done';
             }
           }}
@@ -691,10 +1424,24 @@
     confirmType="danger"
     backdropClosable={false}
     on:confirm={() => {
+      logger.info('Exit confirmation accepted', {
+        category: 'core',
+        data: { 
+          component: 'App',
+          action: 'exitConfirmed'
+        }
+      });
       window.electron.invoke('app-close-response', true);
       showExitConfirmation.set(false);
     }}
     on:cancel={() => {
+      logger.info('Exit confirmation cancelled', {
+        category: 'core',
+        data: { 
+          component: 'App',
+          action: 'exitCancelled'
+        }
+      });
       window.electron.invoke('app-close-response', false);
       showExitConfirmation.set(false);
     }}
@@ -706,6 +1453,7 @@
   <StatusManager />
   <UpdateNotification />
   <Toaster richColors theme="dark" />
+  {/if}
 </main>
 
 <style>
@@ -1288,5 +2036,40 @@
   
   :global(.client-interface td) {
     border-bottom: 1px solid #4b5563;
+  }
+  
+  /* Error boundary styles */
+  .error-boundary {
+    padding: 2rem;
+    margin: 2rem auto;
+    max-width: 600px;
+    background-color: #fff1f0;
+    border: 1px solid #ffccc7;
+    border-radius: 4px;
+    text-align: center;
+    color: #333;
+  }
+  
+  .error-boundary h2 {
+    color: #cf1322;
+    margin-bottom: 1rem;
+  }
+  
+  .error-boundary p {
+    margin-bottom: 1.5rem;
+  }
+  
+  .error-boundary button {
+    margin-top: 1rem;
+    padding: 0.5rem 1rem;
+    background-color: #1890ff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  
+  .error-boundary button:hover {
+    background-color: #40a9ff;
   }
 </style>

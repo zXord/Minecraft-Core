@@ -1,9 +1,30 @@
 <!-- @ts-ignore -->
 <script>
   /// <reference path="../../electron.d.ts" />
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { serverState } from '../../stores/serverState.js';
   import { playerState } from '../../stores/playerState.js';
+  import logger from '../../utils/logger.js';
+  
+  onMount(() => {
+    logger.info('ServerMetrics component mounted', {
+      category: 'ui',
+      data: {
+        component: 'ServerMetrics',
+        lifecycle: 'onMount'
+      }
+    });
+  });
+  
+  onDestroy(() => {
+    logger.debug('ServerMetrics component destroyed', {
+      category: 'ui',
+      data: {
+        component: 'ServerMetrics',
+        lifecycle: 'onDestroy'
+      }
+    });
+  });
   
   // Reactive variables from stores
   $: cpuLoad = $serverState.cpuLoad;
@@ -23,12 +44,36 @@
     const maxMem = Math.max(1, maxRamMB || 1); // Avoid division by zero
     
     // Calculate percentage with bounds
-    return Math.min(Math.max(Number(((usedMem/maxMem)*100).toFixed(1)), 0), 100);
+    const percentage = Math.min(Math.max(Number(((usedMem/maxMem)*100).toFixed(1)), 0), 100);
+    
+    logger.debug('Memory percentage calculated', {
+      category: 'ui',
+      data: {
+        component: 'ServerMetrics',
+        event: 'memoryCalculation',
+        isServerRunning,
+        usedMem,
+        maxMem,
+        percentage
+      }
+    });
+    
+    return percentage;
   })();
 
   // Reset metrics when server stops - simplified logic
   $: if (!isServerRunning && ($serverState.cpuLoad !== 0 || $serverState.memUsedMB !== 0)) {
     // Only reset if values are non-zero to avoid infinite loops
+    logger.debug('Server stopped, resetting metrics', {
+      category: 'ui',
+      data: {
+        component: 'ServerMetrics',
+        event: 'resetMetrics',
+        previousCpuLoad: $serverState.cpuLoad,
+        previousMemUsed: $serverState.memUsedMB
+      }
+    });
+    
     setTimeout(() => {
     serverState.update(state => ({
       ...state,
@@ -43,8 +88,25 @@
   onMount(() => {
     // Add a listener specifically for server status changes
     const statusHandler = (status) => {
-      console.log('ServerMetrics: Received status update:', status);
+      logger.debug('Server status update received', {
+        category: 'ui',
+        data: {
+          component: 'ServerMetrics',
+          event: 'statusUpdate',
+          status
+        }
+      });
+      
       if (status !== 'running') {
+        logger.info('Server stopped, forcing metrics reset', {
+          category: 'ui',
+          data: {
+            component: 'ServerMetrics',
+            event: 'forceMetricsReset',
+            status
+          }
+        });
+        
         // Force reset metrics when server stops
         serverState.update(state => ({
           ...state,
@@ -58,7 +120,21 @@
     
     // Listen for metrics updates
     const metricsHandler = (metrics) => {
-      console.log('ServerMetrics: Received metrics update:', metrics);
+      logger.debug('Metrics update received', {
+        category: 'ui',
+        data: {
+          component: 'ServerMetrics',
+          event: 'metricsUpdate',
+          metrics: {
+            cpuPct: metrics?.cpuPct,
+            memUsedMB: metrics?.memUsedMB,
+            maxRamMB: metrics?.maxRamMB,
+            uptime: metrics?.uptime
+          },
+          hasMetrics: !!metrics
+        }
+      });
+      
       if (metrics) {
         serverState.update(state => ({
           ...state,
@@ -74,17 +150,30 @@
     window.electron.on('server-status', statusHandler);
     window.electron.on('metrics-update', metricsHandler);
     
-    // Debug current metrics state
-    console.log('ServerMetrics: Current state on mount:', {
-      isServerRunning,
-      cpuLoad,
-      memUsedMB,
-      maxRamMB,
-      uptime
+    // Log current metrics state
+    logger.debug('ServerMetrics current state on mount', {
+      category: 'ui',
+      data: {
+        component: 'ServerMetrics',
+        event: 'initialState',
+        isServerRunning,
+        cpuLoad,
+        memUsedMB,
+        maxRamMB,
+        uptime
+      }
     });
     
     // Cleanup
     return () => {
+      logger.debug('Cleaning up ServerMetrics event listeners', {
+        category: 'ui',
+        data: {
+          component: 'ServerMetrics',
+          lifecycle: 'cleanup'
+        }
+      });
+      
       window.electron.removeListener('server-status', statusHandler);
       window.electron.removeListener('metrics-update', metricsHandler);
     };

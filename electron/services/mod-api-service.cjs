@@ -1,5 +1,9 @@
 // Mod API service functions
 const fetch = require('node-fetch');
+const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+
+// Initialize logger
+const logger = getLoggerHandlers();
 
 // Modrinth API base URL
 const MODRINTH_API = 'https://api.modrinth.com/v2';
@@ -7,6 +11,27 @@ const MODRINTH_API = 'https://api.modrinth.com/v2';
 // Add a rate limiter utility
 const RATE_LIMIT_MS = 500; // Delay between API requests
 let lastRequestTime = 0;
+
+// Performance tracking
+let performanceMetrics = {
+  apiRequests: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  retryAttempts: 0,
+  rateLimitDelays: 0,
+  totalDelayTime: 0
+};
+
+// Log service initialization
+logger.info('Mod API service initialized', {
+  category: 'network',
+  data: {
+    service: 'ModApiService',
+    modrinthApi: MODRINTH_API,
+    rateLimitMs: RATE_LIMIT_MS,
+    cacheSize: 0
+  }
+});
 
 /**
  * Simple rate limiter that ensures a minimum delay between API requests
@@ -18,6 +43,22 @@ async function rateLimit() {
   
   if (elapsed < RATE_LIMIT_MS && lastRequestTime > 0) {
     const delay = RATE_LIMIT_MS - elapsed;
+    performanceMetrics.rateLimitDelays++;
+    performanceMetrics.totalDelayTime += delay;
+    
+    logger.debug('Rate limiting API request', {
+      category: 'network',
+      data: {
+        service: 'ModApiService',
+        operation: 'rateLimit',
+        delayMs: delay,
+        elapsedMs: elapsed,
+        rateLimitMs: RATE_LIMIT_MS,
+        totalDelays: performanceMetrics.rateLimitDelays,
+        totalDelayTime: performanceMetrics.totalDelayTime
+      }
+    });
+    
     await new Promise(resolve => setTimeout(resolve, delay));
   }
   
@@ -36,15 +77,44 @@ const versionCache = new Map();
  */
 async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
   let lastError;
+  const retryStartTime = Date.now();
   
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await fn();
+      const result = await fn();
+      
+      if (attempt > 0) {
+        const retryDuration = Date.now() - retryStartTime;
+        logger.info('API request succeeded after retry', {
+          category: 'network',
+          data: {
+            service: 'ModApiService',
+            operation: 'retryWithBackoff',
+            attempt: attempt + 1,
+            maxRetries: maxRetries + 1,
+            duration: retryDuration,
+            totalRetryAttempts: performanceMetrics.retryAttempts
+          }
+        });
+      }
+      
+      return result;
     } catch (error) {
       lastError = error;
+      performanceMetrics.retryAttempts++;
       
       // Don't retry on 404 errors (mod not found)
       if (error.message && error.message.includes('404')) {
+        logger.debug('Not retrying 404 error', {
+          category: 'network',
+          data: {
+            service: 'ModApiService',
+            operation: 'retryWithBackoff',
+            attempt: attempt + 1,
+            errorType: '404',
+            errorMessage: error.message
+          }
+        });
         throw error;
       }
       
@@ -55,10 +125,37 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
       
       // Calculate delay with exponential backoff
       const delay = baseDelay * Math.pow(2, attempt);
-      // TODO: Add proper logging - API request failed, retrying
+      
+      logger.warn('API request failed, retrying with backoff', {
+        category: 'network',
+        data: {
+          service: 'ModApiService',
+          operation: 'retryWithBackoff',
+          attempt: attempt + 1,
+          maxRetries: maxRetries + 1,
+          delayMs: delay,
+          errorType: error.constructor.name,
+          errorMessage: error.message,
+          totalRetryAttempts: performanceMetrics.retryAttempts
+        }
+      });
+      
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
+  
+  const retryDuration = Date.now() - retryStartTime;
+  logger.error('API request failed after all retry attempts', {
+    category: 'network',
+    data: {
+      service: 'ModApiService',
+      operation: 'retryWithBackoff',
+      totalAttempts: maxRetries + 1,
+      duration: retryDuration,
+      finalError: lastError.message,
+      errorType: lastError.constructor.name
+    }
+  });
   
   throw lastError;
 }
@@ -67,7 +164,18 @@ async function retryWithBackoff(fn, maxRetries = 3, baseDelay = 1000) {
  * Clear the version cache - useful when checking compatibility for different versions
  */
 function clearVersionCache() {
+  const cacheSize = versionCache.size;
   versionCache.clear();
+  
+  logger.info('Version cache cleared', {
+    category: 'mods',
+    data: {
+      service: 'ModApiService',
+      operation: 'clearVersionCache',
+      clearedEntries: cacheSize,
+      newCacheSize: versionCache.size
+    }
+  });
 }
 
 /**
@@ -76,7 +184,6 @@ function clearVersionCache() {
  * @returns {string} - Converted sort option
  */
 function convertSortToModrinthFormat(sortBy) {
-  
   // Convert our sort values to Modrinth's expected format
   let modrinthSort;
   switch (sortBy) {
@@ -99,6 +206,17 @@ function convertSortToModrinthFormat(sortBy) {
       modrinthSort = 'relevance';
   }
   
+  logger.debug('Sort option converted for Modrinth API', {
+    category: 'mods',
+    data: {
+      service: 'ModApiService',
+      operation: 'convertSortToModrinthFormat',
+      inputSort: sortBy,
+      outputSort: modrinthSort,
+      wasDefault: sortBy !== modrinthSort
+    }
+  });
+  
   return modrinthSort;
 }
 
@@ -110,21 +228,52 @@ function convertSortToModrinthFormat(sortBy) {
  */
 function filterModsByEnvironment(mods, environmentType = 'all') {
   if (!Array.isArray(mods) || environmentType === 'all') {
+    logger.debug('No environment filtering applied', {
+      category: 'mods',
+      data: {
+        service: 'ModApiService',
+        operation: 'filterModsByEnvironment',
+        environmentType,
+        inputCount: Array.isArray(mods) ? mods.length : 0,
+        outputCount: Array.isArray(mods) ? mods.length : 0,
+        filtered: false
+      }
+    });
     return mods;
   }
+  
+  let filteredMods;
   switch (environmentType) {
     case 'client':
       // Accept any mod that can run on the client (required OR optional)
-      return mods.filter(m => m.clientSide);
+      filteredMods = mods.filter(m => m.clientSide);
+      break;
     case 'server':
       // Accept any mod that can run on the server (required OR optional)
-      return mods.filter(m => m.serverSide);
+      filteredMods = mods.filter(m => m.serverSide);
+      break;
     case 'both':
       // Only mods explicitly supporting both sides
-      return mods.filter(m => m.clientSide && m.serverSide);
+      filteredMods = mods.filter(m => m.clientSide && m.serverSide);
+      break;
     default:
-      return mods;
+      filteredMods = mods;
   }
+  
+  logger.debug('Mods filtered by environment', {
+    category: 'mods',
+    data: {
+      service: 'ModApiService',
+      operation: 'filterModsByEnvironment',
+      environmentType,
+      inputCount: mods.length,
+      outputCount: filteredMods.length,
+      filtered: true,
+      filteredOut: mods.length - filteredMods.length
+    }
+  });
+  
+  return filteredMods;
 }
 
 /**
@@ -140,8 +289,24 @@ function filterModsByEnvironment(mods, environmentType = 'all') {
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
 async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
-  await rateLimit();
+  const requestStartTime = Date.now();
   
+  logger.info('Fetching popular mods from Modrinth', {
+    category: 'network',
+    data: {
+      service: 'ModApiService',
+      operation: 'getModrinthPopular',
+      loader,
+      version,
+      page,
+      limit,
+      sortBy,
+      environmentType
+    }
+  });
+  
+  await rateLimit();
+  performanceMetrics.apiRequests++;
   
   const modrinthSortBy = convertSortToModrinthFormat(sortBy);
   
@@ -175,8 +340,6 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
     ]);
   }
   
-
-  
   // Convert facets to JSON string
   const facetsParam = JSON.stringify(facets);
   
@@ -188,7 +351,20 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
   
   // Add sorting parameter in multiple formats to ensure compatibility
   url.searchParams.append('index', modrinthSortBy);  // For newer API versions
-    // Execute request with retry logic
+  
+  logger.debug('Modrinth API request prepared', {
+    category: 'network',
+    data: {
+      service: 'ModApiService',
+      operation: 'getModrinthPopular',
+      url: url.toString(),
+      facets,
+      facetsParam,
+      offset: (page - 1) * limit,
+      sortBy: modrinthSortBy
+    }
+  });
+  // Execute request with retry logic
   const data = await retryWithBackoff(async () => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
@@ -206,7 +382,21 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
         throw new Error(`Modrinth API error: ${response.status}`);
       }
 
-      return await response.json();
+      const responseData = await response.json();
+      
+      logger.debug('Modrinth API response received', {
+        category: 'network',
+        data: {
+          service: 'ModApiService',
+          operation: 'getModrinthPopular',
+          statusCode: response.status,
+          totalHits: responseData.total_hits,
+          hitsReturned: responseData.hits?.length || 0,
+          responseSize: JSON.stringify(responseData).length
+        }
+      });
+      
+      return responseData;
     } catch (error) {
       clearTimeout(timeoutId);
       if (error.name === 'AbortError') {
@@ -231,7 +421,9 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
       clientSide: mod.client_side === 'required' || mod.client_side === 'optional',
       serverSide: mod.server_side === 'required' || mod.server_side === 'optional'
     }));
-    return {
+    
+    const requestDuration = Date.now() - requestStartTime;
+    const result = {
       mods,
       pagination: {
         currentPage: page,
@@ -240,6 +432,22 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
         limit
       }
     };
+    
+    logger.info('Popular mods fetched successfully', {
+      category: 'network',
+      data: {
+        service: 'ModApiService',
+        operation: 'getModrinthPopular',
+        duration: requestDuration,
+        modsReturned: mods.length,
+        totalResults: data.total_hits,
+        currentPage: page,
+        totalPages: result.pagination.totalPages,
+        totalApiRequests: performanceMetrics.apiRequests
+      }
+    });
+    
+    return result;
 }
 
 /**
@@ -256,8 +464,25 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
  * @returns {Promise<Object>} Object with mods array and pagination info
  */
 async function searchModrinthMods({ query, loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
+  const searchStartTime = Date.now();
+  
+  logger.info('Searching mods on Modrinth', {
+    category: 'network',
+    data: {
+      service: 'ModApiService',
+      operation: 'searchModrinthMods',
+      query,
+      loader,
+      version,
+      page,
+      limit,
+      sortBy,
+      environmentType
+    }
+  });
   
   await rateLimit();
+  performanceMetrics.apiRequests++;
   
   
   const modrinthSortBy = convertSortToModrinthFormat(sortBy);
@@ -306,7 +531,7 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   
   // Add sorting parameter in multiple formats to ensure compatibility
   url.searchParams.append('index', modrinthSortBy);  // For newer API versions
-    // Execute request with retry logic
+  // Execute request with retry logic
   const data = await retryWithBackoff(async () => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
@@ -324,7 +549,21 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
         throw new Error(`Modrinth API error (${response.status}): ${response.statusText}`);
       }
 
-      return await response.json();
+      const responseData = await response.json();
+      
+      logger.debug('Modrinth search response received', {
+        category: 'network',
+        data: {
+          service: 'ModApiService',
+          operation: 'searchModrinthMods',
+          query,
+          statusCode: response.status,
+          totalHits: responseData.total_hits,
+          hitsReturned: responseData.hits?.length || 0
+        }
+      });
+      
+      return responseData;
     } catch (error) {
       clearTimeout(timeoutId);
       if (error.name === 'AbortError') {
@@ -350,7 +589,9 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
       lastUpdated: project.date_modified,
       source: 'modrinth'
     }));
-    return {
+    
+    const searchDuration = Date.now() - searchStartTime;
+    const result = {
       mods,
       pagination: {
         totalResults: data.total_hits,
@@ -358,6 +599,23 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
         currentPage: page
       }
     };
+    
+    logger.info('Mod search completed successfully', {
+      category: 'network',
+      data: {
+        service: 'ModApiService',
+        operation: 'searchModrinthMods',
+        duration: searchDuration,
+        query,
+        modsReturned: mods.length,
+        totalResults: data.total_hits,
+        currentPage: page,
+        totalPages: result.pagination.totalPages,
+        totalApiRequests: performanceMetrics.apiRequests
+      }
+    });
+    
+    return result;
 }
 
 /**
@@ -558,9 +816,27 @@ async function resolveModrinthDependencies(dependencies) {
  * @param {boolean} loadLatestOnly - Whether to only load the latest version
  * @returns {Promise<Array>} Array of version objects
  */
-async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnly = false) {  // Check cache first
+async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnly = false) {
+  const versionsStartTime = Date.now();
+  
+  // Check cache first
   const cacheKey = `${projectId}:${loader || ''}:${gameVersion || ''}`;
   if (versionCache.has(cacheKey)) {
+    performanceMetrics.cacheHits++;
+    
+    logger.debug('Version cache hit', {
+      category: 'mods',
+      data: {
+        service: 'ModApiService',
+        operation: 'getModrinthVersions',
+        projectId,
+        loader,
+        gameVersion,
+        loadLatestOnly,
+        cacheKey,
+        totalCacheHits: performanceMetrics.cacheHits
+      }
+    });
     
     // If we only need the latest version, filter from cache
     if (loadLatestOnly) {
@@ -574,8 +850,25 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     
     return versionCache.get(cacheKey);
   }
-    // Apply rate limiting before API request
+  
+  performanceMetrics.cacheMisses++;
+  
+  logger.debug('Version cache miss, fetching from API', {
+    category: 'mods',
+    data: {
+      service: 'ModApiService',
+      operation: 'getModrinthVersions',
+      projectId,
+      loader,
+      gameVersion,
+      loadLatestOnly,
+      cacheKey,
+      totalCacheMisses: performanceMetrics.cacheMisses
+    }
+  });
+  // Apply rate limiting before API request
   await rateLimit();
+  performanceMetrics.apiRequests++;
 
   // Wrap the API call in retry logic
   const versions = await retryWithBackoff(async () => {
@@ -592,7 +885,17 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
       if (!response.ok) {
         // Add specific diagnostics for 404 errors
         if (response.status === 404) {
-          // TODO: Add proper logging - Project ID not found
+          logger.warn('Project not found on Modrinth', {
+            category: 'network',
+            data: {
+              service: 'ModApiService',
+              operation: 'getModrinthVersions',
+              projectId,
+              statusCode: 404,
+              loader,
+              gameVersion
+            }
+          });
           // Return a user-friendly error message
           throw new Error(`Mod not found on Modrinth - the mod may have been removed or the project ID is outdated. Try re-installing this mod.`);
         }
@@ -600,7 +903,22 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
         throw new Error(`Modrinth API error: ${response.status}`);
       }
       
-      return await response.json();
+      const responseData = await response.json();
+      
+      logger.debug('Modrinth versions response received', {
+        category: 'network',
+        data: {
+          service: 'ModApiService',
+          operation: 'getModrinthVersions',
+          projectId,
+          statusCode: response.status,
+          versionsReturned: responseData.length,
+          loader,
+          gameVersion
+        }
+      });
+      
+      return responseData;
 
     } catch (error) {
       clearTimeout(timeoutId);
@@ -613,14 +931,32 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
   
   // Filter versions that match our requirements
   let compatibleVersions = versions;
+  const originalCount = versions.length;
+  
   if (loader) {
     compatibleVersions = compatibleVersions.filter(v => v.loaders.includes(loader));
-  }  if (gameVersion) {
+  }
+  
+  if (gameVersion) {
     // Strict game version matching - only exact matches for the current version
     compatibleVersions = compatibleVersions.filter(v => {
       return v.game_versions.includes(gameVersion);
     });
   }
+  
+  logger.debug('Versions filtered for compatibility', {
+    category: 'mods',
+    data: {
+      service: 'ModApiService',
+      operation: 'getModrinthVersions',
+      projectId,
+      originalCount,
+      compatibleCount: compatibleVersions.length,
+      loader,
+      gameVersion,
+      filteredOut: originalCount - compatibleVersions.length
+    }
+  });
     
     // Map to a more user-friendly format
     let mappedVersions = compatibleVersions.map(v => ({
@@ -642,15 +978,33 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
       const dateB = new Date(b.datePublished).getTime();
       return dateB - dateA;
     });
-      // Cache the results
+  // Cache the results
   versionCache.set(cacheKey, mappedVersions);
+  
+  const versionsDuration = Date.now() - versionsStartTime;
+  
+  logger.info('Mod versions processed and cached', {
+    category: 'mods',
+    data: {
+      service: 'ModApiService',
+      operation: 'getModrinthVersions',
+      duration: versionsDuration,
+      projectId,
+      versionsFound: mappedVersions.length,
+      loadLatestOnly,
+      cacheKey,
+      cacheSize: versionCache.size,
+      totalApiRequests: performanceMetrics.apiRequests
+    }
+  });
   
   // If we only need the latest version, select the best one for the target game version
   if (loadLatestOnly && mappedVersions.length > 0) {
     // When a specific game version is requested, prioritize versions with narrower compatibility
     if (gameVersion) {
       // Sort versions by compatibility specificity and date
-      const sortedBySpecificity = [...mappedVersions].sort((a, b) => {        // First priority: prefer stable versions
+      const sortedBySpecificity = [...mappedVersions].sort((a, b) => {
+        // First priority: prefer stable versions
         const aStable = a.isStable;
         const bStable = b.isStable;
         if (aStable !== bStable) {
@@ -670,23 +1024,37 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
         if (aVersionCount !== bVersionCount) {
           return aVersionCount - bVersionCount; // fewer versions = more specific
         }
-          // Final priority: prefer versions that list the target version first (primary target)
-        const aTargetIndex = a.gameVersions.indexOf(gameVersion);
-        const bTargetIndex = b.gameVersions.indexOf(gameVersion);        return aTargetIndex - bTargetIndex; // lower index = earlier in list = primary target
-      });
         
-        return [sortedBySpecificity[0]];
-      } else {
-        // No specific game version, use original logic
-        const latestStable = mappedVersions.find(v => v.isStable);
-        if (latestStable) {
-          return [latestStable];
+        // Final priority: prefer versions that list the target version first (primary target)
+        const aTargetIndex = a.gameVersions.indexOf(gameVersion);
+        const bTargetIndex = b.gameVersions.indexOf(gameVersion);
+        return aTargetIndex - bTargetIndex; // lower index = earlier in list = primary target
+      });
+      
+      logger.debug('Latest version selected with specificity sorting', {
+        category: 'mods',
+        data: {
+          service: 'ModApiService',
+          operation: 'getModrinthVersions',
+          projectId,
+          selectedVersion: sortedBySpecificity[0]?.versionNumber,
+          isStable: sortedBySpecificity[0]?.isStable,
+          gameVersions: sortedBySpecificity[0]?.gameVersions?.length
         }
-        return [mappedVersions[0]];
+      });
+      
+      return [sortedBySpecificity[0]];
+    } else {
+      // No specific game version, use original logic
+      const latestStable = mappedVersions.find(v => v.isStable);
+      if (latestStable) {
+        return [latestStable];
       }
+      return [mappedVersions[0]];
     }
-    
-    return mappedVersions;
+  }
+  
+  return mappedVersions;
   }
 
 /**

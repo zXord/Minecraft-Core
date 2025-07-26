@@ -106,12 +106,12 @@ async function loadExpectedModState(clientPath, win = null) {
     let state;
     try {
       state = JSON.parse(data);
-    } catch (parseError) {
+    } catch {
       // TODO: Add proper logging - Corrupted state file, resetting
       // Delete corrupted file and start fresh
       try {
         await fsPromises.unlink(stateFile);
-      } catch (unlinkError) {
+      } catch {
         // TODO: Add proper logging - Could not delete corrupted state file
       }
       return { success: true, requiredMods: new Set(), optionalMods: new Set(), acknowledgedDeps: new Set() };
@@ -331,7 +331,7 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
             }
           }
         }
-      } catch (error) {
+      } catch {
         // TODO: Add proper logging - Failed to analyze dependencies
       }    }
       // Add common Fabric API variants that client mods might reference
@@ -378,7 +378,7 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
     }
     
 
-  } catch (error) {
+  } catch {
     // TODO: Add proper logging - Error analyzing client-side dependencies
   }
     return dependencies;
@@ -1095,7 +1095,7 @@ function createMinecraftLauncherHandlers(win) {
                 // Optional mods downloaded but not tracked in persistent state
               }
             }
-          } catch (stateError) {
+          } catch {
             // TODO: Add proper logging - Failed to update persistent state after download
             // Don't fail the download operation just because state update failed
           }
@@ -1652,7 +1652,8 @@ function createMinecraftLauncherHandlers(win) {
               if (dependsOnExcluded) {
                 dependentMods.push(modFile);
               }
-            } catch (error) {
+            } catch {
+              // TODO: Add proper logging - Failed to analyze mod dependencies
             }
           }
           
@@ -2038,7 +2039,8 @@ function createMinecraftLauncherHandlers(win) {
           }          // await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
           await saveExpectedModState(clientPath, requiredToSave, optionalToSave, win, acknowledgedDependencies);
 
-        } catch (stateError) {
+        } catch {
+          // TODO: Add proper logging - Failed to save expected mod state
         }
       const synchronized = missingMods.length === 0 && outdatedMods.length === 0 && 
                              requiredRemovals.length === 0 && // No required mods need removal
@@ -2334,7 +2336,8 @@ function createMinecraftLauncherHandlers(win) {
               // Save updated state with cleaned acknowledgments
               await saveExpectedModState(clientPath, requiredMods, optionalMods, win, acknowledgedDeps);
               }
-            } catch (stateError) {
+            } catch {
+              // TODO: Add proper logging - Failed to save updated state with cleaned acknowledgments
             }
           }          return {
             success: true,

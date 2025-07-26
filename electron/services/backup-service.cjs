@@ -3,6 +3,29 @@ const path = require('path');
 const { createZip, listBackups } = require('../utils/backup-util.cjs');
 const AdmZip = require('adm-zip');
 const { sendServerCommand, getServerState } = require('./server-manager.cjs');
+const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+
+// Initialize logger
+const logger = getLoggerHandlers();
+
+// Performance tracking
+let performanceMetrics = {
+  backupsCreated: 0,
+  backupsRestored: 0,
+  backupsDeleted: 0,
+  totalBackupSize: 0,
+  averageBackupTime: 0,
+  cleanupOperations: 0
+};
+
+// Log service initialization
+logger.info('Backup service initialized', {
+  category: 'storage',
+  data: {
+    service: 'BackupService',
+    admZipAvailable: !!AdmZip
+  }
+});
 
 // Add a utility to wait for a specified time
 function sleep(ms) {
@@ -62,8 +85,34 @@ async function createBackup({ serverPath, type, trigger }) {
 }
 
 async function safeCreateBackup({ serverPath, type, trigger }) {
-  const backupDir = getBackupDir(serverPath);
-  if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+  const backupStartTime = Date.now();
+  performanceMetrics.backupsCreated++;
+  
+  logger.info('Starting backup creation', {
+    category: 'storage',
+    data: {
+      service: 'BackupService',
+      operation: 'safeCreateBackup',
+      serverPath,
+      type,
+      trigger,
+      totalBackupsCreated: performanceMetrics.backupsCreated
+    }
+  });
+  
+  try {
+    const backupDir = getBackupDir(serverPath);
+    if (!fs.existsSync(backupDir)) {
+      logger.debug('Creating backup directory', {
+        category: 'storage',
+        data: {
+          service: 'BackupService',
+          operation: 'safeCreateBackup',
+          backupDir
+        }
+      });
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
 
   const now = new Date();
   // Use local time for filename to match UI display
@@ -102,12 +151,34 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   // Try to write metadata file first
   try {
     fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
-  } catch (err) {
-    // TODO: Add proper logging - Metadata write failed
+  } catch (error) {
+    logger.error('Failed to write backup metadata file', {
+      category: 'storage',
+      data: {
+        service: 'BackupService',
+        operation: 'safeCreateBackup',
+        metaPath,
+        errorType: error.constructor.name,
+        errorMessage: error.message
+      }
+    });
   }
 
   // Verify we have valid directories to backup
   if (items.length === 0) {
+    const backupDuration = Date.now() - backupStartTime;
+    logger.error('No valid directories found to backup', {
+      category: 'storage',
+      data: {
+        service: 'BackupService',
+        operation: 'safeCreateBackup',
+        duration: backupDuration,
+        serverPath,
+        type,
+        trigger,
+        itemsFound: items.length
+      }
+    });
     throw new Error('No valid directories found to backup');
   }
   
@@ -202,17 +273,84 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   if (fs.existsSync(zipPath)) {
     const stats = fs.statSync(zipPath);
     metadata.size = stats.size;
-      // Verify the zip isn't empty (should be at least a few bytes)
+    performanceMetrics.totalBackupSize += stats.size;
+    
+    // Calculate backup duration and update average
+    const backupDuration = Date.now() - backupStartTime;
+    performanceMetrics.averageBackupTime = 
+      (performanceMetrics.averageBackupTime + backupDuration) / 2;
+    
+    // Verify the zip isn't empty (should be at least a few bytes)
     if (stats.size < 100) {
+      logger.error('Backup file appears to be empty or corrupted', {
+        category: 'storage',
+        data: {
+          service: 'BackupService',
+          operation: 'safeCreateBackup',
+          duration: backupDuration,
+          zipPath,
+          fileSize: stats.size,
+          type,
+          trigger
+        }
+      });
       throw new Error('Backup file appears to be empty or corrupted');
     }
     
     // Write updated metadata with the correct size
     fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
     
+    logger.info('Backup created successfully', {
+      category: 'storage',
+      data: {
+        service: 'BackupService',
+        operation: 'safeCreateBackup',
+        duration: backupDuration,
+        name,
+        size: stats.size,
+        type,
+        trigger,
+        isServerRunning,
+        itemsBackedUp: items.length,
+        totalBackupsCreated: performanceMetrics.backupsCreated,
+        totalBackupSize: performanceMetrics.totalBackupSize,
+        averageBackupTime: Math.round(performanceMetrics.averageBackupTime)
+      }
+    });
+    
     return { name, size: stats.size, metadata };
   } else {
+    const backupDuration = Date.now() - backupStartTime;
+    logger.error('Backup file was not created correctly', {
+      category: 'storage',
+      data: {
+        service: 'BackupService',
+        operation: 'safeCreateBackup',
+        duration: backupDuration,
+        zipPath,
+        type,
+        trigger,
+        isServerRunning
+      }
+    });
     throw new Error('Backup file was not created correctly');
+  }
+  } catch (error) {
+    const backupDuration = Date.now() - backupStartTime;
+    logger.error(`Backup creation failed: ${error.message}`, {
+      category: 'storage',
+      data: {
+        service: 'BackupService',
+        operation: 'safeCreateBackup',
+        duration: backupDuration,
+        serverPath,
+        type,
+        trigger,
+        errorType: error.constructor.name,
+        errorMessage: error.message
+      }
+    });
+    throw error;
   }
 }
 
@@ -367,7 +505,7 @@ async function cleanupAutomaticBackups(serverPath, maxCount) {
           if (result.success) {
             deletedCount++;
           }
-        } catch (err) {
+        } catch {
           // TODO: Add proper logging - Error deleting backup during cleanup
         }
       }

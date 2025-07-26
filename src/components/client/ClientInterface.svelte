@@ -1,5 +1,7 @@
 <script>
   import { onMount } from 'svelte';
+  
+  import { SvelteSet, SvelteMap } from 'svelte/reactivity';
   import { get } from 'svelte/store';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import ClientHeader from './ClientHeader.svelte';
@@ -7,6 +9,7 @@
   import PlayTab from './PlayTab.svelte';
   import ModsTab from './ModsTab.svelte';
   import SettingsTab from './SettingsTab.svelte';
+  import logger from '../../utils/logger.js';
 import {
   errorMessage,
   successMessage,
@@ -156,7 +159,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   
   // Cache for mod versions to prevent excessive API calls
-  let modVersionsCache = new Map();
+  let modVersionsCache = new SvelteMap();
   let cacheTimestamp = 0;
   const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
   
@@ -221,7 +224,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       if (result.success && result.acknowledgedDeps && Array.isArray(result.acknowledgedDeps)) {
         // Set acknowledged deps from persistent storage
         acknowledgedDeps.update(() => {
-          const newSet = new Set();
+          const newSet = new SvelteSet();
           result.acknowledgedDeps.forEach(dep => {
             if (dep && typeof dep === 'string') {
             newSet.add(dep.toLowerCase());
@@ -237,7 +240,28 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
   // Connect to the Management Server (port 8080)
   async function connectToServer() {
+    logger.info('Connecting to management server', {
+      category: 'ui',
+      data: {
+        component: 'ClientInterface',
+        function: 'connectToServer',
+        serverIp: instance?.serverIp,
+        serverPort: instance?.serverPort,
+        hasInstance: !!instance
+      }
+    });
+    
     if (!instance || !instance.serverIp || !instance.serverPort) {
+      logger.warn('Cannot connect - missing server configuration', {
+        category: 'ui',
+        data: {
+          component: 'ClientInterface',
+          function: 'connectToServer',
+          hasInstance: !!instance,
+          hasServerIp: !!(instance?.serverIp),
+          hasServerPort: !!(instance?.serverPort)
+        }
+      });
       setConnectionStatus('disconnected');
       clearAppVersions();
       return;
@@ -508,7 +532,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const managedFiles = get(serverManagedFiles);
       
       // Also check against server's required mods and allClientMods as additional filter
-      const serverModFileNames = new Set();
+      const serverModFileNames = new SvelteSet();
       if (requiredMods && requiredMods.length > 0) {
         requiredMods.forEach(mod => {
           if (mod.fileName) {
@@ -1068,9 +1092,28 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Authenticate with Microsoft
   async function authenticateWithMicrosoft(forceAuth = false) {
+    logger.info('Starting Microsoft authentication', {
+      category: 'ui',
+      data: {
+        component: 'ClientInterface',
+        function: 'authenticateWithMicrosoft',
+        forceAuth,
+        currentAuthStatus: authStatus,
+        hasUsername: !!username,
+        hasAuthData: !!authData
+      }
+    });
     
     // Check if already authenticated (but allow forced re-auth when forceAuth is true)
     if (authStatus === 'authenticated' && username && authData && !forceAuth) {
+      logger.debug('Already authenticated, skipping authentication', {
+        category: 'ui',
+        data: {
+          component: 'ClientInterface',
+          function: 'authenticateWithMicrosoft',
+          username
+        }
+      });
       successMessage.set(`Already authenticated as ${username}`);
       setTimeout(() => successMessage.set(''), 3000);
       return;
@@ -1172,6 +1215,20 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   // Download required mods
   async function onDownloadModsClick() {
+    logger.info('Starting mod download process', {
+      category: 'ui',
+      data: {
+        component: 'ClientInterface',
+        function: 'onDownloadModsClick',
+        currentDownloadStatus: downloadStatus,
+        modSyncStatus: modSyncStatus ? {
+          synchronized: modSyncStatus.synchronized,
+          missingModsCount: modSyncStatus.missingMods?.length || 0,
+          outdatedModsCount: modSyncStatus.outdatedMods?.length || 0
+        } : null
+      }
+    });
+    
     // Show immediate loading state
     downloadStatus = 'downloading';
     downloadProgress = 0;
@@ -1179,6 +1236,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     try {
       await downloadMods();
     } catch (error) {
+      logger.error('Mod download failed', {
+        category: 'ui',
+        data: {
+          component: 'ClientInterface',
+          function: 'onDownloadModsClick',
+          errorMessage: error.message
+        }
+      });
       errorMessage.set(`Download error: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 5000);
       downloadStatus = 'needed'; // Reset status on error
@@ -1353,7 +1418,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           
           if (serverResult.downloadedFiles && serverResult.downloadedFiles.length > 0) {
             serverManagedFiles.update((current) => {
-              const newSet = new Set(current);
+              const newSet = new SvelteSet(current);
               serverResult.downloadedFiles.forEach((m) => newSet.add(m.toLowerCase()));
               return newSet;
             });
@@ -1471,7 +1536,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
         if (result.downloadedFiles && result.downloadedFiles.length > 0) {
           serverManagedFiles.update((current) => {
-            const newSet = new Set(current);
+            const newSet = new SvelteSet(current);
             result.downloadedFiles.forEach((m) => newSet.add(m.toLowerCase()));
             return newSet;
           });
@@ -1730,7 +1795,28 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
     // Launch Minecraft client
   async function launchMinecraft(showDebugTerminal = false, maxMemoryGB = 2) {
+    logger.info('Launching Minecraft client', {
+      category: 'ui',
+      data: {
+        component: 'ClientInterface',
+        function: 'launchMinecraft',
+        showDebugTerminal,
+        maxMemoryGB,
+        authStatus,
+        clientSyncStatus,
+        downloadStatus
+      }
+    });
+    
     if (authStatus !== 'authenticated') {
+      logger.warn('Cannot launch - authentication required', {
+        category: 'ui',
+        data: {
+          component: 'ClientInterface',
+          function: 'launchMinecraft',
+          authStatus
+        }
+      });
       errorMessage.set('Please authenticate with Microsoft first');
       setTimeout(() => errorMessage.set(''), 5000);
       return;
@@ -2115,6 +2201,19 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }, 100);  }
   
   onMount(() => {
+    logger.info('ClientInterface component mounted', {
+      category: 'ui',
+      data: {
+        component: 'ClientInterface',
+        function: 'onMount',
+        instancePath: instance?.path,
+        instanceId: instance?.id,
+        instanceName: instance?.name,
+        serverIp: instance?.serverIp,
+        serverPort: instance?.serverPort
+      }
+    });
+    
     // Initialize client functionality
     setupLauncherEvents();
     
@@ -2130,7 +2229,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         });
         if (state.success && Array.isArray(state.expectedMods)) {
           serverManagedFiles.set(
-            new Set(state.expectedMods.map((m) => m.toLowerCase()))
+            new SvelteSet(state.expectedMods.map((m) => m.toLowerCase()))
           );
         }
       } catch (err) {
@@ -2301,7 +2400,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
       // Update acknowledged deps store
         acknowledgedDeps.update(set => {
-          const updated = new Set(set);
+          const updated = new SvelteSet(set);
         acknowledgedFiles.forEach(fileName => {
           updated.add(fileName.toLowerCase());
         });

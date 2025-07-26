@@ -61,7 +61,7 @@ function createAppSettingsHandlers() {
                 openAtLogin: false
               });
             }
-          } catch (err) {
+          } catch {
             // TODO: Add proper logging - Failed to update startup settings
             // Don't fail the entire operation for this
           }
@@ -96,7 +96,7 @@ function createAppSettingsHandlers() {
           try {
             const loginItemSettings = app.getLoginItemSettings();
             settings.startOnStartup = loginItemSettings.openAtLogin;
-          } catch (err) {
+          } catch {
             // TODO: Add proper logging - Failed to get login item settings
             settings.startOnStartup = false; // Default to false if we can't check
           }

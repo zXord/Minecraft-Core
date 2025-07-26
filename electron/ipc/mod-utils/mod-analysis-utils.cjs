@@ -205,7 +205,7 @@ async function extractDependenciesFromJar(jarPath) {
       metadataCache.set(cacheKey, result);
       return result;
     }
-  } catch (error) {
+  } catch {
     // TODO: Add proper logging - Failed to extract dependencies from ${jarPath}:
     result = null;
     metadataCache.set(cacheKey, result);
