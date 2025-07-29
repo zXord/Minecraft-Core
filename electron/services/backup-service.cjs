@@ -8,15 +8,35 @@ const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 // Initialize logger
 const logger = getLoggerHandlers();
 
-// Performance tracking
+// Enhanced performance tracking
 let performanceMetrics = {
   backupsCreated: 0,
   backupsRestored: 0,
   backupsDeleted: 0,
   totalBackupSize: 0,
   averageBackupTime: 0,
-  cleanupOperations: 0
+  cleanupOperations: 0,
+  sizeCalculations: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  lastBackupSize: 0,
+  largestBackupSize: 0,
+  smallestBackupSize: Number.MAX_SAFE_INTEGER
 };
+
+// Function to get enhanced performance metrics
+function getPerformanceMetrics() {
+  return {
+    ...performanceMetrics,
+    averageBackupSizeMB: performanceMetrics.backupsCreated > 0 
+      ? Math.round((performanceMetrics.totalBackupSize / performanceMetrics.backupsCreated) / (1024 * 1024) * 100) / 100
+      : 0,
+    totalBackupSizeGB: Math.round((performanceMetrics.totalBackupSize / (1024 * 1024 * 1024)) * 100) / 100,
+    cacheEfficiency: performanceMetrics.sizeCalculations > 0 
+      ? Math.round((performanceMetrics.cacheHits / performanceMetrics.sizeCalculations) * 100)
+      : 0
+  };
+}
 
 // Log service initialization
 logger.info('Backup service initialized', {
@@ -269,11 +289,20 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     }
   }
 
-  // Update metadata with file size
+  // Update metadata with file size and integrate with enhanced size tracking
   if (fs.existsSync(zipPath)) {
     const stats = fs.statSync(zipPath);
     metadata.size = stats.size;
     performanceMetrics.totalBackupSize += stats.size;
+    performanceMetrics.lastBackupSize = stats.size;
+    
+    // Track largest and smallest backup sizes
+    if (stats.size > performanceMetrics.largestBackupSize) {
+      performanceMetrics.largestBackupSize = stats.size;
+    }
+    if (stats.size < performanceMetrics.smallestBackupSize) {
+      performanceMetrics.smallestBackupSize = stats.size;
+    }
     
     // Calculate backup duration and update average
     const backupDuration = Date.now() - backupStartTime;
@@ -533,5 +562,6 @@ module.exports = {
   restoreBackup,
   cleanupAutomaticBackups,
   getWorldDirs,
-  getBackupDir
+  getBackupDir,
+  getPerformanceMetrics
 }; 
