@@ -91,6 +91,17 @@ contextBridge.exposeInMainWorld('electron', {
       'backups:get-automation-settings',
       'backups:run-immediate-auto',
       'backups:safe-create',
+      'backups:calculate-sizes',
+      'backups:watch-size-changes',
+      'backups:get-retention-settings',
+      'backups:save-retention-settings',
+      'backups:apply-retention-policy',
+      'backups:validate-retention-policy',
+      'backups:preview-retention-policy',
+      'backups:get-size-cache-stats',
+      'backups:invalidate-size-cache',
+      'backups:check-size-alerts',
+      'backups:get-performance-metrics',
       'save-mod-categories',
       'get-mod-categories',
       'move-mod-file',
@@ -206,6 +217,7 @@ contextBridge.exposeInMainWorld('electron', {
       'logger-get-settings',
       'logger-new-log',
       'logger-logs-cleared',
+      'set-current-instance',
     ];
 
     if (!ipcChannelsLogged) {
@@ -245,6 +257,7 @@ contextBridge.exposeInMainWorld('electron', {
       'mod-install-progress',
       'setup-progress',
       'backup-notification',
+      'backup-size-changed',
       // Management server events
       'management-server-status',
       'management-server-path-updated',
@@ -314,6 +327,7 @@ contextBridge.exposeInMainWorld('electron', {
       'mod-install-progress',
       'setup-progress',
       'backup-notification',
+      'backup-size-changed',
       // Management server events
       'management-server-status',
       'management-server-path-updated',
@@ -383,6 +397,7 @@ contextBridge.exposeInMainWorld('electron', {
       'mod-install-progress',
       'setup-progress',
       'backup-notification',
+      'backup-size-changed',
       // Management server events
       'management-server-status',
       'management-server-path-updated',
