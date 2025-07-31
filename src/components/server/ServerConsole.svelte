@@ -3,88 +3,374 @@
   /// <reference path="../../electron.d.ts" />
   import { onMount, afterUpdate } from 'svelte';
   import { serverState, addServerLog } from '../../stores/serverState.js';
+  import { LogFormatter } from '../../utils/logFormatter.js';
   import logger from '../../utils/logger.js';
   
   // Local state
   let consoleEl;
   let autoScroll = true;
   let command = '';
-    // Access the logs from the store
+  
+  // Access the logs from the store
   $: serverLogs = $serverState.logs;
   
-  // Virtual scrolling variables
-  let startIndex = 0;
-  let visibleCount = 50; // Show 50 items at a time
-  $: totalLogs = serverLogs.length;
-  $: endIndex = Math.min(startIndex + visibleCount, totalLogs);
-  $: visibleLogs = serverLogs.slice(startIndex, endIndex);
-  
-  // Calculate the height for spacers
-  const itemHeight = 21; // Approximate height of each log line in pixels
-  $: topSpacerHeight = startIndex * itemHeight;
-  $: bottomSpacerHeight = Math.max(0, (totalLogs - endIndex) * itemHeight);
-  
-  function onConsoleScroll() {
-    // Add null check to prevent error
-    if (!consoleEl) {
-      logger.warn('Console scroll event with null console element', {
+  // Performance optimized log formatting with caching
+  $: groupedLogs = (() => {
+    try {
+      return LogFormatter.groupLogsByDate(serverLogs);
+    } catch (error) {
+      logger.error('Error grouping logs by date', {
         category: 'ui',
         data: {
           component: 'ServerConsole',
-          function: 'onConsoleScroll',
-          consoleElExists: !!consoleEl
+          function: 'groupedLogs',
+          errorMessage: error.message,
+          logsCount: serverLogs ? serverLogs.length : 0
         }
       });
-      return;
+      // Return fallback grouping
+      return { [new Date().toDateString()]: serverLogs || [] };
     }
-    
-    const wasAutoScroll = autoScroll;
-    
-    // If user scrolls up, disable autoScroll
-    autoScroll = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 5;
-    
-    // Update virtual scrolling indices based on scroll position
-    if (!autoScroll) {
-      const scrollTop = consoleEl.scrollTop;
-      const newStartIndex = Math.floor(scrollTop / itemHeight);
-      startIndex = Math.max(0, Math.min(newStartIndex, Math.max(0, totalLogs - visibleCount)));
+  })();
+  
+  $: showDateSeparators = (() => {
+    try {
+      return Object.keys(groupedLogs).length > 1;
+    } catch (error) {
+      logger.warn('Error determining date separators', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'showDateSeparators',
+          errorMessage: error.message
+        }
+      });
+      return false;
+    }
+  })();
+  
+  // Optimized log formatting using efficient batch processing
+  $: formattedLogs = (() => {
+    try {
+      if (!Array.isArray(serverLogs)) {
+        logger.warn('Server logs is not an array, using empty array', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'formattedLogs',
+            serverLogsType: typeof serverLogs
+          }
+        });
+        return [];
+      }
+
+      if (!showDateSeparators) {
+        // Single day or no logs - use batch formatting for performance
+        return LogFormatter.batchFormatLogs(serverLogs.filter(log => log !== null && log !== undefined));
+      }
       
-      if (wasAutoScroll !== autoScroll) {
-        logger.debug('Auto-scroll disabled by user interaction', {
+      // Multiple days - use optimized separator creation
+      return LogFormatter.createFormattedLogsWithSeparators(groupedLogs);
+    } catch (error) {
+      logger.error('Critical error formatting logs', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'formattedLogs',
+          errorMessage: error.message,
+          serverLogsLength: serverLogs ? serverLogs.length : 0
+        }
+      });
+      // Ultimate fallback - return raw logs or empty array
+      return Array.isArray(serverLogs) ? serverLogs.filter(log => log !== null && log !== undefined) : [];
+    }
+  })();
+  
+  // Virtual scrolling variables with error handling
+  let startIndex = 0;
+  let visibleCount = 50; // Show 50 items at a time
+  
+  $: totalLogs = (() => {
+    try {
+      return Array.isArray(formattedLogs) ? formattedLogs.length : 0;
+    } catch (error) {
+      logger.warn('Error calculating total logs', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'totalLogs',
+          errorMessage: error.message
+        }
+      });
+      return 0;
+    }
+  })();
+  
+  $: endIndex = (() => {
+    try {
+      return Math.min(startIndex + visibleCount, totalLogs);
+    } catch (error) {
+      logger.warn('Error calculating end index', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'endIndex',
+          startIndex,
+          visibleCount,
+          totalLogs,
+          errorMessage: error.message
+        }
+      });
+      return Math.min(50, totalLogs); // Fallback to first 50 items
+    }
+  })();
+  
+  $: visibleLogs = (() => {
+    try {
+      if (!Array.isArray(formattedLogs)) {
+        logger.warn('Formatted logs is not an array for slicing', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'visibleLogs',
+            formattedLogsType: typeof formattedLogs
+          }
+        });
+        return [];
+      }
+      
+      // Ensure indices are valid
+      const safeStartIndex = Math.max(0, Math.min(startIndex, totalLogs));
+      const safeEndIndex = Math.max(safeStartIndex, Math.min(endIndex, totalLogs));
+      
+      return formattedLogs.slice(safeStartIndex, safeEndIndex);
+    } catch (error) {
+      logger.error('Error slicing visible logs', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'visibleLogs',
+          startIndex,
+          endIndex,
+          totalLogs,
+          errorMessage: error.message
+        }
+      });
+      return []; // Return empty array on error
+    }
+  })();
+  
+  // Calculate the height for spacers with error handling
+  const itemHeight = 21; // Approximate height of each log line in pixels
+  
+  $: topSpacerHeight = (() => {
+    try {
+      return Math.max(0, startIndex * itemHeight);
+    } catch (error) {
+      logger.warn('Error calculating top spacer height', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'topSpacerHeight',
+          startIndex,
+          itemHeight,
+          errorMessage: error.message
+        }
+      });
+      return 0;
+    }
+  })();
+  
+  $: bottomSpacerHeight = (() => {
+    try {
+      return Math.max(0, (totalLogs - endIndex) * itemHeight);
+    } catch (error) {
+      logger.warn('Error calculating bottom spacer height', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'bottomSpacerHeight',
+          totalLogs,
+          endIndex,
+          itemHeight,
+          errorMessage: error.message
+        }
+      });
+      return 0;
+    }
+  })();
+  
+  function onConsoleScroll() {
+    try {
+      // Add null check to prevent error
+      if (!consoleEl) {
+        logger.warn('Console scroll event with null console element', {
           category: 'ui',
           data: {
             component: 'ServerConsole',
             function: 'onConsoleScroll',
-            scrollTop,
-            startIndex,
-            totalLogs
+            consoleElExists: !!consoleEl
           }
         });
+        return;
       }
+      
+      // Validate console element properties
+      if (typeof consoleEl.scrollTop !== 'number' || 
+          typeof consoleEl.clientHeight !== 'number' || 
+          typeof consoleEl.scrollHeight !== 'number') {
+        logger.warn('Console element has invalid scroll properties', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'onConsoleScroll',
+            scrollTop: consoleEl.scrollTop,
+            clientHeight: consoleEl.clientHeight,
+            scrollHeight: consoleEl.scrollHeight
+          }
+        });
+        return;
+      }
+      
+      const wasAutoScroll = autoScroll;
+      
+      // If user scrolls up, disable autoScroll with error handling
+      try {
+        autoScroll = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 5;
+      } catch (scrollError) {
+        logger.warn('Error calculating auto-scroll state', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'onConsoleScroll.autoScroll',
+            errorMessage: scrollError.message
+          }
+        });
+        // Keep current autoScroll state on error
+      }
+      
+      // Update virtual scrolling indices based on scroll position
+      if (!autoScroll) {
+        try {
+          const scrollTop = Math.max(0, consoleEl.scrollTop);
+          const newStartIndex = Math.floor(scrollTop / itemHeight);
+          const maxStartIndex = Math.max(0, totalLogs - visibleCount);
+          startIndex = Math.max(0, Math.min(newStartIndex, maxStartIndex));
+          
+          if (wasAutoScroll !== autoScroll) {
+            logger.debug('Auto-scroll disabled by user interaction', {
+              category: 'ui',
+              data: {
+                component: 'ServerConsole',
+                function: 'onConsoleScroll',
+                scrollTop,
+                startIndex,
+                totalLogs
+              }
+            });
+          }
+        } catch (indexError) {
+          logger.warn('Error updating virtual scroll indices', {
+            category: 'ui',
+            data: {
+              component: 'ServerConsole',
+              function: 'onConsoleScroll.indices',
+              errorMessage: indexError.message,
+              scrollTop: consoleEl.scrollTop,
+              totalLogs
+            }
+          });
+          // Keep current startIndex on error
+        }
+      }
+    } catch (error) {
+      logger.error('Critical error in console scroll handler', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'onConsoleScroll',
+          errorMessage: error.message
+        }
+      });
+      // Don't throw - let the UI continue functioning
     }
   }
   
   afterUpdate(() => {
-    if (autoScroll && consoleEl) {
-      // When auto-scrolling, show the most recent logs
-      const newStartIndex = Math.max(0, totalLogs - visibleCount);
-      
-      if (newStartIndex !== startIndex) {
-        // Disabled debug logging to prevent excessive logs
-        // logger.debug('Auto-scrolling to latest logs', {
-        //   category: 'ui',
-        //   data: {
-        //     component: 'ServerConsole',
-        //     function: 'afterUpdate',
-        //     oldStartIndex: startIndex,
-        //     newStartIndex,
-        //     totalLogs
-        //   }
-        // });
+    try {
+      if (autoScroll && consoleEl) {
+        // Validate console element before using it
+        if (typeof consoleEl.scrollHeight !== 'number') {
+          logger.warn('Console element scrollHeight is invalid in afterUpdate', {
+            category: 'ui',
+            data: {
+              component: 'ServerConsole',
+              function: 'afterUpdate',
+              scrollHeight: consoleEl.scrollHeight
+            }
+          });
+          return;
+        }
+        
+        // When auto-scrolling, show the most recent logs
+        try {
+          const newStartIndex = Math.max(0, totalLogs - visibleCount);
+          
+          if (newStartIndex !== startIndex) {
+            // Disabled debug logging to prevent excessive logs
+            // logger.debug('Auto-scrolling to latest logs', {
+            //   category: 'ui',
+            //   data: {
+            //     component: 'ServerConsole',
+            //     function: 'afterUpdate',
+            //     oldStartIndex: startIndex,
+            //     newStartIndex,
+            //     totalLogs
+            //   }
+            // });
+          }
+          
+          startIndex = newStartIndex;
+          
+          // Safely set scroll position
+          try {
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+          } catch (scrollError) {
+            logger.warn('Error setting scroll position in afterUpdate', {
+              category: 'ui',
+              data: {
+                component: 'ServerConsole',
+                function: 'afterUpdate.scroll',
+                errorMessage: scrollError.message,
+                scrollHeight: consoleEl.scrollHeight
+              }
+            });
+          }
+        } catch (indexError) {
+          logger.warn('Error calculating start index in afterUpdate', {
+            category: 'ui',
+            data: {
+              component: 'ServerConsole',
+              function: 'afterUpdate.index',
+              errorMessage: indexError.message,
+              totalLogs,
+              visibleCount
+            }
+          });
+        }
       }
-      
-      startIndex = newStartIndex;
-      consoleEl.scrollTop = consoleEl.scrollHeight;
+    } catch (error) {
+      logger.error('Critical error in afterUpdate', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'afterUpdate',
+          errorMessage: error.message,
+          autoScroll,
+          consoleElExists: !!consoleEl
+        }
+      });
+      // Don't throw - let the component continue functioning
     }
   });
   
@@ -153,20 +439,87 @@
     command = '';
   }
 
-  // Handle server log events
+  // Handle server log events with error recovery
   const logHandler = (line) => {
-    // Disabled debug logging to prevent excessive logs
-    // logger.debug('Received server log line', {
-    //   category: 'ui',
-    //   data: {
-    //     component: 'ServerConsole',
-    //     function: 'logHandler',
-    //     lineLength: line ? line.length : 0,
-    //     hasLine: !!line
-    //   }
-    // });
-    
-    addServerLog(line);
+    try {
+      // Disabled debug logging to prevent excessive logs
+      // logger.debug('Received server log line', {
+      //   category: 'ui',
+      //   data: {
+      //     component: 'ServerConsole',
+      //     function: 'logHandler',
+      //     lineLength: line ? line.length : 0,
+      //     hasLine: !!line
+      //   }
+      // });
+      
+      // Validate the log line before adding
+      if (line === null || line === undefined) {
+        logger.warn('Received null/undefined log line, skipping', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'logHandler',
+            line
+          }
+        });
+        return;
+      }
+      
+      // Convert non-string lines to strings safely
+      let processedLine = line;
+      if (typeof line !== 'string') {
+        try {
+          processedLine = String(line);
+          logger.debug('Converted non-string log line to string', {
+            category: 'ui',
+            data: {
+              component: 'ServerConsole',
+              function: 'logHandler',
+              originalType: typeof line,
+              converted: processedLine
+            }
+          });
+        } catch (conversionError) {
+          logger.warn('Failed to convert log line to string', {
+            category: 'ui',
+            data: {
+              component: 'ServerConsole',
+              function: 'logHandler',
+              errorMessage: conversionError.message,
+              originalType: typeof line
+            }
+          });
+          processedLine = '(invalid log entry)';
+        }
+      }
+      
+      addServerLog(processedLine);
+    } catch (error) {
+      logger.error('Error in log handler', {
+        category: 'ui',
+        data: {
+          component: 'ServerConsole',
+          function: 'logHandler',
+          errorMessage: error.message,
+          lineType: typeof line
+        }
+      });
+      
+      // Try to add an error log entry
+      try {
+        addServerLog(`[LOG_ERROR] Failed to process log entry: ${error.message}`);
+      } catch (fallbackError) {
+        logger.error('Failed to add error log entry', {
+          category: 'ui',
+          data: {
+            component: 'ServerConsole',
+            function: 'logHandler.fallback',
+            errorMessage: fallbackError.message
+          }
+        });
+      }
+    }
   };
 
   onMount(() => {
@@ -222,12 +575,16 @@
     {#if topSpacerHeight > 0}
       <div class="virtual-spacer" style="height: {topSpacerHeight}px;"></div>
     {/if}
-      <!-- Visible log lines -->
-    {#if visibleLogs.length === 0}      <!-- Add empty line to maintain height when no logs -->
-      <div class="console-line console-empty">Server console ready.</div>
+      <!-- Visible log lines with enhanced formatting -->
+    {#if visibleLogs.length === 0}
+      <div class="console-line console-empty">
+        Server console ready. [{new Date().toLocaleString()}]
+      </div>
     {:else}
       {#each visibleLogs as line, index (startIndex + index)}
-        <div class="console-line">{line}</div>
+        <div class="console-line" class:date-separator={line.startsWith('---')}>
+          {line}
+        </div>
       {/each}
     {/if}
     
@@ -309,12 +666,59 @@
   .console-line {
     min-height: 1.4em;
     opacity: 1;
+    padding: 1px 0;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
   }
   
   /* Style for empty console */
   .console-empty {
     color: #888;
     font-style: italic;
+  }
+  
+  /* Date separator styling */
+  .console-line.date-separator {
+    color: #4a9eff;
+    font-weight: bold;
+    text-align: center;
+    margin: 8px 0 4px 0;
+    padding: 4px 0;
+    border-top: 1px solid #333;
+    border-bottom: 1px solid #333;
+    background-color: rgba(74, 158, 255, 0.1);
+    font-size: 0.85rem;
+    letter-spacing: 0.5px;
+  }
+  
+  /* Enhanced timestamp styling within log entries */
+  .console-line:not(.date-separator):not(.console-empty) {
+    /* Ensure timestamps are easily readable */
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  }
+  
+  /* Responsive design for smaller screens */
+  @media (max-width: 768px) {
+    .scrollable-console {
+      font-size: 0.8rem;
+      padding: 8px;
+    }
+    
+    .console-line.date-separator {
+      font-size: 0.75rem;
+      margin: 6px 0 3px 0;
+      padding: 3px 0;
+    }
+    
+    .console-line {
+      line-height: 1.3;
+    }
+  }
+  
+  /* Improved readability for timestamp brackets */
+  .console-line:not(.date-separator):not(.console-empty)::before {
+    /* This will help distinguish timestamp brackets visually */
+    content: '';
   }
   
   /* Virtual scrolling spacers */

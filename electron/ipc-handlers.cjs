@@ -20,6 +20,7 @@ const { createMinecraftLauncherHandlers } = require('./ipc/minecraft-launcher-ha
 const { createServerJavaHandlers } = require('./ipc/server-java-handlers.cjs');
 const { createAppSettingsHandlers } = require('./ipc/app-settings-handlers.cjs');
 const { createUpdateHandlers } = require('./ipc/update-handlers.cjs');
+const { createMetricsHandlers } = require('./ipc/metrics-handlers.cjs');
 const { getLoggerHandlers } = require('./ipc/logger-handlers.cjs');
 
 // Import auto-restart services for the one remaining handler
@@ -57,6 +58,7 @@ function setupIpcHandlers(win) {
     const serverJavaHandlers = createServerJavaHandlers(win);
     const appSettingsHandlers = createAppSettingsHandlers();
     const updateHandlers = createUpdateHandlers(win);
+    const metricsHandlers = createMetricsHandlers();
     
     // Initialize logger handlers (singleton, no creation needed)
     const loggerHandlers = getLoggerHandlers();
@@ -90,6 +92,7 @@ function setupIpcHandlers(win) {
       minecraftLauncherHandlers,
       serverJavaHandlers,
       updateHandlers,
+      metricsHandlers,
       loggerHandlers
     ].forEach((handlers) => {
       if (!handlers) {
