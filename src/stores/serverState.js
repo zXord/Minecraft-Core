@@ -367,6 +367,9 @@ let logStats = {
   lastBatchTime: 0
 };
 
+// Import LogFormatter for consistent timestamp formatting
+import { LogFormatter } from '../utils/logFormatter.js';
+
 // Ensure addServerLog efficiently handles log updates
 export function addServerLog(logLine) {
   try {
@@ -385,8 +388,11 @@ export function addServerLog(logLine) {
       return;
     }
     
+    // Format the log with timestamp when it's first added (preserves original timestamp)
+    const formattedLogLine = LogFormatter.formatLogEntry(logLine);
+    
     // Add to pending logs (don't log every single line to avoid spam)
-    pendingLogs.push(logLine);
+    pendingLogs.push(formattedLogLine);
     logStats.totalProcessed++;
     
     // If we have too many pending logs or no timeout is scheduled, process them
