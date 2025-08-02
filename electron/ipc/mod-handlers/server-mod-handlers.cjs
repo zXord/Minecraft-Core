@@ -1,11 +1,14 @@
 const fs = require('fs');
 const modApiService = require('../../services/mod-api-service.cjs');
+const { getModrinthDownloadUrl, getCurseForgeDownloadUrl } = require('../../services/mod-api-service.cjs');
 const modFileManager = require('../mod-utils/mod-file-manager.cjs');
 const modInstallService = require('../mod-utils/mod-installation-service.cjs');
+const { downloadWithProgress } = require('../../services/download-manager.cjs');
 const {
   extractVersionFromFilename
 } = require('./mod-handler-utils.cjs');
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
+const { serverErrorMonitor } = require('../error-monitoring-handlers.cjs');
 
 function createServerModHandlers(win) {
   const logger = getLoggerHandlers();
@@ -565,6 +568,1123 @@ function createServerModHandlers(win) {
             errorType: error.constructor.name
           }
         });
+        throw error;
+      }
+    },
+
+    'install-mod-with-fallback': async (_e, serverPath, modDetails) => {
+      const startTime = Date.now();
+      
+      logger.info('Installing server mod with fallback support', {
+        category: 'mods',
+        data: {
+          handler: 'install-mod-with-fallback',
+          serverPath: serverPath,
+          modName: modDetails?.name,
+          modId: modDetails?.id,
+          useFallback: modDetails?.useFallback,
+          maxRetries: modDetails?.maxRetries,
+          fallbackDelay: modDetails?.fallbackDelay,
+          hasDownloadUrl: !!modDetails?.downloadUrl,
+          originalSource: modDetails?.originalSource
+        }
+      });
+
+      try {
+        // Use the enhanced mod install service with fallback support
+        const result = await modInstallService.installModToServerWithFallback(
+          win, 
+          serverPath, 
+          modDetails
+        );
+        
+        const duration = Date.now() - startTime;
+        
+        logger.info('Server mod installation with fallback completed', {
+          category: 'mods',
+          data: {
+            handler: 'install-mod-with-fallback',
+            serverPath: serverPath,
+            modName: modDetails?.name,
+            success: result?.success,
+            source: result?.source,
+            attempts: result?.attempts,
+            fallbackUsed: result?.fallbackUsed,
+            checksumErrors: result?.checksumErrors,
+            duration
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        
+        logger.error(`Server mod installation with fallback failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'install-mod-with-fallback',
+            serverPath: serverPath,
+            modName: modDetails?.name,
+            modId: modDetails?.id,
+            errorType: error.constructor.name,
+            duration
+          }
+        });
+        throw error;
+      }
+    },
+
+    'download-mod-from-server': async (_e, { mod, attempt, totalAttempts, validateChecksum = true }) => {
+      logger.info('Downloading mod from server', {
+        category: 'mods',
+        data: {
+          handler: 'download-mod-from-server',
+          modName: mod?.name,
+          modId: mod?.id,
+          attempt,
+          totalAttempts,
+          validateChecksum,
+          hasExpectedChecksum: !!mod.expectedChecksum
+        }
+      });
+
+      try {
+        // Use the existing mod API service to download from server
+        const downloadUrl = mod.downloadUrl || await getModrinthDownloadUrl(
+          mod.projectId || mod.id,
+          mod.version,
+          mod.loader
+        );
+
+        if (!downloadUrl) {
+          throw new Error('No download URL available for server download');
+        }
+
+        // Create a temporary file path for download
+        const tempDir = require('os').tmpdir();
+        const tempFileName = `${mod.name || mod.id}_${Date.now()}.jar`;
+        const tempFilePath = require('path').join(tempDir, tempFileName);
+
+        // Download the file with progress reporting
+        await downloadWithProgress(downloadUrl, tempFilePath, `download-progress-${mod.id || mod.name}`);
+        
+        // Get file size after download
+        const stats = fs.statSync(tempFilePath);
+        const fileSize = stats.size;
+
+        // Perform checksum validation if requested and checksum is available
+        let checksumValidation = null;
+        if (validateChecksum && mod.expectedChecksum) {
+          logger.debug('Performing checksum validation with integrity service', {
+            category: 'mods',
+            data: {
+              handler: 'download-mod-from-server',
+              modName: mod?.name,
+              filePath: tempFilePath,
+              expectedChecksum: mod.expectedChecksum,
+              algorithm: mod.checksumAlgorithm || 'sha1'
+            }
+          });
+
+          // Use the file integrity service for validation
+          checksumValidation = await module.exports.createServerModHandlers(win)['verify-file-integrity'](_e, {
+            filePath: tempFilePath,
+            expectedChecksum: mod.expectedChecksum,
+            algorithm: mod.checksumAlgorithm || 'sha1'
+          });
+
+          if (!checksumValidation.isValid) {
+            // Delete the invalid file
+            try {
+              await require('fs/promises').unlink(tempFilePath);
+            } catch (unlinkError) {
+              logger.warn(`Failed to delete invalid file: ${unlinkError.message}`, {
+                category: 'storage',
+                data: {
+                  handler: 'download-mod-from-server',
+                  filePath: tempFilePath
+                }
+              });
+            }
+
+            throw new Error(`Checksum validation failed: expected ${checksumValidation.expected}, got ${checksumValidation.actual}`);
+          } else {
+            // Store the valid checksum for future verification
+            try {
+              await module.exports.createServerModHandlers(win)['store-file-checksum'](_e, {
+                filePath: tempFilePath,
+                checksum: checksumValidation.actual,
+                algorithm: checksumValidation.algorithm,
+                metadata: {
+                  modId: mod.id,
+                  modName: mod.name,
+                  source: 'server',
+                  downloadUrl,
+                  downloadTime: Date.now()
+                }
+              });
+            } catch (storeError) {
+              logger.warn(`Failed to store checksum: ${storeError.message}`, {
+                category: 'storage',
+                data: {
+                  handler: 'download-mod-from-server',
+                  filePath: tempFilePath
+                }
+              });
+            }
+          }
+        }
+
+        logger.info('Server download completed successfully', {
+          category: 'mods',
+          data: {
+            handler: 'download-mod-from-server',
+            modName: mod?.name,
+            filePath: tempFilePath,
+            fileSize: fileSize,
+            checksumValid: checksumValidation?.isValid,
+            checksumValidated: !!checksumValidation
+          }
+        });
+
+        return {
+          success: true,
+          filePath: tempFilePath,
+          downloadUrl,
+          size: fileSize,
+          checksumValidation
+        };
+      } catch (error) {
+        // Log to error monitoring system
+        serverErrorMonitor.logDownloadError({
+          type: error.message.includes('Checksum') ? 'checksum' : 'network',
+          message: error.message,
+          source: 'server',
+          modId: mod?.id,
+          modName: mod?.name,
+          attempt,
+          totalAttempts,
+          downloadUrl: mod.downloadUrl,
+          httpStatus: error.response?.status,
+          timeout: error.timeout,
+          stack: error.stack,
+          errorType: error.constructor.name,
+          networkDetails: {
+            url: mod.downloadUrl,
+            method: 'GET',
+            timeout: error.timeout,
+            connectionTime: error.connectionTime
+          },
+          checksumDetails: mod.expectedChecksum ? {
+            expected: mod.expectedChecksum,
+            algorithm: mod.checksumAlgorithm || 'sha1'
+          } : null
+        });
+
+        logger.error(`Server download failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'download-mod-from-server',
+            modName: mod?.name,
+            attempt,
+            errorType: error.constructor.name,
+            isChecksumError: error.message.includes('Checksum')
+          }
+        });
+        throw error;
+      }
+    },
+
+    'download-mod-from-fallback': async (_e, { mod, source, attempt, totalAttempts, validateChecksum = true }) => {
+      logger.info('Downloading mod from fallback source', {
+        category: 'mods',
+        data: {
+          handler: 'download-mod-from-fallback',
+          modName: mod?.name,
+          modId: mod?.id,
+          source,
+          attempt,
+          totalAttempts,
+          validateChecksum,
+          hasExpectedChecksum: !!mod.expectedChecksum
+        }
+      });
+
+      let downloadUrl;
+      
+      try {
+        // Get download URL based on fallback source
+        if (source === 'modrinth') {
+          downloadUrl = await getModrinthDownloadUrl(
+            mod.projectId || mod.id,
+            mod.version,
+            mod.loader
+          );
+        } else if (source === 'curseforge') {
+          // Use CurseForge API if available
+          if (mod.curseforgeId) {
+            try {
+              downloadUrl = await getCurseForgeDownloadUrl();
+            } catch (error) {
+              throw new Error(`CurseForge download not supported: ${error.message}`);
+            }
+          } else {
+            throw new Error('CurseForge ID not available for fallback download');
+          }
+        } else {
+          throw new Error(`Unsupported fallback source: ${source}`);
+        }
+
+        if (!downloadUrl) {
+          throw new Error(`No download URL available for ${source} fallback`);
+        }
+
+        // Create a temporary file path for download
+        const tempDir = require('os').tmpdir();
+        const tempFileName = `${mod.name || mod.id}_${source}_${Date.now()}.jar`;
+        const tempFilePath = require('path').join(tempDir, tempFileName);
+
+        // Download the file with progress reporting
+        await downloadWithProgress(downloadUrl, tempFilePath, `download-progress-${mod.id || mod.name}-${source}`);
+        
+        // Get file size after download
+        const fallbackStats = fs.statSync(tempFilePath);
+        const fallbackFileSize = fallbackStats.size;
+
+        // Perform checksum validation if requested and checksum is available
+        let checksumValidation = null;
+        if (validateChecksum && mod.expectedChecksum) {
+          logger.debug('Performing checksum validation on fallback download with integrity service', {
+            category: 'mods',
+            data: {
+              handler: 'download-mod-from-fallback',
+              modName: mod?.name,
+              source,
+              filePath: tempFilePath,
+              expectedChecksum: mod.expectedChecksum,
+              algorithm: mod.checksumAlgorithm || 'sha1'
+            }
+          });
+
+          // Use the file integrity service for validation
+          checksumValidation = await module.exports.createServerModHandlers(win)['verify-file-integrity'](_e, {
+            filePath: tempFilePath,
+            expectedChecksum: mod.expectedChecksum,
+            algorithm: mod.checksumAlgorithm || 'sha1'
+          });
+
+          if (!checksumValidation.isValid) {
+            // Delete the invalid file
+            try {
+              await require('fs/promises').unlink(tempFilePath);
+            } catch (unlinkError) {
+              logger.warn(`Failed to delete invalid file: ${unlinkError.message}`, {
+                category: 'storage',
+                data: {
+                  handler: 'download-mod-from-fallback',
+                  filePath: tempFilePath
+                }
+              });
+            }
+
+            throw new Error(`Checksum validation failed: expected ${checksumValidation.expected}, got ${checksumValidation.actual}`);
+          } else {
+            // Store the valid checksum for future verification
+            try {
+              await module.exports.createServerModHandlers(win)['store-file-checksum'](_e, {
+                filePath: tempFilePath,
+                checksum: checksumValidation.actual,
+                algorithm: checksumValidation.algorithm,
+                metadata: {
+                  modId: mod.id,
+                  modName: mod.name,
+                  source,
+                  downloadUrl,
+                  downloadTime: Date.now()
+                }
+              });
+            } catch (storeError) {
+              logger.warn(`Failed to store checksum: ${storeError.message}`, {
+                category: 'storage',
+                data: {
+                  handler: 'download-mod-from-fallback',
+                  filePath: tempFilePath
+                }
+              });
+            }
+          }
+        }
+
+        logger.info('Fallback download completed successfully', {
+          category: 'mods',
+          data: {
+            handler: 'download-mod-from-fallback',
+            modName: mod?.name,
+            source,
+            filePath: tempFilePath,
+            fileSize: fallbackFileSize,
+            checksumValid: checksumValidation?.isValid,
+            checksumValidated: !!checksumValidation
+          }
+        });
+
+        return {
+          success: true,
+          filePath: tempFilePath,
+          downloadUrl,
+          source,
+          size: fallbackFileSize,
+          checksumValidation
+        };
+      } catch (error) {
+        // Log to error monitoring system
+        serverErrorMonitor.logDownloadError({
+          type: error.message.includes('Checksum') ? 'checksum' : 'network',
+          message: error.message,
+          source,
+          modId: mod?.id,
+          modName: mod?.name,
+          attempt,
+          totalAttempts,
+          downloadUrl: downloadUrl || 'unknown',
+          httpStatus: error.response?.status,
+          timeout: error.timeout,
+          stack: error.stack,
+          errorType: error.constructor.name,
+          networkDetails: {
+            url: downloadUrl || 'unknown',
+            method: 'GET',
+            timeout: error.timeout,
+            fallbackSource: source
+          },
+          checksumDetails: mod.expectedChecksum ? {
+            expected: mod.expectedChecksum,
+            algorithm: mod.checksumAlgorithm || 'sha1'
+          } : null
+        });
+
+        logger.error(`Fallback download failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'download-mod-from-fallback',
+            modName: mod?.name,
+            source,
+            attempt,
+            errorType: error.constructor.name,
+            isChecksumError: error.message.includes('Checksum')
+          }
+        });
+        throw error;
+      }
+    },
+
+    'calculate-file-checksum': async (_e, { filePath, algorithm = 'sha1' }) => {
+      logger.debug('Calculating file checksum', {
+        category: 'mods',
+        data: {
+          handler: 'calculate-file-checksum',
+          filePath,
+          algorithm
+        }
+      });
+
+      try {
+        const crypto = require('crypto');
+        // fs is already declared at the top of the file
+        
+        return new Promise((resolve, reject) => {
+          const hash = crypto.createHash(algorithm);
+          const stream = fs.createReadStream(filePath);
+          
+          stream.on('data', (data) => {
+            hash.update(data);
+          });
+          
+          stream.on('end', () => {
+            const checksum = hash.digest('hex');
+            logger.debug('Checksum calculation completed', {
+              category: 'mods',
+              data: {
+                handler: 'calculate-file-checksum',
+                filePath,
+                algorithm,
+                checksum
+              }
+            });
+            resolve(checksum);
+          });
+          
+          stream.on('error', (error) => {
+            logger.error(`Checksum calculation failed: ${error.message}`, {
+              category: 'mods',
+              data: {
+                handler: 'calculate-file-checksum',
+                filePath,
+                algorithm,
+                errorType: error.constructor.name
+              }
+            });
+            reject(error);
+          });
+        });
+      } catch (error) {
+        logger.error(`Checksum calculation setup failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'calculate-file-checksum',
+            filePath,
+            algorithm,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'download-mod-with-fallback': async (_e, { mod, serverPath, options = { maxRetries: 3, fallbackDelay: 15 * 60 * 1000, useFallback: true } }) => {
+      const startTime = Date.now();
+      const downloadId = `mod-${mod.id || mod.name}-${Date.now()}`;
+      
+      logger.info('Starting mod download with fallback support', {
+        category: 'mods',
+        data: {
+          handler: 'download-mod-with-fallback',
+          modName: mod?.name,
+          modId: mod?.id,
+          serverPath,
+          downloadId,
+          maxRetries: options.maxRetries || 3,
+          fallbackDelay: options.fallbackDelay || 15 * 60 * 1000,
+          useFallback: options.useFallback !== false
+        }
+      });
+
+      try {
+        // Send initial progress update
+        win.webContents.send('download-progress', {
+          id: downloadId,
+          name: mod.name,
+          state: 'queued',
+          progress: 0,
+          source: 'server',
+          attempt: 0,
+          maxAttempts: options.maxRetries || 3,
+          statusMessage: 'Queued for download...',
+          startTime: Date.now()
+        });
+
+        // Use the enhanced mod install service with fallback support
+        const result = await modInstallService.installModToServerWithFallback(
+          win, 
+          serverPath, 
+          {
+            ...mod,
+            maxRetries: options.maxRetries || 3,
+            fallbackDelay: options.fallbackDelay || 15 * 60 * 1000,
+            useFallback: options.useFallback !== false,
+            downloadId
+          }
+        );
+        
+        const duration = Date.now() - startTime;
+        
+        if (result.success) {
+          win.webContents.send('download-progress', {
+            id: downloadId,
+            name: mod.name,
+            state: 'completed',
+            progress: 100,
+            source: result.source || 'server',
+            statusMessage: 'Download completed successfully',
+            completedTime: Date.now(),
+            duration
+          });
+          
+          logger.info('Mod download with fallback completed successfully', {
+            category: 'mods',
+            data: {
+              handler: 'download-mod-with-fallback',
+              modName: mod?.name,
+              downloadId,
+              source: result.source,
+              attempts: result.attempts,
+              fallbackUsed: result.fallbackUsed,
+              checksumErrors: result.checksumErrors,
+              duration
+            }
+          });
+        } else {
+          win.webContents.send('download-progress', {
+            id: downloadId,
+            name: mod.name,
+            state: 'failed',
+            progress: 0,
+            error: result.error || 'Download failed',
+            statusMessage: 'Download failed',
+            errorDetails: {
+              lastSource: result.lastSource,
+              attempts: result.attempts,
+              checksumErrors: result.checksumErrors,
+              networkErrors: result.networkErrors
+            },
+            completedTime: Date.now(),
+            duration
+          });
+          
+          logger.error('Mod download with fallback failed', {
+            category: 'mods',
+            data: {
+              handler: 'download-mod-with-fallback',
+              modName: mod?.name,
+              downloadId,
+              error: result.error,
+              attempts: result.attempts,
+              duration
+            }
+          });
+        }
+        
+        return result;
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        
+        win.webContents.send('download-progress', {
+          id: downloadId,
+          name: mod.name,
+          state: 'failed',
+          progress: 0,
+          error: error.message,
+          statusMessage: 'Download failed',
+          errorDetails: {
+            errorType: error.constructor.name,
+            message: error.message
+          },
+          completedTime: Date.now(),
+          duration
+        });
+        
+        logger.error(`Mod download with fallback failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'download-mod-with-fallback',
+            modName: mod?.name,
+            downloadId,
+            errorType: error.constructor.name,
+            duration
+          }
+        });
+        
+        throw error;
+      }
+    },
+
+    'validate-file-checksum': async (_e, { filePath, expectedChecksum, algorithm = 'sha1' }) => {
+      logger.debug('Validating file checksum', {
+        category: 'mods',
+        data: {
+          handler: 'validate-file-checksum',
+          filePath,
+          expectedChecksum,
+          algorithm
+        }
+      });
+
+      try {
+        const actualChecksum = await module.exports.createServerModHandlers(win)['calculate-file-checksum'](_e, { filePath, algorithm });
+        
+        const isValid = actualChecksum === expectedChecksum;
+        
+        const result = {
+          isValid,
+          expected: expectedChecksum,
+          actual: actualChecksum,
+          algorithm,
+          validationTime: Date.now()
+        };
+        
+        if (!isValid) {
+          // Log checksum mismatch to error monitoring system
+          serverErrorMonitor.logChecksumError({
+            type: 'checksum',
+            message: `Checksum mismatch: expected ${expectedChecksum}, got ${actualChecksum}`,
+            filePath,
+            expected: expectedChecksum,
+            actual: actualChecksum,
+            algorithm,
+            validationTime: Date.now()
+          });
+        }
+        
+        logger.debug('File checksum validation completed', {
+          category: 'mods',
+          data: {
+            handler: 'validate-file-checksum',
+            filePath,
+            isValid,
+            algorithm,
+            expectedChecksum,
+            actualChecksum
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`File checksum validation failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'validate-file-checksum',
+            filePath,
+            expectedChecksum,
+            algorithm,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'verify-file-integrity': async (_e, { filePath, expectedChecksum, algorithm = 'sha1' }) => {
+      const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      
+      logger.debug('Verifying file integrity', {
+        category: 'mods',
+        data: {
+          handler: 'verify-file-integrity',
+          filePath,
+          hasExpectedChecksum: !!expectedChecksum,
+          algorithm
+        }
+      });
+
+      try {
+        const result = await fileIntegrityService.verifyFileIntegrity(filePath, expectedChecksum, algorithm);
+        
+        logger.debug('File integrity verification completed', {
+          category: 'mods',
+          data: {
+            handler: 'verify-file-integrity',
+            filePath,
+            isValid: result.isValid,
+            algorithm: result.algorithm
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`File integrity verification failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'verify-file-integrity',
+            filePath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'store-file-checksum': async (_e, { filePath, checksum, algorithm = 'sha1', metadata = {} }) => {
+      const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      
+      logger.debug('Storing file checksum', {
+        category: 'mods',
+        data: {
+          handler: 'store-file-checksum',
+          filePath,
+          checksum,
+          algorithm,
+          hasMetadata: Object.keys(metadata).length > 0
+        }
+      });
+
+      try {
+        await fileIntegrityService.storeFileChecksum(filePath, checksum, algorithm, metadata);
+        
+        logger.debug('File checksum stored successfully', {
+          category: 'mods',
+          data: {
+            handler: 'store-file-checksum',
+            filePath,
+            algorithm
+          }
+        });
+        
+        return { success: true };
+      } catch (error) {
+        logger.error(`Failed to store file checksum: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'store-file-checksum',
+            filePath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'get-stored-checksum': async (_e, { filePath }) => {
+      const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      
+      logger.debug('Getting stored checksum', {
+        category: 'mods',
+        data: {
+          handler: 'get-stored-checksum',
+          filePath
+        }
+      });
+
+      try {
+        const result = await fileIntegrityService.getStoredChecksum(filePath);
+        
+        logger.debug('Stored checksum retrieved', {
+          category: 'mods',
+          data: {
+            handler: 'get-stored-checksum',
+            filePath,
+            found: !!result,
+            algorithm: result?.algorithm
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`Failed to get stored checksum: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'get-stored-checksum',
+            filePath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'batch-verify-integrity': async (_e, { filePaths }) => {
+      const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      
+      logger.info('Starting batch integrity verification', {
+        category: 'mods',
+        data: {
+          handler: 'batch-verify-integrity',
+          fileCount: filePaths?.length || 0
+        }
+      });
+
+      try {
+        const result = await fileIntegrityService.batchVerifyIntegrity(filePaths, (progress) => {
+          // Send progress updates to the renderer
+          if (win && win.webContents) {
+            win.webContents.send('batch-integrity-progress', progress);
+          }
+        });
+        
+        logger.info('Batch integrity verification completed', {
+          category: 'mods',
+          data: {
+            handler: 'batch-verify-integrity',
+            total: result.total,
+            valid: result.valid,
+            invalid: result.invalid,
+            errors: result.errors
+          }
+        });
+        
+        return result;
+      } catch (error) {
+        logger.error(`Batch integrity verification failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'batch-verify-integrity',
+            fileCount: filePaths?.length || 0,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'get-corruption-alerts': async () => {
+      const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      
+      logger.debug('Getting corruption alerts', {
+        category: 'mods',
+        data: {
+          handler: 'get-corruption-alerts'
+        }
+      });
+
+      try {
+        const alerts = fileIntegrityService.getCorruptionAlerts();
+        
+        logger.debug('Corruption alerts retrieved', {
+          category: 'mods',
+          data: {
+            handler: 'get-corruption-alerts',
+            alertCount: alerts.length
+          }
+        });
+        
+        return alerts;
+      } catch (error) {
+        logger.error(`Failed to get corruption alerts: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'get-corruption-alerts',
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'clear-corruption-alert': async (_e, { filePath }) => {
+      const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      
+      logger.debug('Clearing corruption alert', {
+        category: 'mods',
+        data: {
+          handler: 'clear-corruption-alert',
+          filePath
+        }
+      });
+
+      try {
+        const cleared = fileIntegrityService.clearCorruptionAlert(filePath);
+        
+        logger.debug('Corruption alert clear result', {
+          category: 'mods',
+          data: {
+            handler: 'clear-corruption-alert',
+            filePath,
+            cleared
+          }
+        });
+        
+        return { success: cleared };
+      } catch (error) {
+        logger.error(`Failed to clear corruption alert: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'clear-corruption-alert',
+            filePath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'auto-redownload-corrupted-file': async (event, { filePath, mod, serverPath }) => {
+      logger.info('Starting automatic re-download for corrupted file', {
+        category: 'mods',
+        data: {
+          handler: 'auto-redownload-corrupted-file',
+          filePath,
+          modName: mod?.name,
+          modId: mod?.id,
+          serverPath
+        }
+      });
+
+      try {
+        const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+        
+        // First, verify the file is actually corrupted
+        const integrityResult = await fileIntegrityService.verifyFileIntegrity(filePath);
+        
+        if (integrityResult.isValid === true) {
+          logger.info('File is not corrupted, skipping re-download', {
+            category: 'mods',
+            data: {
+              handler: 'auto-redownload-corrupted-file',
+              filePath,
+              modName: mod?.name
+            }
+          });
+          
+          return { success: true, skipped: true, reason: 'file_not_corrupted' };
+        }
+
+        if (integrityResult.isValid === null) {
+          logger.warn('Cannot verify file integrity (no expected checksum), skipping re-download', {
+            category: 'mods',
+            data: {
+              handler: 'auto-redownload-corrupted-file',
+              filePath,
+              modName: mod?.name
+            }
+          });
+          
+          return { success: false, skipped: true, reason: 'no_expected_checksum' };
+        }
+
+        // File is corrupted, attempt re-download
+        logger.info('File corruption confirmed, attempting re-download', {
+          category: 'mods',
+          data: {
+            handler: 'auto-redownload-corrupted-file',
+            filePath,
+            modName: mod?.name,
+            expected: integrityResult.expected,
+            actual: integrityResult.actual
+          }
+        });
+
+        // Try to re-download using the original source first
+        let redownloadResult;
+        
+        try {
+          // Attempt server download first
+          redownloadResult = await module.exports.createServerModHandlers(win)['download-mod-from-server'](event, {
+            mod: {
+              ...mod,
+              expectedChecksum: integrityResult.expected,
+              checksumAlgorithm: integrityResult.algorithm
+            },
+            attempt: 1,
+            totalAttempts: 3,
+            validateChecksum: true
+          });
+          
+          if (redownloadResult.success) {
+            // Replace the corrupted file with the new download
+            const fsPromises = require('fs/promises');
+            await fsPromises.copyFile(redownloadResult.filePath, filePath);
+            await fsPromises.unlink(redownloadResult.filePath); // Clean up temp file
+            
+            // Clear the corruption alert
+            fileIntegrityService.clearCorruptionAlert(filePath);
+            
+            logger.info('File successfully re-downloaded from server', {
+              category: 'mods',
+              data: {
+                handler: 'auto-redownload-corrupted-file',
+                filePath,
+                modName: mod?.name,
+                source: 'server'
+              }
+            });
+            
+            return { 
+              success: true, 
+              source: 'server',
+              checksumValidation: redownloadResult.checksumValidation
+            };
+          }
+        } catch (serverError) {
+          logger.warn(`Server re-download failed: ${serverError.message}`, {
+            category: 'mods',
+            data: {
+              handler: 'auto-redownload-corrupted-file',
+              filePath,
+              modName: mod?.name,
+              errorType: serverError.constructor.name
+            }
+          });
+        }
+
+        // Try fallback sources if server failed
+        const fallbackSources = [];
+        if (mod.projectId || mod.modrinthId) {
+          fallbackSources.push('modrinth');
+        }
+        if (mod.curseforgeId) {
+          fallbackSources.push('curseforge');
+        }
+
+        for (const source of fallbackSources) {
+          try {
+            logger.info(`Attempting re-download from fallback source: ${source}`, {
+              category: 'mods',
+              data: {
+                handler: 'auto-redownload-corrupted-file',
+                filePath,
+                modName: mod?.name,
+                source
+              }
+            });
+
+            redownloadResult = await module.exports.createServerModHandlers(win)['download-mod-from-fallback'](event, {
+              mod: {
+                ...mod,
+                expectedChecksum: integrityResult.expected,
+                checksumAlgorithm: integrityResult.algorithm
+              },
+              source,
+              attempt: 1,
+              totalAttempts: 1,
+              validateChecksum: true
+            });
+            
+            if (redownloadResult.success) {
+              // Replace the corrupted file with the new download
+              const fsPromises2 = require('fs/promises');
+              await fsPromises2.copyFile(redownloadResult.filePath, filePath);
+              await fsPromises2.unlink(redownloadResult.filePath); // Clean up temp file
+              
+              // Clear the corruption alert
+              fileIntegrityService.clearCorruptionAlert(filePath);
+              
+              logger.info(`File successfully re-downloaded from ${source}`, {
+                category: 'mods',
+                data: {
+                  handler: 'auto-redownload-corrupted-file',
+                  filePath,
+                  modName: mod?.name,
+                  source
+                }
+              });
+              
+              return { 
+                success: true, 
+                source,
+                checksumValidation: redownloadResult.checksumValidation
+              };
+            }
+          } catch (fallbackError) {
+            logger.warn(`Fallback re-download from ${source} failed: ${fallbackError.message}`, {
+              category: 'mods',
+              data: {
+                handler: 'auto-redownload-corrupted-file',
+                filePath,
+                modName: mod?.name,
+                source,
+                errorType: fallbackError.constructor.name
+              }
+            });
+          }
+        }
+
+        // All re-download attempts failed
+        logger.error('All re-download attempts failed for corrupted file', {
+          category: 'mods',
+          data: {
+            handler: 'auto-redownload-corrupted-file',
+            filePath,
+            modName: mod?.name,
+            triedSources: ['server', ...fallbackSources]
+          }
+        });
+
+        return { 
+          success: false, 
+          error: 'All re-download attempts failed',
+          triedSources: ['server', ...fallbackSources]
+        };
+
+      } catch (error) {
+        logger.error(`Automatic re-download failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'auto-redownload-corrupted-file',
+            filePath,
+            modName: mod?.name,
+            errorType: error.constructor.name
+          }
+        });
+        
         throw error;
       }
     },

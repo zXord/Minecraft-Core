@@ -1058,7 +1058,368 @@ async function installModToClient(win, modData) {
   }
 }
 
+/**
+ * Install mod to server with fallback support using download strategy
+ * @param {Object} win - Electron window for progress updates
+ * @param {string} serverPath - Server path
+ * @param {Object} modDetails - Mod details with fallback configuration
+ * @returns {Promise<Object>} Installation result with fallback information
+ */
+async function installModToServerWithFallback(win, serverPath, modDetails) {
+  const logger = getLoggerHandlers();
+  const startTime = Date.now();
+  
+  logger.info('Installing mod to server with fallback support', {
+    category: 'mods',
+    data: {
+      service: 'mod-installation-service',
+      operation: 'installModToServerWithFallback',
+      serverPath: serverPath,
+      modName: modDetails?.name,
+      modId: modDetails?.id,
+      useFallback: modDetails?.useFallback,
+      maxRetries: modDetails?.maxRetries || 3,
+      fallbackDelay: modDetails?.fallbackDelay || 15 * 60 * 1000
+    }
+  });
+
+  if (!serverPath) {
+    return { 
+      success: false, 
+      error: 'Server path not provided',
+      attempts: 0,
+      fallbackUsed: false,
+      checksumErrors: 0,
+      networkErrors: 1
+    };
+  }
+  
+  if (!modDetails || !modDetails.id || !modDetails.name) {
+    return { 
+      success: false, 
+      error: 'Invalid mod details',
+      attempts: 0,
+      fallbackUsed: false,
+      checksumErrors: 0,
+      networkErrors: 1
+    };
+  }
+
+  const maxRetries = modDetails.maxRetries || 3;
+  const fallbackDelay = modDetails.fallbackDelay || 15 * 60 * 1000; // 15 minutes
+  const useFallback = modDetails.useFallback !== false;
+  
+  let attempts = 0;
+  let checksumErrors = 0;
+  let networkErrors = 0;
+  let lastError = null;
+  let fallbackUsed = false;
+  let lastSource = 'server';
+
+  // Try server download with retries
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    attempts++;
+    
+    try {
+      logger.debug(`Attempting server download (attempt ${attempt}/${maxRetries})`, {
+        category: 'mods',
+        data: {
+          service: 'mod-installation-service',
+          operation: 'installModToServerWithFallback',
+          modName: modDetails?.name,
+          attempt,
+          maxRetries
+        }
+      });
+
+      // Send progress update
+      if (win && win.webContents && modDetails.downloadId) {
+        win.webContents.send('download-progress', {
+          id: modDetails.downloadId,
+          name: modDetails.name,
+          state: attempt === 1 ? 'downloading' : 'retrying',
+          progress: 0,
+          source: 'server',
+          attempt,
+          maxAttempts: maxRetries,
+          statusMessage: attempt === 1 ? 'Downloading from server...' : `Retrying download (attempt ${attempt}/${maxRetries})...`
+        });
+      }
+
+      // Use the existing installModToServer method
+      const installResult = await installModToServer(win, serverPath, modDetails);
+      
+      if (installResult.success) {
+        const duration = Date.now() - startTime;
+        
+        logger.info('Server installation completed successfully', {
+          category: 'mods',
+          data: {
+            service: 'mod-installation-service',
+            operation: 'installModToServerWithFallback',
+            modName: modDetails?.name,
+            attempts,
+            duration
+          }
+        });
+        
+        return {
+          ...installResult,
+          source: 'server',
+          attempts,
+          fallbackUsed: false,
+          checksumErrors,
+          networkErrors,
+          duration
+        };
+      } else {
+        throw new Error(installResult.error || 'Installation failed');
+      }
+    } catch (error) {
+      lastError = error;
+      
+      // Categorize the error
+      if (error.message.includes('checksum') || error.message.includes('Checksum')) {
+        checksumErrors++;
+        logger.warn(`Checksum error on attempt ${attempt}: ${error.message}`, {
+          category: 'mods',
+          data: {
+            service: 'mod-installation-service',
+            modName: modDetails?.name,
+            attempt,
+            checksumErrors
+          }
+        });
+      } else {
+        networkErrors++;
+        logger.warn(`Network error on attempt ${attempt}: ${error.message}`, {
+          category: 'mods',
+          data: {
+            service: 'mod-installation-service',
+            modName: modDetails?.name,
+            attempt,
+            networkErrors
+          }
+        });
+      }
+      
+      // If this isn't the last attempt, wait before retrying
+      if (attempt < maxRetries) {
+        const retryDelay = 1000 * Math.pow(2, attempt - 1); // Exponential backoff
+        logger.debug(`Waiting ${retryDelay}ms before retry`, {
+          category: 'mods',
+          data: {
+            service: 'mod-installation-service',
+            modName: modDetails?.name,
+            attempt,
+            retryDelay
+          }
+        });
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      }
+    }
+  }
+
+  // If fallback is disabled or not available, return failure
+  if (!useFallback || (!modDetails.projectId && !modDetails.modrinthId && !modDetails.curseforgeId)) {
+    const duration = Date.now() - startTime;
+    
+    logger.error('Server installation failed and fallback not available', {
+      category: 'mods',
+      data: {
+        service: 'mod-installation-service',
+        operation: 'installModToServerWithFallback',
+        modName: modDetails?.name,
+        attempts,
+        checksumErrors,
+        networkErrors,
+        useFallback,
+        hasIdentifiers: !!(modDetails.projectId || modDetails.modrinthId || modDetails.curseforgeId),
+        duration
+      }
+    });
+    
+    return {
+      success: false,
+      error: lastError?.message || 'All server download attempts failed',
+      source: 'server',
+      attempts,
+      fallbackUsed: false,
+      checksumErrors,
+      networkErrors,
+      duration
+    };
+  }
+
+  // Wait for fallback delay if configured
+  if (fallbackDelay > 0) {
+    logger.info(`Waiting ${Math.round(fallbackDelay / 60000)} minutes before fallback`, {
+      category: 'mods',
+      data: {
+        service: 'mod-installation-service',
+        operation: 'installModToServerWithFallback',
+        modName: modDetails?.name,
+        fallbackDelay
+      }
+    });
+
+    // Send fallback countdown updates
+    if (win && win.webContents && modDetails.downloadId) {
+      const endTime = Date.now() + fallbackDelay;
+      const updateInterval = 30000; // 30 seconds
+      
+      while (Date.now() < endTime) {
+        const remaining = endTime - Date.now();
+        const remainingMinutes = Math.ceil(remaining / 60000);
+        
+        win.webContents.send('download-progress', {
+          id: modDetails.downloadId,
+          name: modDetails.name,
+          state: 'fallback',
+          progress: 0,
+          source: 'server',
+          statusMessage: `Trying alternative source in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}...`,
+          fallbackCountdown: remaining
+        });
+        
+        const waitTime = Math.min(updateInterval, remaining);
+        if (waitTime > 0) {
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+    } else {
+      await new Promise(resolve => setTimeout(resolve, fallbackDelay));
+    }
+  }
+
+  // Try fallback sources
+  const fallbackSources = [];
+  if (modDetails.projectId || modDetails.modrinthId) {
+    fallbackSources.push('modrinth');
+  }
+  if (modDetails.curseforgeId) {
+    fallbackSources.push('curseforge');
+  }
+
+  for (const source of fallbackSources) {
+    attempts++;
+    fallbackUsed = true;
+    lastSource = source;
+    
+    try {
+      logger.info(`Attempting fallback download from ${source}`, {
+        category: 'mods',
+        data: {
+          service: 'mod-installation-service',
+          operation: 'installModToServerWithFallback',
+          modName: modDetails?.name,
+          source,
+          attempts
+        }
+      });
+
+      // Send progress update
+      if (win && win.webContents && modDetails.downloadId) {
+        win.webContents.send('download-progress', {
+          id: modDetails.downloadId,
+          name: modDetails.name,
+          state: 'downloading',
+          progress: 0,
+          source,
+          statusMessage: `Downloading from ${source}...`
+        });
+      }
+
+      // Create modified mod details for fallback source
+      const fallbackModDetails = {
+        ...modDetails,
+        source,
+        downloadUrl: null // Force URL resolution from the fallback source
+      };
+
+      const installResult = await installModToServer(win, serverPath, fallbackModDetails);
+      
+      if (installResult.success) {
+        const duration = Date.now() - startTime;
+        
+        logger.info('Fallback installation completed successfully', {
+          category: 'mods',
+          data: {
+            service: 'mod-installation-service',
+            operation: 'installModToServerWithFallback',
+            modName: modDetails?.name,
+            source,
+            attempts,
+            duration
+          }
+        });
+        
+        return {
+          ...installResult,
+          source,
+          attempts,
+          fallbackUsed: true,
+          checksumErrors,
+          networkErrors,
+          duration
+        };
+      } else {
+        throw new Error(installResult.error || 'Fallback installation failed');
+      }
+    } catch (error) {
+      lastError = error;
+      
+      if (error.message.includes('checksum') || error.message.includes('Checksum')) {
+        checksumErrors++;
+      } else {
+        networkErrors++;
+      }
+      
+      logger.warn(`Fallback source ${source} failed: ${error.message}`, {
+        category: 'mods',
+        data: {
+          service: 'mod-installation-service',
+          modName: modDetails?.name,
+          source,
+          attempts,
+          errorType: error.constructor.name
+        }
+      });
+    }
+  }
+
+  // All attempts failed
+  const duration = Date.now() - startTime;
+  
+  logger.error('All installation attempts failed', {
+    category: 'mods',
+    data: {
+      service: 'mod-installation-service',
+      operation: 'installModToServerWithFallback',
+      modName: modDetails?.name,
+      attempts,
+      checksumErrors,
+      networkErrors,
+      fallbackUsed,
+      lastSource,
+      duration
+    }
+  });
+
+  return {
+    success: false,
+    error: lastError?.message || 'All download sources failed',
+    source: lastSource,
+    attempts,
+    fallbackUsed,
+    checksumErrors,
+    networkErrors,
+    duration
+  };
+}
+
 module.exports = {
   installModToServer,
-  installModToClient
+  installModToClient,
+  installModToServerWithFallback
 };

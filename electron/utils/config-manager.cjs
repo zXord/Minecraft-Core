@@ -383,7 +383,111 @@ function ensureConfigFile(serverPath, defaultSettings = {}) {
   }
 }
 
+/**
+ * Gets instance-specific configuration
+ * @param {string} instanceId - Instance identifier
+ * @param {string} configKey - Configuration key to retrieve
+ * @returns {Promise<any>} Configuration value
+ */
+async function getInstanceConfig(instanceId, configKey) {
+  getLogger().debug('Getting instance configuration', {
+    category: 'settings',
+    data: {
+      function: 'getInstanceConfig',
+      instanceId,
+      configKey
+    }
+  });
+
+  try {
+    const appStore = require('./app-store.cjs');
+    const instanceConfigs = await appStore.get('instanceConfigs') || {};
+    
+    const instanceConfig = instanceConfigs[instanceId] || {};
+    const value = instanceConfig[configKey];
+    
+    getLogger().debug('Instance configuration retrieved', {
+      category: 'settings',
+      data: {
+        function: 'getInstanceConfig',
+        instanceId,
+        configKey,
+        hasValue: value !== undefined,
+        valueType: typeof value
+      }
+    });
+    
+    return value;
+  } catch (error) {
+    getLogger().error(`Failed to get instance config: ${error.message}`, {
+      category: 'settings',
+      data: {
+        function: 'getInstanceConfig',
+        instanceId,
+        configKey,
+        errorType: error.constructor.name
+      }
+    });
+    return undefined;
+  }
+}
+
+/**
+ * Sets instance-specific configuration
+ * @param {string} instanceId - Instance identifier
+ * @param {string} configKey - Configuration key to set
+ * @param {any} value - Configuration value
+ * @returns {Promise<void>}
+ */
+async function setInstanceConfig(instanceId, configKey, value) {
+  getLogger().debug('Setting instance configuration', {
+    category: 'settings',
+    data: {
+      function: 'setInstanceConfig',
+      instanceId,
+      configKey,
+      valueType: typeof value
+    }
+  });
+
+  try {
+    const appStore = require('./app-store.cjs');
+    const instanceConfigs = await appStore.get('instanceConfigs') || {};
+    
+    if (!instanceConfigs[instanceId]) {
+      instanceConfigs[instanceId] = {};
+    }
+    
+    instanceConfigs[instanceId][configKey] = value;
+    
+    appStore.set('instanceConfigs', instanceConfigs);
+    
+    getLogger().info('Instance configuration updated', {
+      category: 'settings',
+      data: {
+        function: 'setInstanceConfig',
+        instanceId,
+        configKey,
+        valueType: typeof value
+      }
+    });
+  } catch (error) {
+    getLogger().error(`Failed to set instance config: ${error.message}`, {
+      category: 'settings',
+      data: {
+        function: 'setInstanceConfig',
+        instanceId,
+        configKey,
+        errorType: error.constructor.name
+      }
+    });
+    throw error;
+  }
+}
+
 module.exports = {
   ensureConfigFile,
-  detectMinecraftVersion
+  detectMinecraftVersion,
+  getInstanceConfig,
+  setInstanceConfig
 };

@@ -908,6 +908,64 @@ function createFileHandlers(win) {
         });
         throw new Error(`Failed to show dialog: ${err.message}`);
       }
+    },
+
+    'calculate-file-checksum': async (_event, { filePath, algorithm = 'sha1' }) => {
+      const startTime = Date.now();
+      
+      logger.debug('File checksum calculation requested', {
+        category: 'storage',
+        data: {
+          handler: 'calculate-file-checksum',
+          filePath,
+          algorithm,
+          sender: _event.sender.id
+        }
+      });
+
+      try {
+        if (!filePath) {
+          logger.error('File path is required for checksum calculation', {
+            category: 'storage',
+            data: {
+              handler: 'calculate-file-checksum',
+              filePath,
+              algorithm
+            }
+          });
+          throw new Error('File path is required');
+        }
+
+        const checksum = await calculateFileChecksum(filePath, algorithm);
+        const duration = Date.now() - startTime;
+
+        logger.info('File checksum calculation completed successfully', {
+          category: 'performance',
+          data: {
+            handler: 'calculate-file-checksum',
+            filePath,
+            algorithm,
+            checksumLength: checksum.length,
+            duration,
+            success: true
+          }
+        });
+
+        return checksum;
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        logger.error(`File checksum calculation failed: ${error.message}`, {
+          category: 'storage',
+          data: {
+            handler: 'calculate-file-checksum',
+            filePath,
+            algorithm,
+            duration,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
     }
   };
 }
@@ -1170,6 +1228,99 @@ async function deleteWorld(serverPath) {
       }
     });
     return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Calculate file checksum using Node.js crypto
+ * 
+ * @param {string} filePath - Path to the file
+ * @param {string} algorithm - Hash algorithm to use
+ * @returns {Promise<string>} - Calculated checksum
+ */
+async function calculateFileChecksum(filePath, algorithm = 'sha1') {
+  const crypto = require('crypto');
+  const startTime = Date.now();
+  
+  logger.debug('Starting file checksum calculation', {
+    category: 'storage',
+    data: {
+      function: 'calculateFileChecksum',
+      filePath,
+      algorithm
+    }
+  });
+
+  try {
+    if (!filePath) {
+      throw new Error('File path is required');
+    }
+
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File does not exist: ${filePath}`);
+    }
+
+    // Validate algorithm
+    const supportedAlgorithms = ['sha1', 'sha256', 'md5'];
+    if (!supportedAlgorithms.includes(algorithm.toLowerCase())) {
+      throw new Error(`Unsupported algorithm: ${algorithm}. Supported: ${supportedAlgorithms.join(', ')}`);
+    }
+
+    const hash = crypto.createHash(algorithm);
+    const stream = fs.createReadStream(filePath);
+
+    return new Promise((resolve, reject) => {
+      stream.on('error', (error) => {
+        const duration = Date.now() - startTime;
+        logger.error(`File stream error during checksum calculation: ${error.message}`, {
+          category: 'storage',
+          data: {
+            function: 'calculateFileChecksum',
+            filePath,
+            algorithm,
+            duration,
+            errorType: error.constructor.name
+          }
+        });
+        reject(new Error(`File stream error: ${error.message}`));
+      });
+
+      stream.on('data', (chunk) => {
+        hash.update(chunk);
+      });
+
+      stream.on('end', () => {
+        const checksum = hash.digest('hex');
+        const duration = Date.now() - startTime;
+
+        logger.info('File checksum calculated successfully', {
+          category: 'performance',
+          data: {
+            function: 'calculateFileChecksum',
+            filePath,
+            algorithm,
+            checksumLength: checksum.length,
+            duration,
+            success: true
+          }
+        });
+
+        resolve(checksum);
+      });
+    });
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    logger.error(`Checksum calculation failed: ${error.message}`, {
+      category: 'storage',
+      data: {
+        function: 'calculateFileChecksum',
+        filePath,
+        algorithm,
+        duration,
+        errorType: error.constructor.name
+      }
+    });
+    throw error;
   }
 }
 

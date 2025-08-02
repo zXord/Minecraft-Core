@@ -105,7 +105,7 @@ export async function loadModsFromServer(instance: Instance) {
         } catch {
           // ignore
         }
-        serverManagedFiles.update(existing => {
+        serverManagedFiles.update((existing: SvelteSet<string>) => {
           const combined = new SvelteSet(existing);
           for (const mod of currentServerMods) combined.add(mod);
           return combined;
@@ -199,10 +199,27 @@ export async function refreshInstalledMods(instance: Instance) {
 export async function downloadRequiredMods(instance: Instance) {
   const reqMods = get(requiredMods);
   if (!instance.path || !reqMods.length) return;
+  
+  // Filter to only download mods that are actually missing or outdated
+  const syncStatus = get(modSyncStatus);
+  const modsToDownload = reqMods.filter(mod => {
+    const isMissing = syncStatus?.missingMods?.includes(mod.fileName);
+    const isOutdated = syncStatus?.outdatedMods?.some((update: any) => 
+      update.fileName?.toLowerCase() === mod.fileName.toLowerCase()
+    );
+    return isMissing || isOutdated;
+  });
+  
+  if (modsToDownload.length === 0) {
+    successMessage.set('All required mods are already up to date');
+    setTimeout(() => successMessage.set(''), 3000);
+    return;
+  }
+  
   try {
     const result = await window.electron.invoke('minecraft-download-mods', {
       clientPath: instance.path,
-      requiredMods: reqMods,
+      requiredMods: modsToDownload,
       allClientMods: get(allClientMods),
       serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
     });
@@ -263,13 +280,29 @@ export async function acknowledgeAllDependencies(instance: Instance) {
 export async function downloadOptionalMods(instance: Instance) {
   const allMods = get(allClientMods);
   if (!instance.path || !allMods.length) return;
+  
+  // Filter to only download optional mods that are actually missing or outdated
+  const syncStatus = get(modSyncStatus);
   const optionalOnly = allMods.filter(mod => !mod.required);
-  if (!optionalOnly.length) return;
+  const modsToDownload = optionalOnly.filter(mod => {
+    const isMissing = syncStatus?.missingOptionalMods?.includes(mod.fileName);
+    const isOutdated = syncStatus?.outdatedOptionalMods?.some((update: any) => 
+      update.fileName?.toLowerCase() === mod.fileName.toLowerCase()
+    );
+    return isMissing || isOutdated;
+  });
+  
+  if (modsToDownload.length === 0) {
+    successMessage.set('All optional mods are already up to date');
+    setTimeout(() => successMessage.set(''), 3000);
+    return;
+  }
+  
   try {
     const result = await window.electron.invoke('minecraft-download-mods', {
       clientPath: instance.path,
       requiredMods: [],
-      optionalMods: optionalOnly,
+      optionalMods: modsToDownload,
       allClientMods: allMods,
       serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
     });
@@ -302,8 +335,34 @@ export async function downloadSingleOptionalMod(instance: Instance, mod: any) {
       serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
     });
     if (result.success) {
-      successMessage.set(`Successfully downloaded ${mod.fileName}`);
-      setTimeout(() => successMessage.set(''), 3000);
+      // Don't show success message here - the download progress handler will show "Download Complete" message
+      if (result.removedMods?.length) removeServerManagedFiles(result.removedMods);
+      setTimeout(async () => {
+        await checkModSynchronization(instance);
+        await refreshInstalledMods(instance);
+      }, 1500);
+    } else {
+      errorMessage.set(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  } catch (err: any) {
+    errorMessage.set(`Error downloading ${mod.fileName}: ${err.message}`);
+    setTimeout(() => errorMessage.set(''), 5000);
+  }
+}
+
+export async function downloadSingleRequiredMod(instance: Instance, mod: any) {
+  if (!instance.path) return;
+  try {
+    const result = await window.electron.invoke('minecraft-download-mods', {
+      clientPath: instance.path,
+      requiredMods: [mod],
+      optionalMods: [],
+      allClientMods: get(allClientMods),
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+    });
+    if (result.success) {
+      // Don't show success message here - the download progress handler will show "Download Complete" message
       if (result.removedMods?.length) removeServerManagedFiles(result.removedMods);
       setTimeout(async () => {
         await checkModSynchronization(instance);
@@ -321,8 +380,10 @@ export async function downloadSingleOptionalMod(instance: Instance, mod: any) {
 
 export async function handleModToggle(instance: Instance, modFileName: string, enabled: boolean) {
   if (!instance.path) return;
+  
   try {
     const result = await window.electron.invoke('toggle-client-mod', { clientPath: instance.path, modFileName, enabled });
+    
     if (result.success) {
       successMessage.set(`Mod ${enabled ? 'enabled' : 'disabled'}: ${modFileName}`);
       setTimeout(() => successMessage.set(''), 3000);
@@ -345,11 +406,11 @@ export async function handleModDelete(instance: Instance, modFileName: string) {
     if (result.success) {
       successMessage.set(`Deleted mod: ${modFileName}`);
       setTimeout(() => successMessage.set(''), 3000);
-      installedModInfo.update(info => {
+      installedModInfo.update((info: any[]) => {
         const updated = info.filter((m: any) => m.fileName !== modFileName);
         const removed = info.find((m: any) => m.fileName === modFileName);
         if (removed && removed.projectId) {
-          installedModIds.update(ids => {
+          installedModIds.update((ids: SvelteSet<string>) => {
             ids.delete(removed.projectId);
             return new SvelteSet(ids);
           });
@@ -375,7 +436,7 @@ export async function handleServerModRemoval(instance: Instance, modFileName: st
       modsToRemove: [modFileName]
     });
     if (result.success) {
-      successMessage.set(`Removed server-managed mod: ${modFileName}`);
+      successMessage.set(`Successfully removed ${result.count} mod${result.count !== 1 ? 's' : ''}`);
       setTimeout(() => successMessage.set(''), 3000);
       await checkModSynchronization(instance);
       await refreshInstalledMods(instance);
@@ -385,6 +446,28 @@ export async function handleServerModRemoval(instance: Instance, modFileName: st
     }
   } catch (err: any) {
     errorMessage.set('Error removing mod: ' + err.message);
+    setTimeout(() => errorMessage.set(''), 5000);
+  }
+}
+
+export async function handleBulkServerModRemoval(instance: Instance, modFileNames: string[]) {
+  if (!instance.path || !modFileNames.length) return;
+  try {
+    const result = await window.electron.invoke('minecraft-remove-server-managed-mods', {
+      clientPath: instance.path,
+      modsToRemove: modFileNames
+    });
+    if (result.success) {
+      successMessage.set(`Successfully removed ${result.count} mod${result.count !== 1 ? 's' : ''}`);
+      setTimeout(() => successMessage.set(''), 3000);
+      await checkModSynchronization(instance);
+      await refreshInstalledMods(instance);
+    } else {
+      errorMessage.set(`Failed to remove mods: ${result.error || 'Unknown error'}`);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
+  } catch (err: any) {
+    errorMessage.set('Error removing mods: ' + err.message);
     setTimeout(() => errorMessage.set(''), 5000);
   }
 }
@@ -437,7 +520,7 @@ export async function updateServerMod(instance: Instance, event: any) {
     });
     if (result?.success) {
       successMessage.set(`Successfully updated ${name} from v${currentVersion} to v${newVersion}`);
-      installedModsInfo.update(info => {
+      installedModsInfo.update((info: any[]) => {
         const idx = info.findIndex((m: any) => m.fileName === fileName);
         if (idx !== -1) {
           const updated = [...info];
