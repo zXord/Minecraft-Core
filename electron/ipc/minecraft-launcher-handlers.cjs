@@ -1,3 +1,6 @@
+const { getLoggerHandlers } = require('./logger-handlers.cjs');
+const logger = getLoggerHandlers();
+
 const { getMinecraftLauncher } = require('../services/minecraft-launcher/index.cjs');
 const utils = require('../services/minecraft-launcher/utils.cjs');
 const fs = require('fs');
@@ -731,14 +734,60 @@ function createMinecraftLauncherHandlers(win) {
               }
             }
             
-            // Ensure we have a Modrinth URL (not server URL)
-            let downloadUrl = mod.downloadUrl;
-            if (!downloadUrl || downloadUrl.includes('/api/mods/download/')) {
-              // Try to get from Modrinth
-              downloadUrl = await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
-              if (downloadUrl) {
-                mod.downloadUrl = downloadUrl;
+            // Get download preferences to determine source priority
+            const configManager = require('../utils/config-manager.cjs');
+            const preferences = await configManager.getInstanceConfig(clientPath, 'downloadPreferences');
+            const primarySource = preferences?.primarySource || 'server';
+            const fallbackSource = preferences?.fallbackSource || 'modrinth';
+            
+            logger.debug('Download preferences loaded', {
+              category: 'mods',
+              data: {
+                clientPath,
+                primarySource,
+                fallbackSource,
+                modName: mod.name || mod.fileName,
+                hasModDownloadUrl: !!mod.downloadUrl,
+                modDownloadUrl: mod.downloadUrl
               }
+            });
+            
+            let downloadUrl = null;
+            let sourceUsed = null;
+            
+            // Try primary source first
+            if (primarySource === 'server' && mod.downloadUrl && mod.downloadUrl.includes('/api/mods/download/')) {
+              downloadUrl = mod.downloadUrl;
+              sourceUsed = 'server';
+            } else if (primarySource === 'modrinth' && mod.projectId) {
+              downloadUrl = await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
+              sourceUsed = 'modrinth';
+            }
+            
+            // Try fallback source if primary failed
+            if (!downloadUrl) {
+              if (fallbackSource === 'server' && mod.downloadUrl && mod.downloadUrl.includes('/api/mods/download/')) {
+                downloadUrl = mod.downloadUrl;
+                sourceUsed = 'server';
+              } else if (fallbackSource === 'modrinth' && mod.projectId) {
+                downloadUrl = await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
+                sourceUsed = 'modrinth';
+              }
+            }
+            
+            logger.info('Download source selected', {
+              category: 'mods',
+              data: {
+                modName: mod.name || mod.fileName,
+                primarySource,
+                fallbackSource,
+                sourceUsed,
+                downloadUrl: downloadUrl ? downloadUrl.substring(0, 100) + '...' : null
+              }
+            });
+            
+            if (downloadUrl) {
+              mod.downloadUrl = downloadUrl;
             }
 
             if (mod.downloadUrl) {
@@ -746,7 +795,7 @@ function createMinecraftLauncherHandlers(win) {
               const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
               const modName = mod.name || mod.fileName;
               
-              // Send initial progress
+              // Send initial progress with source information
               if (win && win.webContents) {
                 win.webContents.send('download-progress', { 
                   id: downloadId, 
@@ -754,7 +803,9 @@ function createMinecraftLauncherHandlers(win) {
                   progress: 0, 
                   speed: 0, 
                   completed: false, 
-                  error: null 
+                  error: null,
+                  source: sourceUsed,
+                  statusMessage: `Downloading from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}...`
                 });
               }
               
@@ -801,7 +852,9 @@ function createMinecraftLauncherHandlers(win) {
                                 downloaded: downloadedBytes,
                                 speed: speed, 
                                 completed: false, 
-                                error: null 
+                                error: null,
+                                source: sourceUsed,
+                                statusMessage: `Downloading from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}... ${progress}%`
                               });
                             }
                             lastProgressUpdate = now;
@@ -822,7 +875,9 @@ function createMinecraftLauncherHandlers(win) {
                               speed: 0, 
                               completed: true, 
                               completedTime: Date.now(),
-                              error: null 
+                              error: null,
+                              source: sourceUsed,
+                              statusMessage: `Download Complete: ${modName} downloaded successfully from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}`
                             });
                           }
                           
@@ -865,7 +920,9 @@ function createMinecraftLauncherHandlers(win) {
                               speed: 0, 
                               completed: false, 
                               error: err.message,
-                              completedTime: Date.now()
+                              completedTime: Date.now(),
+                              source: sourceUsed,
+                              statusMessage: `Download failed from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}: ${err.message}`
                             });
                           }
                           fs.unlinkSync(modPath);
@@ -898,7 +955,9 @@ function createMinecraftLauncherHandlers(win) {
                             downloaded: downloadedBytes,
                             speed: speed, 
                             completed: false, 
-                            error: null 
+                            error: null,
+                            source: sourceUsed,
+                            statusMessage: `Downloading from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}... ${progress}%`
                           });
                         }
                         lastProgressUpdate = now;
@@ -919,7 +978,9 @@ function createMinecraftLauncherHandlers(win) {
                           speed: 0, 
                           completed: true, 
                           completedTime: Date.now(),
-                          error: null 
+                          error: null,
+                          source: sourceUsed,
+                          statusMessage: `Download Complete: ${modName} downloaded successfully from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}`
                         });
                       }
                       
@@ -962,7 +1023,9 @@ function createMinecraftLauncherHandlers(win) {
                           speed: 0, 
                           completed: false, 
                           error: err.message,
-                          completedTime: Date.now()
+                          completedTime: Date.now(),
+                          source: sourceUsed,
+                          statusMessage: `Download failed from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}: ${err.message}`
                         });
                       }
                       fs.unlinkSync(modPath);
@@ -2413,6 +2476,65 @@ function createMinecraftLauncherHandlers(win) {
         }
         return await clearExpectedModState(clientPath);
       } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    'get-download-preferences': async (/** @type {any} */ _e, { instanceId }) => {
+      try {
+        // Load preferences from persistent storage
+        const configManager = require('../utils/config-manager.cjs');
+        const preferences = await configManager.getInstanceConfig(instanceId, 'downloadPreferences');
+        
+        // Return saved preferences or defaults
+        return {
+          primarySource: preferences?.primarySource || 'server',
+          fallbackSource: preferences?.fallbackSource || 'modrinth'
+        };
+      } catch (error) {
+        logger.error(`Failed to get download preferences: ${error.message}`, {
+          category: 'settings',
+          data: {
+            handler: 'get-download-preferences',
+            instanceId,
+            errorType: error.constructor.name
+          }
+        });
+        return { success: false, error: error.message };
+      }
+    },
+
+    'set-download-preferences': async (/** @type {any} */ _e, { instanceId, primarySource, fallbackSource }) => {
+      try {
+        // Save preferences to persistent storage
+        const configManager = require('../utils/config-manager.cjs');
+        await configManager.setInstanceConfig(instanceId, 'downloadPreferences', {
+          primarySource,
+          fallbackSource
+        });
+        
+        logger.info('Download preferences updated', {
+          category: 'settings',
+          data: {
+            handler: 'set-download-preferences',
+            instanceId,
+            primarySource,
+            fallbackSource
+          }
+        });
+        
+        return { success: true };
+      } catch (error) {
+        logger.error(`Failed to set download preferences: ${error.message}`, {
+          category: 'settings',
+          data: {
+            handler: 'set-download-preferences',
+            instanceId,
+            primarySource,
+            fallbackSource,
+            errorType: error.constructor.name
+          }
+        });
         return { success: false, error: error.message };
       }
     },

@@ -1,15 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  
-  import { SvelteSet } from 'svelte/reactivity';import { get } from 'svelte/store'; // Import get
+  import { onMount, createEventDispatcher } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
+  import { get } from 'svelte/store'; // Import get
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { serverManagedFiles, minecraftVersion } from '../../stores/modStore';
 
   // Create event dispatcher
-  const dispatch = (name: string, detail?: any) => {
-    const event = new CustomEvent(name, { detail });
-    document.dispatchEvent(event);
-  };
+  const dispatch = createEventDispatcher();
 
   export let clientPath = '';
   export let refreshTrigger = 0; // Prop to trigger refresh when acknowledgments change  

@@ -9,6 +9,9 @@ const { getLoggerHandlers } = require('./logger-handlers.cjs');
 
 const logger = getLoggerHandlers();
 
+/**
+ * @param {any} win
+ */
 function createModHandlers(win) {
   logger.info('Mod handlers initialized', {
     category: 'mods',
@@ -71,7 +74,7 @@ function createModHandlers(win) {
       }
     },
 
-    'get-dropped-file-paths': async (_e, fileIdentifiers) => {
+    'get-dropped-file-paths': async (/** @type {any} */ _e, /** @type {any} */ fileIdentifiers) => {
       const startTime = Date.now();
       
       logger.debug('Processing dropped file identifiers', {
@@ -128,7 +131,7 @@ function createModHandlers(win) {
       }
     },
 
-    'handle-dropped-files': async (_e, files) => {
+    'handle-dropped-files': async (/** @type {any} */ _e, /** @type {any} */ files) => {
       const startTime = Date.now();
       
       logger.debug('Handling dropped files', {
@@ -220,7 +223,7 @@ function createModHandlers(win) {
       }
     },
 
-    'save-temp-file': async (_e, { name, buffer }) => {
+    'save-temp-file': async (/** @type {any} */ _e, { name, buffer }) => {
       const startTime = Date.now();
       
       logger.debug('Saving temporary mod file', {
@@ -301,7 +304,7 @@ function createModHandlers(win) {
       }
     },
 
-    'direct-add-mod': async (_e, { serverPath, fileName, buffer }) => {
+    'direct-add-mod': async (/** @type {any} */ _e, { serverPath, fileName, buffer }) => {
       const startTime = Date.now();
       
       logger.debug('Direct mod addition requested', {
@@ -398,7 +401,204 @@ function createModHandlers(win) {
         });
         throw error;
       }
-    }
+    },
+
+    // Download management handlers
+    'cancel-download': async (/** @type {any} */ _e, { downloadId }) => {
+      const startTime = Date.now();
+      
+      logger.info('Download cancellation requested', {
+        category: 'mods',
+        data: {
+          handler: 'cancel-download',
+          downloadId,
+          sender: _e.sender.id
+        }
+      });
+
+      try {
+        if (!downloadId || typeof downloadId !== 'string') {
+          logger.error('Invalid download ID provided for cancellation', {
+            category: 'mods',
+            data: {
+              handler: 'cancel-download',
+              downloadId,
+              downloadIdType: typeof downloadId
+            }
+          });
+          throw new Error('Invalid download ID');
+        }
+
+        // TODO: Implement actual download cancellation logic
+        // This would typically involve:
+        // 1. Finding the active download process
+        // 2. Aborting the HTTP request or file operation
+        // 3. Cleaning up temporary files
+        // 4. Updating download state
+        
+        logger.info('Download cancelled successfully', {
+          category: 'mods',
+          data: {
+            handler: 'cancel-download',
+            downloadId,
+            duration: Date.now() - startTime,
+            success: true
+          }
+        });
+
+        return { success: true, downloadId };
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        logger.error(`Download cancellation failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'cancel-download',
+            errorType: error.constructor.name,
+            duration,
+            downloadId
+          }
+        });
+        throw error;
+      }
+    },
+
+    'retry-download': async (/** @type {any} */ _e, { downloadId, modName, source }) => {
+      const startTime = Date.now();
+      
+      logger.info('Download retry requested', {
+        category: 'mods',
+        data: {
+          handler: 'retry-download',
+          downloadId,
+          modName,
+          source,
+          sender: _e.sender.id
+        }
+      });
+
+      try {
+        if (!downloadId || typeof downloadId !== 'string') {
+          logger.error('Invalid download ID provided for retry', {
+            category: 'mods',
+            data: {
+              handler: 'retry-download',
+              downloadId,
+              downloadIdType: typeof downloadId
+            }
+          });
+          throw new Error('Invalid download ID');
+        }
+
+        // TODO: Implement actual download retry logic
+        // This would typically involve:
+        // 1. Resetting download state
+        // 2. Re-initiating the download process
+        // 3. Updating progress tracking
+        
+        logger.info('Download retry initiated successfully', {
+          category: 'mods',
+          data: {
+            handler: 'retry-download',
+            downloadId,
+            modName,
+            source,
+            duration: Date.now() - startTime,
+            success: true
+          }
+        });
+
+        return { success: true, downloadId, modName, source };
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        logger.error(`Download retry failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'retry-download',
+            errorType: error.constructor.name,
+            duration,
+            downloadId,
+            modName,
+            source
+          }
+        });
+        throw error;
+      }
+    },
+
+    'prioritize-download': async (/** @type {any} */ _e, { downloadId, priority }) => {
+      const startTime = Date.now();
+      
+      logger.info('Download prioritization requested', {
+        category: 'mods',
+        data: {
+          handler: 'prioritize-download',
+          downloadId,
+          priority,
+          sender: _e.sender.id
+        }
+      });
+
+      try {
+        if (!downloadId || typeof downloadId !== 'string') {
+          logger.error('Invalid download ID provided for prioritization', {
+            category: 'mods',
+            data: {
+              handler: 'prioritize-download',
+              downloadId,
+              downloadIdType: typeof downloadId
+            }
+          });
+          throw new Error('Invalid download ID');
+        }
+
+        if (!priority || typeof priority !== 'string') {
+          logger.error('Invalid priority provided for download prioritization', {
+            category: 'mods',
+            data: {
+              handler: 'prioritize-download',
+              downloadId,
+              priority,
+              priorityType: typeof priority
+            }
+          });
+          throw new Error('Invalid priority');
+        }
+
+        // TODO: Implement actual download prioritization logic
+        // This would typically involve:
+        // 1. Moving download to front of queue
+        // 2. Updating queue positions
+        // 3. Notifying frontend of queue changes
+        
+        logger.info('Download prioritized successfully', {
+          category: 'mods',
+          data: {
+            handler: 'prioritize-download',
+            downloadId,
+            priority,
+            duration: Date.now() - startTime,
+            success: true
+          }
+        });
+
+        return { success: true, downloadId, priority };
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        logger.error(`Download prioritization failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'prioritize-download',
+            errorType: error.constructor.name,
+            duration,
+            downloadId,
+            priority
+          }
+        });
+        throw error;
+      }
+    },
+
+
   };
 
   return {

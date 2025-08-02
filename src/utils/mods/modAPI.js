@@ -421,12 +421,16 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
 }
 
 /**
- * Install a mod from a source
+ * Install a mod from a source with fallback support
  * @param {Object} mod - Mod object with source, id, title
  * @param {string} serverPath - Server path
+ * @param {Object} [options] - Installation options
+ * @param {boolean} [options.useFallback] - Whether to use fallback strategy (default: true)
+ * @param {number} [options.maxRetries] - Maximum retry attempts (default: 3)
+ * @param {number} [options.fallbackDelay] - Fallback delay in ms (default: 15 minutes)
  * @returns {Promise<boolean>} Success status
  */
-export async function installMod(mod, serverPath) {
+export async function installMod(mod, serverPath, options = {}) {
   try {
     if (!mod || !mod.id) {
       throw new Error('Invalid mod data');
@@ -442,22 +446,49 @@ export async function installMod(mod, serverPath) {
     // to look for and remove any existing version first
     const isVersionUpdate = Boolean(mod.selectedVersionId);
     
-    // Prepare mod data for installation
+    // Prepare mod data for installation with fallback support
     const modData = {
       ...mod,
       // Make sure we set the loader and version if they're not already set
       loader: mod.loader || get(loaderType),
       version: mod.version || get(minecraftVersion),
-      forceReinstall: isVersionUpdate // Tell backend to replace existing version
+      forceReinstall: isVersionUpdate, // Tell backend to replace existing version
+      
+      // Add fallback configuration
+      useFallback: options.useFallback !== false, // Default to true
+      maxRetries: options.maxRetries || 3,
+      fallbackDelay: options.fallbackDelay || 15 * 60 * 1000, // 15 minutes
+      
+      // Add source information for fallback
+      originalSource: mod.source || 'modrinth',
+      projectId: mod.id, // Use mod.id as projectId for Modrinth
+      modrinthId: mod.id,
+      curseforgeId: mod.curseforgeId || null,
+      
+      // Add checksum information if available
+      expectedChecksum: mod.checksum || null,
+      checksumAlgorithm: mod.checksumAlgorithm || 'sha1'
     };
     
-    // Install the mod
-    const result = await safeInvoke('install-mod', serverPath, modData);
+    // Use enhanced install method with fallback support
+    const result = await safeInvoke('install-mod-with-fallback', serverPath, modData);
     
     // Handle result
     if (result && result.success) {
-      // Success!
-      successMessage.set(`Successfully installed ${mod.title || mod.name}`);
+      // Success! - Removed duplicate success message since we have toast notifications
+      // const sourceInfo = result.source && result.source !== 'server' ? 
+      //                   ` (downloaded from ${result.source})` : '';
+      // successMessage.set(`Successfully installed ${mod.title || mod.name}${sourceInfo}`);
+      
+      // Log installation success with source information
+      if (result.source && result.attempts) {
+        console.log(`Mod installation completed: ${mod.title || mod.name}`, {
+          source: result.source,
+          attempts: result.attempts,
+          fallbackUsed: result.fallbackUsed || false,
+          duration: result.duration || 0
+        });
+      }
       
       // Reload the installed mods list
       await loadMods(serverPath);
@@ -469,11 +500,29 @@ export async function installMod(mod, serverPath) {
       
       return true;
     } else {
-      // Installation failed
-      throw new Error(result.error || 'Unknown error during installation');
+      // Installation failed - provide detailed error information
+      let errorMsg = result?.error || 'Unknown error during installation';
+      
+      // Add fallback information to error message if available
+      if (result?.fallbackAttempted) {
+        errorMsg += ` (fallback to ${result.fallbackSource} also failed)`;
+      }
+      
+      if (result?.checksumErrors > 0) {
+        errorMsg += ` (${result.checksumErrors} checksum validation failures)`;
+      }
+      
+      throw new Error(errorMsg);
     }
   } catch (err) {
-    // TODO: Add proper logging
+    // Enhanced error logging with fallback information
+    console.error('Mod installation failed:', {
+      modId: mod?.id,
+      modName: mod?.title || mod?.name,
+      error: err.message,
+      serverPath
+    });
+    
     errorMessage.set(`Failed to install mod: ${err.message}`);
     return false;
   } finally {

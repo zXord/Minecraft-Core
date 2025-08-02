@@ -1,3 +1,4 @@
+/// <reference path="../electron.d.ts" />
 import { writable, derived, get } from 'svelte/store';
 import { SvelteSet } from 'svelte/reactivity';
 import { safeInvoke } from '../utils/ipcUtils.js';
@@ -427,6 +428,489 @@ const filterModLoader = createEnhancedModStore('fabric', 'filterModLoader');
 
 // Store for mod categories and requirement status with enhanced logging
 const modCategories = createEnhancedModStore(new Map(), 'modCategories'); // Map of modId -> { category: string, required: boolean }
+
+// Download states enum for enhanced download tracking
+export const DOWNLOAD_STATES = {
+  QUEUED: 'queued',
+  DOWNLOADING: 'downloading',
+  VERIFYING: 'verifying',
+  RETRYING: 'retrying',
+  FALLBACK: 'fallback',
+  COMPLETED: 'completed',
+  FAILED: 'failed'
+};
+
+// Download sources enum
+export const DOWNLOAD_SOURCES = {
+  SERVER: 'server',
+  MODRINTH: 'modrinth',
+  CURSEFORGE: 'curseforge'
+};
+
+// Enhanced download progress management functions
+/**
+ * Create an enhanced download progress object with all required fields
+ * @param {string} id - Download ID
+ * @param {string} name - Download name
+ * @param {Object} options - Additional options
+ * @returns {Object} Enhanced download progress object
+ */
+export function createEnhancedDownloadProgress(id, name, options = {}) {
+  const now = Date.now();
+  
+  const progress = {
+    // Basic properties
+    id,
+    name,
+    state: options.state || DOWNLOAD_STATES.QUEUED,
+    progress: options.progress || 0,
+    size: options.size || 0,
+    speed: options.speed || 0,
+    
+    // Enhanced properties
+    source: options.source || DOWNLOAD_SOURCES.SERVER,
+    attempt: options.attempt || 1,
+    maxAttempts: options.maxAttempts || 3,
+    checksumValidation: options.checksumValidation || null,
+    fallbackCountdown: options.fallbackCountdown || 0,
+    estimatedTimeRemaining: options.estimatedTimeRemaining || 0,
+    queuePosition: options.queuePosition || 0,
+    
+    // Status messages
+    statusMessage: options.statusMessage || generateStatusMessage(options.state || DOWNLOAD_STATES.QUEUED, options),
+    detailedStatus: options.detailedStatus || null,
+    
+    // Error information
+    error: options.error || null,
+    errorDetails: options.errorDetails || null,
+    
+    // Timestamps
+    startTime: options.startTime || now,
+    completedTime: options.completedTime || null,
+    lastUpdateTime: options.lastUpdateTime || now,
+    
+    // Legacy compatibility
+    completed: options.completed || false
+  };
+  
+  logger.debug('Created enhanced download progress', {
+    category: 'mods',
+    data: {
+      function: 'createEnhancedDownloadProgress',
+      downloadId: id,
+      downloadName: name,
+      state: progress.state,
+      source: progress.source,
+      attempt: progress.attempt,
+      maxAttempts: progress.maxAttempts
+    }
+  });
+  
+  return progress;
+}
+
+/**
+ * Generate status message based on download state and context
+ * @param {string} state - Download state
+ * @param {Object} context - Additional context for message generation
+ * @returns {string} Status message
+ */
+export function generateStatusMessage(state, context = {}) {
+  switch (state) {
+    case DOWNLOAD_STATES.QUEUED:
+      return context.queuePosition > 0 ? 
+        `Queued (position ${context.queuePosition})` : 
+        'Queued for download...';
+    
+    case DOWNLOAD_STATES.DOWNLOADING:
+      if (context.source === DOWNLOAD_SOURCES.SERVER) {
+        return 'Downloading from server...';
+      } else if (context.source === DOWNLOAD_SOURCES.MODRINTH) {
+        return 'Downloading from Modrinth...';
+      } else if (context.source === DOWNLOAD_SOURCES.CURSEFORGE) {
+        return 'Downloading from CurseForge...';
+      }
+      return 'Downloading...';
+    
+    case DOWNLOAD_STATES.VERIFYING:
+      return 'Verifying file integrity...';
+    
+    case DOWNLOAD_STATES.RETRYING:
+      return `Retrying download (attempt ${context.attempt || 1}/${context.maxAttempts || 3})...`;
+    
+    case DOWNLOAD_STATES.FALLBACK:
+      if (context.fallbackCountdown > 0) {
+        const minutes = Math.ceil(context.fallbackCountdown / 60000);
+        return `Trying alternative source in ${minutes} minute${minutes !== 1 ? 's' : ''}...`;
+      }
+      return 'Trying alternative source...';
+    
+    case DOWNLOAD_STATES.COMPLETED:
+      return 'Download completed successfully';
+    
+    case DOWNLOAD_STATES.FAILED:
+      return context.error || 'Download failed';
+    
+    default:
+      return 'Processing...';
+  }
+}
+
+/**
+ * Update download progress with state transitions and validation
+ * @param {Object} currentProgress - Current progress object
+ * @param {Object} updates - Updates to apply
+ * @returns {Object} Updated progress object
+ */
+export function updateDownloadProgress(currentProgress, updates) {
+  const now = Date.now();
+  
+  // Validate state transitions
+  const validatedUpdates = { ...updates };
+  
+  if (updates.state && !isValidStateTransition(currentProgress.state, updates.state)) {
+    logger.warn('Invalid download state transition attempted', {
+      category: 'mods',
+      data: {
+        function: 'updateDownloadProgress',
+        downloadId: currentProgress.id,
+        currentState: currentProgress.state,
+        attemptedState: updates.state
+      }
+    });
+    delete validatedUpdates.state;
+  }
+  
+  // Skip update if state is the same and no other meaningful changes
+  if (updates.state === currentProgress.state && 
+      updates.progress === currentProgress.progress &&
+      !updates.error && !updates.statusMessage) {
+    return currentProgress;
+  }
+  
+  // Ensure progress is within valid range
+  if (typeof validatedUpdates.progress === 'number') {
+    validatedUpdates.progress = Math.max(0, Math.min(100, validatedUpdates.progress));
+  }
+  
+  // Update timestamps
+  validatedUpdates.lastUpdateTime = now;
+  
+  // Set completion time for final states
+  if (validatedUpdates.state === DOWNLOAD_STATES.COMPLETED || 
+      validatedUpdates.state === DOWNLOAD_STATES.FAILED) {
+    validatedUpdates.completedTime = now;
+    validatedUpdates.completed = validatedUpdates.state === DOWNLOAD_STATES.COMPLETED;
+    
+    if (validatedUpdates.state === DOWNLOAD_STATES.COMPLETED) {
+      validatedUpdates.progress = 100;
+    }
+  }
+  
+  // Update estimated time remaining if we have speed and size data
+  if (validatedUpdates.speed && validatedUpdates.size && validatedUpdates.progress < 100) {
+    validatedUpdates.estimatedTimeRemaining = calculateEstimatedTimeRemaining(
+      validatedUpdates.progress,
+      validatedUpdates.speed,
+      validatedUpdates.size
+    );
+  }
+  
+  const updatedProgress = {
+    ...currentProgress,
+    ...validatedUpdates
+  };
+  
+  // Generate status message if not provided
+  if (!validatedUpdates.statusMessage && validatedUpdates.state) {
+    updatedProgress.statusMessage = generateStatusMessage(validatedUpdates.state, updatedProgress);
+  }
+  
+  logger.debug('Download progress updated', {
+    category: 'mods',
+    data: {
+      function: 'updateDownloadProgress',
+      downloadId: updatedProgress.id,
+      oldState: currentProgress.state,
+      newState: updatedProgress.state,
+      progress: updatedProgress.progress,
+      attempt: updatedProgress.attempt,
+      source: updatedProgress.source,
+      statusMessage: updatedProgress.statusMessage
+    }
+  });
+  
+  return updatedProgress;
+}
+
+/**
+ * Check if a state transition is valid
+ * @param {string} currentState - Current state
+ * @param {string} newState - New state
+ * @returns {boolean} True if transition is valid
+ */
+function isValidStateTransition(currentState, newState) {
+  // Allow same-state transitions (no-op updates)
+  if (currentState === newState) {
+    return true;
+  }
+  
+  const validTransitions = {
+    [DOWNLOAD_STATES.QUEUED]: [
+      DOWNLOAD_STATES.DOWNLOADING,
+      DOWNLOAD_STATES.FAILED
+    ],
+    [DOWNLOAD_STATES.DOWNLOADING]: [
+      DOWNLOAD_STATES.VERIFYING,
+      DOWNLOAD_STATES.RETRYING,
+      DOWNLOAD_STATES.FALLBACK,
+      DOWNLOAD_STATES.COMPLETED,
+      DOWNLOAD_STATES.FAILED
+    ],
+    [DOWNLOAD_STATES.VERIFYING]: [
+      DOWNLOAD_STATES.RETRYING,
+      DOWNLOAD_STATES.FALLBACK,
+      DOWNLOAD_STATES.COMPLETED,
+      DOWNLOAD_STATES.FAILED
+    ],
+    [DOWNLOAD_STATES.RETRYING]: [
+      DOWNLOAD_STATES.DOWNLOADING,
+      DOWNLOAD_STATES.FALLBACK,
+      DOWNLOAD_STATES.FAILED
+    ],
+    [DOWNLOAD_STATES.FALLBACK]: [
+      DOWNLOAD_STATES.DOWNLOADING,
+      DOWNLOAD_STATES.COMPLETED,
+      DOWNLOAD_STATES.FAILED
+    ],
+    [DOWNLOAD_STATES.COMPLETED]: [], // Terminal state
+    [DOWNLOAD_STATES.FAILED]: []     // Terminal state
+  };
+  
+  return validTransitions[currentState]?.includes(newState) || false;
+}
+
+/**
+ * Calculate estimated time remaining based on progress and speed
+ * @param {number} progress - Current progress (0-100)
+ * @param {number} speed - Download speed in bytes/second
+ * @param {number} size - Total file size in bytes
+ * @returns {number} Estimated time remaining in milliseconds
+ */
+export function calculateEstimatedTimeRemaining(progress, speed, size) {
+  // Validate inputs
+  if (!speed || speed <= 0 || !size || size <= 0 || progress >= 100) {
+    return 0;
+  }
+  
+  // Ensure progress is in valid range
+  const validProgress = Math.max(0, Math.min(100, progress));
+  
+  const remainingBytes = size * ((100 - validProgress) / 100);
+  const remainingSeconds = remainingBytes / speed;
+  
+  // Cap the estimate at a reasonable maximum (24 hours)
+  const maxEstimate = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+  
+  return Math.max(0, Math.min(remainingSeconds * 1000, maxEstimate));
+}
+
+/**
+ * Format time remaining for display
+ * @param {number} milliseconds - Time in milliseconds
+ * @returns {string} Formatted time string
+ */
+export function formatTimeRemaining(milliseconds) {
+  if (!milliseconds || milliseconds <= 0) {
+    return '';
+  }
+  
+  const seconds = Math.floor(milliseconds / 1000);
+  
+  if (seconds < 60) {
+    return `${seconds}s`;
+  } else if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}m`;
+  } else if (seconds < 86400) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  } else {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  }
+}
+
+/**
+ * Get download queue position based on current downloads
+ * @param {string} downloadId - Download ID to check
+ * @param {Object} allDownloads - All current downloads
+ * @returns {number} Queue position (0 if not queued)
+ */
+export function getDownloadQueuePosition(downloadId, allDownloads) {
+  const queuedDownloads = Object.values(allDownloads)
+    .filter(download => download.state === DOWNLOAD_STATES.QUEUED)
+    .sort((a, b) => a.startTime - b.startTime);
+  
+  const position = queuedDownloads.findIndex(download => download.id === downloadId);
+  return position >= 0 ? position + 1 : 0;
+}
+
+/**
+ * Update all queued downloads with their current queue positions
+ * @param {Object} allDownloads - All current downloads
+ * @returns {Object} Updated downloads with queue positions
+ */
+export function updateQueuePositions(allDownloads) {
+  const updatedDownloads = { ...allDownloads };
+  
+  Object.keys(updatedDownloads).forEach(downloadId => {
+    if (updatedDownloads[downloadId].state === DOWNLOAD_STATES.QUEUED) {
+      updatedDownloads[downloadId].queuePosition = getDownloadQueuePosition(
+        downloadId,
+        allDownloads
+      );
+    }
+  });
+  
+  return updatedDownloads;
+}
+
+/**
+ * Validate download progress data
+ * @param {Object} progress - Download progress object to validate
+ * @returns {boolean} True if valid
+ */
+export function validateDownloadProgress(progress) {
+  if (!progress || typeof progress !== 'object') {
+    return false;
+  }
+  
+  // Required fields
+  if (!progress.id || typeof progress.id !== 'string') {
+    return false;
+  }
+  
+  if (!progress.name || typeof progress.name !== 'string') {
+    return false;
+  }
+  
+  // Validate state
+  if (!progress.state || !Object.values(DOWNLOAD_STATES).includes(progress.state)) {
+    return false;
+  }
+  
+  // Validate source
+  if (!progress.source || !Object.values(DOWNLOAD_SOURCES).includes(progress.source)) {
+    return false;
+  }
+  
+  // Validate numeric fields
+  if (typeof progress.progress !== 'number' || progress.progress < 0 || progress.progress > 100) {
+    return false;
+  }
+  
+  if (typeof progress.attempt !== 'number' || progress.attempt < 1) {
+    return false;
+  }
+  
+  if (typeof progress.maxAttempts !== 'number' || progress.maxAttempts < 1) {
+    return false;
+  }
+  
+  // Validate timestamps
+  if (typeof progress.startTime !== 'number' || progress.startTime <= 0) {
+    return false;
+  }
+  
+  if (typeof progress.lastUpdateTime !== 'number' || progress.lastUpdateTime <= 0) {
+    return false;
+  }
+  
+  return true;
+}
+
+/**
+ * Create a download error object
+ * @param {string} type - Error type
+ * @param {string} message - Error message
+ * @param {string} source - Download source
+ * @param {number} attempt - Attempt number
+ * @param {Object} details - Additional error details
+ * @returns {Object} Download error object
+ */
+export function createDownloadError(type, message, source, attempt, details = {}) {
+  return {
+    timestamp: Date.now(),
+    source,
+    attempt,
+    type,
+    message,
+    details
+  };
+}
+
+/**
+ * Get download statistics for monitoring
+ * @param {Object} allDownloads - All current downloads
+ * @returns {Object} Download statistics
+ */
+export function getDownloadStatistics(allDownloads) {
+  const downloads = Object.values(allDownloads);
+  
+  const stats = {
+    total: downloads.length,
+    queued: 0,
+    downloading: 0,
+    verifying: 0,
+    retrying: 0,
+    fallback: 0,
+    completed: 0,
+    failed: 0,
+    averageSpeed: 0,
+    totalSize: 0,
+    completedSize: 0
+  };
+  
+  let speedSum = 0;
+  let activeDownloads = 0;
+  
+  downloads.forEach(download => {
+    // Count by state (with fallback for invalid states)
+    const state = download.state || 'unknown';
+    if (Object.prototype.hasOwnProperty.call(stats, state)) {
+      stats[state]++;
+    }
+    
+    if (download.size && typeof download.size === 'number') {
+      stats.totalSize += download.size;
+      stats.completedSize += (download.size * (download.progress || 0)) / 100;
+    }
+    
+    if (download.speed && typeof download.speed === 'number' && download.speed > 0) {
+      speedSum += download.speed;
+      activeDownloads++;
+    }
+  });
+  
+  if (activeDownloads > 0) {
+    stats.averageSpeed = speedSum / activeDownloads;
+  }
+  
+  logger.debug('Generated download statistics', {
+    category: 'mods',
+    data: {
+      function: 'getDownloadStatistics',
+      stats,
+      totalDownloads: downloads.length,
+      activeDownloads
+    }
+  });
+  
+  return stats;
+}
 
 // Version comparison helper function
 function compareVersions(versionA, versionB) {
@@ -1371,7 +1855,7 @@ export function removeServerManagedFiles(fileNames = []) {
 
           // Find and remove using case-insensitive comparison
           let found = false;
-          for (const existingFile of updated) {
+          for (const existingFile of Array.from(updated)) {
             if (existingFile.toLowerCase() === fileName.toLowerCase()) {
               updated.delete(existingFile);
               removedCount++;

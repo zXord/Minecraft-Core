@@ -32,5 +32,5 @@
    * to avoid limiting type declarations.
    */
   "include": ["src/**/*", "electron/**/*"],
-  "exclude": ["**/ClientModRemovalList.svelte", "node_modules"]
+  "exclude": ["**/ClientModRemovalList.svelte", "**/DownloadHistory.svelte", "node_modules"]
 }

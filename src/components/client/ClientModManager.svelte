@@ -49,9 +49,11 @@
     acknowledgeAllDependencies,
     downloadOptionalMods,
     downloadSingleOptionalMod,
+    downloadSingleRequiredMod,
     handleModToggle,
     handleModDelete,
     handleServerModRemoval,
+    handleBulkServerModRemoval,
     handleDependencyAcknowledgment,
     updateServerMod
   } from '../../utils/clientMods.js';
@@ -598,27 +600,34 @@
   // Wrapper function for mod toggle that handles completion notification
   async function handleModToggleWrapper(instance, fileName, enabled) {
     try {
-      await handleModToggle(instance, fileName, enabled);
+      // Add timeout to prevent infinite loading - increased to 15 seconds
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Toggle operation timed out')), 15000)
+      );
       
-      // Notify the appropriate component that the toggle is complete
-      if (optionalModListComponent) {
-        optionalModListComponent.onToggleComplete(fileName);
-      }
-      if (clientManualModListComponent) {
-        clientManualModListComponent.onToggleComplete(fileName);
-      }
+      await Promise.race([
+        handleModToggle(instance, fileName, enabled),
+        timeoutPromise
+      ]);
       
-      // No immediate sync refresh to avoid flickering - the backend operation already succeeded
-      // The mod status will be correct on the next natural refresh
     } catch (error) {
       // Error handling is already done in the utility function
-      // Just notify completion to remove loading state
-      if (optionalModListComponent) {
-        optionalModListComponent.onToggleComplete(fileName);
-      }
-      if (clientManualModListComponent) {
-        clientManualModListComponent.onToggleComplete(fileName);
-      }
+      console.error('Mod toggle failed:', error);
+    } finally {
+      // Always notify completion to remove loading state, regardless of success or failure
+      // Use setTimeout to ensure components are ready
+      setTimeout(() => {
+        try {
+          if (optionalModListComponent && typeof optionalModListComponent.onToggleComplete === 'function') {
+            optionalModListComponent.onToggleComplete(fileName);
+          }
+          if (clientManualModListComponent && typeof clientManualModListComponent.onToggleComplete === 'function') {
+            clientManualModListComponent.onToggleComplete(fileName);
+          }
+        } catch (completionError) {
+          console.error('Error during toggle completion:', completionError);
+        }
+      }, 100);
     }
   }
 
@@ -690,7 +699,7 @@
             {@const acknowledgments = pendingAcknowledgments || []}
             
             {#if actualRemovals.length > 0}
-              <button class="compact-btn primary" on:click={() => downloadRequiredMods(instance)}>
+              <button class="compact-btn primary" on:click={() => handleBulkServerModRemoval(instance, actualRemovals.map(r => r.fileName))}>
                 🔄 Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''}
               </button>
             {:else if acknowledgments.length > 0}
@@ -733,6 +742,7 @@
               modSyncStatus={$modSyncStatus}
               serverManagedFiles={$serverManagedFiles}
               on:download={() => downloadRequiredMods(instance)}
+              on:downloadSingle={(e) => downloadSingleRequiredMod(instance, e.detail.mod)}
               on:remove={(e) => handleServerModRemoval(instance, e.detail.fileName)}
               on:acknowledge={(e) => handleDependencyAcknowledgment(instance, e.detail.fileName)}
               on:updateMod={(e) => updateServerMod(instance, e)}

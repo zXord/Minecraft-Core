@@ -28,6 +28,25 @@
   let isDeletingInstance = false;
   let showCopyConfirmation = false;
   let lastAuthDate = authData?.lastLogin || null;
+  
+  // Download source preferences
+  let primaryDownloadSource = 'server';
+  let fallbackDownloadSource = 'modrinth';
+  
+  // Load download preferences on component mount
+  import { onMount } from 'svelte';
+  
+  onMount(async () => {
+    try {
+      const preferences = await window.electron.invoke('get-download-preferences', { instanceId: instance.path });
+      if (preferences) {
+        primaryDownloadSource = preferences.primarySource || 'server';
+        fallbackDownloadSource = preferences.fallbackSource || 'modrinth';
+      }
+    } catch (error) {
+      // Failed to load preferences, will use defaults
+    }
+  });
 
   // Enhanced functions with loading states
   async function handleAuthenticate() {
@@ -101,6 +120,42 @@
           } catch (err) {
       // TODO: Add proper logging - Failed to copy path
     }
+    }
+  }
+  
+  // Download source preference handlers
+  function getFallbackSourceName(source) {
+    switch (source) {
+      case 'server': return 'Server';
+      case 'modrinth': return 'Modrinth';
+      default: return 'Unknown';
+    }
+  }
+  
+  function updateFallbackSource(primary) {
+    // Set fallback to the next best option
+    if (primary === 'server') {
+      fallbackDownloadSource = 'modrinth';
+    } else if (primary === 'modrinth') {
+      fallbackDownloadSource = 'server';
+    }
+  }
+  
+  async function handleDownloadSourceChange() {
+    try {
+      // Update fallback source based on primary choice
+      updateFallbackSource(primaryDownloadSource);
+      
+      // Save preferences to backend
+      await window.electron.invoke('set-download-preferences', {
+        instanceId: instance.path,
+        primarySource: primaryDownloadSource,
+        fallbackSource: fallbackDownloadSource
+      });
+      
+      // Preferences updated successfully
+    } catch (error) {
+      // Failed to save preferences, user will see no visual feedback but can try again
     }
   }
 </script>
@@ -264,6 +319,41 @@
       </div>
           </div>
           
+    <!-- Download Preferences Card -->
+    <div class="settings-card compact-card">
+      <div class="card-header">
+        <h3>📥 Download Preferences</h3>
+      </div>
+      <div class="card-content">
+        <div class="compact-setting-row">
+          <div class="setting-group compact">
+            <label class="setting-label compact" for="primary-download-source">
+              <span class="label-text">Primary Source</span>
+            </label>
+            <select id="primary-download-source" class="modern-select compact" bind:value={primaryDownloadSource} on:change={handleDownloadSourceChange}>
+              <option value="server">Server (Recommended)</option>
+              <option value="modrinth">Modrinth</option>
+            </select>
+          </div>
+          
+          <div class="setting-group compact">
+            <label class="setting-label compact" for="fallback-download-source">
+              <span class="label-text">Fallback Source</span>
+            </label>
+            <select id="fallback-download-source" class="modern-select compact" bind:value={fallbackDownloadSource} disabled>
+              <option value={fallbackDownloadSource}>{getFallbackSourceName(fallbackDownloadSource)}</option>
+            </select>
+          </div>
+        </div>
+        
+        <div class="setting-info compact">
+          <p class="info-text">
+            Server provides fastest downloads, Modrinth is used as fallback.
+          </p>
+        </div>
+      </div>
+    </div>
+
     <!-- Enhanced Danger Zone Card -->
     <div class="settings-card danger-card">
       <div class="card-header">
@@ -962,5 +1052,93 @@
     .danger-actions {
       gap: 0.5rem;
     }
+  }
+
+  /* Download Preferences Styles */
+  .compact-card {
+    padding: 0.75rem 1rem;
+  }
+
+  .compact-setting-row {
+    display: flex;
+    gap: 1rem;
+    align-items: end;
+  }
+
+  .setting-group {
+    margin-bottom: 1rem;
+  }
+
+  .setting-group.compact {
+    margin-bottom: 0.5rem;
+    flex: 1;
+  }
+
+  .setting-label {
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+
+  .setting-label.compact {
+    margin-bottom: 0.25rem;
+  }
+
+  .label-text {
+    font-weight: 500;
+    color: var(--text-primary);
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 0.85rem;
+  }
+
+  .label-description {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-style: italic;
+  }
+
+  .modern-select {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+  }
+
+  .modern-select.compact {
+    padding: 0.4rem;
+    font-size: 0.85rem;
+  }
+
+  .modern-select:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .setting-info {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background: rgba(33, 150, 243, 0.1);
+    border-left: 3px solid #2196f3;
+    border-radius: 4px;
+  }
+
+  .setting-info.compact {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+  }
+
+  .setting-info.compact .info-text {
+    font-size: 0.8rem;
+    margin: 0;
+  }
+
+  .info-text {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
   }
 </style>
