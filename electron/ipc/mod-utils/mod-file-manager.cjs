@@ -375,6 +375,19 @@ async function getInstalledModInfo(serverPath) {
         }
         // Ensure fileName property is always set
         manifest.fileName = modFile;
+        
+        // Handle missing installation dates gracefully
+        if (!manifest.installedAt) {
+          // For existing mods without installation date, we can't determine the exact date
+          // but we can set it to null to indicate it's unknown
+          manifest.installedAt = null;
+        }
+        
+        // Ensure lastUpdated is set - if not present, use installedAt or null
+        if (!manifest.lastUpdated) {
+          manifest.lastUpdated = manifest.installedAt;
+        }
+        
         modInfo.push(manifest);
       }
     }
@@ -499,6 +512,19 @@ async function getClientInstalledModInfo(clientPath) {
         }      }      // Ensure fileName property is always set
       if (manifest) {
         manifest.fileName = file;
+        
+        // Handle missing installation dates gracefully
+        if (!manifest.installedAt) {
+          // For existing mods without installation date, we can't determine the exact date
+          // but we can set it to null to indicate it's unknown
+          manifest.installedAt = null;
+        }
+        
+        // Ensure lastUpdated is set - if not present, use installedAt or null
+        if (!manifest.lastUpdated) {
+          manifest.lastUpdated = manifest.installedAt;
+        }
+        
         modInfo.push(manifest);
       }
     } catch {
@@ -523,7 +549,13 @@ async function getClientInstalledModInfo(clientPath) {
         });      let meta = {};
       if (jarPath) {
         meta = await readModMetadataFromJar(jarPath);
-      }      const modData = { fileName: file, ...meta };
+      }      const modData = { 
+        fileName: file, 
+        ...meta,
+        // For mods without manifests, we don't know installation dates
+        installedAt: null,
+        lastUpdated: null
+      };
       modInfo.push(modData);
     }
   }

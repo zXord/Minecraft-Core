@@ -657,9 +657,9 @@ async function filterAndResolveDependencies(dependencies) {
         // Create version info string
         if (versionToInstall) {
           if (versionToInstall !== latestVersion) {
-            versionInfo = `v${versionToInstall} (latest: v${latestVersion})`;
+            versionInfo = `${versionToInstall} (latest: ${latestVersion})`;
           } else {
-            versionInfo = `v${versionToInstall}`;
+            versionInfo = `${versionToInstall}`;
           }
         } else if (dep.version_requirement) {
           versionInfo = `Requirement: ${dep.version_requirement}`;
@@ -737,9 +737,11 @@ export function showDependencyModal(mod, dependencies) {
 /**
  * Install a mod with its dependencies
  * @param {string} serverPath - Server path
+ * @param {Function} installFn - Install function to use
+ * @param {string} mainContentType - Content type for the main content
  * @returns {Promise<boolean>} - True if successful
  */
-export async function installWithDependencies(serverPath, installFn = installMod) {
+export async function installWithDependencies(serverPath, installFn = installMod, mainContentType = null) {
   const mod = get(modToInstall);
   
   logger.info('Starting installation with dependencies', {
@@ -979,8 +981,8 @@ export async function installWithDependencies(serverPath, installFn = installMod
           return ids;
         });
         
-        // Install the dependency
-        await installFn(depMod, serverPath);
+        // Install the dependency - dependencies are always mods, regardless of main content type
+        await installFn(depMod, serverPath, { contentType: 'mods' });
         installedCount++;
         } catch (error) {
           logger.debug('Failed to install dependency, continuing with others', {
@@ -997,8 +999,9 @@ export async function installWithDependencies(serverPath, installFn = installMod
         }
     }
     
-    // Now install the main mod
-    await installFn(mod, serverPath);
+    // Now install the main content with the correct content type
+    const installOptions = mainContentType ? { contentType: mainContentType } : {};
+    await installFn(mod, serverPath, installOptions);
     
     // Update success message
     successMessage.set(`Installed ${mod.name} with ${installedCount} dependencies`);

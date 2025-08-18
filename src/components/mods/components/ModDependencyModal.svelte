@@ -154,16 +154,16 @@
     // For missing dependencies, show the version to be installed
     if (dependency.dependencyType === 'required' && dependency.requiredVersion) {
       if (dependency.latestVersion && dependency.requiredVersion !== dependency.latestVersion) {
-        return `v${dependency.requiredVersion} (latest: v${dependency.latestVersion})`;
+  return `${dependency.requiredVersion} (latest: ${dependency.latestVersion})`;
       } else {
-        return `v${dependency.requiredVersion}`;
+  return `${dependency.requiredVersion}`;
       }
     }
     
     // For compatibility issues, show current → target version
     if (dependency.dependencyType === 'compatibility') {
       if (dependency.installedVersion && (dependency.targetVersion || dependency.versionRequirement)) {
-        return `v${dependency.installedVersion} → ${dependency.targetVersion || dependency.versionRequirement}`;
+  return `${dependency.installedVersion} → ${dependency.targetVersion || dependency.versionRequirement}`;
       } else if (dependency.versionRequirement) {
         return `Needs version ${dependency.versionRequirement}`;
       }
@@ -171,14 +171,14 @@
     
     // For optional updates
     if (dependency.dependencyType === 'optional' && dependency.installedVersion && dependency.updateVersion) {
-      return `v${dependency.installedVersion} → v${dependency.updateVersion}`;
+  return `${dependency.installedVersion} → ${dependency.updateVersion}`;
     }
     
     // Extract version info from name if present
     if (dependency.name && dependency.name.includes('(Version')) {
       const match = dependency.name.match(/\(Version (.*?) → (.*?)\)/);
       if (match && match.length >= 3) {
-        return `v${match[1]} → v${match[2]}`;
+  return `${match[1]} → ${match[2]}`;
       }
     }
     

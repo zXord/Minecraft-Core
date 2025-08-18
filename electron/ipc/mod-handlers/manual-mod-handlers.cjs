@@ -417,7 +417,7 @@ function createManualModHandlers() {
             const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
             const manifest = JSON.parse(manifestContent);
             manifest.versionNumber = newVersion;
-            manifest.updatedAt = new Date().toISOString();
+            manifest.lastUpdated = new Date().toISOString();
             await fsPromises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
           }
         } catch {
@@ -730,14 +730,14 @@ function createManualModHandlers() {
                 name: modToUpdate.name,
                 fileName: newFileName,
                 versionNumber: (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) || '',
-                updatedAt: new Date().toISOString()
+                lastUpdated: new Date().toISOString()
               };
             }
             manifest.fileName = newFileName;
             if (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) {
               manifest.versionNumber = modToUpdate.newVersionDetails.versionNumber;
             }
-            manifest.updatedAt = new Date().toISOString();
+            manifest.lastUpdated = new Date().toISOString();
             await fsPromises.writeFile(newManifestPath, JSON.stringify(manifest, null, 2));
             if (oldManifestPath !== newManifestPath) {
               await fsPromises.unlink(oldManifestPath).catch(() => {});

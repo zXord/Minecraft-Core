@@ -149,6 +149,26 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let clientSyncInfo = null;
   let isChecking = false;
   let lastCheck = null;
+
+  // Asset synchronization (shaders/resource packs)
+  let isDownloadingAssets = false;
+  let assetsWork = {
+  shaders: { missingItems: [], updates: [], removable: [], serverItems: [], localItems: [] },
+  resourcepacks: { missingItems: [], updates: [], removable: [], serverItems: [], localItems: [] }
+  };
+  // React to asset changes from Mods tab
+  onMount(() => {
+    let assetsChangedTimer = null;
+    function onAssetsChanged() {
+      // Recompute assets status for Play tab; debounce to avoid FS race
+      if (assetsChangedTimer) clearTimeout(assetsChangedTimer);
+      assetsChangedTimer = setTimeout(() => {
+        checkAssetSynchronization();
+      }, 150);
+    }
+    window.addEventListener('assets-changed', onAssetsChanged);
+    return () => window.removeEventListener('assets-changed', onAssetsChanged);
+  });
   
   // Server information
   let serverInfo = null;
@@ -486,10 +506,218 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             await checkModSynchronization(silentRefresh);
               // Check client synchronization status
             await checkClientSynchronization(silentRefresh);
+            // Check asset synchronization status (shaders/resource packs)
+            await checkAssetSynchronization();
         }
       }
     } catch (err) {
       setMinecraftServerStatus('unknown');
+    }
+  }
+  // Asset synchronization checks (shaders/resource packs)
+  async function checkAssetSynchronization() {
+    if (!instance?.path || !$clientState.connectionStatus || $clientState.connectionStatus !== 'connected') return;
+    try {
+      const base = `http://${instance.serverIp}:${instance.serverPort}`;
+      // Fetch server items
+      const [srvShadersRes, srvRpsRes] = await Promise.all([
+        fetch(`${base}/api/assets/list/shaderpacks`, { method: 'GET', signal: AbortSignal.timeout(10000) }).catch(() => null),
+        fetch(`${base}/api/assets/list/resourcepacks`, { method: 'GET', signal: AbortSignal.timeout(10000) }).catch(() => null)
+      ]);
+      const srvShaders = srvShadersRes && srvShadersRes.ok ? await srvShadersRes.json() : { success: false, items: [] };
+      const srvRps = srvRpsRes && srvRpsRes.ok ? await srvRpsRes.json() : { success: false, items: [] };
+      const serverShaderItems = srvShaders?.success ? (srvShaders.items || []) : [];
+      const serverResourcePackItems = srvRps?.success ? (srvRps.items || []) : [];
+
+      // Fetch local items
+      const [localShaders, localRps] = await Promise.all([
+        window.electron.invoke('list-client-assets', { clientPath: instance.path, type: 'shaderpacks' }).catch(() => ({})),
+        window.electron.invoke('list-client-assets', { clientPath: instance.path, type: 'resourcepacks' }).catch(() => ({}))
+      ]);
+  const shaderAssets = localShaders?.success ? (localShaders.items || []) : [];
+  const resourcePackAssets = localRps?.success ? (localRps.items || []) : [];
+
+      // Compute missing, updates and removable
+  const baseName = (fn) => (fn || '').toLowerCase().split(/[\\\/]/).pop();
+  const shaderInstalledSet = new Set(shaderAssets.map(a => baseName(a.fileName)));
+  const rpInstalledSet = new Set(resourcePackAssets.map(a => baseName(a.fileName)));
+  const serverShaderSet = new Set(serverShaderItems.map(it => baseName(it.fileName)));
+  const serverRpSet = new Set(serverResourcePackItems.map(it => baseName(it.fileName)));
+
+  const missingShaders = serverShaderItems.filter(it => !shaderInstalledSet.has(baseName(it.fileName)));
+  const missingRps = serverResourcePackItems.filter(it => !rpInstalledSet.has(baseName(it.fileName)));
+
+      // Build quick lookup maps for local items by base filename
+      const shaderLocalByBase = new Map(shaderAssets.map(a => [baseName(a.fileName), a]));
+      const rpLocalByBase = new Map(resourcePackAssets.map(a => [baseName(a.fileName), a]));
+
+      // Determine updates where the item exists locally but differs by version/checksum
+      const shaderUpdates = serverShaderItems.filter((srv) => {
+        const key = baseName(srv.fileName);
+        const loc = shaderLocalByBase.get(key);
+        if (!loc) return false; // handled by missing
+        const srvV = srv.versionNumber;
+        const locV = loc.versionNumber;
+        const srvC = srv.checksum;
+        const locC = loc.checksum;
+        // Prefer version comparison; fall back to checksum; also update when local unknown but server has version
+        return (srvV && locV && srvV !== locV) || (srvC && locC && srvC !== locC) || (srvV && !locV);
+      });
+
+      const rpUpdates = serverResourcePackItems.filter((srv) => {
+        const key = baseName(srv.fileName);
+        const loc = rpLocalByBase.get(key);
+        if (!loc) return false;
+        const srvV = srv.versionNumber;
+        const locV = loc.versionNumber;
+        const srvC = srv.checksum;
+        const locC = loc.checksum;
+        return (srvV && locV && srvV !== locV) || (srvC && locC && srvC !== locC) || (srvV && !locV);
+      });
+
+      // Removals: local items with source === 'server' that are no longer on server lists
+  const removableShaders = shaderAssets.filter(a => (a.source === 'server') && !serverShaderSet.has(baseName(a.fileName)));
+  const removableRps = resourcePackAssets.filter(a => (a.source === 'server') && !serverRpSet.has(baseName(a.fileName)));
+
+      assetsWork = {
+        shaders: { missingItems: missingShaders, updates: shaderUpdates, removable: removableShaders, serverItems: serverShaderItems, localItems: shaderAssets },
+        resourcepacks: { missingItems: missingRps, updates: rpUpdates, removable: removableRps, serverItems: serverResourcePackItems, localItems: resourcePackAssets }
+      };
+    } catch (err) {
+      // Silent
+    }
+  }
+
+  async function downloadMissingShaders() {
+    if (!instance?.path) return;
+    const items = assetsWork.shaders.missingItems || [];
+    if (!items.length) return;
+    try {
+      isDownloadingAssets = true;
+      await window.electron.invoke('minecraft-download-assets', {
+        clientPath: instance.path,
+        type: 'shaderpacks',
+        requiredItems: items,
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+      });
+  await checkAssetSynchronization();
+      successMessage.set(`Downloaded ${items.length} shader${items.length > 1 ? 's' : ''}`);
+      setTimeout(() => successMessage.set(''), 3000);
+    } catch (err) {
+      errorMessage.set('Failed to download shaders: ' + (err?.message || 'Unknown error'));
+      setTimeout(() => errorMessage.set(''), 5000);
+    } finally {
+      isDownloadingAssets = false;
+    }
+  }
+
+  async function updateOutdatedShaders() {
+    if (!instance?.path) return;
+    const items = assetsWork.shaders.updates || [];
+    if (!items.length) return;
+    try {
+      isDownloadingAssets = true;
+      await window.electron.invoke('minecraft-download-assets', {
+        clientPath: instance.path,
+        type: 'shaderpacks',
+        requiredItems: items,
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+      });
+      await checkAssetSynchronization();
+      const n = items.length;
+      successMessage.set(`Updated ${n} shader${n > 1 ? 's' : ''}`);
+      setTimeout(() => successMessage.set(''), 3000);
+    } catch (err) {
+      errorMessage.set('Failed to update shaders: ' + (err?.message || 'Unknown error'));
+      setTimeout(() => errorMessage.set(''), 5000);
+    } finally {
+      isDownloadingAssets = false;
+    }
+  }
+
+  async function downloadMissingResourcePacks() {
+    if (!instance?.path) return;
+    const items = assetsWork.resourcepacks.missingItems || [];
+    if (!items.length) return;
+    try {
+      isDownloadingAssets = true;
+      await window.electron.invoke('minecraft-download-assets', {
+        clientPath: instance.path,
+        type: 'resourcepacks',
+        requiredItems: items,
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+      });
+  await checkAssetSynchronization();
+      successMessage.set(`Downloaded ${items.length} resource pack${items.length > 1 ? 's' : ''}`);
+      setTimeout(() => successMessage.set(''), 3000);
+    } catch (err) {
+      errorMessage.set('Failed to download resource packs: ' + (err?.message || 'Unknown error'));
+      setTimeout(() => errorMessage.set(''), 5000);
+    } finally {
+      isDownloadingAssets = false;
+    }
+  }
+
+  async function updateOutdatedResourcePacks() {
+    if (!instance?.path) return;
+    const items = assetsWork.resourcepacks.updates || [];
+    if (!items.length) return;
+    try {
+      isDownloadingAssets = true;
+      await window.electron.invoke('minecraft-download-assets', {
+        clientPath: instance.path,
+        type: 'resourcepacks',
+        requiredItems: items,
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+      });
+      await checkAssetSynchronization();
+      const n = items.length;
+      successMessage.set(`Updated ${n} resource pack${n > 1 ? 's' : ''}`);
+      setTimeout(() => successMessage.set(''), 3000);
+    } catch (err) {
+      errorMessage.set('Failed to update resource packs: ' + (err?.message || 'Unknown error'));
+      setTimeout(() => errorMessage.set(''), 5000);
+    } finally {
+      isDownloadingAssets = false;
+    }
+  }
+  async function removeRemovableShaders() {
+    if (!instance?.path) return;
+    const items = assetsWork.shaders.removable || [];
+    if (!items.length) return;
+    try {
+      isDownloadingAssets = true;
+      for (const it of items) {
+        await window.electron.invoke('delete-client-asset', { clientPath: instance.path, type: 'shaderpacks', fileName: it.fileName });
+      }
+  await checkAssetSynchronization();
+      successMessage.set(`Removed ${items.length} shader${items.length > 1 ? 's' : ''}`);
+      setTimeout(() => successMessage.set(''), 3000);
+    } catch (err) {
+      errorMessage.set('Failed to remove shaders: ' + (err?.message || 'Unknown error'));
+      setTimeout(() => errorMessage.set(''), 5000);
+    } finally {
+      isDownloadingAssets = false;
+    }
+  }
+
+  async function removeRemovableResourcePacks() {
+    if (!instance?.path) return;
+    const items = assetsWork.resourcepacks.removable || [];
+    if (!items.length) return;
+    try {
+      isDownloadingAssets = true;
+      for (const it of items) {
+        await window.electron.invoke('delete-client-asset', { clientPath: instance.path, type: 'resourcepacks', fileName: it.fileName });
+      }
+  await checkAssetSynchronization();
+      successMessage.set(`Removed ${items.length} resource pack${items.length > 1 ? 's' : ''}`);
+      setTimeout(() => successMessage.set(''), 3000);
+    } catch (err) {
+      errorMessage.set('Failed to remove resource packs: ' + (err?.message || 'Unknown error'));
+      setTimeout(() => errorMessage.set(''), 5000);
+    } finally {
+      isDownloadingAssets = false;
     }
   }
   // Check client downloaded mods for compatibility with new Minecraft version
@@ -1018,6 +1246,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       // Force a mod synchronization check to detect changes
       if ($clientState.connectionStatus === 'connected') {
         await checkModSynchronization(true);
+  await checkAssetSynchronization();
           // Also trigger mod manager refresh if we have the component
         if (clientModManagerComponent?.refreshFromDashboard) {
           await clientModManagerComponent.refreshFromDashboard();
@@ -2528,6 +2757,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {downloadClient}
         {onDownloadModsClick}
         {onAcknowledgeAllDependencies}
+
+  assetsWork={assetsWork}
+  isDownloadingAssets={isDownloadingAssets}
+  downloadMissingShaders={downloadMissingShaders}
+  downloadMissingResourcePacks={downloadMissingResourcePacks}
+  updateOutdatedShaders={updateOutdatedShaders}
+  updateOutdatedResourcePacks={updateOutdatedResourcePacks}
+  removeRemovableShaders={removeRemovableShaders}
+  removeRemovableResourcePacks={removeRemovableResourcePacks}
 
         {isLaunching}
         {launchStatus}

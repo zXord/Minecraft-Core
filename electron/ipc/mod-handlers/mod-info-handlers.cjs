@@ -52,6 +52,96 @@ function createModInfoHandlers() {
 
     'analyze-mod-from-url': async (_e, { url, modId }) => {
       return await modAnalysisUtils.analyzeModFromUrl(url, modId);
+    },
+
+    'search-shaders': async (_e, { keyword, loader, version, source, page = 1, limit = 20, sortBy = 'popular', environmentType = 'all' }) => {
+      if (source === 'modrinth') {
+        if (!keyword || keyword.trim() === '') {
+          return await modApiService.getModrinthPopular({ 
+            loader, 
+            version, 
+            page, 
+            limit, 
+            sortBy, 
+            environmentType,
+            projectType: 'shader'
+          });
+        }
+        return await modApiService.searchModrinthMods({ 
+          query: keyword, 
+          loader, 
+          version, 
+          page, 
+          limit, 
+          sortBy, 
+          environmentType,
+          projectType: 'shader'
+        });
+      } else if (source === 'curseforge') {
+        if (!keyword || keyword.trim() === '') {
+          return await modApiService.getCurseForgePopular({ 
+            loader, 
+            version, 
+            page, 
+            limit, 
+            environmentType
+          });
+        }
+        return await modApiService.searchCurseForgeMods({ 
+          query: keyword, 
+          loader, 
+          version, 
+          page, 
+          limit, 
+          environmentType
+        });
+      }
+      throw new Error(`Invalid source: ${source}`);
+    },
+
+    'search-resourcepacks': async (_e, { keyword, loader, version, source, page = 1, limit = 20, sortBy = 'popular', environmentType = 'all' }) => {
+      if (source === 'modrinth') {
+        if (!keyword || keyword.trim() === '') {
+          return await modApiService.getModrinthPopular({ 
+            loader, 
+            version, 
+            page, 
+            limit, 
+            sortBy, 
+            environmentType,
+            projectType: 'resourcepack'
+          });
+        }
+        return await modApiService.searchModrinthMods({ 
+          query: keyword, 
+          loader, 
+          version, 
+          page, 
+          limit, 
+          sortBy, 
+          environmentType,
+          projectType: 'resourcepack'
+        });
+      } else if (source === 'curseforge') {
+        if (!keyword || keyword.trim() === '') {
+          return await modApiService.getCurseForgePopular({ 
+            loader, 
+            version, 
+            page, 
+            limit, 
+            environmentType
+          });
+        }
+        return await modApiService.searchCurseForgeMods({ 
+          query: keyword, 
+          loader, 
+          version, 
+          page, 
+          limit, 
+          environmentType
+        });
+      }
+      throw new Error(`Invalid source: ${source}`);
     }
   };
 }

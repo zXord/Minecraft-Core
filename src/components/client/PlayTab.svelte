@@ -19,6 +19,15 @@
   export let downloadClient;
   export let onDownloadModsClick;
   export let onAcknowledgeAllDependencies;
+  // Asset sync props
+  export let assetsWork;
+  export let isDownloadingAssets;
+  export let downloadMissingShaders;
+  export let downloadMissingResourcePacks;
+  export let removeRemovableShaders;
+  export let removeRemovableResourcePacks;
+  export let updateOutdatedShaders;
+  export let updateOutdatedResourcePacks;
   // Memory/RAM settings - handled internally with localStorage persistence
   let maxMemory = 2; // Default 2GB
   let memoryLoaded = false; // Flag to prevent saving before loading
@@ -484,7 +493,7 @@
                           {#each modSyncStatus.outdatedMods as update, index (update.name || update.fileName || `req-update-${index}`)}
                             <div class="compact-mod-item">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
-                              <span class="version-badge">v{update.currentVersion} → v{update.newVersion}</span>
+                              <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
                             </div>
                           {/each}
                         </div>
@@ -498,7 +507,7 @@
                           {#each modSyncStatus.outdatedOptionalMods as update, index (update.name || update.fileName || `opt-update-${index}`)}
                             <div class="compact-mod-item optional">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
-                              <span class="version-badge">v{update.currentVersion} → v{update.newVersion}</span>
+                              <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
                             </div>
                           {/each}
                         </div>
@@ -512,7 +521,7 @@
                           {#each validClientUpdates as update, index (update.name || update.fileName || `client-update-${index}`)}
                             <div class="compact-mod-item client-mod">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
-                              <span class="version-badge">v{update.currentVersion} → v{update.newVersion}</span>
+                              <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
                             </div>
                           {/each}
                         </div>
@@ -612,6 +621,138 @@
                     {/if}
                   </div>
                 </div>
+              {/if}
+
+              <!-- Asset synchronization details (Shaders & Resource Packs) -->
+              {#if assetsWork}
+                {@const missingShaders = assetsWork.shaders?.missingItems?.length || 0}
+                {@const missingRps = assetsWork.resourcepacks?.missingItems?.length || 0}
+                {@const updateShaders = assetsWork.shaders?.updates?.length || 0}
+                {@const updateRps = assetsWork.resourcepacks?.updates?.length || 0}
+                {@const removableShaders = assetsWork.shaders?.removable?.length || 0}
+                {@const removableRps = assetsWork.resourcepacks?.removable?.length || 0}
+                {#if (missingShaders + missingRps + updateShaders + updateRps + removableShaders + removableRps) > 0}
+                  <div class="detail-section">
+                    <h3>Assets Need Update ({missingShaders + missingRps + updateShaders + updateRps + removableShaders + removableRps})</h3>
+
+                    {#if missingShaders > 0}
+                      <div class="compact-mod-section">
+                        <h4>✨ Missing Shaders:</h4>
+                        <div class="compact-mod-list">
+                          {#each assetsWork.shaders.missingItems as it (it.fileName)}
+                            <div class="compact-mod-item new-download">
+                              <span class="mod-name">{it.fileName}</span>
+                              <span class="new-badge">NEW</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    {#if missingRps > 0}
+                      <div class="compact-mod-section">
+                        <h4>🎨 Missing Resource Packs:</h4>
+                        <div class="compact-mod-list">
+                          {#each assetsWork.resourcepacks.missingItems as it (it.fileName)}
+                            <div class="compact-mod-item new-download">
+                              <span class="mod-name">{it.fileName}</span>
+                              <span class="new-badge">NEW</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    {#if updateShaders > 0}
+                      <div class="compact-mod-section">
+                        <h4>✨ Shader Updates:</h4>
+                        <div class="compact-mod-list">
+              {#each assetsWork.shaders.updates as it (it.fileName)}
+                            <div class="compact-mod-item">
+                              <span class="mod-name">{it.fileName}</span>
+                <span class="version-badge">{it.versionNumber ? `→ ${it.versionNumber}` : 'Update'}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    {#if updateRps > 0}
+                      <div class="compact-mod-section">
+                        <h4>🎨 Resource Pack Updates:</h4>
+                        <div class="compact-mod-list">
+              {#each assetsWork.resourcepacks.updates as it (it.fileName)}
+                            <div class="compact-mod-item">
+                              <span class="mod-name">{it.fileName}</span>
+                <span class="version-badge">{it.versionNumber ? `→ ${it.versionNumber}` : 'Update'}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    {#if removableShaders > 0}
+                      <div class="compact-mod-section">
+                        <h4>❌ Shaders To Remove:</h4>
+                        <div class="compact-mod-list">
+                          {#each assetsWork.shaders.removable as it (it.fileName)}
+                            <div class="compact-mod-item removal">
+                              <span class="mod-name">{it.fileName}</span>
+                              <span class="removal-badge">no longer required</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    {#if removableRps > 0}
+                      <div class="compact-mod-section">
+                        <h4>❌ Resource Packs To Remove:</h4>
+                        <div class="compact-mod-list">
+                          {#each assetsWork.resourcepacks.removable as it (it.fileName)}
+                            <div class="compact-mod-item removal">
+                              <span class="mod-name">{it.fileName}</span>
+                              <span class="removal-badge">no longer required</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+
+                    <div class="mod-actions-compact">
+                      {#if missingShaders > 0}
+                        <button class="mod-action-btn primary" on:click={downloadMissingShaders} disabled={isDownloadingAssets}>
+                          📥 Download Shaders ({missingShaders})
+                        </button>
+                      {/if}
+                      {#if updateShaders > 0}
+                        <button class="mod-action-btn primary" on:click={updateOutdatedShaders} disabled={isDownloadingAssets}>
+                          🔄 Update Shaders ({updateShaders})
+                        </button>
+                      {/if}
+                      {#if missingRps > 0}
+                        <button class="mod-action-btn primary" on:click={downloadMissingResourcePacks} disabled={isDownloadingAssets}>
+                          📥 Download Resource Packs ({missingRps})
+                        </button>
+                      {/if}
+                      {#if updateRps > 0}
+                        <button class="mod-action-btn primary" on:click={updateOutdatedResourcePacks} disabled={isDownloadingAssets}>
+                          🔄 Update Resource Packs ({updateRps})
+                        </button>
+                      {/if}
+                      {#if removableShaders > 0}
+                        <button class="mod-action-btn" on:click={removeRemovableShaders} disabled={isDownloadingAssets}>
+                          🔄 Remove Shaders ({removableShaders})
+                        </button>
+                      {/if}
+                      {#if removableRps > 0}
+                        <button class="mod-action-btn" on:click={removeRemovableResourcePacks} disabled={isDownloadingAssets}>
+                          🔄 Remove Resource Packs ({removableRps})
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                {/if}
               {/if}
               
               <!-- Compact Memory Settings -->

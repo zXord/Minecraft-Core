@@ -257,7 +257,7 @@
             <div class="section-header">
               <h4>🎮 Client Management</h4>
               {#if serverInfo?.minecraftVersion}
-                <div class="version-badge">v{serverInfo.minecraftVersion}</div>
+                <div class="version-badge">{serverInfo.minecraftVersion}</div>
               {/if}
             </div>
             <div class="section-content">

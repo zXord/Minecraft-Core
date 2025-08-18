@@ -53,8 +53,7 @@ export class BackupStatistics {
         }
 
         return optimizedStats;
-      } catch (optimizedError) {
-        console.warn('Optimized statistics calculation failed, falling back to standard method:', optimizedError);
+      } catch {
         // Fall through to standard calculation
       }
     }

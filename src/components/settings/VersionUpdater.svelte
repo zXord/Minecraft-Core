@@ -381,7 +381,7 @@
                 <li class="compatible-mod-item">
                   <span class="mod-name">{mod.name}</span>
                   {#if mod.currentVersion}
-                    <span class="mod-version">v{mod.currentVersion}</span>
+                    <span class="mod-version">{mod.currentVersion}</span>
                   {/if}
                   <span class="compatible-status">✅ Compatible</span>
                 </li>
@@ -400,7 +400,7 @@
               <li class="incompatible-mod-item">
                 <span class="mod-name">{mod.name}</span>
                 {#if mod.currentVersion}
-                  <span class="mod-version">v{mod.currentVersion}</span>
+                  <span class="mod-version">{mod.currentVersion}</span>
                 {/if}
                 <span class="incompatible-reason">No compatible version found</span>
               </li>
@@ -516,7 +516,7 @@
               <li class="disabled-mod-item">
                 <span class="mod-name">{mod.name}</span>
                 {#if mod.currentVersion}
-                  <span class="mod-version">v{mod.currentVersion}</span>
+                  <span class="mod-version">{mod.currentVersion}</span>
                 {/if}
               </li>
             {/each}

@@ -11,6 +11,7 @@
     searchResults,
     successMessage, 
     errorMessage,
+    installedModInfo,
     minecraftVersion,
     loaderType,
     totalPages,
@@ -22,7 +23,15 @@
     expandedInstalledMod,
     modsWithUpdates,
     currentDependencies,
-    modToInstall
+    modToInstall,
+    // Content type stores
+    activeContentType,
+    shaderResults,
+    resourcePackResults,
+    CONTENT_TYPES,
+    contentTypeConfigs,
+    // Performance optimization stores
+    contentTypeSwitching
   } from '../../stores/modStore.js';
     // Import components
 import ModSearch from '../mods/components/ModSearch.svelte';
@@ -33,7 +42,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     // Import API utilities
   import { 
     loadMods, 
-    searchMods,
     loadServerConfig,
     installMod,
     checkForUpdates
@@ -54,12 +62,22 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   
   // Local state
   let minecraftVersionOptions = [$minecraftVersion];
-  let filterType = 'all';
   let downloadManagerCleanup;
   let activeTab = 'installed'; // 'installed' or 'search' or 'categories'
   
-  // Initialize filter stores
-  $: if ($minecraftVersion && $filterMinecraftVersion === '') {
+  // Content type configuration
+  const contentTypes = [
+    { id: CONTENT_TYPES.MODS, label: 'Mods', icon: '🧩' },
+    { id: CONTENT_TYPES.SHADERS, label: 'Shaders', icon: '✨' },
+    { id: CONTENT_TYPES.RESOURCE_PACKS, label: 'Resource Packs', icon: '🎨' }
+  ];
+  
+  // Initialize filter stores (only for mods to avoid version filter ping-pong on shaders/resource packs)
+  $: if (
+    $minecraftVersion &&
+    $activeContentType === CONTENT_TYPES.MODS &&
+    $filterMinecraftVersion === ''
+  ) {
     filterMinecraftVersion.set($minecraftVersion);
   }
   $: if ($loaderType && $filterModLoader === '') {
@@ -97,6 +115,20 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         loadMods(serverPath),
         loadServerConfig(serverPath)
       ]);
+
+      // Post-load sanity: if installed mod info lacks versions initially, trigger one light refresh
+      try {
+        const info = get(installedModInfo);
+        const missingVersions = !info || info.length === 0 || info.every(i => !i?.versionNumber);
+        if (missingVersions) {
+          // Small delay to allow backend to warm up, then refresh once
+          setTimeout(() => {
+            loadMods(serverPath);
+          }, 250);
+        }
+      } catch (_) {
+        // ignore
+      }
     };
     
     // Start initialization
@@ -120,7 +152,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   // Handle installing mod with dependencies
   async function handleInstallWithDependencies() {
     try {
-      const result = await installWithDependencies(serverPath);
+      const result = await installWithDependencies(serverPath, installMod, $activeContentType);
       
       if (!result) {
         // If installation failed, ensure we clean up any installing state
@@ -250,7 +282,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   
   // Handle mod installation
   async function handleInstallMod(event) {
-    const { mod, versionId, isVersionChange } = event.detail;
+    const { mod, versionId, isVersionChange, isDependency, onSuccess, onError, contentType } = event.detail;
+    
+
     
     try {
       // Mark this mod as being installed to prevent duplicate installation attempts
@@ -325,13 +359,27 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         }
         
         // Install (will replace existing version)
-        await installMod(modToUpdate, serverPath);
+        // Use contentType from event if provided (for dependencies), otherwise use active content type
+        const targetContentType = contentType || $activeContentType;
+        
+
+        
+        const installSuccess = await installMod(modToUpdate, serverPath, { contentType: targetContentType });
         
         // Clear installing state
         installingModIds.update(ids => {
           ids.delete(mod.id);
           return ids;
         });
+        
+        // Call success callback if provided and installation was successful
+        if (installSuccess && onSuccess) {
+          try {
+            await onSuccess();
+          } catch (callbackError) {
+            // Success callback failed
+          }
+        }
         
         return;
       }
@@ -395,13 +443,31 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           return;
         } else {
           // No dependencies or compatibility issues, install directly
-          await installMod(mod, serverPath);
+          // Use contentType from event if provided (for dependencies), otherwise use active content type
+          const targetContentType = contentType || $activeContentType;
+          
+
+          
+          const installSuccess = await installMod(mod, serverPath, { contentType: targetContentType });
           
           // Clear installing state after installation
           installingModIds.update(ids => {
             ids.delete(mod.id);
             return ids;
           });
+          
+          // Call success callback if provided and installation was successful
+          if (installSuccess && onSuccess) {
+            try {
+              await onSuccess();
+            } catch (callbackError) {
+              // Success callback failed
+            }
+          } else if (installSuccess && isDependency) {
+            // Show specific success message for dependency installations
+            successMessage.set(`Dependency "${mod.name || mod.title}" installed successfully!`);
+            setTimeout(() => successMessage.set(''), 3000);
+          }
         }
       } catch (depError) {
         
@@ -412,8 +478,30 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         // Ask the user if they want to continue with installation
         if (confirm(`Warning: Failed to check if the mod "${mod.name || mod.title}" requires dependencies. Continue with installation anyway?`)) {
           // If user confirms, proceed with installation
-          await installMod(mod, serverPath);
+          // Use contentType from event if provided (for dependencies), otherwise use active content type
+          const targetContentType = contentType || $activeContentType;
+          
+
+          
+          const installSuccess = await installMod(mod, serverPath, { contentType: targetContentType });
+          
+          // Call success callback if provided and installation was successful
+          if (installSuccess && onSuccess) {
+            try {
+              await onSuccess();
+            } catch (callbackError) {
+              // Success callback failed
+            }
+          }
         } else {
+          // User cancelled, call error callback if provided
+          if (onError) {
+            try {
+              onError(new Error('Installation cancelled by user'));
+            } catch (callbackError) {
+              // Error callback failed
+            }
+          }
         }
         
         // Clear installing state after installation
@@ -430,6 +518,15 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         ids.delete(mod.id);
         return ids;
       });
+      
+      // Call error callback if provided
+      if (onError) {
+        try {
+          onError(error);
+        } catch (callbackError) {
+          // Error callback failed
+        }
+      }
     }
   }
     // Handle mod update from InstalledModList
@@ -455,7 +552,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       });
       
       // Install the new version (it will replace the old one automatically)
-      const success = await installMod(mod, serverPath);
+      const success = await installMod(mod, serverPath, { contentType: $activeContentType });
       
       if (success) {
         // Force a full reload of installed mods to refresh version information
@@ -474,11 +571,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   
   // Handle filter change
   async function handleFilterChange(event) {
-    const { filterType: newFilterType, 
-            filterMinecraftVersion: newVersionFilter, 
+    const { filterMinecraftVersion: newVersionFilter, 
             filterModLoader: newLoaderFilter } = event.detail;
     
-    filterType = newFilterType;
     filterMinecraftVersion.set(newVersionFilter);
     filterModLoader.set(newLoaderFilter);
   }
@@ -488,13 +583,28 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     try {
       isSearching.set(true);
       
-      // Reset to empty values first
-      searchResults.set([]);
+      // Reset to empty values first based on content type
+      const currentContentType = get(activeContentType);
+      switch (currentContentType) {
+        case CONTENT_TYPES.SHADERS:
+          shaderResults.set([]);
+          break;
+        case CONTENT_TYPES.RESOURCE_PACKS:
+          resourcePackResults.set([]);
+          break;
+        case CONTENT_TYPES.MODS:
+        default:
+          searchResults.set([]);
+          break;
+      }
       totalResults.set(0);
       totalPages.set(1);
       
-      // Perform search
-      await searchMods();
+      // Import searchContent function
+      const { searchContent } = await import('../../utils/mods/modAPI.js');
+      
+      // Perform search for the active content type
+      await searchContent(currentContentType);
       
     } catch (error) {
       errorMessage.set(`Search failed: ${error.message || 'Unknown error'}`);
@@ -506,8 +616,10 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   // Watch for changes to the minecraftVersion store
   $: {
     if ($minecraftVersion) {
-      // Make sure filterMinecraftVersion is set to the current version
-      filterMinecraftVersion.set($minecraftVersion);
+      // Only force filter version for mods to avoid conflicts with shaders/resource packs
+      if ($activeContentType === CONTENT_TYPES.MODS) {
+        filterMinecraftVersion.set($minecraftVersion);
+      }
       // Add the current version to options if not already included
       if (!minecraftVersionOptions.includes($minecraftVersion)) {
         minecraftVersionOptions = [$minecraftVersion, ...minecraftVersionOptions.filter(v => v !== $minecraftVersion)];
@@ -516,8 +628,16 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   }
   
   // Watch for tab changes and load search results when switching to search tab
-  $: if (activeTab === 'search' && get(searchResults).length === 0) {
-    handleSearch();
+  $: if (activeTab === 'search') {
+    const currentType = get(activeContentType);
+    const hasResults = currentType === CONTENT_TYPES.SHADERS
+      ? get(shaderResults).length > 0
+      : currentType === CONTENT_TYPES.RESOURCE_PACKS
+        ? get(resourcePackResults).length > 0
+        : get(searchResults).length > 0;
+    if (!hasResults) {
+      handleSearch();
+    }
   }
   
 
@@ -533,21 +653,85 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     
     // If switching to installed tab, refresh mod list
     if (tabName === 'installed') {
-      loadMods(serverPath);
-      checkForUpdates(serverPath);
+      // Load content for the active content type, then check for updates
+      (async () => {
+        try {
+          const { loadContent } = await import('../../utils/mods/modAPI.js');
+          await loadContent(serverPath, get(activeContentType));
+        } catch (_) {}
+        checkForUpdates(serverPath);
+      })();
     }
     // If switching to search tab, refresh search results and check for updates
     else if (tabName === 'search') {
       // Clear any stale update counts when switching away from installed tab
       modsWithUpdates.set(new SvelteMap());
-      
-      // Always check for updates when switching to search tab to ensure update buttons are shown
-      checkForUpdates(serverPath).then(() => {
-        // Only search if no results yet or explicitly requested
-        if (get(searchResults).length === 0) {
-          handleSearch();
+
+      // Ensure installed IDs/info for the current content type are loaded
+      (async () => {
+        try {
+          const { loadContent } = await import('../../utils/mods/modAPI.js');
+          await loadContent(serverPath, get(activeContentType));
+        } catch (_) {
+          // ignore
         }
-      });
+        // Always check for updates when switching to search tab to ensure update buttons are shown
+        checkForUpdates(serverPath).then(() => {
+          // Only search if no results yet for the active content type
+          const currentType = get(activeContentType);
+          const hasResults = currentType === CONTENT_TYPES.SHADERS
+            ? get(shaderResults).length > 0
+            : currentType === CONTENT_TYPES.RESOURCE_PACKS
+              ? get(resourcePackResults).length > 0
+              : get(searchResults).length > 0;
+          if (!hasResults) {
+            handleSearch();
+          }
+        });
+      })();
+    }
+  }
+  
+  // Handle content type switching with performance optimizations
+  async function switchContentType(contentTypeId) {
+    if ($activeContentType === contentTypeId) return;
+    
+    // Set switching state for loading indicator
+    contentTypeSwitching.set(true);
+    
+    try {
+      // Set the active content type
+      activeContentType.set(contentTypeId);
+      
+      // Clear any expanded dropdowns
+      expandedInstalledMod.set(null);
+      
+      // If on search tab, trigger search for new content type
+      if (activeTab === 'search') {
+        // Load installed IDs for this content type so search results can reflect installed status
+        const { loadContent } = await import('../../utils/mods/modAPI.js');
+        await loadContent(serverPath, contentTypeId);
+        await handleSearch();
+      }
+      // If on installed tab, load content for new type
+      else if (activeTab === 'installed') {
+        // Import loadContent function
+        const { loadContent } = await import('../../utils/mods/modAPI.js');
+        await loadContent(serverPath, contentTypeId);
+        // Ensure updates are checked for the newly selected content type
+        // Use a follow-up check that can coalesce with any in-flight check
+        try {
+          const { checkForUpdates } = await import('../../utils/mods/modAPI.js');
+          // Ask for a refresh to avoid stale cache when switching types
+          checkForUpdates(serverPath, true);
+        } catch (_) {}
+      }
+    } catch (error) {
+      // Error switching content type
+      // Optionally show user feedback
+    } finally {
+      // Clear switching state
+      contentTypeSwitching.set(false);
     }
   }
   
@@ -555,6 +739,13 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       switchTab(tabName);
+    }
+  }
+  
+  function handleContentTypeKeydown(event, contentTypeId) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      switchContentType(contentTypeId);
     }
   }
   
@@ -597,7 +788,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       modToInstall.set(mod);
       currentDependencies.set(rawDependencies);
       // Perform the installation immediately
-      await installWithDependencies(serverPath);
+      await installWithDependencies(serverPath, installMod, $activeContentType);
     } catch (error) {
       errorMessage.set(`Error installing dependencies: ${error.message || 'Unknown error'}`);
     }
@@ -609,6 +800,35 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   <DownloadProgress />
   <ModDependencyModal on:install={handleInstallWithDependencies} />
   
+  <!-- Content Type Tabs -->
+  <div class="content-type-tabs" role="tablist">
+    {#each contentTypes as contentType (contentType.id)}
+      <button 
+        type="button"
+        class="content-type-tab" 
+        class:active={$activeContentType === contentType.id}
+        class:switching={$contentTypeSwitching && $activeContentType === contentType.id}
+        disabled={$contentTypeSwitching}
+        on:click={() => switchContentType(contentType.id)}
+        on:keydown={(e) => handleContentTypeKeydown(e, contentType.id)}
+        aria-selected={$activeContentType === contentType.id}
+        aria-controls="{contentType.id}-content-panel"
+        id="{contentType.id}-content-tab"
+        role="tab"
+        tabindex={$activeContentType === contentType.id ? 0 : -1}
+      >
+        <span class="content-type-icon">
+          {#if $contentTypeSwitching && $activeContentType === contentType.id}
+            <span class="loading-spinner">⏳</span>
+          {:else}
+            {contentType.icon}
+          {/if}
+        </span>
+        <span class="content-type-label">{contentType.label}</span>
+      </button>
+    {/each}
+  </div>
+
   <div class="mod-manager-tabs" role="tablist">
     <button 
       type="button"
@@ -622,7 +842,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       role="tab"
       tabindex={activeTab === 'installed' ? 0 : -1}
     >
-      Installed Mods
+      Installed {contentTypeConfigs[$activeContentType]?.label || 'Content'}
     </button>
     <button 
       type="button"
@@ -636,7 +856,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       role="tab"
       tabindex={activeTab === 'search' ? 0 : -1}
     >
-      Find Mods
+      Find {contentTypeConfigs[$activeContentType]?.label || 'Content'}
     </button>
   </div>
   
@@ -657,6 +877,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         on:refresh={handleRefresh}
         on:compatibility-warning={handleCompatibilityWarning}
         on:install-dependencies={handleInstallDependenciesFromModList}
+        on:install={handleInstallMod}
       />
     </div>
     
@@ -675,7 +896,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         on:filterChange={handleFilterChange}
         serverPath={serverPath}
         {minecraftVersionOptions}
-        bind:filterType
       />
       
       <div class="search-results">
@@ -689,6 +909,89 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   .mod-manager {
     display: flex;
     flex-direction: column;
+  }
+  
+  .content-type-tabs {
+    display: flex;
+    background: var(--tab-container-bg);
+    border-radius: var(--tab-container-border-radius);
+    padding: var(--tab-container-padding);
+    border: var(--tab-container-border);
+    justify-content: center;
+    gap: var(--tab-container-gap);
+    margin-bottom: 0.5rem;
+  }
+  
+  .content-type-tab {
+    width: var(--tab-button-width) !important;
+    min-width: var(--tab-button-width) !important;
+    max-width: var(--tab-button-width) !important;
+    min-height: var(--tab-button-min-height);
+    padding: var(--tab-button-padding) !important;
+    margin: var(--tab-button-margin) !important;
+    border: var(--tab-inactive-border);
+    border-radius: var(--tab-button-border-radius);
+    font-size: var(--tab-button-font-size);
+    font-weight: var(--tab-button-font-weight);
+    cursor: pointer;
+    transition: var(--tab-button-transition);
+    background: var(--tab-inactive-bg);
+    color: var(--tab-inactive-color);
+    box-sizing: border-box !important;
+    flex-shrink: 0 !important;
+    
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  
+  .content-type-tab.active {
+    background: var(--tab-active-bg);
+    color: var(--tab-active-color);
+    border: var(--tab-active-border);
+  }
+  
+  .content-type-tab:hover:not(.active) {
+    background: var(--tab-hover-bg);
+    color: var(--tab-hover-color);
+    transform: var(--tab-hover-transform);
+  }
+  
+  .content-type-tab.active:hover {
+    background: var(--tab-active-hover-bg);
+    border: var(--tab-active-hover-border);
+  }
+
+  .content-type-tab:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
+  .content-type-tab.switching {
+    opacity: 0.8;
+  }
+
+  .loading-spinner {
+    display: inline-block;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  
+  .content-type-icon {
+    font-size: 1.2em;
+    line-height: 1;
+  }
+  
+  .content-type-label {
+    font-size: 0.85em;
+    line-height: 1;
   }
   
   .mod-manager-tabs {

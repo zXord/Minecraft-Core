@@ -262,10 +262,7 @@
                   </option>
                 {/each}
               </select>
-              <!-- Debug info -->
-              <small style="color: #666; font-size: 0.7rem;">
-                Debug: selectedVersion="{selectedVersion}", availableVersions={availableVersions.length}
-              </small>
+
             {/if}
           </div>
         </div>

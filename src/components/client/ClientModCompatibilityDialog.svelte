@@ -158,7 +158,7 @@
                   <span class="mod-name">{mod.name}</span>
                   <span class="mod-reason">{mod.reason}</span>
                   {#if mod.availableUpdate}
-                    <span class="update-info">Update to v{mod.availableUpdate.version}</span>
+                    <span class="update-info">Update to {mod.availableUpdate.version}</span>
                   {/if}
                 </div>
               {/each}

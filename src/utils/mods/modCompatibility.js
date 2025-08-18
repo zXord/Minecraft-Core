@@ -235,16 +235,16 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
               // Add info about version to be installed to the message
               if (requiredVersionNumber) {
                 if (requiredVersionNumber !== latestVersion) {
-                  missingIssue.versionInfo = `v${requiredVersionNumber} (latest: v${latestVersion})`;
+                  missingIssue.versionInfo = `${requiredVersionNumber} (latest: ${latestVersion})`;
                 } else {
-                  missingIssue.versionInfo = `v${requiredVersionNumber}`;
+                  missingIssue.versionInfo = `${requiredVersionNumber}`;
                 }
               } else {
                 missingIssue.versionInfo = `Requirement: ${requirement}`;
               }            } else {
               // No specific requirement, will install latest              missingIssue.requiredVersion = latestVersion;
               missingIssue.latestVersion = latestVersion;
-              missingIssue.versionInfo = `v${latestVersion}`;
+              missingIssue.versionInfo = `${latestVersion}`;
             }
           }
         } catch (error) {
@@ -396,7 +396,7 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
               installedVersion: installedMod.versionNumber,
               requiredVersion: versionRequirement,
               targetVersion: compatibleVersion || versionRequirement,
-              versionInfo: `v${installedMod.versionNumber} → ${compatibleVersion || versionRequirement}`,
+              versionInfo: `${installedMod.versionNumber} → ${compatibleVersion || versionRequirement}`,
               message: `Version ${installedMod.versionNumber} needs to be updated to ${compatibleVersion || versionRequirement}`
             });
           }
@@ -432,8 +432,8 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
               },
               installedVersion: installedMod.versionNumber,
               updateVersion: updateInfo.versionNumber,
-              versionInfo: `v${installedMod.versionNumber} → v${updateInfo.versionNumber}`,
-              message: `Update available: v${installedMod.versionNumber} → v${updateInfo.versionNumber}`
+              versionInfo: `${installedMod.versionNumber} → ${updateInfo.versionNumber}`,
+              message: `Update available: ${installedMod.versionNumber} → ${updateInfo.versionNumber}`
             });
           }
         }
