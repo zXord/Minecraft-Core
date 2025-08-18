@@ -293,116 +293,84 @@ export function parseVersion(version) {
  * @returns {number} -1 if version1 < version2, 0 if equal, 1 if version1 > version2
  */
 export function compareVersions(version1, version2) {
+  // Robust comparator (matches store logic):
+  // - Handles alphanumeric suffixes in segments: 1.2a > 1.2
+  // - Handles pre-release markers: 1.2-rc1 < 1.2
+  // - Ignores leading 'v'
   logger.debug('Comparing versions', {
     category: 'utils',
-    data: {
-      function: 'compareVersions',
-      version1,
-      version2
-    }
+    data: { function: 'compareVersions', version1, version2 }
   });
-  
-  const parsed1 = parseVersion(version1);
-  const parsed2 = parseVersion(version2);
-  
-  if (!parsed1.valid || !parsed2.valid) {
-    logger.warn('Invalid version(s) provided to compareVersions', {
-      category: 'utils',
-      data: {
-        function: 'compareVersions',
-        version1,
-        version2,
-        version1Valid: parsed1.valid,
-        version2Valid: parsed2.valid
-      }
-    });
-    return 0; // Consider invalid versions as equal
-  }
-  
-  // Compare major, minor, patch
-  const comparisons = [
-    parsed1.major - parsed2.major,
-    parsed1.minor - parsed2.minor,
-    parsed1.patch - parsed2.patch
-  ];
-  
-  for (const comparison of comparisons) {
-    if (comparison !== 0) {
-      const result = comparison > 0 ? 1 : -1;
-      logger.debug('Version comparison completed', {
-        category: 'utils',
-        data: {
-          function: 'compareVersions',
-          version1,
-          version2,
-          result,
-          resultDescription: result === 1 ? 'version1 > version2' : 'version1 < version2'
-        }
-      });
-      return result;
+
+  if (!version1 || !version2) return 0;
+  if (version1 === version2) return 0;
+
+  const normalize = (v) => String(v).trim().replace(/^v/i, '');
+  const aStr = normalize(version1);
+  const bStr = normalize(version2);
+
+  const splitPre = (v) => {
+    const idx = v.indexOf('-');
+    return idx === -1 ? { main: v, pre: null } : { main: v.slice(0, idx), pre: v.slice(idx + 1) };
+  };
+  const tokenize = (seg) => (seg ? seg.match(/\d+|[A-Za-z]+/g)?.map(t => (/^\d+$/.test(t) ? Number(t) : t.toLowerCase())) || [] : []);
+  const parse = (v) => {
+    const { main, pre } = splitPre(v);
+    return { mainTokens: main.split('.').flatMap(tokenize), preTokens: pre ? pre.split('.').flatMap(tokenize) : null, hasPre: !!pre };
+  };
+
+  const a = parse(aStr);
+  const b = parse(bStr);
+
+  const len = Math.max(a.mainTokens.length, b.mainTokens.length);
+  for (let i = 0; i < len; i++) {
+    const at = a.mainTokens[i];
+    const bt = b.mainTokens[i];
+    if (at === undefined && bt === undefined) break;
+    if (at === undefined) {
+      const rest = b.mainTokens.slice(i);
+      const allZero = rest.every(x => typeof x === 'number' && x === 0);
+      return allZero ? 0 : -1;
+    }
+    if (bt === undefined) {
+      const rest = a.mainTokens.slice(i);
+      const allZero = rest.every(x => typeof x === 'number' && x === 0);
+      return allZero ? 0 : 1;
+    }
+    if (typeof at === 'number' && typeof bt === 'number') {
+      if (at !== bt) return at > bt ? 1 : -1;
+    } else if (typeof at === 'string' && typeof bt === 'string') {
+      if (at !== bt) return at > bt ? 1 : -1;
+    } else {
+      return typeof at === 'number' ? 1 : -1;
     }
   }
-  
-  // Handle pre-release versions (pre-release < release)
-  if (parsed1.prerelease && !parsed2.prerelease) {
-    logger.debug('Version comparison completed - prerelease vs release', {
-      category: 'utils',
-      data: {
-        function: 'compareVersions',
-        version1,
-        version2,
-        result: -1,
-        reason: 'version1 is prerelease, version2 is release'
-      }
-    });
-    return -1;
-  }
-  
-  if (!parsed1.prerelease && parsed2.prerelease) {
-    logger.debug('Version comparison completed - release vs prerelease', {
-      category: 'utils',
-      data: {
-        function: 'compareVersions',
-        version1,
-        version2,
-        result: 1,
-        reason: 'version1 is release, version2 is prerelease'
-      }
-    });
-    return 1;
-  }
-  
-  // Both are pre-release or both are release
-  if (parsed1.prerelease && parsed2.prerelease) {
-    const prereleaseComparison = parsed1.prerelease.localeCompare(parsed2.prerelease);
-    if (prereleaseComparison !== 0) {
-      const result = prereleaseComparison > 0 ? 1 : -1;
-      logger.debug('Version comparison completed - prerelease comparison', {
-        category: 'utils',
-        data: {
-          function: 'compareVersions',
-          version1,
-          version2,
-          result,
-          prerelease1: parsed1.prerelease,
-          prerelease2: parsed2.prerelease
-        }
-      });
-      return result;
+
+  if (a.hasPre && !b.hasPre) return -1;
+  if (!a.hasPre && b.hasPre) return 1;
+  if (!a.hasPre && !b.hasPre) return 0;
+
+  const maxPre = Math.max(a.preTokens.length, b.preTokens.length);
+  for (let i = 0; i < maxPre; i++) {
+    const at = a.preTokens[i];
+    const bt = b.preTokens[i];
+    if (at === undefined && bt === undefined) break;
+    if (at === undefined) return -1;
+    if (bt === undefined) return 1;
+    if (typeof at === 'number' && typeof bt === 'number') {
+      if (at !== bt) return at > bt ? 1 : -1;
+    } else if (typeof at === 'string' && typeof bt === 'string') {
+      if (at !== bt) return at > bt ? 1 : -1;
+    } else {
+      return typeof at === 'number' ? 1 : -1;
     }
   }
-  
+
   logger.debug('Version comparison completed - versions are equal', {
     category: 'utils',
-    data: {
-      function: 'compareVersions',
-      version1,
-      version2,
-      result: 0
-    }
+    data: { function: 'compareVersions', version1, version2, result: 0 }
   });
-  
-  return 0; // Versions are equal
+  return 0;
 }
 
 /**

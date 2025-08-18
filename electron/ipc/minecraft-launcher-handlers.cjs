@@ -50,7 +50,8 @@ async function saveExpectedModState(clientPath, requiredMods, optionalMods, win 
         existingState = JSON.parse(existingData);
       } catch {
         // File doesn't exist or is invalid, start fresh
-      }        const state = {
+      }
+      const state = {
         ...existingState,
         requiredMods: Array.from(requiredMods),
         optionalMods: Array.from(optionalMods),
@@ -58,13 +59,11 @@ async function saveExpectedModState(clientPath, requiredMods, optionalMods, win 
         lastUpdated: new Date().toISOString(),
         version: 1 // New simplified schema version
       };
-        await fsPromises.writeFile(stateFile, JSON.stringify(state, null, 2));
+      await fsPromises.writeFile(stateFile, JSON.stringify(state, null, 2));
       
       resolver();
       return { success: true };
     } catch (error) {
-      // TODO: Add proper logging - Failed to save expected mod state
-      
       // Surface error to UI if window reference is available
       if (win && !win.isDestroyed()) {
         win.webContents.send('mod-state-persistence-error', {
@@ -892,13 +891,16 @@ function createMinecraftLauncherHandlers(win) {
                           
                           downloaded.push(mod.fileName);
                           const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                          const installationDate = new Date().toISOString();
                           const manifestData = {
                             fileName: mod.fileName,
                             source: 'server',
                             projectId: mod.projectId || null,
                             versionId: mod.versionId || null,
                             versionNumber: mod.versionNumber || null,
-                            name: mod.name || null
+                            name: mod.name || null,
+                            installedAt: installationDate,
+                            lastUpdated: installationDate
                           };
                           const meta = await readModMetadataFromJar(modPath).catch(() => null);
                           if (meta) {
@@ -995,13 +997,16 @@ function createMinecraftLauncherHandlers(win) {
                       
                       downloaded.push(mod.fileName);
                           const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                          const installationDate = new Date().toISOString();
                           const manifestData = {
                             fileName: mod.fileName,
                             source: 'server',
                             projectId: mod.projectId || null,
                             versionId: mod.versionId || null,
                             versionNumber: mod.versionNumber || null,
-                            name: mod.name || null
+                            name: mod.name || null,
+                            installedAt: installationDate,
+                            lastUpdated: installationDate
                           };
                           const meta = await readModMetadataFromJar(modPath).catch(() => null);
                           if (meta) {
@@ -1130,11 +1135,14 @@ function createMinecraftLauncherHandlers(win) {
                   if (!fs.existsSync(manifestDir)) {
                     fs.mkdirSync(manifestDir, { recursive: true });
                   }
+                  const installationDate = new Date().toISOString();
                   fs.writeFileSync(manifestPath, JSON.stringify({ 
                     fileName: modFile, 
                     source: 'manual', 
                     preserved: true,
-                    timestamp: new Date().toISOString()
+                    installedAt: installationDate,
+                    lastUpdated: installationDate,
+                    timestamp: installationDate // Keep for backward compatibility
                   }, null, 2));
               }
             }          }        // **FIX**: Update persistent state to include newly downloaded REQUIRED mods only
@@ -1181,6 +1189,215 @@ function createMinecraftLauncherHandlers(win) {
 
         return result;
         
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+    // Download shaders or resource packs to client from management server (serverInfo)
+    'minecraft-download-assets': async (_e, { clientPath, type, requiredItems = [], serverInfo }) => {
+      try {
+        if (!clientPath || !type || !serverInfo) {
+          return { success: false, error: 'Invalid parameters' };
+        }
+
+        const subdir = type === 'shaderpacks' ? 'shaderpacks' : 'resourcepacks';
+        const installDir = path.join(clientPath, subdir);
+        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        if (!fs.existsSync(installDir)) fs.mkdirSync(installDir, { recursive: true });
+        if (!fs.existsSync(manifestDir)) fs.mkdirSync(manifestDir, { recursive: true });
+
+        const downloaded = [];
+        const skipped = [];
+        const failures = [];
+
+        // Helper to emit progress events to renderer using the unified downloads UI
+        function emitProgress(progress) {
+          try {
+            if (win && win.webContents && !win.isDestroyed()) {
+              win.webContents.send('download-progress', progress);
+            }
+          } catch {
+            // ignore progress send errors
+          }
+        }
+
+        // Internal helper to download with progress and redirect support
+        async function downloadFileWithProgress(url, tmpPath, name, id) {
+          const protocol = url.startsWith('https:') ? https : http;
+          const startTime = Date.now();
+          let totalBytes = 0;
+          let downloadedBytes = 0;
+
+          return new Promise((resolve, reject) => {
+            const fileStream = fs.createWriteStream(tmpPath);
+            const request = protocol.get(url, (response) => {
+              // Handle redirects
+              if (response.statusCode === 302 || response.statusCode === 301) {
+                const redirectUrl = response.headers.location;
+                if (!redirectUrl) {
+                  fileStream.close();
+                  return reject(new Error(`HTTP ${response.statusCode} without location`));
+                }
+                // Close stream before re-request
+                fileStream.close();
+                const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
+                const fileStream2 = fs.createWriteStream(tmpPath);
+                const redirected = redirectProtocol.get(redirectUrl, (redirectResponse) => {
+                  if (redirectResponse.statusCode !== 200) {
+                    fileStream2.close();
+                    return reject(new Error(`HTTP ${redirectResponse.statusCode}`));
+                  }
+                  totalBytes = parseInt(redirectResponse.headers['content-length'] || '0', 10) || 0;
+                  emitProgress({ id, name, progress: 0, size: totalBytes, downloaded: 0, speed: 0, state: 'downloading', source: 'server' });
+                  redirectResponse.on('data', (chunk) => {
+                    downloadedBytes += chunk.length;
+                    const elapsed = Math.max(0.001, (Date.now() - startTime) / 1000);
+                    const speed = downloadedBytes / elapsed; // bytes/sec
+                    const percent = totalBytes > 0 ? (downloadedBytes / totalBytes) * 100 : 0;
+                    emitProgress({ id, name, progress: percent, size: totalBytes, downloaded: downloadedBytes, speed, state: 'downloading', source: 'server' });
+                  });
+                  redirectResponse.pipe(fileStream2);
+                  fileStream2.on('finish', () => {
+                    fileStream2.close();
+                    // Mark verifying phase (checksum/move)
+                    emitProgress({ id, name, progress: 100, size: totalBytes, downloaded: downloadedBytes, speed: 0, state: 'verifying', source: 'server' });
+                    resolve();
+                  });
+                  fileStream2.on('error', (err) => {
+                    try { fileStream2.close(); } catch { /* noop */ }
+                    reject(err);
+                  });
+                });
+                redirected.on('error', (err) => reject(err));
+                redirected.setTimeout(60000, () => { try { redirected.abort(); } catch { /* noop */ } ; reject(new Error('Download timeout')); });
+                return;
+              }
+
+              if (response.statusCode !== 200) {
+                fileStream.close();
+                return reject(new Error(`HTTP ${response.statusCode}`));
+              }
+              totalBytes = parseInt(response.headers['content-length'] || '0', 10) || 0;
+              emitProgress({ id, name, progress: 0, size: totalBytes, downloaded: 0, speed: 0, state: 'downloading', source: 'server' });
+              response.on('data', (chunk) => {
+                downloadedBytes += chunk.length;
+                const elapsed = Math.max(0.001, (Date.now() - startTime) / 1000);
+                const speed = downloadedBytes / elapsed; // bytes/sec
+                const percent = totalBytes > 0 ? (downloadedBytes / totalBytes) * 100 : 0;
+                emitProgress({ id, name, progress: percent, size: totalBytes, downloaded: downloadedBytes, speed, state: 'downloading', source: 'server' });
+              });
+              response.pipe(fileStream);
+              fileStream.on('finish', () => {
+                fileStream.close();
+                // Mark verifying phase (checksum/move)
+                emitProgress({ id, name, progress: 100, size: totalBytes, downloaded: downloadedBytes, speed: 0, state: 'verifying', source: 'server' });
+                resolve();
+              });
+              fileStream.on('error', (err) => {
+                try { fileStream.close(); } catch { /* noop */ }
+                reject(err);
+              });
+            });
+            request.on('error', (err) => reject(err));
+            request.setTimeout(60000, () => { try { request.abort(); } catch { /* noop */ } ; reject(new Error('Download timeout')); });
+          });
+        }
+
+        for (const item of requiredItems) {
+          const fileName = item.fileName;
+          const destPath = path.join(installDir, fileName);
+          const downloadId = `asset-${subdir}-${fileName}`;
+
+          try {
+            if (fs.existsSync(destPath)) {
+              // If checksum provided, verify, otherwise skip
+              if (item.checksum) {
+                const existingChecksum = utils.calculateFileChecksum(destPath);
+                if (existingChecksum === item.checksum) {
+                  skipped.push(fileName);
+                  continue;
+                }
+              } else {
+                skipped.push(fileName);
+                continue;
+              }
+            }
+
+            // Prefer server download URL, else construct default
+            let downloadUrl = item.downloadUrl;
+            if (!downloadUrl) {
+              const host = serverInfo.serverIp;
+              const port = serverInfo.serverPort;
+              downloadUrl = `http://${host}:${port}/api/assets/download/${subdir}/${encodeURIComponent(fileName)}`;
+            }
+
+            const tmpPath = destPath + '.part';
+            await downloadFileWithProgress(downloadUrl, tmpPath, fileName, downloadId);
+
+            // Verify checksum if provided
+            if (item.checksum) {
+              const downloadedChecksum = utils.calculateFileChecksum(tmpPath);
+              if (downloadedChecksum !== item.checksum) {
+                fs.unlinkSync(tmpPath);
+                emitProgress({ id: downloadId, name: fileName, progress: 100, size: 0, downloaded: 0, speed: 0, state: 'failed', source: 'server', error: 'Checksum mismatch' });
+                throw new Error('Checksum mismatch');
+              }
+            }
+
+            // Move into place
+            if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+            fs.renameSync(tmpPath, destPath);
+
+            // Create manifest
+            const manifestPath = path.join(manifestDir, `${fileName}.json`);
+            const now = new Date().toISOString();
+            const manifestData = {
+              fileName,
+              source: 'server',
+              contentType: subdir === 'shaderpacks' ? 'shaders' : 'resourcepacks',
+              installedAt: now,
+              lastUpdated: now,
+              // Preserve metadata if provided by server listing
+              projectId: item.projectId || null,
+              versionId: item.versionId || null,
+              versionNumber: item.versionNumber || item.version || null,
+              name: item.name || item.title || null,
+              checksum: item.checksum || null
+            };
+            fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
+            try {
+              logger.info('Wrote asset manifest after server download', {
+                category: 'mods',
+                data: {
+                  handler: 'minecraft-download-assets',
+                  type: subdir,
+                  fileName,
+                  projectId: manifestData.projectId,
+                  versionId: manifestData.versionId,
+                  versionNumber: manifestData.versionNumber
+                }
+              });
+            } catch {
+              // ignore logging errors
+            }
+
+            // Emit completion progress for this asset
+            emitProgress({ id: downloadId, name: fileName, progress: 100, size: 0, downloaded: 0, speed: 0, state: 'completed', source: 'server' });
+
+            downloaded.push(fileName);
+          } catch (err) {
+            emitProgress({ id: downloadId, name: fileName, progress: 0, size: 0, downloaded: 0, speed: 0, state: 'failed', source: 'server', error: err.message });
+            failures.push({ fileName, error: err.message });
+          }
+        }
+
+        return {
+          success: failures.length === 0,
+          type: subdir,
+          downloaded: downloaded.length,
+          skipped: skipped.length,
+          failures
+        };
       } catch (error) {
         return { success: false, error: error.message };
       }
@@ -2249,6 +2466,61 @@ function createMinecraftLauncherHandlers(win) {
             return { success: false, error: 'Mod file not found' };
           }
         }
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Toggle shader or resource pack (enable by ensuring .zip present; disable by renaming to .zip.disabled)
+    'toggle-client-asset': async (_e, { clientPath, type, fileName, enabled }) => {
+      try {
+        if (!clientPath || !type || !fileName) {
+          return { success: false, error: 'Client path, type and fileName are required' };
+        }
+        const subdir = type === 'shaderpacks' ? 'shaderpacks' : 'resourcepacks';
+        const dir = path.join(clientPath, subdir);
+        const filePath = path.join(dir, fileName);
+        const disabledPath = path.join(dir, fileName + '.disabled');
+
+        if (enabled) {
+          if (fs.existsSync(disabledPath)) {
+            fs.renameSync(disabledPath, filePath);
+            return { success: true, action: 'enabled' };
+          } else if (fs.existsSync(filePath)) {
+            return { success: true, action: 'already_enabled' };
+          } else {
+            return { success: false, error: 'File not found' };
+          }
+        } else {
+          if (fs.existsSync(filePath)) {
+            fs.renameSync(filePath, disabledPath);
+            return { success: true, action: 'disabled' };
+          } else if (fs.existsSync(disabledPath)) {
+            return { success: true, action: 'already_disabled' };
+          } else {
+            return { success: false, error: 'File not found' };
+          }
+        }
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Delete shader/resource pack from client
+    'delete-client-asset': async (_e, { clientPath, type, fileName }) => {
+      try {
+        if (!clientPath || !type || !fileName) {
+          return { success: false, error: 'Client path, type and fileName are required' };
+        }
+        const subdir = type === 'shaderpacks' ? 'shaderpacks' : 'resourcepacks';
+        const dir = path.join(clientPath, subdir);
+        const filePath = path.join(dir, fileName);
+        const disabledPath = path.join(dir, fileName + '.disabled');
+
+        let deleted = false;
+        if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); deleted = true; }
+        if (fs.existsSync(disabledPath)) { fs.unlinkSync(disabledPath); deleted = true; }
+        return deleted ? { success: true, action: 'deleted' } : { success: false, error: 'File not found' };
       } catch (error) {
         return { success: false, error: error.message };
       }

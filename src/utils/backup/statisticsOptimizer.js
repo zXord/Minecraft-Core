@@ -565,8 +565,7 @@ export class BackgroundStatisticsUpdater {
 
           // Small delay between updates
           await new Promise(resolve => setTimeout(resolve, 50));
-        } catch (error) {
-          console.error(`Background statistics update failed for ${update.serverPath}:`, error);
+        } catch {
           this.updateQueue.delete(update.serverPath);
         }
       }

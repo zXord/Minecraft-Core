@@ -63,26 +63,99 @@ async function installModToServer(win, serverPath, modDetails) {
 
   try {
     const clientPath = path.join(serverPath, 'client');
-    const modsDir = path.join(serverPath, 'mods');
-    const clientModsDir = path.join(clientPath, 'mods');
+    
+    // Determine directories based on content type
+    let modsDir, clientModsDir, targetSubDir;
+    
+    if (modDetails.contentType === 'shaders') {
+      targetSubDir = 'shaderpacks';
+      modsDir = path.join(clientPath, targetSubDir);
+      clientModsDir = path.join(clientPath, targetSubDir);
+      
+      logger.info('SHADER INSTALL: Using shader directories', {
+        category: 'storage',
+        data: {
+          service: 'mod-installation-service',
+          contentType: modDetails.contentType,
+          modsDir: modsDir,
+          clientModsDir: clientModsDir,
+          targetSubDir: targetSubDir
+        }
+      });
+    } else if (modDetails.contentType === 'resourcepacks') {
+      targetSubDir = 'resourcepacks';
+      modsDir = path.join(clientPath, targetSubDir);
+      clientModsDir = path.join(clientPath, targetSubDir);
+      
+      logger.info('RESOURCEPACK INSTALL: Using resource pack directories', {
+        category: 'storage',
+        data: {
+          service: 'mod-installation-service',
+          contentType: modDetails.contentType,
+          modsDir: modsDir,
+          clientModsDir: clientModsDir,
+          targetSubDir: targetSubDir
+        }
+      });
+    } else {
+      // Default to mods
+      targetSubDir = 'mods';
+      modsDir = path.join(serverPath, 'mods');
+      clientModsDir = path.join(clientPath, 'mods');
+      
+      logger.debug('MOD INSTALL: Using default mod directories', {
+        category: 'storage',
+        data: {
+          service: 'mod-installation-service',
+          contentType: modDetails.contentType || 'mods',
+          modsDir: modsDir,
+          clientModsDir: clientModsDir,
+          targetSubDir: targetSubDir
+        }
+      });
+    }
 
-    logger.debug('Creating mod directories', {
+    logger.debug('Creating content directories', {
       category: 'storage',
       data: {
         service: 'mod-installation-service',
         modsDir: modsDir,
-        clientModsDir: clientModsDir
+        clientModsDir: clientModsDir,
+        contentType: modDetails.contentType || 'mods'
       }
     });
 
     await fs.mkdir(modsDir, { recursive: true });
     await fs.mkdir(clientModsDir, { recursive: true });
 
-    // Sanitize the name but avoid appending an extra .jar if it's already present
+    // Sanitize the name and determine file extension based on content type
     const sanitizedBase = modDetails.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-    let fileName = /\.jar$/i.test(sanitizedBase)
-      ? sanitizedBase
-      : `${sanitizedBase}.jar`;
+    let fileName;
+    
+    if (modDetails.contentType === 'shaders' || modDetails.contentType === 'resourcepacks') {
+      // For shaders and resource packs, prefer .zip but allow .jar
+      if (/\.(zip|jar)$/i.test(sanitizedBase)) {
+        fileName = sanitizedBase;
+      } else {
+        fileName = `${sanitizedBase}.zip`;
+      }
+      
+      logger.info(`${modDetails.contentType.toUpperCase()} INSTALL: Determined filename`, {
+        category: 'storage',
+        data: {
+          service: 'mod-installation-service',
+          contentType: modDetails.contentType,
+          originalName: modDetails.name,
+          sanitizedBase: sanitizedBase,
+          fileName: fileName
+        }
+      });
+    } else {
+      // For mods, use .jar
+      fileName = /\.jar$/i.test(sanitizedBase)
+        ? sanitizedBase
+        : `${sanitizedBase}.jar`;
+    }
 
     // For updates (forceReinstall), preserve the original filename
     if (modDetails.forceReinstall && modDetails.oldFileName) {
@@ -536,7 +609,8 @@ async function installModToServer(win, serverPath, modDetails) {
             fileName: finalFileName, // Use the final filename (clean or original)
             versionId: (versionInfoToSave && versionInfoToSave.id) || modDetails.selectedVersionId || 'unknown',
             versionNumber: (versionInfoToSave && (versionInfoToSave.version_number || versionInfoToSave.name)) || modDetails.version || 'unknown',
-            source: modDetails.source
+            source: modDetails.source,
+            installedAt: new Date().toISOString()
           };
 
           if (currentModLocation === 'client-only') {
@@ -654,9 +728,10 @@ async function installModToClient(win, modData) {
       clientPath: modData?.clientPath,
       modName: modData?.name,
       modId: modData?.id,
-      loader: modData?.loader,
+  loader: modData?.loader,
       version: modData?.version,
-      forceReinstall: modData?.forceReinstall
+  forceReinstall: modData?.forceReinstall,
+  contentType: modData?.contentType || 'mods'
     }
   });
 
@@ -685,7 +760,20 @@ async function installModToClient(win, modData) {
   }
 
   try {
-    const clientModsDir = path.join(modData.clientPath, 'mods');
+    // Determine target subdir and default extension based on content type
+    const contentType = (modData.contentType || 'mods').toLowerCase();
+    let targetSubDir = 'mods';
+    let defaultExtension = '.jar';
+
+    if (contentType === 'shaders') {
+      targetSubDir = 'shaderpacks';
+      defaultExtension = '.zip';
+    } else if (contentType === 'resourcepacks') {
+      targetSubDir = 'resourcepacks';
+      defaultExtension = '.zip';
+    }
+
+    const clientModsDir = path.join(modData.clientPath, targetSubDir);
     await fs.mkdir(clientModsDir, { recursive: true });
     const clientManifestDir = path.join(modData.clientPath, 'minecraft-core-manifests');
     await fs.mkdir(clientManifestDir, { recursive: true });
@@ -702,9 +790,18 @@ async function installModToClient(win, modData) {
     // Use a sanitized file name instead of the API provided one to
     // match the server install behaviour and avoid version suffixes.
     const sanitizedBase = modData.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-    const sanitizedFileName = /\.jar$/i.test(sanitizedBase)
-      ? sanitizedBase
-      : `${sanitizedBase}.jar`;
+    // Determine extension based on content type; allow explicit extension if provided
+    let sanitizedFileName;
+    if (contentType === 'mods') {
+      sanitizedFileName = /\.jar$/i.test(sanitizedBase) ? sanitizedBase : `${sanitizedBase}${defaultExtension}`;
+    } else {
+      // shaders/resourcepacks: prefer .zip, but if name already has .zip or .jar, keep it
+      if (/\.(zip|jar)$/i.test(sanitizedBase)) {
+        sanitizedFileName = sanitizedBase;
+      } else {
+        sanitizedFileName = `${sanitizedBase}${defaultExtension}`;
+      }
+    }
     let targetPath = path.join(clientModsDir, sanitizedFileName); // Initial target path
 
     logger.debug('Determined client mod filename', {
@@ -810,7 +907,9 @@ async function installModToClient(win, modData) {
     }
 
     try {
-      const loader = modData.loader || 'fabric'; // Default or passed
+      // For shaders/resourcepacks, loaders don't apply; keep null to allow API to handle appropriately
+      const isNonMod = contentType === 'shaders' || contentType === 'resourcepacks';
+      const loader = isNonMod ? null : (modData.loader || 'fabric'); // Default or passed
       const mcVersion = modData.version || '1.20.1'; // Default or passed
 
       logger.debug('Resolving client mod version', {
@@ -872,7 +971,7 @@ async function installModToClient(win, modData) {
           versionInfo = null;
         }
       }    // If no suitable version info found, pick the best compatible version automatically
-      if (!versionInfo) {
+  if (!versionInfo) {
         logger.debug('Finding best compatible version for client mod', {
           category: 'network',
           data: {
@@ -883,7 +982,7 @@ async function installModToClient(win, modData) {
           }
         });
 
-        const versions = await getModrinthVersions(modData.id, loader, mcVersion, true);
+  const versions = await getModrinthVersions(modData.id, loader, mcVersion, true);
         if (!versions || versions.length === 0) {
           logger.error('No compatible versions found for client mod', {
             category: 'mods',
@@ -941,7 +1040,7 @@ async function installModToClient(win, modData) {
       });
 
       // Use sanitized file name for storage to match server behaviour
-      const fileName = sanitizedFileName;
+  const fileName = sanitizedFileName;
       targetPath = path.join(clientModsDir, fileName);
 
       const downloadId = `client-mod-${modData.id}-${Date.now()}`;
@@ -1002,11 +1101,23 @@ async function installModToClient(win, modData) {
         }
       });
 
+      const installationDate = new Date().toISOString();
       const manifestData = {
-        projectId: modData.id, versionId: versionToInstall.id, fileName: fileName,
-        name: modData.name, title: modData.title || modData.name, versionNumber: versionToInstall.versionNumber,
-        mcVersion: mcVersion, loader: loader, source: 'modrinth', downloadUrl: downloadUrl,
-        installedAt: new Date().toISOString(), filePath: targetPath, fileSize: primaryFile.size
+        projectId: modData.id,
+        versionId: versionToInstall.id,
+        fileName: fileName,
+        name: modData.name,
+        title: modData.title || modData.name,
+        versionNumber: versionToInstall.versionNumber,
+        mcVersion: mcVersion,
+        loader: loader,
+        source: 'modrinth',
+        downloadUrl: downloadUrl,
+        installedAt: installationDate,
+        lastUpdated: installationDate,
+        filePath: targetPath,
+        fileSize: primaryFile.size,
+        contentType
       };
       const manifestPath = path.join(clientManifestDir, `${fileName}.json`);
       await fs.writeFile(manifestPath, JSON.stringify(manifestData, null, 2), 'utf8');

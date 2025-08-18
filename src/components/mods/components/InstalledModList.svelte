@@ -1,30 +1,38 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   
-  import { SvelteSet } from 'svelte/reactivity';import { fly } from 'svelte/transition';
+  import { SvelteSet, SvelteMap } from 'svelte/reactivity';import { fly } from 'svelte/transition';
   
   // Import existing stores
   import {
     installedMods,
     installedModInfo,
     modsWithUpdates,
-    getUpdateCount,
     expandedInstalledMod,
     isCheckingUpdates,
+    isLoading,
     successMessage,
     errorMessage,
     disabledMods,
     disabledModUpdates,
     getCategorizedMods,
     updateModCategory,
-    updateModRequired
+    updateModRequired,
+    activeContentType,
+    CONTENT_TYPES,
+    installedShaders,
+    installedResourcePacks,
+    installedShaderInfo,
+    installedResourcePackInfo
   } from '../../../stores/modStore.js';
   import { serverState } from '../../../stores/serverState.js';
+  import { formatInstallationDate, formatLastUpdated, formatTooltipDate } from '../../../utils/dateUtils.js';
   
   // Import existing API functions
-  import { loadMods, deleteMod, checkForUpdates, enableAndUpdateMod, fetchModVersions } from '../../../utils/mods/modAPI.js';
+  import { loadMods, loadContent, deleteMod, deleteContent, checkForUpdates, enableAndUpdateMod, fetchModVersions } from '../../../utils/mods/modAPI.js';
   import { safeInvoke } from '../../../utils/ipcUtils.js';
-  import { checkDependencyCompatibility } from '../../../utils/mods/modCompatibility.js';
+  import { checkDependencyCompatibility, checkVersionCompatibility } from '../../../utils/mods/modCompatibility.js';
   import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
 
   
@@ -55,7 +63,9 @@
 
   let updateAllInProgress = false;
   let checkingCompatibility = false;
-  let compatibilityResults = null;  
+  let compatibilityResults = null;
+  let bulkDownloadInProgress = false;
+  let bulkDownloadProgress = 0;  
   
   // Initialize drop zone state from localStorage
   let dropZoneCollapsed = localStorage.getItem('minecraft-core-drop-zone-collapsed') === 'true';
@@ -66,14 +76,338 @@
 
   // Get stores 
   const categorizedModsStore = getCategorizedMods();
-  const updateCountStore = getUpdateCount();
 
-  // Reactive values
-  $: updateCount = $updateCountStore;
+  // Reactive list of installed info based on content type (ensures proper reactivity on first load)
+  $: currentInfoList = $activeContentType === CONTENT_TYPES.SHADERS
+    ? $installedShaderInfo
+    : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS
+      ? $installedResourcePackInfo
+      : $installedModInfo;
+
+  // Track if we've attempted to load version info to prevent infinite loops
+  let versionLoadAttempted = false;
+  let loadingVersionInfo = false;
+  // Defer short loads to avoid UI flicker in the Current column
+  let showLoadingIndicator = false;
+  let loadingTimer = null;
+  // Also suppress Modrinth matching UI for a brief window right after load completes
+  let suppressMatchingUi = false;
+  let suppressTimer = null;
+  // Additionally, suppress initial UI swaps right after this component mounts (e.g., when switching tabs)
+  let initialUiSuppression = true;
+  let initialSuppressionTimer = null;
+
+  // Last-known versions cache to render instantly without flicker
+  const LAST_VERSIONS_KEY = 'minecraft-core:last-known-versions';
+  let lastVersionsCache = {};
+  let saveCacheTimer = null;
+
+  function cacheKey(contentType, server) {
+    return `${server || ''}::${contentType || 'MODS'}`;
+  }
+  function loadLastVersions() {
+    try {
+      const raw = localStorage.getItem(LAST_VERSIONS_KEY);
+      lastVersionsCache = raw ? JSON.parse(raw) : {};
+    } catch {
+      lastVersionsCache = {};
+    }
+  }
+  function scheduleSaveCache() {
+    if (saveCacheTimer) clearTimeout(saveCacheTimer);
+    saveCacheTimer = setTimeout(() => {
+      try { localStorage.setItem(LAST_VERSIONS_KEY, JSON.stringify(lastVersionsCache)); } catch {}
+      saveCacheTimer = null;
+    }, 200);
+  }
+  function setCachedVersion(fileName, version, contentType = $activeContentType) {
+    if (!fileName || !version) return;
+    const key = cacheKey(contentType, serverPath);
+    if (!lastVersionsCache[key]) lastVersionsCache[key] = {};
+    if (lastVersionsCache[key][fileName] === version) return;
+    lastVersionsCache[key][fileName] = version;
+    scheduleSaveCache();
+  }
+  function getCachedVersion(fileName, contentType = $activeContentType) {
+    const key = cacheKey(contentType, serverPath);
+    return (lastVersionsCache[key] && lastVersionsCache[key][fileName]) || null;
+  }
+  function removeCachedVersion(fileName, contentType = $activeContentType) {
+    const key = cacheKey(contentType, serverPath);
+    if (lastVersionsCache[key] && lastVersionsCache[key][fileName]) {
+      delete lastVersionsCache[key][fileName];
+      scheduleSaveCache();
+    }
+  }
+
+  // Imperative grace handler to avoid reactive loop warnings
+  let _prevBusy = false;
+  function updateLoadingGrace() {
+    const busy = get(isLoading) || loadingVersionInfo;
+    // Track transitions to set a short post-load suppression window
+    if (!_prevBusy && busy) {
+      // Loading started
+      if (!loadingTimer) {
+        loadingTimer = setTimeout(() => {
+          showLoadingIndicator = true;
+        }, 250);
+      }
+      // Cancel any suppression when loading starts again
+      if (suppressTimer) {
+        clearTimeout(suppressTimer);
+        suppressTimer = null;
+      }
+      suppressMatchingUi = false;
+  } else if (_prevBusy && !busy) {
+      // Loading just finished
+      if (loadingTimer) {
+        clearTimeout(loadingTimer);
+        loadingTimer = null;
+      }
+      showLoadingIndicator = false;
+      // Start brief suppression to avoid UI flicker as data settles
+      suppressMatchingUi = true;
+      if (suppressTimer) clearTimeout(suppressTimer);
+      suppressTimer = setTimeout(() => {
+        suppressMatchingUi = false;
+        suppressTimer = null;
+      }, 200);
+    } else if (!busy) {
+      // Idle steady state
+      if (loadingTimer) {
+        clearTimeout(loadingTimer);
+        loadingTimer = null;
+      }
+      showLoadingIndicator = false;
+    }
+  _prevBusy = busy;
+  }
+
+  // Subscribe to global isLoading changes to keep indicator in sync
+  let unsubscribeIsLoading;
+  onMount(() => {
+  // Load cache on mount
+  loadLastVersions();
+
+    // Initial mount suppression to avoid brief UI swap when returning to the tab
+    initialUiSuppression = true;
+    if (initialSuppressionTimer) clearTimeout(initialSuppressionTimer);
+    initialSuppressionTimer = setTimeout(() => {
+      initialUiSuppression = false;
+      initialSuppressionTimer = null;
+    }, 300);
+
+    unsubscribeIsLoading = isLoading.subscribe(() => {
+      updateLoadingGrace();
+    });
+  });
+
+  // Function to check and load version info if needed
+  async function checkAndLoadVersionInfo(contentType, serverPathParam) {
+    if (versionLoadAttempted || loadingVersionInfo || !serverPathParam || !contentType) {
+      return;
+    }
+
+    // Get current values without reactive access
+    const currentInfo = getCurrentInfoStore();
+    let currentItems = [];
+    
+    try {
+      if (contentType === CONTENT_TYPES.SHADERS) {
+        currentItems = get(installedShaders) || [];
+      } else if (contentType === CONTENT_TYPES.RESOURCE_PACKS) {
+        currentItems = get(installedResourcePacks) || [];
+      } else {
+        currentItems = get(installedMods) || [];
+      }
+    } catch (error) {
+      // Error getting current items
+      return;
+    }
+    
+    // If we have installed items but no version info, trigger a refresh
+    if (currentItems.length > 0 && (!currentInfo || currentInfo.length === 0 || currentInfo.every(info => !info || !info.versionNumber))) {
+      versionLoadAttempted = true;
+
+      
+      try {
+  loadingVersionInfo = true;
+  updateLoadingGrace();
+        if (contentType === CONTENT_TYPES.MODS) {
+          await loadMods(serverPathParam);
+        } else {
+          await loadContent(serverPathParam, contentType);
+        }
+        // Reset the flag after a delay to allow future refreshes if needed
+        setTimeout(() => {
+          versionLoadAttempted = false;
+        }, 2000);
+      } catch (error) {
+        // Failed to refresh version info
+        versionLoadAttempted = false;
+      } finally {
+  loadingVersionInfo = false;
+  updateLoadingGrace();
+      }
+    }
+  }
+
+  // Track content type changes to trigger version loading
+  let lastActiveContentType = $activeContentType;
+
+  // Helper function to get the appropriate info store based on content type
+  function getCurrentInfoStore() {
+    switch ($activeContentType) {
+      case CONTENT_TYPES.SHADERS:
+        return $installedShaderInfo || [];
+      case CONTENT_TYPES.RESOURCE_PACKS:
+        return $installedResourcePackInfo || [];
+      case CONTENT_TYPES.MODS:
+      default:
+        return $installedModInfo || [];
+    }
+  }
+
+  // Update cache whenever fresh version info arrives
+  $: if (currentInfoList && currentInfoList.length) {
+    for (const info of currentInfoList) {
+      if (info && info.fileName && info.versionNumber && info.versionNumber !== 'Unknown') {
+        setCachedVersion(info.fileName, info.versionNumber);
+      }
+    }
+  }
+
+  // Briefly suppress UI only when content type actually changes
+  $: if ($activeContentType !== undefined && $activeContentType !== lastActiveContentType) {
+    suppressUiBriefly(250);
+    lastActiveContentType = $activeContentType;
+  }
+
+  function suppressUiBriefly(ms = 250) {
+    // Start suppression for both matching UI and initial placeholders
+    suppressMatchingUi = true;
+    initialUiSuppression = true;
+    if (suppressTimer) clearTimeout(suppressTimer);
+    if (initialSuppressionTimer) clearTimeout(initialSuppressionTimer);
+    suppressTimer = setTimeout(() => { suppressMatchingUi = false; suppressTimer = null; }, ms);
+    initialSuppressionTimer = setTimeout(() => { initialUiSuppression = false; initialSuppressionTimer = null; }, ms);
+  }
+
+  // Cleanup any pending timers
+  onDestroy(() => {
+    if (loadingTimer) {
+      clearTimeout(loadingTimer);
+      loadingTimer = null;
+    }
+    if (suppressTimer) {
+      clearTimeout(suppressTimer);
+      suppressTimer = null;
+    }
+    if (initialSuppressionTimer) {
+      clearTimeout(initialSuppressionTimer);
+      initialSuppressionTimer = null;
+    }
+    if (unsubscribeIsLoading) {
+      unsubscribeIsLoading();
+      unsubscribeIsLoading = null;
+    }
+    if (saveCacheTimer) {
+      clearTimeout(saveCacheTimer);
+      saveCacheTimer = null;
+    }
+  });
+
+
+
+  // Generate enhanced tooltip content with installation date information
+  function generateVersionTooltip(modInfo) {
+    if (!modInfo || !modInfo.versionNumber) {
+      return 'No version information available';
+    }
+
+    let tooltip = `Version: ${modInfo.versionNumber}`;
+    
+    // Add installation date information with improved formatting
+    const installDate = modInfo.installationDate || modInfo.installedAt || modInfo.dateInstalled;
+    if (installDate) {
+      try {
+        const friendlyDate = formatTooltipDate(installDate);
+        const relativeDate = formatInstallationDate(installDate);
+        tooltip += `\n\nInstalled: ${friendlyDate}`;
+        tooltip += `\n(${relativeDate})`;
+      } catch (error) {
+        // Error formatting installation date
+        tooltip += `\n\nInstallation date: ${installDate}`;
+      }
+    } else {
+      tooltip += `\n\nInstallation date: Unknown`;
+    }
+    
+    // Add last updated information if different from installation
+    if (modInfo.lastUpdated && modInfo.lastUpdated !== installDate) {
+      try {
+        const friendlyUpdateDate = formatTooltipDate(modInfo.lastUpdated);
+        const relativeUpdateDate = formatLastUpdated(modInfo.lastUpdated);
+        tooltip += `\n\nLast Updated: ${friendlyUpdateDate}`;
+        tooltip += `\n(${relativeUpdateDate})`;
+      } catch (error) {
+        // Error formatting last updated date
+        tooltip += `\n\nLast Updated: ${modInfo.lastUpdated}`;
+      }
+    }
+    
+    return tooltip;
+  }
+
+  // Reactive values for content-type specific data
+  $: currentInstalledItems = $activeContentType === CONTENT_TYPES.SHADERS ? $installedShaders :
+                            $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? $installedResourcePacks :
+                            $installedMods;
+  
+  // Content-type specific update count
+  $: updateCount = (() => {
+    const allUpdates = $modsWithUpdates;
+    const currentItems = $activeContentType === CONTENT_TYPES.SHADERS ? $installedShaders :
+                        $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? $installedResourcePacks :
+                        $installedMods;
+    
+    let count = 0;
+    for (const [fileName] of allUpdates.entries()) {
+      // Skip project: prefixed entries (they're for reference only)
+      if (fileName.startsWith('project:')) continue;
+      
+      // Only count updates for items in the current content type
+      if (currentItems.includes(fileName)) {
+        count++;
+      }
+    }
+    
+    // Add disabled mod updates only for mods content type
+    if ($activeContentType === CONTENT_TYPES.MODS) {
+      count += $disabledModUpdates.size;
+    }
+    
+    return count;
+  })();
   $: serverRunning = $serverState.status === 'Running';
   
+  // Reactive statement to load content when content type changes
+  $: if ($activeContentType && serverPath) {
+    (async () => {
+      try {
+        if ($activeContentType === CONTENT_TYPES.MODS) {
+          await loadMods(serverPath);
+        } else {
+          await loadContent(serverPath, $activeContentType);
+        }
+      } catch (error) {
+        // Silently handle content loading errors
+      }
+    })();
+  }
+  
   // Auto-collapse drop zone after successful mod upload
-  $: if ($installedMods.length > 0) {
+  $: if (currentInstalledItems.length > 0) {
     // Only auto-collapse if we haven't done so already
     if (!localStorage.getItem('minecraft-core-drop-zone-collapsed')) {
       dropZoneCollapsed = true;
@@ -81,10 +415,10 @@
     }
   }
   
-  // Filter mods based on search term
-  $: filteredMods = $installedMods.filter(mod => {
+  // Filter items based on search term
+  $: filteredMods = currentInstalledItems.filter(mod => {
     if (!searchTerm) return true;
-    const modInfo = $installedModInfo.find(m => m.fileName === mod);
+    const modInfo = currentInfoList.find(m => m.fileName === mod);
     const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod);
     const searchLower = searchTerm.toLowerCase();
     
@@ -469,7 +803,7 @@
       if (modName.startsWith('project:')) continue;
       if ($disabledMods.has(modName)) continue; // Skip disabled mods here, we'll handle them separately
       
-      const modInfo = $installedModInfo.find(m => m.fileName === modName);
+      const modInfo = getCurrentInfoStore().find(m => m.fileName === modName);
       if (modInfo && modInfo.projectId) {
         enabledModsToUpdate.push({
           modName,
@@ -542,14 +876,29 @@
     if (selectedMods.size === 0) return;
     
     try {
-      for (const modName of selectedMods) {
-        await deleteMod(modName, serverPath, true);
+      for (const itemName of selectedMods) {
+        if ($activeContentType === CONTENT_TYPES.MODS) {
+          await deleteMod(itemName, serverPath, false); // Don't reload for each item
+          removeCachedVersion(itemName, CONTENT_TYPES.MODS);
+        } else {
+          await deleteContent(itemName, serverPath, $activeContentType, false); // Don't reload for each item
+          removeCachedVersion(itemName, $activeContentType);
+        }
       }
       selectedMods = new SvelteSet();
-      await loadMods(serverPath);
+      
+      // Reload once after all deletions
+      if ($activeContentType === CONTENT_TYPES.MODS) {
+        await loadMods(serverPath);
+      } else {
+        await loadContent(serverPath, $activeContentType);
+      }
+      
       dispatch('modRemoved');
     } catch (error) {
-      errorMessage.set(`Failed to delete selected mods: ${error.message}`);
+      const itemType = $activeContentType === CONTENT_TYPES.MODS ? 'mods' : 
+                      $activeContentType === CONTENT_TYPES.SHADERS ? 'shaders' : 'resource packs';
+      errorMessage.set(`Failed to delete selected ${itemType}: ${error.message}`);
     }
   }
 
@@ -638,7 +987,7 @@
     
     expandedInstalledMod.set(modName);
     
-    const modInfo = $installedModInfo.find(m => m.fileName === modName);
+    const modInfo = currentInfoList.find(m => m.fileName === modName);
     const confirmedMatch = $confirmedModrinthMatches.get(modName);
     
     // Determine which project ID to use - prefer confirmed Modrinth match
@@ -651,7 +1000,8 @@
     
     if (projectId) {
       try {
-        const versions = await fetchModVersions(projectId);
+        // Pass the correct content type for version fetching
+        const versions = await fetchModVersions(projectId, 'modrinth', false, false, $activeContentType);
         installedModVersionsCache = { 
           ...installedModVersionsCache, 
           [projectId]: versions 
@@ -681,7 +1031,7 @@
 
   function updateModToLatest(modName) {
     const updateInfo = $modsWithUpdates.get(modName);
-    const modInfo = $installedModInfo.find(m => m.fileName === modName);
+    const modInfo = currentInfoList.find(m => m.fileName === modName);
     
     if (!updateInfo || !modInfo || !modInfo.projectId) return;
     
@@ -692,6 +1042,36 @@
     });
   }
 
+  function updateContentToLatest(contentName) {
+    const updateInfo = $modsWithUpdates.get(contentName);
+    const contentInfo = currentInfoList.find(m => m.fileName === contentName);
+    
+    if (!updateInfo || !contentInfo || !contentInfo.projectId) return;
+    
+    // Use the same event name as mods, but pass the content type
+    dispatch('updateMod', {
+      modName: contentName,
+      projectId: contentInfo.projectId,
+      versionId: updateInfo.id,
+      contentType: $activeContentType
+    });
+  }
+
+  async function switchToContentVersion(contentName, projectId, versionId) {
+    try {
+      // Use the same event name as mods, but pass the content type
+      dispatch('updateMod', { 
+        modName: contentName, 
+        projectId, 
+        versionId,
+        contentType: $activeContentType
+      });
+      expandedInstalledMod.set(null);
+    } catch (error) {
+      errorMessage.set(`Failed to switch version: ${error.message}`);
+    }
+  }
+
   function showDeleteConfirmation(modName) {
     modToDelete = modName;
     confirmDeleteVisible = true;
@@ -699,18 +1079,26 @@
 
   async function confirmDeleteMod() {
     if (modToDelete) {
-      const wasDisabled = $disabledMods.has(modToDelete);
+      let deleteSuccess;
       
-      const deleteSuccess = await deleteMod(modToDelete, serverPath, true);
-      
-      if (deleteSuccess && wasDisabled) {
-        disabledMods.update(mods => {
-          const newMods = new SvelteSet(mods);
-          newMods.delete(modToDelete);
-          return newMods;
-        });
+      if ($activeContentType === CONTENT_TYPES.MODS) {
+        const wasDisabled = $disabledMods.has(modToDelete);
+        deleteSuccess = await deleteMod(modToDelete, serverPath, true);
+  removeCachedVersion(modToDelete, CONTENT_TYPES.MODS);
         
-        await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+        if (deleteSuccess && wasDisabled) {
+          disabledMods.update(mods => {
+            const newMods = new SvelteSet(mods);
+            newMods.delete(modToDelete);
+            return newMods;
+          });
+          
+          await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+        }
+      } else {
+        // For shaders and resource packs, use the generic delete function
+        deleteSuccess = await deleteContent(modToDelete, serverPath, $activeContentType, true);
+  removeCachedVersion(modToDelete, $activeContentType);
       }
       
       modToDelete = null;
@@ -765,6 +1153,285 @@
       }
     } catch (error) {
       errorMessage.set(`Failed to enable and update mod: ${error.message}`);
+    }
+  }
+
+  async function handleDependencyDownload(dependency) {
+    if (!dependency.projectId) {
+      errorMessage.set('Cannot download dependency: missing project information');
+      return;
+    }
+
+    try {
+      successMessage.set(`Downloading dependency: ${dependency.name}...`);
+      
+      // Create a mod object for the dependency
+      const dependencyMod = {
+        id: dependency.projectId,
+        name: dependency.name,
+        title: dependency.name,
+        source: 'modrinth'
+      };
+
+      // Try to determine the actual content type of the dependency
+      let dependencyContentType = $activeContentType; // Default to parent type
+      
+      // Use name-based heuristics to determine content type
+      const dependencyName = (dependency.name || '').toLowerCase();
+      
+      // Check for common shader keywords
+      if (dependencyName.includes('shader') || 
+          dependencyName.includes('iris') || 
+          dependencyName.includes('optifine') ||
+          dependencyName.includes('complementary') ||
+          dependencyName.includes('bsl') ||
+          dependencyName.includes('seus')) {
+        dependencyContentType = 'shaders';
+      }
+      // Check for common resource pack keywords
+      else if (dependencyName.includes('texture') || 
+               dependencyName.includes('resource') ||
+               dependencyName.includes('pack') ||
+               dependencyName.includes('animation') ||
+               dependencyName.includes('fresh animations') ||
+               dependencyName.includes('entity texture') ||
+               dependencyName.includes('entity model')) {
+        dependencyContentType = 'resourcepacks';
+      }
+      // Otherwise, assume it's a mod
+      else {
+        dependencyContentType = 'mods';
+      }
+      
+
+
+      // Determine the best version to install based on version requirement
+      let versionId = null;
+      if (dependency.versionRequirement) {
+        try {
+          // Try to get versions and find the best match
+          const versions = await safeInvoke('get-mod-versions', {
+            modId: dependency.projectId,
+            source: 'modrinth'
+          });
+          
+          if (versions && versions.length > 0) {
+            // Sort versions by date (newest first)
+            const sortedVersions = [...versions].sort((a, b) => {
+              const dateA = a.datePublished ? new Date(a.datePublished).getTime() : 0;
+              const dateB = b.datePublished ? new Date(b.datePublished).getTime() : 0;
+              return dateB - dateA;
+            });
+            
+            // Find the best version that matches the requirement
+            for (const version of sortedVersions) {
+              if (checkVersionCompatibility(version.versionNumber, dependency.versionRequirement)) {
+                versionId = version.id;
+                break;
+              }
+            }
+            
+            // If no specific version matches, use the latest
+            if (!versionId && sortedVersions.length > 0) {
+              versionId = sortedVersions[0].id;
+            }
+          }
+        } catch (versionError) {
+          // If version resolution fails, let the system choose
+        }
+      }
+
+      // Dispatch install event to parent component (ServerModManager)
+      dispatch('install', { 
+        mod: dependencyMod, 
+        versionId: versionId,
+        isDependency: true, // Flag to indicate this is a dependency installation
+        contentType: dependencyContentType, // Pass the determined content type for dependencies
+        onSuccess: async () => {
+          // Refresh compatibility check after successful installation
+          await refreshCompatibilityAfterInstall();
+          successMessage.set(`Successfully installed dependency: ${dependency.name}`);
+        },
+        onError: (error) => {
+          errorMessage.set(`Failed to install dependency ${dependency.name}: ${error.message || error}`);
+        }
+      });
+
+    } catch (error) {
+      errorMessage.set(`Failed to download dependency: ${error.message}`);
+    }
+  }
+
+  async function refreshCompatibilityAfterInstall() {
+    try {
+      // Reload mods to get updated installed mod info
+      await loadMods(serverPath);
+      
+      // Re-run compatibility check if results are currently displayed
+      if (compatibilityResults) {
+        await checkAllModsCompatibility();
+      }
+    } catch (error) {
+      // Failed to refresh compatibility after dependency install
+    }
+  }
+
+  async function handleBulkDependencyDownload(missingDependencies) {
+    if (bulkDownloadInProgress || missingDependencies.length === 0) {
+      return;
+    }
+
+    bulkDownloadInProgress = true;
+    bulkDownloadProgress = 0;
+    
+    const totalDependencies = missingDependencies.length;
+    const successfulInstalls = [];
+    const failedInstalls = [];
+    
+    try {
+      successMessage.set(`Starting bulk download of ${totalDependencies} dependencies...`);
+      
+      // Create a unique list of dependencies to avoid duplicates
+      const uniqueDependencies = [];
+      const seenProjectIds = new SvelteSet();
+      
+      for (const issue of missingDependencies) {
+        const projectId = issue.dependency?.projectId;
+        if (projectId && !seenProjectIds.has(projectId)) {
+          seenProjectIds.add(projectId);
+          uniqueDependencies.push(issue.dependency);
+        }
+      }
+      
+      // Download dependencies one by one to avoid overwhelming the system
+      for (let i = 0; i < uniqueDependencies.length; i++) {
+        const dependency = uniqueDependencies[i];
+        bulkDownloadProgress = i;
+        
+        try {
+          successMessage.set(`Installing dependency ${i + 1}/${uniqueDependencies.length}: ${dependency.name}...`);
+          
+          // Create a mod object for the dependency
+          const dependencyMod = {
+            id: dependency.projectId,
+            name: dependency.name,
+            title: dependency.name,
+            source: 'modrinth'
+          };
+
+          // Try to determine the actual content type of the dependency
+          let dependencyContentType = $activeContentType; // Default to parent type
+          
+          // Use name-based heuristics to determine content type
+          const dependencyName = (dependency.name || '').toLowerCase();
+          
+          // Check for common shader keywords
+          if (dependencyName.includes('shader') || 
+              dependencyName.includes('iris') || 
+              dependencyName.includes('optifine') ||
+              dependencyName.includes('complementary') ||
+              dependencyName.includes('bsl') ||
+              dependencyName.includes('seus')) {
+            dependencyContentType = 'shaders';
+          }
+          // Check for common resource pack keywords
+          else if (dependencyName.includes('texture') || 
+                   dependencyName.includes('resource') ||
+                   dependencyName.includes('pack') ||
+                   dependencyName.includes('animation') ||
+                   dependencyName.includes('fresh animations') ||
+                   dependencyName.includes('entity texture') ||
+                   dependencyName.includes('entity model')) {
+            dependencyContentType = 'resourcepacks';
+          }
+          // Otherwise, assume it's a mod
+          else {
+            dependencyContentType = 'mods';
+          }
+          
+
+
+          // Determine the best version to install
+          let versionId = null;
+          if (dependency.versionRequirement) {
+            try {
+              const versions = await safeInvoke('get-mod-versions', {
+                modId: dependency.projectId,
+                source: 'modrinth'
+              });
+              
+              if (versions && versions.length > 0) {
+                const sortedVersions = [...versions].sort((a, b) => {
+                  const dateA = a.datePublished ? new Date(a.datePublished).getTime() : 0;
+                  const dateB = b.datePublished ? new Date(b.datePublished).getTime() : 0;
+                  return dateB - dateA;
+                });
+                
+                for (const version of sortedVersions) {
+                  if (checkVersionCompatibility(version.versionNumber, dependency.versionRequirement)) {
+                    versionId = version.id;
+                    break;
+                  }
+                }
+                
+                if (!versionId && sortedVersions.length > 0) {
+                  versionId = sortedVersions[0].id;
+                }
+              }
+            } catch (versionError) {
+              // Failed to resolve dependency version
+            }
+          }
+
+          // Install the dependency using a Promise to handle the callback-based system
+          await new Promise((resolve, reject) => {
+            dispatch('install', { 
+              mod: dependencyMod, 
+              versionId: versionId,
+              isDependency: true,
+              contentType: dependencyContentType, // Pass the determined content type for dependencies
+              onSuccess: async () => {
+                successfulInstalls.push(dependency.name);
+                resolve();
+              },
+              onError: (error) => {
+                failedInstalls.push({ name: dependency.name, error: error.message || error });
+                reject(error);
+              }
+            });
+          });
+          
+        } catch (error) {
+          // Failed to install dependency
+          failedInstalls.push({ name: dependency.name, error: error.message || error });
+        }
+      }
+      
+      bulkDownloadProgress = uniqueDependencies.length;
+      
+      // Show final results
+      if (failedInstalls.length === 0) {
+        successMessage.set(`Successfully installed all ${successfulInstalls.length} dependencies!`);
+      } else if (successfulInstalls.length === 0) {
+        errorMessage.set(`Failed to install all dependencies. ${failedInstalls.length} failed.`);
+      } else {
+        successMessage.set(`Partially successful: ${successfulInstalls.length} installed, ${failedInstalls.length} failed.`);
+        
+        // Show details of failed installations
+        const failedNames = failedInstalls.map(f => f.name).join(', ');
+        setTimeout(() => {
+          errorMessage.set(`Failed dependencies: ${failedNames}`);
+        }, 3000);
+      }
+      
+      // Refresh compatibility check after bulk installation
+      await refreshCompatibilityAfterInstall();
+      
+    } catch (error) {
+      errorMessage.set(`Bulk dependency download failed: ${error.message || error}`);
+    } finally {
+      bulkDownloadInProgress = false;
+      bulkDownloadProgress = 0;
     }
   }
 
@@ -840,6 +1507,79 @@
           await modrinthMatchingActions.loadConfirmedMatches();
         } catch (error) {
         }
+
+        // Ensure mod info is loaded for the current content type
+        // This helps fix the initial "No version info" display issue
+        
+        // Try multiple times with increasing delays to ensure version info is loaded
+        const attemptVersionLoad = async (attempt = 1, maxAttempts = 3) => {
+          if (versionLoadAttempted) return;
+          
+          const currentInfo = getCurrentInfoStore();
+          const currentItems = $activeContentType === CONTENT_TYPES.SHADERS ? $installedShaders :
+                              $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? $installedResourcePacks :
+                              $installedMods;
+          
+
+          
+          if (currentItems.length > 0 && (currentInfo.length === 0 || currentInfo.every(info => !info || !info.versionNumber))) {
+            versionLoadAttempted = true;
+            try {
+              loadingVersionInfo = true;
+              updateLoadingGrace();
+              const currentContentType = get(activeContentType);
+              if (currentContentType === CONTENT_TYPES.MODS) {
+                await loadMods(serverPath);
+              } else {
+                await loadContent(serverPath, currentContentType);
+              }
+              
+              // Check if we got version info, if not and we have more attempts, try again
+              const updatedInfo = getCurrentInfoStore();
+              if (attempt < maxAttempts && updatedInfo.every(info => !info || !info.versionNumber)) {
+                versionLoadAttempted = false; // Reset for next attempt
+                setTimeout(() => attemptVersionLoad(attempt + 1, maxAttempts), 500 * attempt);
+              } else {
+                // Reset after successful load or max attempts
+                setTimeout(() => {
+                  versionLoadAttempted = false;
+                }, 2000);
+              }
+            } catch (error) {
+              // Version load attempt failed
+              versionLoadAttempted = false;
+              if (attempt < maxAttempts) {
+                setTimeout(() => attemptVersionLoad(attempt + 1, maxAttempts), 500 * attempt);
+              }
+            } finally {
+              loadingVersionInfo = false;
+              updateLoadingGrace();
+            }
+          }
+        };
+        
+        // Start the first attempt after a small delay
+        setTimeout(() => attemptVersionLoad(), 200);
+        
+        // Set up content type change monitoring
+        const checkContentTypeChange = () => {
+          if ($activeContentType !== lastActiveContentType) {
+            lastActiveContentType = $activeContentType;
+            versionLoadAttempted = false;
+            loadingVersionInfo = false;
+            updateLoadingGrace();
+            // Check version info after a small delay to allow stores to update
+            setTimeout(() => checkAndLoadVersionInfo($activeContentType, serverPath), 100);
+          }
+        };
+        
+        // Check for content type changes periodically
+        const contentTypeInterval = setInterval(checkContentTypeChange, 300);
+        
+        // Clean up interval on component destroy
+        return () => {
+          clearInterval(contentTypeInterval);
+        };
       }
     } catch (error) {
     }
@@ -862,16 +1602,19 @@
       <button class="icon-btn" on:click={handleCheckUpdates} disabled={$isCheckingUpdates} title={$isCheckingUpdates ? 'Checking...' : 'Check for Updates'}>
         🔄
       </button>
-      <button class="icon-btn" on:click={checkAllModsCompatibility} disabled={checkingCompatibility} title={checkingCompatibility ? 'Checking compatibility...' : 'Check Compatibility'}>
-        {#if checkingCompatibility}⏳{:else}✅{/if}
-      </button>
+      <!-- Only show compatibility check for mods -->
+      {#if $activeContentType === CONTENT_TYPES.MODS}
+        <button class="icon-btn" on:click={checkAllModsCompatibility} disabled={checkingCompatibility} title={checkingCompatibility ? 'Checking compatibility...' : 'Check Compatibility'}>
+          {#if checkingCompatibility}⏳{:else}✅{/if}
+        </button>
+      {/if}
       
       <!-- Search box -->
       <div class="search-container">
         <input 
           type="text" 
           class="search-input" 
-          placeholder="Search mods ( / )"
+          placeholder="Search {$activeContentType === CONTENT_TYPES.SHADERS ? 'shaders' : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? 'resource packs' : 'mods'} ( / )"
           bind:value={searchTerm}
         />
         {#if searchTerm}
@@ -879,7 +1622,7 @@
         {/if}
       </div>
       
-      <!-- Add mods button -->
+      <!-- Add content button -->
       <button class="add-mods-btn-outline" 
               class:drag-highlight={isDragover}
               on:click={toggleDropZone} 
@@ -887,8 +1630,8 @@
               on:dragover={handleDragOver}
               on:dragleave={handleDragLeave}
               on:drop={handleDrop}
-              title="Add mods by dragging files or clicking to browse">
-        📦 Add Mods
+              title="Add {$activeContentType === CONTENT_TYPES.SHADERS ? 'shaders' : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? 'resource packs' : 'mods'} by dragging files or clicking to browse">
+        📦 Add {$activeContentType === CONTENT_TYPES.SHADERS ? 'Shaders' : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? 'Resource Packs' : 'Mods'}
       </button>
       
       <!-- Search hint -->
@@ -918,11 +1661,14 @@
       <button class="danger sm" on:click={handleDeleteSelected} disabled={serverRunning}>
         {#if serverRunning}🔒{/if} 🗑 Delete Selected ({selectedMods.size})
       </button>
-      <button class="{buttonClass} sm" on:click={handleBulkToggle} disabled={serverRunning}>
-        {#if serverRunning}🔒{/if} 
-        {buttonText === 'Enable' ? '✅' : buttonText === 'Disable' ? '🚫' : '⚡'} 
-        {buttonText} Selected ({selectedMods.size})
-      </button>
+      <!-- Only show disable/enable for mods, not for shaders or resource packs -->
+      {#if $activeContentType === CONTENT_TYPES.MODS}
+        <button class="{buttonClass} sm" on:click={handleBulkToggle} disabled={serverRunning}>
+          {#if serverRunning}🔒{/if} 
+          {buttonText === 'Enable' ? '✅' : buttonText === 'Disable' ? '🚫' : '⚡'} 
+          {buttonText} Selected ({selectedMods.size})
+        </button>
+      {/if}
     </div>
   {/if}
 </div>
@@ -948,40 +1694,95 @@
     </div>
     
     {#if compatibilityResults.issues.length > 0}
+      {@const allMissingDependencies = compatibilityResults.issues.flatMap(modIssue => 
+        modIssue.issues.filter(issue => issue.type === 'missing' && issue.dependency?.projectId)
+      )}
+      
+      {@const groupedDependencies = (() => {
+        const groups = new SvelteMap();
+        
+        // Group all issues by dependency
+        for (const modIssue of compatibilityResults.issues) {
+          for (const issue of modIssue.issues) {
+            if (issue.dependency?.projectId) {
+              const depId = issue.dependency.projectId;
+              if (!groups.has(depId)) {
+                groups.set(depId, {
+                  dependency: issue.dependency,
+                  type: issue.type,
+                  versionInfo: issue.versionInfo,
+                  message: issue.message,
+                  affectedMods: []
+                });
+              }
+              groups.get(depId).affectedMods.push({
+                modName: modIssue.modName,
+                mod: modIssue.mod
+              });
+            }
+          }
+        }
+        
+        return Array.from(groups.values());
+      })()}
+      
+      {@const uniqueMissingDependencies = groupedDependencies.filter(group => group.type === 'missing')}
+      
+      {#if uniqueMissingDependencies.length > 1}
+        <div class="bulk-download-section">
+          <button 
+            class="bulk-download-btn"
+            on:click={() => handleBulkDependencyDownload(allMissingDependencies)}
+            disabled={serverRunning || bulkDownloadInProgress}
+            title={serverRunning ? 'Server must be stopped to install dependencies' : `Download all ${uniqueMissingDependencies.length} missing dependencies`}
+          >
+            {#if serverRunning}🔒{:else if bulkDownloadInProgress}⏳{:else}📦{/if} 
+            {bulkDownloadInProgress ? `Downloading... (${bulkDownloadProgress}/${uniqueMissingDependencies.length})` : `Download All Dependencies (${uniqueMissingDependencies.length})`}
+          </button>
+        </div>
+      {/if}
+      
       <div class="issues-list">
-        {#each compatibilityResults.issues as modIssue (modIssue.mod)}
-          <div class="mod-issues">
-            <div class="mod-issues-header">
-              <strong>{modIssue.modName}</strong>
-              <span class="issue-count">({modIssue.issues.length} issue{modIssue.issues.length > 1 ? 's' : ''})</span>
+        {#each groupedDependencies as dependencyGroup (dependencyGroup.dependency.projectId)}
+          <div class="dependency-group dependency-{dependencyGroup.type}">
+            <div class="dependency-header">
+              <span class="dependency-type">
+                {#if dependencyGroup.type === 'missing'}
+                  ❌ Missing Dependency
+                {:else if dependencyGroup.type === 'disabled'}
+                  ⚠️ Disabled Dependency
+                {:else if dependencyGroup.type === 'version_mismatch'}
+                  🔄 Version Mismatch
+                {:else if dependencyGroup.type === 'update_available'}
+                  ⬆️ Update Available
+                {:else}
+                  ℹ️ {dependencyGroup.type}
+                {/if}
+              </span>
+              <strong class="dependency-name">{dependencyGroup.dependency.name || 'Unknown'}</strong>
+              {#if dependencyGroup.versionInfo}
+                <span class="version-info">({dependencyGroup.versionInfo})</span>
+              {/if}
+              {#if dependencyGroup.type === 'missing' && dependencyGroup.dependency.projectId}
+                <button 
+                  class="dependency-download-btn"
+                  on:click={() => handleDependencyDownload(dependencyGroup.dependency)}
+                  disabled={serverRunning}
+                  title={serverRunning ? 'Server must be stopped to install dependencies' : `Download ${dependencyGroup.dependency.name}`}
+                >
+                  {#if serverRunning}🔒{/if} Download
+                </button>
+              {/if}
             </div>
-            <ul class="issues">
-              {#each modIssue.issues as issue (issue.dependency?.projectId + issue.type)}
-                <li class="issue-item {issue.type}">
-                  <span class="issue-type">
-                    {#if issue.type === 'missing'}
-                      ❌ Missing Dependency
-                    {:else if issue.type === 'disabled'}
-                      ⚠️ Disabled Dependency
-                    {:else if issue.type === 'version_mismatch'}
-                      🔄 Version Mismatch
-                    {:else if issue.type === 'update_available'}
-                      ⬆️ Update Available
-                    {:else}
-                      ℹ️ {issue.type}
-                    {/if}
-                  </span>
-                  <span class="issue-details">
-                    <strong>{issue.dependency?.name || 'Unknown'}</strong>
-                    {#if issue.versionInfo}
-                      <span class="version-info">({issue.versionInfo})</span>
-                    {/if}
-                    <br>
-                    <span class="issue-message">{issue.message}</span>
-                  </span>
-                </li>
-              {/each}
-            </ul>
+            <div class="affected-mods">
+              <span class="affected-label">Required by:</span>
+              <span class="affected-list">
+                {dependencyGroup.affectedMods.map(mod => mod.modName).join(', ')}
+              </span>
+            </div>
+            <div class="dependency-message">
+              {dependencyGroup.message}
+            </div>
           </div>
         {/each}
       </div>
@@ -1017,34 +1818,36 @@
 </div>
 {/if}
 
-<!-- Installed Mods table -->
+<!-- Content table -->
 <div class="table-container">
-<table class="mods-table">
-  <thead>
-    <tr>
-      <th class="chk sel-all" title="Select all" on:click={toggleSelectAll}>
-        {#if selectedMods.size === filteredMods.length && selectedMods.size > 0}
-          ■
-        {:else if selectedMods.size > 0}
-          ◩
-        {:else}
-          ▢
-        {/if}
-        <input type="checkbox"
-               checked={selectedMods.size === filteredMods.length}
-               indeterminate={selectedMods.size && selectedMods.size !== filteredMods.length}
-               on:change={toggleSelectAll}
-               style="opacity: 0; position: absolute; pointer-events: none;">
-      </th>
-      <th>Mod Name</th>
-      <th class="loc">Location</th>
-      <th class="ver">Current</th>
-      <th class="alert">⚠️</th>
-      <th class="status">Status</th>
-      <th class="upd">Update</th>
-      <th class="act">Actions</th>
-    </tr>
-  </thead>
+{#if $activeContentType === CONTENT_TYPES.MODS}
+  <!-- Mods table with full functionality -->
+  <table class="mods-table">
+    <thead>
+      <tr>
+        <th class="chk sel-all" title="Select all" on:click={toggleSelectAll}>
+          {#if selectedMods.size === filteredMods.length && selectedMods.size > 0}
+            ■
+          {:else if selectedMods.size > 0}
+            ◩
+          {:else}
+            ▢
+          {/if}
+          <input type="checkbox"
+                 checked={selectedMods.size === filteredMods.length}
+                 indeterminate={selectedMods.size && selectedMods.size !== filteredMods.length}
+                 on:change={toggleSelectAll}
+                 style="opacity: 0; position: absolute; pointer-events: none;">
+        </th>
+        <th>Mod Name</th>
+        <th class="loc">Location</th>
+        <th class="ver">Current</th>
+        <th class="alert">⚠️</th>
+        <th class="status">Status</th>
+        <th class="upd">Update</th>
+        <th class="act">Actions</th>
+      </tr>
+    </thead>
 
   <tbody>
     {#if filteredMods.length === 0 && searchTerm}
@@ -1055,7 +1858,7 @@
       </tr>
     {:else}
       {#each filteredMods as mod (mod)}
-      {@const modInfo = $installedModInfo.find(m => m.fileName === mod)}
+      {@const modInfo = currentInfoList.find(m => m && m.fileName === mod)}
               {@const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod)}
       {@const location = modCategoryInfo?.category || 'server-only'}
         {@const isDisabled = $disabledMods.has(mod)}
@@ -1129,7 +1932,7 @@
                   🔄
                 </button>
               {:else if modInfo && modInfo.versionNumber}
-                <code title="Installed version: {modInfo.versionNumber}">{modInfo.versionNumber}</code>
+                <code title={generateVersionTooltip(modInfo)}>{modInfo.versionNumber}</code>
                 <button 
                   class="reset-match-btn" 
                   title="Reset Modrinth match and search again"
@@ -1138,34 +1941,58 @@
                   🔄
                 </button>
               {:else}
-                <div class="no-version-info">
-                  <span>No version info</span>
-                  <button 
-                    class="reset-match-btn" 
-                    title="Reset Modrinth match and search again"
-                    on:click={() => resetModMatch(mod)}
-                  >
-                    🔄
-                  </button>
-                </div>
+                {@const cached = getCachedVersion(mod)}
+                {#if cached}
+                  <code title="Cached version (refreshing in background)">{cached}</code>
+                {:else if showLoadingIndicator}
+                  <span class="loading">Loading...</span>
+                {:else if $isLoading || loadingVersionInfo}
+                  <span class="loading" style="visibility:hidden;">Loading...</span>
+                {:else}
+                  {#if !initialUiSuppression}
+                    <div class="no-version-info">
+                      <span>No version info</span>
+                      <button 
+                        class="reset-match-btn" 
+                        title="Reset Modrinth match and search again"
+                        on:click={() => resetModMatch(mod)}
+                      >
+                        🔄
+                      </button>
+                    </div>
+                  {/if}
+                {/if}
               {/if}
             {:else if modInfo && modInfo.versionNumber}
               <!-- Show basic version info when no confirmed match but mod has version info -->
-              <code title="Installed version: {modInfo.versionNumber}">{modInfo.versionNumber}</code>
+              <code title={generateVersionTooltip(modInfo)}>{modInfo.versionNumber}</code>
             {:else}
-              <!-- No version info and no confirmed match - show matching options -->
-              <div class="no-version-info">
-                <span>No version info</span>
-              </div>
+              <!-- No version info and no confirmed match - check if we're loading -->
+              {@const cached = getCachedVersion(mod)}
+              {#if cached}
+                <code title="Cached version (refreshing in background)">{cached}</code>
+              {:else if showLoadingIndicator}
+                <span class="loading">Loading...</span>
+              {:else if $isLoading || loadingVersionInfo}
+                <span class="loading" style="visibility:hidden;">Loading...</span>
+              {:else}
+                {#if !initialUiSuppression}
+                  <div class="no-version-info">
+                    <span>No version info</span>
+                  </div>
+                {/if}
+              {/if}
               
               <!-- Modrinth matching UI for unmatched mods without version info -->
-              <ModrinthMatchConfirmation 
-                fileName={mod}
-                on:matchConfirmed={handleMatchConfirmed}
-                on:matchRejected={handleMatchRejected}
-                on:triggerAutoSearch={handleTriggerAutoSearch}
-                on:triggerManualSearch={handleTriggerManualSearch}
-              />
+              {#if !suppressMatchingUi && !initialUiSuppression && !getCachedVersion(mod)}
+                <ModrinthMatchConfirmation 
+                  fileName={mod}
+                  on:matchConfirmed={handleMatchConfirmed}
+                  on:matchRejected={handleMatchRejected}
+                  on:triggerAutoSearch={handleTriggerAutoSearch}
+                  on:triggerManualSearch={handleTriggerManualSearch}
+                />
+              {/if}
             {/if}
           {/each}
         </td>
@@ -1276,6 +2103,142 @@
       {/if}
     </tbody>
   </table>
+{:else}
+  <!-- Enhanced table for shaders and resource packs -->
+  <table class="mods-table">
+    <thead>
+      <tr>
+        <th class="chk sel-all" title="Select all" on:click={toggleSelectAll}>
+          {#if selectedMods.size === filteredMods.length && selectedMods.size > 0}
+            ■
+          {:else if selectedMods.size > 0}
+            ◩
+          {:else}
+            ▢
+          {/if}
+          <input type="checkbox"
+                 checked={selectedMods.size === filteredMods.length}
+                 indeterminate={selectedMods.size && selectedMods.size !== filteredMods.length}
+                 on:change={toggleSelectAll}
+                 style="opacity: 0; position: absolute; pointer-events: none;">
+        </th>
+        <th>{$activeContentType === CONTENT_TYPES.SHADERS ? 'Shader' : 'Resource Pack'} Name</th>
+        <th class="loc">Location</th>
+        <th class="ver">Current</th>
+        <th class="upd">Update</th>
+        <th class="act">Actions</th>
+      </tr>
+    </thead>
+
+    <tbody>
+      {#if filteredMods.length === 0 && searchTerm}
+        <tr>
+          <td colspan="6" class="no-results">
+            No {$activeContentType === CONTENT_TYPES.SHADERS ? 'shaders' : 'resource packs'} found matching "{searchTerm}"
+          </td>
+        </tr>
+      {:else}
+        {#each filteredMods as item (item)}
+          {@const info = currentInfoList.find(i => i.fileName === item)}
+          <tr class:selected={selectedMods.has(item)}>
+            <!-- checkbox -->
+            <td>
+              <input type="checkbox"
+                     checked={selectedMods.has(item)}
+                     on:change={() => toggleSelect(item)} />
+            </td>
+
+            <!-- name -->
+            <td>
+              <strong>{item.replace(/\.(zip|jar)$/i, '')}</strong>
+            </td>
+
+            <!-- location (read-only for now) -->
+            <td class="loc">
+              <span class="tag ok">Client Only</span>
+            </td>
+
+            <!-- current version -->
+            <td class="ver">
+              {#if info && info.versionNumber && info.versionNumber !== 'Unknown'}
+                <code title={generateVersionTooltip(info)}>{info.versionNumber}</code>
+              {:else if info && info.versionNumber === 'Unknown'}
+                <span class="no-versions" title="Version information not available in file">Unknown</span>
+              {:else}
+                {#if showLoadingIndicator}
+                  <span class="loading">Loading...</span>
+                {:else if $isLoading || loadingVersionInfo}
+                  <span class="loading" style="visibility:hidden;">Loading...</span>
+                {:else}
+                  <span class="no-versions">No version info</span>
+                {/if}
+              {/if}
+            </td>
+
+            <!-- update column -->
+            <td class="upd">
+              {#if $modsWithUpdates.has(item)}
+        {@const updateInfo = $modsWithUpdates.get(item)}
+                <button class="tag new clickable" 
+        title={`Update to ${updateInfo?.versionNumber || updateInfo?.latestVersion || updateInfo?.version_number || updateInfo?.name || 'latest'}`}
+                        on:click={() => updateContentToLatest(item)}>
+      ↑ {updateInfo?.versionNumber || updateInfo?.latestVersion || updateInfo?.version_number || 'latest'}
+                </button>
+              {:else}
+                <span class="tag ok">Up to date</span>
+              {/if}
+            </td>
+
+            <!-- action buttons -->
+            <td class="act">
+              <button class="danger sm"
+                      disabled={serverRunning}
+                      title={serverRunning ? 'Stop the server to delete files' : `Delete ${$activeContentType === CONTENT_TYPES.SHADERS ? 'shader' : 'resource pack'}`}
+                      on:click={() => showDeleteConfirmation(item)}>
+                {#if serverRunning}🔒{/if} 🗑
+              </button>
+              {#if info && info.projectId}
+                <button class="ghost sm" 
+                        title="Change version" 
+                        disabled={serverRunning}
+                        on:click={() => toggleVersionSelector(item)}>
+                  {#if serverRunning}🔒{/if} {$expandedInstalledMod === item ? '▲' : '▼'}
+                </button>
+              {/if}
+            </td>
+          </tr>
+          
+          <!-- Version selector for shaders/resource packs -->
+          {#if $expandedInstalledMod === item && info && info.projectId}
+            {@const projectId = info.projectId}
+            <tr transition:fly="{{ x: 10, duration: 100 }}">
+              <td colspan="6" style="padding: 0;">
+                <div class="versions">
+                {#if installedModVersionsCache[projectId] === undefined}
+                  <span class="loading">Loading versions...</span>
+                {:else if installedModVersionsCache[projectId]?.length === 0}
+                  <span class="err">No versions available</span>
+                {:else}
+                  {#each installedModVersionsCache[projectId] || [] as version (version.id)}
+                    {@const isCurrentVersion = info && info.versionId === version.id}
+                    <button
+                      class:sel={isCurrentVersion}
+                      disabled={isCurrentVersion}
+                      on:click={() => switchToContentVersion(item, projectId, version.id)}
+                    >
+                      {version.versionNumber}
+                    </button>
+                  {/each}
+                {/if}
+                </div>
+              </td>
+            </tr>
+          {/if}
+        {/each}
+      {/if}
+    </tbody>
+  </table>
+{/if}
     </div>
 
 
@@ -1410,73 +2373,69 @@
     overflow-y: auto;
   }
   
-  .mod-issues {
+  .dependency-group {
     margin-bottom: 12px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
     border-left: 3px solid var(--col-warn);
-    padding-left: 8px;
   }
   
-  .mod-issues-header {
+  .dependency-group.dependency-missing {
+    border-left-color: var(--col-danger);
+  }
+  
+  .dependency-group.dependency-version_mismatch {
+    border-left-color: var(--col-primary);
+  }
+  
+  .dependency-group.dependency-update_available {
+    border-left-color: var(--col-ok);
+  }
+  
+  .dependency-group.dependency-disabled {
+    border-left-color: var(--col-warn);
+  }
+  
+  .dependency-header {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 4px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
   }
   
-  .mod-issues-header strong {
-    color: var(--text-primary);
-  }
-  
-  .issue-count {
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-  }
-  
-  .issues {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  
-  .issue-item {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 6px;
-    padding: 6px;
-    background: var(--bg-secondary);
-    border-radius: 4px;
-    font-size: 0.85rem;
-  }
-  
-  .issue-item.missing {
-    border-left: 3px solid var(--col-danger);
-  }
-  
-  .issue-item.disabled {
-    border-left: 3px solid var(--col-warn);
-  }
-  
-  .issue-item.version_mismatch {
-    border-left: 3px solid var(--col-primary);
-  }
-  
-  .issue-item.update_available {
-    border-left: 3px solid var(--col-ok);
-  }
-  
-  .issue-type {
+  .dependency-type {
     flex-shrink: 0;
     font-weight: 500;
     color: var(--text-primary);
+    font-size: 0.9rem;
   }
   
-  .issue-details {
-    flex: 1;
-    color: var(--text-secondary);
-  }
-  
-  .issue-details strong {
+  .dependency-name {
     color: var(--text-primary);
+    font-size: 1rem;
+  }
+  
+  .affected-mods {
+    margin-bottom: 6px;
+    font-size: 0.85rem;
+  }
+  
+  .affected-label {
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+  
+  .affected-list {
+    color: var(--text-primary);
+    margin-left: 4px;
+  }
+  
+  .dependency-message {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-style: italic;
   }
   
   .version-info {
@@ -1487,6 +2446,62 @@
   .issue-message {
     font-style: italic;
     color: var(--text-secondary);
+  }
+  
+  .dependency-download-btn {
+    background: var(--col-primary);
+    color: white;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-left: 8px;
+    flex-shrink: 0;
+  }
+  
+  .dependency-download-btn:hover:not(:disabled) {
+    background: #0066cc;
+    transform: translateY(-1px);
+  }
+  
+  .dependency-download-btn:disabled {
+    background: var(--text-secondary);
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  
+  .bulk-download-section {
+    margin-bottom: 12px;
+    padding: 8px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    border-left: 3px solid var(--col-primary);
+  }
+  
+  .bulk-download-btn {
+    background: var(--col-primary);
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    width: 100%;
+  }
+  
+  .bulk-download-btn:hover:not(:disabled) {
+    background: #0066cc;
+    transform: translateY(-1px);
+  }
+  
+  .bulk-download-btn:disabled {
+    background: var(--text-secondary);
+    cursor: not-allowed;
+    opacity: 0.6;
   }
   
   .no-issues {
@@ -1616,6 +2631,23 @@
     cursor: help; /* Show it's hoverable */
   }
 
+  .version-button {
+    font-size: 0.75rem;
+    padding: 1px 3px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    border: none;
+    color: inherit;
+    font-family: monospace;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .version-button:hover {
+    background: rgba(255, 255, 255, 0.2);
+    transform: translateY(-1px);
+  }
+
   .reset-match-btn {
     background: none;
     border: none;
@@ -1636,28 +2668,36 @@
     color: #f1f5f9;
   }
   
-  /* Hover tooltip for version */
+  /* Hover tooltip for version with enhanced installation date display */
   .ver code:hover::after {
     content: attr(title);
     position: absolute;
     bottom: 100%;
     left: 50%;
     transform: translateX(-50%);
-    background: #333;
-    color: white;
-    padding: 4px 8px;
-    border-radius: 4px;
+    background: #2a2a2a;
+    color: #e2e8f0;
+    padding: 10px 14px;
+    border-radius: 8px;
     font-size: 0.8rem;
-    white-space: nowrap;
+    white-space: pre-line;
     z-index: 1000;
     pointer-events: none;
-    border: 1px solid #555;
+    border: 1px solid #4a5568;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+    max-width: 280px;
+    text-align: left;
+    line-height: 1.5;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
   
   /* Update column with tooltip */
   .upd {
     position: relative;
   }
+  /* Prevent stray text nodes (e.g., a lone '.') from rendering next to the button */
+  td.upd { font-size: 0; }
+  td.upd > .tag { font-size: 0.72rem; }
   
   .tag.clickable:hover::after {
     content: attr(title);
@@ -1788,19 +2828,23 @@
     display: flex; 
     flex-wrap: wrap; 
     gap: 4px; 
-    padding: 4px; 
+    padding: 8px; 
     background: #101010; 
     border: 1px solid #333; 
-    border-radius: 4px; 
+    border-radius: 4px;
+    width: 100%;
+    box-sizing: border-box;
   }
   .versions button { 
-    padding: 2px 6px; 
+    padding: 4px 8px; 
     font-size: 0.75rem; 
     border-radius: 3px; 
     background: #262626; 
     border: 1px solid #444; 
     color: #ccc; 
-    cursor: pointer; 
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .versions button:hover:not(:disabled) { background: #2d2d2d; }
   .versions button.sel { 

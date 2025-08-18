@@ -8,6 +8,7 @@ import {
   installedMods,
   installedModInfo,
   installedModIds,
+  filterMinecraftVersion,
   searchResults,
   modVersionsCache,
   installedModVersionsCache,
@@ -24,7 +25,6 @@ import {
   serverConfig,
   minecraftVersion,
   loaderType,
-  compareVersions,
   searchKeyword,
   modSource,
   resultsPerPage,
@@ -32,13 +32,17 @@ import {
   disabledMods,
   installingModIds,
   modCategories,
-  disabledModUpdates
+  disabledModUpdates,
+  installedShaderInfo,
+  installedResourcePackInfo
 } from '../../stores/modStore.js';
 
 // IDs to track concurrent operations
 let loadId = 0;
 let searchId = 0;
 let updateCheckId = 0;
+// Track a pending update check request if one comes in while a check is running
+let pendingUpdateCheck = null;
 
 // Rate limiting protection
 let lastSearchRequestTime = 0;
@@ -49,13 +53,13 @@ let lastVersionFetchTime = 0;
 const MIN_VERSION_FETCH_INTERVAL = 500; // Minimum time between version fetches in ms
 
 /**
- * Load mods from the server directory
+ * Load content (mods, shaders, resource packs) from the server directory
  * @param {string} serverPath - Path to the server
+ * @param {string} contentType - Content type ('mods', 'shaders', 'resourcepacks')
  * @returns {Promise<boolean>} - True if successful
  */
-export async function loadMods(serverPath) {
-  
-  // Prevent concurrent loadMods calls
+export async function loadContent(serverPath, contentType = 'mods') {
+  // Prevent concurrent loadContent calls
   if (get(isLoading)) {
     return false;
   }
@@ -72,162 +76,300 @@ export async function loadMods(serverPath) {
       }
     }
     
-    const result = await safeInvoke('list-mods', serverPath);
+    // Use appropriate IPC method based on content type
+    let ipcMethod;
+    switch (contentType) {
+      case 'shaders':
+        ipcMethod = 'list-shaders';
+        break;
+      case 'resourcepacks':
+        ipcMethod = 'list-resourcepacks';
+        break;
+      case 'mods':
+      default:
+        ipcMethod = 'list-mods';
+        break;
+    }
+    
+    const result = await safeInvoke(ipcMethod, serverPath);
     
     // Check if this is still the latest request
     if (currentLoadId !== loadId) {
       return false;
     }
     
-    // Use the flat list of mod filenames for backward compatibility
-    const modsList = result.modFiles || [];
-    if (modsList.length === 0 && result.mods?.length > 0) {
-      // Fallback to extracting filenames from the mods objects if modFiles is empty
-      const extractedMods = result.mods.map(mod => mod.fileName);
-      modsList.push(...extractedMods);
+    // Use the flat list of content filenames
+    const contentList = result.modFiles || result.shaderFiles || result.resourcePackFiles || [];
+    if (contentList.length === 0 && result.mods?.length > 0) {
+      // Fallback to extracting filenames from the content objects if files list is empty
+      const extractedContent = result.mods.map(item => item.fileName);
+      contentList.push(...extractedContent);
     }
     
-    // Store all mods in the installedMods store
-    installedMods.set(modsList);
-    
-    // Load existing saved categories first - with multiple attempts if needed
-    const { loadModCategories } = await import('../../stores/modStore.js');
-    
-    // Try loading categories multiple times to ensure they're properly loaded
-    let categoriesLoaded = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        await loadModCategories();
-        const currentCategories = get(modCategories);
-        if (currentCategories.size > 0 || modsList.length === 0) {
-          categoriesLoaded = true;
-          break;
+    // Store content in the appropriate store based on content type
+    switch (contentType) {
+      case 'shaders': {
+        const { installedShaders, installedShaderIds, installedShaderInfo } = await import('../../stores/modStore.js');
+        installedShaders.set(contentList);
+        
+        // Extract project IDs and info from result.mods if available
+        const shaderProjectIds = new SvelteSet();
+        const shaderInfoList = [];
+        
+        if (result.mods && Array.isArray(result.mods)) {
+          result.mods.forEach(item => {
+            
+            // Always add to info list, even without projectId
+            const shaderInfo = {
+              fileName: item.fileName || '',
+              projectId: item.projectId || null,
+              versionId: item.versionId || null,
+              versionNumber: item.versionNumber || null,
+              name: item.name || (item.fileName ? item.fileName.replace(/\.zip$/i, '') : null),
+              source: item.source || 'modrinth',
+              installationDate: item.installationDate || item.installedAt || null,
+              installedAt: item.installedAt || item.installationDate || null,
+              lastUpdated: item.lastUpdated || null
+            };
+            shaderInfoList.push(shaderInfo);
+            
+            // Only add to project IDs if we have a valid project ID
+            if (item.projectId || item.id) {
+              const projectId = item.projectId || item.id;
+              shaderProjectIds.add(projectId);
+            }
+          });
         }
-        // Small delay before retry
-        await new Promise(resolve => setTimeout(resolve, 100));
-      } catch {
-        // TODO: Add proper logging - Category loading attempt failed
+        
+        installedShaderIds.set(shaderProjectIds);
+        installedShaderInfo.set(shaderInfoList);
+        // Auto-check for updates for shaders as well (parity with mods)
+        setTimeout(() => {
+          checkForUpdates(serverPath);
+        }, 500);
+        break;
       }
+      case 'resourcepacks': {
+        const { installedResourcePacks, installedResourcePackIds, installedResourcePackInfo } = await import('../../stores/modStore.js');
+        installedResourcePacks.set(contentList);
+        
+        // Extract project IDs and info from result.mods if available
+        const resourcePackProjectIds = new SvelteSet();
+        const resourcePackInfoList = [];
+        
+        if (result.mods && Array.isArray(result.mods)) {
+          result.mods.forEach(item => {
+            
+            // Always add to info list, even without projectId
+            const resourcePackInfo = {
+              fileName: item.fileName || '',
+              projectId: item.projectId || null,
+              versionId: item.versionId || null,
+              versionNumber: item.versionNumber || null,
+              name: item.name || (item.fileName ? item.fileName.replace(/\.zip$/i, '') : null),
+              source: item.source || 'modrinth',
+              installationDate: item.installationDate || item.installedAt || null,
+              installedAt: item.installedAt || item.installationDate || null,
+              lastUpdated: item.lastUpdated || null
+            };
+            resourcePackInfoList.push(resourcePackInfo);
+            
+            // Only add to project IDs if we have a valid project ID
+            if (item.projectId || item.id) {
+              const projectId = item.projectId || item.id;
+              resourcePackProjectIds.add(projectId);
+            }
+          });
+        }
+        
+        installedResourcePackIds.set(resourcePackProjectIds);
+        installedResourcePackInfo.set(resourcePackInfoList);
+        // Auto-check for updates for resource packs as well (parity with mods)
+        setTimeout(() => {
+          checkForUpdates(serverPath);
+        }, 500);
+        break;
+      }
+      case 'mods':
+      default:
+        installedMods.set(contentList);
+        break;
     }
     
-    // Get current categories to merge with new mod data
-    let currentCategories = get(modCategories);
-    
-    // If we have mod data but no categories loaded, this indicates a persistence issue
-    if (!categoriesLoaded && result.mods && result.mods.length > 0) {
-      // TODO: Add proper logging - Failed to load saved categories, initializing from scan results
-      currentCategories = new Map();
-    }
-    
-    // Always update categories based on current file locations
-    const updatedCategories = new Map();
-    
-    // First, preserve any existing category settings
-    if (currentCategories.size > 0) {
-      currentCategories.forEach((value, key) => {
-        updatedCategories.set(key, { ...value });
+    // For mods, continue with the existing category and mod info logic
+    if (contentType === 'mods') {
+      // Load existing saved categories first - with multiple attempts if needed
+      const { loadModCategories } = await import('../../stores/modStore.js');
+      
+      // Try loading categories multiple times to ensure they're properly loaded
+      let categoriesLoaded = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await loadModCategories();
+          const currentCategories = get(modCategories);
+          if (currentCategories.size > 0 || contentList.length === 0) {
+            categoriesLoaded = true;
+            break;
+          }
+          // Small delay before retry
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch {
+          // TODO: Add proper logging - Category loading attempt failed
+        }
+      }
+      
+      // Get current categories to merge with new mod data
+      let currentCategories = get(modCategories);
+      
+      // If we have mod data but no categories loaded, this indicates a persistence issue
+      if (!categoriesLoaded && result.mods && result.mods.length > 0) {
+        // TODO: Add proper logging - Failed to load saved categories, initializing from scan results
+        currentCategories = new Map();
+      }
+      
+      // Always update categories based on current file locations
+      const updatedCategories = new Map();
+      
+      // First, preserve any existing category settings
+      if (currentCategories.size > 0) {
+        currentCategories.forEach((value, key) => {
+          updatedCategories.set(key, { ...value });
+        });
+      }
+      
+      // Then update based on current file scan results
+      result.mods?.forEach((mod) => {
+        const existingCategoryInfo = updatedCategories.get(mod.fileName);
+        
+        if (existingCategoryInfo) {
+          // Existing mod - preserve saved settings but update category if file location changed
+          updatedCategories.set(mod.fileName, {
+            category: mod.category, // Update to match current file location
+            required: existingCategoryInfo.required // Preserve saved requirement status
+          });
+        } else {
+          // New mod not in saved categories - set defaults
+          updatedCategories.set(mod.fileName, {
+            category: mod.category,
+            required: true // Default to required for new mods
+          });
+        }
       });
-    }
-    
-    // Then update based on current file scan results
-    result.mods?.forEach((mod) => {
-      const existingCategoryInfo = updatedCategories.get(mod.fileName);
       
-      if (existingCategoryInfo) {
-        // Existing mod - preserve saved settings but update category if file location changed
-        updatedCategories.set(mod.fileName, {
-          category: mod.category, // Update to match current file location
-          required: existingCategoryInfo.required // Preserve saved requirement status
-        });
-      } else {
-        // New mod not in saved categories - set defaults
-        updatedCategories.set(mod.fileName, {
-          category: mod.category,
-          required: true // Default to required for new mods
-        });
+      // Remove categories for mods that no longer exist
+      const currentModSet = new Set(contentList);
+      const categoriesToRemove = [];
+      updatedCategories.forEach((_, key) => {
+        if (!currentModSet.has(key)) {
+          categoriesToRemove.push(key);
+        }
+      });
+      categoriesToRemove.forEach(key => updatedCategories.delete(key));
+      
+      // Update the store with the merged categories
+      modCategories.set(updatedCategories);
+      
+      // Save updated categories to persistent storage
+      try {
+        const { saveModCategories } = await import('../../stores/modStore.js');
+        await saveModCategories();
+      } catch {
+        // TODO: Add proper logging - Failed to save updated mod categories
       }
-    });
-    
-    // Remove categories for mods that no longer exist
-    const currentModSet = new Set(modsList);
-    const categoriesToRemove = [];
-    updatedCategories.forEach((_, key) => {
-      if (!currentModSet.has(key)) {
-        categoriesToRemove.push(key);
-      }
-    });
-    categoriesToRemove.forEach(key => updatedCategories.delete(key));
-    
-    // Update the store with the merged categories
-    modCategories.set(updatedCategories);
-    
-    // Save updated categories to persistent storage
-    try {
-      const { saveModCategories } = await import('../../stores/modStore.js');
-      await saveModCategories();
-    } catch {
-      // TODO: Add proper logging - Failed to save updated mod categories
-    }
 
-    // Get installed mod IDs and version info
-    try {
-      // Clear existing installedModInfo to ensure we get fresh data
-      installedModInfo.set([]);
-      
-      const modInfo = await safeInvoke('get-installed-mod-info', serverPath);
-      
-      // Check again if this is still the latest request
-      if (currentLoadId !== loadId) {
-        return false;
-      }
-        // Process installed mod info to ensure we have version IDs and proper data
-      const modVersionsFromCache = get(installedModVersionsCache);
-      const updatedModInfo = modInfo.map((info) => {
-        // Ensure we have a clean object with all necessary properties
-        const cleanInfo = {
-          fileName: info.fileName,
-          projectId: info.projectId || null,
-          versionId: info.versionId || null,
-          versionNumber: info.versionNumber || null,
-          name: info.name || (info.fileName ? info.fileName.replace(/\.jar$/i, '') : null),
-          source: info.source || 'modrinth'
-        };
+      // Get installed mod IDs and version info
+      try {
+        // Clear existing installedModInfo to ensure we get fresh data
+        installedModInfo.set([]);
+        
+        let modInfo = await safeInvoke('get-installed-mod-info', serverPath);
+        if (!Array.isArray(modInfo)) {
+          modInfo = [];
+        }
+        
+        // Check again if this is still the latest request
+        if (currentLoadId !== loadId) {
+          return false;
+        }
+          // Process installed mod info to ensure we have version IDs and proper data
+        const modVersionsFromCache = get(installedModVersionsCache);
+        const updatedModInfo = modInfo.map((info) => {
+          // Ensure we have a clean object with all necessary properties
+          const cleanInfo = {
+            fileName: info.fileName,
+            projectId: info.projectId || null,
+            versionId: info.versionId || null,
+            versionNumber: info.versionNumber || null,
+            name: info.name || (info.fileName ? info.fileName.replace(/\.jar$/i, '') : null),
+            source: info.source || 'modrinth',
+            installationDate: info.installationDate || info.installedAt || null,
+            installedAt: info.installedAt || info.installationDate || null,
+            lastUpdated: info.lastUpdated || null
+          };
 
-        if (cleanInfo.projectId) {
-          // If we have cached version info, match version number to version ID
-          if (modVersionsFromCache[cleanInfo.projectId] && cleanInfo.versionNumber) {
-            const versions = modVersionsFromCache[cleanInfo.projectId];
-            const matchingVersion = versions.find(v => v.versionNumber === cleanInfo.versionNumber);
-            if (matchingVersion) {
-              cleanInfo.versionId = matchingVersion.id;
+          if (cleanInfo.projectId) {
+            // If we have cached version info, match version number to version ID
+            if (modVersionsFromCache[cleanInfo.projectId] && cleanInfo.versionNumber) {
+              const versions = modVersionsFromCache[cleanInfo.projectId];
+              const matchingVersion = versions.find(v => v.versionNumber === cleanInfo.versionNumber);
+              if (matchingVersion) {
+                cleanInfo.versionId = matchingVersion.id;
+              }
             }
           }
+          return cleanInfo;
+        });
+
+        // If we got zero or mostly incomplete entries, perform one background refresh of manifests and re-read
+        const needsRetry = updatedModInfo.length === 0 || updatedModInfo.every(i => !i.versionNumber && !i.versionId);
+        if (needsRetry && serverPath) {
+          try {
+            // Trigger a lightweight list-mods first so manifests and jar paths are fully discovered
+            await safeInvoke('list-mods', serverPath);
+            const retryInfo = await safeInvoke('get-installed-mod-info', serverPath);
+            if (Array.isArray(retryInfo)) {
+              modInfo = retryInfo;
+            }
+          } catch {
+            // Ignore retry errors
+          }
         }
-        return cleanInfo;
-      });
-      
-      // Update stores with clean, properly structured data
-      const validProjectIds = new SvelteSet(updatedModInfo.map(info => info.projectId).filter(Boolean));
-      installedModIds.set(validProjectIds);
-      installedModInfo.set(updatedModInfo);
-      
-      // Automatically check for updates after loading mods
-      setTimeout(() => {
-        checkForUpdates(serverPath)
-      }, 500);
+        
+        // Update stores with clean, properly structured data
+        const validProjectIds = new SvelteSet(updatedModInfo.map(info => info.projectId).filter(Boolean));
+        installedModIds.set(validProjectIds);
+        installedModInfo.set(updatedModInfo);
+        
+        // Automatically check for updates after loading mods
+        setTimeout(() => {
+          checkForUpdates(serverPath)
+        }, 500);
+          return true;
+      } catch {
+        // TODO: Add proper logging - Error getting mod info
+        // Continue without installed mod IDs, still consider this a success
         return true;
-    } catch {
-      // TODO: Add proper logging - Error getting mod info
-      // Continue without installed mod IDs, still consider this a success
-      return true;
+      }
     }
+    
+    return true;
   } catch (err) {
-    // TODO: Add proper logging - Fatal error in loadMods
-    errorMessage.set(`Failed to load mods: ${err.message || 'Unknown error'}`);
+    // TODO: Add proper logging - Fatal error in loadContent
+    errorMessage.set(`Failed to load ${contentType}: ${err.message || 'Unknown error'}`);
     return false;
   } finally {
     isLoading.set(false);
   }
+}
+
+/**
+ * Load mods from the server directory
+ * @param {string} serverPath - Path to the server
+ * @returns {Promise<boolean>} - True if successful
+ */
+export async function loadMods(serverPath) {
+  // Use the new loadContent function with 'mods' as the content type
+  return await loadContent(serverPath, 'mods');
 }
 
 /**
@@ -264,86 +406,307 @@ export async function loadServerConfig(serverPath) {
 }
 
 /**
- * Search for mods
+ * Search for content (mods, shaders, resource packs)
+ * @param {string} contentType - Content type ('mods', 'shaders', 'resourcepacks')
  * @param {Object} [options={}] - Search options object
  * @param {string} [options.sortBy] - Sort by parameter (relevance, downloads, follows, newest, updated)
  * @param {string} [options.environmentType] - Filter by environment (e.g. 'all', 'client', 'server')
  * @returns {Promise<Object>} - Search results object
  */
-export async function searchMods(options = {}) {
+/**
+ * Generate a cache key for content type search results
+ * @param {string} contentType - Content type
+ * @param {Object} options - Search options
+ * @returns {string} - Cache key
+ */
+function generateCacheKey(contentType, options = {}) {
+  const { searchKeyword, modSource, filterMinecraftVersion, filterModLoader, currentPage, resultsPerPage, sortBy, environmentType } = options;
+  return `${contentType}-${searchKeyword || ''}-${modSource || ''}-${filterMinecraftVersion || ''}-${filterModLoader || ''}-${currentPage || 1}-${resultsPerPage || 20}-${sortBy || 'relevance'}-${environmentType || 'all'}`;
+}
+
+/**
+ * Check if cached results are still valid (within 5 minutes)
+ * @param {Object} cacheEntry - Cache entry with timestamp
+ * @returns {boolean} - Whether cache is valid
+ */
+function isCacheValid(cacheEntry) {
+  if (!cacheEntry || !cacheEntry.timestamp) return false;
+  const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+  return Date.now() - cacheEntry.timestamp < CACHE_DURATION;
+}
+
+export async function searchContent(contentType = 'mods', options = {}) {
   if (get(isSearching)) {
     return null;
   }
+
+  // Import performance optimization stores
+  const { contentTypeSwitching, contentTypeCache, contentTypeRetryCount } = await import('../../stores/modStore.js');
   
-  // Rate limiting protection
-  const now = Date.now();
-  if (now - lastSearchRequestTime < MIN_SEARCH_INTERVAL) {
-    await new Promise(resolve => setTimeout(resolve, MIN_SEARCH_INTERVAL - (now - lastSearchRequestTime)));
-  }
-  lastSearchRequestTime = Date.now();
-  
-  isSearching.set(true);
-  searchError.set('');
-  const currentSearchId = ++searchId;
+  // Set switching state
+  contentTypeSwitching.set(true);
   
   try {
+    // Generate cache key
+    const cacheKey = generateCacheKey(contentType, {
+      searchKeyword: get(searchKeyword),
+      modSource: get(modSource),
+      filterMinecraftVersion: get(filterMinecraftVersion),
+      filterModLoader: get(filterModLoader),
+      currentPage: get(currentPage),
+      resultsPerPage: get(resultsPerPage),
+      ...options
+    });
+
+    // Check cache first
+    const cache = get(contentTypeCache);
+    const cachedResult = cache.get(cacheKey);
+    
+    if (cachedResult && isCacheValid(cachedResult)) {
+      // Use cached results
+      switch (contentType) {
+        case 'shaders': {
+          const { shaderResults } = await import('../../stores/modStore.js');
+          shaderResults.set(cachedResult.data.mods || []);
+          break;
+        }
+        case 'resourcepacks': {
+          const { resourcePackResults } = await import('../../stores/modStore.js');
+          resourcePackResults.set(cachedResult.data.mods || []);
+          break;
+        }
+        case 'mods':
+        default:
+          searchResults.set(cachedResult.data.mods || []);
+          break;
+      }
+      
+      // Update pagination from cache
+      if (cachedResult.data.pagination) {
+        totalResults.set(cachedResult.data.pagination.totalResults || 0);
+        totalPages.set(cachedResult.data.pagination.totalPages || 1);
+        currentPage.set(cachedResult.data.pagination.currentPage || 1);
+      }
+      
+      contentTypeSwitching.set(false);
+      return cachedResult.data;
+    }
+
+    // Rate limiting protection
+    const now = Date.now();
+    if (now - lastSearchRequestTime < MIN_SEARCH_INTERVAL) {
+      await new Promise(resolve => setTimeout(resolve, MIN_SEARCH_INTERVAL - (now - lastSearchRequestTime)));
+    }
+    lastSearchRequestTime = Date.now();
+  
+    isSearching.set(true);
+    searchError.set('');
+    const currentSearchId = ++searchId;
     // Read filters from the centralized stores
     const query = get(searchKeyword);
     const source = get(modSource);
-    // Always use the current Minecraft version, not the filter value
     const currentMinecraftVer = get(minecraftVersion);
+    const filterVer = get(filterMinecraftVersion);
     const loader = get(filterModLoader) || get(loaderType);
     const page = get(currentPage);
     const limit = get(resultsPerPage);
     const sortBy = options.sortBy || 'relevance';
     const environmentType = options.environmentType || 'all';
     
+    // Use filter version if available and different from empty string
+    // For shaders/resource packs: empty string means "All Versions" (no filter)
+    // For mods: empty string means use current Minecraft version
+    let versionToUse;
+    if (filterVer && filterVer !== '') {
+      // User selected a specific version
+      versionToUse = filterVer;
+    } else if (contentType === 'mods') {
+      // For mods, always use current version when no specific version selected
+      versionToUse = currentMinecraftVer;
+    } else {
+      // For shaders/resource packs, empty string means "All Versions" (no version filter)
+      versionToUse = undefined;
+    }
     
     const invokeArgs = {
       keyword: query,
       source,
-      loader,
-      version: currentMinecraftVer, // Always include the current Minecraft version
+      // Only include loader for mods, not for shaders/resource packs
+      loader: contentType === 'mods' ? loader : undefined,
+      version: versionToUse,
       page,
       limit,
       sortBy,
-      environmentType // Include the environment filter
+      environmentType
     };
     
-
-    const result = await safeInvoke('search-mods', invokeArgs);
+    
+    // Use different IPC methods based on content type
+    let ipcMethod;
+    switch (contentType) {
+      case 'shaders':
+        ipcMethod = 'search-shaders';
+        break;
+      case 'resourcepacks':
+        ipcMethod = 'search-resourcepacks';
+        break;
+      case 'mods':
+      default:
+        ipcMethod = 'search-mods';
+        break;
+    }
+    
+    const result = await safeInvoke(ipcMethod, invokeArgs);
     
     if (currentSearchId !== searchId) {
       return null;
     }
     
     if (result && result.mods) {
-      const installedModIdsSet = get(installedModIds);
-      const mods = result.mods.map(mod => ({
-        ...mod,
-        isInstalled:
-          installedModIdsSet.has(mod.id) ||
-          (mod.slug && installedModIdsSet.has(mod.slug))
-      }));
-      searchResults.set(mods);
+      // Get the appropriate installed IDs store based on content type
+      let installedIdsSet;
+      let installedFilesList = [];
+      let installedInfoList = [];
+      switch (contentType) {
+        case 'shaders': {
+          const { installedShaderIds, installedShaders, installedShaderInfo } = await import('../../stores/modStore.js');
+          installedIdsSet = get(installedShaderIds);
+          installedFilesList = get(installedShaders);
+          installedInfoList = get(installedShaderInfo);
+          break;
+        }
+        case 'resourcepacks': {
+          const { installedResourcePackIds, installedResourcePacks, installedResourcePackInfo } = await import('../../stores/modStore.js');
+          installedIdsSet = get(installedResourcePackIds);
+          installedFilesList = get(installedResourcePacks);
+          installedInfoList = get(installedResourcePackInfo);
+          break;
+        }
+        case 'mods':
+        default:
+          installedIdsSet = get(installedModIds);
+          break;
+      }
+
+      const normalize = (str) => (str || '')
+        .toString()
+        .toLowerCase()
+        .replace(/\.(zip|jar)$/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+
+      const fileBaseNames = (installedFilesList || []).map((f) => normalize(f));
+
+      const mods = result.mods.map(mod => {
+        // Primary check by IDs
+        let installed = installedIdsSet.has(mod.id) || (mod.slug && installedIdsSet.has(mod.slug));
+
+        // Fallback using installed info names and filenames (for shaders/resourcepacks)
+        if (!installed && (contentType === 'shaders' || contentType === 'resourcepacks')) {
+          const targetSlug = normalize(mod.slug || '');
+          const targetName = normalize(mod.name || mod.title || '');
+
+          if (installedInfoList && installedInfoList.length > 0) {
+            installed = installedInfoList.some(info => {
+              if (info.projectId && info.projectId === mod.id) return true;
+              const infoName = normalize(info.name || info.fileName || '');
+              return !!infoName && (
+                infoName === targetSlug || infoName === targetName ||
+                (targetSlug && (infoName.startsWith(targetSlug) || targetSlug.startsWith(infoName))) ||
+                (targetName && (infoName.startsWith(targetName) || targetName.startsWith(infoName)))
+              );
+            });
+          }
+
+          if (!installed && fileBaseNames && fileBaseNames.length > 0) {
+            installed = fileBaseNames.some(base => (
+              (targetSlug && (base === targetSlug || base.startsWith(targetSlug) || targetSlug.startsWith(base))) ||
+              (targetName && (base === targetName || base.startsWith(targetName) || targetName.startsWith(base)))
+            ));
+          }
+        }
+
+        return {
+          ...mod,
+          isInstalled: installed
+        };
+      });
+      
+      // Update the appropriate results store based on content type
+      switch (contentType) {
+        case 'shaders': {
+          const { shaderResults } = await import('../../stores/modStore.js');
+          shaderResults.set(mods);
+          break;
+        }
+        case 'resourcepacks': {
+          const { resourcePackResults } = await import('../../stores/modStore.js');
+          resourcePackResults.set(mods);
+          break;
+        }
+        case 'mods':
+        default:
+          searchResults.set(mods);
+          break;
+      }
+      
       if (result.pagination) {
         totalResults.set(result.pagination.totalResults || mods.length);
         totalPages.set(result.pagination.totalPages || Math.ceil(mods.length / limit));
         if (result.pagination.currentPage !== page) {
-        currentPage.set(result.pagination.currentPage || page);
+          currentPage.set(result.pagination.currentPage || page);
         }
       } else {
         totalResults.set(mods.length);
         totalPages.set(1);
         currentPage.set(page);
       }
-      return {
+
+      const resultData = {
         hits: mods,
         totalHits: result.pagination?.totalResults || mods.length,
-        totalPages: result.pagination?.totalPages || 1
+        totalPages: result.pagination?.totalPages || 1,
+        mods: mods,
+        pagination: result.pagination || {
+          totalResults: mods.length,
+          totalPages: 1,
+          currentPage: page
+        }
       };
+
+      // Cache the successful result
+      const cache = get(contentTypeCache);
+      cache.set(cacheKey, {
+        data: resultData,
+        timestamp: Date.now()
+      });
+      contentTypeCache.set(cache);
+
+      // Reset retry count on success
+      const retryCount = get(contentTypeRetryCount);
+      retryCount.delete(contentType);
+      contentTypeRetryCount.set(retryCount);
+
+      return resultData;
     } else {
-      searchResults.set([]);
+      // Clear the appropriate results store
+      switch (contentType) {
+        case 'shaders': {
+          const { shaderResults } = await import('../../stores/modStore.js');
+          shaderResults.set([]);
+          break;
+        }
+        case 'resourcepacks': {
+          const { resourcePackResults } = await import('../../stores/modStore.js');
+          resourcePackResults.set([]);
+          break;
+        }
+        case 'mods':
+        default:
+          searchResults.set([]);
+          break;
+      }
+      
       totalResults.set(0);
       totalPages.set(1);
       currentPage.set(1);
@@ -353,12 +716,65 @@ export async function searchMods(options = {}) {
       return { hits: [], totalHits: 0, totalPages: 1 };
     }
   } catch (err) {
-    searchError.set(`Search failed: ${err.message || 'Unknown error'}`);
-    searchResults.set([]);
+    // Implement retry mechanism
+    const retryCount = get(contentTypeRetryCount);
+    const currentRetries = retryCount.get(contentType) || 0;
+    const maxRetries = 2;
+
+    if (currentRetries < maxRetries) {
+      // Increment retry count
+      retryCount.set(contentType, currentRetries + 1);
+      contentTypeRetryCount.set(retryCount);
+
+      // Wait before retry with exponential backoff
+      const retryDelay = Math.min(1000 * Math.pow(2, currentRetries), 5000);
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+
+      // Clear switching state temporarily for retry
+      contentTypeSwitching.set(false);
+      
+      // Retry the search
+      return await searchContent(contentType, options);
+    }
+
+    // Max retries reached, handle error
+    searchError.set(`Search failed after ${maxRetries} retries: ${err.message || 'Unknown error'}`);
+    
+    // Clear the appropriate results store
+    switch (contentType) {
+      case 'shaders': {
+        const { shaderResults } = await import('../../stores/modStore.js');
+        shaderResults.set([]);
+        break;
+      }
+      case 'resourcepacks': {
+        const { resourcePackResults } = await import('../../stores/modStore.js');
+        resourcePackResults.set([]);
+        break;
+      }
+      case 'mods':
+      default:
+        searchResults.set([]);
+        break;
+    }
+    
     return { hits: [], totalHits: 0, totalPages: 1, error: err.message };
   } finally {
     isSearching.set(false);
+    contentTypeSwitching.set(false);
   }
+}
+
+/**
+ * Search for mods
+ * @param {Object} [options={}] - Search options object
+ * @param {string} [options.sortBy] - Sort by parameter (relevance, downloads, follows, newest, updated)
+ * @param {string} [options.environmentType] - Filter by environment (e.g. 'all', 'client', 'server')
+ * @returns {Promise<Object>} - Search results object
+ */
+export async function searchMods(options = {}) {
+  // Use the new searchContent function with 'mods' as the content type
+  return await searchContent('mods', options);
 }
 
 /**
@@ -369,7 +785,7 @@ export async function searchMods(options = {}) {
  * @param {boolean} forceRefresh - Whether to bypass cache and fetch fresh data
  * @returns {Promise<Array>} - Array of version objects
 */
-export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false, forceRefresh = false) {
+export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false, forceRefresh = false, contentType = 'mods') {
   // Cache key
   const loader = get(loaderType);
   const gameVersion = get(minecraftVersion);
@@ -394,7 +810,7 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
     const invokeArgs = {
       modId,
       source,
-      loader,
+      loader: (contentType === 'shaders' || contentType === 'resourcepacks') ? null : loader,
       mcVersion: gameVersion,
       loadLatestOnly: loadLatestOnly,
       forceRefresh: forceRefresh
@@ -421,15 +837,64 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
 }
 
 /**
- * Install a mod from a source with fallback support
- * @param {Object} mod - Mod object with source, id, title
+ * Install content (mod, shader, or resource pack) from a source with fallback support
+ * @param {Object} mod - Content object with source, id, title
  * @param {string} serverPath - Server path
  * @param {Object} [options] - Installation options
  * @param {boolean} [options.useFallback] - Whether to use fallback strategy (default: true)
  * @param {number} [options.maxRetries] - Maximum retry attempts (default: 3)
  * @param {number} [options.fallbackDelay] - Fallback delay in ms (default: 15 minutes)
+ * @param {string} [options.contentType] - Content type ('mods', 'shaders', 'resourcepacks')
  * @returns {Promise<boolean>} Success status
  */
+
+/**
+ * Refresh search results to update installed status after installation
+ * @param {string} contentType - Content type that was installed
+ */
+async function refreshSearchResults(contentType) {
+  try {
+    // Get the appropriate stores
+    let resultsStore, installedIdsStore;
+    
+    switch (contentType) {
+      case 'shaders': {
+        const { shaderResults, installedShaderIds } = await import('../../stores/modStore.js');
+        resultsStore = shaderResults;
+        installedIdsStore = installedShaderIds;
+        break;
+      }
+      case 'resourcepacks': {
+        const { resourcePackResults, installedResourcePackIds } = await import('../../stores/modStore.js');
+        resultsStore = resourcePackResults;
+        installedIdsStore = installedResourcePackIds;
+        break;
+      }
+      case 'mods':
+      default: {
+        resultsStore = searchResults;
+        installedIdsStore = installedModIds;
+        break;
+      }
+    }
+    
+    // Get current search results and installed IDs
+    const currentResults = get(resultsStore);
+    const installedIds = get(installedIdsStore);
+    
+    // Update the isInstalled status for all results
+    const updatedResults = currentResults.map(item => ({
+      ...item,
+      isInstalled: installedIds.has(item.id) || (item.slug && installedIds.has(item.slug))
+    }));
+    
+    // Update the store with refreshed results
+    resultsStore.set(updatedResults);
+  } catch {
+    // Failed to refresh search results
+  }
+}
+
 export async function installMod(mod, serverPath, options = {}) {
   try {
     if (!mod || !mod.id) {
@@ -446,13 +911,27 @@ export async function installMod(mod, serverPath, options = {}) {
     // to look for and remove any existing version first
     const isVersionUpdate = Boolean(mod.selectedVersionId);
     
-    // Prepare mod data for installation with fallback support
-    const modData = {
+    // Determine content type from options or mod data
+    const contentType = options.contentType || mod.contentType || 'mods';
+    
+
+    
+    // Get content type configuration
+    const { contentTypeConfigs } = await import('../../stores/modStore.js');
+    const config = contentTypeConfigs[contentType] || contentTypeConfigs['mods'];
+    
+    // Prepare content data for installation with fallback support
+    const contentData = {
       ...mod,
       // Make sure we set the loader and version if they're not already set
       loader: mod.loader || get(loaderType),
       version: mod.version || get(minecraftVersion),
       forceReinstall: isVersionUpdate, // Tell backend to replace existing version
+      
+      // Add content type information
+      contentType: contentType,
+      installDirectory: config.installDirectory,
+      fileExtensions: config.fileExtensions,
       
       // Add fallback configuration
       useFallback: options.useFallback !== false, // Default to true
@@ -470,8 +949,22 @@ export async function installMod(mod, serverPath, options = {}) {
       checksumAlgorithm: mod.checksumAlgorithm || 'sha1'
     };
     
-    // Use enhanced install method with fallback support
-    const result = await safeInvoke('install-mod-with-fallback', serverPath, modData);
+    // Use appropriate install method based on content type
+    let ipcMethod;
+    switch (contentType) {
+      case 'shaders':
+        ipcMethod = 'install-shader-with-fallback';
+        break;
+      case 'resourcepacks':
+        ipcMethod = 'install-resourcepack-with-fallback';
+        break;
+      case 'mods':
+      default:
+        ipcMethod = 'install-mod';
+        break;
+    }
+    
+    const result = await safeInvoke(ipcMethod, serverPath, contentData);
     
     // Handle result
     if (result && result.success) {
@@ -480,18 +973,19 @@ export async function installMod(mod, serverPath, options = {}) {
       //                   ` (downloaded from ${result.source})` : '';
       // successMessage.set(`Successfully installed ${mod.title || mod.name}${sourceInfo}`);
       
-      // Log installation success with source information
-      if (result.source && result.attempts) {
-        console.log(`Mod installation completed: ${mod.title || mod.name}`, {
-          source: result.source,
-          attempts: result.attempts,
-          fallbackUsed: result.fallbackUsed || false,
-          duration: result.duration || 0
-        });
+
+      
+      // Reload the appropriate content list based on content type
+      if (contentType === 'shaders') {
+        await loadContent(serverPath, 'shaders');
+      } else if (contentType === 'resourcepacks') {
+        await loadContent(serverPath, 'resourcepacks');
+      } else {
+        await loadMods(serverPath);
       }
       
-      // Reload the installed mods list
-      await loadMods(serverPath);
+      // Refresh search results to update installed status
+      await refreshSearchResults(contentType);
       
       // Clear the success message after a delay
       setTimeout(() => {
@@ -516,12 +1010,6 @@ export async function installMod(mod, serverPath, options = {}) {
     }
   } catch (err) {
     // Enhanced error logging with fallback information
-    console.error('Mod installation failed:', {
-      modId: mod?.id,
-      modName: mod?.title || mod?.name,
-      error: err.message,
-      serverPath
-    });
     
     errorMessage.set(`Failed to install mod: ${err.message}`);
     return false;
@@ -535,12 +1023,70 @@ export async function installMod(mod, serverPath, options = {}) {
 }
 
 /**
- * Delete a mod
- * @param {string} modName - Mod name/filename
- * @param {string} serverPath - Server path
- * @param {boolean} shouldReload - Whether to reload mods after deletion
+ * Delete content from server (mod, shader, or resource pack)
+ * @param {string} itemName - Name of the item to delete
+ * @param {string} serverPath - Path to the server
+ * @param {string} contentType - Type of content ('mods', 'shaders', 'resourcepacks')
+ * @param {boolean} shouldReload - Whether to reload the content list after deletion
  * @returns {Promise<boolean>} - True if successful
  */
+export async function deleteContent(itemName, serverPath, contentType = 'mods', shouldReload = true) {
+  try {
+    if (!itemName || !serverPath) {
+      errorMessage.set(`Invalid ${contentType === 'mods' ? 'mod' : contentType === 'shaders' ? 'shader' : 'resource pack'} name or server path for deletion`);
+      return false;
+    }
+    
+    // Use appropriate IPC method based on content type
+    let ipcMethod;
+    switch (contentType) {
+      case 'shaders':
+        ipcMethod = 'delete-shader';
+        break;
+      case 'resourcepacks':
+        ipcMethod = 'delete-resourcepack';
+        break;
+      case 'mods':
+      default:
+        ipcMethod = 'delete-mod';
+        break;
+    }
+    
+    const result = await safeInvoke(ipcMethod, serverPath, itemName);
+    
+    // Handle new response format with enhanced feedback
+    if (result === true || (result && result.success)) {
+      const itemType = contentType === 'mods' ? 'mod' : contentType === 'shaders' ? 'shader' : 'resource pack';
+      let message = `Successfully deleted ${itemType} ${itemName}`;
+      
+      // Provide additional feedback based on the deletion result
+      if (result && result.deletedFrom) {
+        if (result.deletedFrom === 'not_found') {
+          message = `${itemName} was not found (may have been already deleted)`;
+        }
+      }
+      
+      successMessage.set(message);
+      setTimeout(() => successMessage.set(''), 3000);
+      
+      if (shouldReload) {
+        await loadContent(serverPath, contentType);
+      }
+      
+      return true;
+    } else {
+      const itemType = contentType === 'mods' ? 'mod' : contentType === 'shaders' ? 'shader' : 'resource pack';
+      errorMessage.set(`Failed to delete ${itemType}: ${result?.error || 'Unknown error'}`);
+      return false;
+    }
+  } catch (error) {
+    const itemType = contentType === 'mods' ? 'mod' : contentType === 'shaders' ? 'shader' : 'resource pack';
+    errorMessage.set(`Error deleting ${itemType}: ${error.message || 'Unknown error'}`);
+    return false;
+  }
+}
+
+// Keep the original deleteMod function for backward compatibility
 export async function deleteMod(modName, serverPath, shouldReload = true) {
   try {
     if (!modName || !serverPath) {
@@ -617,6 +1163,12 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
 export async function checkForUpdates(serverPath, forceRefresh = false) {
   // Prevent concurrent update checks
   if (get(isCheckingUpdates)) {
+    // Queue a follow-up check to run right after the current one finishes
+    // If multiple calls arrive, prefer the more aggressive (forceRefresh) option
+    pendingUpdateCheck = {
+      serverPath: serverPath || (pendingUpdateCheck?.serverPath || null),
+      forceRefresh: forceRefresh || (pendingUpdateCheck?.forceRefresh || false)
+    };
     return new Map();
   }
 
@@ -636,49 +1188,60 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
       modVersionsCache.set({});
     }
     
-    // Skip update check if no mods have project IDs
+    // Get all content with project IDs (mods, shaders, resource packs)
     const modsInfo = get(installedModInfo);
+    const shadersInfo = get(installedShaderInfo);
+    const resourcePacksInfo = get(installedResourcePackInfo);
     const disabledModsSet = get(disabledMods);
-    const modsWithProjectIds = modsInfo.filter(m => m.projectId && !disabledModsSet.has(m.fileName));
     
-    if (modsWithProjectIds.length === 0) {
+    const modsWithProjectIds = modsInfo.filter(m => m.projectId && !disabledModsSet.has(m.fileName));
+    const shadersWithProjectIds = shadersInfo.filter(s => s.projectId);
+    const resourcePacksWithProjectIds = resourcePacksInfo.filter(r => r.projectId);
+    
+    const allContentWithProjectIds = [
+      ...modsWithProjectIds.map(m => ({ ...m, contentType: 'mods' })),
+      ...shadersWithProjectIds.map(s => ({ ...s, contentType: 'shaders' })),
+      ...resourcePacksWithProjectIds.map(r => ({ ...r, contentType: 'resourcepacks' }))
+    ];
+    
+    if (allContentWithProjectIds.length === 0) {
       modsWithUpdates.set(new Map());
     }
     
     // Check for disabled mod updates in parallel
     checkDisabledModUpdates(serverPath);
     
-    for (const modInfo of modsWithProjectIds) {
+    for (const contentInfo of allContentWithProjectIds) {
       // Check if a newer update check has started
       if (currentCheckId !== updateCheckId) {
         break;
       }
       
-      if (modInfo.projectId) {
+      if (contentInfo.projectId) {
         try {
           // Always fetch fresh versions to check for updates
           // This ensures we detect if a user has installed an older version
-          const versions = await fetchModVersions(modInfo.projectId, 'modrinth', false, forceRefresh);
+          const versions = await fetchModVersions(contentInfo.projectId, 'modrinth', false, forceRefresh, contentInfo.contentType);
           
           // Update cache
           installedModVersionsCache.update(cache => {
-            cache[modInfo.projectId] = versions;
+            cache[contentInfo.projectId] = versions;
             return cache;
           });
           
           // Check if an update is available
-          const updateVersion = checkForUpdate(modInfo, versions);
+          const updateVersion = checkForUpdate(contentInfo, versions);
           if (updateVersion) {
             // Only add the filename to the updates map for display
             // This ensures we don't double-count updates
-            updatesMap.set(modInfo.fileName, updateVersion);
+            updatesMap.set(contentInfo.fileName, updateVersion);
             
-            // Store the project ID separately for reference in the Find Mods tab
-            // We'll use a special prefix to distinguish it from actual mod filenames
-            updatesMap.set(`project:${modInfo.projectId}`, updateVersion);
+            // Store the project ID separately for reference in the Find tab
+            // We'll use a special prefix to distinguish it from actual filenames
+            updatesMap.set(`project:${contentInfo.projectId}`, updateVersion);
           }
         } catch {
-          // Silently skip this mod
+          // Silently skip this content
         }
       }
     }
@@ -690,6 +1253,16 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     return updatesMap;
   } finally {
     isCheckingUpdates.set(false);
+    // If a check was requested while we were busy, run it now
+    if (pendingUpdateCheck) {
+      const { serverPath: pendingPath, forceRefresh: pendingForce } = pendingUpdateCheck;
+      pendingUpdateCheck = null;
+      // Fire-and-forget to avoid recursive blocking; errors are handled internally
+      // Use setTimeout to yield back to the event loop
+      setTimeout(() => {
+        checkForUpdates(pendingPath || serverPath, pendingForce);
+      }, 0);
+    }
   }
 }
 
@@ -820,12 +1393,22 @@ function checkForUpdate(modInfo, versions) {
   // Get the latest version
   const latestVersion = sortedVersions[0];
   
-  // If the latest version is newer than the installed version
-  if (latestVersion && latestVersion.versionNumber !== modInfo.versionNumber) {
-    // Check if the latest version is actually newer using semantic versioning
-    const versionComparison = compareVersions(latestVersion.versionNumber, modInfo.versionNumber);
-    
-    if (versionComparison > 0) {
+  // Simple, general rule: if the latest (by date) differs from what's installed, offer update.
+  // Prefer comparing by Modrinth version id if we have it; otherwise compare normalized version text.
+  if (latestVersion) {
+    const normalize = (v) => (typeof v === 'string' ? v.trim().replace(/^v/i, '') : v);
+    const installedId = modInfo.versionId;
+    const latestId = latestVersion.id;
+    if (installedId && latestId && installedId !== latestId) {
+      return latestVersion;
+    }
+    const installedVer = normalize(modInfo.versionNumber || '');
+    const latestVer = normalize(latestVersion.versionNumber || latestVersion.name || '');
+    if (installedVer && latestVer && installedVer !== latestVer) {
+      return latestVersion;
+    }
+    // If installed has unknown/empty version but projectId matches and there's a latest, offer update
+    if (!installedVer && (modInfo.projectId && latestVer)) {
       return latestVersion;
     }
   }

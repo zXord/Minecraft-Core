@@ -605,6 +605,103 @@ class ManagementServer {
         res.status(500).json({ error: 'Failed to serve mod file' });
       }
     });
+
+    // List assets (shaderpacks or resourcepacks) available for clients
+    this.app.get('/api/assets/list/:type', (req, res) => {
+      if (!this.serverPath) {
+        return res.status(404).json({ error: 'No server configured' });
+      }
+
+      const { type } = req.params;
+      const validTypes = new Set(['shaderpacks', 'resourcepacks']);
+      if (!validTypes.has(type)) {
+        return res.status(400).json({ error: 'Invalid asset type' });
+      }
+
+      try {
+        const assetsDir = path.join(this.serverPath, 'client', type);
+        if (!fs.existsSync(assetsDir)) {
+          // If directory does not exist, return empty list
+          return res.json({ success: true, type, items: [] });
+        }
+
+        const files = fs.readdirSync(assetsDir);
+        // Extract version from filename helper (e.g., "Name r1.2.3.zip" or "Name v1.2.zip")
+        function extractVersionFromFilename(fileName) {
+          if (!fileName) return null;
+          const base = fileName.replace(/\.(zip|jar)$/i, '');
+          // Allow optional separators, optional 'v' and/or 'r' before version digits, and optional suffixes like -beta9
+          const match = base.match(/(?:^|[-_\s])(?:v?r?|rv)?\s*(\d+(?:\.\d+)*(?:-[A-Za-z0-9.]+)?)$/i);
+          return match ? match[1] : null;
+        }
+        function cleanName(fileName) {
+          const base = fileName.replace(/\.(zip|jar)$/i, '');
+          return base
+            .replace(/(?:[-_\s])?(?:r\d+(?:\.\d+)*)$/i, '')
+            .replace(/(?:[-_\s])?(?:v?\d+(?:\.\d+)*)$/i, '')
+            .replace(/(?:[-_\s])?mc[_-]?\d+(?:\.\d+)*$/i, '')
+            .replace(/[_-]+/g, ' ')
+            .trim();
+        }
+        // Prefer zip files, but include directories too if present
+        const items = files
+          .filter(file => file.toLowerCase().endsWith('.zip') || fs.statSync(path.join(assetsDir, file)).isDirectory())
+          .map(file => ({
+            fileName: file,
+            size: (() => { try { return fs.statSync(path.join(assetsDir, file)).size; } catch { return 0; } })(),
+            lastModified: (() => { try { return fs.statSync(path.join(assetsDir, file)).mtime; } catch { return new Date(0); } })(),
+            downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/assets/download/${type}/${encodeURIComponent(file)}`,
+            versionNumber: extractVersionFromFilename(file),
+            name: cleanName(file),
+            checksum: (() => { try { return this.calculateFileChecksum(path.join(assetsDir, file)); } catch { return null; } })()
+          }));
+
+        return res.json({ success: true, type, items });
+      } catch {
+        return res.status(500).json({ error: 'Failed to list assets' });
+      }
+    });
+
+    // Download an asset (shaderpack or resourcepack)
+    this.app.get('/api/assets/download/:type/:fileName', (req, res) => {
+      if (!this.serverPath) {
+        return res.status(404).json({ error: 'No server configured' });
+      }
+
+      const { type, fileName } = req.params;
+      const validTypes = new Set(['shaderpacks', 'resourcepacks']);
+      if (!validTypes.has(type)) {
+        return res.status(400).json({ error: 'Invalid asset type' });
+      }
+      if (!fileName) {
+        return res.status(400).json({ error: 'Invalid file name' });
+      }
+
+      try {
+        const assetPath = path.join(this.serverPath, 'client', type, fileName);
+        if (!fs.existsSync(assetPath)) {
+          return res.status(404).json({ error: 'Asset not found' });
+        }
+
+        // Set appropriate content type based on file extension
+        if (fileName.toLowerCase().endsWith('.zip')) {
+          res.setHeader('Content-Type', 'application/zip');
+        } else {
+          res.setHeader('Content-Type', 'application/octet-stream');
+        }
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+        const fileStream = fs.createReadStream(assetPath);
+        fileStream.on('error', () => {
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Failed to serve asset file' });
+          }
+        });
+        fileStream.pipe(res);
+      } catch {
+        return res.status(500).json({ error: 'Failed to serve asset file' });
+      }
+    });
     
     // Get required mods endpoint
     this.app.get('/api/debug/required-mods', async (_, res) => {

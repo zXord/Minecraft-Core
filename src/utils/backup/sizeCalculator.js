@@ -56,16 +56,14 @@ export async function calculateTotalSize(backups, serverPath = '', options = {})
         });
         
         return result.totalSize;
-      } catch (optimizedError) {
-        console.warn('Optimized calculation failed, falling back to standard method:', optimizedError);
+      } catch {
         // Fall through to standard calculation
       }
     }
 
     // Standard calculation with error handling
-    let totalSize = 0;
-    let errorCount = 0;
-    const errors = [];
+  let totalSize = 0;
+  const errors = [];
 
     for (const backup of backups) {
       try {
@@ -89,7 +87,6 @@ export async function calculateTotalSize(backups, serverPath = '', options = {})
               error: sizeError.message,
               type: 'size_calculation_failed'
             });
-            errorCount++;
           }
         }
       } catch (backupError) {
@@ -98,18 +95,17 @@ export async function calculateTotalSize(backups, serverPath = '', options = {})
           error: backupError.message,
           type: 'backup_processing_failed'
         });
-        errorCount++;
+  // Track errors via errors.length
       }
     }
 
     // Log errors but don't fail the entire calculation
     if (errors.length > 0) {
-      console.warn(`Size calculation encountered ${errorCount} errors:`, errors);
+      // Size calculation encountered errors: ${errorCount}
     }
 
     return totalSize;
   } catch (error) {
-    console.error('Critical error in calculateTotalSize:', error);
     throw new Error(`Failed to calculate total backup size: ${error.message}`);
   }
 }
@@ -208,7 +204,7 @@ export async function watchSizeChanges(serverPath, callback, retryCount = 0) {
       
       // Retry for certain types of errors
       if (retryCount < MAX_RETRIES && isRetryableError(errorMessage)) {
-        console.warn(`File watcher setup failed (attempt ${retryCount + 1}/${MAX_RETRIES + 1}): ${errorMessage}. Retrying...`);
+        // File watcher setup failed, retrying...
         
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
         return watchSizeChanges(serverPath, callback, retryCount + 1);
@@ -223,8 +219,8 @@ export async function watchSizeChanges(serverPath, callback, retryCount = 0) {
         if (data && data.serverPath === serverPath) {
           callback(data);
         }
-      } catch (callbackError) {
-        console.error('Error in size change callback:', callbackError);
+      } catch {
+        // Error in size change callback
         // Don't throw here to avoid breaking the watcher
       }
     };
@@ -232,30 +228,30 @@ export async function watchSizeChanges(serverPath, callback, retryCount = 0) {
     // Register the event listener
     window.electron.on('backup-size-changed', eventHandler);
     
-    console.log(`File system watcher setup successfully for: ${serverPath}`);
+
     
     // Return cleanup function with error handling
     return () => {
       try {
         window.electron.removeListener('backup-size-changed', eventHandler);
-        console.log(`File system watcher cleaned up for: ${serverPath}`);
-      } catch (cleanupError) {
-        console.error('Error cleaning up file system watcher:', cleanupError);
+
+      } catch {
+        // Error cleaning up file system watcher
       }
     };
-  } catch (error) {
-    console.error('Failed to set up size change watcher:', error);
+  } catch {
+    // Failed to set up size change watcher
     
     if (retryCount >= MAX_RETRIES) {
-      console.warn('File system watcher setup failed after all retries, continuing without watcher');
+      // File system watcher setup failed after all retries, continuing without watcher
       
       // Return a no-op cleanup function
       return () => {
-        console.log('No-op cleanup for failed watcher setup');
+
       };
     }
     
-    throw new Error(`Failed to setup file system watcher after ${retryCount + 1} attempts: ${error.message}`);
+    throw new Error(`Failed to setup file system watcher after ${retryCount + 1} attempts`);
   }
 }
 
@@ -302,7 +298,7 @@ export async function calculateBackupSizes(serverPath, forceRefresh = false, ret
       
       // Check if this is a temporary file system error that might benefit from retry
       if (retryCount < MAX_RETRIES && isRetryableError(errorMessage)) {
-        console.warn(`Size calculation failed (attempt ${retryCount + 1}/${MAX_RETRIES + 1}): ${errorMessage}. Retrying...`);
+        // Size calculation failed, retrying...
         
         // Wait before retrying with exponential backoff
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * Math.pow(2, retryCount)));
@@ -315,12 +311,12 @@ export async function calculateBackupSizes(serverPath, forceRefresh = false, ret
     
     // Validate result structure
     if (!result.backups || !Array.isArray(result.backups)) {
-      console.warn('Backend returned invalid backup list, using fallback');
+      // Backend returned invalid backup list, using fallback
       result.backups = [];
     }
     
     if (typeof result.totalSize !== 'number') {
-      console.warn('Backend returned invalid total size, calculating from backup list');
+      // Backend returned invalid total size, calculating from backup list
       result.totalSize = result.backups.reduce((sum, backup) => {
         return sum + (typeof backup.size === 'number' && backup.size >= 0 ? backup.size : 0);
       }, 0);
@@ -335,22 +331,22 @@ export async function calculateBackupSizes(serverPath, forceRefresh = false, ret
     });
     
     return result;
-  } catch (error) {
-    console.error('Failed to calculate backup sizes:', error);
+  } catch {
+    // Failed to calculate backup sizes
     
     // If all retries failed, try to provide fallback size estimation
     if (retryCount >= MAX_RETRIES) {
-      console.warn('All retry attempts failed, attempting fallback size estimation');
+      // All retry attempts failed, attempting fallback size estimation
       
       try {
         const fallbackResult = await getFallbackSizeEstimation(serverPath);
         return fallbackResult;
-      } catch (fallbackError) {
-        console.error('Fallback size estimation also failed:', fallbackError);
+      } catch {
+        // Fallback size estimation also failed
       }
     }
     
-    throw new Error(`Failed to calculate backup sizes after ${retryCount + 1} attempts: ${error.message}`);
+    throw new Error(`Failed to calculate backup sizes after ${retryCount + 1} attempts`);
   }
 }
 
@@ -408,7 +404,7 @@ async function getFallbackSizeEstimation(serverPath) {
     
     const totalSize = estimatedBackups.reduce((sum, backup) => sum + (backup.size || 0), 0);
     
-    console.warn(`Using fallback size estimation for ${estimatedBackups.length} backups (total: ${formatSize(totalSize)})`);
+    // Using fallback size estimation
     
     return {
       success: true,
@@ -417,9 +413,9 @@ async function getFallbackSizeEstimation(serverPath) {
       estimated: true,
       warning: 'Size calculations are estimated due to file system access issues'
     };
-  } catch (fallbackError) {
+  } catch {
     // Last resort: return empty result
-    console.error('Fallback size estimation failed:', fallbackError);
+    // Fallback size estimation failed
     
     return {
       success: true,
@@ -672,8 +668,8 @@ export function getCacheStats() {
       ...basicStats,
       performance: performanceStats
     };
-  } catch (error) {
-    console.warn('Failed to get performance stats:', error);
+  } catch {
+    // Failed to get performance stats
     return basicStats;
   }
 }
@@ -692,7 +688,7 @@ export function cleanup() {
   // Cleanup optimizer
   try {
     cleanupOptimizer();
-  } catch (error) {
-    console.warn('Failed to cleanup optimizer:', error);
+  } catch {
+    // Failed to cleanup optimizer
   }
 }

@@ -33,8 +33,8 @@ try {
       shouldStartMinimized: process.argv.includes('--start-minimized')
     }
   });
-} catch (error) {
-  console.error('Failed to initialize logger service:', error);
+} catch {
+  // Failed to initialize logger service
 }
 
 // Utility function to open folders directly using child_process
@@ -54,8 +54,9 @@ function openFolderDirectly(folderPath) {
   
   return new Promise((resolve, reject) => {
     if (process.platform === 'win32') {
-      // Windows - use explorer
-      exec(`explorer "${normalizedPath}"`, (error) => {
+      // Windows - use explorer with proper escaping
+      const command = `explorer.exe "${normalizedPath.replace(/\//g, '\\')}"`;
+      exec(command, (error) => {
         if (error) {
           if (logger) {
             logger.error(`Failed to open folder on Windows: ${error.message}`, {
@@ -63,6 +64,7 @@ function openFolderDirectly(folderPath) {
               data: {
                 folderPath: normalizedPath,
                 platform: 'win32',
+                command: command,
                 errorType: error.constructor.name
               }
             });

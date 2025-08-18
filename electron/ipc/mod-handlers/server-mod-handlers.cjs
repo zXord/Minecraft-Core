@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 const modApiService = require('../../services/mod-api-service.cjs');
 const { getModrinthDownloadUrl, getCurseForgeDownloadUrl } = require('../../services/mod-api-service.cjs');
 const modFileManager = require('../mod-utils/mod-file-manager.cjs');
@@ -2505,6 +2506,584 @@ function createServerModHandlers(win) {
           }
         });
         throw new Error(`Failed to check disabled mod updates: ${error.message}`);
+      }
+    },
+
+    'list-shaders': async (_e, serverPath) => {
+      logger.debug('Listing server shaders', {
+        category: 'mods',
+        data: {
+          handler: 'list-shaders',
+          serverPath: serverPath,
+          pathExists: fs.existsSync(serverPath)
+        }
+      });
+
+      try {
+        const shadersPath = path.join(serverPath, 'client', 'shaderpacks');
+        
+        // Create shaderpacks directory if it doesn't exist
+        if (!fs.existsSync(shadersPath)) {
+          fs.mkdirSync(shadersPath, { recursive: true });
+          logger.info('Created shaderpacks directory', {
+            category: 'mods',
+            data: { handler: 'list-shaders', shadersPath }
+          });
+        }
+
+        const files = fs.readdirSync(shadersPath);
+        const shaderFiles = files.filter(file => 
+          file.toLowerCase().endsWith('.zip') || 
+          file.toLowerCase().endsWith('.jar')
+        );
+
+        // Extract metadata from shader files
+        const shaders = [];
+        const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
+        const clientManifestDir = path.join(serverPath, 'client', 'minecraft-core-manifests');
+        
+        for (const file of shaderFiles) {
+          const filePath = path.join(shadersPath, file);
+          let shaderData = {
+            fileName: file,
+            name: file.replace(/\.(zip|jar)$/i, ''),
+            type: 'shader',
+            path: filePath
+          };
+
+          // First, try to get version info from manifest files (created during installation)
+          let manifestFound = false;
+          const manifestPaths = [
+            path.join(clientManifestDir, `${file}.json`),
+            path.join(serverManifestDir, `${file}.json`)
+          ];
+          
+          for (const manifestPath of manifestPaths) {
+            try {
+              if (fs.existsSync(manifestPath)) {
+                const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+                const manifest = JSON.parse(manifestContent);
+                
+                if (manifest) {
+                  shaderData = {
+                    ...shaderData,
+                    versionNumber: manifest.versionNumber || manifest.version,
+                    projectId: manifest.projectId,
+                    versionId: manifest.versionId,
+                    name: manifest.name || shaderData.name,
+                    minecraftVersion: manifest.minecraftVersion,
+                    source: manifest.source || 'modrinth',
+                    installationDate: manifest.installedAt || manifest.installationDate,
+                    lastUpdated: manifest.lastUpdated,
+                    installedAt: manifest.installedAt || manifest.installationDate
+                  };
+                  
+                  logger.debug(`Shader manifest data for ${file}:`, {
+                    category: 'core',
+                    data: {
+                      manifestPath: manifestPath,
+                      installedAt: manifest.installedAt,
+                      installationDate: manifest.installationDate,
+                      lastUpdated: manifest.lastUpdated,
+                      finalInstallationDate: shaderData.installationDate,
+                      versionNumber: manifest.versionNumber || manifest.version,
+                      projectId: manifest.projectId,
+                      name: manifest.name
+                    }
+                  });
+                  
+                  manifestFound = true;
+                  break;
+                }
+              }
+            } catch {
+              // Continue to next manifest path
+            }
+          }
+
+          // If no manifest found, try to extract version information from the shader file itself
+          if (!manifestFound) {
+            try {
+              const metadata = await modFileManager.readModMetadataFromJar(filePath);
+              
+              if (metadata && metadata.versionNumber) {
+                shaderData = {
+                  ...shaderData,
+                  versionNumber: metadata.versionNumber,
+                  projectId: metadata.projectId,
+                  name: metadata.name || shaderData.name,
+                  minecraftVersion: metadata.minecraftVersion,
+                  source: 'modrinth' // Default source
+                };
+              } else {
+                // Try to extract version from filename as fallback
+                const versionFromFilename = extractVersionFromFilename(file);
+                if (versionFromFilename) {
+                  shaderData.versionNumber = versionFromFilename;
+                } else {
+                  // For shaders without version info, set a placeholder
+                  shaderData.versionNumber = 'Unknown';
+                }
+              }
+            } catch {
+              // If metadata extraction fails, set placeholder version
+              shaderData.versionNumber = 'Unknown';
+            }
+          }
+
+          shaders.push(shaderData);
+        }
+        
+        logger.info('Server shaders listed successfully', {
+          category: 'mods',
+          data: {
+            handler: 'list-shaders',
+            serverPath: serverPath,
+            shaderCount: shaders.length
+          }
+        });
+        
+        const response = { shaderFiles: shaderFiles, mods: shaders };
+        logger.debug('Returning shader data:', {
+          category: 'mods',
+          data: {
+            handler: 'list-shaders',
+            shaderFilesCount: shaderFiles.length,
+            modsCount: shaders.length,
+            sampleShader: shaders[0] || null
+          }
+        });
+        return response;
+      } catch (error) {
+        logger.error(`Failed to list server shaders: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'list-shaders',
+            serverPath: serverPath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'list-resourcepacks': async (_e, serverPath) => {
+      logger.debug('Listing server resource packs', {
+        category: 'mods',
+        data: {
+          handler: 'list-resourcepacks',
+          serverPath: serverPath,
+          pathExists: fs.existsSync(serverPath)
+        }
+      });
+
+      try {
+        const resourcePacksPath = path.join(serverPath, 'client', 'resourcepacks');
+        
+        // Create resourcepacks directory if it doesn't exist
+        if (!fs.existsSync(resourcePacksPath)) {
+          fs.mkdirSync(resourcePacksPath, { recursive: true });
+          logger.info('Created resourcepacks directory', {
+            category: 'mods',
+            data: { handler: 'list-resourcepacks', resourcePacksPath }
+          });
+        }
+
+        const files = fs.readdirSync(resourcePacksPath);
+        const resourcePackFiles = files.filter(file => 
+          file.toLowerCase().endsWith('.zip') || 
+          file.toLowerCase().endsWith('.jar')
+        );
+
+        // Extract metadata from resource pack files
+        const resourcePacks = [];
+        const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
+        const clientManifestDir = path.join(serverPath, 'client', 'minecraft-core-manifests');
+        
+        for (const file of resourcePackFiles) {
+          const filePath = path.join(resourcePacksPath, file);
+          let resourcePackData = {
+            fileName: file,
+            name: file.replace(/\.(zip|jar)$/i, ''),
+            type: 'resourcepack',
+            path: filePath
+          };
+
+          // First, try to get version info from manifest files (created during installation)
+          let manifestFound = false;
+          const manifestPaths = [
+            path.join(clientManifestDir, `${file}.json`),
+            path.join(serverManifestDir, `${file}.json`)
+          ];
+          
+          for (const manifestPath of manifestPaths) {
+            try {
+              if (fs.existsSync(manifestPath)) {
+                const manifestContent = fs.readFileSync(manifestPath, 'utf8');
+                const manifest = JSON.parse(manifestContent);
+                
+                if (manifest) {
+                  resourcePackData = {
+                    ...resourcePackData,
+                    versionNumber: manifest.versionNumber || manifest.version,
+                    projectId: manifest.projectId,
+                    versionId: manifest.versionId,
+                    name: manifest.name || resourcePackData.name,
+                    minecraftVersion: manifest.minecraftVersion,
+                    source: manifest.source || 'modrinth',
+                    installationDate: manifest.installedAt || manifest.installationDate,
+                    lastUpdated: manifest.lastUpdated,
+                    installedAt: manifest.installedAt || manifest.installationDate
+                  };
+                  
+                  logger.debug(`Resource pack manifest data for ${file}:`, {
+                    category: 'core',
+                    data: {
+                      manifestPath: manifestPath,
+                      installedAt: manifest.installedAt,
+                      installationDate: manifest.installationDate,
+                      lastUpdated: manifest.lastUpdated,
+                      finalInstallationDate: resourcePackData.installationDate,
+                      versionNumber: manifest.versionNumber || manifest.version,
+                      projectId: manifest.projectId,
+                      name: manifest.name
+                    }
+                  });
+                  
+                  manifestFound = true;
+                  break;
+                }
+              }
+            } catch {
+              // Continue to next manifest path
+            }
+          }
+
+          // If no manifest found, try to extract version information from the resource pack file itself
+          if (!manifestFound) {
+            try {
+              const metadata = await modFileManager.readModMetadataFromJar(filePath);
+              
+              if (metadata && metadata.versionNumber) {
+                resourcePackData = {
+                  ...resourcePackData,
+                  versionNumber: metadata.versionNumber,
+                  projectId: metadata.projectId,
+                  name: metadata.name || resourcePackData.name,
+                  minecraftVersion: metadata.minecraftVersion,
+                  source: 'modrinth' // Default source
+                };
+              } else {
+                // Try to extract version from filename as fallback
+                const versionFromFilename = extractVersionFromFilename(file);
+                if (versionFromFilename) {
+                  resourcePackData.versionNumber = versionFromFilename;
+                } else {
+                  // For resource packs without version info, set a placeholder
+                  resourcePackData.versionNumber = 'Unknown';
+                }
+              }
+            } catch {
+              // If metadata extraction fails, set placeholder version
+              resourcePackData.versionNumber = 'Unknown';
+            }
+          }
+
+          resourcePacks.push(resourcePackData);
+        }
+        
+        logger.info('Server resource packs listed successfully', {
+          category: 'mods',
+          data: {
+            handler: 'list-resourcepacks',
+            serverPath: serverPath,
+            resourcePackCount: resourcePacks.length
+          }
+        });
+        
+        const response = { resourcePackFiles: resourcePackFiles, mods: resourcePacks };
+        logger.debug('Returning resource pack data:', {
+          category: 'mods',
+          data: {
+            handler: 'list-resourcepacks',
+            resourcePackFilesCount: resourcePackFiles.length,
+            modsCount: resourcePacks.length,
+            sampleResourcePack: resourcePacks[0] || null
+          }
+        });
+        return response;
+      } catch (error) {
+        logger.error(`Failed to list server resource packs: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'list-resourcepacks',
+            serverPath: serverPath,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'delete-shader': async (_e, serverPath, shaderName) => {
+      logger.debug('Deleting server shader', {
+        category: 'mods',
+        data: {
+          handler: 'delete-shader',
+          serverPath: serverPath,
+          shaderName: shaderName
+        }
+      });
+
+      try {
+        const shadersPath = path.join(serverPath, 'client', 'shaderpacks');
+        const shaderPath = path.join(shadersPath, shaderName);
+        
+        if (fs.existsSync(shaderPath)) {
+          fs.unlinkSync(shaderPath);
+          
+          logger.info('Server shader deleted successfully', {
+            category: 'mods',
+            data: {
+              handler: 'delete-shader',
+              serverPath: serverPath,
+              shaderName: shaderName
+            }
+          });
+          
+          return { success: true, deletedFrom: [shaderPath] };
+        } else {
+          logger.warn('Shader file not found for deletion', {
+            category: 'mods',
+            data: {
+              handler: 'delete-shader',
+              serverPath: serverPath,
+              shaderName: shaderName,
+              shaderPath: shaderPath
+            }
+          });
+          
+          return { success: true, deletedFrom: 'not_found' };
+        }
+      } catch (error) {
+        logger.error(`Failed to delete server shader: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'delete-shader',
+            serverPath: serverPath,
+            shaderName: shaderName,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'delete-resourcepack': async (_e, serverPath, resourcePackName) => {
+      logger.debug('Deleting server resource pack', {
+        category: 'mods',
+        data: {
+          handler: 'delete-resourcepack',
+          serverPath: serverPath,
+          resourcePackName: resourcePackName
+        }
+      });
+
+      try {
+        const resourcePacksPath = path.join(serverPath, 'client', 'resourcepacks');
+        const resourcePackPath = path.join(resourcePacksPath, resourcePackName);
+        
+        if (fs.existsSync(resourcePackPath)) {
+          fs.unlinkSync(resourcePackPath);
+          
+          logger.info('Server resource pack deleted successfully', {
+            category: 'mods',
+            data: {
+              handler: 'delete-resourcepack',
+              serverPath: serverPath,
+              resourcePackName: resourcePackName
+            }
+          });
+          
+          return { success: true, deletedFrom: [resourcePackPath] };
+        } else {
+          logger.warn('Resource pack file not found for deletion', {
+            category: 'mods',
+            data: {
+              handler: 'delete-resourcepack',
+              serverPath: serverPath,
+              resourcePackName: resourcePackName,
+              resourcePackPath: resourcePackPath
+            }
+          });
+          
+          return { success: true, deletedFrom: 'not_found' };
+        }
+      } catch (error) {
+        logger.error(`Failed to delete server resource pack: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'delete-resourcepack',
+            serverPath: serverPath,
+            resourcePackName: resourcePackName,
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+    },
+
+    'install-shader-with-fallback': async (_e, serverPath, shaderDetails) => {
+      const startTime = Date.now();
+      
+      logger.info('SHADER INSTALL: Starting shader installation', {
+        category: 'mods',
+        data: {
+          handler: 'install-shader-with-fallback',
+          serverPath: serverPath,
+          shaderName: shaderDetails?.name,
+          shaderId: shaderDetails?.id,
+          shaderDetails: JSON.stringify(shaderDetails, null, 2)
+        }
+      });
+
+      try {
+        // Modify shader details to specify it's a shader
+        const modifiedShaderDetails = {
+          ...shaderDetails,
+          contentType: 'shaders',
+          targetDirectory: 'shaderpacks'
+        };
+        
+        logger.info('SHADER INSTALL: Calling mod install service with modified details', {
+          category: 'mods',
+          data: {
+            handler: 'install-shader-with-fallback',
+            modifiedDetails: JSON.stringify(modifiedShaderDetails, null, 2)
+          }
+        });
+        
+        // First install using the regular mod install service
+        const result = await modInstallService.installModToServer(win, serverPath, modifiedShaderDetails);
+        
+        logger.info('SHADER INSTALL: Result from mod service', {
+          category: 'mods',
+          data: {
+            handler: 'install-shader-with-fallback',
+            success: result?.success,
+            filePath: result?.filePath,
+            hasResult: !!result,
+            fullResult: JSON.stringify(result, null, 2)
+          }
+        });
+        
+        // No need to move files anymore since they're installed directly in client/shaderpacks
+        if (result && result.success) {
+          logger.info('Shader installed successfully to client/shaderpacks', {
+            category: 'mods',
+            data: {
+              handler: 'install-shader-with-fallback',
+              filePath: result.filePath,
+              shaderName: shaderDetails.name
+            }
+          });
+        }
+        
+        logger.info('Shader installation completed', {
+          category: 'mods',
+          data: {
+            handler: 'install-shader-with-fallback',
+            serverPath: serverPath,
+            shaderName: shaderDetails?.name,
+            success: result?.success,
+            duration: Date.now() - startTime
+          }
+        });
+
+        return result;
+      } catch (error) {
+        logger.error(`Shader installation failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'install-shader-with-fallback',
+            serverPath: serverPath,
+            shaderName: shaderDetails?.name,
+            error: error.message,
+            duration: Date.now() - startTime
+          }
+        });
+        throw error;
+      }
+    },
+
+    'install-resourcepack-with-fallback': async (_e, serverPath, resourcePackDetails) => {
+      const startTime = Date.now();
+      
+      logger.info('RESOURCEPACK INSTALL: Starting resource pack installation', {
+        category: 'mods',
+        data: {
+          handler: 'install-resourcepack-with-fallback',
+          serverPath: serverPath,
+          resourcePackName: resourcePackDetails?.name,
+          resourcePackId: resourcePackDetails?.id,
+          resourcePackDetails: JSON.stringify(resourcePackDetails, null, 2)
+        }
+      });
+
+      try {
+        // Modify resource pack details to specify it's a resource pack
+        const modifiedResourcePackDetails = {
+          ...resourcePackDetails,
+          contentType: 'resourcepacks',
+          targetDirectory: 'resourcepacks'
+        };
+        
+        logger.info('RESOURCEPACK INSTALL: Calling mod install service with modified details', {
+          category: 'mods',
+          data: {
+            handler: 'install-resourcepack-with-fallback',
+            modifiedDetails: JSON.stringify(modifiedResourcePackDetails, null, 2)
+          }
+        });
+        
+        // First install using the regular mod install service
+        const result = await modInstallService.installModToServer(win, serverPath, modifiedResourcePackDetails);
+        
+        logger.info('RESOURCEPACK INSTALL: Result from mod service', {
+          category: 'mods',
+          data: {
+            handler: 'install-resourcepack-with-fallback',
+            success: result?.success,
+            filePath: result?.filePath,
+            hasResult: !!result,
+            fullResult: JSON.stringify(result, null, 2)
+          }
+        });
+        
+        logger.info('Resource pack installation completed', {
+          category: 'mods',
+          data: {
+            handler: 'install-resourcepack-with-fallback',
+            serverPath: serverPath,
+            resourcePackName: resourcePackDetails?.name,
+            success: result?.success,
+            duration: Date.now() - startTime
+          }
+        });
+
+        return result;
+      } catch (error) {
+        logger.error(`Resource pack installation failed: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'install-resourcepack-with-fallback',
+            serverPath: serverPath,
+            resourcePackName: resourcePackDetails?.name,
+            error: error.message,
+            duration: Date.now() - startTime
+          }
+        });
+        throw error;
       }
     }
   };

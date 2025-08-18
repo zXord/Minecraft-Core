@@ -277,7 +277,7 @@ function filterModsByEnvironment(mods, environmentType = 'all') {
 }
 
 /**
- * Get popular mods from Modrinth
+ * Get popular content from Modrinth
  * 
  * @param {Object} options - Search options
  * @param {string} options.loader - Mod loader (fabric, forge, etc.)
@@ -286,9 +286,10 @@ function filterModsByEnvironment(mods, environmentType = 'all') {
  * @param {number} options.limit - Results per page
  * @param {string} options.sortBy - Sort method (popular, recent, downloads, name)
  * @param {string} [options.environmentType='all'] - Filter by environment type ('all', 'client', 'server', 'both')
- * @returns {Promise<Object>} Object with mods array and pagination info
+ * @param {string} [options.projectType='mod'] - Project type ('mod', 'shader', 'resourcepack')
+ * @returns {Promise<Object>} Object with content array and pagination info
  */
-async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
+async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all', projectType = 'mod' }) {
   const requestStartTime = Date.now();
   
   logger.info('Fetching popular mods from Modrinth', {
@@ -301,7 +302,8 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
       page,
       limit,
       sortBy,
-      environmentType
+      environmentType,
+      projectType
     }
   });
   
@@ -312,6 +314,12 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
   
   // Build the facets array
   const facets = [];
+  
+  // Add project type facet
+  if (projectType) {
+    facets.push([`project_type:${projectType}`]);
+  }
+  
   if (loader) {
     facets.push([`categories:${loader}`]);
   }
@@ -451,7 +459,7 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
 }
 
 /**
- * Search for mods on Modrinth
+ * Search for content on Modrinth
  * 
  * @param {Object} options - Search options
  * @param {string} options.query - Search query
@@ -461,9 +469,10 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
  * @param {number} options.limit - Number of results per page
  * @param {string} [options.sortBy='relevance'] - Sort by option
  * @param {string} [options.environmentType='all'] - Filter by environment type ('all', 'client', 'server', 'both')
- * @returns {Promise<Object>} Object with mods array and pagination info
+ * @param {string} [options.projectType='mod'] - Project type ('mod', 'shader', 'resourcepack')
+ * @returns {Promise<Object>} Object with content array and pagination info
  */
-async function searchModrinthMods({ query, loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all' }) {
+async function searchModrinthMods({ query, loader, version, page = 1, limit = 20, sortBy = 'relevance', environmentType = 'all', projectType = 'mod' }) {
   const searchStartTime = Date.now();
   
   logger.info('Searching mods on Modrinth', {
@@ -477,7 +486,8 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
       page,
       limit,
       sortBy,
-      environmentType
+      environmentType,
+      projectType
     }
   });
   
@@ -489,6 +499,12 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   
   // Build the facets array
   const facets = [];
+  
+  // Add project type facet
+  if (projectType) {
+    facets.push([`project_type:${projectType}`]);
+  }
+  
   if (loader) {
     facets.push([`categories:${loader}`]);
   }
@@ -933,8 +949,8 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
   let compatibleVersions = versions;
   const originalCount = versions.length;
   
-  if (loader) {
-    compatibleVersions = compatibleVersions.filter(v => v.loaders.includes(loader));
+  if (loader && loader !== null) {
+    compatibleVersions = compatibleVersions.filter(v => v.loaders && v.loaders.includes(loader));
   }
   
   if (gameVersion) {
@@ -1135,6 +1151,42 @@ async function getLatestModrinthVersionInfo(projectId, gameVersion, loader) {
 }
 
 /**
+ * Lookup Modrinth version by file hash
+ * Docs: GET /version_file/{hash}
+ * Hash algorithm: sha1 (recommended), sha512 supported but we use sha1 here
+ * @param {string} hashHex - file hash in hex
+ * @param {'sha1'|'sha512'} algorithm
+ * @returns {Promise<Object|null>} Version JSON or null if not found
+ */
+async function getModrinthVersionByFileHash(hashHex, algorithm = 'sha1') {
+  if (!hashHex) return null;
+  await rateLimit();
+  return await retryWithBackoff(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(`${MODRINTH_API}/version_file/${hashHex}?algorithm=${algorithm}`, {
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (response.status === 404) {
+        return null;
+      }
+      if (!response.ok) {
+        throw new Error(`Modrinth API error: ${response.status}`);
+      }
+      return await response.json();
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error(`API timeout for version_file ${algorithm}:${hashHex.substring(0,8)}...`);
+      }
+      throw error;
+    }
+  });
+}
+
+/**
  * Get popular mods from CurseForge
  * 
  * @param {Object} options - Search options
@@ -1209,6 +1261,7 @@ module.exports = {
   getModrinthVersions,
   getModrinthVersionInfo,
   getLatestModrinthVersionInfo,
+  getModrinthVersionByFileHash,
   getCurseForgePopular,
   searchCurseForgeMods,
   getCurseForgeDownloadUrl

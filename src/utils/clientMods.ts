@@ -77,7 +77,7 @@ export async function loadModsFromServer(instance: Instance) {
       return;
     }
     connectionStatus.set('connected');
-    const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
+  const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
     const serverInfoResponse = await fetch(serverInfoUrl, { method: 'GET', signal: AbortSignal.timeout(10000) }); // Increased timeout
     if (serverInfoResponse.ok) {
       const serverInfo = await serverInfoResponse.json();
@@ -122,6 +122,8 @@ export async function loadModsFromServer(instance: Instance) {
         }
         if (instance.path) {
           await checkModSynchronization(instance);
+          // Intentionally do NOT auto-download shaders/resource packs here.
+          // Asset synchronization is now user-initiated from the Play tab, similar to mods.
         }
       }
     }
@@ -247,6 +249,7 @@ export async function downloadRequiredMods(instance: Instance) {
     setTimeout(() => errorMessage.set(''), 5000);
   }
 }
+
 
 export async function acknowledgeAllDependencies(instance: Instance) {
   const status = get(modSyncStatus);

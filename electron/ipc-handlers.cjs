@@ -23,6 +23,7 @@ const { createUpdateHandlers } = require('./ipc/update-handlers.cjs');
 const { createMetricsHandlers } = require('./ipc/metrics-handlers.cjs');
 const { getLoggerHandlers } = require('./ipc/logger-handlers.cjs');
 const { createErrorMonitoringHandlers } = require('./ipc/error-monitoring-handlers.cjs');
+const { createUtilityHandlers } = require('./ipc/utility-handlers.cjs');
 
 // Import auto-restart services for the one remaining handler
 const {
@@ -61,6 +62,7 @@ function setupIpcHandlers(win) {
     const updateHandlers = createUpdateHandlers(win);
     const metricsHandlers = createMetricsHandlers();
     const errorMonitoringHandlers = createErrorMonitoringHandlers(win);
+  const utilityHandlers = createUtilityHandlers(win);
     
     // Initialize logger handlers (singleton, no creation needed)
     const loggerHandlers = getLoggerHandlers();
@@ -95,7 +97,8 @@ function setupIpcHandlers(win) {
       serverJavaHandlers,
       updateHandlers,
       metricsHandlers,
-      errorMonitoringHandlers,
+  errorMonitoringHandlers,
+  utilityHandlers,
       loggerHandlers
     ].forEach((handlers) => {
       if (!handlers) {

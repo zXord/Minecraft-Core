@@ -7,6 +7,8 @@ const modFileManager = require('../mod-utils/mod-file-manager.cjs');
 const modAnalysisUtils = require('../mod-utils/mod-analysis-utils.cjs');
 const { checkModCompatibilityFromFilename } = require('./mod-handler-utils.cjs');
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
+const modApiService = require('../../services/mod-api-service.cjs');
+const crypto = require('crypto');
 
 function createClientModHandlers(win) {
   const logger = getLoggerHandlers();
@@ -56,6 +58,248 @@ function createClientModHandlers(win) {
           }
         });
         throw error;
+      }
+    },
+
+    // List client assets (shaderpacks or resourcepacks)
+    'list-client-assets': async (_e, { clientPath, type }) => {
+      logger.debug('Listing client assets', {
+        category: 'mods',
+        data: { handler: 'list-client-assets', clientPath, type }
+      });
+      try {
+        if (!clientPath || !type) throw new Error('Invalid parameters');
+        const subdir = type === 'shaderpacks' ? 'shaderpacks' : 'resourcepacks';
+        const dir = path.join(clientPath, subdir);
+        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        if (!fs.existsSync(dir)) {
+          return { success: true, type: subdir, items: [] };
+        }
+        // Simple version extractor from filename, e.g., "name-1.2.3.zip" or "name v1.2.zip"
+        function extractVersionFromFilename(fileName) {
+          if (!fileName) return null;
+          const base = fileName.replace(/\.(zip|jar)$/i, '');
+          // Look for x.y or x.y.z patterns possibly prefixed by v or r
+          const match = base.match(/(?:r|v|version)?\s*(\d+\.\d+(?:\.\d+)?)/i);
+          return match ? match[1] : null;
+        }
+  const all = fs.readdirSync(dir);
+        // Consider .zip, .zip.disabled; also allow directories for resourcepacks
+        const items = [];
+        for (const name of all) {
+          const lower = name.toLowerCase();
+          const full = path.join(dir, name);
+          const isZip = lower.endsWith('.zip') || lower.endsWith('.zip.disabled');
+          const isDir = !isZip && fs.existsSync(full) && fs.statSync(full).isDirectory();
+          if (!isZip && !isDir) continue;
+
+          const fileName = name.replace(/\.disabled$/i, '');
+          const enabled = !lower.endsWith('.disabled');
+          const statPath = enabled ? full : full.replace(/\.disabled$/i, '');
+          let size = 0; let lastModified = null;
+          try {
+            const st = fs.statSync(statPath);
+            size = st.size || 0;
+            lastModified = st.mtime;
+          } catch (err) {
+            // Ignore stat errors for missing/invalid files
+            logger.debug('Stat error while listing client assets', {
+              category: 'mods',
+              data: { handler: 'list-client-assets', file: statPath, error: err?.message }
+            });
+          }
+          let source = 'manual';
+          let projectId = null;
+          let versionId = null;
+          let versionNumber = null;
+          let manifestName = null;
+          const manifestPath = path.join(manifestDir, `${fileName}.json`);
+          if (fs.existsSync(manifestPath)) {
+            try {
+              const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+              if (manifest && manifest.source) source = manifest.source;
+        if (manifest && manifest.projectId) projectId = manifest.projectId;
+        if (manifest && manifest.versionId) versionId = manifest.versionId;
+        if (manifest && (manifest.versionNumber || manifest.version)) versionNumber = manifest.versionNumber || manifest.version;
+              if (manifest && (manifest.name || manifest.title)) manifestName = manifest.name || manifest.title;
+            } catch (err) {
+              // Ignore manifest parse errors
+              logger.debug('Manifest parse error for client asset', {
+                category: 'mods',
+                data: { handler: 'list-client-assets', manifestPath, error: err?.message }
+              });
+            }
+          }
+          // Fallback: derive version from filename if manifest didn't provide one
+          if (!versionNumber) {
+            const derived = extractVersionFromFilename(fileName);
+            if (derived) versionNumber = derived;
+          }
+
+          // If we still lack projectId or version, try to resolve via Modrinth by file hash (sha1)
+          if ((!versionNumber || !projectId) && (isZip || isDir)) {
+            try {
+              const hashPath = fs.existsSync(full) ? full : (fs.existsSync(statPath) ? statPath : null);
+              if (hashPath && fs.existsSync(hashPath) && fs.statSync(hashPath).isFile()) {
+                // Compute sha1 of the file
+                const sha1 = (() => {
+                  const hash = crypto.createHash('sha1');
+                  const stream = fs.createReadStream(hashPath);
+                  return new Promise((resolve, reject) => {
+                    stream.on('data', (chunk) => hash.update(chunk));
+                    stream.on('end', () => resolve(hash.digest('hex')));
+                    stream.on('error', (err) => reject(err));
+                  });
+                })();
+                let sha1Hex = null;
+                try { sha1Hex = await sha1; } catch (e) {
+                  logger.debug('SHA1 computation failed', { category: 'mods', data: { handler: 'list-client-assets', subdir, fileName, error: e?.message } });
+                }
+                if (sha1Hex) {
+                  try {
+                    const ver = await modApiService.getModrinthVersionByFileHash(sha1Hex, 'sha1');
+                    if (ver && ver.id) {
+                      versionId = ver.id;
+                      versionNumber = ver.version_number || ver.versionNumber || versionNumber;
+                      projectId = ver.project_id || ver.projectId || projectId;
+                      manifestName = manifestName || ver.name || ver.title || manifestName;
+                      // Persist enrichment
+                      try {
+                        const existing = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : {};
+                        const updated = {
+                          ...existing,
+                          projectId: projectId || existing.projectId || null,
+                          versionId: versionId || existing.versionId || null,
+                          versionNumber: versionNumber || existing.versionNumber || null,
+                          name: manifestName || existing.name || null,
+                          source: existing.source || source
+                        };
+                        fs.writeFileSync(manifestPath, JSON.stringify(updated, null, 2));
+                        logger.debug('Enriched asset manifest via hash lookup', {
+                          category: 'mods',
+                          data: { handler: 'list-client-assets', subdir, fileName, projectId: updated.projectId, versionId: updated.versionId, versionNumber: updated.versionNumber }
+                        });
+                      } catch (persistErr) {
+                        logger.debug('Failed to persist manifest after hash enrichment', {
+                          category: 'mods',
+                          data: { handler: 'list-client-assets', subdir, fileName, error: persistErr?.message }
+                        });
+                      }
+                    }
+                  } catch (hashLookupErr) {
+                    logger.debug('Modrinth hash lookup failed or no match', {
+                      category: 'mods',
+                      data: { handler: 'list-client-assets', subdir, fileName, error: hashLookupErr?.message }
+                    });
+                  }
+                }
+              }
+            } catch (hashErr) {
+              logger.debug('Error computing file hash for asset', {
+                category: 'mods',
+                data: { handler: 'list-client-assets', subdir, fileName, error: hashErr?.message }
+              });
+            }
+          }
+
+          // If manifest is missing projectId, try to enrich via Modrinth search and persist
+          if (!projectId) {
+            try {
+              const baseNoExt = fileName.replace(/\.(zip|jar)$/i, '');
+              const cleanedBase = baseNoExt
+                .replace(/(?:[-_\s])?(?:r\d+(?:\.\d+)*)$/i, '')
+                .replace(/(?:[-_\s])?(?:v?\d+(?:\.\d+)*)$/i, '')
+                .replace(/(?:[-_\s])?mc[_-]?\d+(?:\.\d+)*$/i, '')
+                .replace(/[_-]+/g, ' ')
+                .trim();
+              const projectType = subdir === 'shaderpacks' ? 'shader' : 'resourcepack';
+              const res = await modApiService.searchModrinthMods({
+                query: cleanedBase || baseNoExt,
+                loader: null,
+                version: null,
+                page: 1,
+                limit: 5,
+                sortBy: 'relevance',
+                environmentType: 'client',
+                projectType
+              });
+              if (res && Array.isArray(res.mods) && res.mods.length) {
+                const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+                const target = norm(cleanedBase || baseNoExt);
+                let best = res.mods[0];
+                let bestScore = 0;
+                for (const m of res.mods) {
+                  const n1 = norm(m.name);
+                  const n2 = norm(m.slug);
+                  let score = 0;
+                  if (n1 === target || n2 === target) score = 3;
+                  else if (n1.includes(target) || target.includes(n1)) score = 2;
+                  else if (n2.includes(target) || target.includes(n2)) score = 2;
+                  else if (n1 && target && n1[0] === target[0]) score = 1;
+                  if (score > bestScore) { best = m; bestScore = score; }
+                }
+                if (best) {
+                  projectId = best.id || best.project_id || null;
+                  manifestName = manifestName || best.name || best.title || null;
+                  // Persist enrichment back to manifest for future reads
+                  try {
+                    const existing = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : {};
+                    const updated = { ...existing, projectId, name: manifestName };
+                    fs.writeFileSync(manifestPath, JSON.stringify(updated, null, 2));
+                    logger.debug('Enriched asset manifest with projectId', {
+                      category: 'mods',
+                      data: { handler: 'list-client-assets', subdir, fileName, projectId }
+                    });
+                  } catch (persistErr) {
+                    logger.debug('Failed to persist enriched asset manifest', {
+                      category: 'mods',
+                      data: { handler: 'list-client-assets', subdir, fileName, error: persistErr?.message }
+                    });
+                  }
+                }
+              }
+            } catch (enrichErr) {
+              logger.debug('Asset enrichment lookup failed', {
+                category: 'mods',
+                data: { handler: 'list-client-assets', subdir, fileName, error: enrichErr?.message }
+              });
+            }
+          }
+          // Debug: show how version was determined
+          try {
+            logger.debug('Asset version resolution', {
+              category: 'mods',
+              data: {
+                handler: 'list-client-assets',
+                subdir,
+                fileName,
+                fromManifest: !!fs.existsSync(manifestPath),
+                versionFromManifest: !!(versionNumber && fs.existsSync(manifestPath)),
+                versionNumber: versionNumber || null,
+                projectId: projectId || null
+              }
+            });
+          } catch {
+            // ignore logging errors
+          }
+          // Calculate checksum for reliable server vs client comparison (md5)
+          let checksum = null;
+          try {
+            if (fs.existsSync(statPath) && fs.statSync(statPath).isFile()) {
+              checksum = require('../../services/minecraft-launcher/utils.cjs').calculateFileChecksum(statPath);
+            }
+          } catch {
+            checksum = null;
+          }
+          items.push({ fileName, enabled, size, lastModified, source, projectId, versionId, versionNumber, name: manifestName, checksum });
+        }
+        return { success: true, type: subdir, items };
+      } catch (error) {
+        logger.error(`Failed to list client assets: ${error.message}`, {
+          category: 'mods',
+          data: { handler: 'list-client-assets', errorType: error.constructor.name }
+        });
+        return { success: false, error: error.message };
       }
     },
 
@@ -327,7 +571,7 @@ function createClientModHandlers(win) {
           name: modInfo.name,
           fileName: newFileName,
           versionNumber: modInfo.newVersion || modInfo.version || '',
-          updatedAt: new Date().toISOString()
+          lastUpdated: new Date().toISOString()
         };
       }
       manifest.fileName = newFileName;
@@ -336,7 +580,7 @@ function createClientModHandlers(win) {
       } else if (modInfo.version) {
         manifest.versionNumber = modInfo.version;
       }
-      manifest.updatedAt = new Date().toISOString();
+      manifest.lastUpdated = new Date().toISOString();
       await fs.promises.writeFile(newManifestPath, JSON.stringify(manifest, null, 2));
       if (oldManifestPath !== newManifestPath) {
         await fs.promises.unlink(oldManifestPath).catch(() => {});
@@ -524,14 +768,14 @@ function createClientModHandlers(win) {
               name: modToUpdate.name,
               fileName: newFileName,
               versionNumber: (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) || '',
-              updatedAt: new Date().toISOString()
+              lastUpdated: new Date().toISOString()
             };
           }
           manifest.fileName = newFileName;
           if (modToUpdate.newVersionDetails && modToUpdate.newVersionDetails.versionNumber) {
             manifest.versionNumber = modToUpdate.newVersionDetails.versionNumber;
           }
-          manifest.updatedAt = new Date().toISOString();
+          manifest.lastUpdated = new Date().toISOString();
           await fs.promises.writeFile(newManifestPath, JSON.stringify(manifest, null, 2));
           if (oldManifestPath !== newManifestPath) {
             await fs.promises.unlink(oldManifestPath).catch(() => {});
@@ -986,12 +1230,12 @@ function createClientModHandlers(win) {
                 name: update.name,
                 fileName: newFileName, // Use new filename
                 versionNumber: update.newVersion,
-                updatedAt: new Date().toISOString(),
+                lastUpdated: new Date().toISOString(),
                 minecraftVersion: minecraftVersion
               };
             }            // Update manifest with new version info but preserve filename consistency
             manifest.versionNumber = update.newVersion;
-            manifest.updatedAt = new Date().toISOString();
+            manifest.lastUpdated = new Date().toISOString();
             manifest.minecraftVersion = minecraftVersion;
             manifest.fileName = newFileName; // Keep consistent with original filename
             // Ensure we preserve the Modrinth projectId for API compatibility

@@ -39,6 +39,12 @@ function validateModStoreData(data, storeName) {
       case 'installedMods':
       case 'installedModInfo':
       case 'searchResults':
+      case 'shaderResults':
+      case 'resourcePackResults':
+      case 'installedShaders':
+      case 'installedResourcePacks':
+      case 'installedShaderInfo':
+      case 'installedResourcePackInfo':
         if (!Array.isArray(data)) {
           logger.warn('Mod store array data is not an array', {
             category: 'mods',
@@ -144,6 +150,12 @@ function recoverModStoreData(corruptedData, storeName) {
       case 'installedMods':
       case 'installedModInfo':
       case 'searchResults':
+      case 'shaderResults':
+      case 'resourcePackResults':
+      case 'installedShaders':
+      case 'installedResourcePacks':
+      case 'installedShaderInfo':
+      case 'installedResourcePackInfo':
         recoveredData = Array.isArray(corruptedData) ? corruptedData : [];
         break;
       case 'modVersionsCache':
@@ -209,6 +221,12 @@ function recoverModStoreData(corruptedData, storeName) {
       case 'installedMods':
       case 'installedModInfo':
       case 'searchResults':
+      case 'shaderResults':
+      case 'resourcePackResults':
+      case 'installedShaders':
+      case 'installedResourcePacks':
+      case 'installedShaderInfo':
+      case 'installedResourcePackInfo':
         return [];
       case 'modVersionsCache':
       case 'installedModVersionsCache':
@@ -428,6 +446,71 @@ const filterModLoader = createEnhancedModStore('fabric', 'filterModLoader');
 
 // Store for mod categories and requirement status with enhanced logging
 const modCategories = createEnhancedModStore(new Map(), 'modCategories'); // Map of modId -> { category: string, required: boolean }
+
+// Content type stores for shaders and resource packs
+const activeContentType = createEnhancedModStore('mods', 'activeContentType');
+const shaderResults = createEnhancedModStore([], 'shaderResults');
+const resourcePackResults = createEnhancedModStore([], 'resourcePackResults');
+const installedShaders = createEnhancedModStore([], 'installedShaders');
+const installedResourcePacks = createEnhancedModStore([], 'installedResourcePacks');
+
+// Content type switching performance optimization stores
+const contentTypeSwitching = createEnhancedModStore(false, 'contentTypeSwitching');
+const contentTypeCache = createEnhancedModStore(new Map(), 'contentTypeCache');
+const contentTypeRetryCount = createEnhancedModStore(new Map(), 'contentTypeRetryCount');
+
+// Installed ID stores for different content types
+const installedShaderIds = createEnhancedModStore(new SvelteSet(), 'installedShaderIds');
+const installedResourcePackIds = createEnhancedModStore(new SvelteSet(), 'installedResourcePackIds');
+
+// Installed info stores for different content types (similar to installedModInfo)
+const installedShaderInfo = createEnhancedModStore([], 'installedShaderInfo');
+const installedResourcePackInfo = createEnhancedModStore([], 'installedResourcePackInfo');
+
+// Content type configuration objects
+export const CONTENT_TYPES = {
+  MODS: 'mods',
+  SHADERS: 'shaders',
+  RESOURCE_PACKS: 'resourcepacks'
+};
+
+export const contentTypeConfigs = {
+  [CONTENT_TYPES.MODS]: {
+    id: CONTENT_TYPES.MODS,
+    label: 'Mods',
+    icon: '🧩',
+    searchEndpoint: 'search-mods',
+    installDirectory: 'mods',
+    fileExtensions: ['.jar'],
+    resultsStore: 'searchResults',
+    installedStore: 'installedMods',
+    installedIdsStore: 'installedModIds'
+  },
+  [CONTENT_TYPES.SHADERS]: {
+    id: CONTENT_TYPES.SHADERS,
+    label: 'Shaders',
+    icon: '✨',
+    searchEndpoint: 'search-shaders',
+    installDirectory: 'shaderpacks',
+    fileExtensions: ['.zip'],
+    resultsStore: 'shaderResults',
+    installedStore: 'installedShaders',
+    installedIdsStore: 'installedShaderIds',
+    installedInfoStore: 'installedShaderInfo'
+  },
+  [CONTENT_TYPES.RESOURCE_PACKS]: {
+    id: CONTENT_TYPES.RESOURCE_PACKS,
+    label: 'Resource Packs',
+    icon: '🎨',
+    searchEndpoint: 'search-resourcepacks',
+    installDirectory: 'resourcepacks',
+    fileExtensions: ['.zip'],
+    resultsStore: 'resourcePackResults',
+    installedStore: 'installedResourcePacks',
+    installedIdsStore: 'installedResourcePackIds',
+    installedInfoStore: 'installedResourcePackInfo'
+  }
+};
 
 // Download states enum for enhanced download tracking
 export const DOWNLOAD_STATES = {
@@ -914,46 +997,87 @@ export function getDownloadStatistics(allDownloads) {
 
 // Version comparison helper function
 function compareVersions(versionA, versionB) {
+  // Robust comparator that understands:
+  // - Alphanumeric suffixes in segments (e.g., 1.2a > 1.2, 1.2b > 1.2a)
+  // - Pre-release markers ("-rc1", "-beta") are lower than release (1.2-rc1 < 1.2)
+  // - Trailing .0 segments do not make a version newer (1.2.0 == 1.2)
   if (!versionA || !versionB) return 0;
   if (versionA === versionB) return 0;
 
-  // Convert to arrays of version components
-  const partsA = versionA.split(/[.-]/).map(part => {
-    const num = parseInt(part, 10);
-    return isNaN(num) ? part : num;
-  });
+  const normalize = (v) => String(v).trim().replace(/^v/i, '');
+  const aStr = normalize(versionA);
+  const bStr = normalize(versionB);
 
-  const partsB = versionB.split(/[.-]/).map(part => {
-    const num = parseInt(part, 10);
-    return isNaN(num) ? part : num;
-  });
+  const splitPre = (v) => {
+    const idx = v.indexOf('-');
+    if (idx === -1) return { main: v, pre: null };
+    return { main: v.slice(0, idx), pre: v.slice(idx + 1) };
+  };
 
-  // Compare each part
-  const minLength = Math.min(partsA.length, partsB.length);
+  const tokenize = (seg) => {
+    // Split into numeric and alphabetic tokens: '2a10' -> [2, 'a', 10]
+    if (!seg) return [];
+    return seg.match(/\d+|[A-Za-z]+/g)?.map(t => (/^\d+$/.test(t) ? Number(t) : t.toLowerCase())) || [];
+  };
 
-  for (let i = 0; i < minLength; i++) {
-    const a = partsA[i];
-    const b = partsB[i];
+  const parse = (v) => {
+    const { main, pre } = splitPre(v);
+    const mainTokens = main.split('.').flatMap(tokenize);
+    const preTokens = pre ? pre.split('.').flatMap(tokenize) : null;
+    return { mainTokens, preTokens, hasPre: !!pre };
+  };
 
-    // If both are numbers, compare numerically
-    if (typeof a === 'number' && typeof b === 'number') {
-      if (a !== b) return a - b;
+  const a = parse(aStr);
+  const b = parse(bStr);
+
+  const len = Math.max(a.mainTokens.length, b.mainTokens.length);
+  for (let i = 0; i < len; i++) {
+    const at = a.mainTokens[i];
+    const bt = b.mainTokens[i];
+    if (at === undefined && bt === undefined) break;
+    if (at === undefined) {
+      // Remaining tokens in b: if all remaining are numeric zeros, treat equal; else b is newer
+      const rest = b.mainTokens.slice(i);
+      const allZero = rest.every(x => typeof x === 'number' && x === 0);
+      return allZero ? 0 : -1;
     }
-    // If both are strings, compare alphabetically
-    else if (typeof a === 'string' && typeof b === 'string') {
-      if (a !== b) return a.localeCompare(b);
+    if (bt === undefined) {
+      const rest = a.mainTokens.slice(i);
+      const allZero = rest.every(x => typeof x === 'number' && x === 0);
+      return allZero ? 0 : 1;
     }
-    // Numbers are considered greater than strings for this purpose
-    else if (typeof a === 'number') {
-      return 1;
+    if (typeof at === 'number' && typeof bt === 'number') {
+      if (at !== bt) return at > bt ? 1 : -1;
+    } else if (typeof at === 'string' && typeof bt === 'string') {
+      if (at !== bt) return at > bt ? 1 : -1;
     } else {
-      return -1;
+      // number vs string: number has higher precedence
+      return typeof at === 'number' ? 1 : -1;
     }
   }
 
-  // If we get here, one version might be a prefix of the other
-  // The longer one is considered newer (e.g., 1.0.1 > 1.0)
-  return partsA.length - partsB.length;
+  // If main tokens are equal, handle pre-release: absence of pre means higher precedence
+  if (a.hasPre && !b.hasPre) return -1;
+  if (!a.hasPre && b.hasPre) return 1;
+  if (!a.hasPre && !b.hasPre) return 0;
+
+  // Both have pre-release; compare their tokens
+  const maxPre = Math.max(a.preTokens.length, b.preTokens.length);
+  for (let i = 0; i < maxPre; i++) {
+    const at = a.preTokens[i];
+    const bt = b.preTokens[i];
+    if (at === undefined && bt === undefined) break;
+    if (at === undefined) return -1; // shorter pre is considered smaller
+    if (bt === undefined) return 1;
+    if (typeof at === 'number' && typeof bt === 'number') {
+      if (at !== bt) return at > bt ? 1 : -1;
+    } else if (typeof at === 'string' && typeof bt === 'string') {
+      if (at !== bt) return at > bt ? 1 : -1;
+    } else {
+      return typeof at === 'number' ? 1 : -1;
+    }
+  }
+  return 0;
 }
 
 // Lazy-loaded derived stores to avoid effect_orphan errors
@@ -1269,6 +1393,20 @@ export {
   filterMinecraftVersion,
   filterModLoader,
   modCategories,
+  // Content type stores
+  activeContentType,
+  shaderResults,
+  resourcePackResults,
+  installedShaders,
+  installedResourcePacks,
+  installedShaderIds,
+  installedResourcePackIds,
+  installedShaderInfo,
+  installedResourcePackInfo,
+  // Content type performance optimization stores
+  contentTypeSwitching,
+  contentTypeCache,
+  contentTypeRetryCount,
   // Derived store getters (lazy-loaded)
   getHasUpdates,
   getUpdateCount,

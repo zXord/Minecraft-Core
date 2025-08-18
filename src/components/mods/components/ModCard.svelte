@@ -5,7 +5,15 @@
     installingModIds, 
     expandedModId, 
     modsWithUpdates,
-    installedModInfo
+    installedModInfo,
+    activeContentType,
+    CONTENT_TYPES,
+    installedShaders,
+    installedResourcePacks,
+    installedShaderIds,
+    installedResourcePackIds,
+    installedShaderInfo,
+    installedResourcePackInfo
   } from '../../../stores/modStore.js';
   import { onMount } from 'svelte';
   
@@ -27,13 +35,93 @@
   let hasUpdate = false; // Add variable declaration for update status
   let updateInfo = null; // Add variable declaration for update information
   let updateVersionNumber = null; // Add variable declaration for update version number
-  $: isInstalled = $installedModIds.has(mod.id);
+  let isInstalled = false; // Add variable declaration for installed status
+  let installedModData = null; // Add variable declaration for installed content data
+  // Helper to normalize names/ids for fuzzy matching
+  function normalizeName(str) {
+    if (!str || typeof str !== 'string') return '';
+    return str
+      .toLowerCase()
+      .replace(/\.(zip|jar)$/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  // Determine installed status based on active content type (with fallbacks for shaders/resource packs)
+  $: {
+    let installedIds;
+    let installedInfoList;
+    let installedFileList;
+    switch ($activeContentType) {
+      case CONTENT_TYPES.SHADERS:
+        installedIds = $installedShaderIds;
+        installedInfoList = $installedShaderInfo;
+        installedFileList = $installedShaders;
+        break;
+      case CONTENT_TYPES.RESOURCE_PACKS:
+        installedIds = $installedResourcePackIds;
+        installedInfoList = $installedResourcePackInfo;
+        installedFileList = $installedResourcePacks;
+        break;
+      case CONTENT_TYPES.MODS:
+      default:
+        installedIds = $installedModIds;
+        installedInfoList = $installedModInfo;
+        installedFileList = [];
+        break;
+    }
+
+    // Primary: direct id/slug match in installed IDs
+    let installed = installedIds.has(mod.id) || (mod.slug && installedIds.has(mod.slug));
+
+    // Fallbacks for shaders/resource packs where IDs may be missing in installed set
+    if (!installed && installedInfoList && installedInfoList.length > 0) {
+      const targetSlug = normalizeName(mod.slug || '');
+      const targetName = normalizeName(mod.name || mod.title || '');
+      installed = installedInfoList.some((info) => {
+        const infoById = info.projectId && (info.projectId === mod.id);
+        if (infoById) return true;
+        const infoName = normalizeName(info.name || info.fileName || '');
+        return (targetSlug && infoName === targetSlug) || (targetName && infoName === targetName);
+      });
+    }
+
+    // Fallback to filename-only match when no info list (common for shaders/resourcepacks)
+    if (!installed && installedFileList && installedFileList.length > 0 && ($activeContentType !== CONTENT_TYPES.MODS)) {
+      const installedBaseNames = installedFileList.map((f) => normalizeName(f));
+      const targetSlug = normalizeName(mod.slug || '');
+      const targetName = normalizeName(mod.name || mod.title || '');
+      if (targetSlug) {
+        installed = installedBaseNames.includes(targetSlug);
+      }
+      if (!installed && targetName) {
+        installed = installedBaseNames.includes(targetName);
+      }
+    }
+
+    isInstalled = installed;
+  }
   $: isInstalling = $installingModIds.has(mod.id);
   $: isChangingVersion = isInstalled && selectedVersionId && selectedVersionId !== installedVersionId;
   
   
-  // Get installed mod information
-  $: installedModData = $installedModInfo.find(info => info.projectId === mod.id);
+  // Get installed content information based on active content type
+  $: {
+    let installedInfoStore;
+    switch ($activeContentType) {
+      case CONTENT_TYPES.SHADERS:
+        installedInfoStore = $installedShaderInfo;
+        break;
+      case CONTENT_TYPES.RESOURCE_PACKS:
+        installedInfoStore = $installedResourcePackInfo;
+        break;
+      case CONTENT_TYPES.MODS:
+      default:
+        installedInfoStore = $installedModInfo;
+        break;
+    }
+    installedModData = installedInfoStore.find(info => info.projectId === mod.id);
+  }
   $: installedVersionNumber = installedModData?.versionNumber || '';
   
   // Get update information if available - check both ways: direct mod ID and installed mod's filename
@@ -67,13 +155,13 @@
   $: {
     if (versions.length > 0) {
       // First, get all stable versions (non-alpha, non-beta)
-      unfilteredVersions = versions.filter(v => v.isStable !== false);
+      unfilteredVersions = versions.filter(v => v && v.isStable !== false);
       
-      if (filterMinecraftVersion) {
+      if (filterMinecraftVersion && filterMinecraftVersion !== "") {
         // Show versions compatible with selected Minecraft version
         // Use more lenient matching that includes versions likely to work
         const exactMatches = versions.filter(v => 
-          v.gameVersions.includes(filterMinecraftVersion) && v.isStable !== false
+          v && v.gameVersions && v.gameVersions.includes(filterMinecraftVersion) && v.isStable !== false
         );
         
         // If we have exact matches, use those
@@ -85,11 +173,32 @@
           if (mcVersionParts.length >= 2 && mcVersionParts[0] === '1') {
             const majorMinorPrefix = `${mcVersionParts[0]}.${mcVersionParts[1]}`;
             
-            // Find versions that match the major.minor version
+            // Find versions that match the major.minor version or are broadly compatible
             const likelyCompatible = versions.filter(v => {
-              return v.isStable !== false && v.gameVersions.some(gameVer => 
-                gameVer.startsWith(majorMinorPrefix)
-              );
+              if (!v || !v.gameVersions || v.isStable === false) return false;
+              
+              return v.gameVersions.some(gameVer => {
+                if (!gameVer) return false;
+                
+                // Check for exact major.minor match (e.g., "1.21" matches "1.21.4")
+                if (gameVer.startsWith(majorMinorPrefix)) return true;
+                
+                // Check for broader compatibility patterns
+                // e.g., "1.21.x", "1.21+", "1.21-1.22"
+                if (gameVer.includes(majorMinorPrefix)) return true;
+                
+                // For shaders/resource packs, be more lenient with version matching
+                // Check if it's a recent version that might be compatible
+                const gameVerParts = gameVer.split('.');
+                if (gameVerParts.length >= 2 && gameVerParts[0] === mcVersionParts[0]) {
+                  const gameMinor = parseInt(gameVerParts[1]);
+                  const targetMinor = parseInt(mcVersionParts[1]);
+                  // Allow versions within 2 minor versions (e.g., 1.19-1.21 for 1.21.4)
+                  return Math.abs(gameMinor - targetMinor) <= 2;
+                }
+                
+                return false;
+              });
             });
             
             if (likelyCompatible.length > 0) {
@@ -147,7 +256,7 @@
     let compatibleVersions = versions;
     if (filterMinecraftVersion) {
       const mcVersionSpecificVersions = versions.filter(v => 
-        v.gameVersions.includes(filterMinecraftVersion)
+        v && v.gameVersions && v.gameVersions.includes(filterMinecraftVersion)
       );
       if (mcVersionSpecificVersions.length > 0) {
         compatibleVersions = mcVersionSpecificVersions;
@@ -155,18 +264,18 @@
     }
     
     // Then try to find stable versions
-    const stableVersions = compatibleVersions.filter(v => v.isStable !== false);
+    const stableVersions = compatibleVersions.filter(v => v && v.isStable !== false);
     const versionsToUse = stableVersions.length > 0 ? stableVersions : compatibleVersions;
     
     // Sort by date (newest first)
     const sortedVersions = [...versionsToUse].sort((a, b) => {
-      const dateA = new Date(a.datePublished).getTime();
-      const dateB = new Date(b.datePublished).getTime();
+      const dateA = a && a.datePublished ? new Date(a.datePublished).getTime() : 0;
+      const dateB = b && b.datePublished ? new Date(b.datePublished).getTime() : 0;
       return dateB - dateA;
     });
     
     // Return the ID of the first (newest) version
-    return sortedVersions.length > 0 ? sortedVersions[0].id : null;
+    return sortedVersions.length > 0 && sortedVersions[0] ? sortedVersions[0].id : null;
   }
   
   /**
@@ -305,6 +414,132 @@
       return 'Unknown date';
     }
   }
+
+  /**
+   * Generate webpage URL for content based on its source and type
+   * @param {Object} mod - Content object (mod, shader, or resource pack)
+   * @returns {string|null} - Webpage URL or null if not available
+   */
+  function getModWebpageUrl(mod) {
+    if (!mod || !mod.source) return null;
+    
+    // Validate that we have the necessary identifiers
+    const identifier = mod.slug || mod.id;
+    if (!identifier) return null;
+    
+    if (mod.source === 'modrinth') {
+      // Determine the content type path for Modrinth
+      let contentPath = 'mod'; // default for mods
+      switch ($activeContentType) {
+        case CONTENT_TYPES.SHADERS:
+          contentPath = 'shader';
+          break;
+        case CONTENT_TYPES.RESOURCE_PACKS:
+          contentPath = 'resourcepack';
+          break;
+        case CONTENT_TYPES.MODS:
+        default:
+          contentPath = 'mod';
+          break;
+      }
+      return `https://modrinth.com/${contentPath}/${identifier}`;
+    } else if (mod.source === 'curseforge') {
+      // Determine the content type path for CurseForge
+      let contentPath = 'mc-mods'; // default for mods
+      switch ($activeContentType) {
+        case CONTENT_TYPES.SHADERS:
+          contentPath = 'shaders';
+          break;
+        case CONTENT_TYPES.RESOURCE_PACKS:
+          contentPath = 'texture-packs';
+          break;
+        case CONTENT_TYPES.MODS:
+        default:
+          contentPath = 'mc-mods';
+          break;
+      }
+      return `https://www.curseforge.com/minecraft/${contentPath}/${identifier}`;
+    }
+    
+    return null;
+  }
+
+  /**
+   * Validate a URL before attempting to open it
+   * @param {string} url - URL to validate
+   * @returns {boolean} - Whether the URL is valid
+   */
+  function isValidUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    
+    try {
+      const urlObj = new URL(url);
+      return urlObj.protocol === 'http:' || urlObj.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Handle opening mod webpage in external browser with enhanced error handling
+   * @param {Object} mod - Mod object
+   */
+  function openModWebpage(mod) {
+    const url = getModWebpageUrl(mod);
+    
+    if (!url) {
+      // No URL available for mod
+      // Show user feedback for missing URL
+      if (window.electron && window.electron.invoke) {
+        window.electron.invoke('show-error-dialog', {
+          title: 'Webpage Not Available',
+          message: `Unable to open webpage for "${mod?.name || 'this mod'}". The webpage URL is not available.`
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    // Validate URL before attempting to open
+    if (!isValidUrl(url)) {
+      // Invalid URL generated
+      if (window.electron && window.electron.invoke) {
+        window.electron.invoke('show-error-dialog', {
+          title: 'Invalid Webpage URL',
+          message: `The webpage URL for "${mod?.name || 'this mod'}" appears to be invalid.`
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    // Attempt to open URL with proper error handling
+    if (window.electron && window.electron.invoke) {
+      window.electron.invoke('open-external-url', url).catch(() => {
+        // Failed to open external URL
+        
+        // Show user feedback for failed URL opening
+        window.electron.invoke('show-error-dialog', {
+          title: 'Failed to Open Webpage',
+          message: `Unable to open the webpage for "${mod?.name || 'this mod'}". Please try again or visit the URL manually: ${url}`
+        }).catch(() => {});
+        
+        // Attempt fallback to window.open
+        try {
+          window.open(url, '_blank');
+        } catch {
+          // Fallback window.open also failed
+        }
+      });
+    } else {
+      // Fallback for when electron is not available
+      try {
+        window.open(url, '_blank');
+      } catch {
+        // Failed to open URL with window.open
+        // In non-electron environment, we can't show native dialogs
+        alert(`Failed to open webpage: ${url}`);
+      }
+    }
+  }
 </script>
 
 <div class="mod-card" class:has-warnings={mod.warnings && mod.warnings.length > 0} class:has-update={hasUpdate}>
@@ -410,6 +645,40 @@
     </button>
     
     <div class="mod-actions">
+      {#if getModWebpageUrl(mod) && isValidUrl(getModWebpageUrl(mod))}
+        <button
+          class="webpage-button"
+          title="View on {mod.source === 'modrinth' ? 'Modrinth' : mod.source === 'curseforge' ? 'CurseForge' : 'webpage'}"
+          aria-label="View on {mod.source === 'modrinth' ? 'Modrinth' : mod.source === 'curseforge' ? 'CurseForge' : 'webpage'}"
+          on:click={(e) => {
+            e.stopPropagation();
+            openModWebpage(mod);
+          }}
+          type="button"
+        >
+          <svg class="webpage-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+            <polyline points="15,3 21,3 21,9"></polyline>
+            <line x1="10" y1="14" x2="21" y2="3"></line>
+          </svg>
+        </button>
+      {:else if mod.source && (mod.source === 'modrinth' || mod.source === 'curseforge')}
+        <!-- Show disabled button with explanation when URL should be available but isn't -->
+        <button
+          class="webpage-button disabled"
+          title="Webpage not available for this {$activeContentType === CONTENT_TYPES.SHADERS ? 'shader' : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? 'resource pack' : 'mod'}"
+          aria-label="Webpage not available"
+          disabled
+          type="button"
+        >
+          <svg class="webpage-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+            <polyline points="15,3 21,3 21,9"></polyline>
+            <line x1="10" y1="14" x2="21" y2="3"></line>
+          </svg>
+        </button>
+      {/if}
+      
       <button
         class="install-button"
         class:installed={isInstalled && (!isChangingVersion || !expanded) && !hasUpdate}
@@ -453,7 +722,13 @@
         }}
       >
         {#if serverManaged}
-          Server Mod
+          {#if $activeContentType === CONTENT_TYPES.SHADERS}
+            Server Shader
+          {:else if $activeContentType === CONTENT_TYPES.RESOURCE_PACKS}
+            Server Resource Pack
+          {:else}
+            Server Mod
+          {/if}
         {:else if isInstalling}
           Installing...
         {:else if isInstalled}
@@ -481,19 +756,23 @@
         <div class="no-versions">
           No compatible versions for Minecraft {filterMinecraftVersion}
         </div>
-      {:else}        {#if filteredVersions.some(v => v.gameVersions.includes(filterMinecraftVersion))}
+      {:else}
+        {@const hasExactMatches = filteredVersions.some(v => v && v.gameVersions && v.gameVersions.includes(filterMinecraftVersion))}
+        
+        {#if !filterMinecraftVersion || filterMinecraftVersion === "" || hasExactMatches}
+          <!-- Show versions normally when no filter is applied or when we have exact matches -->
           <div class="version-list">
-            {#each filteredVersions as version (version.id)}
+            {#each filteredVersions.filter(v => v && v.id) as version (version.id)}
               <div
                 class="version-item"
                 class:selected={version.id === selectedVersionId}
                 class:installed-version={version.id === installedVersionId}
-                class:compatible={version.gameVersions.includes(filterMinecraftVersion)}
+                class:compatible={version && version.gameVersions && version.gameVersions.includes(filterMinecraftVersion)}
                 aria-selected={version.id === selectedVersionId}
               >
                 <div class="version-info">
                   <span class="version-name">{version.name || version.versionNumber}</span>
-                  <span class="version-mc">{version.gameVersions.join(', ')}</span>
+                  <span class="version-mc">{version.gameVersions ? version.gameVersions.join(', ') : 'Unknown'}</span>
                   {#if version.id === installedVersionId}
                     <span class="installed-badge">Installed</span>
                   {/if}
@@ -517,10 +796,12 @@
             {/each}
           </div>
         {:else}
+          <!-- Show compatibility note only when we have a version filter but no exact matches -->
           <div class="version-note">
             No versions are officially tagged for Minecraft {filterMinecraftVersion}, but these versions may be compatible:
-          </div>          <div class="version-list">
-            {#each filteredVersions as version (version.id)}
+          </div>
+          <div class="version-list">
+            {#each filteredVersions.filter(v => v && v.id) as version (version.id)}
               <div
                 class="version-item"
                 class:selected={version.id === selectedVersionId}
@@ -529,7 +810,7 @@
               >
                 <div class="version-info">
                   <span class="version-name">{version.name || version.versionNumber}</span>
-                  <span class="version-mc">{version.gameVersions.join(', ')}</span>
+                  <span class="version-mc">{version.gameVersions ? version.gameVersions.join(', ') : 'Unknown'}</span>
                   {#if version.id === installedVersionId}
                     <span class="installed-badge">Installed</span>
                   {/if}
@@ -666,7 +947,49 @@
   .mod-actions {
     display: flex;
     align-items: center;
+    gap: 8px;
     padding-right: 12px;
+  }
+
+  .webpage-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.7);
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .webpage-button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.2);
+    color: rgba(255, 255, 255, 0.9);
+    transform: translateY(-1px);
+  }
+
+  .webpage-button:disabled,
+  .webpage-button.disabled {
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.3);
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .webpage-button:disabled:hover,
+  .webpage-button.disabled:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.3);
+    transform: none;
+  }
+
+  .webpage-icon {
+    width: 16px;
+    height: 16px;
   }
   
   .install-button {
