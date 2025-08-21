@@ -15,6 +15,26 @@
   let windowSize = 'medium'; // 'small', 'medium', 'large', 'custom'
   let customWidth = 1200;
   let customHeight = 800;
+
+  // Browser control panel (served by management server)
+  let browserPanelEnabled = false;
+  let browserPanelAutoStart = false;
+  let browserPanelPort = 8080;
+  let browserPanelUsername = 'user';
+  let browserPanelPassword = 'password';
+  // Per-instance visibility (id -> boolean). Only server instances matter server-side.
+  let instanceVisibility = {};
+  let instances = [];
+  
+  // Browser panel status for Start/Stop UX (decoupled from management server)
+  let panelIsRunning = false;
+  let panelPort = null;
+  let panelStatusText = 'Unknown';
+  let panelError = '';
+  let panelBusy = false;
+  // Derived selection state for server visibility
+  $: serverInstances = (instances || []).filter((i) => i.type === 'server');
+  $: hasVisibleServers = serverInstances.some((s) => instanceVisibility[s.id] !== false);
   
   // Window size presets
   const windowPresets = {
@@ -41,7 +61,15 @@
         startOnStartup,
         windowSize,
         customWidth,
-        customHeight
+        customHeight,
+        browserPanel: {
+          enabled: browserPanelEnabled,
+          autoStart: browserPanelAutoStart,
+          port: browserPanelPort,
+          username: browserPanelUsername,
+          password: browserPanelPassword,
+          instanceVisibility
+        }
       };
       
     try {
@@ -57,6 +85,11 @@
       // TODO: Add proper logging - Error saving app settings
     }
     
+    try {
+      // Persist instance visibility separately to keep a lightweight IPC you can reuse elsewhere
+      await window.electron.invoke('set-instance-visibility', instanceVisibility);
+    } catch {}
+
     closeModal();
   }
   
@@ -158,10 +191,108 @@
         windowSize = result.settings.windowSize || 'medium';
         customWidth = result.settings.customWidth || 1200;
         customHeight = result.settings.customHeight || 800;
+
+        // Load browser panel settings
+        const bp = result.settings.browserPanel || {};
+  browserPanelEnabled = !!bp.enabled;
+  browserPanelAutoStart = !!bp.autoStart;
+        browserPanelPort = bp.port || 8080;
+        browserPanelUsername = bp.username || 'user';
+        browserPanelPassword = bp.password || 'password';
+        instanceVisibility = bp.instanceVisibility || {};
       }
+      // Load instances to let user choose which servers are visible
+      try {
+        instances = await window.electron.invoke('get-instances');
+      } catch {}
+
+  // Also refresh browser panel status
+  await refreshPanelStatus();
     } catch (error) {
       // TODO: Add proper logging - Error loading app settings
     }
+  }
+
+  async function refreshPanelStatus() {
+    try {
+      const res = await window.electron.invoke('browser-panel:status');
+      if (res && res.success && res.status) {
+        panelIsRunning = !!res.status.isRunning;
+        panelPort = res.status.port || null;
+        panelStatusText = panelIsRunning ? `Running on port ${panelPort}` : 'Stopped';
+      } else {
+        panelIsRunning = false;
+        panelPort = null;
+        panelStatusText = 'Stopped';
+      }
+    } catch {
+      panelIsRunning = false;
+      panelPort = null;
+      panelStatusText = 'Stopped';
+    }
+  }
+
+  // Start/Stop the web panel (separate server)
+  async function startWebPanel() {
+    panelError = '';
+    panelBusy = true;
+    // Require at least one visible server
+    if (!(instances || []).some(i => i.type === 'server' && instanceVisibility[i.id] !== false)) {
+      panelBusy = false;
+      panelError = 'Select at least one server under "Visible Server Instances" to start the web panel.';
+      return;
+    }
+    // Persist port/creds changes without flipping enabled yet
+    await saveSettingsLightweight(/*enabledOverride*/ null);
+    // Try starting on configured port
+    const res = await window.electron.invoke('browser-panel:start', { port: browserPanelPort });
+    if (res && res.success) {
+      browserPanelEnabled = true;
+      await saveSettingsLightweight(/*enabledOverride*/ true);
+    } else {
+      panelError = (res && res.error) || 'Failed to start the web panel';
+    }
+    await refreshPanelStatus();
+    panelBusy = false;
+  }
+
+  async function stopWebPanel() {
+    panelError = '';
+    panelBusy = true;
+    const res = await window.electron.invoke('browser-panel:stop');
+    if (res && res.success) {
+      browserPanelEnabled = false;
+      await saveSettingsLightweight(/*enabledOverride*/ false);
+    } else {
+      panelError = (res && res.error) || 'Failed to stop the web panel';
+    }
+    await refreshPanelStatus();
+    panelBusy = false;
+  }
+
+  // Save only browser panel related settings without closing modal
+  async function saveSettingsLightweight(enabledOverride = null) {
+    const settings = {
+      minimizeToTray,
+      startMinimized,
+      startOnStartup,
+      windowSize,
+      customWidth,
+      customHeight,
+      browserPanel: {
+        enabled: enabledOverride === null ? browserPanelEnabled : !!enabledOverride,
+        autoStart: browserPanelAutoStart,
+        port: browserPanelPort,
+        username: browserPanelUsername,
+        password: browserPanelPassword,
+        instanceVisibility
+      }
+    };
+    try {
+      await window.electron.invoke('save-app-settings', settings);
+      // Persist instance visibility separately as done in full save
+      try { await window.electron.invoke('set-instance-visibility', instanceVisibility); } catch {}
+    } catch {}
   }
 
   async function openLogger() {
@@ -175,6 +306,29 @@
       }
     } catch (error) {
       // TODO: Add proper logging - Error opening logger
+    }
+  }
+
+  // Listen for live browser panel status updates
+  if (typeof window !== 'undefined' && window.electron && window.electron.on) {
+    window.electron.on('browser-panel-status', (_evt, payload) => {
+      panelIsRunning = !!(payload && payload.isRunning);
+      panelPort = payload && payload.port ? payload.port : panelPort;
+      panelStatusText = panelIsRunning ? `Running on port ${panelPort}` : 'Stopped';
+    });
+  }
+
+  async function openPanelInBrowser() {
+    try {
+      const url = `http://localhost:${panelPort || browserPanelPort}/`;
+      const result = await window.electron.invoke('open-external-url', url);
+      if (!result || !result.success) {
+        await window.electron.invoke('show-error-dialog', { title: 'Open in Browser', message: 'Failed to open the web panel in your browser.', detail: result?.error || 'Unknown error' });
+      }
+    } catch (err) {
+      try {
+        await window.electron.invoke('show-error-dialog', { title: 'Open in Browser', message: 'Failed to open the web panel in your browser.', detail: err?.message });
+      } catch {}
     }
   }
 </script>
@@ -295,6 +449,84 @@
           <div class="setting-info">
             <small>💡 The logger opens in a separate window and provides real-time log streaming, filtering, search, and export capabilities.</small>
           </div>
+        </div>
+
+        <!-- Browser Control Panel (served by management server) -->
+        <div class="settings-section compact-panel">
+          <h4>
+            <span class="section-icon">🌐</span>
+            Browser Control Panel <span class="beta-badge" title="Early feature – still evolving">BETA</span>
+          </h4>
+          <div class="panel-header-row">
+            <div class="panel-title">
+              <small class="status">{panelStatusText}</small>
+              {#if panelIsRunning}
+                <button class="open-link small-btn" type="button" on:click={openPanelInBrowser}>Open in browser</button>
+              {/if}
+            </div>
+            <div class="actions">
+              <button class="start-button" on:click={startWebPanel} disabled={panelIsRunning || panelBusy || !hasVisibleServers} type="button">{panelBusy && !panelIsRunning ? 'Starting…' : 'Start'}</button>
+              <button class="stop-button" on:click={stopWebPanel} disabled={!panelIsRunning || panelBusy} type="button">{panelBusy && panelIsRunning ? 'Stopping…' : 'Stop'}</button>
+            </div>
+          </div>
+          {#if panelError}
+            <div class="setting-info error"><small>{panelError}</small></div>
+          {/if}
+          {#if panelIsRunning && panelPort && browserPanelPort != panelPort}
+            <div class="setting-info warning"><small>Panel is running on port {panelPort}. Change applies after Stop → Start.</small></div>
+          {/if}
+
+      <div class="panel-grid-3">
+            <div>
+              <label for="browser-port" class="field-label">Port</label>
+              <input id="browser-port" type="number" min="1" max="65535" bind:value={browserPanelPort} class="size-input" placeholder="8081" disabled={panelIsRunning || panelBusy} />
+            </div>
+            <div>
+              <label for="browser-username" class="field-label">User</label>
+              <input id="browser-username" type="text" bind:value={browserPanelUsername} class="size-input" placeholder="user" disabled={panelIsRunning || panelBusy} />
+            </div>
+            <div>
+              <label for="browser-password" class="field-label">Password</label>
+              <input id="browser-password" type="password" bind:value={browserPanelPassword} class="size-input" placeholder="password" disabled={panelIsRunning || panelBusy} />
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <label class="setting-label" for="browser-autostart">
+              <span class="setting-text">
+                <strong>Auto start on app launch</strong>
+                <small>Start the browser control panel automatically when the desktop app starts</small>
+              </span>
+            </label>
+            <input id="browser-autostart" type="checkbox" bind:checked={browserPanelAutoStart} disabled={!hasVisibleServers || panelIsRunning || panelBusy} title={!hasVisibleServers ? 'Select at least one server below' : (panelIsRunning ? 'Stop the panel to change this' : '')} />
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-label" style="cursor:default">
+              <span class="setting-text">
+                <strong>Visible Server Instances</strong>
+                <small>Only server instances will show. Toggle which ones are visible on the web panel.</small>
+              </span>
+            </div>
+            <div class="instance-list compact-list">
+        {#each (instances || []).filter(i => i.type === 'server') as inst (inst.id)}
+        <label class="instance-row">
+      <input type="checkbox" checked={instanceVisibility[inst.id] !== false} disabled={panelIsRunning || panelBusy} on:change={(e) => { instanceVisibility = { ...instanceVisibility, [inst.id]: e.currentTarget.checked }; }} />
+                  <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block;">
+                    <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><strong>{inst.name}</strong></div>
+                    <div class="small" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{inst.path}</div>
+                  </span>
+                </label>
+              {/each}
+              {#if (instances || []).filter(i => i.type === 'server').length === 0}
+                <div class="setting-info"><small>No server instances found.</small></div>
+              {/if}
+              {#if ((instances || []).filter(i => i.type === 'server').length > 0) && !hasVisibleServers}
+                <div class="setting-info warning" style="margin-top:0.5rem"><small>Select at least one server to enable Start.</small></div>
+              {/if}
+            </div>
+          </div>
+          <div class="setting-info"><small>Protected with HTTP Basic Auth. Change credentials above.</small></div>
         </div>
 
         <!-- Window & Display Settings -->
@@ -485,6 +717,12 @@
   .setting-item.disabled {
     opacity: 0.5;
   }
+
+  /* removed old .grid-2 layout (no longer used) */
+  .instance-list { margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .instance-row { display: flex; align-items: flex-start; gap: 0.6rem; }
+  .instance-row input[type="checkbox"] { margin-top: 4px; accent-color: #3b82f6; }
+  .small { font-size: 0.75rem; color: #9ca3af; }
   
   .setting-label {
     display: flex;
@@ -531,7 +769,85 @@
     font-size: 0.85rem;
     line-height: 1.4;
   }
+  /* Web panel controls */
+  .actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.25rem; }
+  .start-button { background: #10b981; color: #fff; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; }
+  .stop-button { background: #ef4444; color: #fff; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; }
+  .start-button:disabled, .stop-button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .setting-info.error { color: #ef4444; background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.4); }
+  .setting-info.warning { color: #f59e0b; background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.4); }
+  .open-link { color: #60a5fa; text-decoration: none; }
+  .open-link:hover { text-decoration: underline; }
   
+  /* Compact Browser Control Panel layout */
+  .compact-panel .panel-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .compact-panel .panel-title { display: flex; align-items: center; gap: 0.5rem; }
+  .compact-panel .panel-title .status { color: #9ca3af; margin-left: 0.25rem; }
+  .compact-panel .panel-grid-3 {
+    display: grid;
+    grid-template-columns: 120px minmax(160px, 1fr) minmax(170px, 1.1fr);
+    gap: 0.6rem;
+    margin: 0.25rem 0 0.75rem 0;
+  }
+  /* Responsive collapse to avoid placeholder overlapping */
+  @media (max-width: 640px) {
+    .compact-panel .panel-grid-3 { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  }
+  @media (max-width: 480px) {
+    .compact-panel .panel-grid-3 { grid-template-columns: 1fr; }
+  }
+  .field-label { display: block; font-size: 0.75rem; color: #cbd5e1; }
+  .small-btn { padding: 0.2rem 0.45rem; font-size: 0.8rem; }
+  .compact-list { gap: 0.3rem; }
+  /* Compact inputs in panel */
+  .compact-panel .size-input {
+    padding: 0.4rem 0.55rem;
+    font-size: 0.85rem;
+    border-radius: 5px;
+    margin-top: 0.4rem;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .compact-panel .size-input::placeholder { color: #9aa1ad; opacity: 0.85; }
+  .compact-panel .panel-grid-3 > div { min-width: 0; position: relative; }
+  /* Prevent visual collision of long placeholder strings by allowing them to fade */
+  .compact-panel .size-input {
+    background: linear-gradient(to right, rgba(45,55,72,1), rgba(45,55,72,0.9));
+  }
+  /* Badge */
+  .beta-badge {
+    display: inline-block;
+    background: linear-gradient(90deg,#6366f1,#3b82f6);
+    color: #fff;
+    font-size: 0.55rem;
+    font-weight: 600;
+    padding: 0.15rem 0.4rem 0.2rem 0.4rem;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    vertical-align: middle;
+    position: relative;
+    top: -1px;
+  }
+  .compact-panel .actions .start-button,
+  .compact-panel .actions .stop-button {
+    padding: 0.3rem 0.6rem;
+    font-size: 0.85rem;
+    border-radius: 5px;
+  }
+  .compact-panel .panel-title .status { font-size: 0.8rem; }
+  /* Compact checkboxes */
+  .compact-panel input[type="checkbox"] {
+    transform: scale(1.0);
+    margin-top: 0.1rem;
+  }
+  .compact-panel .instance-row { gap: 0.5rem; }
+  .compact-panel .instance-row .small { font-size: 0.7rem; }
 
 
 

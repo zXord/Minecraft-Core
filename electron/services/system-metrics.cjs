@@ -10,6 +10,8 @@ let prevCpuTimes = os.cpus().map(cpu => ({ ...cpu.times }));
 let memLookupTimer = 0;
 let metricsInterval = null;
 let isMetricsActive = false;
+// Keep the last published metrics for external queries (e.g., browser panel)
+let lastPublishedMetrics = null;
 
 function startMetricsReporting() {
   
@@ -271,7 +273,9 @@ async function publishSystemMetrics() {
       // Ignore logging errors
     }
     
-    // Send metrics to renderer
+  // Save last metrics for other services (e.g., browser panel server)
+  lastPublishedMetrics = metrics;
+  // Send metrics to renderer
     sendMetricsUpdate(metrics);
   } catch {
     // TODO: Add proper logging - Metrics publishing error
@@ -295,5 +299,7 @@ module.exports = {
   startMetricsReporting,
   stopMetricsReporting,
   getSystemCpuPct,
-  publishSystemMetrics
+  publishSystemMetrics,
+  // Expose a safe getter for last metrics
+  getLastMetrics: () => lastPublishedMetrics
 };

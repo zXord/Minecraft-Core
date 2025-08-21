@@ -16,6 +16,7 @@ const { createConfigHandlers } = require('./ipc/config-handlers.cjs');
 const { createServerPropertiesHandlers } = require('./ipc/server-properties-handlers.cjs');
 const { createBackupHandlers, loadBackupManager } = require('./ipc/backup-handlers.cjs');
 const { createManagementServerHandlers } = require('./ipc/management-server-handlers.cjs');
+const { createBrowserPanelHandlers } = require('./ipc/browser-panel-handlers.cjs');
 const { createMinecraftLauncherHandlers } = require('./ipc/minecraft-launcher-handlers.cjs');
 const { createServerJavaHandlers } = require('./ipc/server-java-handlers.cjs');
 const { createAppSettingsHandlers } = require('./ipc/app-settings-handlers.cjs');
@@ -56,6 +57,7 @@ function setupIpcHandlers(win) {
     const settingsHandlers = createSettingsHandlers();
     const backupHandlers = createBackupHandlers();
     const managementServerHandlers = createManagementServerHandlers(win);
+  const browserPanelHandlers = createBrowserPanelHandlers(win);
     const minecraftLauncherHandlers = createMinecraftLauncherHandlers(win);
     const serverJavaHandlers = createServerJavaHandlers(win);
     const appSettingsHandlers = createAppSettingsHandlers();
@@ -93,6 +95,7 @@ function setupIpcHandlers(win) {
       serverHandlers,
       settingsHandlers,
       managementServerHandlers,
+  browserPanelHandlers,
       minecraftLauncherHandlers,
       serverJavaHandlers,
       updateHandlers,

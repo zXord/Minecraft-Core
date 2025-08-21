@@ -4,6 +4,8 @@ interface ElectronAPI {
   on: (channel: string, listener: (...args: any[]) => void) => void;
   removeAllListeners: (channel: string) => void;
   removeListener: (channel: string, listener: (...args: any[]) => void) => void;
+  // Present only in browser panel shim
+  isBrowserPanel?: boolean;
 }
 
 interface ServerPath {
@@ -23,4 +25,6 @@ interface Window {
   _folderOpenInProgress?: boolean; // Flag for debouncing folder opens
   getInitialInstances?: () => { instances: any[], loaded: boolean };
   appStartupCompleted?: boolean; // Flag to track if app startup is complete
+  // Set by browser panel shim to detect web context
+  IS_BROWSER_PANEL?: boolean;
 }

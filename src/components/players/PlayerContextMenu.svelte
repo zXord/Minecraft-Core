@@ -1,7 +1,8 @@
 <!-- @ts-ignore -->
 <script>
   /// <reference path="../../electron.d.ts" />
-  import { playerState, hideContextMenu, refreshPlayerLists } from '../../stores/playerState.js';
+  import { playerState, hideContextMenu, refreshPlayerLists, updatePlayerPermissions } from '../../stores/playerState.js';
+  import logger from '../../utils/logger.js';
   
   // Access the context menu state from the store
   $: contextMenu = $playerState.contextMenu;
@@ -32,34 +33,48 @@
     actionInProgress = true;
     
     try {
+  // (debug removed)
       await handlePlayerAction(player, action);
       
       // Get server path for refreshing lists
       let serverPath = '';
-      if (window.serverPath) {
-        try {
+      // Try window.serverPath first
+      try {
+        if (window.serverPath && typeof window.serverPath.get === 'function') {
           const pathResult = await window.serverPath.get();
           if (pathResult) {
-            if (typeof pathResult === 'object' && pathResult && 'path' in pathResult) {
-              serverPath = /** @type {any} */ (pathResult).path;
-            } else {
-              serverPath = String(pathResult);
-            }
+            serverPath = typeof pathResult === 'object' && pathResult && 'path' in pathResult
+              ? /** @type {any} */ (pathResult).path
+              : String(pathResult);
           }
-            } catch (err) {
-      // TODO: Add proper logging - Failed to get server path
-    }
+        }
+  } catch (e) { /* suppressed debug: serverPath.get failed */ }
+      // Fallback to settings store (lastServerPath) via API
+      if (!serverPath) {
+        try {
+          const settings = await window.electron.invoke('get-settings');
+          const sp = settings && (settings.serverPath || settings.lastServerPath || settings.settings?.serverPath);
+          if (sp) serverPath = String(sp);
+  } catch (e) { /* suppressed debug: get-settings failed */ }
       }
       
-      // Refresh all player lists to ensure UI is up to date
-      if (serverPath) {
-        await refreshPlayerLists(serverPath);
+      // In browser panel, SSE will drive the refresh; avoid immediate refresh that can overwrite optimistic UI
+      const isWeb = !!(window.electron && window.electron.isBrowserPanel);
+      if (!isWeb && serverPath) {
+        try {
+          // Delay slightly to allow backend writes to settle
+          await new Promise(r => setTimeout(r, 200));
+          await refreshPlayerLists(serverPath);
+          // (debug removed)
+        } catch (e) {
+          logger.error('refreshPlayerLists failed after context action', { category: 'ui', data: { error: e?.message } });
+        }
       }
       
       // Small delay to ensure state updates have propagated
       await new Promise(resolve => setTimeout(resolve, 100));
       
-    } finally {
+  } finally {
       actionInProgress = false;
       hideContextMenu();
     }
@@ -95,29 +110,42 @@
       }
     }
     
-    if (listName) {
+  if (listName) {
       try {
         // Get server path from global context - properly await the Promise
-        let serverPath = '';        if (window.serverPath) {
-          try {            // Make sure to await the Promise and extract the path property
+        let serverPath = '';
+        try {
+          if (window.serverPath && typeof window.serverPath.get === 'function') {
             const pathResult = await window.serverPath.get();
-            // The result could be either { path: '...' } or just the path string
             if (pathResult) {
-              if (typeof pathResult === 'object' && pathResult && 'path' in pathResult) {
-                serverPath = /** @type {any} */ (pathResult).path;
-              } else {
-                serverPath = String(pathResult);
-              }
+              serverPath = typeof pathResult === 'object' && pathResult && 'path' in pathResult
+                ? /** @type {any} */ (pathResult).path
+                : String(pathResult);
             }
-          } catch (err) {
           }
-        }
+          if (!serverPath) {
+            const settings = await window.electron.invoke('get-settings');
+            const sp = settings && (settings.serverPath || settings.lastServerPath || settings.settings?.serverPath);
+            if (sp) serverPath = String(sp);
+          }
+  } catch (e) { /* suppressed debug: serverPath resolution failed */ }
         
         
         if (!serverPath) {
+          logger.error('No serverPath available for player action', { category: 'ui', data: { action, player } });
           return;
         }
         
+        // Decide optimistic update details
+        const permType = listName === 'ops' ? 'op' : listName === 'whitelist' ? 'whitelist' : listName === 'banned-players' ? 'ban' : listName === 'banned-ips' ? 'ban-ip' : null;
+        const isRemove = action === 'deop' || action === 'whitelist remove' || action === 'unban' || action === 'unban-ip' || action.startsWith('un');
+        const optimisticAction = isRemove ? 'remove' : 'add';
+
+        // Apply optimistic update first so the next right-click reflects immediately
+        if (permType) {
+          try { updatePlayerPermissions(player, permType, optimisticAction); } catch {}
+        }
+
         // Special handling for ban-ip to include the player name
         if (action === 'ban-ip') {
           try {
@@ -135,6 +163,7 @@
             
             // Add the IP with the special formatted string to save player name
             await window.electron.invoke('add-player', listName, serverPath, formattedEntry);
+            // (debug removed)
             
             // Send ban-ip command if server is running
             const statusResult = await window.electron.invoke('get-server-status');
@@ -142,22 +171,33 @@
             
             if (serverStatus && ['running', 'Running'].includes(serverStatus)) {
               await window.electron.invoke('send-command', { command: `ban-ip ${player}` });
+              // (debug removed)
             }
           } catch (err) {
+            logger.error('ban-ip action failed', { category: 'ui', data: { error: err?.message } });
+            // Rollback optimistic update
+            try { updatePlayerPermissions(player, 'ban-ip', 'remove'); } catch {}
           }
           
           return; // Exit early since we've handled the entire action        } else {
           // Regular player actions
           // Update list in backend
           try {
+            const channel = isRemove ? 'remove-player' : 'add-player';
             await window.electron.invoke(
-              action.startsWith('un') ? 'remove-player' : 'add-player', 
+              channel, 
               listName, 
               serverPath,
               player
             );
+            // (debug removed)
           } catch (err) {
             // Error handled silently
+            logger.error('player list update invoke failed', { category: 'ui', data: { action, error: err?.message } });
+            // Rollback optimistic update
+            if (permType) {
+              try { updatePlayerPermissions(player, permType, isRemove ? 'add' : 'remove'); } catch {}
+            }
           }
         }
         
@@ -168,6 +208,7 @@
         
         if (serverStatus && ['running', 'Running'].includes(serverStatus)) {
           await window.electron.invoke('send-command', { command: cmd });
+          // (debug removed)
         } else if (listName === 'whitelist') {
           // If server is not running and this is a whitelist action, update the onlinePlayers list
           playerState.update(state => {
@@ -182,6 +223,7 @@
           });
         }
       } catch (err) {
+        logger.error('handlePlayerAction failed', { category: 'ui', data: { action, error: err?.message } });
       }
     }
   }

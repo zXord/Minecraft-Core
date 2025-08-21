@@ -71,6 +71,7 @@ contextBridge.exposeInMainWorld('electron', {
       'get-settings',
       'save-instances',
       'get-instances',
+  'set-instance-visibility',
       'rename-instance',
       'delete-instance',
       'get-auto-restart',
@@ -131,6 +132,10 @@ contextBridge.exposeInMainWorld('electron', {
     'update-management-server-path',
     'set-management-server-external-host',
     'get-management-server-host-info',
+  // Browser panel channels
+  'browser-panel:start',
+  'browser-panel:stop',
+  'browser-panel:status',
       // Minecraft launcher channels
       'minecraft-auth',
       'minecraft-load-auth',
@@ -198,6 +203,8 @@ contextBridge.exposeInMainWorld('electron', {
       // Management server events
       'management-server-status',
       'management-server-path-updated',
+  // Browser panel events
+  'browser-panel-status',
       // Minecraft launcher events
       'launcher-auth-success',
       'launcher-auth-error',

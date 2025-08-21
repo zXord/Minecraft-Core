@@ -42,8 +42,9 @@
 
   // Ensure we have a valid server path
   $: {
-    if (!serverPath && window.serverPath) {
-      serverPath = window.serverPath.get();
+    if (!serverPath && window.serverPath && typeof window.serverPath.get === 'function') {
+      // Note: don't await in reactive block; handled in onMount and per-call
+      // Keep this as a noop to avoid setting a Promise
     }
   }
 
@@ -51,10 +52,10 @@
     try {
       // Ensure we have a valid server path
       if (!serverPath) {
-        serverPath = window.serverPath ? await window.serverPath.get() : '';
-        if (!serverPath) {
-          return;
-        }
+        const sp = window.serverPath && typeof window.serverPath.get === 'function' ? await window.serverPath.get() : '';
+        const spVal = sp == null ? '' : sp;
+        serverPath = (typeof spVal === 'object' && /** @type {any} */(spVal).path) ? String(/** @type {any} */(spVal).path) : String(spVal);
+        if (!serverPath) return;
       }
 
       const raw = await window.electron.invoke('read-players', name, serverPath) || [];
@@ -129,10 +130,10 @@
     try {
       // Ensure we have a valid server path
       if (!serverPath) {
-        serverPath = window.serverPath ? await window.serverPath.get() : '';
-        if (!serverPath) {
-          return;
-        }
+        const sp = window.serverPath && typeof window.serverPath.get === 'function' ? await window.serverPath.get() : '';
+        const spVal = sp == null ? '' : sp;
+        serverPath = (typeof spVal === 'object' && /** @type {any} */(spVal).path) ? String(/** @type {any} */(spVal).path) : String(spVal);
+        if (!serverPath) return;
       }
       
       // Special handling for banned-ips to save the player name
@@ -244,8 +245,10 @@
   onMount(() => {
     // Make sure we have a valid server path
     (async () => {
-      if (!serverPath && window.serverPath) {
-        serverPath = await window.serverPath.get();
+      if (!serverPath && window.serverPath && typeof window.serverPath.get === 'function') {
+        const sp = await window.serverPath.get();
+        const spVal = sp == null ? '' : sp;
+        serverPath = (typeof spVal === 'object' && /** @type {any} */(spVal).path) ? String(/** @type {any} */(spVal).path) : String(spVal);
       }
       
       // Initialize our component state
@@ -292,9 +295,35 @@
     // Remove any existing listeners to avoid duplicates
     window.electron.removeAllListeners('server-status');
     window.electron.on('server-status', statusHandler);
+
+    // Listen for player list changes from any context (app or web)
+    const playersChangedHandler = async (payload) => {
+      try {
+        if (!payload) return;
+        const { listName } = payload;
+        if (!serverPath && window.serverPath) {
+          serverPath = await window.serverPath.get();
+        }
+        if (!serverPath) return;
+        if (listName && listNames[listName]) {
+          // Refresh just the affected list
+          await loadList(listName);
+          // If banned-ips changed, refresh raw list too
+          if (listName === 'banned-ips') {
+            const raw = await window.electron.invoke('read-players', 'banned-ips', serverPath) || [];
+            rawBannedIps = raw;
+          }
+        } else {
+          // Unknown list: refresh all as a fallback
+          await loadAllLists();
+        }
+      } catch {}
+    };
+    window.electron.on('players-list-changed', playersChangedHandler);
     
     return () => {
       window.electron.removeListener('server-status', statusHandler);
+      window.electron.removeListener('players-list-changed', playersChangedHandler);
     };
   });
 </script>

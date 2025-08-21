@@ -191,7 +191,7 @@ class ManagementServer {
         version: this.appVersion, // Backward compatibility
         timestamp: new Date().toISOString()
       });
-    });    // Client registration
+  });    // Client registration
     this.app.post('/api/client/register', (req, res) => {
       const { clientId, name } = req.body;
       
@@ -228,7 +228,7 @@ class ManagementServer {
           appVersion: this.appVersion // Include app version in registration response
         }
       });
-    });    // Client heartbeat/ping to keep connection alive
+  });    // Client heartbeat/ping to keep connection alive
     this.app.post('/api/client/ping', (req, res) => {
       const { clientId } = req.body;
       
@@ -488,6 +488,49 @@ class ManagementServer {
         res.status(500).json({ error: 'Failed to read server information' });
       }
     });
+
+    // Lightweight Minecraft server status (parity with browser-panel-server /api/server/status)
+    // Provides immediate running/stopped state plus metrics so browser client using only the
+    // management server port (default 8080) can still poll for status without 404s.
+    let statusVersionCounter = 0;
+    let lastIsRunning = null;
+    let lastTransitionTs = 0;
+    this.app.get('/api/server/status', (_req, res) => {
+      try {
+        const serverManager = require('./server-manager.cjs');
+        const state = serverManager.getServerState();
+        const isRunning = !!state.isRunning && !!state.serverProcess;
+        if (lastIsRunning === null) {
+          lastIsRunning = isRunning;
+          lastTransitionTs = Date.now();
+        } else if (lastIsRunning !== isRunning) {
+          lastIsRunning = isRunning;
+          statusVersionCounter++;
+          lastTransitionTs = Date.now();
+          try {
+            // Notify desktop renderer (mirrors browser panel behavior)
+            const { safeSend } = require('../utils/safe-send.cjs');
+            safeSend && safeSend('server-status', isRunning ? 'running' : 'stopped');
+          } catch { /* ignore */ }
+        }
+        const info = state.serverProcess ? state.serverProcess['serverInfo'] : null;
+        const uptime = state.serverStartMs ? (Date.now() - state.serverStartMs) : 0;
+        const players = state.playersInfo || { count: 0, names: [] };
+        let cpuPct = 0, memUsedMB = 0, maxRamMB = (state.serverMaxRam || 4) * 1024;
+        try {
+          const { getLastMetrics } = require('./system-metrics.cjs');
+          const last = getLastMetrics && getLastMetrics();
+          if (last) {
+            if (typeof last.cpuPct === 'number') cpuPct = last.cpuPct;
+            if (typeof last.memUsedMB === 'number') memUsedMB = last.memUsedMB;
+            if (typeof last.maxRamMB === 'number') maxRamMB = last.maxRamMB;
+          }
+        } catch { /* ignore metrics errors */ }
+        res.json({ success: true, isRunning, serverInfo: info, uptimeMs: uptime, players, cpuPct, memUsedMB, maxRamMB, statusVersion: statusVersionCounter, lastTransitionTs });
+      } catch (e) {
+        res.json({ success: false, error: e.message });
+      }
+    });
     
     // Get mod list
     this.app.get('/api/mods/list', (_, res) => {
@@ -744,6 +787,7 @@ class ManagementServer {
         count: clientList.length
       });
     });
+
   }
   
   async start(port = 8080, serverPath = null) {
@@ -751,11 +795,11 @@ class ManagementServer {
       return { success: true, port: this.port };
     }
     
-    this.port = port;
+  this.port = port;
     this.serverPath = serverPath;
     
     return new Promise((resolve) => {
-      this.server = this.app.listen(port, () => {
+      this.server = this.app.listen(this.port, () => {
         this.isRunning = true;
 
         // Detect external IP for mod downloads
@@ -776,7 +820,7 @@ class ManagementServer {
 
         resolve({ 
           success: true, 
-          port, 
+          port: this.port, 
           externalHost: this.externalHost, 
           detectedPublicHost: this.detectedPublicHost,
           downloadHost: this.getModDownloadHost()
@@ -786,7 +830,7 @@ class ManagementServer {
       this.server.on('error', (error) => {
         this.isRunning = false;
         if (error && error['code'] === 'EADDRINUSE') {
-          resolve({ success: false, error: `Port ${port} is already in use` });
+          resolve({ success: false, error: `Port ${this.port} is already in use` });
         } else {
           resolve({ success: false, error: error.message });
         }

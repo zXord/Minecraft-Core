@@ -142,7 +142,18 @@ const storeConfig = {
     appSettings: {
       minimizeToTray: false,
       startMinimized: false,
-      startOnStartup: false
+      startOnStartup: false,
+      // Browser control panel (served by management server)
+      browserPanel: {
+        enabled: false,
+  autoStart: false,
+  // Use a different default port than management server to avoid conflicts
+  port: 8081,
+        username: 'user',
+        password: 'password',
+        // Map of instanceId -> true/false (only server instances are respected)
+        instanceVisibility: {}
+      }
     },
     loggerSettings: {
       maxLogs: 1000,
