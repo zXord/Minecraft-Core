@@ -193,6 +193,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   // Connection check interval
   let connectionCheckInterval;
   let statusCheckInterval;
+  let visibilityListenerAdded = false;
+  let lastQuickStatusCheck = 0;
   
   // Active tab tracking
   const tabs = ['play', 'mods', 'settings'];
@@ -1240,6 +1242,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     isChecking = true;
     
     try {
+  // Immediate direct status probe for accuracy
+  await fetchImmediateStatus();
       // Use silent refresh to prevent content flickering, but keep button feedback
       await checkServerStatus(true);
       
@@ -2197,6 +2201,31 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Set up launcher event listeners
   function setupLauncherEvents() {    // Download events
+    // Real-time server status (browser panel + desktop). Previously the client tab only refreshed
+    // status every manual/5m check causing lag. Listening to server-status events (emitted by
+    // Electron safeSend or panel-shim poll) keeps $clientState.minecraftServerStatus in sync.
+    try {
+      if (window.electron && typeof window.electron.on === 'function') {
+        window.electron.on('server-status', (rawStatus) => {
+          let status = rawStatus;
+          if (status !== 'running' && status !== 'stopped') {
+            status = (status && String(status)) || 'unknown';
+          }
+          try { console.debug('[ClientInterface] server-status event', { raw: rawStatus, normalized: status }); } catch {}
+            setMinecraftServerStatus(status === 'running' ? 'running' : (status === 'stopped' ? 'stopped' : 'unknown'));
+          // When server transitions to running fetch fresh server info (mods/version) silently
+          if (status === 'running') {
+            try {
+              const st = get(clientState);
+              if (st.connectionStatus === 'connected') {
+                getServerInfo(true).catch(() => {});
+              }
+            } catch { /* ignore */ }
+          }
+        });
+      }
+    } catch { /* ignore listener setup errors */ }
+
     window.electron.on('launcher-download-start', () => {
       downloadStatus = 'downloading';
       downloadProgress = 0;
@@ -2375,13 +2404,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }, 60000); // Every 60 seconds
       
     // Set up periodic server status check - ONLY if connected AND component is visible (reduced frequency)
+    // Revert to low-frequency background check (every 5 minutes) – we now do an immediate
+    // direct status probe on manual refresh / tab activation for accuracy.
     statusCheckInterval = setInterval(() => {
-      if ($clientState.connectionStatus === 'connected' && 
-          $clientState.activeTab === 'play' && 
+      if ($clientState.connectionStatus === 'connected' &&
+          $clientState.activeTab === 'play' &&
           document.visibilityState === 'visible') {
-        checkServerStatus(true); // Silent refresh
+        checkServerStatus(true); // Silent periodic validation
       }
-    }, 300000); // Every 5 minutes (reduced from 2 minutes)
+    }, 300000); // 5 minutes
 
     // Set up periodic mod synchronization check - ONLY if connected and not busy AND component is visible (reduced frequency)
     const modCheckInterval = setInterval(() => {
@@ -2421,6 +2452,99 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       if (launcherStatusInterval) clearInterval(launcherStatusInterval);
       if (modCheckInterval) clearInterval(modCheckInterval);    };
   }    // Reactive statement to refresh mod sync when switching to Play tab
+  // Quick reactive server status refresh when switching to Play tab or regaining visibility
+  // Direct status fetch helper for immediate accuracy (bypasses slower /info propagation)
+  async function fetchImmediateStatus() {
+    // Try regardless of connection status (could be race where we haven't marked connected yet)
+    try {
+      const primaryPort = instance.serverPort; // management server port (often 8080)
+      const panelPortsToTry = [primaryPort];
+      // If primary is 8080 (management) also try 8081 (browser panel) for newer status endpoint
+      if (primaryPort && primaryPort.toString() === '8080') panelPortsToTry.push('8081');
+      let anyRunning = false;
+      let sawDefinite = false; // saw at least one ok response
+      let lastMapped = null;
+      for (const p of panelPortsToTry) {
+        try {
+          const statusUrl = `http://${instance.serverIp}:${p}/api/server/status`;
+          const res = await fetch(statusUrl, { method: 'GET', signal: AbortSignal.timeout(2200) });
+          if (res.status === 404) continue; // skip to next port
+          if (res.ok) {
+            const data = await res.json();
+            try { console.debug('[ClientInterface] fetchImmediateStatus response', p, data); } catch {}
+            if (data && typeof data.isRunning === 'boolean') {
+              sawDefinite = true;
+              if (data.isRunning) anyRunning = true;
+              // Keep last mapped for potential stopped state only if we never see running
+              lastMapped = data.isRunning ? 'running' : (lastMapped === 'running' ? 'running' : 'stopped');
+              // Early exit optimization: if we already found running, no need to query remaining
+              if (data.isRunning) break;
+            }
+          }
+        } catch { /* silent per port */ }
+      }
+      if (sawDefinite) {
+        const desired = anyRunning ? 'running' : lastMapped || 'stopped';
+        const current = get(clientState).minecraftServerStatus;
+        if (desired !== current) {
+          // Avoid flicker: if current is running and desired is stopped but we only saw one source,
+          // require confirmation (sawDefinite && !anyRunning already) across multiple ports.
+          if (!(current === 'running' && desired === 'stopped' && panelPortsToTry.length > 1 && anyRunning === false)) {
+            setMinecraftServerStatus(desired);
+          }
+        }
+        return desired;
+      }
+    } catch { /* overall silent */ }
+    return null;
+  }
+
+  let acceleratedProbeActive = false;
+  async function acceleratedStatusProbe(maxMs = 12000) {
+    if (acceleratedProbeActive) return;
+    acceleratedProbeActive = true;
+    const start = Date.now();
+    const initial = get(clientState).minecraftServerStatus;
+    let attempt = 0;
+    while (Date.now() - start < maxMs) {
+      const result = await fetchImmediateStatus();
+      attempt++;
+      if (result && result !== initial) break;
+      const delay = Math.min(1500, 700 + attempt * 120); // gentle backoff
+      await new Promise(r => setTimeout(r, delay));
+    }
+    acceleratedProbeActive = false;
+  }
+
+  // Enhanced manual / activation refresh logic
+  $: if ($clientState.activeTab === 'play') {
+    const now = Date.now();
+    if (now - lastQuickStatusCheck > 4000) {
+      lastQuickStatusCheck = now;
+      if ($clientState.connectionStatus === 'connected') {
+  // Fast probe + accelerated follow-up to catch transition within seconds
+  fetchImmediateStatus().then(() => acceleratedStatusProbe(10000));
+  getServerInfo(true); // silent; may update required mods/version
+      } else if ($clientState.connectionStatus === 'disconnected') {
+        connectToServer();
+      }
+    }
+    if (!visibilityListenerAdded) {
+      visibilityListenerAdded = true;
+      try {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible' && get(clientState).activeTab === 'play') {
+            fetchImmediateStatus().then(() => acceleratedStatusProbe(8000));
+            getServerInfo(true);
+          }
+        });
+      } catch { /* ignore */ }
+    }
+  }
+
+  // Wrap existing manual refresh handler (PlayTab passes handleRefreshFromDashboard prop)
+  // so that it performs immediate status fetch before legacy check flow.
+  // (Removed reassignment wrapper; integrated immediate status in original function above.)
   $: if ($clientState.activeTab === 'play' && $clientState.connectionStatus === 'connected' && 
          serverInfo?.allClientMods && serverInfo.allClientMods.length > 0 &&
          serverInfo.allClientMods.some(mod => mod.hasOwnProperty('required'))) {

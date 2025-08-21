@@ -893,6 +893,22 @@ function createSettingsHandlers() {
         return [];
       }
     },
+
+    // Update visibility map for browser panel (App Settings scope)
+    'set-instance-visibility': async (_e, visibilityMap) => {
+      try {
+        const appSettings = appStore.get('appSettings') || {};
+        const current = appSettings.browserPanel || {};
+        const sanitized = (visibilityMap && typeof visibilityMap === 'object') ? visibilityMap : {};
+        appStore.set('appSettings', {
+          ...appSettings,
+          browserPanel: { ...current, instanceVisibility: sanitized }
+        });
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    },
     
     // Rename instance
     'rename-instance': async (_e, { id, newName }) => {

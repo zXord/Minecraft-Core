@@ -1210,9 +1210,11 @@
           </div>
         {/each}
       </div>
-      <button class="add-instance-btn" on:click={showAddInstanceScreen}>
-        <span class="plus-icon">+</span> Add Instance
-      </button>
+      {#if !window.IS_BROWSER_PANEL}
+        <button class="add-instance-btn" on:click={showAddInstanceScreen}>
+          <span class="plus-icon">+</span> Add Instance
+        </button>
+      {/if}
     </div>
 
     <!-- Instance type selector modal -->
@@ -1323,12 +1325,14 @@
                 You haven't created any instances yet. Get started by creating
                 your first server or client instance.
               </p>
-              <button
-                class="create-instance-btn"
-                on:click={showAddInstanceScreen}
-              >
-                <span class="plus-icon">+</span> Create Your First Instance
-              </button>
+              {#if !window.IS_BROWSER_PANEL}
+                <button
+                  class="create-instance-btn"
+                  on:click={showAddInstanceScreen}
+                >
+                  <span class="plus-icon">+</span> Create Your First Instance
+                </button>
+              {/if}
             </div>
           </div>
         {:else if instanceType === "server"}

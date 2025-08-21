@@ -45,6 +45,23 @@ function createAppSettingsHandlers() {
           customHeight: Math.max(600, parseInt(settings.customHeight) || 800)
         };
 
+        // Optional: browser control panel settings (served by management server)
+        if (settings.browserPanel && typeof settings.browserPanel === 'object') {
+          const bp = settings.browserPanel;
+          const bpCurrent = currentSettings.browserPanel || {};
+          const portNum = parseInt(bp.port);
+          const safePort = !isNaN(portNum) && portNum >= 1 && portNum <= 65535 ? portNum : (bpCurrent.port || 8080);
+
+          updatedSettings.browserPanel = {
+            enabled: Boolean(bp.enabled),
+            autoStart: Boolean(bp.autoStart),
+            port: safePort,
+            username: typeof bp.username === 'string' && bp.username.trim().length > 0 ? bp.username.trim() : (bpCurrent.username || 'user'),
+            password: typeof bp.password === 'string' && bp.password.trim().length > 0 ? bp.password.trim() : (bpCurrent.password || 'password'),
+            instanceVisibility: (bp.instanceVisibility && typeof bp.instanceVisibility === 'object') ? bp.instanceVisibility : (bpCurrent.instanceVisibility || {})
+          };
+        }
+
 
 
         // Handle startup setting
@@ -85,7 +102,15 @@ function createAppSettingsHandlers() {
           startOnStartup: false,
           windowSize: 'medium',
           customWidth: 1200,
-          customHeight: 800
+          customHeight: 800,
+          browserPanel: {
+            enabled: false,
+            autoStart: false,
+            port: 8080,
+            username: 'user',
+            password: 'password',
+            instanceVisibility: {}
+          }
         };
 
         const settings = appStore.get('appSettings') || defaultSettings;

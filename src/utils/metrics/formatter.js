@@ -11,7 +11,10 @@ export class MetricsFormatter {
    * @returns {Object} Formatted memory display object
    */
   static formatMemory(usedMB, totalMB) {
-    if (!usedMB || !totalMB || totalMB <= 0) {
+  // Accept 0 as a valid value for usedMB; only treat null/undefined or invalid as loading
+  const usedIsValid = Number.isFinite(usedMB);
+  const totalIsValid = Number.isFinite(totalMB);
+  if (!totalIsValid || totalMB <= 0 || !usedIsValid || usedMB < 0) {
       return { 
         display: 'Calculating...', 
         percentage: 0, 
@@ -21,8 +24,8 @@ export class MetricsFormatter {
       };
     }
     
-    const used = Math.max(0, usedMB);
-    const total = Math.max(1, totalMB);
+  const used = Math.max(0, usedMB);
+  const total = Math.max(1, totalMB);
     const percentage = Math.min(100, (used / total) * 100);
     
     const status = percentage > 90 ? 'critical' : percentage > 75 ? 'warning' : 'normal';
@@ -42,11 +45,19 @@ export class MetricsFormatter {
    * @returns {Object} Formatted uptime display object
    */
   static formatUptime(uptimeString) {
-    if (!uptimeString || uptimeString === '0h 0m 0s') {
+    // For uptime "0h 0m 0s", prefer showing a "recent" state (the component already guards on server running)
+    if (!uptimeString) {
       return { 
         display: '—', 
         status: 'not-running',
         context: 'Server not running'
+      };
+    }
+    if (uptimeString === '0h 0m 0s') {
+      return {
+        display: '0h 0m 0s',
+        status: 'recent',
+        context: 'Recently started'
       };
     }
     
@@ -119,7 +130,7 @@ export class MetricsFormatter {
       display: baseDisplay,
       status: count > 0 ? 'active' : 'empty',
       percentage: 0,
-      context: count > 0 ? `${count} player${count !== 1 ? 's' : ''} online` : 'No players online'
+      context: ''
     };
   }
 

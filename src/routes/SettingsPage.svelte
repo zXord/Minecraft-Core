@@ -443,11 +443,13 @@
                     >
                       {showCopyConfirmation ? "✅" : "📋"}
                     </button>
-                    <button
-                      class="icon-btn"
-                      on:click={openServerFolder}
-                      title="Open server folder">📁</button
-                    >
+                    {#if !window.IS_BROWSER_PANEL}
+                      <button
+                        class="icon-btn"
+                        on:click={openServerFolder}
+                        title="Open server folder">📁</button
+                      >
+                    {/if}
                   </div>
                 {/if}
               </div>

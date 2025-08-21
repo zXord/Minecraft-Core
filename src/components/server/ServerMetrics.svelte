@@ -519,11 +519,7 @@
     >
       {playerDisplay.display}
     </div>
-    {#if playerDisplay.context && playerDisplay.status !== "not-running"}
-      <div class="context-info">
-        {playerDisplay.context}
-      </div>
-    {/if}
+  <!-- players context removed as requested -->
     {#if playerDisplay.percentage > 0}
       <div class="progress-bar">
         <div

@@ -459,6 +459,28 @@ function createWindow() {
       }
     }
   });
+
+  // Auto-start Browser Control Panel if configured
+  try {
+    const settings = appStore.get('appSettings') || {};
+    const bp = settings.browserPanel || {};
+    if (bp.enabled && bp.autoStart) {
+      try {
+        const { getBrowserPanel } = require('./services/browser-panel-server.cjs');
+        const panel = getBrowserPanel();
+        const port = bp.port || 8081;
+        panel.start(port).then((res) => {
+          if (logger) {
+            logger.info('Browser Panel auto-start attempted', { category: 'core', data: { success: !!(res && res.success), port, error: res && !res.success ? res.error : undefined } });
+          }
+        });
+      } catch (e) {
+        if (logger) {
+          logger.error(`Browser Panel auto-start failed: ${e.message}`, { category: 'core', data: { errorType: e.constructor.name } });
+        }
+      }
+    }
+  } catch { /* ignore */ }
   
   win.on('close', () => {
     if (logger) {
