@@ -45,6 +45,16 @@ function createAppSettingsHandlers() {
           customHeight: Math.max(600, parseInt(settings.customHeight) || 800)
         };
 
+        if (settings.modWatch && typeof settings.modWatch === 'object') {
+          const mw = settings.modWatch;
+            updatedSettings.modWatch = {
+              showWindowsNotifications: Boolean(mw.showWindowsNotifications),
+              intervalHours: mw.intervalHours === 24 ? 24 : 12
+            };
+        } else if (!currentSettings.modWatch) {
+          updatedSettings.modWatch = { showWindowsNotifications: false, intervalHours: 12 };
+        }
+
         // Optional: browser control panel settings (served by management server)
         if (settings.browserPanel && typeof settings.browserPanel === 'object') {
           const bp = settings.browserPanel;
@@ -114,6 +124,9 @@ function createAppSettingsHandlers() {
         };
 
         const settings = appStore.get('appSettings') || defaultSettings;
+        if (!settings.modWatch) {
+          settings.modWatch = { showWindowsNotifications: false, intervalHours: 12 };
+        }
 
         // Only verify startup setting with system if we don't have a stored value
         // This prevents overriding user changes that haven't been reflected by the system yet
