@@ -219,7 +219,6 @@ function convertSortToModrinthFormat(sortBy) {
   
   return modrinthSort;
 }
-
 /**
  * Helper function to filter mods by environment type (client, server, both).
  * @param {Array<Object>} mods - Array of mod objects
@@ -834,6 +833,7 @@ async function resolveModrinthDependencies(dependencies) {
  */
 async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnly = false) {
   const versionsStartTime = Date.now();
+  const traceId = `${projectId}-${Date.now()}-${Math.floor(Math.random()*1000)}`;
   
   // Check cache first
   const cacheKey = `${projectId}:${loader || ''}:${gameVersion || ''}`;
@@ -930,7 +930,8 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
           statusCode: response.status,
           versionsReturned: responseData.length,
           loader,
-          gameVersion
+          gameVersion,
+          sample: responseData.slice(0, 5).map(v => ({ id: v.id, num: v.version_number, gv: v.game_versions.slice(0,3), loaders: v.loaders }))
         }
       });
       
@@ -958,6 +959,72 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     compatibleVersions = compatibleVersions.filter(v => {
       return v.game_versions.includes(gameVersion);
     });
+
+    logger.debug('Strict version filter applied', {
+      category: 'mods',
+      data: {
+        service: 'ModApiService',
+        operation: 'getModrinthVersions',
+        traceId,
+        projectId,
+        gameVersion,
+        strictCount: compatibleVersions.length
+      }
+    });
+
+    // If no exact matches, attempt relaxed matching on major.minor (e.g., 1.21 matches 1.21.x)
+    if (compatibleVersions.length === 0) {
+      const majorMinor = gameVersion.split('.').slice(0, 2).join('.');
+      if (majorMinor && majorMinor.includes('.')) {
+        const relaxed = versions.filter(v => v.game_versions.some(gv => gv.startsWith(majorMinor + '.')));
+        if (relaxed.length > 0) {
+          logger.warn('No exact game version matches; using relaxed major.minor match', {
+            category: 'mods',
+            data: {
+              service: 'ModApiService',
+              operation: 'getModrinthVersions',
+              projectId,
+              requestedVersion: gameVersion,
+              majorMinor,
+              relaxedCount: relaxed.length
+            }
+          });
+          // Prefer versions whose patch is <= requested patch to avoid selecting future patch versions
+          const parts = gameVersion.split('.');
+          const requestedPatch = parts.length > 2 ? parseInt(parts[2], 10) : null;
+          if (requestedPatch !== null && !Number.isNaN(requestedPatch)) {
+            const notFuture = relaxed.filter(v => v.game_versions.some(gv => {
+              if (!gv.startsWith(majorMinor + '.')) return false;
+              const patchStr = gv.split('.')[2];
+              const patchNum = parseInt(patchStr, 10);
+              return !Number.isNaN(patchNum) && patchNum <= requestedPatch;
+            }));
+            if (notFuture.length > 0) {
+              compatibleVersions = notFuture;
+            } else {
+              compatibleVersions = relaxed; // fallback if all are newer
+            }
+          } else {
+            compatibleVersions = relaxed;
+          }
+
+          logger.debug('Relaxed version selection decided', {
+            category: 'mods',
+            data: {
+              service: 'ModApiService',
+              operation: 'getModrinthVersions',
+              traceId,
+              projectId,
+              requestedVersion: gameVersion,
+              majorMinor,
+              requestedPatch,
+              finalRelaxedCount: compatibleVersions.length,
+              chosenVersions: compatibleVersions.slice(0,5).map(v => ({ num: v.version_number, gv: v.game_versions.filter(gv=>gv.startsWith(majorMinor+'.')) }))
+            }
+          });
+        }
+      }
+    }
   }
   
   logger.debug('Versions filtered for compatibility', {
@@ -965,6 +1032,7 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     data: {
       service: 'ModApiService',
       operation: 'getModrinthVersions',
+  traceId,
       projectId,
       originalCount,
       compatibleCount: compatibleVersions.length,
@@ -1098,6 +1166,34 @@ async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader)
       clearTimeout(timeoutId);
 
       if (!response.ok) {
+        // Graceful fallback for 404 (version removed or invalid)
+        if (response.status === 404 && projectId) {
+          logger.warn('Version ID returned 404, falling back to latest version', {
+            category: 'network',
+            data: {
+              function: 'getModrinthVersionInfo',
+              projectId,
+              missingVersionId: versionId,
+              status: response.status,
+              fallback: true
+            }
+          });
+          try {
+            const latest = await getLatestModrinthVersionInfo(projectId, gameVersion, loader);
+            return { ...latest, _fallbackFrom404: true, originalVersionId: versionId };
+          } catch (fallbackErr) {
+            logger.error(`Fallback to latest version failed: ${fallbackErr.message}`, {
+              category: 'network',
+              data: {
+                function: 'getModrinthVersionInfo',
+                projectId,
+                missingVersionId: versionId,
+                errorType: fallbackErr.constructor.name
+              }
+            });
+            throw new Error(`Modrinth version not found (404) and fallback failed: ${fallbackErr.message}`);
+          }
+        }
         throw new Error(`Modrinth API error: ${response.status}`);
       }
 

@@ -369,7 +369,7 @@ async function installModToServer(win, serverPath, modDetails) {
         downloadUrl = modDetails.downloadUrl;
         // If we have selectedVersionId, use it to get version info for manifest
         if (modDetails.selectedVersionId && modDetails.source === 'modrinth') {
-          versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId);
+          versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId, modDetails.version, modDetails.loader);
         }
       } else if (modDetails.source === 'modrinth') {
         if (modDetails.selectedVersionId) {
@@ -382,7 +382,7 @@ async function installModToServer(win, serverPath, modDetails) {
             }
           });
 
-          versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId);
+          versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId, modDetails.version, modDetails.loader);
           if (!versionInfoToSave || !versionInfoToSave.files || versionInfoToSave.files.length === 0) {
             logger.error('No files found for selected Modrinth version', {
               category: 'mods',
@@ -489,6 +489,34 @@ async function installModToServer(win, serverPath, modDetails) {
         }
       });
 
+      // Post-download verification (existence + non-zero size)
+      try {
+        const stat = await fs.stat(targetPath);
+        if (!stat || stat.size === 0) {
+          logger.error('Downloaded mod file is missing or empty', {
+            category: 'storage',
+            data: {
+              service: 'mod-installation-service',
+              targetPath,
+              size: stat ? stat.size : 0,
+              modId: modDetails.id
+            }
+          });
+          return { success: false, error: 'Download incomplete (empty file)' };
+        }
+      } catch (vfErr) {
+        logger.error(`Post-download file verification failed: ${vfErr.message}`, {
+          category: 'storage',
+          data: {
+            service: 'mod-installation-service',
+            targetPath,
+            modId: modDetails.id,
+            errorType: vfErr.constructor.name
+          }
+        });
+        return { success: false, error: 'Download verification failed' };
+      }
+
       // Extract mod metadata to get the clean filename
       let finalFileName = fileName;
       let finalTargetPath = targetPath;
@@ -589,7 +617,7 @@ async function installModToServer(win, serverPath, modDetails) {
           // If we don't have version info, try to get it as a fallback
           if (!versionInfoToSave && modDetails.selectedVersionId) {
             try {
-              versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId);
+              versionInfoToSave = await getModrinthVersionInfo(modDetails.id, modDetails.selectedVersionId, modDetails.version, modDetails.loader);
             } catch (error) {
               logger.warn(`Could not fetch version info for manifest: ${error.message}`, {
                 category: 'network',
@@ -602,7 +630,30 @@ async function installModToServer(win, serverPath, modDetails) {
               });
             }
           }
-          // Create manifest with available information
+          // If version info absent but we have selectedVersionId (or fallback marker) attempt one more fetch
+          if (!versionInfoToSave && modDetails.id) {
+            try {
+              versionInfoToSave = await getLatestModrinthVersionInfo(modDetails.id, modDetails.version, modDetails.loader);
+              logger.debug('Fetched latest version info during manifest fallback', {
+                category: 'network',
+                data: {
+                  service: 'mod-installation-service',
+                  modId: modDetails.id
+                }
+              });
+            } catch (lateErr) {
+              logger.warn(`Could not fetch fallback version info for manifest: ${lateErr.message}`, {
+                category: 'network',
+                data: {
+                  service: 'mod-installation-service',
+                  modId: modDetails.id,
+                  errorType: lateErr.constructor.name
+                }
+              });
+            }
+          }
+
+          // Create manifest with available information (reflect fallback flags if present)
           const manifest = {
             projectId: modDetails.id,
             name: modDetails.name, // This should now be the display name from project info
@@ -610,7 +661,9 @@ async function installModToServer(win, serverPath, modDetails) {
             versionId: (versionInfoToSave && versionInfoToSave.id) || modDetails.selectedVersionId || 'unknown',
             versionNumber: (versionInfoToSave && (versionInfoToSave.version_number || versionInfoToSave.name)) || modDetails.version || 'unknown',
             source: modDetails.source,
-            installedAt: new Date().toISOString()
+            installedAt: new Date().toISOString(),
+            fallbackFrom404: !!(versionInfoToSave && versionInfoToSave._fallbackFrom404),
+            originalVersionId: (versionInfoToSave && versionInfoToSave.originalVersionId) || undefined
           };
 
           if (currentModLocation === 'client-only') {
@@ -680,7 +733,14 @@ async function installModToServer(win, serverPath, modDetails) {
         }
       });
 
-      return { success: true };
+      return { 
+        success: true,
+        filePath: finalTargetPath,
+        fileName: finalFileName,
+        versionId: (versionInfoToSave && versionInfoToSave.id) || modDetails.selectedVersionId || 'unknown',
+        versionNumber: (versionInfoToSave && (versionInfoToSave.version_number || versionInfoToSave.name)) || modDetails.version || 'unknown',
+        fallbackFrom404: !!(versionInfoToSave && versionInfoToSave._fallbackFrom404)
+      };
     } catch (err) {
       let errorMessage = err.message || 'Unknown error';
 
@@ -929,7 +989,7 @@ async function installModToClient(win, modData) {
       if (modData.selectedVersionId) {
         // Try to fetch the requested version info
         try {
-          versionInfo = await getModrinthVersionInfo(modData.id, modData.selectedVersionId);
+          versionInfo = await getModrinthVersionInfo(modData.id, modData.selectedVersionId, mcVersion, loader);
           if (
             versionInfo &&
             (!loader || versionInfo.loaders.includes(loader)) &&
@@ -999,7 +1059,7 @@ async function installModToClient(win, modData) {
         // **FIX**: Ensure we get the complete version info, not just the summary
         const bestVersion = versions[0];
         versionToInstall = { id: bestVersion.id, versionNumber: bestVersion.versionNumber };
-        versionInfo = await getModrinthVersionInfo(modData.id, bestVersion.id);
+  versionInfo = await getModrinthVersionInfo(modData.id, bestVersion.id, mcVersion, loader);
 
         logger.debug('Found best compatible version for client mod', {
           category: 'mods',

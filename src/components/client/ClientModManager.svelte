@@ -829,7 +829,7 @@
     });
 
     try {
-      const dependencies = await checkModDependencies(modForInstall);
+  const dependencies = await checkModDependencies(modForInstall, new Set(), { interactive: true });
       let compatibilityIssues = [];
 
       try {

@@ -135,6 +135,16 @@ class LoggerHandlers {
       }
     });
 
+    // Activate a temporary burst logging window (reduces suppression for interactive actions)
+    ipcMain.handle('logger-allow-burst', async (_, durationMs) => {
+      try {
+        this.logger.allowBurstLogging(durationMs);
+        return { success: true, interactiveUntil: this.logger.interactiveUntil };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    });
+
     // Search logs
     ipcMain.handle('logger-search-logs', async (_, searchOptions) => {
       try {

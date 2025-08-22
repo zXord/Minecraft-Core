@@ -469,6 +469,16 @@ function createServerModHandlers(win) {
                 mcVersion: mcVersion
               }
             });
+
+            logger.debug('Diagnostic snapshot for incompatibility', {
+              category: 'mods',
+              data: {
+                modName: name,
+                availableSample: availableVersions.slice(0,5).map(v => ({ num: v.versionNumber, gv: v.gameVersions })),
+                latestSample: latestVersions ? latestVersions.slice(0,3).map(v => v.versionNumber) : [],
+                reason: 'No version entry matched both versionNumber and mcVersion'
+              }
+            });
             
             results.push({
               projectId,
@@ -1767,7 +1777,7 @@ function createServerModHandlers(win) {
       }
     },
 
-    'update-mod': async (_e, { serverPath, projectId, targetVersion, fileName }) => {
+    'update-mod': async (_e, { serverPath, projectId, targetVersion, fileName, mcVersion }) => {
       logger.info('Updating server mod', {
         category: 'mods',
         data: {
@@ -1775,12 +1785,21 @@ function createServerModHandlers(win) {
           serverPath: serverPath,
           projectId: projectId,
           targetVersion: targetVersion,
-          fileName: fileName
+          fileName: fileName,
+          mcVersion
         }
       });
 
       try {
-        const versions = await modApiService.getModrinthVersions(projectId, 'fabric', null, false);
+        if (!mcVersion) {
+          logger.warn('update-mod called without mcVersion; rejecting to avoid picking wrong latest version', {
+            category: 'mods',
+            data: { handler: 'update-mod', projectId }
+          });
+          throw new Error('Minecraft version (mcVersion) is required to update a mod safely');
+        }
+
+        const versions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
         const targetVersionInfo = versions.find(v => v.versionNumber === targetVersion);
         
         if (!targetVersionInfo) {
@@ -1804,7 +1823,7 @@ function createServerModHandlers(win) {
             versionId: targetVersionInfo.id
           }
         });
-      const completeVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionInfo.id);
+  const completeVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionInfo.id, mcVersion, 'fabric');
       const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
       const modDetails = {
         id: projectId,
@@ -1962,7 +1981,7 @@ function createServerModHandlers(win) {
       }
     },
 
-    'enable-and-update-mod': async (_e, { serverPath, modFileName, projectId, targetVersion, targetVersionId }) => {
+  'enable-and-update-mod': async (_e, { serverPath, modFileName, projectId, targetVersion, targetVersionId, mcVersion }) => {
       logger.info('Enabling and updating server mod', {
         category: 'mods',
         data: {
@@ -2101,7 +2120,7 @@ function createServerModHandlers(win) {
           }
         });
         
-        const targetVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionId);
+  const targetVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionId, mcVersion, 'fabric');
         const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
 
         if (!targetVersionInfo || !targetVersionInfo.files || targetVersionInfo.files.length === 0) {

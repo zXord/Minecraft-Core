@@ -2,7 +2,7 @@
  * Mod compatibility checking utilities
  */
 import { get } from 'svelte/store';
-import { installedModInfo, modsWithUpdates, disabledMods } from '../../stores/modStore.js';
+import { installedModInfo, modsWithUpdates, disabledMods, loaderType, minecraftVersion } from '../../stores/modStore.js';
 import { safeInvoke } from '../ipcUtils.js';
 import logger from '../logger.js';
 
@@ -78,8 +78,8 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
       continue;
     }
     
-    seenProjectIds.add(projectId);
-    uniqueDependencies.push(dep);
+  seenProjectIds.add(projectId);
+  uniqueDependencies.push(dep);
   }
   
   logger.debug('Deduplicated dependencies', {
@@ -171,8 +171,49 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
       // Check if the mod is disabled
       const isDisabled = installedMod && disabled.has(installedMod.fileName);
       
-      // If the mod is not installed, it's a missing dependency
-      if (!isInstalled) {
+      // Fuzzy detection: sometimes a dependency (e.g. Fabric API) is physically installed but missing projectId mapping
+      let fuzzyInstalledMod = null;
+      if (!isInstalled && name) {
+        // Only fuzzy match if dependency lacks a projectId mapping OR if it's Fabric API and the file clearly contains fabric-api
+        const allowFuzzy = !projectId || (projectId === 'P7dR8mSH');
+        if (!allowFuzzy) {
+          // Skip fuzzy matching for explicitly identified dependencies (prevents false positives like GuardVillagers matching Fabric API)
+        } else {
+        const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const depNorm = norm(name);
+        // Common aliases / slugs to check (extendable)
+        const depAliases = [depNorm];
+        if (depNorm === 'fabricapi' || projectId === 'P7dR8mSH') {
+          depAliases.push('fabricapi', 'fabric');
+        }
+        fuzzyInstalledMod = installedInfo.find(info => {
+          const inName = norm(info.name);
+            const inFile = norm(info.fileName);
+            // For Fabric API specifically, require 'fabricapi' substring to reduce false matches
+            if (projectId === 'P7dR8mSH') {
+              const fabricApiLike = inName.includes('fabricapi') || inFile.includes('fabricapi');
+              if (!fabricApiLike) return false;
+            }
+            return depAliases.some(a => a && (inName.includes(a) || inFile.includes(a)));
+        });
+        if (fuzzyInstalledMod) {
+          logger.debug('Fuzzy matched installed dependency without projectId mapping', {
+            category: 'mods',
+            data: {
+              function: 'checkDependencyCompatibility',
+              projectId: projectId,
+              dependencyName: name,
+              matchedFile: fuzzyInstalledMod.fileName,
+              matchedName: fuzzyInstalledMod.name,
+              matchedProjectId: fuzzyInstalledMod.projectId || null
+            }
+          });
+        }
+        }
+      }
+
+      // If the mod is not installed AND not fuzzy matched, it's a missing dependency
+      if (!isInstalled && !fuzzyInstalledMod) {
         logger.debug('Found missing required dependency', {
           category: 'mods',
           data: {
@@ -199,9 +240,26 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
         
         // Try to get available versions
         try {
+          const loader = get(loaderType);
+          const mcVersionVal = get(minecraftVersion);
+          if (!mcVersionVal) {
+            logger.warn('Fetching mod versions without mcVersion (may lead to broad latest-version selection)', {
+              category: 'mods',
+              data: {
+                function: 'checkDependencyCompatibility',
+                projectId: projectId,
+                dependencyName: name,
+                context: 'missingDependencyVersions',
+                loader: loader || null,
+                mcVersion: mcVersionVal || null
+              }
+            });
+          }
           const versions = await safeInvoke('get-mod-versions', {
             modId: projectId,
-            source: 'modrinth'
+            source: 'modrinth',
+            loader,
+            mcVersion: mcVersionVal
           });
           
           if (versions && versions.length > 0) {
@@ -289,12 +347,13 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
         issues.push(disabledIssue);
       }
       // If the mod IS installed and enabled, check for version compatibility
-      else if (installedMod) {
+      else if (installedMod || fuzzyInstalledMod) {
         // The dependency is installed, check if the version matches requirements
         const versionRequirement = dep.version_requirement || dep.versionRequirement;
-        
-        if (versionRequirement && installedMod.versionNumber) {
-          const isCompatible = checkVersionCompatibility(installedMod.versionNumber, versionRequirement);
+        const targetInstalled = installedMod || fuzzyInstalledMod;
+
+        if (versionRequirement && targetInstalled.versionNumber) {
+      const isCompatible = checkVersionCompatibility(targetInstalled.versionNumber, versionRequirement);
           
           logger.debug('Checked version compatibility for installed dependency', {
             category: 'mods',
@@ -302,7 +361,7 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
               function: 'checkDependencyCompatibility',
               projectId: projectId,
               dependencyName: name,
-              installedVersion: installedMod.versionNumber,
+              installedVersion: targetInstalled.versionNumber,
               versionRequirement: versionRequirement,
               isCompatible: isCompatible
             }
@@ -310,7 +369,7 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
           
           if (!isCompatible) {
             // For version mismatch issues, ALWAYS use the installed mod's proper name
-            let displayName = installedMod.name;
+            let displayName = targetInstalled.name;
             
             // If we don't have a name from installedMod, try harder to get one
             if (!displayName || displayName === 'Required Dependency') {
@@ -335,9 +394,26 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
             let compatibleVersion = null;
             
             try {
+              const loader = get(loaderType);
+              const mcVersionVal = get(minecraftVersion);
+              if (!mcVersionVal) {
+                logger.warn('Fetching mod versions without mcVersion (may lead to broad latest-version selection)', {
+                  category: 'mods',
+                  data: {
+                    function: 'checkDependencyCompatibility',
+                    projectId: projectId,
+                    dependencyName: name,
+                    context: 'versionMismatchResolution',
+                    loader: loader || null,
+                    mcVersion: mcVersionVal || null
+                  }
+                });
+              }
               const versions = await safeInvoke('get-mod-versions', {
                 modId: projectId,
-                source: 'modrinth'
+                source: 'modrinth',
+                loader,
+                mcVersion: mcVersionVal
               });
               
               if (versions && versions.length > 0) {
@@ -376,7 +452,7 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 function: 'checkDependencyCompatibility',
                 projectId: projectId,
                 dependencyName: displayName,
-                installedVersion: installedMod.versionNumber,
+                installedVersion: targetInstalled.versionNumber,
                 requiredVersion: versionRequirement,
                 compatibleVersion: compatibleVersion
               }
@@ -388,16 +464,16 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 projectId: projectId,
                 name: displayName,
                 dependencyType: 'compatibility',
-                currentVersionId: installedMod.versionId,
+                currentVersionId: targetInstalled.versionId,
                 versionRequirement: versionRequirement,
-                installedVersion: installedMod.versionNumber,
+                installedVersion: targetInstalled.versionNumber,
                 targetVersion: compatibleVersion || versionRequirement
               },
-              installedVersion: installedMod.versionNumber,
+              installedVersion: targetInstalled.versionNumber,
               requiredVersion: versionRequirement,
               targetVersion: compatibleVersion || versionRequirement,
-              versionInfo: `${installedMod.versionNumber} → ${compatibleVersion || versionRequirement}`,
-              message: `Version ${installedMod.versionNumber} needs to be updated to ${compatibleVersion || versionRequirement}`
+              versionInfo: `${targetInstalled.versionNumber} → ${compatibleVersion || versionRequirement}`,
+              message: `Version ${targetInstalled.versionNumber} needs to be updated to ${compatibleVersion || versionRequirement}`
             });
           }
         }
@@ -415,8 +491,8 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
               function: 'checkDependencyCompatibility',
               projectId: projectId,
               dependencyName: name,
-              currentVersion: installedMod.versionNumber,
-              updateVersion: updateInfo.versionNumber,
+                currentVersion: targetInstalled.versionNumber,
+                updateVersion: updateInfo.versionNumber,
               updateCompatible: updateCompatible
             }
           });
@@ -430,10 +506,10 @@ export async function checkDependencyCompatibility(dependencies, mainModId = nul
                 dependencyType: 'optional',
                 versionRequirement: versionRequirement
               },
-              installedVersion: installedMod.versionNumber,
+                installedVersion: targetInstalled.versionNumber,
               updateVersion: updateInfo.versionNumber,
-              versionInfo: `${installedMod.versionNumber} → ${updateInfo.versionNumber}`,
-              message: `Update available: ${installedMod.versionNumber} → ${updateInfo.versionNumber}`
+              versionInfo: `${targetInstalled.versionNumber} → ${updateInfo.versionNumber}`,
+              message: `Update available: ${targetInstalled.versionNumber} → ${updateInfo.versionNumber}`
             });
           }
         }

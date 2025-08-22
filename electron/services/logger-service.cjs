@@ -3,6 +3,12 @@ const path = require('path');
 const { app, BrowserWindow } = require('electron');
 const EventEmitter = require('events');
 const instanceContext = require('../utils/instance-context.cjs');
+let devConfig = null;
+try {
+  devConfig = require('../../dev-config.cjs');
+} catch {
+  devConfig = { enableDevConsole: false, enableVerboseLogging: false };
+}
 
 // Lazy app-store initialization to avoid circular dependency
 let appStore = null;
@@ -72,7 +78,11 @@ class LoggerService extends EventEmitter {
       maxMemoryLogs: 10000,
       maxFileSize: 50 * 1024 * 1024, // 50MB
       maxFiles: 5,
-      retentionDays: 7
+  retentionDays: 7,
+  suppressBackgroundLogs: true, // Suppress non-interactive logs by default
+  burstDurationMs: 15000, // Logging window after explicit user action
+  quietMods: true, // Backward flag – still honored
+  quietCategories: ['mods','network'] // Suppress debug/info for these categories unless forceLog
     };
     
     // Config will be loaded on first use to avoid circular dependency issues
@@ -81,6 +91,8 @@ class LoggerService extends EventEmitter {
     // Memory buffer for real-time display
     this.memoryLogs = [];
     this.logIdCounter = 0;
+  // Track temporary interactive logging window
+  this.interactiveUntil = 0;
 
     // Sensitive data patterns for redaction
     this.sensitivePatterns = [
@@ -157,8 +169,9 @@ class LoggerService extends EventEmitter {
 
       // Update configuration with store values, keeping defaults as fallback
       this.config = {
-        maxMemoryLogs: 10000, // Keep this hardcoded for memory management
-        maxFileSize: (loggerSettings.maxFileSize || 50) * 1024 * 1024, // Convert MB to bytes
+        ...this.config, // Preserve new fields like suppressBackgroundLogs / burstDurationMs
+        maxMemoryLogs: 10000, // Keep hardcoded cap
+        maxFileSize: (loggerSettings.maxFileSize || 50) * 1024 * 1024,
         maxFiles: loggerSettings.maxFiles || 5,
         retentionDays: loggerSettings.retentionDays || 7
       };
@@ -698,6 +711,30 @@ class LoggerService extends EventEmitter {
       level = 'info';
     }
 
+    // Determine if we are in an interactive logging window
+    const now = Date.now();
+    const interactive = now < this.interactiveUntil;
+
+    // Apply suppression: allow warnings/errors always; during suppression drop debug/info unless interactive or explicitly whitelisted
+    const category = (options && options.category) || (options && options.data && options.data.category) || '';
+    const forceLog = options && options.data && options.data.forceLog;
+
+    // Unified quiet categories suppression (includes mods, network by default)
+    if ((this.config.quietMods && category === 'mods') || (Array.isArray(this.config.quietCategories) && this.config.quietCategories.includes(category))) {
+      if ((level === 'debug' || level === 'info') && !forceLog) {
+        return; // Hard suppressed by quiet category
+      }
+    }
+
+    if (this.config.suppressBackgroundLogs && !interactive && (level === 'debug' || level === 'info')) {
+      const operation = (options && options.data && options.data.operation) || '';
+      const whitelistOps = new Set(['installModToServer','installModToClient','installModToServerWithFallback']);
+      const whitelistCats = new Set(['network']); // Removed 'mods' from default whitelist
+      if (!whitelistOps.has(operation) && !whitelistCats.has(category) && !forceLog) {
+        return; // Suppressed
+      }
+    }
+
     const logEntry = this.createLogEntry(level, message, options);
 
     // Add to memory buffer
@@ -709,12 +746,44 @@ class LoggerService extends EventEmitter {
     // Emit for real-time streaming
     this.emit('log', logEntry);
 
+    // Development console mirroring so F11 DevTools sees backend logs
+    try {
+      const mirror = devConfig.enableDevConsole || process.env.MC_CORE_DEBUG;
+      if (mirror) {
+        // Basic level to console method mapping
+        const payload = {
+          cat: logEntry.category,
+          msg: logEntry.message,
+          data: options.data || undefined,
+          id: logEntry.id
+        };
+        if (level === 'error' || level === 'fatal') {
+          console.error(`[MC][${level}] ${logEntry.message}`, payload);
+        } else if (level === 'warn') {
+          console.warn(`[MC][${level}] ${logEntry.message}`, payload);
+        } else if (level === 'info') {
+          console.info(`[MC][${level}] ${logEntry.message}`, payload);
+        } else {
+          if (devConfig.enableVerboseLogging) {
+            console.debug(`[MC][${level}] ${logEntry.message}`, payload);
+          }
+        }
+      }
+    } catch { /* swallow */ }
+
     return logEntry;
+  }
+
+  // Activate burst logging window
+  allowBurstLogging(durationMs) {
+    const d = typeof durationMs === 'number' && durationMs > 0 ? durationMs : this.config.burstDurationMs;
+    this.interactiveUntil = Date.now() + d;
+    this.log('debug','Burst logging window activated',{ category:'logger', data:{ durationMs:d, interactiveUntil:this.interactiveUntil }});
   }
 
   // Convenience methods
   debug(message, options = {}) {
-    return this.log('debug', message, options);
+  return this.log('debug', message, options);
   }
 
   info(message, options = {}) {
