@@ -697,6 +697,38 @@ async function getDisabledMods(serverPath) {
   return disabledMods;
 }
 
+// ---------------- Ignored Mod Updates Persistence -----------------
+// Structure: { [fileName]: { ids: string[], vers: string[] } }
+async function getIgnoredModUpdates(serverPath) {
+  if (!serverPath) throw new Error('Server path is required');
+  const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
+  await fs.mkdir(configDirMgr, { recursive: true });
+  const ignoredPath = path.join(configDirMgr, 'ignored-mod-updates.json');
+  try {
+    const raw = await fs.readFile(ignoredPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+async function saveIgnoredModUpdates(serverPath, data) {
+  if (!serverPath) throw new Error('Server path is required');
+  if (!data || typeof data !== 'object') throw new Error('Ignored updates data must be an object');
+  const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
+  await fs.mkdir(configDirMgr, { recursive: true });
+  const ignoredPath = path.join(configDirMgr, 'ignored-mod-updates.json');
+  try {
+    await fs.writeFile(ignoredPath, JSON.stringify(data, null, 2));
+  } catch {
+    // Silent failure; caller can decide to log if needed
+  }
+  return true;
+}
+
+
 async function addMod(serverPath, modPath) {
   
   if (!serverPath) {
@@ -1005,5 +1037,7 @@ module.exports = {
   saveTemporaryFile,
   directAddMod,
   moveModFile,
-  readModMetadataFromJar
+  readModMetadataFromJar,
+  getIgnoredModUpdates,
+  saveIgnoredModUpdates
 };

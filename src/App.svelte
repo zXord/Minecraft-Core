@@ -25,6 +25,10 @@
   import { Toaster } from "svelte-sonner";
   import { showExitConfirmation } from "./stores/exitStore.js";
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
+  import { getUpdateCount } from "./stores/modStore.js";
+  const updateCountStore = getUpdateCount();
+  import { checkForUpdates } from "./utils/mods/modAPI.js";
+  let updateIntervalId = null;
 
   // --- Flow & Tabs ---
   let step = "loading"; // loading → chooseFolder → chooseVersion → done
@@ -250,6 +254,18 @@
 
     // Make session ID available to other components
     setContext("sessionId", sessionId);
+
+    // Background periodic mod/shader/resource pack update check (every 30 min)
+    const runUpdateCheck = () => {
+      try {
+        if (path) {
+          checkForUpdates(path);
+        }
+      } catch {}
+    };
+    updateIntervalId = setInterval(runUpdateCheck, 30 * 60 * 1000);
+    // Initial delayed check (wait a bit for initial loads)
+    setTimeout(runUpdateCheck, 15 * 1000);
 
     // Set up navigation tracking
     const unsubscribeRoute = route.subscribe((currentRoute) => {
@@ -499,6 +515,22 @@
             }
             // Set step to done to show the main UI
             step = "done";
+            // Prime server config, then content, then run update check so counts show on launch
+            if (path) {
+              (async () => {
+                try {
+                  const { loadServerConfig, loadMods, loadContent, checkForUpdates: cf } = await import('./utils/mods/modAPI.js');
+                  await loadServerConfig(path); // ensure minecraftVersion populated before update check
+                  await loadMods(path); // mods first so installedModInfo populated
+                  // Load shaders then resourcepacks sequentially to avoid isLoading gate skipping one
+                  try { await loadContent(path, 'shaders'); } catch {}
+                  try { await loadContent(path, 'resourcepacks'); } catch {}
+                  await cf(path); // first pass
+                  // Safety: run a second pass shortly after to catch any late-loaded manifests (resource packs etc.)
+                  setTimeout(() => { try { cf(path); } catch {} }, 2000);
+                } catch { /* silent prime errors */ }
+              })();
+            }
           }
         } else {
           logger.info("No valid instances found during setup check", {
@@ -562,6 +594,10 @@
   });
 
   onDestroy(() => {
+    if (updateIntervalId) {
+      clearInterval(updateIntervalId);
+      updateIntervalId = null;
+    }
     // Enhanced component lifecycle logging for unmount
     logger.debug("App component unmounted", {
       category: "ui",
@@ -1381,7 +1417,7 @@
                   {:else if t === "players"}
                     👥 Players
                   {:else if t === "mods"}
-                    🧩 Mods
+                    🧩 Mods {#if $updateCountStore > 0}<span class="nav-update-badge" title="Pending content updates">{$updateCountStore}</span>{/if}
                   {:else if t === "backups"}
                     💾 Backups
                   {:else if t === "settings"}
@@ -2199,6 +2235,7 @@
   }
 
   .error-boundary button:hover {
-    background-color: #40a9ff;
-  }
-</style>
+      background-color: #40a9ff;
+    }
+    .nav-update-badge {background:#ef4444;color:#fff;font-size:0.55rem;padding:2px 6px;border-radius:10px;font-weight:600;margin-left:4px;display:inline-block;min-width:18px;text-align:center;}
+  </style>

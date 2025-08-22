@@ -12,6 +12,8 @@
     successMessage, 
     errorMessage,
     installedModInfo,
+    installedShaderInfo,
+    installedResourcePackInfo,
     minecraftVersion,
     loaderType,
     totalPages,
@@ -22,6 +24,7 @@
     filterModLoader,
     expandedInstalledMod,
     modsWithUpdates,
+  disabledModUpdates,
     currentDependencies,
     modToInstall,
     // Content type stores
@@ -71,6 +74,52 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     { id: CONTENT_TYPES.SHADERS, label: 'Shaders', icon: '✨' },
     { id: CONTENT_TYPES.RESOURCE_PACKS, label: 'Resource Packs', icon: '🎨' }
   ];
+
+  // Per-content-type update counts (reactive)
+  $: modsUpdateCount = (() => {
+    let count = 0;
+    if ($modsWithUpdates && $installedModInfo) {
+      const modNames = new Set($installedModInfo.map(m => m.fileName));
+      for (const [name] of $modsWithUpdates.entries()) {
+        if (name.startsWith('project:')) continue;
+        if (modNames.has(name)) count++;
+      }
+    }
+    // Include disabled mod compatible updates
+    if ($disabledModUpdates) count += $disabledModUpdates.size;
+    return count;
+  })();
+  $: shaderUpdateCount = (() => {
+    let count = 0;
+    if ($modsWithUpdates && $installedShaderInfo) {
+      const shaderNames = new Set($installedShaderInfo.map(s => s.fileName));
+      for (const [name] of $modsWithUpdates.entries()) {
+        if (name.startsWith('project:')) continue;
+        if (shaderNames.has(name)) count++;
+      }
+    }
+    return count;
+  })();
+  $: resourcePackUpdateCount = (() => {
+    let count = 0;
+    if ($modsWithUpdates && $installedResourcePackInfo) {
+      const rpNames = new Set($installedResourcePackInfo.map(r => r.fileName));
+      for (const [name] of $modsWithUpdates.entries()) {
+        if (name.startsWith('project:')) continue;
+        if (rpNames.has(name)) count++;
+      }
+    }
+    return count;
+  })();
+
+  function getUpdateCountFor(contentTypeId) {
+    switch (contentTypeId) {
+      case CONTENT_TYPES.MODS: return modsUpdateCount;
+      case CONTENT_TYPES.SHADERS: return shaderUpdateCount;
+      case CONTENT_TYPES.RESOURCE_PACKS: return resourcePackUpdateCount;
+      default: return 0;
+    }
+  }
   
   // Initialize filter stores (only for mods to avoid version filter ping-pong on shaders/resource packs)
   $: if (
@@ -653,17 +702,16 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     
     // If switching to installed tab, refresh mod list
     if (tabName === 'installed') {
-      // Load content for the active content type, then check for updates
+      // Load content for the active content type without triggering update checks
       (async () => {
         try {
           const { loadContent } = await import('../../utils/mods/modAPI.js');
           await loadContent(serverPath, get(activeContentType));
         } catch (_) {}
-        checkForUpdates(serverPath);
       })();
     }
     // If switching to search tab, refresh search results and check for updates
-    else if (tabName === 'search') {
+  else if (tabName === 'search') {
       // Clear any stale update counts when switching away from installed tab
       modsWithUpdates.set(new SvelteMap());
 
@@ -675,8 +723,8 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         } catch (_) {
           // ignore
         }
-        // Always check for updates when switching to search tab to ensure update buttons are shown
-        checkForUpdates(serverPath).then(() => {
+  // Do NOT auto-check updates here (manual or interval only)
+  Promise.resolve().then(() => {
           // Only search if no results yet for the active content type
           const currentType = get(activeContentType);
           const hasResults = currentType === CONTENT_TYPES.SHADERS
@@ -715,16 +763,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       }
       // If on installed tab, load content for new type
       else if (activeTab === 'installed') {
-        // Import loadContent function
+        // Import loadContent function (no auto update check)
         const { loadContent } = await import('../../utils/mods/modAPI.js');
         await loadContent(serverPath, contentTypeId);
-        // Ensure updates are checked for the newly selected content type
-        // Use a follow-up check that can coalesce with any in-flight check
-        try {
-          const { checkForUpdates } = await import('../../utils/mods/modAPI.js');
-          // Ask for a refresh to avoid stale cache when switching types
-          checkForUpdates(serverPath, true);
-        } catch (_) {}
       }
     } catch (error) {
       // Error switching content type
@@ -825,6 +866,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           {/if}
         </span>
         <span class="content-type-label">{contentType.label}</span>
+        {#if getUpdateCountFor(contentType.id) > 0}
+          <span class="update-badge" title="Updates available for this type">{getUpdateCountFor(contentType.id)}</span>
+        {/if}
       </button>
     {/each}
   </div>
@@ -963,6 +1007,19 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   .content-type-tab.active:hover {
     background: var(--tab-active-hover-bg);
     border: var(--tab-active-hover-border);
+  }
+
+  .update-badge {
+    background: #ef4444;
+    color: #fff;
+    font-size: 0.6rem;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 10px;
+    font-weight: 600;
+    margin-top: 2px;
+    display: inline-block;
+    min-width: 20px;
   }
 
   .content-type-tab:disabled {
