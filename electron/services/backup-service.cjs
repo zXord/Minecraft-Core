@@ -4,6 +4,8 @@ const { createZip, listBackups } = require('../utils/backup-util.cjs');
 const AdmZip = require('adm-zip');
 const { sendServerCommand, getServerState } = require('./server-manager.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+// Lazy-load retention policy when needed
+let RetentionPolicy = null;
 
 // Initialize logger
 const logger = getLoggerHandlers();
@@ -119,6 +121,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
       totalBackupsCreated: performanceMetrics.backupsCreated
     }
   });
+  // Removed noisy console START log
   
   try {
     const backupDir = getBackupDir(serverPath);
@@ -329,7 +332,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     // Write updated metadata with the correct size
     fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
     
-    logger.info('Backup created successfully', {
+  logger.info('Backup created successfully', {
       category: 'storage',
       data: {
         service: 'BackupService',
@@ -346,8 +349,11 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
         averageBackupTime: Math.round(performanceMetrics.averageBackupTime)
       }
     });
+  // Removed noisy console SUCCESS log
     
-    return { name, size: stats.size, metadata };
+  // Fire-and-forget advanced retention after successful creation
+  try { applyAdvancedRetention({ serverPath, trigger }); } catch { /* ignore */ }
+  return { name, size: stats.size, metadata };
   } else {
     const backupDuration = Date.now() - backupStartTime;
     logger.error('Backup file was not created correctly', {
@@ -366,7 +372,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   }
   } catch (error) {
     const backupDuration = Date.now() - backupStartTime;
-    logger.error(`Backup creation failed: ${error.message}`, {
+  logger.error(`Backup creation failed: ${error.message}`, {
       category: 'storage',
       data: {
         service: 'BackupService',
@@ -379,7 +385,60 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
         errorMessage: error.message
       }
     });
+  try { console.error('[BackupService] ERROR', { message: error.message, type, trigger, duration: backupDuration }); } catch { /* console logging failed */ }
     throw error;
+  }
+}
+
+// Internal helper to apply advanced retention rules (size/age/count) centrally after automated backups
+async function applyAdvancedRetention({ serverPath, trigger }) {
+  try {
+    // Only for automated triggers
+    if (!(trigger === 'auto' || trigger === 'app-launch' || trigger === 'manual-auto')) return;
+
+    const appStore = require('../utils/app-store.cjs');
+    const retentionKey = `retentionSettings_${Buffer.from(serverPath).toString('base64')}`;
+    const adv = appStore.get(retentionKey);
+  logger.debug('Advanced retention loaded', { category: 'backup', data: { serverPath, hasSettings: !!adv } });
+    if (!adv || !(adv.sizeRetentionEnabled || adv.ageRetentionEnabled || adv.countRetentionEnabled)) {
+  logger.debug('Advanced retention skipped (no enabled rules)', { category: 'backup', data: { serverPath } });
+      return;
+    }
+    // Load engine
+    try { ({ RetentionPolicy } = require('../utils/retention-policy.cjs')); } catch (e) {
+  logger.warn('Advanced retention engine load failed', { category: 'backup', data: { serverPath, error: e.message } }); return; }
+
+    const toBytes = (value, unit) => {
+      const n = Number(value) || 0; const u = (unit||'').toLowerCase();
+      if (u === 'kb') return n*1024; if (u === 'mb') return n*1024*1024; if (u === 'gb') return n*1024*1024*1024; if (u === 'tb') return n*1024*1024*1024*1024; return n; };
+    const toMs = (value, unit) => {
+      const n = Number(value) || 0; const u = (unit||'').toLowerCase();
+      switch(u){ case 'minutes': return n*60*1000; case 'hours': return n*60*60*1000; case 'days': return n*24*60*60*1000; case 'weeks': return n*7*24*60*60*1000; case 'months': return n*30*24*60*60*1000; default: return n; }
+    };
+    const policy = {
+      maxSize: adv.sizeRetentionEnabled ? toBytes(adv.maxSizeValue, adv.maxSizeUnit) : null,
+      maxAge: adv.ageRetentionEnabled ? toMs(adv.maxAgeValue, adv.maxAgeUnit) : null,
+      maxCount: adv.countRetentionEnabled ? adv.maxCountValue : null,
+      preserveRecent: 1
+    };
+  logger.debug('Advanced retention policy constructed', { category: 'backup', data: { serverPath, policy } });
+    let engine;
+  try { engine = new RetentionPolicy(policy); } catch (e) { logger.warn('Advanced retention invalid policy', { category: 'backup', data: { serverPath, error: e.message } }); return; }
+  if (!engine.hasActiveRules()) { logger.debug('Advanced retention no active rules after validation', { category: 'backup', data: { serverPath } }); return; }
+    const backups = await listBackupsWithMetadata(serverPath);
+  logger.debug('Advanced retention evaluating backups', { category: 'backup', data: { serverPath, count: backups.length } });
+    const toDelete = await engine.evaluateBackups(backups);
+  logger.info('Advanced retention evaluation result', { category: 'backup', data: { serverPath, deleteCount: toDelete.length } });
+    for (const b of toDelete) {
+      try {
+        await deleteBackup({ serverPath, name: b.name });
+  logger.debug('Advanced retention deleted backup', { category: 'backup', data: { serverPath, name: b.name } });
+      } catch (e) {
+  logger.warn('Advanced retention delete failed', { category: 'backup', data: { serverPath, name: b.name, error: e.message } });
+      }
+    }
+  } catch (err) {
+  logger.error('Advanced retention error', { category: 'backup', data: { serverPath, error: err.message } });
   }
 }
 
@@ -501,7 +560,8 @@ async function cleanupAutomaticBackups(serverPath, maxCount) {
       return { success: true, message: 'No cleanup needed' };
     }
     
-    const backups = await listBackupsWithMetadata(serverPath);
+  const backups = await listBackupsWithMetadata(serverPath);
+  // (diagnostic log removed)
     
     // Filter to only get automated backups (including app-launch)
     const autoBackups = backups.filter(b => 
@@ -512,7 +572,7 @@ async function cleanupAutomaticBackups(serverPath, maxCount) {
        b.metadata.trigger === 'manual-auto')
     );
     
-    if (autoBackups.length === 0) {
+  if (autoBackups.length === 0) {
       return { success: true, deleted: 0, message: 'No automated backups to clean up' };
     }
     
@@ -524,7 +584,7 @@ async function cleanupAutomaticBackups(serverPath, maxCount) {
     });
     
     // If we have more than the max, delete the oldest ones
-    if (autoBackups.length > maxCount) {
+  if (autoBackups.length > maxCount) {
       const backupsToDelete = autoBackups.slice(maxCount);
       
       let deletedCount = 0;
@@ -546,7 +606,8 @@ async function cleanupAutomaticBackups(serverPath, maxCount) {
       };
     }
     
-    return { success: true, deleted: 0, message: 'No cleanup needed' };
+  // (diagnostic log removed)
+  return { success: true, deleted: 0, message: 'No cleanup needed' };
   } catch (err) {
     // TODO: Add proper logging - Error during backup cleanup
     return { success: false, error: err.message };
