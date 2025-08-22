@@ -28,6 +28,29 @@
   let isDeletingInstance = false;
   let showCopyConfirmation = false;
   let lastAuthDate = authData?.lastLogin || null;
+  let clientFolderSize = null; // bytes
+  let clientFolderSizeLoading = false;
+
+  function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    if (!bytes || isNaN(bytes)) return '—';
+    const k = 1024; const sizes = ['B','KB','MB','GB','TB'];
+    const i = Math.min(Math.floor(Math.log(bytes)/Math.log(k)), sizes.length-1);
+    return `${(bytes/Math.pow(k,i)).toFixed(2)} ${sizes[i]}`;
+  }
+
+  async function loadClientFolderSize() {
+    if (!instance?.path) return;
+    clientFolderSizeLoading = true;
+    try {
+      const res = await window.electron.invoke('get-folder-size', { path: instance.path });
+      if (res?.success) clientFolderSize = res.size;
+    } catch (_) {
+      // silently ignore
+    } finally {
+      clientFolderSizeLoading = false;
+    }
+  }
   
   // Download source preferences
   let primaryDownloadSource = 'server';
@@ -43,6 +66,7 @@
         primaryDownloadSource = preferences.primarySource || 'server';
         fallbackDownloadSource = preferences.fallbackSource || 'modrinth';
       }
+  loadClientFolderSize();
     } catch (error) {
       // Failed to load preferences, will use defaults
     }
@@ -205,6 +229,20 @@
               {/if}
             </div>
           </div>
+          {#if instance.path}
+          <div class="info-row enhanced" title="Total size of the client folder">
+            <div class="info-label">
+              <span class="info-icon">💾</span>
+              <span>Folder Size</span>
+            </div>
+            <span class="info-value">
+              {clientFolderSizeLoading ? 'Calculating...' : (clientFolderSize !== null ? formatBytes(clientFolderSize) : '—')}
+              {#if !clientFolderSizeLoading}
+                <button class="icon-btn" on:click={loadClientFolderSize} title="Refresh size" style="margin-left:6px;">🔄</button>
+              {/if}
+            </span>
+          </div>
+          {/if}
         </div>
       </div>
     </div>

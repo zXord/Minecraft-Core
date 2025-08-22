@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('electron', {
       'analyze-mod-from-url',
       'select-folder',
       'get-last-server-path',
+  'get-folder-size',
       'read-config',
       'save-version-selection',
       'write-eula',

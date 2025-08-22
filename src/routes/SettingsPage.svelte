@@ -23,6 +23,32 @@
   let formOperations = 0;
   let categoryChanges = 0;
   let previousServerPath = "";
+  let serverFolderSize = null; // bytes
+  let serverFolderSizeLoading = false;
+
+  function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    if (!bytes || isNaN(bytes)) return '—';
+    const k = 1024;
+    const sizes = ['B','KB','MB','GB','TB'];
+    const i = Math.min(Math.floor(Math.log(bytes)/Math.log(k)), sizes.length-1);
+    return `${(bytes/Math.pow(k,i)).toFixed(2)} ${sizes[i]}`;
+  }
+
+  async function loadServerFolderSize() {
+    if (!serverPath) return;
+    serverFolderSizeLoading = true;
+    try {
+      const res = await window.electron.invoke('get-folder-size', { path: serverPath });
+      if (res?.success) {
+        serverFolderSize = res.size;
+      }
+    } catch (e) {
+      // ignore size errors to keep UI responsive
+    } finally {
+      serverFolderSizeLoading = false;
+    }
+  }
 
   const settingsCategories = [
     { id: "overview", name: "Server Overview", icon: "🖥️" },
@@ -116,6 +142,8 @@
     try {
       // Simulate settings data loading
       await loadSettingsData();
+  // After data load attempt to fetch size (non-blocking)
+  loadServerFolderSize();
 
       pageInitialized = true;
       loadingState = "loaded";
@@ -381,6 +409,7 @@
       handleSettingsPageError(error, "folder_open");
     }
   }
+
 </script>
 
 <div class="settings-container">
@@ -405,7 +434,22 @@
       <!-- Server Overview Card -->
       <div class="settings-card overview-card">
         <div class="card-header">
-          <h3>🖥️ Server Overview</h3>
+          <h3>
+            <span class="icon-wrapper" aria-hidden="true">
+              <svg class="server-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                <rect x="3" y="3" width="18" height="6" rx="1.5" ry="1.5"></rect>
+                <rect x="3" y="10" width="18" height="6" rx="1.5" ry="1.5"></rect>
+                <rect x="3" y="17" width="18" height="4" rx="1.5" ry="1.5"></rect>
+                <circle cx="7" cy="6" r="1.2" fill="#4ade80"></circle>
+                <circle cx="11" cy="6" r="1.2" fill="#facc15"></circle>
+                <circle cx="15" cy="6" r="1.2" fill="#ef4444"></circle>
+                <circle cx="7" cy="13" r="1.2" fill="#4ade80"></circle>
+                <circle cx="11" cy="13" r="1.2" fill="#facc15"></circle>
+                <circle cx="15" cy="13" r="1.2" fill="#ef4444"></circle>
+              </svg>
+            </span>
+            Server Overview
+          </h3>
           <div class="status-pills">
             <div class="status-pill server">
               <div class="status-dot"></div>
@@ -417,7 +461,7 @@
           <div class="info-grid">
             <div class="info-row enhanced" title="Server instance name">
               <div class="info-label">
-                <span class="info-icon">📛</span>
+                  <span class="info-icon">🏷️</span>
                 <span>Name</span>
               </div>
               <span class="info-value"
@@ -454,6 +498,20 @@
                 {/if}
               </div>
             </div>
+            {#if serverPath}
+            <div class="info-row enhanced" title="Total size of the server folder">
+              <div class="info-label">
+                <span class="info-icon">💾</span>
+                <span>Folder Size</span>
+              </div>
+              <span class="info-value">
+                {serverFolderSizeLoading ? 'Calculating...' : (serverFolderSize !== null ? formatBytes(serverFolderSize) : '—')}
+                {#if !serverFolderSizeLoading}
+                  <button class="icon-btn" on:click={loadServerFolderSize} title="Refresh size" style="margin-left:6px;">🔄</button>
+                {/if}
+              </span>
+            </div>
+            {/if}
           </div>
         </div>
       </div>
@@ -838,4 +896,8 @@
     padding: 0 !important;
     margin: 0 !important;
   }
+  /* Server overview icon styles */
+  .icon-wrapper { display:inline-flex; align-items:center; margin-right:6px; }
+  .server-icon { vertical-align:middle; color: var(--color-text, #ccc); }
+  h3 { display:flex; align-items:center; gap:4px; }
 </style>
