@@ -76,40 +76,51 @@ function isBundledFabricModule(id) {
  * @param {Object} mod - The mod object
  * @returns {Promise<Array>} - Array of dependency objects
  */
-export async function checkModDependencies(mod, visited = new Set()) {
-  logger.info('Checking mod dependencies', {
-    category: 'mods',
-    data: {
-      function: 'checkModDependencies',
-      modId: mod?.id,
-      modName: mod?.name,
-      visitedCount: visited.size
-    }
-  });
+// options: { interactive?: boolean }
+export async function checkModDependencies(mod, visited = new Set(), options = {}, depth = 0) {
+  const interactive = options.interactive === true;
+  const rootInteractive = interactive && depth === 0;
+  if (rootInteractive) {
+    logger.info('Checking mod dependencies', {
+      category: 'mods',
+      data: {
+        function: 'checkModDependencies',
+        modId: mod?.id,
+        modName: mod?.name,
+        visitedCount: visited.size,
+        interactive: true,
+        depth
+      }
+    });
+  }
   
   try {
     if (!mod || !mod.id) {
-      logger.debug('Invalid mod or missing ID for dependency check', {
-        category: 'mods',
-        data: {
-          function: 'checkModDependencies',
-          mod,
-          hasId: !!(mod?.id)
-        }
-      });
+      if (rootInteractive) {
+        logger.debug('Invalid mod or missing ID for dependency check', {
+          category: 'mods',
+          data: {
+            function: 'checkModDependencies',
+            mod,
+            hasId: !!(mod?.id)
+          }
+        });
+      }
       return [];
     }
     
     // Avoid infinite recursion by checking visited mods
     if (visited.has(mod.id)) {
-      logger.debug('Mod already visited, avoiding circular dependency', {
-        category: 'mods',
-        data: {
-          function: 'checkModDependencies',
-          modId: mod.id,
-          visitedMods: Array.from(visited)
-        }
-      });
+      if (rootInteractive) {
+        logger.debug('Mod already visited, avoiding circular dependency', {
+          category: 'mods',
+          data: {
+            function: 'checkModDependencies',
+            modId: mod.id,
+            visitedMods: Array.from(visited)
+          }
+        });
+      }
       return [];
     }
     visited.add(mod.id);
@@ -382,7 +393,7 @@ export async function checkModDependencies(mod, visited = new Set()) {
     
     // SPECIAL CASE: If this is a Fabric mod, ensure Fabric API is included (unless installing Fabric API itself)
     if (isFabricMod) {
-      logger.debug('Detected Fabric mod, checking for Fabric API dependency', {
+  if (rootInteractive) logger.debug('Detected Fabric mod, checking for Fabric API dependency', {
         category: 'mods',
         data: {
           function: 'checkModDependencies',
@@ -400,7 +411,7 @@ export async function checkModDependencies(mod, visited = new Set()) {
         if (mod.id !== fapiId) {
           const hasFapi = allDependencies.some(dep => dep.project_id === fapiId);
           if (!hasFapi) {
-            logger.debug('Adding Fabric API as required dependency', {
+            if (rootInteractive) logger.debug('Adding Fabric API as required dependency', {
               category: 'mods',
               data: {
                 function: 'checkModDependencies',
@@ -418,7 +429,7 @@ export async function checkModDependencies(mod, visited = new Set()) {
           }
         }
       } catch (err) {
-        logger.warn('Failed to fetch Fabric API info for dependency injection', {
+  if (rootInteractive) logger.warn('Failed to fetch Fabric API info for dependency injection', {
           category: 'mods',
           data: {
             function: 'checkModDependencies',
@@ -493,39 +504,47 @@ export async function checkModDependencies(mod, visited = new Set()) {
     
     
     // Resolve direct dependencies
-    const directDeps = await filterAndResolveDependencies(filteredDeps);
+  const directDeps = await filterAndResolveDependencies(filteredDeps, { interactive: rootInteractive });
     // Recursively check dependencies of each dependency
     const allDeps = [...directDeps];
     for (const dep of directDeps) {
-      const nestedDeps = await checkModDependencies({ id: dep.projectId, selectedVersionId: null, source: mod.source || 'modrinth' }, visited);
+      const nestedDeps = await checkModDependencies({ id: dep.projectId, selectedVersionId: null, source: mod.source || 'modrinth' }, visited, options, depth + 1);
       for (const nested of nestedDeps) {
         if (!allDeps.find(d => d.projectId === nested.projectId)) {
           allDeps.push(nested);
         }
       }
     }
-    logger.info('Mod dependency check completed', {
-      category: 'mods',
-      data: {
-        function: 'checkModDependencies',
-        modId: mod.id,
-        modName: mod.name,
-        totalDependencies: allDeps.length,
-        directDependencies: directDeps.length
-      }
-    });
+    if (rootInteractive) {
+      logger.info('Mod dependency check completed', {
+        category: 'mods',
+        data: {
+          function: 'checkModDependencies',
+          modId: mod.id,
+          modName: mod.name,
+          totalDependencies: allDeps.length,
+          directDependencies: directDeps.length,
+          interactive: true,
+          depth
+        }
+      });
+    }
     
     return allDeps;
   } catch (err) {
-    logger.error('Failed to check mod dependencies', {
-      category: 'mods',
-      data: {
-        function: 'checkModDependencies',
-        modId: mod?.id,
-        modName: mod?.name,
-        errorMessage: err.message
-      }
-    });
+    if (rootInteractive) {
+      logger.error('Failed to check mod dependencies', {
+        category: 'mods',
+        data: {
+          function: 'checkModDependencies',
+          modId: mod?.id,
+          modName: mod?.name,
+          errorMessage: err.message,
+          interactive: true,
+          depth
+        }
+      });
+    }
     return [];
   }
 }
@@ -535,14 +554,17 @@ export async function checkModDependencies(mod, visited = new Set()) {
  * @param {Array} dependencies - Raw dependencies from API
  * @returns {Promise<Array>} - Filtered and resolved dependencies
  */
-async function filterAndResolveDependencies(dependencies) {
-  logger.debug('Filtering and resolving dependencies', {
-    category: 'mods',
-    data: {
-      function: 'filterAndResolveDependencies',
-      dependenciesCount: dependencies ? dependencies.length : 0
-    }
-  });
+async function filterAndResolveDependencies(dependencies, { interactive = false } = {}) {
+  if (interactive) {
+    logger.debug('Filtering and resolving dependencies', {
+      category: 'mods',
+      data: {
+        function: 'filterAndResolveDependencies',
+        dependenciesCount: dependencies ? dependencies.length : 0,
+        interactive: true
+      }
+    });
+  }
   
   const disabled = get(disabledMods); // Get the set of disabled mods
   
@@ -580,19 +602,24 @@ async function filterAndResolveDependencies(dependencies) {
     const isDisabled = installedMod && disabled.has(installedMod.fileName);
     const isInstalledAndEnabled = isPhysicallyInstalled && !isDisabled;
     
-    logger.debug('Evaluating dependency requirement', {
-      category: 'mods',
-      data: {
-        function: 'filterAndResolveDependencies',
-        projectId: dep.project_id,
-        isRequired: isRequired,
-        isPhysicallyInstalled: isPhysicallyInstalled,
-        isDisabled: isDisabled,
-        needsInstallation: isRequired && !isInstalledAndEnabled
-      }
-    });
+    // Reduce log noise: only log dependencies that actually require action
+    const needsInstallation = isRequired && !isInstalledAndEnabled;
+  if (needsInstallation && interactive) {
+      logger.debug('Evaluating dependency requirement', {
+        category: 'mods',
+        data: {
+          function: 'filterAndResolveDependencies',
+          projectId: dep.project_id,
+          isRequired: isRequired,
+          isPhysicallyInstalled: isPhysicallyInstalled,
+          isDisabled: isDisabled,
+      needsInstallation,
+      interactive: true
+        }
+      });
+    }
     
-    return isRequired && !isInstalledAndEnabled;
+  return needsInstallation;
   });
   
   
@@ -666,15 +693,18 @@ async function filterAndResolveDependencies(dependencies) {
         }
       }
       } catch (error) {
-        logger.debug('Failed to resolve dependency info, using fallback', {
-          category: 'network',
-          data: {
-            function: 'filterAndResolveDependencies',
-            projectId: dep.project_id,
-            errorType: error.constructor.name,
-            context: 'dependency_resolution'
-          }
-        });
+        if (interactive) {
+          logger.debug('Failed to resolve dependency info, using fallback', {
+            category: 'network',
+            data: {
+              function: 'filterAndResolveDependencies',
+              projectId: dep.project_id,
+              errorType: error.constructor.name,
+              context: 'dependency_resolution',
+              interactive: true
+            }
+          });
+        }
         
         // Fall back to basic info if available
         if (!name && dep.project_id) {
@@ -699,16 +729,19 @@ async function filterAndResolveDependencies(dependencies) {
     };
   }));
   
-  logger.debug('Dependencies filtered and resolved', {
-    category: 'mods',
-    data: {
-      function: 'filterAndResolveDependencies',
-      originalCount: dependencies.length,
-      normalizedCount: normalizedDeps.length,
-      requiredCount: requiredDeps.length,
-      resolvedCount: resolvedDeps.length
-    }
-  });
+  if (interactive) {
+    logger.debug('Dependencies filtered and resolved', {
+      category: 'mods',
+      data: {
+        function: 'filterAndResolveDependencies',
+        originalCount: dependencies.length,
+        normalizedCount: normalizedDeps.length,
+        requiredCount: requiredDeps.length,
+        resolvedCount: resolvedDeps.length,
+        interactive: true
+      }
+    });
+  }
   
   return resolvedDeps;
 }

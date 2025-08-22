@@ -24,7 +24,9 @@
     installedShaders,
     installedResourcePacks,
     installedShaderInfo,
-    installedResourcePackInfo
+  installedResourcePackInfo,
+  loaderType,
+  minecraftVersion
   } from '../../../stores/modStore.js';
   import { serverState } from '../../../stores/serverState.js';
   import { formatInstallationDate, formatLastUpdated, formatTooltipDate } from '../../../utils/dateUtils.js';
@@ -757,7 +759,7 @@
             id: mod.projectId,
             selectedVersionId: mod.versionId,
             source: mod.source || 'modrinth'
-          });
+          }, new Set(), { interactive: true });
           checkedCount++;
           
           if (deps && deps.length > 0) {
@@ -1189,13 +1191,11 @@
         dependencyContentType = 'shaders';
       }
       // Check for common resource pack keywords
-      else if (dependencyName.includes('texture') || 
-               dependencyName.includes('resource') ||
-               dependencyName.includes('pack') ||
-               dependencyName.includes('animation') ||
-               dependencyName.includes('fresh animations') ||
-               dependencyName.includes('entity texture') ||
-               dependencyName.includes('entity model')) {
+      else if (
+        // Narrowed: require explicit resource-pack style indicators and absence of clear mod signals
+        (/resource\s?pack/.test(dependencyName) || dependencyName.endsWith('pack') || dependencyName.includes('textures.zip')) &&
+        !/fabric|forge|neoforge|quilt|api|core|library/.test(dependencyName)
+      ) {
         dependencyContentType = 'resourcepacks';
       }
       // Otherwise, assume it's a mod
@@ -1207,12 +1207,21 @@
 
       // Determine the best version to install based on version requirement
       let versionId = null;
-      if (dependency.versionRequirement) {
+    if (dependency.versionRequirement) {
         try {
           // Try to get versions and find the best match
+          const loader = get(loaderType);
+          const mcVersion = get(minecraftVersion);
+          if (!mcVersion) {
+            // Log via IPC logger utility if available
+            try { await safeInvoke('log-message', { level: 'warn', category: 'mods', message: 'Dependency version fetch without mcVersion', data: { projectId: dependency.projectId }}); } catch {}
+          }
+      try { await safeInvoke('logger-allow-burst', 15000); } catch {}
           const versions = await safeInvoke('get-mod-versions', {
             modId: dependency.projectId,
-            source: 'modrinth'
+            source: 'modrinth',
+            loader,
+            mcVersion
           });
           
           if (versions && versions.length > 0) {
@@ -1335,13 +1344,7 @@
             dependencyContentType = 'shaders';
           }
           // Check for common resource pack keywords
-          else if (dependencyName.includes('texture') || 
-                   dependencyName.includes('resource') ||
-                   dependencyName.includes('pack') ||
-                   dependencyName.includes('animation') ||
-                   dependencyName.includes('fresh animations') ||
-                   dependencyName.includes('entity texture') ||
-                   dependencyName.includes('entity model')) {
+          else if ((/resource\s?pack/.test(dependencyName) || dependencyName.endsWith('pack') || dependencyName.includes('textures.zip')) && !/fabric|forge|neoforge|quilt|api|core|library/.test(dependencyName)) {
             dependencyContentType = 'resourcepacks';
           }
           // Otherwise, assume it's a mod
@@ -1353,11 +1356,19 @@
 
           // Determine the best version to install
           let versionId = null;
-          if (dependency.versionRequirement) {
+      if (dependency.versionRequirement) {
             try {
+              const loader = get(loaderType);
+              const mcVersion = get(minecraftVersion);
+              if (!mcVersion) {
+                try { await safeInvoke('log-message', { level: 'warn', category: 'mods', message: 'Bulk dependency version fetch without mcVersion', data: { projectId: dependency.projectId }}); } catch {}
+              }
+        try { await safeInvoke('logger-allow-burst', 15000); } catch {}
               const versions = await safeInvoke('get-mod-versions', {
                 modId: dependency.projectId,
-                source: 'modrinth'
+                source: 'modrinth',
+                loader,
+                mcVersion
               });
               
               if (versions && versions.length > 0) {

@@ -7,7 +7,7 @@ const fs = require('fs');
 function createModrinthMatchingHandlers() {
   return {
     // Search Modrinth for potential matches for a manually added mod
-    'search-modrinth-matches': async (_event, { modPath, modName, modVersion }) => {
+  'search-modrinth-matches': async (_event, { modPath, modName, modVersion, minecraftVersion }) => {
       try {
         // Extract mod metadata first
         let metadata = null;
@@ -69,7 +69,7 @@ function createModrinthMatchingHandlers() {
                 const versions = await modApiService.getModrinthVersions(
                   match.project_id,
                   'fabric', // Default to fabric, could be made configurable
-                  null, // Get all versions
+                  minecraftVersion || null, // Constrain to current MC version if provided
                   false // Don't load latest only
                 );
                 
@@ -197,10 +197,10 @@ function createModrinthMatchingHandlers() {
     },
 
     // Get detailed information about a specific Modrinth project for confirmation
-    'get-modrinth-project-details': async (_event, { projectId }) => {
+  'get-modrinth-project-details': async (_event, { projectId, minecraftVersion }) => {
       try {
         const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
-        const versions = await modApiService.getModrinthVersions(projectId, 'fabric', null, false);
+  const versions = await modApiService.getModrinthVersions(projectId, 'fabric', minecraftVersion || null, false);
 
         return {
           success: true,

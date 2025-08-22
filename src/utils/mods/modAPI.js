@@ -912,7 +912,25 @@ export async function installMod(mod, serverPath, options = {}) {
     const isVersionUpdate = Boolean(mod.selectedVersionId);
     
     // Determine content type from options or mod data
-    const contentType = options.contentType || mod.contentType || 'mods';
+    let contentType = options.contentType || mod.contentType || 'mods';
+
+    // SAFEGUARD: If we have clear signals this is a mod (loader present OR jar download/file) but
+    // the current contentType is shaders/resourcepacks (e.g. user was on another tab), coerce to 'mods'.
+    const probableJar = (mod.downloadUrl && /\.jar($|\?)/i.test(mod.downloadUrl)) || (mod.fileName && /\.jar$/i.test(mod.fileName));
+    if (contentType !== 'mods') {
+      if (mod.loader || probableJar) {
+        contentType = 'mods';
+      }
+    }
+
+    // Additional heuristic: If title/name contains "fabric"/"forge" or common mod keywords, force mods
+    const nameLc = (mod.name || mod.title || '').toLowerCase();
+    if (contentType !== 'mods') {
+      const modKeywords = ['fabric', 'forge', 'neoforge', 'quilt'];
+      if (modKeywords.some(k => nameLc.includes(k))) {
+        contentType = 'mods';
+      }
+    }
     
 
     
@@ -951,7 +969,7 @@ export async function installMod(mod, serverPath, options = {}) {
     
     // Use appropriate install method based on content type
     let ipcMethod;
-    switch (contentType) {
+  switch (contentType) {
       case 'shaders':
         ipcMethod = 'install-shader-with-fallback';
         break;

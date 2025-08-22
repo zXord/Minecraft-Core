@@ -387,7 +387,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       // Regular installation with dependency check
       // Always check for dependencies even for reinstalling mods
       try {
-        const dependencies = await checkModDependencies(mod);
+        const dependencies = await checkModDependencies(mod, new Set(), { interactive: true });
         
         // Get the version info to also check for compatibility issues
         let compatibilityIssues = [];
@@ -1060,4 +1060,4 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   /* h2 headers removed - no longer needed since tabs indicate the content */
   
 
-</style> 
+</style>
