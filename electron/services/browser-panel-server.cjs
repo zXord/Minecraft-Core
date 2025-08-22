@@ -83,6 +83,20 @@ class BrowserPanelServer {
       const serveDir = fs.existsSync(distDir) ? distDir : (fs.existsSync(publicDir) ? publicDir : path.join(__dirname, '../../'));
       const indexPath = fs.existsSync(path.join(serveDir, 'index.html')) ? path.join(serveDir, 'index.html') : path.join(__dirname, '../../index.html');
       let html = fs.readFileSync(indexPath, 'utf8');
+      // Ensure favicon/icon usage for browser panel (replace any vite.svg reference)
+      if (html.includes('vite.svg')) {
+        html = html.replace(/vite\.svg/g, 'icon.png');
+      }
+      // Ensure <link rel="icon" exists pointing to icon.png
+      if (!/rel=["']icon["']/i.test(html)) {
+        if (html.includes('</head>')) {
+          html = html.replace('</head>', '  <link rel="icon" type="image/png" href="/icon.png" />\n</head>');
+        } else if (html.includes('<head>')) {
+          html = html.replace('<head>', '<head>\n  <link rel="icon" type="image/png" href="/icon.png" />');
+        } else {
+          html = '<link rel="icon" type="image/png" href="/icon.png" />\n' + html;
+        }
+      }
       // Ensure shim is injected early
       if (!html.includes('/panel-shim.js')) {
         if (html.includes('<head>')) {
@@ -252,6 +266,19 @@ class BrowserPanelServer {
         const path = require('path');
         const indexPath = fs.existsSync(path.join(serveDir, 'index.html')) ? path.join(serveDir, 'index.html') : path.join(__dirname, '../../index.html');
         let html = fs.readFileSync(indexPath, 'utf8');
+        // Normalize favicon in served UI HTML
+        if (html.includes('vite.svg')) {
+          html = html.replace(/vite\.svg/g, 'icon.png');
+        }
+        if (!/rel=["']icon["']/i.test(html)) {
+          if (html.includes('</head>')) {
+            html = html.replace('</head>', '  <link rel="icon" type="image/png" href="/icon.png" />\n</head>');
+          } else if (html.includes('<head>')) {
+            html = html.replace('<head>', '<head>\n  <link rel="icon" type="image/png" href="/icon.png" />');
+          } else {
+            html = '<link rel="icon" type="image/png" href="/icon.png" />\n' + html;
+          }
+        }
         // Inject shim early to ensure window.electron exists before app scripts run
         if (!html.includes('/panel-shim.js')) {
           if (html.includes('<head>')) {
@@ -269,6 +296,24 @@ class BrowserPanelServer {
         res.send(html);
       } catch {
         res.status(500).send('Panel not available');
+      }
+    });
+
+    // Explicit favicon/icon routes so browser always finds it regardless of build hashing
+    this.app.get(['/favicon.ico', '/icon.png'], (req, res) => {
+      try {
+        const path = require('path');
+        const fs = require('fs');
+        const candidates = [
+          path.join(__dirname, '../../public/icon.png'),
+          path.join(__dirname, '../../icon.png'),
+          path.join(__dirname, '../../dist/icon.png')
+        ];
+        const file = candidates.find(p => fs.existsSync(p));
+        if (file) return res.sendFile(file);
+        res.status(404).end();
+      } catch {
+        res.status(500).end();
       }
     });
 
