@@ -2035,12 +2035,31 @@
         <td class="upd">
             {#if isDisabled && $disabledModUpdates.has(mod)}
               {@const updateInfo = $disabledModUpdates.get(mod)}
-              <button class="tag new clickable" 
-                      disabled={serverRunning}
-                      on:click={() => handleEnableAndUpdate(mod)}
-                      title={serverRunning ? 'Server must be stopped to enable and update mods' : `Enable and update to ${updateInfo.latestVersion}`}>
-                {#if serverRunning}🔒{/if} ↑ {updateInfo.latestVersion}
-              </button>
+              <div class="update-actions compact">
+                <button class="tag new clickable upd-btn" 
+                        disabled={serverRunning}
+                        on:click={() => handleEnableAndUpdate(mod)}
+                        title={serverRunning ? 'Server must be stopped to enable and update mods' : `Enable and update to ${updateInfo.latestVersion}`}>
+                  {#if serverRunning}🔒{/if} ↑ <span class="ver-label">{updateInfo.latestVersion}</span>
+                </button>
+                <button class="ghost sm ignore-btn"
+                        disabled={serverRunning}
+                        aria-label="Ignore this version"
+                        title="Ignore this version (won't show until a newer one exists)"
+                        on:click={() => {
+                          const ui = updateInfo; // snapshot
+                          if (!ui) return;
+                          // Optimistically remove
+                          disabledModUpdates.update(m => {
+                            const nm = new SvelteMap(m);
+                            nm.delete(mod);
+                            return nm;
+                          });
+                          ignoreUpdate(mod, ui.latestVersionId, ui.latestVersion);
+                        }}>
+                  ✖
+                </button>
+              </div>
             {:else if !isDisabled && $modsWithUpdates.has(mod)}
             {@const updateInfo = $modsWithUpdates.get(mod)}
             <div class="update-actions compact">

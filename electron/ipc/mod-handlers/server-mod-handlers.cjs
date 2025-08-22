@@ -2315,6 +2315,28 @@ function createServerModHandlers(win) {
         });
         
         const results = [];
+
+        // Helper: loose semantic-ish comparison. Returns negative if a<b, 0 if equal, positive if a>b
+        function compareLooseVersions(a, b) {
+          try {
+            const norm = v => String(v || '').trim().toLowerCase().replace(/^v/, '');
+            const extractNumeric = v => {
+              const m = norm(v).match(/\d+(?:\.\d+){0,3}/); // capture up to 4 numeric segments
+              return m ? m[0] : '';
+            };
+            const as = extractNumeric(a).split('.').filter(Boolean).map(n => parseInt(n, 10));
+            const bs = extractNumeric(b).split('.').filter(Boolean).map(n => parseInt(n, 10));
+            if (as.length === 0 || bs.length === 0) return 0; // can't compare meaningfully
+            const len = Math.max(as.length, bs.length);
+            for (let i = 0; i < len; i++) {
+              const ai = as[i] || 0; const bi = bs[i] || 0;
+              if (ai !== bi) return ai - bi;
+            }
+            return 0;
+          } catch {
+            return 0;
+          }
+        }
         
         for (const mod of disabledModsInfo) {
           const projectId = mod.projectId;
@@ -2411,7 +2433,7 @@ function createServerModHandlers(win) {
             
             if (currentVersionExists) {
               // Current version is available for target MC version
-              if (latest && latest.versionNumber !== currentVersion) {
+              if (latest && latest.versionNumber !== currentVersion && compareLooseVersions(currentVersion, latest.versionNumber) < 0) {
                 // There's a newer version available
                 logger.debug('Update available for disabled mod', {
                   category: 'mods',
@@ -2458,29 +2480,49 @@ function createServerModHandlers(win) {
                 });
               }
             } else if (latest) {
-              // Current version doesn't exist for target MC, but there's a compatible version available
-              logger.debug('Disabled mod needs update for compatibility', {
-                category: 'mods',
-                data: {
-                  modName: name,
-                  currentVersion: currentVersion,
+              // Current version doesn't exist for target MC, but there's a compatible version available.
+              // Guard: avoid suggesting a downgrade if installed version appears newer semantically.
+              const cmp = compareLooseVersions(currentVersion, latest.versionNumber);
+              if (cmp >= 0) { // installed is newer or equal numerically
+                logger.debug('Skipping disabled mod update - would be downgrade across MC branches', {
+                  category: 'mods',
+                  data: { modName: name, currentVersion: currentVersion, targetVersion: latest.versionNumber, updateType: 'downgrade_skip' }
+                });
+                results.push({
+                  projectId,
+                  fileName,
+                  name,
+                  currentVersion,
+                  hasUpdate: false,
+                  updateAvailable: false,
+                  isCompatibleUpdate: false,
+                  reason: cmp > 0
+                    ? `Installed version (${currentVersion}) appears newer than compatible build (${latest.versionNumber}) for MC ${mcVersion}`
+                    : `Installed version (${currentVersion}) equals latest compatible build (${latest.versionNumber}) for MC ${mcVersion}`
+                });
+              } else {
+                logger.debug('Disabled mod needs update for compatibility', {
+                  category: 'mods',
+                  data: {
+                    modName: name,
+                    currentVersion: currentVersion,
+                    latestVersion: latest.versionNumber,
+                    updateType: 'compatibility_required'
+                  }
+                });
+                results.push({
+                  projectId,
+                  fileName,
+                  name,
+                  currentVersion,
+                  hasUpdate: true,
+                  updateAvailable: true,
+                  isCompatibleUpdate: true,
                   latestVersion: latest.versionNumber,
-                  updateType: 'compatibility_required'
-                }
-              });
-              
-              results.push({
-                projectId,
-                fileName,
-                name,
-                currentVersion,
-                hasUpdate: true,
-                updateAvailable: true,
-                isCompatibleUpdate: true,
-                latestVersion: latest.versionNumber,
-                latestVersionId: latest.id,
-                reason: `Update required: ${currentVersion} not available for MC ${mcVersion}, compatible version: ${latest.versionNumber}`
-              });
+                  latestVersionId: latest.id,
+                  reason: `Update required: ${currentVersion} not available for MC ${mcVersion}, compatible version: ${latest.versionNumber}`
+                });
+              }
             } else {
               // This shouldn't happen since we checked availableVersions.length > 0 above
               logger.warn('No compatible versions found for disabled mod despite available versions', {

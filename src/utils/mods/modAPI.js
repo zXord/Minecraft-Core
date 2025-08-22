@@ -1322,6 +1322,9 @@ export async function checkDisabledModUpdates(serverPath) {
     
     for (const result of results) {
       if (result.isCompatibleUpdate && result.hasUpdate) {
+        // Skip if user has ignored this update/version
+        const ignored = isUpdateIgnored(result.fileName, result.latestVersionId, result.latestVersion);
+        if (ignored) continue;
         disabledUpdatesMap.set(result.fileName, {
           projectId: result.projectId,
           currentVersion: result.currentVersion,
