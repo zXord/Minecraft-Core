@@ -16,30 +16,83 @@ export class ChecksumValidator {
    */
   static async validateFile(filePath, expectedChecksum, algorithm = 'sha1') {
     const startTime = Date.now();
-    
+    const rawExpected = expectedChecksum;
+    let normalizedExpected = expectedChecksum;
+    let usedAlgorithm = (algorithm || 'sha1').toLowerCase();
+
+    // Normalize expected checksum (trim + lowercase) to avoid false mismatches
+    if (normalizedExpected) {
+      const trimmed = normalizedExpected.trim();
+      if (trimmed !== normalizedExpected || /[A-F]/.test(normalizedExpected)) {
+        normalizedExpected = trimmed.toLowerCase();
+      }
+    }
+
     logger.debug('Starting file checksum validation', {
       category: 'mods',
       data: {
         function: 'ChecksumValidator.validateFile',
         filePath,
-        algorithm,
-        hasExpectedChecksum: !!expectedChecksum
+        algorithm: usedAlgorithm,
+        hasExpectedChecksum: !!normalizedExpected,
+        wasNormalized: rawExpected !== normalizedExpected
       }
     });
 
     try {
-      if (!filePath || !expectedChecksum) {
+      if (!filePath || !normalizedExpected) {
         throw new Error('File path and expected checksum are required');
       }
 
-      const actualChecksum = await this.calculateChecksum(filePath, algorithm);
-      const isValid = actualChecksum === expectedChecksum;
+      if (!this.isAlgorithmSupported(usedAlgorithm)) {
+        throw new Error(`Unsupported algorithm: ${usedAlgorithm}. Supported: ${this.getSupportedAlgorithms().join(', ')}`);
+      }
+
+      // Primary validation attempt
+      const actualChecksumPrimary = await this.calculateChecksum(filePath, usedAlgorithm);
+      let isValid = actualChecksumPrimary === normalizedExpected;
+      let actualChecksum = actualChecksumPrimary;
+
+      // If not valid, attempt adaptive algorithm detection (length-based) to recover from metadata algorithm mismatch.
+      if (!isValid) {
+        const lengthMap = { 32: 'md5', 40: 'sha1', 64: 'sha256' };
+        const inferred = lengthMap[normalizedExpected.length];
+        if (inferred && inferred !== usedAlgorithm && this.isAlgorithmSupported(inferred)) {
+          try {
+            const inferredActual = await this.calculateChecksum(filePath, inferred);
+            if (inferredActual === normalizedExpected) {
+              logger.warn('Checksum matched after adaptive algorithm inference', {
+                category: 'mods',
+                data: {
+                  function: 'ChecksumValidator.validateFile',
+                  filePath,
+                  originalAlgorithmTried: usedAlgorithm,
+                  inferredAlgorithm: inferred
+                }
+              });
+              usedAlgorithm = inferred;
+              isValid = true;
+              actualChecksum = inferredActual;
+            }
+          } catch (adaptiveErr) {
+            logger.debug('Adaptive algorithm attempt failed', {
+              category: 'mods',
+              data: {
+                function: 'ChecksumValidator.validateFile',
+                filePath,
+                inferredAlgorithm: inferred,
+                error: adaptiveErr.message
+              }
+            });
+          }
+        }
+      }
       
       const result = {
         isValid,
-        expected: expectedChecksum,
+        expected: normalizedExpected,
         actual: actualChecksum,
-        algorithm,
+        algorithm: usedAlgorithm,
         validationTime: Date.now() - startTime
       };
 
@@ -48,11 +101,12 @@ export class ChecksumValidator {
         data: {
           function: 'ChecksumValidator.validateFile',
           filePath,
-          algorithm,
+          algorithm: usedAlgorithm,
           isValid,
           duration: result.validationTime,
-          expectedLength: expectedChecksum.length,
-          actualLength: actualChecksum.length
+          expectedLength: normalizedExpected.length,
+          actualLength: actualChecksum.length,
+          normalized: rawExpected !== normalizedExpected
         }
       });
 
@@ -65,8 +119,8 @@ export class ChecksumValidator {
         data: {
           function: 'ChecksumValidator.validateFile',
           filePath,
-          algorithm,
-          expectedChecksum,
+          algorithm: usedAlgorithm,
+          expectedChecksum: normalizedExpected,
           duration,
           errorType: error.constructor.name
         }
@@ -229,7 +283,7 @@ export class ChecksumValidator {
    * @returns {Array<string>} Array of supported algorithms
    */
   static getSupportedAlgorithms() {
-    return ['sha1', 'sha256', 'md5'];
+  return ['sha1', 'sha256', 'md5']; // Extend here if adding new algorithms (e.g., sha512)
   }
 
   /**
