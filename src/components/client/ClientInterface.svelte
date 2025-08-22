@@ -2457,10 +2457,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   async function fetchImmediateStatus() {
     // Try regardless of connection status (could be race where we haven't marked connected yet)
     try {
-      const primaryPort = instance.serverPort; // management server port (often 8080)
-      const panelPortsToTry = [primaryPort];
-      // If primary is 8080 (management) also try 8081 (browser panel) for newer status endpoint
-      if (primaryPort && primaryPort.toString() === '8080') panelPortsToTry.push('8081');
+  const primaryPort = instance.serverPort; // management server port (often 8080)
+  const panelPortsToTry = [primaryPort]; // no implicit 8081 probe; browser panel not used in client instance
       let anyRunning = false;
       let sawDefinite = false; // saw at least one ok response
       let lastMapped = null;
