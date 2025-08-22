@@ -28,6 +28,7 @@
   loaderType,
   minecraftVersion
   } from '../../../stores/modStore.js';
+    import { ignoreUpdate } from '../../../stores/modStore.js';
   import { serverState } from '../../../stores/serverState.js';
   import { formatInstallationDate, formatLastUpdated, formatTooltipDate } from '../../../utils/dateUtils.js';
   
@@ -718,9 +719,15 @@
   // Mod management functions
   async function handleCheckUpdates() {
     try {
+      // Ensure all content types are loaded so updates cover resource packs & shaders too
+      const { loadContent } = await import('../../../utils/mods/modAPI.js');
+      await loadMods(serverPath); // mods first
+      await Promise.allSettled([
+        loadContent(serverPath, 'shaders'),
+        loadContent(serverPath, 'resourcepacks')
+      ]);
       // Force fresh data when user explicitly clicks "Check for Updates"
       await checkForUpdates(serverPath, true);
-      await loadMods(serverPath);
       successMessage.set('Update check completed successfully!');
       setTimeout(() => successMessage.set(''), 3000);
     } catch (error) {
@@ -2036,12 +2043,35 @@
               </button>
             {:else if !isDisabled && $modsWithUpdates.has(mod)}
             {@const updateInfo = $modsWithUpdates.get(mod)}
-            <button class="tag new clickable"
-                    disabled={serverRunning}
-                    on:click={() => updateModToLatest(mod)}
-                    title={serverRunning ? 'Server must be stopped to update mods' : `Update to ${updateInfo.versionNumber}`}>
-              {#if serverRunning}🔒{/if} ↑ {updateInfo.versionNumber}
-            </button>
+            <div class="update-actions compact">
+              <button class="tag new clickable upd-btn"
+                      disabled={serverRunning}
+                      on:click={() => updateModToLatest(mod)}
+                      title={serverRunning ? 'Server must be stopped to update mods' : `Update to ${updateInfo.versionNumber}`}>
+                {#if serverRunning}🔒{/if} ↑ <span class="ver-label">{updateInfo.versionNumber}</span>
+              </button>
+              <button class="ghost sm ignore-btn"
+                      disabled={serverRunning}
+                      aria-label="Ignore this version"
+                      title="Ignore this version (won't show until a newer one exists)"
+                      on:click={() => {
+                        const ui = updateInfo; // snapshot before reactive removal
+                        if (!ui) return;
+                        // Optimistically remove from updates list immediately
+                        modsWithUpdates.update(m => { 
+                          const nm = new SvelteMap(m); 
+                          nm.delete(mod); 
+                          try {
+                            const info = $installedModInfo.find(i => i.fileName === mod);
+                            if (info && info.projectId) nm.delete(`project:${info.projectId}`); 
+                          } catch {}
+                          return nm; 
+                        });
+                        ignoreUpdate(mod, ui.id, ui.versionNumber || ui.version_number || ui.name);
+                      }}>
+                ✖
+              </button>
+            </div>
           {:else}
               <span class="tag ok" title={isDisabled ? 'Mod is disabled' : 'Up to date'}>{isDisabled ? '—' : 'Up to date'}</span>
           {/if}
@@ -2190,11 +2220,32 @@
             <td class="upd">
               {#if $modsWithUpdates.has(item)}
         {@const updateInfo = $modsWithUpdates.get(item)}
-                <button class="tag new clickable" 
-        title={`Update to ${updateInfo?.versionNumber || updateInfo?.latestVersion || updateInfo?.version_number || updateInfo?.name || 'latest'}`}
-                        on:click={() => updateContentToLatest(item)}>
-      ↑ {updateInfo?.versionNumber || updateInfo?.latestVersion || updateInfo?.version_number || 'latest'}
-                </button>
+                <div class="update-actions compact">
+                  <button class="tag new clickable upd-btn" 
+            title={`Update to ${updateInfo?.versionNumber || updateInfo?.latestVersion || updateInfo?.version_number || updateInfo?.name || 'latest'}`}
+                            on:click={() => updateContentToLatest(item)}>
+          ↑ <span class="ver-label">{updateInfo?.versionNumber || updateInfo?.latestVersion || updateInfo?.version_number || 'latest'}</span>
+                  </button>
+                  <button class="ghost sm ignore-btn"
+                          aria-label="Ignore this version"
+                          title="Ignore this version (won't show until a newer one exists)"
+                          on:click={() => {
+                            const ui = updateInfo; // snapshot
+                            if (!ui) return;
+                            modsWithUpdates.update(m => { 
+                              const nm = new SvelteMap(m); 
+                              nm.delete(item); 
+                              try {
+                                const info = $installedModInfo.find(i => i.fileName === item);
+                                if (info && info.projectId) nm.delete(`project:${info.projectId}`);
+                              } catch {}
+                              return nm; 
+                            });
+                            ignoreUpdate(item, ui.id, ui.versionNumber || ui.version_number || ui.latestVersion || ui.name);
+                          }}>
+                    ✖
+                  </button>
+                </div>
               {:else}
                 <span class="tag ok">Up to date</span>
               {/if}
@@ -2709,6 +2760,7 @@
   /* Prevent stray text nodes (e.g., a lone '.') from rendering next to the button */
   td.upd { font-size: 0; }
   td.upd > .tag { font-size: 0.72rem; }
+  td.upd { width: 170px; } /* ensure enough horizontal space for update + ignore */
   
   .tag.clickable:hover::after {
     content: attr(title);
@@ -2811,6 +2863,43 @@
   .tag.clickable:disabled { 
     opacity: 0.5; 
     cursor: not-allowed; 
+  }
+
+  /* Update actions wrapper (update + ignore) */
+  .update-actions { display: inline-flex; align-items: center; gap: 4px; }
+  .ignore-btn { 
+    line-height: 1; 
+    padding: 2px 4px; 
+    background: #222; 
+    border: 1px solid #333; 
+    color: #888; 
+  }
+  .ignore-btn:hover:not(:disabled) { background:#333; color:#bbb; }
+  .update-actions.compact { 
+    max-width: 100%; 
+    display: flex; 
+    align-items: stretch; 
+    gap: 4px; 
+  }
+  .update-actions.compact .upd-btn { 
+    flex: 1 1 auto; 
+    min-width: 0; 
+    display: inline-flex; 
+    align-items: center; 
+    gap: 2px; 
+  }
+  .update-actions.compact .ignore-btn { 
+    flex: 0 0 26px; 
+    display: inline-flex; 
+    justify-content: center; 
+    align-items: center; 
+  }
+  .update-actions.compact .upd-btn .ver-label { 
+    max-width: calc(100% - 4px); 
+    overflow: hidden; 
+    text-overflow: ellipsis; 
+    white-space: nowrap; 
+    display: inline-block; 
   }
 
   /* Status badges */

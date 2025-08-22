@@ -405,6 +405,8 @@ const installingModIds = createEnhancedModStore(new SvelteSet(), 'installingModI
 const modWarnings = createEnhancedModStore(new Map(), 'modWarnings');
 const disabledMods = createEnhancedModStore(new SvelteSet(), 'disabledMods'); // Store for disabled mods
 const disabledModUpdates = createEnhancedModStore(new Map(), 'disabledModUpdates'); // Store for disabled mods with available updates
+// Store for ignored updates (Map<fileName, { ids: Set<string>, vers: Set<string> }>)
+const ignoredUpdates = createEnhancedModStore(new Map(), 'ignoredUpdates');
 // Names of mods that are managed by the server (required or optional)
 const serverManagedFiles = createEnhancedModStore(new SvelteSet(), 'serverManagedFiles');
 
@@ -412,6 +414,7 @@ const serverManagedFiles = createEnhancedModStore(new SvelteSet(), 'serverManage
 const isLoading = createEnhancedModStore(false, 'isLoading');
 const isSearching = createEnhancedModStore(false, 'isSearching');
 const isCheckingUpdates = createEnhancedModStore(false, 'isCheckingUpdates');
+const lastUpdateCheckTime = createEnhancedModStore(0, 'lastUpdateCheckTime');
 
 // UI states with logging
 const errorMessage = createEnhancedModStore('', 'errorMessage');
@@ -1084,6 +1087,260 @@ function compareVersions(versionA, versionB) {
 let hasUpdates = null;
 let updateCount = null;
 let categorizedMods = null;
+let ignoredUpdatesLoaded = false;
+// Persistence strategy: prefer server path file via IPC, fallback to localStorage
+const IGNORED_UPDATES_LOCAL_KEY = 'minecraft-core:ignored-updates';
+let ignoredUpdatesMigrated = false;
+// (IgnorePersist logging removed)
+
+// Helper: extract a plausible filesystem path from arbitrary value (object/string)
+function _extractPathCandidate(raw, seen = new Set(), depth = 0) {
+  if (!raw || depth > 3) return '';
+  if (typeof raw === 'string') {
+    // Quick heuristic: must contain path separator or drive letter pattern
+    if (/^[a-zA-Z]:\\/.test(raw) || /[\\/]/.test(raw)) return raw;
+    return '';
+  }
+  if (typeof raw !== 'object') return '';
+  if (seen.has(raw)) return '';
+  seen.add(raw);
+  // Prefer obvious keys
+  const preferredKeys = ['path','serverPath','dir','directory','root','value'];
+  for (const k of preferredKeys) {
+    if (typeof raw[k] === 'string') {
+      const cand = _extractPathCandidate(raw[k], seen, depth + 1);
+      if (cand) return cand;
+    }
+  }
+  // Scan other string props
+  for (const [,v] of Object.entries(raw)) {
+    if (typeof v === 'string') {
+      const cand = _extractPathCandidate(v, seen, depth + 1);
+      if (cand) return cand;
+    } else if (typeof v === 'object') {
+      const cand = _extractPathCandidate(v, seen, depth + 1);
+      if (cand) return cand;
+    }
+  }
+  return '';
+}
+
+// Obtain current server path; fallback strategies if we get an object or nothing
+async function _getServerPath() {
+  try {
+    const spObj = (typeof window !== 'undefined') ? window.serverPath : null;
+    let rawVal = '';
+    if (spObj && typeof spObj.get === 'function') {
+      let val = spObj.get();
+      // Promise-like
+      // @ts-ignore
+      if (val && typeof val.then === 'function') {
+  try { val = await val; } catch { /* swallow */ }
+      }
+      rawVal = val;
+    }
+    let candidate = '';
+    if (typeof rawVal === 'string') {
+      candidate = rawVal;
+    } else if (rawVal && typeof rawVal === 'object') {
+      candidate = _extractPathCandidate(rawVal);
+      if (!candidate) {
+        try { candidate = Object.prototype.toString.call(rawVal); } catch { /* ignore */ }
+      }
+    }
+    // If candidate still looks like [object Object] or lacks separators, treat as invalid
+    if (!candidate || candidate === '[object Object]' || (!/[\\/]/.test(candidate) && !/^[a-zA-Z]:/.test(candidate))) {
+      // Try IPC fallback for last server path
+      try {
+        if (window.electron && window.electron.invoke) {
+          const last = await window.electron.invoke('get-last-server-path');
+          if (typeof last === 'string' && (/[\\/]/.test(last) || /^[a-zA-Z]:/.test(last))) {
+            return last;
+          }
+        }
+      } catch { /* ignore */ }
+      // Try localStorage cache if we ever stored it
+      try {
+        const ls = localStorage.getItem('minecraft-core:last-server-path');
+  if (ls && (/[\\/]/.test(ls) || /^[a-zA-Z]:/.test(ls))) {
+          return ls;
+        }
+      } catch { /* ignore */ }
+  // server path unresolved
+      return '';
+    }
+  // resolved server path
+    // Cache for potential fallback later
+    try { localStorage.setItem('minecraft-core:last-server-path', candidate); } catch { /* ignore */ }
+    return candidate;
+  } catch {
+    return '';
+  }
+}
+
+async function _loadIgnoredFromBackend() {
+  try {
+  const sp = await _getServerPath();
+  if (!sp){ return null; }
+  if (!window.electron || !window.electron.invoke){ return null; }
+    const data = await window.electron.invoke('get-ignored-mod-updates', sp);
+  if (data && typeof data === 'object'){ return data; }
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function _saveIgnoredToBackend(map) {
+  try {
+  const sp = await _getServerPath();
+    if (!sp) return false;
+    if (!window.electron || !window.electron.invoke) return false;
+    const obj = {};
+    for (const [fileName, rec] of map.entries()) {
+      obj[fileName] = { ids: Array.from(rec.ids||[]), vers: Array.from(rec.vers||[]) };
+    }
+  let json;
+  try { json = JSON.stringify(obj); } catch { return false; }
+  await window.electron.invoke('save-ignored-mod-updates', sp, json);
+  // saved
+    return true;
+  } catch { return false; }
+}
+
+// Ensure backend file exists even with empty map
+async function _ensureBackendIgnoredFile() {
+  try {
+  const sp = await _getServerPath();
+  if (!sp){ return; }
+  if (!window.electron || !window.electron.invoke){ return; }
+    // Call save with existing map (may be empty) to force file creation
+    const map = get(ignoredUpdates) || new Map();
+    await _saveIgnoredToBackend(map);
+  // ensure file attempted
+  } catch { /* ignore */ }
+}
+
+// Load ignored updates from localStorage once
+async function loadIgnoredUpdates() {
+  if (ignoredUpdatesLoaded) return;
+  ignoredUpdatesLoaded = true;
+  let parsed = await _loadIgnoredFromBackend();
+  if (!parsed) {
+    try {
+      const raw = localStorage.getItem(IGNORED_UPDATES_LOCAL_KEY);
+      if (raw) parsed = JSON.parse(raw);
+    } catch { /* ignore */ }
+  }
+  if (parsed && typeof parsed === 'object') {
+    const map = new Map();
+    for (const [fileName, data] of Object.entries(parsed)) {
+      if (data && typeof data === 'object') {
+        const ids = new SvelteSet(Array.isArray(data.ids) ? data.ids : []);
+        const vers = new SvelteSet(Array.isArray(data.vers) ? data.vers : []);
+        map.set(fileName, { ids, vers });
+      }
+    }
+    ignoredUpdates.set(map);
+  // initialized ignored updates store
+  }
+  // After load, attempt to create backend file if server path already set and no file existed
+  setTimeout(_ensureBackendIgnoredFile, 500);
+}
+loadIgnoredUpdates();
+
+async function attemptIgnoredUpdatesMigration() {
+  if (ignoredUpdatesMigrated) return;
+  try {
+  const sp = await _getServerPath();
+  if (!sp){ return; }
+    const map = get(ignoredUpdates);
+    // Migrate even if empty so file is created
+    ignoredUpdatesMigrated = true; // mark before to avoid duplicate attempts
+  _saveIgnoredToBackend(map || new Map()).then(saved => {
+      if (!saved) {
+        ignoredUpdatesMigrated = false; // allow retry
+      }
+    });
+  } catch { /* ignore */ }
+}
+
+// Wrap serverPath.set to detect when user selects/changes server path
+try {
+  if (typeof window !== 'undefined' && window.serverPath && typeof window.serverPath.set === 'function' && !window.serverPath['__ignoredWrap']) {
+    const originalSet = window.serverPath.set;
+    window.serverPath.set = function(path) {
+      const result = originalSet.call(this, path);
+      // Fire and forget async migration
+      setTimeout(() => { attemptIgnoredUpdatesMigration(); }, 0);
+      return result;
+    };
+    window.serverPath['__ignoredWrap'] = true;
+  }
+} catch { /* ignore */ }
+
+// Also attempt migration shortly after load in case serverPath already set
+setTimeout(() => { attemptIgnoredUpdatesMigration(); }, 1000);
+
+// Persist ignored updates on change (debounced)
+let _ignorePersistTimer = null;
+ignoredUpdates.subscribe(($map) => {
+  if (_ignorePersistTimer) clearTimeout(_ignorePersistTimer);
+  _ignorePersistTimer = setTimeout(async () => {
+    // Attempt backend save first; fallback to localStorage
+    const savedToBackend = await _saveIgnoredToBackend($map);
+    if (!savedToBackend) {
+      try {
+        const obj = {};
+        for (const [fileName, rec] of $map.entries()) {
+          obj[fileName] = { ids: Array.from(rec.ids||[]), vers: Array.from(rec.vers||[]) };
+        }
+        localStorage.setItem(IGNORED_UPDATES_LOCAL_KEY, JSON.stringify(obj));
+      } catch { /* ignore */ }
+    }
+  // After any change, attempt migration if not done yet
+  attemptIgnoredUpdatesMigration();
+  }, 250);
+});
+
+function ignoreUpdate(fileName, versionId, versionNumber) {
+  if (!fileName) return;
+  ignoredUpdates.update(map => {
+    const rec = map.get(fileName) || { ids: new SvelteSet(), vers: new SvelteSet() };
+    if (versionId) rec.ids.add(String(versionId));
+    if (versionNumber) {
+      const raw = String(versionNumber);
+      rec.vers.add(raw);
+      // Also store normalized variant (lowercase, strip leading 'v') for robust matching
+      const norm = raw.trim().toLowerCase().replace(/^v/, '');
+      rec.vers.add(norm);
+    }
+    map.set(fileName, rec);
+    return map;
+  });
+}
+
+function isUpdateIgnored(fileName, versionId, versionNumber) {
+  try {
+    const map = get(ignoredUpdates);
+    const rec = map.get(fileName);
+    if (!rec) return false;
+    if (versionId && rec.ids.has(String(versionId))) return true;
+    if (versionNumber) {
+      const raw = String(versionNumber);
+      const norm = raw.trim().toLowerCase().replace(/^v/, '');
+      if (rec.vers.has(raw) || rec.vers.has(norm)) return true;
+    }
+  } catch {
+    // ignore lookup errors
+  }
+  return false;
+}
+
+function clearIgnoredUpdates(fileName) {
+  if (!fileName) return;
+  ignoredUpdates.update(map => { map.delete(fileName); return map; });
+}
+
+function getIgnoredUpdatesStore() { return ignoredUpdates; }
 
 // Functions to create derived stores when needed (within component context)
 function getHasUpdates() {
@@ -1159,32 +1416,10 @@ export function getCacheValue(cacheStore, key, cacheName) {
     const cache = get(cacheStore);
     const hasValue = cache && Object.prototype.hasOwnProperty.call(cache, key);
     const value = hasValue ? cache[key] : null;
-
-    logger.debug('Cache access', {
-      category: 'mods',
-      data: {
-        store: 'modStore',
-        function: 'getCacheValue',
-        cacheName,
-        key,
-        hit: hasValue,
-        valueType: typeof value,
-        cacheSize: cache ? Object.keys(cache).length : 0
-      }
-    });
-
+    logger.debug('Cache access', { category: 'mods', data: { store: 'modStore', function: 'getCacheValue', cacheName, key, hasValue, valueType: typeof value } });
     return value;
   } catch (error) {
-    logger.error(`Cache access failed: ${error.message}`, {
-      category: 'mods',
-      data: {
-        store: 'modStore',
-        function: 'getCacheValue',
-        cacheName,
-        key,
-        errorType: error.constructor.name
-      }
-    });
+    logger.error(`Cache access failed: ${error.message}`, { category: 'mods', data: { store: 'modStore', function: 'getCacheValue', cacheName, key, errorType: error.constructor.name } });
     return null;
   }
 }
@@ -1367,6 +1602,11 @@ export {
   modWarnings,
   disabledMods,
   disabledModUpdates,
+  ignoredUpdates,
+  ignoreUpdate,
+  isUpdateIgnored,
+  clearIgnoredUpdates,
+  getIgnoredUpdatesStore,
   serverManagedFiles,
   isLoading,
   isSearching,
@@ -1390,6 +1630,7 @@ export {
   serverConfig,
   minecraftVersion,
   loaderType,
+  lastUpdateCheckTime,
   filterMinecraftVersion,
   filterModLoader,
   modCategories,

@@ -540,6 +540,36 @@ function createServerModHandlers(win) {
         throw error;
       }
     },
+    // ---------------- Ignored Mod Updates -----------------
+    'get-ignored-mod-updates': async (_e, serverPath) => {
+      try {
+        const data = await modFileManager.getIgnoredModUpdates(serverPath);
+        return data;
+      } catch (error) {
+        logger.error(`Failed to get ignored mod updates: ${error.message}`, { category: 'mods', data: { handler: 'get-ignored-mod-updates', serverPath } });
+        return {};
+      }
+    },
+    'save-ignored-mod-updates': async (_e, serverPath, data) => {
+      try {
+        let parsed = data;
+        if (typeof data === 'string') {
+          try { parsed = JSON.parse(data); } catch { parsed = {}; }
+        }
+        try {
+          const loggerHandlers = getLoggerHandlers();
+          loggerHandlers.debug('Saving ignored mod updates', {
+            category:'mods',
+            data: { handler:'save-ignored-mod-updates', serverPath, keys: Object.keys(parsed||{}).length }
+          });
+  } catch { /* ignore logging errors */ }
+        await modFileManager.saveIgnoredModUpdates(serverPath, parsed || {});
+        return { success: true };
+      } catch (error) {
+        logger.error(`Failed to save ignored mod updates: ${error.message}`, { category: 'mods', data: { handler: 'save-ignored-mod-updates', serverPath } });
+        return { success: false, error: error.message };
+      }
+    },
 
     'install-mod': async (_e, serverPath, modDetails) => {
       logger.info('Installing server mod', {

@@ -34,7 +34,9 @@ import {
   modCategories,
   disabledModUpdates,
   installedShaderInfo,
-  installedResourcePackInfo
+  installedResourcePackInfo,
+  isUpdateIgnored,
+  lastUpdateCheckTime
 } from '../../stores/modStore.js';
 
 // IDs to track concurrent operations
@@ -143,10 +145,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
         
         installedShaderIds.set(shaderProjectIds);
         installedShaderInfo.set(shaderInfoList);
-        // Auto-check for updates for shaders as well (parity with mods)
-        setTimeout(() => {
-          checkForUpdates(serverPath);
-        }, 500);
+  // (Removed automatic update check – now only manual button or interval triggers)
         break;
       }
       case 'resourcepacks': {
@@ -184,10 +183,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
         
         installedResourcePackIds.set(resourcePackProjectIds);
         installedResourcePackInfo.set(resourcePackInfoList);
-        // Auto-check for updates for resource packs as well (parity with mods)
-        setTimeout(() => {
-          checkForUpdates(serverPath);
-        }, 500);
+  // (Removed automatic update check – now only manual button or interval triggers)
         break;
       }
       case 'mods':
@@ -340,10 +336,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
         installedModIds.set(validProjectIds);
         installedModInfo.set(updatedModInfo);
         
-        // Automatically check for updates after loading mods
-        setTimeout(() => {
-          checkForUpdates(serverPath)
-        }, 500);
+  // (Removed automatic post-load auto update check – now only manual button or interval triggers)
           return true;
       } catch {
         // TODO: Add proper logging - Error getting mod info
@@ -1229,7 +1222,7 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     // Check for disabled mod updates in parallel
     checkDisabledModUpdates(serverPath);
     
-    for (const contentInfo of allContentWithProjectIds) {
+  for (const contentInfo of allContentWithProjectIds) {
       // Check if a newer update check has started
       if (currentCheckId !== updateCheckId) {
         break;
@@ -1250,6 +1243,21 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
           // Check if an update is available
           const updateVersion = checkForUpdate(contentInfo, versions);
           if (updateVersion) {
+            // Skip if this version is ignored for this file
+            try {
+              const candidates = [
+                updateVersion.versionNumber,
+                updateVersion.version_number,
+                updateVersion.name
+              ].filter(Boolean);
+              let ignored = false;
+              for (const c of candidates) {
+                if (isUpdateIgnored(contentInfo.fileName, updateVersion.id, c)) { ignored = true; break; }
+                const norm = String(c).trim().toLowerCase().replace(/^v/, '');
+                if (norm !== c && isUpdateIgnored(contentInfo.fileName, updateVersion.id, norm)) { ignored = true; break; }
+              }
+              if (ignored) continue;
+            } catch { /* ignore filtering errors */ }
             // Only add the filename to the updates map for display
             // This ensures we don't double-count updates
             updatesMap.set(contentInfo.fileName, updateVersion);
@@ -1266,6 +1274,7 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     
     // Update the store
     modsWithUpdates.set(updatesMap);
+  try { lastUpdateCheckTime.set(Date.now()); } catch { /* ignore timestamp errors */ }
     return updatesMap;
   } catch {
     return updatesMap;
@@ -1407,9 +1416,33 @@ function checkForUpdate(modInfo, versions) {
     const dateB = new Date(b.datePublished).getTime();
     return dateB - dateA;
   });
-  
-  // Get the latest version
-  const latestVersion = sortedVersions[0];
+
+  // Determine Minecraft-version compatible versions
+  let latestVersion = null;
+  try {
+    const currentMc = get(minecraftVersion);
+    if (currentMc) {
+      const parts = currentMc.split('.');
+      const majorMinor = parts.length >= 2 ? `${parts[0]}.${parts[1]}` : currentMc;
+      const compatible = sortedVersions.filter(v => {
+        if (!v || !Array.isArray(v.gameVersions)) return false;
+        return v.gameVersions.some(gv => {
+          if (typeof gv !== 'string') return false;
+          return gv === currentMc || gv.startsWith(majorMinor) || gv.includes(majorMinor);
+        });
+      });
+      if (compatible.length > 0) {
+        latestVersion = compatible[0];
+      } else {
+        // No compatible versions -> treat as NO update even if newer future versions exist
+        return null;
+      }
+    }
+  } catch { /* ignore filter errors */ }
+  // If no minecraft version context (unlikely), fall back to newest stable
+  if (!latestVersion) {
+    latestVersion = sortedVersions[0];
+  }
   
   // Simple, general rule: if the latest (by date) differs from what's installed, offer update.
   // Prefer comparing by Modrinth version id if we have it; otherwise compare normalized version text.
