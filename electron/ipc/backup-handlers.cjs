@@ -1037,9 +1037,13 @@ function createBackupHandlers() {
           message: `✅ ${type === 'full' ? 'Full' : 'World-only'} ${trigger} backup created at ${new Date().toLocaleTimeString()}`
         });
 
-        // Apply retention policy if it's an automated backup
-        if (trigger === 'auto' || trigger === 'app-launch') {
+        // Apply retention policy if it's an automated backup (scheduled, app launch, or manual-auto)
+        if (trigger === 'auto' || trigger === 'app-launch' || trigger === 'manual-auto') {
           const backupSettings = appStore.get('backupSettings') || {};
+          // Preload advanced settings to decide whether to skip legacy retention
+            const advKeyPre = `retentionSettings_${Buffer.from(serverPath).toString('base64')}`;
+            const advPre = appStore.get(advKeyPre);
+            const advancedEnabled = !!(advPre && (advPre.sizeRetentionEnabled || advPre.ageRetentionEnabled || advPre.countRetentionEnabled));
 
           // Fix for users with old low retention counts - upgrade to 100 if it's too low
           let retentionCount = backupSettings.retentionCount;
@@ -1058,7 +1062,7 @@ function createBackupHandlers() {
             });
           }
 
-          if (retentionCount) {
+          if (retentionCount && !advancedEnabled) {
             logger.debug('Applying retention policy for automated backup', {
               category: 'backup',
               data: {
@@ -1069,6 +1073,120 @@ function createBackupHandlers() {
               }
             });
             await backupService.cleanupAutomaticBackups(serverPath, retentionCount);
+          } else if (retentionCount && advancedEnabled) {
+            logger.debug('Skipping legacy retentionCount cleanup because advanced retention rules are active', {
+              category: 'backup',
+              data: { handler: 'backups:safe-create', retentionCount, advancedEnabled }
+            });
+          }
+
+          // Also apply the new advanced retention policy (maxSize / maxAge / maxCount) if configured
+          try {
+            const adv = advPre; // reuse preloaded settings
+            logger.debug('Loaded advanced retention settings for automated backup (post-backup)', {
+              category: 'backup',
+              data: { handler: 'backups:safe-create', serverPath, advPresent: !!adv, adv }
+            });
+            if (adv && (adv.sizeRetentionEnabled || adv.ageRetentionEnabled || adv.countRetentionEnabled)) {
+              // Lazy-load utilities we need (avoid top-level require cost if not used)
+              let convertSizeToBytes, convertAgeToMs, RetentionPolicy;
+              try {
+                ({ RetentionPolicy } = require('../utils/retention-policy.cjs'));
+              } catch (e) {
+                logger.debug('Could not load RetentionPolicy module for advanced retention (auto)', {
+                  category: 'backup',
+                  data: { handler: 'backups:safe-create', error: e.message }
+                });
+              }
+              // Basic converters (mirror frontend logic) if not provided elsewhere
+              convertSizeToBytes = (value, unit) => {
+                const n = Number(value) || 0;
+                switch ((unit || '').toLowerCase()) {
+                  case 'kb': return n * 1024;
+                  case 'mb': return n * 1024 * 1024;
+                  case 'gb': return n * 1024 * 1024 * 1024;
+                  default: return n; // bytes
+                }
+              };
+              convertAgeToMs = (value, unit) => {
+                const n = Number(value) || 0;
+                switch ((unit || '').toLowerCase()) {
+                  case 'minutes': return n * 60 * 1000;
+                  case 'hours': return n * 60 * 60 * 1000;
+                  case 'days': return n * 24 * 60 * 60 * 1000;
+                  case 'weeks': return n * 7 * 24 * 60 * 60 * 1000;
+                  default: return n; // ms
+                }
+              };
+              const policy = {
+                maxSize: adv.sizeRetentionEnabled ? convertSizeToBytes(adv.maxSizeValue, adv.maxSizeUnit) : null,
+                maxAge: adv.ageRetentionEnabled ? convertAgeToMs(adv.maxAgeValue, adv.maxAgeUnit) : null,
+                maxCount: adv.countRetentionEnabled ? adv.maxCountValue : null,
+                preserveRecent: 1
+              };
+              logger.debug('Applying advanced retention policy after automated backup', {
+                category: 'backup',
+                data: { handler: 'backups:safe-create', serverPath, policy }
+              });
+              // Reuse existing engine
+              let retentionEngine = null;
+              if (RetentionPolicy) {
+                try {
+                  retentionEngine = new RetentionPolicy({
+                    maxSize: policy.maxSize,
+                    maxAge: policy.maxAge,
+                    maxCount: policy.maxCount,
+                    preserveRecent: policy.preserveRecent
+                  });
+                } catch (rpErr) {
+                  logger.warn('Advanced retention policy invalid; skipping', {
+                    category: 'backup',
+                    data: { handler: 'backups:safe-create', error: rpErr.message }
+                  });
+                }
+              }
+              const backups = await backupService.listBackupsWithMetadata(serverPath);
+              logger.debug('Advanced retention evaluation input (auto)', {
+                category: 'backup',
+                data: { handler: 'backups:safe-create', backupCount: backups?.length }
+              });
+              const toDelete = retentionEngine ? await retentionEngine.evaluateBackups(backups) : [];
+              logger.debug('Advanced retention evaluation output (auto)', {
+                category: 'backup',
+                data: { handler: 'backups:safe-create', toDeleteCount: toDelete.length, names: toDelete.map(b=>b.name) }
+              });
+              if (toDelete.length) {
+                logger.info('Advanced retention deleting backups (auto)', {
+                  category: 'backup',
+                  data: { handler: 'backups:safe-create', deleteCount: toDelete.length }
+                });
+                for (const b of toDelete) {
+                  try {
+                    await backupService.deleteBackup({ serverPath, name: b.name });
+                  } catch (delErr) {
+                    logger.warn('Failed to delete backup during advanced retention (auto)', {
+                      category: 'backup',
+                      data: { handler: 'backups:safe-create', name: b.name, error: delErr.message }
+                    });
+                  }
+                }
+              } else {
+                logger.debug('Advanced retention found nothing to delete (auto)', {
+                  category: 'backup', data: { handler: 'backups:safe-create' }
+                });
+              }
+            }
+            else {
+              logger.debug('Advanced retention skipped: no settings or rules enabled', {
+                category: 'backup',
+                data: { handler: 'backups:safe-create', serverPath, advPresent: !!adv }
+              });
+            }
+          } catch (advErr) {
+            logger.error('Failed applying advanced retention after auto backup', {
+              category: 'backup',
+              data: { handler: 'backups:safe-create', error: advErr.message }
+            });
           }
         }
 
@@ -1448,6 +1566,62 @@ function createBackupHandlers() {
             }
           });
           await backupService.cleanupAutomaticBackups(serverPath, retentionCount);
+        }
+
+        // Apply advanced retention (new engine) for manual-auto trigger
+        try {
+          const retentionKey = `retentionSettings_${Buffer.from(serverPath).toString('base64')}`;
+            const adv = appStore.get(retentionKey);
+            logger.debug('Loaded advanced retention settings (manual-auto)', { category: 'backup', data: { handler: 'backups:run-immediate-auto', serverPath, advPresent: !!adv, adv } });
+            if (adv && (adv.sizeRetentionEnabled || adv.ageRetentionEnabled || adv.countRetentionEnabled)) {
+              let RetentionPolicy;
+              try { ({ RetentionPolicy } = require('../utils/retention-policy.cjs')); } catch (e) {
+                logger.debug('Could not load RetentionPolicy module for advanced retention (manual-auto)', {
+                  category: 'backup', data: { handler: 'backups:run-immediate-auto', error: e.message }
+                });
+              }
+              const convertSizeToBytes = (value, unit) => {
+                const n = Number(value) || 0; const u = (unit||'').toLowerCase();
+                return u === 'kb' ? n*1024 : u === 'mb' ? n*1024*1024 : u === 'gb' ? n*1024*1024*1024 : n;
+              };
+              const convertAgeToMs = (value, unit) => {
+                const n = Number(value) || 0; const u = (unit||'').toLowerCase();
+                switch (u) { case 'minutes': return n*60*1000; case 'hours': return n*60*60*1000; case 'days': return n*24*60*60*1000; case 'weeks': return n*7*24*60*60*1000; default: return n; }
+              };
+              const policy = {
+                maxSize: adv.sizeRetentionEnabled ? convertSizeToBytes(adv.maxSizeValue, adv.maxSizeUnit) : null,
+                maxAge: adv.ageRetentionEnabled ? convertAgeToMs(adv.maxAgeValue, adv.maxAgeUnit) : null,
+                maxCount: adv.countRetentionEnabled ? adv.maxCountValue : null,
+                preserveRecent: 1
+              };
+              logger.debug('Applying advanced retention policy after manual-auto backup', {
+                category: 'backup', data: { handler: 'backups:run-immediate-auto', serverPath, policy }
+              });
+              let retentionEngine = null;
+              if (RetentionPolicy) {
+                try { retentionEngine = new RetentionPolicy(policy); } catch (rpErr) {
+                  logger.warn('Advanced retention invalid (manual-auto); skipping', { category: 'backup', data: { handler: 'backups:run-immediate-auto', error: rpErr.message } });
+                }
+              }
+              const backups = await backupService.listBackupsWithMetadata(serverPath);
+              logger.debug('Advanced retention evaluation input (manual-auto)', { category: 'backup', data: { handler: 'backups:run-immediate-auto', backupCount: backups?.length } });
+              const toDelete = retentionEngine ? await retentionEngine.evaluateBackups(backups) : [];
+              logger.debug('Advanced retention evaluation output (manual-auto)', { category: 'backup', data: { handler: 'backups:run-immediate-auto', toDeleteCount: toDelete.length, names: toDelete.map(b=>b.name) } });
+              if (toDelete.length) {
+                logger.info('Advanced retention deleting backups (manual-auto)', { category: 'backup', data: { handler: 'backups:run-immediate-auto', deleteCount: toDelete.length } });
+                for (const b of toDelete) {
+                  try { await backupService.deleteBackup({ serverPath, name: b.name }); } catch (delErr) {
+                    logger.warn('Failed to delete backup during advanced retention (manual-auto)', { category: 'backup', data: { handler: 'backups:run-immediate-auto', name: b.name, error: delErr.message } });
+                  }
+                }
+              } else {
+                logger.debug('Advanced retention found nothing to delete (manual-auto)', { category: 'backup', data: { handler: 'backups:run-immediate-auto' } });
+              }
+            } else {
+              logger.debug('Advanced retention skipped: no enabled rules (manual-auto)', { category: 'backup', data: { handler: 'backups:run-immediate-auto', serverPath } });
+            }
+        } catch (advErr) {
+          logger.error('Failed applying advanced retention after manual-auto backup', { category: 'backup', data: { handler: 'backups:run-immediate-auto', error: advErr.message } });
         }
 
         const duration = Date.now() - startTime;

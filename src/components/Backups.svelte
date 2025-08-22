@@ -934,7 +934,23 @@
 
   // Generate retention optimization analysis
   async function generateOptimization() {
+    // Start optimization analysis
+    logger.debug("Retention optimization generation started", {
+      category: "ui",
+      data: {
+        component: "Backups",
+        function: "generateOptimization",
+        backupCount: backups ? backups.length : 0,
+        hasBackups: !!(backups && backups.length)
+      }
+    });
+
     if (!backups || backups.length === 0) {
+      optimizationLoading = false; // prevent spinner hang when no backups
+      logger.debug("Retention optimization skipped (no backups)", {
+        category: "ui",
+        data: { component: "Backups", function: "generateOptimization" }
+      });
       return;
     }
 
@@ -958,6 +974,17 @@
         settings,
       );
 
+      logger.debug("Retention optimization raw result", {
+        category: "ui",
+        data: {
+          component: "Backups",
+            function: "generateOptimization",
+            recommendationsCount: retentionOptimization?.recommendations?.length || 0,
+            effectivenessScore: retentionOptimization?.effectiveness?.overallScore,
+            backupCount: backups.length
+        }
+      });
+
       logger.info("Retention optimization analysis completed", {
         category: "ui",
         data: {
@@ -974,11 +1001,21 @@
           component: "Backups",
           function: "generateOptimization",
           errorMessage: e.message,
+          stack: e.stack
         },
       });
       retentionOptimization = null;
     }
     optimizationLoading = false;
+    logger.debug("Retention optimization generation finished", {
+      category: "ui",
+      data: {
+        component: "Backups",
+        function: "generateOptimization",
+        loading: optimizationLoading,
+        hasResult: !!retentionOptimization
+      }
+    });
   }
 
   // Toggle optimization display
@@ -1093,6 +1130,7 @@
         component: "Backups",
         function: "applyRetentionPolicy",
         serverPath,
+  backupCount: backups ? backups.length : 0
       },
     });
 
@@ -1117,6 +1155,17 @@
           policy,
         },
       );
+
+      logger.debug("Retention policy IPC response", {
+        category: "ui",
+        data: {
+          component: "Backups",
+          function: "applyRetentionPolicy",
+          responseSuccess: !!(result && result.success),
+          deletedBackups: result?.deletedBackups?.length || 0,
+          spaceSaved: result?.spaceSaved || 0
+        }
+      });
 
       if (result && result.success) {
         logger.info("Retention policy applied successfully", {
@@ -1301,6 +1350,31 @@
         invalidateSizeCache(serverPath);
         await fetchBackups(); // Refresh the backup list and total size
         loadAutomationSettings(); // Refresh next-backup timer
+
+        // Auto-apply retention policy (new engine) if any policy is active
+        try {
+          const retentionActive = (
+            (sizeRetentionEnabled && maxSizeValue) ||
+            (ageRetentionEnabled && maxAgeValue) ||
+            (countRetentionEnabled && maxCountValue)
+          );
+          if (retentionActive) {
+            const policy = {
+              maxSize: sizeRetentionEnabled ? convertSizeToBytes(maxSizeValue, maxSizeUnit) : null,
+              maxAge: ageRetentionEnabled ? convertAgeToMilliseconds(maxAgeValue, maxAgeUnit) : null,
+              maxCount: countRetentionEnabled ? maxCountValue : null,
+              preserveRecent: 1,
+            };
+            const retentionResult = await window.electron.invoke('backups:apply-retention-policy', { serverPath, policy });
+            if (retentionResult && retentionResult.deletedBackups && retentionResult.deletedBackups.length) {
+              // Refresh list again if deletions occurred
+              await fetchBackups();
+              status = `Backup + retention: deleted ${retentionResult.deletedBackups.length} old backup(s)`;
+            }
+          }
+        } catch (re) {
+          logger.error('Retention auto-apply failed', { category: 'ui', data: { component: 'Backups', error: re?.message } });
+        }
         setTimeout(() => (status = ""), 2000);
       } else {
         error = result?.error || "Failed to create manual backup";
