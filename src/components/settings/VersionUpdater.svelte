@@ -7,6 +7,7 @@
   import { safeInvoke } from '../../utils/ipcUtils.js';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { fetchAllFabricVersions } from '../../utils/versionUtils.js';
+  import { modAvailabilityWatchStore } from '../../stores/modAvailabilityWatchStore.js';
 
   export let serverPath = '';
 
@@ -25,6 +26,46 @@
   let currentStep = 0;
   let completedUpdates = []; // Track successful mod updates
   let updateSummary = null; // Complete summary of all changes
+  let showWatchPanel = false;
+  let serverPathLocal = '';
+  let showWatchSettings = false;
+  let modWatchPrefs = { showWindowsNotifications: false, intervalHours: 12 };
+  $: serverPathLocal = resolvedPath;
+  $: if (serverPathLocal && !$modAvailabilityWatchStore.loaded) {
+    modAvailabilityWatchStore.refresh(serverPathLocal);
+  }
+  $: activeWatches = new Set(($modAvailabilityWatchStore.watches || []).map(w => `${w.projectId}::${w.target?.mc}::${w.target?.fabric}`));
+  function watchKey(mod) { return `${mod.projectId}::${selectedMC}::${selectedFabric}`; }
+  async function toggleWatch(mod) {
+    if (!resolvedPath || !mod?.projectId || !selectedMC || !selectedFabric) return;
+    const key = watchKey(mod);
+    if (activeWatches.has(key)) {
+      await modAvailabilityWatchStore.remove(resolvedPath, { projectId: mod.projectId, target: { mc: selectedMC, fabric: selectedFabric } });
+    } else {
+      await modAvailabilityWatchStore.add(resolvedPath, { projectId: mod.projectId, name: mod.name, fileName: mod.fileName, targetMc: selectedMC, targetFabric: selectedFabric });
+    }
+  }
+  function formatDate(ts) { if (!ts) return '-'; try { return new Date(ts).toLocaleString(); } catch { return ts; } }
+
+  async function loadModWatchPrefs() {
+    try {
+      const res = await safeInvoke('get-app-settings');
+      if (res?.settings?.modWatch) {
+        modWatchPrefs = { ...modWatchPrefs, ...res.settings.modWatch };
+      }
+    } catch {}
+  }
+  loadModWatchPrefs();
+
+  async function saveModWatchPrefs() {
+    try {
+      await safeInvoke('save-app-settings', { modWatch: modWatchPrefs });
+      await safeInvoke('mod-watch:interval:set', modWatchPrefs.intervalHours);
+      // refresh config display
+      modAvailabilityWatchStore.refresh(resolvedPath);
+      showWatchSettings = false;
+    } catch {}
+  }
 
   // Track current server status
   $: serverStatus = $serverState.status;
@@ -280,6 +321,12 @@
         await safeInvoke('save-disabled-mods', resolvedPath, modFilesToDisable);
       }        // Step 7: Update version state
       updateVersions(selectedMC, selectedFabric);
+      // After successful upgrade, clear any remaining mod availability watches (upgrade path complete)
+      try {
+        if (resolvedPath) {
+          await modAvailabilityWatchStore.clear(resolvedPath);
+        }
+      } catch {}
       compatChecked = false;
         // Create comprehensive update summary
       updateSummary = {
@@ -403,6 +450,11 @@
                   <span class="mod-version">{mod.currentVersion}</span>
                 {/if}
                 <span class="incompatible-reason">No compatible version found</span>
+                {#if mod.projectId}
+                  <button class="watch-btn" on:click={() => toggleWatch(mod)} title={activeWatches.has(watchKey(mod)) ? 'Remove watch' : 'Watch for availability'}>
+                    {#if activeWatches.has(watchKey(mod))}🔔{:else}🔕{/if}
+                  </button>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -429,6 +481,73 @@
       </div>
     </div>
   {/if}
+  <div class="watch-panel-toggle global">
+    <button on:click={() => showWatchPanel = !showWatchPanel}>{showWatchPanel ? 'Hide' : 'Show'} Watched Mods</button>
+  </div>
+  {#if showWatchPanel}
+    <div class="watch-panel">
+      <div class="watch-header-row">
+        <h5>Watched Mods ({$modAvailabilityWatchStore.watches.length})</h5>
+        <button class="watch-settings-btn" on:click={() => showWatchSettings = !showWatchSettings} title="Mod watch settings">⚙️</button>
+      </div>
+      <div class="watch-config-line">Interval: {$modAvailabilityWatchStore.config.intervalHours}h | Last: {formatDate($modAvailabilityWatchStore.config.lastCheck)} | Next: {formatDate($modAvailabilityWatchStore.config.nextCheck)}</div>
+      {#if showWatchSettings}
+        <div class="watch-settings-form">
+          <label><input type="checkbox" bind:checked={modWatchPrefs.showWindowsNotifications}> Windows Notification</label>
+          <label>Interval:
+            <select bind:value={modWatchPrefs.intervalHours}>
+              <option value={12}>12 hours</option>
+              <option value={24}>24 hours</option>
+            </select>
+          </label>
+          <div class="settings-actions">
+            <button on:click={saveModWatchPrefs}>Save</button>
+            <button on:click={() => { showWatchSettings = false; loadModWatchPrefs(); }}>Cancel</button>
+          </div>
+        </div>
+      {/if}
+      {#if $modAvailabilityWatchStore.watches.length === 0}
+        <p class="empty">No current watches.</p>
+      {:else}
+        <ul class="watch-list">
+          {#each $modAvailabilityWatchStore.watches as w (w.projectId + w.target.mc + w.target.fabric)}
+            <li class="watch-item">
+              <div class="watch-main">
+                <span class="watch-name">{w.modName || w.projectId}</span>
+                <span class="watch-target">{w.target.mc} / {w.target.fabric}</span>
+                <span class="watch-added">added {formatDate(w.addedAt)}</span>
+              </div>
+              <div class="watch-buttons">
+                <button class="remove-watch" on:click={() => modAvailabilityWatchStore.remove(resolvedPath, { projectId: w.projectId, target: { mc: w.target.mc, fabric: w.target.fabric } })}>✖</button>
+              </div>
+            </li>
+          {/each}
+        </ul>
+        <div class="watch-actions">
+          <button on:click={() => modAvailabilityWatchStore.clear(resolvedPath)}>Clear Watches</button>
+        </div>
+      {/if}
+      <h5>History</h5>
+      {#if $modAvailabilityWatchStore.history.length === 0}
+        <p class="empty">No fulfilled watches yet.</p>
+      {:else}
+        <ul class="history-list">
+          {#each $modAvailabilityWatchStore.history as h (h.projectId + h.foundAt)}
+            <li class="history-item">
+              <span class="hist-name">{h.modName || h.projectId}</span>
+              <span class="hist-version">{h.versionFound}</span>
+              <span class="hist-target">{h.target.mc}/{h.target.fabric}</span>
+              <span class="hist-time">{formatDate(h.foundAt)}</span>
+            </li>
+          {/each}
+        </ul>
+        <div class="watch-actions">
+          <button on:click={() => modAvailabilityWatchStore.clearHistory(resolvedPath)}>Clear History</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   <button
     class="update-btn"
     on:click={updateServerVersion}
@@ -752,6 +871,40 @@
     border-radius: 4px;
     margin: 0;
   }
+  .watch-btn { margin-left:0.5rem; background:transparent; border:1px solid rgba(255,255,255,0.2); color:#ffb347; cursor:pointer; border-radius:4px; padding:2px 6px; font-size:0.85rem; }
+  .watch-btn:hover { background: rgba(255,255,255,0.1); }
+  .watch-panel-toggle { margin-top:0.75rem; }
+  .watch-panel-toggle.global { text-align:left; margin-top:1rem; }
+  .watch-buttons { display:flex; gap:4px; }
+  .watch-panel-toggle button { background:#2d3748; color:#fff; border:1px solid #4b5563; padding:0.3rem 0.6rem; border-radius:4px; cursor:pointer; font-size:0.75rem; }
+  .watch-panel { margin-top:0.75rem; padding:0.6rem; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); border-radius:6px; font-size:0.75rem; }
+  .watch-header-row { display:flex; justify-content:space-between; align-items:center; }
+  .watch-settings-btn { background:transparent; border:1px solid rgba(255,255,255,0.2); color:#a0aec0; cursor:pointer; border-radius:4px; padding:2px 6px; font-size:0.7rem; }
+  .watch-settings-btn:hover { background:rgba(255,255,255,0.1); }
+  .watch-settings-form { margin:0.5rem 0; display:flex; gap:1rem; flex-wrap:wrap; align-items:center; background:rgba(0,0,0,0.25); padding:6px 8px; border-radius:4px; }
+  .watch-settings-form label { display:flex; gap:4px; align-items:center; font-size:0.65rem; }
+  .watch-settings-form select { background:#2d3748; color:#e2e8f0; border:1px solid #4b5563; border-radius:4px; font-size:0.65rem; padding:2px 4px; }
+  .settings-actions { display:flex; gap:6px; }
+  .settings-actions button { background:#4a5568; border:1px solid #2d3748; color:#e2e8f0; padding:2px 8px; font-size:0.6rem; border-radius:4px; cursor:pointer; }
+  .settings-actions button:hover { background:#2d3748; }
+  .watch-panel h5 { margin:0.4rem 0 0.3rem 0; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.5px; color:#a0aec0; }
+  .watch-config-line { font-size:0.65rem; color:#718096; margin-bottom:0.3rem; }
+  .watch-list, .history-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
+  .watch-item, .history-item { display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.2); padding:4px 6px; border-radius:4px; }
+  .watch-main { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .watch-name { font-weight:500; color:#e2e8f0; }
+  .watch-target { color:#63b3ed; font-family:'Courier New', monospace; }
+  .watch-added { color:#718096; font-size:0.6rem; }
+  .remove-watch { background:transparent; border:none; color:#f56565; cursor:pointer; font-size:0.8rem; }
+  .remove-watch:hover { color:#fc8181; }
+  .hist-name { font-weight:500; color:#e2e8f0; }
+  .hist-version { color:#48bb78; font-family:'Courier New', monospace; }
+  .hist-target { color:#63b3ed; font-family:'Courier New', monospace; }
+  .hist-time { color:#a0aec0; font-size:0.6rem; }
+  .watch-actions { margin-top:4px; display:flex; gap:6px; }
+  .watch-actions button { background:#4a5568; border:1px solid #2d3748; color:#e2e8f0; padding:2px 8px; font-size:0.65rem; border-radius:4px; cursor:pointer; }
+  .watch-actions button:hover { background:#2d3748; }
+  .empty { color:#718096; font-style:italic; }
   .mod-name {
     font-weight: 500;
     flex: 1;

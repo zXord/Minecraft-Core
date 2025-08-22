@@ -24,6 +24,7 @@
   import UpdateNotification from "./components/common/UpdateNotification.svelte";
   import { Toaster } from "svelte-sonner";
   import { showExitConfirmation } from "./stores/exitStore.js";
+  import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
 
   // --- Flow & Tabs ---
   let step = "loading"; // loading → chooseFolder → chooseVersion → done
@@ -1568,7 +1569,8 @@
       bind:visible={showAppSettings}
       on:close={() => (showAppSettings = false)}
     />
-    <StatusManager />
+  <StatusManager />
+  <ModAvailabilityNotifications />
     <UpdateNotification />
     <Toaster richColors theme="dark" />
   {/if}

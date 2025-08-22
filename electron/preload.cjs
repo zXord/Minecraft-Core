@@ -239,11 +239,21 @@ contextBridge.exposeInMainWorld('electron', {
       'logger-close-window',
       'logger-save-settings',
   'logger-get-settings',
+  // Mod availability watch
+  'mod-watch:add',
+  'mod-watch:remove',
+  'mod-watch:list',
+  'mod-watch:clear',
+  'mod-watch:history',
+  'mod-watch:history:clear',
+  'mod-watch:interval:set',
+  'mod-watch:config',
   // Utility helpers
   'open-external-url',
   'show-error-dialog',
       'logger-new-log',
       'logger-logs-cleared',
+  'mod-availability-notification',
       'set-current-instance',
     ];
 
@@ -285,6 +295,8 @@ contextBridge.exposeInMainWorld('electron', {
       'setup-progress',
       'backup-notification',
       'backup-size-changed',
+  // Mod availability watcher events
+  'mod-availability-notification',
       // Management server events
       'management-server-status',
       'management-server-path-updated',
@@ -355,6 +367,7 @@ contextBridge.exposeInMainWorld('electron', {
       'setup-progress',
       'backup-notification',
       'backup-size-changed',
+  'mod-availability-notification',
       // Management server events
       'management-server-status',
       'management-server-path-updated',
@@ -425,6 +438,7 @@ contextBridge.exposeInMainWorld('electron', {
       'setup-progress',
       'backup-notification',
       'backup-size-changed',
+  'mod-availability-notification',
       // Management server events
       'management-server-status',
       'management-server-path-updated',
