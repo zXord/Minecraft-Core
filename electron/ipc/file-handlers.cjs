@@ -164,6 +164,86 @@ function createFileHandlers(win) {
         throw error;
       }
     },
+    /**
+     * Get total size (in bytes) of a folder (recursive)
+     * @channel get-folder-size
+     * @param {Object} _e - event
+     * @param {{path?:string, includeFileCount?:boolean}} payload - input payload
+     * @returns {Promise<{success:boolean,size?:number,fileCount?:number,error?:string,durationMs?:number}>}
+     */
+    'get-folder-size': async (_e, payload) => {
+      payload = payload || {};
+      const start = Date.now();
+      const targetPath = payload?.path;
+      const includeFileCount = !!payload?.includeFileCount;
+
+      logger.debug('Starting folder size calculation', {
+        category: 'storage',
+        data: { handler: 'get-folder-size', targetPath, includeFileCount }
+      });
+
+      try {
+        if (!targetPath || typeof targetPath !== 'string') {
+          return { success: false, error: 'Invalid path', durationMs: Date.now() - start };
+        }
+        if (!fs.existsSync(targetPath)) {
+          return { success: false, error: 'Path does not exist', durationMs: Date.now() - start };
+        }
+
+        // Non-blocking async traversal using a queue
+        let totalSize = 0;
+        let fileCount = 0;
+        const queue = [targetPath];
+
+        while (queue.length) {
+          const current = queue.pop();
+          let dirEntries;
+          try {
+            dirEntries = await fsPromises.readdir(current, { withFileTypes: true });
+          } catch (err) {
+            // Skip directories we cannot read
+            logger.warn('Skipping unreadable directory during size calc', {
+              category: 'storage',
+              data: { handler: 'get-folder-size', current, errorType: err.constructor.name }
+            });
+            continue;
+          }
+
+            for (const entry of dirEntries) {
+              const fullPath = path.join(current, entry.name);
+              try {
+                if (entry.isDirectory()) {
+                  queue.push(fullPath);
+                } else if (entry.isFile()) {
+                  const stats = await fsPromises.stat(fullPath);
+                  totalSize += stats.size;
+                  if (includeFileCount) fileCount++;
+                }
+              } catch (err) {
+                // Skip problematic entry
+                logger.warn('Skipping entry during size calc', {
+                  category: 'storage',
+                  data: { handler: 'get-folder-size', fullPath, errorType: err.constructor.name }
+                });
+              }
+            }
+        }
+
+        const durationMs = Date.now() - start;
+        logger.debug('Folder size calculation complete', {
+          category: 'performance',
+          data: { handler: 'get-folder-size', targetPath, durationMs, totalSize, fileCount: includeFileCount ? fileCount : undefined }
+        });
+        return { success: true, size: totalSize, fileCount: includeFileCount ? fileCount : undefined, durationMs };
+      } catch (error) {
+        const durationMs = Date.now() - start;
+        logger.error(`Folder size calculation failed: ${error.message}`, {
+          category: 'storage',
+          data: { handler: 'get-folder-size', targetPath, errorType: error.constructor.name, durationMs }
+        });
+        return { success: false, error: error.message, durationMs };
+      }
+    },
     
     'set-server-path': (_e, path) => {
       const startTime = Date.now();
