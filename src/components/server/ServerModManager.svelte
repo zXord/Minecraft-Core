@@ -24,6 +24,7 @@
     filterModLoader,
     expandedInstalledMod,
     modsWithUpdates,
+    disabledMods,
   disabledModUpdates,
     currentDependencies,
     modToInstall,
@@ -47,7 +48,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     loadMods, 
     loadServerConfig,
     installMod,
-    checkForUpdates
+    checkForUpdates,
+    loadContent,
+    searchContent
   } from '../../utils/mods/modAPI.js';
   import { 
     installWithDependencies,
@@ -78,15 +81,24 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   // Per-content-type update counts (reactive)
   $: modsUpdateCount = (() => {
     let count = 0;
-    if ($modsWithUpdates && $installedModInfo) {
-      const modNames = new Set($installedModInfo.map(m => m.fileName));
+    let modNames = null;
+    if ($installedModInfo) {
+      modNames = new Set($installedModInfo.map(m => m.fileName));
+    }
+    if ($modsWithUpdates && modNames) {
       for (const [name] of $modsWithUpdates.entries()) {
         if (name.startsWith('project:')) continue;
         if (modNames.has(name)) count++;
       }
     }
-    // Include disabled mod compatible updates
-    if ($disabledModUpdates) count += $disabledModUpdates.size;
+    if ($disabledModUpdates) {
+      const disabledSet = $disabledMods;
+      for (const name of $disabledModUpdates.keys()) {
+        if ((modNames && modNames.has(name)) || (disabledSet && disabledSet.has && disabledSet.has(name))) {
+          count++;
+        }
+      }
+    }
     return count;
   })();
   $: shaderUpdateCount = (() => {
@@ -594,10 +606,14 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         selectedVersionId: versionId,
         source: 'modrinth'
       };
-        // Remove this mod from the updates list immediately to prevent duplicate clicks
+      // Remove this mod from the updates list immediately to prevent duplicate clicks
       modsWithUpdates.update(updates => {
-        updates.delete(modName);
-        return updates;
+        const next = new SvelteMap(updates);
+        next.delete(modName);
+        if (projectId) {
+          next.delete('project:' + projectId);
+        }
+        return next;
       });
       
       // Install the new version (it will replace the old one automatically)
@@ -649,8 +665,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       totalResults.set(0);
       totalPages.set(1);
       
-      // Import searchContent function
-      const { searchContent } = await import('../../utils/mods/modAPI.js');
       
       // Perform search for the active content type
       await searchContent(currentContentType);
@@ -705,26 +719,21 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       // Load content for the active content type without triggering update checks
       (async () => {
         try {
-          const { loadContent } = await import('../../utils/mods/modAPI.js');
           await loadContent(serverPath, get(activeContentType));
         } catch (_) {}
       })();
     }
     // If switching to search tab, refresh search results and check for updates
-  else if (tabName === 'search') {
-      // Clear any stale update counts when switching away from installed tab
-      modsWithUpdates.set(new SvelteMap());
-
+    else if (tabName === 'search') {
       // Ensure installed IDs/info for the current content type are loaded
       (async () => {
         try {
-          const { loadContent } = await import('../../utils/mods/modAPI.js');
           await loadContent(serverPath, get(activeContentType));
         } catch (_) {
           // ignore
         }
-  // Do NOT auto-check updates here (manual or interval only)
-  Promise.resolve().then(() => {
+        // Do NOT auto-check updates here (manual or interval only)
+        Promise.resolve().then(() => {
           // Only search if no results yet for the active content type
           const currentType = get(activeContentType);
           const hasResults = currentType === CONTENT_TYPES.SHADERS
@@ -757,14 +766,12 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       // If on search tab, trigger search for new content type
       if (activeTab === 'search') {
         // Load installed IDs for this content type so search results can reflect installed status
-        const { loadContent } = await import('../../utils/mods/modAPI.js');
         await loadContent(serverPath, contentTypeId);
         await handleSearch();
       }
       // If on installed tab, load content for new type
       else if (activeTab === 'installed') {
-        // Import loadContent function (no auto update check)
-        const { loadContent } = await import('../../utils/mods/modAPI.js');
+        // Load content for new type (no auto update check)
         await loadContent(serverPath, contentTypeId);
       }
     } catch (error) {

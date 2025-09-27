@@ -19,21 +19,22 @@
     getCategorizedMods,
     updateModCategory,
     updateModRequired,
+    loadModCategories,
     activeContentType,
     CONTENT_TYPES,
     installedShaders,
     installedResourcePacks,
     installedShaderInfo,
-  installedResourcePackInfo,
-  loaderType,
-  minecraftVersion
+    installedResourcePackInfo,
+    loaderType,
+    minecraftVersion,
+    ignoreUpdate
   } from '../../../stores/modStore.js';
-    import { ignoreUpdate } from '../../../stores/modStore.js';
   import { serverState } from '../../../stores/serverState.js';
   import { formatInstallationDate, formatLastUpdated, formatTooltipDate } from '../../../utils/dateUtils.js';
   
   // Import existing API functions
-  import { loadMods, loadContent, deleteMod, deleteContent, checkForUpdates, enableAndUpdateMod, fetchModVersions } from '../../../utils/mods/modAPI.js';
+  import { loadMods, loadContent, deleteMod, deleteContent, checkForUpdates, enableAndUpdateMod, fetchModVersions, checkDisabledModUpdates } from '../../../utils/mods/modAPI.js';
   import { safeInvoke } from '../../../utils/ipcUtils.js';
   import { checkDependencyCompatibility, checkVersionCompatibility } from '../../../utils/mods/modCompatibility.js';
   import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
@@ -362,6 +363,21 @@
     return tooltip;
   }
 
+  function normalizeFileName(name) {
+    if (!name) return '';
+    return String(name).split(/[\\/]/).pop();
+  }
+
+  function findDisabledUpdate(updates, modName) {
+    if (!updates || typeof updates.has !== 'function' || !modName) return null;
+    if (updates.has(modName)) return updates.get(modName);
+    const normalized = normalizeFileName(modName);
+    if (normalized && normalized !== modName && updates.has(normalized)) {
+      return updates.get(normalized);
+    }
+    return null;
+  }
+
   // Reactive values for content-type specific data
   $: currentInstalledItems = $activeContentType === CONTENT_TYPES.SHADERS ? $installedShaders :
                             $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? $installedResourcePacks :
@@ -373,23 +389,25 @@
     const currentItems = $activeContentType === CONTENT_TYPES.SHADERS ? $installedShaders :
                         $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? $installedResourcePacks :
                         $installedMods;
-    
+
     let count = 0;
     for (const [fileName] of allUpdates.entries()) {
-      // Skip project: prefixed entries (they're for reference only)
       if (fileName.startsWith('project:')) continue;
-      
-      // Only count updates for items in the current content type
       if (currentItems.includes(fileName)) {
         count++;
       }
     }
-    
-    // Add disabled mod updates only for mods content type
-    if ($activeContentType === CONTENT_TYPES.MODS) {
-      count += $disabledModUpdates.size;
+
+    if ($activeContentType === CONTENT_TYPES.MODS && $disabledModUpdates) {
+      const disabledSet = $disabledMods;
+      const modNames = $installedModInfo ? new Set($installedModInfo.map(m => m.fileName)) : null;
+      for (const name of $disabledModUpdates.keys()) {
+        if ((modNames && modNames.has(name)) || (disabledSet && disabledSet.has && disabledSet.has(name))) {
+          count++;
+        }
+      }
     }
-    
+
     return count;
   })();
   $: serverRunning = $serverState.status === 'Running';
@@ -400,6 +418,7 @@
       try {
         if ($activeContentType === CONTENT_TYPES.MODS) {
           await loadMods(serverPath);
+          try { await checkDisabledModUpdates(serverPath); } catch {}
         } else {
           await loadContent(serverPath, $activeContentType);
         }
@@ -720,7 +739,6 @@
   async function handleCheckUpdates() {
     try {
       // Ensure all content types are loaded so updates cover resource packs & shaders too
-      const { loadContent } = await import('../../../utils/mods/modAPI.js');
       await loadMods(serverPath); // mods first
       await Promise.allSettled([
         loadContent(serverPath, 'shaders'),
@@ -1131,6 +1149,7 @@
         });
       
         await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+        try { await checkDisabledModUpdates(serverPath); } catch {}
         
       const action = isDisabled ? 'enabled' : 'disabled';
       successMessage.set(`Mod ${modName} ${action} successfully.`);
@@ -1141,22 +1160,25 @@
   }
 
   async function handleEnableAndUpdate(modFileName) {
-    const updateInfo = $disabledModUpdates.get(modFileName);
-    
+    const updatesMap = get(disabledModUpdates);
+    const updateInfo = findDisabledUpdate(updatesMap, modFileName);
+
     if (!updateInfo) {
       errorMessage.set('No update information available for this mod');
       return;
     }
-    
+
+    const updateKey = updateInfo.fileName || normalizeFileName(modFileName);
+
     try {
       const success = await enableAndUpdateMod(
         serverPath,
-        modFileName,
+        updateKey || modFileName,
         updateInfo.projectId,
         updateInfo.latestVersion,
         updateInfo.latestVersionId
       );
-      
+
       if (success) {
         await loadMods(serverPath);
       }
@@ -1506,7 +1528,6 @@
     // Load mod categories and disabled mods from storage on startup
     const initAsync = async () => {
     try {
-      const { loadModCategories } = await import('../../../stores/modStore.js');
       await loadModCategories();
       
       // Load disabled mods from storage
@@ -1515,6 +1536,7 @@
           const disabledModsList = await safeInvoke('get-disabled-mods', serverPath);
           if (Array.isArray(disabledModsList)) {
             disabledMods.set(new SvelteSet(disabledModsList));
+            try { await checkDisabledModUpdates(serverPath); } catch {}
           }
         } catch (error) {
         }
@@ -2033,34 +2055,39 @@
 
         <!-- update badge / selector trigger -->
         <td class="upd">
-            {#if isDisabled && $disabledModUpdates.has(mod)}
-              {@const updateInfo = $disabledModUpdates.get(mod)}
+          {#if isDisabled}
+            {@const disabledUpdateInfo = findDisabledUpdate($disabledModUpdates, mod)}
+            {#if disabledUpdateInfo}
               <div class="update-actions compact">
-                <button class="tag new clickable upd-btn" 
+                <button class="tag new clickable upd-btn"
                         disabled={serverRunning}
                         on:click={() => handleEnableAndUpdate(mod)}
-                        title={serverRunning ? 'Server must be stopped to enable and update mods' : `Enable and update to ${updateInfo.latestVersion}`}>
-                  {#if serverRunning}🔒{/if} ↑ <span class="ver-label">{updateInfo.latestVersion}</span>
+                        title={serverRunning ? 'Server must be stopped to enable and update mods' : `Enable and update to ${disabledUpdateInfo.latestVersion}`}>
+                  {#if serverRunning}🔒{/if} ↑ <span class="ver-label">{disabledUpdateInfo.latestVersion}</span>
                 </button>
                 <button class="ghost sm ignore-btn"
                         disabled={serverRunning}
                         aria-label="Ignore this version"
                         title="Ignore this version (won't show until a newer one exists)"
                         on:click={() => {
-                          const ui = updateInfo; // snapshot
+                          const ui = disabledUpdateInfo;
                           if (!ui) return;
-                          // Optimistically remove
+                          const updateKey = ui.fileName || normalizeFileName(mod);
                           disabledModUpdates.update(m => {
                             const nm = new SvelteMap(m);
-                            nm.delete(mod);
+                            if (updateKey) nm.delete(updateKey);
+                            if (updateKey && updateKey !== mod) nm.delete(mod);
                             return nm;
                           });
-                          ignoreUpdate(mod, ui.latestVersionId, ui.latestVersion);
+                          ignoreUpdate(updateKey || mod, ui.latestVersionId, ui.latestVersion);
                         }}>
                   ✖
                 </button>
               </div>
-            {:else if !isDisabled && $modsWithUpdates.has(mod)}
+            {:else}
+              <span class="tag ok" title="Enable to check for updates">—</span>
+            {/if}
+          {:else if $modsWithUpdates.has(mod)}
             {@const updateInfo = $modsWithUpdates.get(mod)}
             <div class="update-actions compact">
               <button class="tag new clickable upd-btn"
@@ -2074,17 +2101,16 @@
                       aria-label="Ignore this version"
                       title="Ignore this version (won't show until a newer one exists)"
                       on:click={() => {
-                        const ui = updateInfo; // snapshot before reactive removal
+                        const ui = updateInfo;
                         if (!ui) return;
-                        // Optimistically remove from updates list immediately
-                        modsWithUpdates.update(m => { 
-                          const nm = new SvelteMap(m); 
-                          nm.delete(mod); 
+                        modsWithUpdates.update(m => {
+                          const nm = new SvelteMap(m);
+                          nm.delete(mod);
                           try {
                             const info = $installedModInfo.find(i => i.fileName === mod);
-                            if (info && info.projectId) nm.delete(`project:${info.projectId}`); 
+                            if (info && info.projectId) nm.delete(`project:${info.projectId}`);
                           } catch {}
-                          return nm; 
+                          return nm;
                         });
                         ignoreUpdate(mod, ui.id, ui.versionNumber || ui.version_number || ui.name);
                       }}>
@@ -2092,7 +2118,7 @@
               </button>
             </div>
           {:else}
-              <span class="tag ok" title={isDisabled ? 'Mod is disabled' : 'Up to date'}>{isDisabled ? '—' : 'Up to date'}</span>
+            <span class="tag ok" title={isDisabled ? 'Mod is disabled' : 'Up to date'}>{isDisabled ? '—' : 'Up to date'}</span>
           {/if}
         </td>
 
