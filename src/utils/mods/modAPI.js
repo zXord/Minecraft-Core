@@ -32,9 +32,21 @@ import {
   disabledMods,
   installingModIds,
   modCategories,
+  loadModCategories,
+  saveModCategories,
   disabledModUpdates,
+  installedShaders,
+  installedShaderIds,
   installedShaderInfo,
+  installedResourcePacks,
+  installedResourcePackIds,
   installedResourcePackInfo,
+  shaderResults,
+  resourcePackResults,
+  contentTypeSwitching,
+  contentTypeCache,
+  contentTypeRetryCount,
+  contentTypeConfigs,
   isUpdateIgnored,
   lastUpdateCheckTime
 } from '../../stores/modStore.js';
@@ -111,7 +123,6 @@ export async function loadContent(serverPath, contentType = 'mods') {
     // Store content in the appropriate store based on content type
     switch (contentType) {
       case 'shaders': {
-        const { installedShaders, installedShaderIds, installedShaderInfo } = await import('../../stores/modStore.js');
         installedShaders.set(contentList);
         
         // Extract project IDs and info from result.mods if available
@@ -149,7 +160,6 @@ export async function loadContent(serverPath, contentType = 'mods') {
         break;
       }
       case 'resourcepacks': {
-        const { installedResourcePacks, installedResourcePackIds, installedResourcePackInfo } = await import('../../stores/modStore.js');
         installedResourcePacks.set(contentList);
         
         // Extract project IDs and info from result.mods if available
@@ -195,7 +205,6 @@ export async function loadContent(serverPath, contentType = 'mods') {
     // For mods, continue with the existing category and mod info logic
     if (contentType === 'mods') {
       // Load existing saved categories first - with multiple attempts if needed
-      const { loadModCategories } = await import('../../stores/modStore.js');
       
       // Try loading categories multiple times to ensure they're properly loaded
       let categoriesLoaded = false;
@@ -267,7 +276,6 @@ export async function loadContent(serverPath, contentType = 'mods') {
       
       // Save updated categories to persistent storage
       try {
-        const { saveModCategories } = await import('../../stores/modStore.js');
         await saveModCategories();
       } catch {
         // TODO: Add proper logging - Failed to save updated mod categories
@@ -333,8 +341,10 @@ export async function loadContent(serverPath, contentType = 'mods') {
         
         // Update stores with clean, properly structured data
         const validProjectIds = new SvelteSet(updatedModInfo.map(info => info.projectId).filter(Boolean));
-        installedModIds.set(validProjectIds);
-        installedModInfo.set(updatedModInfo);
+  installedModIds.set(validProjectIds);
+  installedModInfo.set(updatedModInfo);
+  // Prime disabled mod updates so UI can show "Enable and update" without manual check
+  try { await checkDisabledModUpdates(serverPath); } catch { /* ignore */ }
         
   // (Removed automatic post-load auto update check – now only manual button or interval triggers)
           return true;
@@ -434,7 +444,6 @@ export async function searchContent(contentType = 'mods', options = {}) {
   }
 
   // Import performance optimization stores
-  const { contentTypeSwitching, contentTypeCache, contentTypeRetryCount } = await import('../../stores/modStore.js');
   
   // Set switching state
   contentTypeSwitching.set(true);
@@ -459,12 +468,10 @@ export async function searchContent(contentType = 'mods', options = {}) {
       // Use cached results
       switch (contentType) {
         case 'shaders': {
-          const { shaderResults } = await import('../../stores/modStore.js');
           shaderResults.set(cachedResult.data.mods || []);
           break;
         }
         case 'resourcepacks': {
-          const { resourcePackResults } = await import('../../stores/modStore.js');
           resourcePackResults.set(cachedResult.data.mods || []);
           break;
         }
@@ -562,14 +569,12 @@ export async function searchContent(contentType = 'mods', options = {}) {
       let installedInfoList = [];
       switch (contentType) {
         case 'shaders': {
-          const { installedShaderIds, installedShaders, installedShaderInfo } = await import('../../stores/modStore.js');
           installedIdsSet = get(installedShaderIds);
           installedFilesList = get(installedShaders);
           installedInfoList = get(installedShaderInfo);
           break;
         }
         case 'resourcepacks': {
-          const { installedResourcePackIds, installedResourcePacks, installedResourcePackInfo } = await import('../../stores/modStore.js');
           installedIdsSet = get(installedResourcePackIds);
           installedFilesList = get(installedResourcePacks);
           installedInfoList = get(installedResourcePackInfo);
@@ -628,12 +633,10 @@ export async function searchContent(contentType = 'mods', options = {}) {
       // Update the appropriate results store based on content type
       switch (contentType) {
         case 'shaders': {
-          const { shaderResults } = await import('../../stores/modStore.js');
           shaderResults.set(mods);
           break;
         }
         case 'resourcepacks': {
-          const { resourcePackResults } = await import('../../stores/modStore.js');
           resourcePackResults.set(mods);
           break;
         }
@@ -685,12 +688,10 @@ export async function searchContent(contentType = 'mods', options = {}) {
       // Clear the appropriate results store
       switch (contentType) {
         case 'shaders': {
-          const { shaderResults } = await import('../../stores/modStore.js');
           shaderResults.set([]);
           break;
         }
         case 'resourcepacks': {
-          const { resourcePackResults } = await import('../../stores/modStore.js');
           resourcePackResults.set([]);
           break;
         }
@@ -736,12 +737,10 @@ export async function searchContent(contentType = 'mods', options = {}) {
     // Clear the appropriate results store
     switch (contentType) {
       case 'shaders': {
-        const { shaderResults } = await import('../../stores/modStore.js');
         shaderResults.set([]);
         break;
       }
       case 'resourcepacks': {
-        const { resourcePackResults } = await import('../../stores/modStore.js');
         resourcePackResults.set([]);
         break;
       }
@@ -852,13 +851,11 @@ async function refreshSearchResults(contentType) {
     
     switch (contentType) {
       case 'shaders': {
-        const { shaderResults, installedShaderIds } = await import('../../stores/modStore.js');
         resultsStore = shaderResults;
         installedIdsStore = installedShaderIds;
         break;
       }
       case 'resourcepacks': {
-        const { resourcePackResults, installedResourcePackIds } = await import('../../stores/modStore.js');
         resultsStore = resourcePackResults;
         installedIdsStore = installedResourcePackIds;
         break;
@@ -928,7 +925,6 @@ export async function installMod(mod, serverPath, options = {}) {
 
     
     // Get content type configuration
-    const { contentTypeConfigs } = await import('../../stores/modStore.js');
     const config = contentTypeConfigs[contentType] || contentTypeConfigs['mods'];
     
     // Prepare content data for installation with fallback support
@@ -1219,9 +1215,6 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
       modsWithUpdates.set(new Map());
     }
     
-    // Check for disabled mod updates in parallel
-    checkDisabledModUpdates(serverPath);
-    
   for (const contentInfo of allContentWithProjectIds) {
       // Check if a newer update check has started
       if (currentCheckId !== updateCheckId) {
@@ -1274,7 +1267,8 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     
     // Update the store
     modsWithUpdates.set(updatesMap);
-  try { lastUpdateCheckTime.set(Date.now()); } catch { /* ignore timestamp errors */ }
+    await checkDisabledModUpdates(serverPath);
+    try { lastUpdateCheckTime.set(Date.now()); } catch { /* ignore timestamp errors */ }
     return updatesMap;
   } catch {
     return updatesMap;
@@ -1299,9 +1293,25 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
  */
 export async function checkDisabledModUpdates(serverPath) {
   try {
-    const mcVersion = get(minecraftVersion);
+    let mcVersion = get(minecraftVersion);
     
-    if (!mcVersion || !serverPath) {
+    if (!serverPath) {
+      disabledModUpdates.set(new Map());
+      return;
+    }
+    
+    if (!mcVersion) {
+      try {
+        const config = await loadServerConfig(serverPath);
+        if (config?.version) {
+          mcVersion = config.version;
+        }
+      } catch {
+        // ignore config load errors
+      }
+    }
+    
+    if (!mcVersion) {
       disabledModUpdates.set(new Map());
       return;
     }
@@ -1322,16 +1332,20 @@ export async function checkDisabledModUpdates(serverPath) {
     
     for (const result of results) {
       if (result.isCompatibleUpdate && result.hasUpdate) {
+  const rawFileName = result.fileName || '';
+  const normalizedName = rawFileName.split(/[\\/]/).pop() || rawFileName;
         // Skip if user has ignored this update/version
-        const ignored = isUpdateIgnored(result.fileName, result.latestVersionId, result.latestVersion);
+        const ignored = isUpdateIgnored(normalizedName, result.latestVersionId, result.latestVersion);
         if (ignored) continue;
-        disabledUpdatesMap.set(result.fileName, {
+        disabledUpdatesMap.set(normalizedName, {
           projectId: result.projectId,
           currentVersion: result.currentVersion,
           latestVersion: result.latestVersion,
           latestVersionId: result.latestVersionId,
           reason: result.reason,
-          name: result.name
+          name: result.name,
+          fileName: normalizedName,
+          originalFileName: rawFileName
         });
       }
     }
@@ -1406,6 +1420,25 @@ function checkForUpdate(modInfo, versions) {
   if (!versions || versions.length === 0 || !modInfo || !modInfo.versionNumber) {
     return null;
   }
+  // Loose numeric comparator: returns <0 if a<b, 0 if equal, >0 if a>b
+  const compareLoose = (a, b) => {
+    try {
+      const norm = (v) => String(v || '').trim().toLowerCase().replace(/^v/, '');
+      const extract = (v) => {
+        const m = norm(v).match(/\d+(?:\.\d+){0,3}/);
+        return m ? m[0] : '';
+      };
+      const as = extract(a).split('.').filter(Boolean).map(n => parseInt(n, 10));
+      const bs = extract(b).split('.').filter(Boolean).map(n => parseInt(n, 10));
+      if (!as.length || !bs.length) return 0;
+      const len = Math.max(as.length, bs.length);
+      for (let i = 0; i < len; i++) {
+        const ai = as[i] || 0; const bi = bs[i] || 0;
+        if (ai !== bi) return ai - bi;
+      }
+      return 0;
+    } catch { return 0; }
+  };
   
   // Find stable versions for this MC version
   const stableVersions = versions.filter(v => v.isStable !== false);
@@ -1447,22 +1480,17 @@ function checkForUpdate(modInfo, versions) {
     latestVersion = sortedVersions[0];
   }
   
-  // Simple, general rule: if the latest (by date) differs from what's installed, offer update.
-  // Prefer comparing by Modrinth version id if we have it; otherwise compare normalized version text.
+  // Offer update only if the latest compatible version is strictly newer than installed.
   if (latestVersion) {
-    const normalize = (v) => (typeof v === 'string' ? v.trim().replace(/^v/i, '') : v);
+    const norm = (v) => (typeof v === 'string' ? v.trim().replace(/^v/i, '') : v);
+    const installedVer = norm(modInfo.versionNumber || '');
+    const latestVer = norm(latestVersion.versionNumber || latestVersion.name || '');
+    const cmp = compareLoose(installedVer, latestVer);
+    if (cmp < 0) return latestVersion; // only if strictly newer numerically
+    // If installed version string missing, fall back to id compare
     const installedId = modInfo.versionId;
     const latestId = latestVersion.id;
-    if (installedId && latestId && installedId !== latestId) {
-      return latestVersion;
-    }
-    const installedVer = normalize(modInfo.versionNumber || '');
-    const latestVer = normalize(latestVersion.versionNumber || latestVersion.name || '');
-    if (installedVer && latestVer && installedVer !== latestVer) {
-      return latestVersion;
-    }
-    // If installed has unknown/empty version but projectId matches and there's a latest, offer update
-    if (!installedVer && (modInfo.projectId && latestVer)) {
+    if (!installedVer && installedId && latestId && installedId !== latestId) {
       return latestVersion;
     }
   }

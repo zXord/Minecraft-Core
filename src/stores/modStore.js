@@ -1362,8 +1362,7 @@ function getHasUpdates() {
 
 function getUpdateCount() {
   if (!updateCount) {
-    updateCount = derived([modsWithUpdates, disabledModUpdates], ([$updates, $disabledUpdates]) => {
-      // Count regular enabled mod updates
+    updateCount = derived([modsWithUpdates, disabledModUpdates, disabledMods], ([$updates, $disabledUpdates, $disabledSet]) => {
       let count = 0;
       for (const [modName] of $updates.entries()) {
         if (!modName.startsWith('project:')) {
@@ -1371,8 +1370,13 @@ function getUpdateCount() {
         }
       }
 
-      // Add disabled mods with compatible updates
-      count += $disabledUpdates.size;
+      if ($disabledUpdates) {
+        for (const name of $disabledUpdates.keys()) {
+          if ($disabledSet && $disabledSet.has && $disabledSet.has(name)) {
+            count++;
+          }
+        }
+      }
 
       return count;
     });

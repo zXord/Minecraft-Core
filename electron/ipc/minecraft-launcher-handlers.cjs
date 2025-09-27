@@ -736,8 +736,9 @@ function createMinecraftLauncherHandlers(win) {
             // Get download preferences to determine source priority
             const configManager = require('../utils/config-manager.cjs');
             const preferences = await configManager.getInstanceConfig(clientPath, 'downloadPreferences');
-            const primarySource = preferences?.primarySource || 'server';
-            const fallbackSource = preferences?.fallbackSource || 'modrinth';
+            // Default: primary = modrinth, fallback = server
+            const primarySource = preferences?.primarySource || 'modrinth';
+            const fallbackSource = preferences?.fallbackSource || 'server';
             
             logger.debug('Download preferences loaded', {
               category: 'mods',
@@ -753,25 +754,276 @@ function createMinecraftLauncherHandlers(win) {
             
             let downloadUrl = null;
             let sourceUsed = null;
-            
-            // Try primary source first
-            if (primarySource === 'server' && mod.downloadUrl && mod.downloadUrl.includes('/api/mods/download/')) {
-              downloadUrl = mod.downloadUrl;
-              sourceUsed = 'server';
-            } else if (primarySource === 'modrinth' && mod.projectId) {
-              downloadUrl = await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
-              sourceUsed = 'modrinth';
-            }
-            
-            // Try fallback source if primary failed
-            if (!downloadUrl) {
-              if (fallbackSource === 'server' && mod.downloadUrl && mod.downloadUrl.includes('/api/mods/download/')) {
-                downloadUrl = mod.downloadUrl;
-                sourceUsed = 'server';
-              } else if (fallbackSource === 'modrinth' && mod.projectId) {
-                downloadUrl = await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
-                sourceUsed = 'modrinth';
+            let triedPrimary = false;
+            let triedFallback = false;
+            let lastError = null;
+
+            // Helper to get download URL for a given source
+            async function getUrlForSource(source) {
+              if (source === 'server' && mod.downloadUrl && mod.downloadUrl.includes('/api/mods/download/')) {
+                return mod.downloadUrl;
+              } else if (source === 'modrinth' && mod.projectId) {
+                return await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
               }
+              return null;
+            }
+
+            // Always define downloadId and modName for progress reporting
+            const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
+            const modName = mod.name || mod.fileName;
+
+            // Try primary, then fallback if primary fails (network/HTTP error)
+            for (const [source, mark] of [[primarySource, 'primary'], [fallbackSource, 'fallback']]) {
+              if ((mark === 'primary' && triedPrimary) || (mark === 'fallback' && triedFallback)) continue;
+              try {
+                downloadUrl = await getUrlForSource(source);
+                sourceUsed = source;
+                if (!downloadUrl) throw new Error('No download URL for source: ' + source);
+                // Try download
+                await new Promise((resolve, reject) => {
+                  const protocol = downloadUrl.startsWith('https:') ? https : http;
+                  const file = fs.createWriteStream(modPath);
+                  let downloadedBytes = 0;
+                  let totalBytes = 0;
+                  let lastProgressUpdate = Date.now();
+                  const request = protocol.get(downloadUrl, (response) => {
+                    if (response.statusCode === 302 || response.statusCode === 301) {
+                      file.close();
+                      fs.unlinkSync(modPath);
+                      const redirectUrl = response.headers.location;
+                      const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
+                      redirectProtocol.get(redirectUrl, (redirectResponse) => {
+                        if (redirectResponse.statusCode === 200) {
+                          const file2 = fs.createWriteStream(modPath);
+                          totalBytes = parseInt(redirectResponse.headers['content-length'], 10) || 0;
+                          downloadedBytes = 0;
+                          redirectResponse.on('data', (chunk) => {
+                            downloadedBytes += chunk.length;
+                            const now = Date.now();
+                            if (now - lastProgressUpdate >= 200) {
+                              const progress = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
+                              const speed = totalBytes > 0 ? downloadedBytes / ((now - (lastProgressUpdate - 200)) / 1000) : 0;
+                              if (win && win.webContents) {
+                                win.webContents.send('download-progress', {
+                                  id: downloadId,
+                                  name: modName,
+                                  progress: progress,
+                                  size: totalBytes,
+                                  downloaded: downloadedBytes,
+                                  speed: speed,
+                                  completed: false,
+                                  error: null,
+                                  source: sourceUsed,
+                                  statusMessage: `Downloading from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}... ${progress}%`
+                                });
+                              }
+                              lastProgressUpdate = now;
+                            }
+                          });
+                          redirectResponse.pipe(file2);
+                          file2.on('finish', async () => {
+                            file2.close();
+                            if (win && win.webContents) {
+                              win.webContents.send('download-progress', {
+                                id: downloadId,
+                                name: modName,
+                                progress: 100,
+                                speed: 0,
+                                completed: true,
+                                completedTime: Date.now(),
+                                error: null,
+                                source: sourceUsed,
+                                statusMessage: `Download Complete: ${modName} downloaded successfully from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}`
+                              });
+                            }
+                            if (mod.checksum) {
+                              const downloadedChecksum = utils.calculateFileChecksum(modPath);
+                              if (downloadedChecksum !== mod.checksum) {
+                                fs.unlinkSync(modPath);
+                                reject(new Error(`Checksum mismatch for ${mod.fileName}`));
+                                return;
+                              }
+                            }
+                            downloaded.push(mod.fileName);
+                            const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                            const installationDate = new Date().toISOString();
+                            const manifestData = {
+                              fileName: mod.fileName,
+                              source: sourceUsed,
+                              projectId: mod.projectId || null,
+                              versionId: mod.versionId || null,
+                              versionNumber: mod.versionNumber || null,
+                              name: mod.name || null,
+                              installedAt: installationDate,
+                              lastUpdated: installationDate
+                            };
+                            const meta = await readModMetadataFromJar(modPath).catch(() => null);
+                            if (meta) {
+                              if (!manifestData.projectId) manifestData.projectId = meta.projectId;
+                              if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
+                              if (!manifestData.name) manifestData.name = meta.name;
+                            }
+                            fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
+                            resolve();
+                          });
+                          file2.on('error', (err) => {
+                            if (win && win.webContents) {
+                              win.webContents.send('download-progress', {
+                                id: downloadId,
+                                name: modName,
+                                progress: 0,
+                                speed: 0,
+                                completed: false,
+                                error: err.message,
+                                completedTime: Date.now(),
+                                source: sourceUsed,
+                                statusMessage: `Download failed from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}: ${err.message}`
+                              });
+                            }
+                            fs.unlinkSync(modPath);
+                            reject(err);
+                          });
+                        } else {
+                          reject(new Error(`Failed to download ${mod.fileName}: HTTP ${redirectResponse.statusCode}`));
+                        }
+                      }).on('error', reject);
+                    } else if (response.statusCode === 200) {
+                      totalBytes = parseInt(response.headers['content-length'], 10) || 0;
+                      downloadedBytes = 0;
+                      response.on('data', (chunk) => {
+                        downloadedBytes += chunk.length;
+                        const now = Date.now();
+                        if (now - lastProgressUpdate >= 200) {
+                          const progress = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
+                          const speed = totalBytes > 0 ? downloadedBytes / ((now - (lastProgressUpdate - 200)) / 1000) : 0;
+                          if (win && win.webContents) {
+                            win.webContents.send('download-progress', {
+                              id: downloadId,
+                              name: modName,
+                              progress: progress,
+                              size: totalBytes,
+                              downloaded: downloadedBytes,
+                              speed: speed,
+                              completed: false,
+                              error: null,
+                              source: sourceUsed,
+                              statusMessage: `Downloading from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}... ${progress}%`
+                            });
+                          }
+                          lastProgressUpdate = now;
+                        }
+                      });
+                      response.pipe(file);
+                      file.on('finish', async () => {
+                        file.close();
+                        if (win && win.webContents) {
+                          win.webContents.send('download-progress', {
+                            id: downloadId,
+                            name: modName,
+                            progress: 100,
+                            speed: 0,
+                            completed: true,
+                            completedTime: Date.now(),
+                            error: null,
+                            source: sourceUsed,
+                            statusMessage: `Download Complete: ${modName} downloaded successfully from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}`
+                          });
+                        }
+                        if (mod.checksum) {
+                          const downloadedChecksum = utils.calculateFileChecksum(modPath);
+                          if (downloadedChecksum !== mod.checksum) {
+                            fs.unlinkSync(modPath);
+                            reject(new Error(`Checksum mismatch for ${mod.fileName}`));
+                            return;
+                          }
+                        }
+                        downloaded.push(mod.fileName);
+                        const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                        const installationDate = new Date().toISOString();
+                        const manifestData = {
+                          fileName: mod.fileName,
+                          source: sourceUsed,
+                          projectId: mod.projectId || null,
+                          versionId: mod.versionId || null,
+                          versionNumber: mod.versionNumber || null,
+                          name: mod.name || null,
+                          installedAt: installationDate,
+                          lastUpdated: installationDate
+                        };
+                        const meta = await readModMetadataFromJar(modPath).catch(() => null);
+                        if (meta) {
+                          if (!manifestData.projectId) manifestData.projectId = meta.projectId;
+                          if (!manifestData.versionNumber) manifestData.versionNumber = meta.versionNumber;
+                          if (!manifestData.name) manifestData.name = meta.name;
+                        }
+                        fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2));
+                        resolve();
+                      });
+                      file.on('error', (err) => {
+                        if (win && win.webContents) {
+                          win.webContents.send('download-progress', {
+                            id: downloadId,
+                            name: modName,
+                            progress: 0,
+                            speed: 0,
+                            completed: false,
+                            error: err.message,
+                            completedTime: Date.now(),
+                            source: sourceUsed,
+                            statusMessage: `Download failed from ${sourceUsed === 'modrinth' ? 'Modrinth' : 'Server'}: ${err.message}`
+                          });
+                        }
+                        fs.unlinkSync(modPath);
+                        reject(err);
+                      });
+                    } else {
+                      file.close();
+                      fs.unlinkSync(modPath);
+                      reject(new Error(`Failed to download ${mod.fileName}: HTTP ${response.statusCode}`));
+                    }
+                  }).on('error', (err) => {
+                    file.close();
+                    if (fs.existsSync(modPath)) {
+                      fs.unlinkSync(modPath);
+                    }
+                    reject(err);
+                  });
+                  request.setTimeout(60000, () => {
+                    request.abort();
+                    reject(new Error(`Download timeout for ${mod.fileName}`));
+                  });
+                });
+                // If we got here, download succeeded
+                break;
+              } catch (err) {
+                lastError = err;
+                if (mark === 'primary') triedPrimary = true;
+                if (mark === 'fallback') triedFallback = true;
+                downloadUrl = null;
+                sourceUsed = null;
+                // Try next source
+                continue;
+              }
+            }
+            if (!downloadUrl) {
+              // Send error progress for no download URL
+              const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
+              const modName = mod.name || mod.fileName;
+              if (win && win.webContents) {
+                win.webContents.send('download-progress', {
+                  id: downloadId,
+                  name: modName,
+                  progress: 0,
+                  speed: 0,
+                  completed: false,
+                  error: lastError ? lastError.message : 'No download URL provided',
+                  completedTime: Date.now()
+                });
+              }
+              failures.push({
+                fileName: mod.fileName,
+                error: lastError ? lastError.message : 'No download URL provided'
+              });
             }
             
             logger.info('Download source selected', {

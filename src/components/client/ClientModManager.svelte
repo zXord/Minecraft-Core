@@ -16,8 +16,8 @@
     modToInstall,
     currentDependencies
   } from '../../stores/modStore.js';
-  import { searchContent } from '../../utils/mods/modAPI.js';
-  import { installedModIds, installedModInfo } from '../../stores/modStore.js';
+  import { searchContent, loadContent } from '../../utils/mods/modAPI.js';
+  import { installedModIds, installedModInfo, installedShaders, installedResourcePacks, installedShaderIds, installedResourcePackIds, installedShaderInfo, installedResourcePackInfo } from '../../stores/modStore.js';
   import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
   import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   import ModDependencyModal from '../mods/components/ModDependencyModal.svelte';
@@ -436,14 +436,6 @@
       }
       // Update global stores so Search/Mod cards can reflect installed status immediately
       try {
-        const {
-          installedShaders,
-          installedResourcePacks,
-          installedShaderIds,
-          installedResourcePackIds,
-          installedShaderInfo,
-          installedResourcePackInfo
-        } = await import('../../stores/modStore.js');
 
         // Shaders
         const shaderFileNames = (shaderAssets || []).map(a => a.fileName).filter(Boolean);
@@ -748,7 +740,6 @@
       if (activeTab === 'search') {
         // Ensure installed IDs/info are loaded for proper installed flags in search results
         try {
-          const { loadContent } = await import('../../utils/mods/modAPI.js');
           await loadContent(instance?.path || '', contentTypeId);
         } catch (_) {}
         // Trigger search if keyword present
