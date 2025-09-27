@@ -38,16 +38,15 @@ function createManagementServerHandlers(win) {
       try {
         const result = await managementServer.stop();
         
-        if (result.success) {
-          
-          // Notify renderer about server status
-          if (win && win.webContents) {
-            win.webContents.send('management-server-status', {
-              isRunning: false,
-              port: null,
-              serverPath: null
-            });
-          }
+        // Notify renderer about server status when stopped, even if forced/timeout
+        if (win && win.webContents && (result.success || result.forced)) {
+          win.webContents.send('management-server-status', {
+            isRunning: false,
+            port: null,
+            serverPath: null,
+            forced: !!result.forced,
+            reason: result.reason || undefined
+          });
         }
         
         return result;
