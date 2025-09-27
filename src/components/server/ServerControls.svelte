@@ -794,17 +794,30 @@
     managementServerStatus = 'stopping';
     try {
       const result = await window.electron.invoke('stop-management-server');
-      
-      if (result.success) {
+
+      if (result.success || result.forced) {
         managementServerStatus = 'stopped';
         connectedClients = 0;
-        logger.info('Management server stopped successfully', {
-          category: 'ui',
-          data: {
-            component: 'ServerControls',
-            function: 'stopManagementServer'
-          }
-        });
+        if (result.forced) {
+          logger.warn('Management server stop forced (timeout/active connections)', {
+            category: 'ui',
+            data: {
+              component: 'ServerControls',
+              function: 'stopManagementServer',
+              reason: result.reason || 'timeout'
+            }
+          });
+          errorMessage.set('Management server stop forced after timeout.');
+          setTimeout(() => errorMessage.set(''), 5000);
+        } else {
+          logger.info('Management server stopped successfully', {
+            category: 'ui',
+            data: {
+              component: 'ServerControls',
+              function: 'stopManagementServer'
+            }
+          });
+        }
       } else {
         managementServerStatus = 'running';
         logger.error('Failed to stop management server', {

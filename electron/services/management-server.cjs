@@ -25,6 +25,8 @@ class ManagementServer {
     this.versionInfo = { minecraftVersion: null, loaderType: null, loaderVersion: null };
     this.versionWatcher = null;
     this.sseClients = [];
+    // Track active sockets to enable forceful shutdown if needed
+    this.activeSockets = new Set();
     this.appVersion = this.getAppVersion(); // Get current app version
     this.externalHost = null; // External host IP for mod downloads
     this.configuredHost = null; // Manually configured host override
@@ -802,6 +804,23 @@ class ManagementServer {
       this.server = this.app.listen(this.port, () => {
         this.isRunning = true;
 
+        // Configure shorter keep-alive to help shutdowns complete faster
+        try {
+          // These properties exist on Node's http.Server
+          this.server.keepAliveTimeout = 1000; // 1s
+          this.server.headersTimeout = 2000;   // 2s
+        } catch { /* ignore: optional server timeouts not supported in this runtime */ }
+
+        // Track incoming connections for graceful/forced shutdown
+        this.server.on('connection', (socket) => {
+          try { socket.setKeepAlive(false); } catch { /* noop */ }
+          this.activeSockets.add(socket);
+          const remove = () => this.activeSockets.delete(socket);
+          socket.on('close', remove);
+          socket.on('end', remove);
+          socket.on('error', remove);
+        });
+
         // Detect external IP for mod downloads
         this.externalHost = this.detectExternalIP();
         // Startup info (reduced)
@@ -844,17 +863,53 @@ class ManagementServer {
     }
     
     return new Promise((resolve) => {
-      this.server.close(() => {
+      const serverRef = this.server;
+
+      // Close any Server-Sent Events streams to allow connections to end
+      try {
+        if (Array.isArray(this.sseClients) && this.sseClients.length) {
+          for (const res of this.sseClients) {
+            try { res.end(); } catch { /* ignore: stream may already be closed */ }
+          }
+        }
+      } finally {
+        this.sseClients = [];
+      }
+
+      let settled = false;
+      const finalize = (forced = false, reason = undefined) => {
+        if (settled) return;
+        settled = true;
         this.isRunning = false;
         this.server = null;
         this.clients.clear();
-        
-        // Stop client cleanup interval
+        // Clear any tracked sockets
+        try { this.activeSockets.clear(); } catch { /* ignore */ }
+        // Stop client cleanup interval and watchers
         this.stopClientCleanup();
         this.stopVersionWatcher();
+        resolve({ success: !forced, forced, reason });
+      };
 
-        resolve({ success: true });
-      });
+      // Start graceful close
+      try {
+        serverRef.close(() => finalize(false));
+      } catch (e) {
+        // If close throws synchronously, force finalize
+        finalize(true, e && e.message ? e.message : 'close-threw');
+        return;
+      }
+
+      // After a timeout, force-destroy any remaining sockets
+      const FORCE_TIMEOUT_MS = 5000;
+      setTimeout(() => {
+        if (settled) return;
+        for (const socket of this.activeSockets) {
+          try { socket.destroy(); } catch { /* noop */ }
+        }
+        // Give a brief moment for 'close' to fire after destroying sockets
+        setTimeout(() => finalize(true, 'timeout'), 500);
+      }, FORCE_TIMEOUT_MS);
     });
   }
     updateServerPath(newPath) {

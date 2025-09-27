@@ -27,7 +27,7 @@
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
   import { getUpdateCount } from "./stores/modStore.js";
   const updateCountStore = getUpdateCount();
-  import { checkForUpdates } from "./utils/mods/modAPI.js";
+  import { checkForUpdates, loadServerConfig, loadMods, loadContent, checkDisabledModUpdates } from "./utils/mods/modAPI.js";
   let updateIntervalId = null;
 
   // --- Flow & Tabs ---
@@ -519,17 +519,18 @@
             if (path) {
               (async () => {
                 try {
-                  const { loadServerConfig, loadMods, loadContent, checkForUpdates: cf, checkDisabledModUpdates: cdu } = await import('./utils/mods/modAPI.js');
                   await loadServerConfig(path); // ensure minecraftVersion populated before update check
                   await loadMods(path); // mods first so installedModInfo populated
                   // Load shaders then resourcepacks sequentially to avoid isLoading gate skipping one
                   try { await loadContent(path, 'shaders'); } catch {}
                   try { await loadContent(path, 'resourcepacks'); } catch {}
-                  await cf(path); // first pass
-                  try { await cdu(path); } catch {}
+                  await checkForUpdates(path); // first pass
+                  try { await checkDisabledModUpdates(path); } catch {}
                   // Safety: run a second pass shortly after to catch any late-loaded manifests (resource packs etc.)
-                  setTimeout(() => { try { cf(path); cdu(path); } catch {} }, 2000);
-                } catch { /* silent prime errors */ }
+                  setTimeout(() => { try { checkForUpdates(path); checkDisabledModUpdates(path); } catch {} }, 2000);
+                } catch {
+                  /* silent prime errors */
+                }
               })();
             }
           }
