@@ -4,6 +4,14 @@
   function dismiss(i){
     modAvailabilityWatchStore.dismissNotification(i);
   }
+  function formatTarget(target){
+    if(!target) return '-';
+    const loader = target.loader || (target.fabric ? 'fabric' : '');
+    const loaderVersion = target.loaderVersion || target.fabric || '';
+    const loaderPart = loader ? `${loader}${loaderVersion ? ` ${loaderVersion}` : ''}` : loaderVersion;
+    const mc = target.mc || '?';
+    return loaderPart ? `${mc}/${loaderPart}` : mc;
+  }
   $: notifications = ($modAvailabilityWatchStore.notifications || []).slice(0, limit);
 </script>
 
@@ -13,7 +21,7 @@
       <div class="icon">✅</div>
       <div class="body">
         <div class="line"><strong>{n.modName}</strong> now available</div>
-        <div class="target">{n.target.mc}/{n.target.fabric} • {n.versionFound}</div>
+        <div class="target">{formatTarget(n.target)} • {n.versionFound}</div>
         <div class="time">{new Date(n.at).toLocaleString()}</div>
       </div>
       <button class="close" on:click={() => dismiss(i)} aria-label="Dismiss">✖</button>

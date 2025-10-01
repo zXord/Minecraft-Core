@@ -1,5 +1,6 @@
-import { writable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
 import { safeInvoke } from '../utils/ipcUtils.js';
+import { loaderType } from './modStore.js';
 
 // Store for pending Modrinth confirmations
 export const pendingModrinthConfirmations = writable(new Map());
@@ -174,11 +175,12 @@ export const modrinthMatchingActions = {
   },
 
   // Manual search for Modrinth mods
-  async searchModrinthManual(query, loader = 'fabric', limit = 20) {
+  async searchModrinthManual(query, loader = null, limit = 20) {
     try {
+      const effectiveLoader = loader || get(loaderType);
       const result = await safeInvoke('search-modrinth-manual', {
         query,
-        loader,
+        loader: effectiveLoader,
         limit
       });
 
@@ -194,7 +196,10 @@ export const modrinthMatchingActions = {
   // Get Modrinth project details
   async getProjectDetails(projectId) {
     try {
-      const result = await safeInvoke('get-modrinth-project-details', { projectId });
+      const result = await safeInvoke('get-modrinth-project-details', {
+        projectId,
+        loader: get(loaderType)
+      });
       if (result && result.success) {
         return result;
       }

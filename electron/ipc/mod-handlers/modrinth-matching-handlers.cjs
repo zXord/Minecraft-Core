@@ -3,12 +3,14 @@ const { readModMetadata } = require('./mod-handler-utils.cjs');
 const { modMatchingManager } = require('../mod-utils/mod-matching-manager.cjs');
 const path = require('path');
 const fs = require('fs');
+const { normalizeLoaderName } = require('../../utils/server-loader.cjs');
 
 function createModrinthMatchingHandlers() {
   return {
     // Search Modrinth for potential matches for a manually added mod
-  'search-modrinth-matches': async (_event, { modPath, modName, modVersion, minecraftVersion }) => {
+  'search-modrinth-matches': async (_event, { modPath, modName, modVersion, minecraftVersion, loader }) => {
       try {
+        const normalizedLoader = normalizeLoaderName(loader) || 'fabric';
         // Extract mod metadata first
         let metadata = null;
         if (modPath && fs.existsSync(modPath)) {
@@ -26,7 +28,7 @@ function createModrinthMatchingHandlers() {
         // First, try searching by exact name
         let searchResults = await modApiService.searchModrinthMods({
           query: searchName,
-          loader: 'fabric', // Default to fabric, could be made configurable
+          loader: normalizedLoader,
           version: null,
           page: 1,
           limit: 10,
@@ -68,9 +70,9 @@ function createModrinthMatchingHandlers() {
               try {
                 const versions = await modApiService.getModrinthVersions(
                   match.project_id,
-                  'fabric', // Default to fabric, could be made configurable
-                  minecraftVersion || null, // Constrain to current MC version if provided
-                  false // Don't load latest only
+                  normalizedLoader,
+                  minecraftVersion || null,
+                  false
                 );
                 
                 return {
@@ -133,7 +135,7 @@ function createModrinthMatchingHandlers() {
           for (const strategy of searchStrategies) {
             const broaderResults = await modApiService.searchModrinthMods({
               query: strategy,
-              loader: 'fabric',
+              loader: normalizedLoader,
               version: null,
               page: 1,
               limit: 10,
@@ -197,10 +199,11 @@ function createModrinthMatchingHandlers() {
     },
 
     // Get detailed information about a specific Modrinth project for confirmation
-  'get-modrinth-project-details': async (_event, { projectId, minecraftVersion }) => {
+  'get-modrinth-project-details': async (_event, { projectId, minecraftVersion, loader }) => {
       try {
+    const normalizedLoader = normalizeLoaderName(loader) || 'fabric';
         const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
-  const versions = await modApiService.getModrinthVersions(projectId, 'fabric', minecraftVersion || null, false);
+  const versions = await modApiService.getModrinthVersions(projectId, normalizedLoader, minecraftVersion || null, false);
 
         return {
           success: true,
@@ -219,9 +222,10 @@ function createModrinthMatchingHandlers() {
     // Search Modrinth with custom query for manual matching
     'search-modrinth-manual': async (_event, { query, loader = 'fabric', limit = 20 }) => {
       try {
+        const normalizedLoader = normalizeLoaderName(loader) || 'fabric';
         const results = await modApiService.searchModrinthMods({
           query,
-          loader,
+          loader: normalizedLoader,
           version: null,
           page: 1,
           limit,

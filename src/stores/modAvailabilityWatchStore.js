@@ -1,17 +1,47 @@
 import { writable } from 'svelte/store';
 import { safeInvoke } from '../utils/ipcUtils.js';
 
+function normalizeTarget(target = {}) {
+  /** @type {Record<string, any>} */
+  const normalized = { ...target };
+  normalized.mc = normalized.mc || null;
+  const loader = normalized.loader || (normalized.fabric ? 'fabric' : null) || null;
+  const loaderVersion = normalized.loaderVersion || normalized.fabric || null;
+  normalized.loader = loader;
+  normalized.loaderVersion = loaderVersion;
+  if (loader === 'fabric') {
+    normalized.fabric = normalized.fabric || loaderVersion || null;
+  } else if ('fabric' in normalized) {
+    delete normalized.fabric;
+  }
+  return normalized;
+}
+
+function buildWatchKey(entry) {
+  const target = normalizeTarget(entry?.target);
+  const projectId = entry?.projectId || '';
+  return `${projectId}::${target.mc || ''}::${target.loader || ''}::${target.loaderVersion || ''}`;
+}
+
 function createModAvailabilityWatchStore() {
   const { subscribe, update } = writable({ watches: [], history: [], config: { intervalHours: 12, lastCheck: null, nextCheck: null }, loaded: false, error: null, notifications: [] });
 
   async function refresh(serverPath) {
     try {
-      const [watches, history, config] = await Promise.all([
+      const [watchesRaw, historyRaw, config] = await Promise.all([
         safeInvoke('mod-watch:list', serverPath),
         safeInvoke('mod-watch:history', serverPath),
         safeInvoke('mod-watch:config', serverPath)
       ]);
-  update(s => ({ ...s, watches: watches || [], history: history || [], config: config || {}, loaded: true, error: null }));
+      const watches = (watchesRaw || []).map((entry) => {
+        const target = normalizeTarget(entry?.target);
+        return { ...entry, target, key: buildWatchKey({ ...entry, target }) };
+      });
+      const history = (historyRaw || []).map((entry) => {
+        const target = normalizeTarget(entry?.target);
+        return { ...entry, target, key: buildWatchKey({ ...entry, target }) };
+      });
+      update(s => ({ ...s, watches, history, config: config || {}, loaded: true, error: null }));
     } catch (e) {
       update(s => ({ ...s, error: e.message }));
     }
@@ -24,17 +54,22 @@ function createModAvailabilityWatchStore() {
       modName: mod.name,
       fileName: mod.fileName,
       targetMc: mod.targetMc,
-      targetFabric: mod.targetFabric
+      targetFabric: mod.targetFabric,
+      targetLoader: mod.targetLoader,
+      targetLoaderVersion: mod.targetLoaderVersion
     });
     await refresh(serverPath);
   }
 
   async function remove(serverPath, entry) {
+    const target = normalizeTarget(entry?.target);
     await safeInvoke('mod-watch:remove', {
       serverPath,
       projectId: entry.projectId,
-      targetMc: entry.target.mc,
-      targetFabric: entry.target.fabric
+      targetMc: target.mc,
+      targetFabric: target.fabric,
+      targetLoader: target.loader,
+      targetLoaderVersion: target.loaderVersion
     });
     await refresh(serverPath);
   }
@@ -81,7 +116,7 @@ modAvailabilityWatchStore._pushNotification = (notif) => {
     modName: notif.modName || notif.projectId,
     projectId: notif.projectId,
     versionFound: notif.versionFound,
-    target: notif.target,
+    target: normalizeTarget(notif.target),
     at: new Date().toISOString()
   };
   modAvailabilityWatchStore._appendNotification(entry);

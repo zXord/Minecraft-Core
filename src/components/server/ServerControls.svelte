@@ -1,7 +1,9 @@
 <!-- @ts-ignore -->
 <script>  /// <reference path="../../electron.d.ts" />
   import { onMount, onDestroy } from 'svelte';
-  import { get } from 'svelte/store';  import { serverState, updateServerMetrics } from '../../stores/serverState.js';
+  import { get } from 'svelte/store';
+  import { serverState, updateServerMetrics } from '../../stores/serverState.js';
+  import { clientState, setManagementServerStatus } from '../../stores/clientStore.js';
   import { playerState, updateOnlinePlayers, showContextMenu } from '../../stores/playerState.js';
   import PlayerContextMenu from '../players/PlayerContextMenu.svelte';
   import { validateServerPath } from '../../utils/folderUtils.js';
@@ -92,9 +94,39 @@
   // Server status tracking - use reactive statements only for display, not for overriding loaded values
 
   // Management server state
-  let managementServerStatus = 'stopped'; // stopped, starting, running, stopping
+  let managementServerStatus = 'unknown'; // stopped, starting, running, stopping, unknown
   let managementPort = 8080;
   let connectedClients = 0;
+  const MANAGEMENT_STATUS_VALUES = new Set(['running', 'stopped', 'starting', 'stopping', 'unknown', 'error']);
+  let managementStatusSyncLock = false;
+
+  function normalizeManagementStatus(value) {
+    if (!value) {
+      return 'unknown';
+    }
+    const normalized = String(value).toLowerCase();
+    return MANAGEMENT_STATUS_VALUES.has(normalized) ? normalized : 'unknown';
+  }
+
+  function applyManagementStatus(status) {
+    const normalized = normalizeManagementStatus(status);
+    const currentStoreStatus = normalizeManagementStatus(get(clientState).managementServerStatus);
+    if (managementServerStatus !== normalized) {
+      managementServerStatus = normalized;
+    }
+    if (currentStoreStatus !== normalized) {
+      managementStatusSyncLock = true;
+      setManagementServerStatus(normalized);
+      managementStatusSyncLock = false;
+    }
+  }
+
+  $: if (!managementStatusSyncLock) {
+    const storeStatus = normalizeManagementStatus($clientState.managementServerStatus);
+    if (storeStatus !== managementServerStatus) {
+      managementServerStatus = storeStatus;
+    }
+  }
   
   // Auto-start settings
   let autoStartMinecraft = false;
@@ -546,7 +578,7 @@
         try {
           const result = await window.electron.invoke('get-management-server-status');
           if (result.success && result.status) {
-            managementServerStatus = result.status.isRunning ? 'running' : 'stopped';
+            applyManagementStatus(result.status.isRunning ? 'running' : 'stopped');
             // Don't override managementPort - it was already loaded from saved settings above
             connectedClients = result.status.clientCount || 0;
           }
@@ -612,18 +644,18 @@
     // Listen for management server status updates
     const handleManagementServerStatus = (data) => {
       if (data.isRunning) {
-        managementServerStatus = 'running';
+        applyManagementStatus('running');
         // Don't override managementPort here - user may have changed it from saved settings
       } else {
-        managementServerStatus = 'stopped';
+        applyManagementStatus('stopped');
         connectedClients = 0;
       }
     };
     
     window.electron.on('management-server-status', handleManagementServerStatus);
-    
+
     return () => {
-      window.electron.removeAllListeners('management-server-status');
+      window.electron.removeListener('management-server-status', handleManagementServerStatus);
     };
   });
 
@@ -692,7 +724,7 @@
     }
     
     // Auto-start management server first if enabled
-    if (autoStartManagement && managementServerStatus === 'stopped') {
+    if (autoStartManagement && managementServerStatus !== 'running' && managementServerStatus !== 'starting') {
       try {
         await startManagementServer();
       } catch (error) {
@@ -737,7 +769,7 @@
       }
     });
     
-    managementServerStatus = 'starting';
+    applyManagementStatus('starting');
     try {
       const result = await window.electron.invoke('start-management-server', {
         port: managementPort,
@@ -745,7 +777,7 @@
       });
       
       if (result.success) {
-        managementServerStatus = 'running';
+        applyManagementStatus('running');
         logger.info('Management server started successfully', {
           category: 'ui',
           data: {
@@ -755,7 +787,7 @@
           }
         });
       } else {
-        managementServerStatus = 'stopped';
+        applyManagementStatus('stopped');
         logger.error('Failed to start management server', {
           category: 'ui',
           data: {
@@ -768,7 +800,7 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
-      managementServerStatus = 'stopped';
+      applyManagementStatus('stopped');
       logger.error('Error starting management server', {
         category: 'ui',
         data: {
@@ -791,12 +823,12 @@
       }
     });
     
-    managementServerStatus = 'stopping';
+    applyManagementStatus('stopping');
     try {
       const result = await window.electron.invoke('stop-management-server');
 
       if (result.success || result.forced) {
-        managementServerStatus = 'stopped';
+        applyManagementStatus('stopped');
         connectedClients = 0;
         if (result.forced) {
           logger.warn('Management server stop forced (timeout/active connections)', {
@@ -819,7 +851,7 @@
           });
         }
       } else {
-        managementServerStatus = 'running';
+        applyManagementStatus('running');
         logger.error('Failed to stop management server', {
           category: 'ui',
           data: {
@@ -832,7 +864,7 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
-      managementServerStatus = 'running';
+      applyManagementStatus('running');
       logger.error('Error stopping management server', {
         category: 'ui',
         data: {

@@ -3308,10 +3308,15 @@
     cursor: pointer;
     transition: opacity 0.2s;
     flex: 1;
+    /* Allow the tooltip to escape and stack above neighbors */
+    z-index: 0;
+    overflow: visible;
   }
 
-  .chart-bar:hover {
+  .chart-bar:hover,
+  .chart-bar:focus-within {
     opacity: 0.8;
+    z-index: 5;
   }
 
   .chart-tooltip {

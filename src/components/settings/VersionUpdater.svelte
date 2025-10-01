@@ -34,15 +34,32 @@
   $: if (serverPathLocal && !$modAvailabilityWatchStore.loaded) {
     modAvailabilityWatchStore.refresh(serverPathLocal);
   }
-  $: activeWatches = new Set(($modAvailabilityWatchStore.watches || []).map(w => `${w.projectId}::${w.target?.mc}::${w.target?.fabric}`));
-  function watchKey(mod) { return `${mod.projectId}::${selectedMC}::${selectedFabric}`; }
+  const selectedLoader = 'fabric';
+  function deriveWatchKey(entry) {
+    if (!entry) return '';
+    if (entry.key) return entry.key;
+    const target = entry.target || {};
+    const loader = target.loader || (target.fabric ? 'fabric' : '');
+    const loaderVersion = target.loaderVersion || target.fabric || '';
+    return `${entry.projectId || ''}::${target.mc || ''}::${loader}::${loaderVersion}`;
+  }
+  function formatWatchTarget(target) {
+    if (!target) return '-';
+    const loader = target.loader || (target.fabric ? 'fabric' : '');
+    const loaderVersion = target.loaderVersion || target.fabric || '';
+    const loaderLabel = loader ? loader + (loaderVersion ? ` ${loaderVersion}` : '') : loaderVersion;
+    const mc = target.mc || '?';
+    return loaderLabel ? `${mc} / ${loaderLabel}` : mc;
+  }
+  $: activeWatches = new Set(($modAvailabilityWatchStore.watches || []).map(deriveWatchKey));
+  function watchKey(mod) { return `${mod.projectId}::${selectedMC}::${selectedLoader}::${selectedFabric}`; }
   async function toggleWatch(mod) {
     if (!resolvedPath || !mod?.projectId || !selectedMC || !selectedFabric) return;
     const key = watchKey(mod);
     if (activeWatches.has(key)) {
-      await modAvailabilityWatchStore.remove(resolvedPath, { projectId: mod.projectId, target: { mc: selectedMC, fabric: selectedFabric } });
+      await modAvailabilityWatchStore.remove(resolvedPath, { projectId: mod.projectId, target: { mc: selectedMC, fabric: selectedFabric, loader: selectedLoader, loaderVersion: selectedFabric } });
     } else {
-      await modAvailabilityWatchStore.add(resolvedPath, { projectId: mod.projectId, name: mod.name, fileName: mod.fileName, targetMc: selectedMC, targetFabric: selectedFabric });
+      await modAvailabilityWatchStore.add(resolvedPath, { projectId: mod.projectId, name: mod.name, fileName: mod.fileName, targetMc: selectedMC, targetFabric: selectedFabric, targetLoader: selectedLoader, targetLoaderVersion: selectedFabric });
     }
   }
   function formatDate(ts) { if (!ts) return '-'; try { return new Date(ts).toLocaleString(); } catch { return ts; } }
@@ -510,15 +527,15 @@
         <p class="empty">No current watches.</p>
       {:else}
         <ul class="watch-list">
-          {#each $modAvailabilityWatchStore.watches as w (w.projectId + w.target.mc + w.target.fabric)}
+          {#each $modAvailabilityWatchStore.watches as w (deriveWatchKey(w))}
             <li class="watch-item">
               <div class="watch-main">
                 <span class="watch-name">{w.modName || w.projectId}</span>
-                <span class="watch-target">{w.target.mc} / {w.target.fabric}</span>
+                <span class="watch-target">{formatWatchTarget(w.target)}</span>
                 <span class="watch-added">added {formatDate(w.addedAt)}</span>
               </div>
               <div class="watch-buttons">
-                <button class="remove-watch" on:click={() => modAvailabilityWatchStore.remove(resolvedPath, { projectId: w.projectId, target: { mc: w.target.mc, fabric: w.target.fabric } })}>✖</button>
+                <button class="remove-watch" on:click={() => modAvailabilityWatchStore.remove(resolvedPath, { projectId: w.projectId, target: w.target })}>✖</button>
               </div>
             </li>
           {/each}
@@ -536,7 +553,7 @@
             <li class="history-item">
               <span class="hist-name">{h.modName || h.projectId}</span>
               <span class="hist-version">{h.versionFound}</span>
-              <span class="hist-target">{h.target.mc}/{h.target.fabric}</span>
+              <span class="hist-target">{formatWatchTarget(h.target)}</span>
               <span class="hist-time">{formatDate(h.foundAt)}</span>
             </li>
           {/each}

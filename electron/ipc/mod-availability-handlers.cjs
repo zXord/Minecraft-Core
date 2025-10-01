@@ -28,13 +28,13 @@ function createModAvailabilityHandlers() {
   // Ensure background watcher started
   startModAvailabilityWatcher();
   return {
-    'mod-watch:add': async (_e, { serverPath, projectId, modName, fileName, targetMc, targetFabric }) => {
-      log('info', 'Adding mod availability watch', { serverPath, projectId, targetMc, targetFabric });
-      return await addModAvailabilityWatch({ serverPath, projectId, modName, fileName, targetMc, targetFabric });
+    'mod-watch:add': async (_e, { serverPath, projectId, modName, fileName, targetMc, targetFabric, targetLoader, targetLoaderVersion }) => {
+      log('info', 'Adding mod availability watch', { serverPath, projectId, targetMc, targetFabric, targetLoader, targetLoaderVersion });
+      return await addModAvailabilityWatch({ serverPath, projectId, modName, fileName, targetMc, targetFabric, targetLoader, targetLoaderVersion });
     },
-    'mod-watch:remove': async (_e, { serverPath, projectId, targetMc, targetFabric }) => {
-      log('info', 'Removing mod availability watch', { serverPath, projectId, targetMc, targetFabric });
-      return await removeModAvailabilityWatch({ serverPath, projectId, targetMc, targetFabric });
+    'mod-watch:remove': async (_e, { serverPath, projectId, targetMc, targetFabric, targetLoader, targetLoaderVersion }) => {
+      log('info', 'Removing mod availability watch', { serverPath, projectId, targetMc, targetFabric, targetLoader, targetLoaderVersion });
+      return await removeModAvailabilityWatch({ serverPath, projectId, targetMc, targetFabric, targetLoader, targetLoaderVersion });
     },
     'mod-watch:list': async (_e, serverPath) => {
       return await listModAvailabilityWatches(serverPath);

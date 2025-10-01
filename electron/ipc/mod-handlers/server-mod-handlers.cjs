@@ -10,6 +10,7 @@ const {
 } = require('./mod-handler-utils.cjs');
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
 const { serverErrorMonitor } = require('../error-monitoring-handlers.cjs');
+const { resolveServerLoader } = require('../../utils/server-loader.cjs');
 
 function createServerModHandlers(win) {
   const logger = getLoggerHandlers();
@@ -187,17 +188,52 @@ function createServerModHandlers(win) {
         });
         throw new Error('Invalid server path');
       }
-      if (!mcVersion || !fabricVersion) {
-        logger.error('Version information missing for compatibility check', {
+      const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = resolveServerLoader(serverPath);
+      const normalizedLoader = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;
+      const loaderForApi = normalizedLoader;
+      const effectiveLoaderVersion = detectedLoaderVersion || (normalizedLoader === 'fabric' ? fabricVersion : null);
+
+      if (!mcVersion) {
+        logger.error('Minecraft version missing for compatibility check', {
           category: 'mods',
           data: {
             handler: 'check-mod-compatibility',
-            mcVersion: mcVersion,
-            fabricVersion: fabricVersion
+            serverPath,
+            mcVersion,
+            detectedLoader,
+            loaderVersion: effectiveLoaderVersion
           }
         });
-        throw new Error('Version information missing');
-      }      // Helper function for version compatibility checking
+        throw new Error('Minecraft version missing');
+      }
+
+      if (normalizedLoader === 'fabric' && !effectiveLoaderVersion) {
+        logger.warn('Fabric loader version not provided; proceeding without loader version context', {
+          category: 'mods',
+          data: {
+            handler: 'check-mod-compatibility',
+            serverPath,
+            mcVersion,
+            detectedLoader,
+            fabricVersionParam: fabricVersion,
+            detectedLoaderVersion
+          }
+        });
+      }
+
+      logger.debug('Resolved loader context for compatibility check', {
+        category: 'mods',
+        data: {
+          handler: 'check-mod-compatibility',
+          serverPath,
+          mcVersion,
+          detectedLoader,
+          loaderForApi,
+          loaderVersion: effectiveLoaderVersion
+        }
+      });
+
+      // Helper function for version compatibility checking
       function checkMinecraftVersionCompatibility(modVersion, targetVersion) {
         if (!modVersion || !targetVersion) return false;
         
@@ -348,7 +384,7 @@ function createServerModHandlers(win) {
         
         try {
           // FIXED: Check if ANY versions exist for target MC version FIRST (most important)
-          const availableVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
+          const availableVersions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, false);
           
           logger.debug('Retrieved available versions for mod', {
             category: 'network',
@@ -386,7 +422,7 @@ function createServerModHandlers(win) {
           }
           
           // Get the latest available version for the target MC version
-          const latestVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
+          const latestVersions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, true);
           const latest = latestVersions && latestVersions[0];
           
           // Check if current version is among the available versions for target MC
@@ -1829,7 +1865,22 @@ function createServerModHandlers(win) {
           throw new Error('Minecraft version (mcVersion) is required to update a mod safely');
         }
 
-        const versions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
+        const { loader: detectedLoader } = resolveServerLoader(serverPath);
+        const loaderForApi = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;
+
+        logger.debug('Resolved loader for mod update', {
+          category: 'mods',
+          data: {
+            handler: 'update-mod',
+            projectId,
+            serverPath,
+            mcVersion,
+            detectedLoader,
+            loaderForApi
+          }
+        });
+
+        const versions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, false);
         const targetVersionInfo = versions.find(v => v.versionNumber === targetVersion);
         
         if (!targetVersionInfo) {
@@ -1853,7 +1904,7 @@ function createServerModHandlers(win) {
             versionId: targetVersionInfo.id
           }
         });
-  const completeVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionInfo.id, mcVersion, 'fabric');
+  const completeVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionInfo.id, mcVersion, loaderForApi);
       const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
       const modDetails = {
         id: projectId,
@@ -2140,6 +2191,21 @@ function createServerModHandlers(win) {
           fs.unlinkSync(clientManifestPath);
         }
 
+        const { loader: detectedLoader } = resolveServerLoader(serverPath);
+        const loaderForApi = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;
+
+        logger.debug('Resolved loader for enable-and-update-mod', {
+          category: 'mods',
+          data: {
+            handler: 'enable-and-update-mod',
+            projectId,
+            serverPath,
+            mcVersion,
+            detectedLoader,
+            loaderForApi
+          }
+        });
+
         // Get the version info and project info for the target version
         logger.debug('Retrieving target version and project info', {
           category: 'network',
@@ -2150,7 +2216,7 @@ function createServerModHandlers(win) {
           }
         });
         
-  const targetVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionId, mcVersion, 'fabric');
+  const targetVersionInfo = await modApiService.getModrinthVersionInfo(projectId, targetVersionId, mcVersion, loaderForApi);
         const projectInfo = await modApiService.getModrinthProjectInfo(projectId);
 
         if (!targetVersionInfo || !targetVersionInfo.files || targetVersionInfo.files.length === 0) {
@@ -2304,13 +2370,18 @@ function createServerModHandlers(win) {
         const disabledModsSet = new Set(disabledMods);
         const disabledModsInfo = installed.filter(mod => disabledModsSet.has(mod.fileName));
         
+        const { loader: detectedLoader } = resolveServerLoader(serverPath);
+        const loaderForApi = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;
+
         logger.debug('Processing disabled mod update checks', {
           category: 'mods',
           data: {
             handler: 'check-disabled-mod-updates',
             totalDisabledMods: disabledMods.length,
             disabledModsWithInfo: disabledModsInfo.length,
-            mcVersion: mcVersion
+            mcVersion: mcVersion,
+            detectedLoader,
+            loaderForApi
           }
         });
         
@@ -2384,7 +2455,7 @@ function createServerModHandlers(win) {
           
           try {
             // FIXED: Check if ANY versions exist for target MC version FIRST
-            const availableVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, false);
+            const availableVersions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, false);
             
             logger.debug('Retrieved available versions for disabled mod', {
               category: 'network',
@@ -2421,7 +2492,7 @@ function createServerModHandlers(win) {
             }
             
             // Get the latest available version for the target MC version
-            const latestVersions = await modApiService.getModrinthVersions(projectId, 'fabric', mcVersion, true);
+            const latestVersions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, true);
             const latest = latestVersions && latestVersions[0];
             
             // Check if current version actually exists in available versions for target MC

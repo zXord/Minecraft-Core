@@ -946,21 +946,375 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
     }
   });
   
-  // Filter versions that match our requirements
-  let compatibleVersions = versions;
-  const originalCount = versions.length;
-  
-  if (loader && loader !== null) {
-    compatibleVersions = compatibleVersions.filter(v => v.loaders && v.loaders.includes(loader));
-  }
-  
-  if (gameVersion) {
-    // Strict game version matching - only exact matches for the current version
-    compatibleVersions = compatibleVersions.filter(v => {
-      return v.game_versions.includes(gameVersion);
+  // Helper utilities for version filtering
+  const normalizeVersionString = value => String(value || '').trim().toLowerCase();
+  const targetVersionNormalized = normalizeVersionString(gameVersion);
+
+  const parseVersionSegments = versionValue => {
+    const matches = String(versionValue || '').toLowerCase().match(/\d+|x/g);
+    if (!matches) {
+      return [];
+    }
+    return matches.map(segment => segment === 'x' ? Number.NaN : parseInt(segment, 10));
+  };
+
+  const compareVersions = (a, b) => {
+    const aSegments = parseVersionSegments(a);
+    const bSegments = parseVersionSegments(b);
+    const maxLength = Math.max(aSegments.length, bSegments.length);
+
+    for (let i = 0; i < maxLength; i++) {
+      const aValue = aSegments[i];
+      const bValue = bSegments[i];
+
+      if (aValue === undefined && bValue === undefined) {
+        return 0;
+      }
+
+      if (Number.isNaN(aValue) || Number.isNaN(bValue)) {
+        // Treat wildcard segments as matching any value
+        continue;
+      }
+
+      const normalizedA = aValue === undefined ? 0 : aValue;
+      const normalizedB = bValue === undefined ? 0 : bValue;
+
+      if (normalizedA > normalizedB) {
+        return 1;
+      }
+      if (normalizedA < normalizedB) {
+        return -1;
+      }
+    }
+
+    return 0;
+  };
+
+  const comparisonRegex = /^(>=|<=|>|<|==|=|!=)\s*(.+)$/;
+
+  const satisfiesComparisonExpression = (expression, target) => {
+    if (!expression) {
+      return false;
+    }
+
+    const trimmedExpression = expression.trim();
+    if (!trimmedExpression) {
+      return false;
+    }
+
+    const tokens = trimmedExpression.split(/\s+/).filter(Boolean);
+    if (tokens.length > 1 && tokens.every(token => comparisonRegex.test(token))) {
+      return tokens.every(token => satisfiesComparisonExpression(token, target));
+    }
+
+    const comparisonMatch = trimmedExpression.match(comparisonRegex);
+    if (comparisonMatch) {
+      const [, operator, comparisonValue] = comparisonMatch;
+      const comparisonResult = compareVersions(target, comparisonValue);
+      switch (operator) {
+        case '>=':
+          return comparisonResult >= 0;
+        case '>':
+          return comparisonResult > 0;
+        case '<=':
+          return comparisonResult <= 0;
+        case '<':
+          return comparisonResult < 0;
+        case '=':
+        case '==':
+          return comparisonResult === 0;
+        case '!=':
+          return comparisonResult !== 0;
+        default:
+          return false;
+      }
+    }
+
+    const hyphenRangeMatch = trimmedExpression.match(/^(\d[\d.x]*)\s*-\s*(\d[\d.x]*)$/);
+    if (hyphenRangeMatch) {
+      const [, lower, upper] = hyphenRangeMatch;
+      return compareVersions(target, lower) >= 0 && compareVersions(target, upper) <= 0;
+    }
+
+    if ((trimmedExpression.startsWith('[') || trimmedExpression.startsWith('(')) &&
+        (trimmedExpression.endsWith(']') || trimmedExpression.endsWith(')'))) {
+      const startBracket = trimmedExpression[0];
+      const endBracket = trimmedExpression[trimmedExpression.length - 1];
+      const inner = trimmedExpression.slice(1, -1);
+      const parts = inner.split(',');
+      if (parts.length === 2) {
+        const lower = parts[0].trim();
+        const upper = parts[1].trim();
+        const lowerOk = startBracket === '[' ? compareVersions(target, lower) >= 0 : compareVersions(target, lower) > 0;
+        const upperOk = endBracket === ']' ? compareVersions(target, upper) <= 0 : compareVersions(target, upper) < 0;
+        if (lowerOk && upperOk) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  };
+
+  const doesVersionTagApply = (tag, target) => {
+    if (!tag || !target) {
+      return false;
+    }
+
+    const normalizedTag = normalizeVersionString(tag);
+    if (!normalizedTag) {
+      return false;
+    }
+
+    const compoundParts = normalizedTag
+      .split(/[,|]/)
+      .map(part => part.trim())
+      .filter(Boolean);
+
+    if (compoundParts.length > 1) {
+      return compoundParts.some(part => doesVersionTagApply(part, target));
+    }
+
+    if (normalizedTag === target) {
+      return true;
+    }
+
+    if (normalizedTag.includes('.x') || normalizedTag.includes('.*')) {
+      const base = normalizedTag.replace(/\.[x*].*$/, '');
+      return target.startsWith(`${base}.`);
+    }
+
+    if (normalizedTag.startsWith('~')) {
+      const approx = normalizedTag.substring(1);
+      const approxParts = approx.split('.');
+      const targetParts = target.split('.');
+      if (approxParts.length >= 2) {
+        return approxParts[0] === targetParts[0] && approxParts[1] === targetParts[1];
+      }
+      return approxParts[0] === targetParts[0];
+    }
+
+    if (comparisonRegex.test(normalizedTag)) {
+      return satisfiesComparisonExpression(normalizedTag, target);
+    }
+
+    const hyphenRangeMatch = normalizedTag.match(/^(\d[\d.x]*)\s*-\s*(\d[\d.x]*)$/);
+    if (hyphenRangeMatch) {
+      const [, lower, upper] = hyphenRangeMatch;
+      return compareVersions(target, lower) >= 0 && compareVersions(target, upper) <= 0;
+    }
+
+    if ((normalizedTag.startsWith('[') || normalizedTag.startsWith('(')) &&
+        (normalizedTag.endsWith(']') || normalizedTag.endsWith(')'))) {
+      const startBracket = normalizedTag[0];
+      const endBracket = normalizedTag[normalizedTag.length - 1];
+      const inner = normalizedTag.slice(1, -1);
+      const parts = inner.split(',');
+      if (parts.length === 2) {
+        const lower = parts[0].trim();
+        const upper = parts[1].trim();
+        const lowerOk = startBracket === '[' ? compareVersions(target, lower) >= 0 : compareVersions(target, lower) > 0;
+        const upperOk = endBracket === ']' ? compareVersions(target, upper) <= 0 : compareVersions(target, upper) < 0;
+        if (lowerOk && upperOk) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  };
+
+  const classifyVersionMatch = (versionTags = [], target) => {
+    if (!target || !Array.isArray(versionTags) || versionTags.length === 0) {
+      return null;
+    }
+
+  const normalizedTarget = normalizeVersionString(target);
+  const targetParts = normalizedTarget.split('.');
+  const [targetMajor, targetMinor] = targetParts;
+  const targetHasPatch = targetParts.length > 2 && targetParts[2] !== undefined && targetParts[2] !== '';
+  const targetPatchValue = targetHasPatch ? Number.parseInt(targetParts[2], 10) : NaN;
+  const targetPatchIsPositive = Number.isFinite(targetPatchValue) && targetPatchValue > 0;
+    const targetMajorMinor = targetMajor && targetMinor ? `${targetMajor}.${targetMinor}` : null;
+
+    const tokens = [];
+    versionTags.forEach(tag => {
+      if (tag === null || tag === undefined) {
+        return;
+      }
+      const normalizedTag = normalizeVersionString(tag);
+      if (!normalizedTag) {
+        return;
+      }
+      normalizedTag
+        .split(/[,|]/)
+        .map(token => token.trim())
+        .filter(Boolean)
+        .forEach(token => tokens.push(token));
     });
 
-    logger.debug('Strict version filter applied', {
+    for (const token of tokens) {
+      if (token === normalizedTarget) {
+        return 'exact';
+      }
+
+      if (targetMajorMinor) {
+        if (token === targetMajorMinor) {
+          if (!targetPatchIsPositive) {
+          return 'majorMinor';
+          }
+          continue;
+        }
+
+        if ([`${targetMajorMinor}.x`, `${targetMajorMinor}.*`, `${targetMajorMinor}-x`, `${targetMajorMinor}_x`, `${targetMajorMinor}+`].includes(token)) {
+          return 'wildcard';
+        }
+
+        if (!targetHasPatch && token.startsWith(`${targetMajorMinor}.`)) {
+          const suffix = token.substring(targetMajorMinor.length + 1);
+          if (/^\d+$/.test(suffix)) {
+            return 'patch';
+          }
+        }
+      }
+
+      if (targetMajor && token === targetMajor) {
+        if (targetParts.length === 1) {
+        return 'major';
+        }
+        continue;
+      }
+
+      if (token.startsWith('~')) {
+        const approx = token.substring(1);
+        if (targetMajorMinor && approx.startsWith(targetMajorMinor)) {
+          return 'approx';
+        }
+        if (targetMajor && approx.startsWith(targetMajor)) {
+          return 'approx';
+        }
+      }
+
+      if (satisfiesComparisonExpression(token, normalizedTarget)) {
+        return 'range';
+      }
+    }
+
+    return null;
+  };
+
+  // Filter versions that match our requirements
+  const originalCount = versions.length;
+  const normalizeLoaderValue = value => {
+    if (!value) {
+      return '';
+    }
+    const normalized = String(value).trim().toLowerCase();
+    const loaderAliases = {
+      'fabricloader': 'fabric',
+      'fabric-loader': 'fabric',
+      'fabric_api': 'fabric',
+      'neo-forge': 'neoforge',
+      'neo_forge': 'neoforge',
+      'neo.forge': 'neoforge',
+      'forge-loader': 'forge',
+      'quilt-loader': 'quilt',
+      'quiltloader': 'quilt',
+      'liteloader': 'liteloader',
+      'rift-loader': 'rift'
+    };
+    return loaderAliases[normalized] || normalized;
+  };
+
+  const effectiveLoader = normalizeLoaderValue(loader);
+
+  let loaderFilteredVersions = versions;
+  if (effectiveLoader) {
+    loaderFilteredVersions = versions.filter(v => Array.isArray(v.loaders) && v.loaders.some(loaderCandidate => normalizeLoaderValue(loaderCandidate) === effectiveLoader));
+  }
+
+  if (effectiveLoader && loaderFilteredVersions.length === 0) {
+    logger.debug('No versions matched requested loader', {
+      category: 'mods',
+      data: {
+        service: 'ModApiService',
+        operation: 'getModrinthVersions',
+        traceId,
+        projectId,
+        requestedLoader: effectiveLoader,
+        originalCount
+      }
+    });
+  }
+
+  let compatibleVersions = loaderFilteredVersions;
+  let versionMatchType = 'any';
+  const matchBuckets = {
+    exact: [],
+    patch: [],
+    majorMinor: [],
+    wildcard: [],
+    range: [],
+    approx: [],
+    major: []
+  };
+
+  if (gameVersion) {
+    loaderFilteredVersions.forEach(versionEntry => {
+      const matchType = classifyVersionMatch(versionEntry.game_versions, targetVersionNormalized);
+      if (matchType && matchBuckets[matchType]) {
+        matchBuckets[matchType].push(versionEntry);
+      } else if (matchType) {
+        matchBuckets.range.push(versionEntry);
+      }
+    });
+
+    const priorityOrder = ['exact', 'patch', 'majorMinor', 'wildcard', 'range', 'approx', 'major'];
+    for (const priority of priorityOrder) {
+      if (matchBuckets[priority] && matchBuckets[priority].length > 0) {
+        compatibleVersions = matchBuckets[priority];
+        versionMatchType = priority;
+        break;
+      }
+    }
+
+    if (versionMatchType === 'any' && loaderFilteredVersions.length > 0 && compatibleVersions === loaderFilteredVersions) {
+      if (loadLatestOnly) {
+        versionMatchType = 'fallback';
+      } else {
+        compatibleVersions = [];
+        versionMatchType = 'none';
+      }
+    }
+
+    if (compatibleVersions.length > 0) {
+      const strictlyCompatibleVersions = compatibleVersions.filter(versionEntry =>
+        Array.isArray(versionEntry.game_versions) &&
+        versionEntry.game_versions.some(tag => doesVersionTagApply(tag, targetVersionNormalized))
+      );
+
+      if (strictlyCompatibleVersions.length !== compatibleVersions.length) {
+        logger.debug('Strict compatibility filter removed ambiguous tags', {
+          category: 'mods',
+          data: {
+            service: 'ModApiService',
+            operation: 'getModrinthVersions',
+            traceId,
+            projectId,
+            gameVersion,
+            removedCount: compatibleVersions.length - strictlyCompatibleVersions.length
+          }
+        });
+      }
+
+      compatibleVersions = strictlyCompatibleVersions;
+
+      if (compatibleVersions.length === 0) {
+        versionMatchType = 'none';
+      }
+    }
+
+    logger.debug('Game version filtering applied', {
       category: 'mods',
       data: {
         service: 'ModApiService',
@@ -968,77 +1322,26 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
         traceId,
         projectId,
         gameVersion,
-        strictCount: compatibleVersions.length
+        versionMatchType,
+        matchCounts: Object.fromEntries(Object.entries(matchBuckets).map(([key, list]) => [key, list.length]))
       }
     });
-
-    // If no exact matches, attempt relaxed matching on major.minor (e.g., 1.21 matches 1.21.x)
-    if (compatibleVersions.length === 0) {
-      const majorMinor = gameVersion.split('.').slice(0, 2).join('.');
-      if (majorMinor && majorMinor.includes('.')) {
-        const relaxed = versions.filter(v => v.game_versions.some(gv => gv.startsWith(majorMinor + '.')));
-        if (relaxed.length > 0) {
-          logger.warn('No exact game version matches; using relaxed major.minor match', {
-            category: 'mods',
-            data: {
-              service: 'ModApiService',
-              operation: 'getModrinthVersions',
-              projectId,
-              requestedVersion: gameVersion,
-              majorMinor,
-              relaxedCount: relaxed.length
-            }
-          });
-          // Prefer versions whose patch is <= requested patch to avoid selecting future patch versions
-          const parts = gameVersion.split('.');
-          const requestedPatch = parts.length > 2 ? parseInt(parts[2], 10) : null;
-          if (requestedPatch !== null && !Number.isNaN(requestedPatch)) {
-            const notFuture = relaxed.filter(v => v.game_versions.some(gv => {
-              if (!gv.startsWith(majorMinor + '.')) return false;
-              const patchStr = gv.split('.')[2];
-              const patchNum = parseInt(patchStr, 10);
-              return !Number.isNaN(patchNum) && patchNum <= requestedPatch;
-            }));
-            if (notFuture.length > 0) {
-              compatibleVersions = notFuture;
-            } else {
-              compatibleVersions = relaxed; // fallback if all are newer
-            }
-          } else {
-            compatibleVersions = relaxed;
-          }
-
-          logger.debug('Relaxed version selection decided', {
-            category: 'mods',
-            data: {
-              service: 'ModApiService',
-              operation: 'getModrinthVersions',
-              traceId,
-              projectId,
-              requestedVersion: gameVersion,
-              majorMinor,
-              requestedPatch,
-              finalRelaxedCount: compatibleVersions.length,
-              chosenVersions: compatibleVersions.slice(0,5).map(v => ({ num: v.version_number, gv: v.game_versions.filter(gv=>gv.startsWith(majorMinor+'.')) }))
-            }
-          });
-        }
-      }
-    }
   }
-  
+
   logger.debug('Versions filtered for compatibility', {
     category: 'mods',
     data: {
       service: 'ModApiService',
       operation: 'getModrinthVersions',
-  traceId,
+      traceId,
       projectId,
       originalCount,
+      loaderFilteredCount: loaderFilteredVersions.length,
       compatibleCount: compatibleVersions.length,
-      loader,
+      loader: effectiveLoader || loader,
       gameVersion,
-      filteredOut: originalCount - compatibleVersions.length
+      filteredOut: originalCount - compatibleVersions.length,
+      versionMatchType
     }
   });
     
