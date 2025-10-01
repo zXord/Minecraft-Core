@@ -331,7 +331,8 @@
               serverPath: resolvedPath,
               projectId: mod.projectId,
               targetVersion: mod.newVersion,
-              fileName: mod.fileName
+              fileName: mod.fileName,
+              mcVersion: selectedMC
             });
               // Track successful update
             if (updateResult && updateResult.success) {
@@ -356,14 +357,22 @@
       updateProgress = Math.round((currentStep / totalSteps) * 100);
       await safeInvoke('update-config', { serverPath: resolvedPath, updates: { version: selectedMC, fabric: selectedFabric } });
       
-      // Step 6: Handle incompatible mods
+      // Step 6: Handle incompatible mods (preserve previously disabled mods)
       if (incompatibleMods.length > 0) {
         currentStep++;
         currentTask = 'Disabling incompatible mods...';
         updateProgress = Math.round((currentStep / totalSteps) * 100);
-        // Extract just the filenames from incompatible mods for the disable operation
-        const modFilesToDisable = incompatibleMods.map(mod => mod.fileName);
-        await safeInvoke('save-disabled-mods', resolvedPath, modFilesToDisable);
+        
+        // Get the current list of disabled mods BEFORE the upgrade
+        const currentlyDisabledMods = await safeInvoke('get-disabled-mods', resolvedPath) || [];
+        
+        // Extract just the filenames from newly incompatible mods
+        const newlyIncompatibleMods = incompatibleMods.map(mod => mod.fileName);
+        
+        // Merge: keep previously disabled mods + add newly incompatible ones (avoid duplicates)
+        const allDisabledMods = [...new Set([...currentlyDisabledMods, ...newlyIncompatibleMods])];
+        
+        await safeInvoke('save-disabled-mods', resolvedPath, allDisabledMods);
       }        // Step 7: Update version state
       updateVersions(selectedMC, selectedFabric);
       // After successful upgrade, clear any remaining mod availability watches (upgrade path complete)
