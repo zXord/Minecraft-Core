@@ -7,6 +7,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { safeSend } = require('../utils/safe-send.cjs');
 const appStore = require('../utils/app-store.cjs');
+const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 
 let logger = null;
 try {
@@ -89,7 +90,10 @@ async function saveHistory(serverPath, history) {
 }
 
 function makeWatchKey(w) {
-  return `${w.projectId}::${w.target.mc}::${w.target.fabric}`;
+  const target = w.target || {};
+  const loader = target.loader || (target.fabric ? 'fabric' : '') || '';
+  const loaderVersion = target.loaderVersion || target.fabric || '';
+  return `${w.projectId || ''}::${target.mc || ''}::${loader}::${loaderVersion}`;
 }
 
 async function hydrateServerState(serverPath) {
@@ -100,16 +104,30 @@ async function hydrateServerState(serverPath) {
   return serverWatchState.get(serverPath);
 }
 
-async function addWatch({ serverPath, projectId, modName, fileName, targetMc, targetFabric }) {
-  if (!serverPath || !projectId || !targetMc || !targetFabric) throw new Error('Missing required fields');
+async function addWatch({ serverPath, projectId, modName, fileName, targetMc, targetFabric, targetLoader, targetLoaderVersion }) {
+  if (!serverPath || !projectId || !targetMc) throw new Error('Missing required fields');
+
+  const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = resolveServerLoader(serverPath);
+  const resolvedLoader = (targetLoader || detectedLoader || (targetFabric ? 'fabric' : null)) || null;
+  const resolvedLoaderVersion = targetLoaderVersion || detectedLoaderVersion || targetFabric || null;
+
   const state = await hydrateServerState(serverPath);
-  const key = `${projectId}::${targetMc}::${targetFabric}`;
+  const key = `${projectId}::${targetMc}::${resolvedLoader || ''}::${resolvedLoaderVersion || ''}`;
   if (!state.watches.find(w => makeWatchKey(w) === key)) {
+    const target = {
+      mc: targetMc,
+      loader: resolvedLoader,
+      loaderVersion: resolvedLoaderVersion
+    };
+    if (resolvedLoader === 'fabric' && resolvedLoaderVersion) {
+      target.fabric = resolvedLoaderVersion;
+    }
+
     state.watches.push({
       projectId,
       modName: modName || projectId,
       fileName: fileName || null,
-      target: { mc: targetMc, fabric: targetFabric },
+      target,
       addedAt: new Date().toISOString(),
       lastChecked: null
     });
@@ -118,9 +136,12 @@ async function addWatch({ serverPath, projectId, modName, fileName, targetMc, ta
   return state.watches;
 }
 
-async function removeWatch({ serverPath, projectId, targetMc, targetFabric }) {
+async function removeWatch({ serverPath, projectId, targetMc, targetFabric, targetLoader, targetLoaderVersion }) {
   const state = await hydrateServerState(serverPath);
-  const key = `${projectId}::${targetMc}::${targetFabric}`;
+  const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = resolveServerLoader(serverPath);
+  const resolvedLoader = (targetLoader || detectedLoader || (targetFabric ? 'fabric' : null)) || null;
+  const resolvedLoaderVersion = targetLoaderVersion || detectedLoaderVersion || targetFabric || null;
+  const key = `${projectId}::${targetMc}::${resolvedLoader || ''}::${resolvedLoaderVersion || ''}`;
   state.watches = state.watches.filter(w => makeWatchKey(w) !== key);
   await saveWatches(serverPath, state);
   return state.watches;
@@ -182,10 +203,23 @@ async function checkSingleWatch(serverPath, watch) {
   // Reuse existing IPC handler logic indirectly by calling the mod API service directly
   try {
     const modApiService = require('./mod-api-service.cjs');
-  const versions = await modApiService.getModrinthVersions(watch.projectId, 'fabric', watch.target.mc, false);
+    const target = watch.target || {};
+    const targetLoaderNormalized = target.loader ? normalizeLoaderName(target.loader) : (target.fabric ? 'fabric' : null);
+    const versions = await modApiService.getModrinthVersions(watch.projectId, targetLoaderNormalized, target.mc, false);
     if (Array.isArray(versions) && versions.length > 0) {
-      // Filter for matching mc + fabric loader
-      const matching = versions.filter(v => Array.isArray(v.gameVersions) && v.gameVersions.includes(watch.target.mc) && Array.isArray(v.loaders) && v.loaders.includes('fabric'));
+      // Filter for matching minecraft version and loader if specified
+      const matching = versions.filter(v => {
+        const supportsMinecraft = Array.isArray(v.gameVersions) && v.gameVersions.includes(target.mc);
+        if (!supportsMinecraft) {
+          return false;
+        }
+
+        if (!targetLoaderNormalized) {
+          return true;
+        }
+
+        return Array.isArray(v.loaders) && v.loaders.some(loaderCandidate => normalizeLoaderName(loaderCandidate) === targetLoaderNormalized);
+      });
       if (matching.length > 0) {
         // Sort newest by datePublished
         matching.sort((a, b) => new Date(b.datePublished).getTime() - new Date(a.datePublished).getTime());

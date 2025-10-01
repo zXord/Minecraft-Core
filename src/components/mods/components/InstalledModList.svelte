@@ -582,7 +582,8 @@
       const result = await safeInvoke('search-modrinth-matches', {
         modPath,
         modName: fileName.replace(/\.jar$/i, ''),
-        modVersion: null
+        modVersion: null,
+        loader: get(loaderType)
       });
 
       if (result && result.success && result.matches && result.matches.length > 0) {
