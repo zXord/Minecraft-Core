@@ -35,6 +35,27 @@ export const WarningSeverity = {
 };
 
 /**
+ * Recommendation severity levels (aligned with warning semantics)
+ */
+export const RecommendationSeverity = {
+  INFO: 'info',
+  ADVISORY: 'advisory',
+  WARNING: 'warning',
+  CRITICAL: 'critical'
+};
+
+/**
+ * Recommendation grouping keys to help the UI cluster related advice
+ */
+export const RecommendationGroups = {
+  COVERAGE: 'policy-coverage',
+  STORAGE: 'storage-health',
+  SAFETY: 'data-safety',
+  PERFORMANCE: 'performance',
+  MAINTENANCE: 'maintenance'
+};
+
+/**
  * Retention Policy Warning System
  */
 export class RetentionWarningSystem {
@@ -165,19 +186,48 @@ export class RetentionWarningSystem {
       const policy = this._createPolicyFromSettings(retentionSettings);
 
       if (!policy.hasActiveRules()) {
+        const totalSize = backups.reduce((sum, b) => sum + (b.size || 0), 0);
+        const impact = {
+          totalBackups: backups.length,
+          backupsToDelete: 0,
+          backupsRemaining: backups.length,
+          spaceSaved: 0,
+          totalSize,
+          deletedSize: 0,
+          remainingSize: totalSize,
+          oldestBackupToDelete: null,
+          newestBackupToDelete: null,
+          preservedRecentCount: Math.min(1, backups.length)
+        };
+
+        const optimization = await optimizeRetentionPolicies(backups, retentionSettings);
+        const recommendationContext = this._buildRecommendationContext({
+          backups,
+          retentionSettings,
+          impact,
+          optimization
+        });
+
+        const recommendations = this._generateRecommendations({
+          backups,
+          retentionSettings,
+          impact,
+          optimization,
+          context: recommendationContext
+        });
+
         return {
           hasActiveRules: false,
-          impact: {
-            totalBackups: backups.length,
-            backupsToDelete: 0,
-            backupsRemaining: backups.length,
-            spaceSaved: 0,
-            totalSize: backups.reduce((sum, b) => sum + (b.size || 0), 0)
-          },
+          impact,
           backupsToDelete: [],
           backupsToKeep: [...backups],
           warnings: [],
-          recommendations: []
+          recommendations,
+          recommendationContext,
+          optimization,
+          breakdown: null,
+          policyDescription: 'No retention rules active',
+          timestamp: new Date().toISOString()
         };
       }
 
@@ -197,12 +247,24 @@ export class RetentionWarningSystem {
       // Generate warnings for this preview
       const warnings = await this.analyzeRetentionWarnings(backups, retentionSettings);
 
-      // Generate recommendations
-      const recommendations = this._generateRecommendations(
+      // Run advanced optimization to feed richer recommendation context
+      const optimization = await optimizeRetentionPolicies(backups, retentionSettings);
+
+      const recommendationContext = this._buildRecommendationContext({
         backups,
         retentionSettings,
-        impact
-      );
+        impact,
+        optimization
+      });
+
+      // Generate recommendations with contextual awareness
+      const recommendations = this._generateRecommendations({
+        backups,
+        retentionSettings,
+        impact,
+        optimization,
+        context: recommendationContext
+      });
 
       // Create detailed breakdown by policy type
       const breakdown = await this._createPolicyBreakdown(
@@ -237,6 +299,8 @@ export class RetentionWarningSystem {
         })),
         warnings,
         recommendations,
+        recommendationContext,
+        optimization,
         breakdown,
         policyDescription: policy.getDescription(),
         timestamp: new Date().toISOString()
@@ -450,70 +514,302 @@ export class RetentionWarningSystem {
   }
 
   /**
-   * Generate recommendations based on backup patterns and current settings
-   * @param {Array} backups - Array of backup objects
-   * @param {Object} settings - Current retention settings
-   * @param {Object} impact - Policy impact analysis
-   * @returns {Array} Array of recommendation objects
+   * Generate recommendations based on backup patterns, settings, and optimization context
+   * @param {Object} params
+   * @param {Array} params.backups
+   * @param {Object} params.retentionSettings
+   * @param {Object} [params.impact]
+   * @param {Object|null} [params.optimization]
+   * @param {Object} [params.context]
+   * @returns {Array}
    * @private
    */
-  _generateRecommendations(backups, settings, impact) {
+  _generateRecommendations({ backups, retentionSettings: settings, impact = {}, optimization = null, context }) {
     const recommendations = [];
+    const seen = new Set();
 
-    // Recommend enabling retention if none are active
-    const hasActiveRetention = settings.sizeRetentionEnabled ||
-      settings.ageRetentionEnabled ||
-      settings.countRetentionEnabled;
-
-    if (!hasActiveRetention && backups.length > 10) {
-      recommendations.push({
-        type: 'enable-retention',
-        priority: 'high',
-        title: 'Enable Retention Policies',
-        message: 'Consider enabling retention policies to manage storage usage',
-        details: `You have ${backups.length} backups. Retention policies can help manage storage automatically.`,
-        suggestedAction: 'Enable count-based retention with a limit of 14 backups'
-      });
-    }
-
-    // Recommend size-based retention if backups are large
-    const totalSize = backups.reduce((sum, b) => sum + (b.size || 0), 0);
-    if (totalSize > 10 * SizeConstants.GB && !settings.sizeRetentionEnabled) {
-      recommendations.push({
-        type: 'enable-size-retention',
-        priority: 'medium',
-        title: 'Consider Size-Based Retention',
-        message: `Total backup size is ${formatSize(totalSize)}`,
-        details: 'Size-based retention can help prevent excessive storage usage.',
-        suggestedAction: `Set size limit to ${Math.ceil(totalSize / SizeConstants.GB * 1.5)} GB`
-      });
-    }
-
-    // Recommend age-based retention for old backups
-    const oldestBackup = this._getOldestBackup(backups);
-    if (oldestBackup) {
-      const oldestAge = Date.now() - this._getBackupDate(oldestBackup).getTime();
-      if (oldestAge > 90 * TimeConstants.DAY && !settings.ageRetentionEnabled) {
-        recommendations.push({
-          type: 'enable-age-retention',
-          priority: 'medium',
-          title: 'Consider Age-Based Retention',
-          message: `Oldest backup is ${this._formatDuration(oldestAge)} old`,
-          details: 'Age-based retention can help remove outdated backups automatically.',
-          suggestedAction: 'Set age limit to 30 days'
-        });
+    const pushRecommendation = (recommendation) => {
+      if (!recommendation) {
+        return;
       }
+
+      const key = recommendation.id || recommendation.type || recommendation.title;
+      if (!key || seen.has(key)) {
+        return;
+      }
+
+      const severity = recommendation.severity || this._mapPriorityToSeverity(recommendation.priority);
+      const priority = recommendation.priority || this._mapSeverityToPriority(severity);
+
+      const enriched = {
+        group: RecommendationGroups.STORAGE,
+        severity,
+        priority,
+        timestamp: new Date().toISOString(),
+        ...recommendation
+      };
+
+      if (!enriched.group && recommendation.type) {
+        enriched.group = this._inferGroupFromType(recommendation.type);
+      }
+
+      seen.add(key);
+      recommendations.push(enriched);
+    };
+
+    const totalBackups = context?.totalCount ?? backups.length;
+    const totalSize = context?.totalSize ?? backups.reduce((sum, b) => sum + (b.size || 0), 0);
+    const averageSize = context?.averageSize ?? (totalBackups > 0 ? totalSize / totalBackups : 0);
+
+    const hasSizeRetention = !!settings.sizeRetentionEnabled;
+    const hasAgeRetention = !!settings.ageRetentionEnabled;
+    const hasCountRetention = !!settings.countRetentionEnabled;
+    const activeRetentionCount = [hasSizeRetention, hasAgeRetention, hasCountRetention].filter(Boolean).length;
+
+    const storageUtilization = context?.storageUtilization ?? null;
+    const sizeRatio = context?.sizeRatio ?? null;
+    const countRatio = context?.countRatio ?? null;
+    const ageRatio = context?.ageRatio ?? null;
+
+    const projectMonthlyGrowth = context?.projectedMonthlyGrowthBytes ?? null;
+    const projectedMonthlyBackups = context?.projectedMonthlyBackups ?? null;
+    const averageIntervalMs = context?.averageIntervalMs ?? null;
+    const growthTrend = context?.growthTrend ?? 'unknown';
+
+    const humanFrequency = frequency => {
+      if (!frequency) return 'an unknown schedule';
+      const pattern = frequency.pattern;
+      switch (pattern) {
+        case 'very-frequent':
+          return 'multiple times per hour';
+        case 'frequent':
+          return 'several times per day';
+        case 'daily':
+          return 'daily';
+        case 'weekly':
+          return 'weekly';
+        case 'infrequent':
+          return 'every few months';
+        case 'irregular':
+        default:
+          return 'irregular intervals';
+      }
+    };
+
+    const contextualMetrics = {
+      totalBackups,
+      totalSize,
+      averageSize,
+      storageUtilization,
+      projectedMonthlyGrowth: projectMonthlyGrowth,
+      projectedMonthlyBackups,
+      averageIntervalMs,
+      sizeRatio,
+      countRatio,
+      ageRatio
+    };
+
+    // Integrate optimization engine recommendations for richer guidance
+    if (optimization?.recommendations?.length) {
+      optimization.recommendations.forEach((optRec, index) => {
+        const mappedSeverity = this._mapPriorityToSeverity(optRec.priority);
+        pushRecommendation({
+          id: `optimizer-${optRec.type || index}`,
+          type: optRec.type || 'optimizer-recommendation',
+          title: optRec.title || 'Optimization Suggestion',
+          message: optRec.message,
+          details: optRec.description,
+          group: this._inferGroupFromType(optRec.type),
+          severity: mappedSeverity,
+          priority: (optRec.priority || 'medium').toLowerCase(),
+          suggestedAction: optRec.suggestedAction,
+          suggestedValue: optRec.suggestedValue,
+          suggestedUnit: optRec.suggestedUnit,
+          expectedImpact: optRec.expectedImpact,
+          confidence: optRec.confidence,
+          metrics: {
+            ...contextualMetrics,
+            optimizer: true
+          }
+        });
+      });
     }
 
-    // Recommend adjusting aggressive policies
+    // Recommend enabling retention if none are active or coverage is low
+    if (activeRetentionCount === 0) {
+      const severity = (totalBackups > 20 || growthTrend === 'growing')
+        ? RecommendationSeverity.CRITICAL
+        : RecommendationSeverity.WARNING;
+
+      const suggestedLimit = Math.max(10, Math.min(30, Math.ceil(totalBackups * 0.7) || 10));
+
+      pushRecommendation({
+        id: 'enable-retention',
+        type: 'enable-retention',
+        group: RecommendationGroups.COVERAGE,
+        severity,
+        priority: severity === RecommendationSeverity.CRITICAL ? 'critical' : 'high',
+        title: 'Enable retention automation',
+        message: `Backups run on ${humanFrequency(context?.frequency)} and none of the retention safeguards are enabled.`,
+        details: `With ${totalBackups} backups totalling ${formatSize(totalSize)}, turning on retention prevents runaway growth.`,
+        suggestedAction: `Enable count-based retention and cap at ${suggestedLimit} backups`,
+        suggestedSettings: {
+          countRetentionEnabled: true,
+          maxCountValue: suggestedLimit
+        },
+        metrics: contextualMetrics
+      });
+    }
+
+    // Recommend size-based retention or adjustments when storage utilization is high
+    if (!hasSizeRetention && totalSize > 5 * SizeConstants.GB) {
+      const suggestedLimitGb = Math.max(5, Math.ceil((totalSize / SizeConstants.GB) * 0.9));
+      pushRecommendation({
+        id: 'enable-size-retention',
+        type: 'enable-size-retention',
+        group: RecommendationGroups.STORAGE,
+        severity: storageUtilization && storageUtilization > 0.85
+          ? RecommendationSeverity.CRITICAL
+          : RecommendationSeverity.WARNING,
+        priority: storageUtilization && storageUtilization > 0.85 ? 'high' : 'medium',
+        title: 'Control storage usage with a size limit',
+        message: `Backups currently occupy ${formatSize(totalSize)} without a size cap.`,
+        details: 'Size-based retention protects against spikes when automated backups run frequently.',
+        suggestedAction: `Enable size retention and cap at ${suggestedLimitGb} GB`,
+        suggestedValue: suggestedLimitGb,
+        suggestedUnit: 'GB',
+        metrics: contextualMetrics
+      });
+    } else if (hasSizeRetention && sizeRatio !== null && sizeRatio >= 0.8) {
+      const severity = sizeRatio >= 1 ? RecommendationSeverity.CRITICAL : RecommendationSeverity.WARNING;
+      pushRecommendation({
+        id: 'adjust-size-retention',
+        type: 'adjust-size-retention',
+        group: RecommendationGroups.STORAGE,
+        severity,
+        priority: severity === RecommendationSeverity.CRITICAL ? 'high' : 'medium',
+        title: 'Size limit nearly reached',
+        message: `Backups are using ${(sizeRatio * 100).toFixed(0)}% of the configured size limit.`,
+        details: 'Consider raising the limit slightly or pruning older backups manually.',
+        suggestedAction: 'Increase the size limit or delete stale backups',
+        metrics: {
+          ...contextualMetrics,
+          sizeLimitBytes: context?.sizeLimitBytes
+        }
+      });
+    }
+
+    // Recommend age-based retention if oldest backups are stale
+    if (!hasAgeRetention && context?.oldestAgeMs && context.oldestAgeMs > 60 * TimeConstants.DAY) {
+      const suggestedAgeDays = context.averageIntervalMs
+        ? Math.max(30, Math.round((context.averageIntervalMs / TimeConstants.DAY) * 10))
+        : 30;
+
+      pushRecommendation({
+        id: 'enable-age-retention',
+        type: 'enable-age-retention',
+        group: RecommendationGroups.SAFETY,
+        severity: RecommendationSeverity.ADVISORY,
+        priority: 'medium',
+        title: 'Cull very old backups automatically',
+        message: `Oldest backup is ${this._formatDuration(context.oldestAgeMs)} old and never expires.`,
+        details: 'Age-based retention prevents ancient backups from lingering indefinitely.',
+        suggestedAction: `Enable age retention and expire backups after ${suggestedAgeDays} days`,
+        suggestedValue: suggestedAgeDays,
+        suggestedUnit: 'days',
+        metrics: contextualMetrics
+      });
+    } else if (hasAgeRetention && ageRatio !== null && ageRatio >= 0.8) {
+      pushRecommendation({
+        id: 'age-limit-approaching',
+        type: 'adjust-age-retention',
+        group: RecommendationGroups.SAFETY,
+        severity: RecommendationSeverity.WARNING,
+        priority: 'medium',
+        title: 'Age limit nearly reached',
+        message: `Several backups will expire soon (oldest is ${this._formatDuration(context.oldestAgeMs || 0)} old).`,
+        details: 'Review whether the age window is still appropriate before automatic cleanup runs.',
+        metrics: contextualMetrics
+      });
+    }
+
+    // Recommend count-based retention adjustments
+    if (!hasCountRetention && totalBackups > 15) {
+      const suggestedLimit = Math.max(10, Math.floor(totalBackups * 0.75));
+      pushRecommendation({
+        id: 'enable-count-retention',
+        type: 'enable-count-retention',
+        group: RecommendationGroups.COVERAGE,
+        severity: RecommendationSeverity.ADVISORY,
+        priority: 'medium',
+        title: 'Cap the number of backups retained',
+        message: `You currently have ${totalBackups} backups with no count limit.`,
+        details: 'A count limit keeps the catalog manageable and speeds up browse operations.',
+        suggestedAction: `Enable count retention and keep the latest ${suggestedLimit} backups`,
+        suggestedValue: suggestedLimit,
+        metrics: contextualMetrics
+      });
+    } else if (hasCountRetention && countRatio !== null && countRatio >= 0.85) {
+      pushRecommendation({
+        id: 'count-limit-approaching',
+        type: 'adjust-count-retention',
+        group: RecommendationGroups.COVERAGE,
+        severity: RecommendationSeverity.WARNING,
+        priority: 'medium',
+        title: 'Backup count limit is nearly reached',
+        message: `Count limit is ${(countRatio * 100).toFixed(0)}% consumed.`,
+        details: 'Increase the cap or remove older backups to avoid forced deletions during the next cleanup.',
+        metrics: contextualMetrics
+      });
+    }
+
+    // Detect aggressive policies that remove most backups
     if (impact.backupsToDelete > impact.backupsRemaining && impact.backupsRemaining < 5) {
-      recommendations.push({
+      pushRecommendation({
+        id: 'aggressive-policy',
         type: 'adjust-aggressive-policy',
+        group: RecommendationGroups.SAFETY,
+        severity: RecommendationSeverity.CRITICAL,
         priority: 'high',
-        title: 'Policy May Be Too Aggressive',
-        message: `Would delete ${impact.backupsToDelete} backups, keeping only ${impact.backupsRemaining}`,
-        details: 'Consider relaxing retention limits to preserve more backup history.',
-        suggestedAction: 'Increase retention limits or disable some policies'
+        title: 'Retention policy is overly aggressive',
+        message: `This run would delete ${impact.backupsToDelete} backups, leaving only ${impact.backupsRemaining}.`,
+        details: 'Relax the limits or disable one of the rules to keep a healthier safety net.',
+        suggestedAction: 'Raise the limits or disable overlapping policies',
+        metrics: {
+          ...contextualMetrics,
+          backupsToDelete: impact.backupsToDelete,
+          backupsRemaining: impact.backupsRemaining
+        }
+      });
+    }
+
+    // Highlight rapid growth trends
+    if (growthTrend === 'growing' && projectMonthlyGrowth && projectMonthlyGrowth > 5 * SizeConstants.GB) {
+      pushRecommendation({
+        id: 'growth-alert',
+        type: 'growth-trend',
+        group: RecommendationGroups.PERFORMANCE,
+        severity: RecommendationSeverity.WARNING,
+        priority: 'medium',
+        title: 'Backups are growing quickly',
+        message: `At the current pace you'll add ${formatSize(projectMonthlyGrowth)} of backups this month.`,
+        details: 'Adjust retention or review backup frequency to avoid exceeding storage capacity.',
+        metrics: contextualMetrics
+      });
+    }
+
+    // Surface optimization potential if score indicates room for improvement
+    if (context?.optimizationPotential !== null && context.optimizationPotential > 0.6) {
+      pushRecommendation({
+        id: 'apply-optimizer-suggestions',
+        type: 'optimization-followup',
+        group: RecommendationGroups.MAINTENANCE,
+        severity: RecommendationSeverity.ADVISORY,
+        priority: 'medium',
+        title: 'Apply optimizer suggestions',
+        message: 'There is significant room for tightening retention. Review the optimization panel for guided changes.',
+        details: 'Optimizer insights combine frequency analysis and storage projections to recommend safer defaults.',
+        metrics: contextualMetrics
       });
     }
 
@@ -573,6 +869,146 @@ export class RetentionWarningSystem {
     }
 
     return breakdown;
+  }
+
+  /**
+   * Build context information used when generating recommendations
+   * @param {Object} params
+   * @param {Array} params.backups
+   * @param {Object} params.retentionSettings
+   * @param {Object} params.impact
+   * @param {Object|null} params.optimization
+   * @returns {Object}
+   * @private
+   */
+  _buildRecommendationContext({ backups, retentionSettings, impact, optimization }) {
+    const totalSize = backups.reduce((sum, backup) => sum + (backup.size || 0), 0);
+    const totalCount = backups.length;
+    const averageSize = totalCount > 0 ? totalSize / totalCount : 0;
+
+    const oldestBackup = this._getOldestBackup(backups);
+    const newestBackup = backups.reduce((latest, backup) => {
+      if (!latest) return backup;
+      const backupDate = this._getBackupDate(backup);
+      const latestDate = this._getBackupDate(latest);
+      return backupDate > latestDate ? backup : latest;
+    }, null);
+
+    const oldestAgeMs = oldestBackup ? Date.now() - this._getBackupDate(oldestBackup).getTime() : null;
+    const newestAgeMs = newestBackup ? Date.now() - this._getBackupDate(newestBackup).getTime() : null;
+
+    const sizeLimitBytes = retentionSettings.sizeRetentionEnabled && retentionSettings.maxSizeValue
+      ? this._convertSizeToBytes(retentionSettings.maxSizeValue, retentionSettings.maxSizeUnit)
+      : null;
+
+    const countLimit = retentionSettings.countRetentionEnabled && retentionSettings.maxCountValue
+      ? retentionSettings.maxCountValue
+      : null;
+
+    const ageLimitMs = retentionSettings.ageRetentionEnabled && retentionSettings.maxAgeValue
+      ? this._convertAgeToMilliseconds(retentionSettings.maxAgeValue, retentionSettings.maxAgeUnit)
+      : null;
+
+    const diskCapacityBytes = typeof retentionSettings.diskCapacityBytes === 'number'
+      ? retentionSettings.diskCapacityBytes
+      : null;
+
+    const optimizationMetrics = optimization?.metrics || {};
+    const optimizationPatterns = optimization?.patterns || {};
+
+    const frequency = optimizationPatterns.frequency || null;
+    const growthTrend = optimizationPatterns.growthTrend || 'unknown';
+    const storageUtilization = optimizationMetrics.storageUtilization ?? null;
+    const retentionPressure = optimizationMetrics.retentionPressure ?? null;
+    const optimizationPotential = optimizationMetrics.optimizationPotential ?? null;
+
+    const averageIntervalMs = frequency?.averageInterval ?? null;
+    const projectedMonthlyBackups = averageIntervalMs && averageIntervalMs > 0
+      ? Math.max(1, Math.round(TimeConstants.MONTH / averageIntervalMs))
+      : null;
+
+    const projectedMonthlyGrowthBytes = projectedMonthlyBackups && averageSize
+      ? projectedMonthlyBackups * averageSize
+      : null;
+
+    const sizeRatio = sizeLimitBytes ? totalSize / sizeLimitBytes : null;
+    const countRatio = countLimit ? totalCount / countLimit : null;
+    const ageRatio = ageLimitMs && oldestAgeMs ? oldestAgeMs / ageLimitMs : null;
+
+    return {
+      totalSize,
+      totalCount,
+      averageSize,
+      oldestBackup,
+      newestBackup,
+      oldestAgeMs,
+      newestAgeMs,
+      sizeLimitBytes,
+      countLimit,
+      ageLimitMs,
+      diskCapacityBytes,
+      storageUtilization,
+      retentionPressure,
+      optimizationPotential,
+      frequency,
+      growthTrend,
+      averageIntervalMs,
+      projectedMonthlyBackups,
+      projectedMonthlyGrowthBytes,
+      sizeRatio,
+      countRatio,
+      ageRatio,
+      impact
+    };
+  }
+
+  _mapPriorityToSeverity(priority) {
+    const normalized = typeof priority === 'string' ? priority.toLowerCase() : priority;
+    switch (normalized) {
+      case 'critical':
+        return RecommendationSeverity.CRITICAL;
+      case 'high':
+        return RecommendationSeverity.WARNING;
+      case 'medium':
+        return RecommendationSeverity.ADVISORY;
+      case 'low':
+      default:
+        return RecommendationSeverity.INFO;
+    }
+  }
+
+  _mapSeverityToPriority(severity) {
+    switch (severity) {
+      case RecommendationSeverity.CRITICAL:
+        return 'critical';
+      case RecommendationSeverity.WARNING:
+        return 'high';
+      case RecommendationSeverity.ADVISORY:
+        return 'medium';
+      case RecommendationSeverity.INFO:
+      default:
+        return 'low';
+    }
+  }
+
+  _inferGroupFromType(type = '') {
+    const normalized = type.toLowerCase();
+    if (normalized.includes('size')) {
+      return RecommendationGroups.STORAGE;
+    }
+    if (normalized.includes('count')) {
+      return RecommendationGroups.COVERAGE;
+    }
+    if (normalized.includes('age')) {
+      return RecommendationGroups.SAFETY;
+    }
+    if (normalized.includes('growth') || normalized.includes('performance')) {
+      return RecommendationGroups.PERFORMANCE;
+    }
+    if (normalized.includes('optimization')) {
+      return RecommendationGroups.MAINTENANCE;
+    }
+    return RecommendationGroups.STORAGE;
   }
 
   /**

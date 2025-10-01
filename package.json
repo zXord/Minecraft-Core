@@ -12,11 +12,12 @@
     "dev:electron": "wait-on --timeout 30000 http-get://localhost:5173 && electron . || wait-on --timeout 30000 http-get://localhost:5174 && electron .",
     "test": "node --test",
     "build": "vite build && node post-build.mjs",
+    "build:icons": "node scripts/generate-icon.cjs",
     "start": "electron .",
     "prod": "npm run build && npm run start",
-    "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder",
-    "release": "npm run build && electron-builder --publish=always"
+    "pack": "npm run build && npm run build:icons && electron-builder --dir",
+    "dist": "npm run build && npm run build:icons && electron-builder",
+    "release": "npm run build && npm run build:icons && electron-builder --publish=always"
   },
   "devDependencies": {
     "@eslint/js": "^9.28.0",
@@ -28,6 +29,8 @@
     "eslint": "^9.31.0",
     "eslint-plugin-svelte": "^3.9.2",
     "globals": "^16.2.0",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.33.5",
     "typescript": "^5.8.3",
     "vite": "^6.0.0",
     "wait-on": "^7.2.0"
@@ -73,6 +76,7 @@
       "electron/**/*",
       "package.json",
       "icon.png",
+      "build/icon.ico",
       "dev-config.cjs"
     ],
     "copyright": "Copyright © 2025 zXord",
@@ -81,7 +85,7 @@
       "requestedExecutionLevel": "asInvoker",
       "verifyUpdateCodeSignature": false,
       "executableName": "Minecraft Core",
-      "icon": "icon.png",
+      "icon": "build/icon.ico",
       "signAndEditExecutable": false
     },
     "nsis": {
