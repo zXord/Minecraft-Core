@@ -75,11 +75,14 @@
       "icon.png",
       "dev-config.cjs"
     ],
+    "copyright": "Copyright © 2025 zXord",
     "win": {
       "target": "nsis",
       "requestedExecutionLevel": "asInvoker",
       "verifyUpdateCodeSignature": false,
-      "executableName": "Minecraft Core"
+      "executableName": "Minecraft Core",
+      "icon": "icon.png",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
