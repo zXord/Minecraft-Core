@@ -1,7 +1,7 @@
 <script>
   import { createEventDispatcher } from 'svelte';
   import { formatSize } from '../../utils/backup/index.js';
-  import { WarningSeverity } from '../../utils/backup/retentionWarnings.js';
+  import { WarningSeverity, RecommendationSeverity, RecommendationGroups } from '../../utils/backup/retentionWarnings.js';
 
   const dispatch = createEventDispatcher();
 
@@ -9,6 +9,7 @@
   /** @type {Object|null} */
   export let preview = null;
   export let loading = false;
+  export let recommendationHistory = {};
 
   let dialogElement;
 
@@ -52,6 +53,196 @@
         return 'ℹ️';
     }
   }
+
+  function getRecommendationSeverityClass(severity) {
+    switch (severity) {
+      case RecommendationSeverity.CRITICAL:
+        return 'rec-critical';
+      case RecommendationSeverity.WARNING:
+        return 'rec-warning';
+      case RecommendationSeverity.ADVISORY:
+        return 'rec-advisory';
+      default:
+        return 'rec-info';
+    }
+  }
+
+  function getRecommendationSeverityIcon(severity) {
+    switch (severity) {
+      case RecommendationSeverity.CRITICAL:
+        return '🚨';
+      case RecommendationSeverity.WARNING:
+        return '⚠️';
+      case RecommendationSeverity.ADVISORY:
+        return '💡';
+      default:
+        return 'ℹ️';
+    }
+  }
+
+  function getRecommendationGroupLabel(group) {
+    switch (group) {
+      case RecommendationGroups.COVERAGE:
+        return 'Policy Coverage';
+      case RecommendationGroups.STORAGE:
+        return 'Storage Health';
+      case RecommendationGroups.SAFETY:
+        return 'Data Safety';
+      case RecommendationGroups.PERFORMANCE:
+        return 'Performance';
+      case RecommendationGroups.MAINTENANCE:
+        return 'Maintenance';
+      default:
+        return 'General';
+    }
+  }
+
+  function formatConfidence(confidence) {
+    if (typeof confidence !== 'number' || Number.isNaN(confidence)) {
+      return null;
+    }
+    return `${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}% confidence`;
+  }
+
+  function dismissRecommendation(recommendation) {
+    dispatch('dismiss-recommendation', { recommendation });
+  }
+
+  function getRecommendationKey(recommendation) {
+    if (!recommendation) {
+      return null;
+    }
+
+    return recommendation.id || recommendation.type || recommendation.title || null;
+  }
+
+  function formatRelativeTime(timestamp) {
+    if (!timestamp) {
+      return null;
+    }
+
+    const now = Date.now();
+    const elapsed = now - Number(timestamp);
+    if (!Number.isFinite(elapsed) || elapsed < 0) {
+      return null;
+    }
+
+    const minute = 60 * 1000;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    const week = 7 * day;
+    const month = 30 * day;
+
+    if (elapsed < minute) {
+      return 'moments ago';
+    }
+    if (elapsed < hour) {
+      const minutes = Math.round(elapsed / minute);
+      return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+    }
+    if (elapsed < day) {
+      const hours = Math.round(elapsed / hour);
+      return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    }
+    if (elapsed < week) {
+      const days = Math.round(elapsed / day);
+      return `${days} day${days === 1 ? '' : 's'} ago`;
+    }
+    if (elapsed < month) {
+      const weeks = Math.round(elapsed / week);
+      return `${weeks} week${weeks === 1 ? '' : 's'} ago`;
+    }
+
+    const months = Math.round(elapsed / month);
+    return `${months} month${months === 1 ? '' : 's'} ago`;
+  }
+
+  function formatHistoryChanges(recommendation, stored) {
+    if (!recommendation?.metrics || !stored?.metrics) {
+      return [];
+    }
+
+    const changes = [];
+    const metricInfo = [
+      ['sizeRatio', 'storage usage'],
+      ['countRatio', 'backup count'],
+      ['ageRatio', 'backup age'],
+      ['storageUtilization', 'storage utilization'],
+      ['projectedMonthlyGrowth', 'projected growth']
+    ];
+
+    for (const [key, label] of metricInfo) {
+      const current = Number(recommendation.metrics[key]);
+      const previous = Number(stored.metrics[key]);
+      if (!Number.isFinite(current) || !Number.isFinite(previous)) {
+        continue;
+      }
+
+      const delta = current - previous;
+      if (Math.abs(delta) < 0.05 && key !== 'projectedMonthlyGrowth') {
+        continue;
+      }
+
+      if (key === 'projectedMonthlyGrowth') {
+        const gigabytesDelta = (delta / (1024 ** 3)) || 0;
+        if (Math.abs(gigabytesDelta) < 1) {
+          continue;
+        }
+        const direction = gigabytesDelta > 0 ? 'up' : 'down';
+        changes.push(`${label} ${direction} ${Math.abs(gigabytesDelta).toFixed(1)} GB/mo`);
+      } else {
+        const percentDelta = Math.round(delta * 100);
+        if (percentDelta === 0) {
+          continue;
+        }
+        const direction = percentDelta > 0 ? 'up' : 'down';
+        changes.push(`${label} ${direction} ${Math.abs(percentDelta)} pts`);
+      }
+    }
+
+    return changes;
+  }
+
+  function getRecommendationHistorySummary(recommendation) {
+    const key = getRecommendationKey(recommendation);
+    if (!key) {
+      return null;
+    }
+
+    const stored = recommendationHistory?.[key];
+    if (!stored) {
+      return recommendation.justification || null;
+    }
+
+    const parts = [];
+    const relativeTime = formatRelativeTime(stored.dismissedAt);
+    if (relativeTime) {
+      parts.push(`Dismissed ${relativeTime}`);
+    } else {
+      parts.push('Previously dismissed');
+    }
+
+    if (stored.severity) {
+      parts.push(`Marked as ${stored.severity}`);
+    }
+
+    const changeDescriptions = formatHistoryChanges(recommendation, stored);
+    if (changeDescriptions.length) {
+      parts.push(`Changes since: ${changeDescriptions.join(', ')}`);
+    }
+
+    if (recommendation.justification) {
+      parts.push(recommendation.justification);
+    }
+
+    return parts.join(' · ');
+  }
+
+  $: previewRecommendations = preview?.recommendations ?? [];
+  $: decoratedRecommendations = previewRecommendations.map(recommendation => ({
+    ...recommendation,
+    historySummary: getRecommendationHistorySummary(recommendation)
+  }));
 
   // Format backup age for display
   function formatBackupAge(ageInDays) {
@@ -206,22 +397,78 @@
           {/if}
 
           <!-- Recommendations Section -->
-          {#if preview.recommendations && preview.recommendations.length > 0}
+          {#if decoratedRecommendations.length > 0}
             <div class="recommendations-section">
               <h3>Recommendations</h3>
               <div class="recommendations-list">
-                {#each preview.recommendations as recommendation (recommendation.type)}
-                  <div class="recommendation-item priority-{recommendation.priority}">
+                {#each decoratedRecommendations as recommendation (recommendation.id || recommendation.type || recommendation.title)}
+                  <div class="recommendation-item {getRecommendationSeverityClass(recommendation.severity)}">
                     <div class="recommendation-header">
-                      <span class="recommendation-title">{recommendation.title}</span>
-                      <span class="recommendation-priority">{recommendation.priority}</span>
-                    </div>
-                    <div class="recommendation-message">{recommendation.message}</div>
-                    {#if recommendation.suggestedAction}
-                      <div class="recommendation-action">
-                        <strong>Suggested:</strong> {recommendation.suggestedAction}
+                      <div class="recommendation-title">
+                        <span class="recommendation-icon">{getRecommendationSeverityIcon(recommendation.severity)}</span>
+                        <span>{recommendation.title}</span>
                       </div>
-                    {/if}
+                      <div class="recommendation-meta">
+                        <div class="recommendation-tags">
+                          {#if recommendation.group}
+                            <span class="recommendation-tag group">{getRecommendationGroupLabel(recommendation.group)}</span>
+                          {/if}
+                          <span class="recommendation-tag priority">{recommendation.priority}</span>
+                          {#if recommendation.severity}
+                            <span class="recommendation-tag severity">{recommendation.severity}</span>
+                          {/if}
+                          {#if recommendation.confidence !== undefined}
+                            {#if formatConfidence(recommendation.confidence) !== null}
+                              <span class="recommendation-tag confidence">{formatConfidence(recommendation.confidence)}</span>
+                            {/if}
+                          {/if}
+                          {#if recommendation.historySummary}
+                            <span class="recommendation-tag history" title={recommendation.historySummary}>History</span>
+                          {/if}
+                        </div>
+                        <button
+                          class="recommendation-dismiss"
+                          type="button"
+                          on:click={() => dismissRecommendation(recommendation)}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+
+                    <div class="recommendation-body">
+                      <div class="recommendation-message">{recommendation.message}</div>
+                      {#if recommendation.details}
+                        <div class="recommendation-details">{recommendation.details}</div>
+                      {/if}
+
+                      {#if recommendation.expectedImpact}
+                        <div class="recommendation-impact">
+                          <strong>Expected Impact:</strong> {recommendation.expectedImpact}
+                        </div>
+                      {/if}
+
+                      {#if recommendation.suggestedAction}
+                        <div class="recommendation-action">
+                          <strong>Suggested:</strong> {recommendation.suggestedAction}
+                        </div>
+                      {/if}
+
+                      {#if recommendation.suggestedValue !== undefined}
+                        <div class="recommendation-suggestion">
+                          <strong>Target:</strong> {recommendation.suggestedValue}
+                          {#if recommendation.suggestedUnit}
+                            {recommendation.suggestedUnit}
+                          {/if}
+                        </div>
+                      {/if}
+
+                      {#if recommendation.metrics?.projectedMonthlyGrowth}
+                        <div class="recommendation-metric">
+                          <strong>Projected Monthly Growth:</strong> {formatSize(recommendation.metrics.projectedMonthlyGrowth)}
+                        </div>
+                      {/if}
+                    </div>
                   </div>
                 {/each}
               </div>
@@ -576,67 +823,137 @@
   }
 
   .recommendation-item {
-    padding: 12px;
+    padding: 14px;
     border-radius: 6px;
     border: 1px solid var(--border-color);
     background: var(--card-bg);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
-  .recommendation-item.priority-high {
+  .recommendation-item.rec-critical {
     border-left: 4px solid var(--danger-color);
   }
 
-  .recommendation-item.priority-medium {
+  .recommendation-item.rec-warning {
     border-left: 4px solid var(--warning-color);
   }
 
-  .recommendation-item.priority-low {
-    border-left: 4px solid var(--info-color);
+  .recommendation-item.rec-advisory {
+    border-left: 4px solid var(--accent-color);
+  }
+
+  .recommendation-item.rec-info {
+    border-left: 4px solid var(--border-color);
   }
 
   .recommendation-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 4px;
   }
 
   .recommendation-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-weight: 600;
     color: var(--text-color);
   }
 
-  .recommendation-priority {
-    font-size: 0.75rem;
-    padding: 2px 6px;
-    border-radius: 3px;
+  .recommendation-icon {
+    font-size: 1rem;
+  }
+
+  .recommendation-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  .recommendation-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .recommendation-tag {
+    font-size: 0.7rem;
+    padding: 2px 8px;
+    border-radius: 999px;
     text-transform: uppercase;
     font-weight: 600;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-muted);
+    letter-spacing: 0.4px;
   }
 
-  .priority-high .recommendation-priority {
-    background: var(--danger-color);
-    color: white;
+  .recommendation-tag.severity {
+    background: rgba(255, 170, 0, 0.15);
+    color: #ffc66d;
   }
 
-  .priority-medium .recommendation-priority {
-    background: var(--warning-color);
-    color: white;
+  .recommendation-tag.priority {
+    background: rgba(255, 85, 105, 0.18);
+    color: #ff98a5;
   }
 
-  .priority-low .recommendation-priority {
-    background: var(--info-color);
-    color: white;
+  .recommendation-tag.group {
+    background: rgba(136, 192, 208, 0.2);
+    color: #a3d5f3;
+  }
+
+  .recommendation-tag.confidence {
+    background: rgba(96, 228, 164, 0.2);
+    color: #88f0bf;
+  }
+
+  .recommendation-tag.history {
+    background: rgba(255, 193, 7, 0.25);
+    color: #ffd777;
+    cursor: help;
+  }
+
+  .recommendation-dismiss {
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease;
+  }
+
+  .recommendation-dismiss:hover {
+    color: var(--accent-color);
+    border-color: var(--accent-color);
+  }
+
+  .recommendation-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .recommendation-message {
     color: var(--text-color);
-    margin-bottom: 4px;
   }
 
+  .recommendation-details,
   .recommendation-action {
     color: var(--text-muted);
     font-size: 0.875rem;
+  }
+
+  .recommendation-impact,
+  .recommendation-suggestion,
+  .recommendation-metric {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    padding-left: 4px;
   }
 
   .dialog-footer {

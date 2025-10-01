@@ -6,6 +6,7 @@
   import { serverState } from "../stores/serverState.js";
   import { writable } from "svelte/store";
   import logger from "../utils/logger.js";
+  import { toast } from "svelte-sonner";
   import {
     calculateTotalSize,
     formatSize,
@@ -25,6 +26,8 @@
   let sizeChangeCleanup = null;
 
   onMount(() => {
+    loadDismissedRecommendations();
+
     logger.info("Backups component mounted", {
       category: "ui",
       data: {
@@ -138,6 +141,17 @@
   let retentionPreview = null;
   let previewLoading = false;
 
+  const DISMISSED_RECOMMENDATION_STORAGE_KEY =
+    "mc-core.dismissedRetentionRecommendations";
+  let dismissedRetentionRecommendations = {};
+
+  const recommendationSeverityRank = {
+    critical: 3,
+    warning: 2,
+    advisory: 1,
+    info: 0,
+  };
+
   // Retention optimization variables
   let retentionOptimization = null;
   let optimizationLoading = false;
@@ -239,6 +253,159 @@
         console.warn("Failed to clear retention state from localStorage:", e);
       }
     }
+  }
+
+  function getRecommendationKey(recommendation) {
+    if (!recommendation) {
+      return null;
+    }
+
+    return (
+      recommendation.id ||
+      recommendation.type ||
+      recommendation.title ||
+      null
+    );
+  }
+
+  function loadDismissedRecommendations() {
+    try {
+      const stored = localStorage.getItem(
+        DISMISSED_RECOMMENDATION_STORAGE_KEY,
+      );
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && typeof parsed === "object") {
+          dismissedRetentionRecommendations = parsed;
+        }
+      }
+    } catch (storageError) {
+      logger.warn("Failed to load dismissed retention recommendations", {
+        category: "ui",
+        data: {
+          component: "Backups",
+          function: "loadDismissedRecommendations",
+          error: storageError.message,
+        },
+      });
+      dismissedRetentionRecommendations = {};
+    }
+  }
+
+  function persistDismissedRecommendations() {
+    try {
+      localStorage.setItem(
+        DISMISSED_RECOMMENDATION_STORAGE_KEY,
+        JSON.stringify(dismissedRetentionRecommendations),
+      );
+    } catch (storageError) {
+      logger.warn("Failed to persist dismissed retention recommendations", {
+        category: "ui",
+        data: {
+          component: "Backups",
+          function: "persistDismissedRecommendations",
+          error: storageError.message,
+        },
+      });
+    }
+  }
+
+  function getSeverityRank(severity) {
+    if (!severity) {
+      return 0;
+    }
+    const normalized = severity.toLowerCase();
+    return recommendationSeverityRank[normalized] ?? 0;
+  }
+
+  function shouldResurfaceDismissedRecommendation(recommendation, stored) {
+    if (!stored) {
+      return true;
+    }
+
+    const currentSeverityRank = getSeverityRank(recommendation.severity);
+    const storedSeverityRank = getSeverityRank(stored.severity);
+    if (currentSeverityRank > storedSeverityRank) {
+      return true;
+    }
+
+    const currentMetrics = recommendation.metrics || {};
+    const storedMetrics = stored.metrics || {};
+    const ratioKeys = [
+      "sizeRatio",
+      "countRatio",
+      "ageRatio",
+      "storageUtilization",
+    ];
+
+    for (const key of ratioKeys) {
+      const currentValue = Number(currentMetrics[key]);
+      const storedValue = Number(storedMetrics[key]);
+      if (
+        Number.isFinite(currentValue) &&
+        Number.isFinite(storedValue) &&
+        currentValue > storedValue + 0.1
+      ) {
+        return true;
+      }
+    }
+
+    if (
+      Number.isFinite(currentMetrics.projectedMonthlyGrowth) &&
+      Number.isFinite(storedMetrics.projectedMonthlyGrowth) &&
+      currentMetrics.projectedMonthlyGrowth >
+        storedMetrics.projectedMonthlyGrowth * 1.25
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function applyDismissalFilter(recommendations = []) {
+    if (!recommendations || recommendations.length === 0) {
+      return recommendations;
+    }
+
+    return recommendations.filter((recommendation) => {
+      const key = getRecommendationKey(recommendation);
+      if (!key) {
+        return true;
+      }
+
+      const stored = dismissedRetentionRecommendations[key];
+      if (!stored) {
+        return true;
+      }
+
+      return shouldResurfaceDismissedRecommendation(recommendation, stored);
+    });
+  }
+
+  function recordDismissedRecommendation(recommendation) {
+    const key = getRecommendationKey(recommendation);
+    if (!key) {
+      return;
+    }
+
+    dismissedRetentionRecommendations = {
+      ...dismissedRetentionRecommendations,
+      [key]: {
+        severity: recommendation.severity || "info",
+        dismissedAt: Date.now(),
+        metrics: {
+          sizeRatio: recommendation.metrics?.sizeRatio ?? null,
+          countRatio: recommendation.metrics?.countRatio ?? null,
+          ageRatio: recommendation.metrics?.ageRatio ?? null,
+          storageUtilization:
+            recommendation.metrics?.storageUtilization ?? null,
+          projectedMonthlyGrowth:
+            recommendation.metrics?.projectedMonthlyGrowth ?? null,
+        },
+      },
+    };
+
+    persistDismissedRecommendations();
   }
 
   // Initialize state when serverPath changes
@@ -872,6 +1039,29 @@
 
       retentionPreview = await generateRetentionPreview(backups, settings);
 
+      if (retentionPreview?.recommendations) {
+        const originalCount = retentionPreview.recommendations.length;
+        const filteredRecommendations = applyDismissalFilter(
+          retentionPreview.recommendations,
+        );
+
+        if (filteredRecommendations.length !== originalCount) {
+          logger.debug("Suppressed dismissed retention recommendations", {
+            category: "ui",
+            data: {
+              component: "Backups",
+              function: "generatePreview",
+              suppressed: originalCount - filteredRecommendations.length,
+            },
+          });
+        }
+
+        retentionPreview = {
+          ...retentionPreview,
+          recommendations: filteredRecommendations,
+        };
+      }
+
       if (!retentionPreview) {
         throw new Error(
           "No preview result returned from retention policy engine",
@@ -886,6 +1076,8 @@
           totalBackups: retentionPreview.impact?.totalBackups || 0,
           backupsToDelete: retentionPreview.impact?.backupsToDelete || 0,
           spaceSaved: retentionPreview.impact?.spaceSaved || 0,
+          recommendationsVisible:
+            retentionPreview.recommendations?.length || 0,
         },
       });
     } catch (e) {
@@ -917,6 +1109,46 @@
     } finally {
       previewLoading = false;
     }
+  }
+
+  function handleRecommendationDismiss(event) {
+    const recommendation = event.detail?.recommendation;
+    if (!recommendation) {
+      return;
+    }
+
+    recordDismissedRecommendation(recommendation);
+
+    const key = getRecommendationKey(recommendation);
+    if (!key) {
+      return;
+    }
+
+    if (retentionPreview?.recommendations) {
+      retentionPreview = {
+        ...retentionPreview,
+        recommendations: retentionPreview.recommendations.filter(
+          (item) => getRecommendationKey(item) !== key,
+        ),
+      };
+    }
+
+    logger.debug("Retention recommendation dismissed", {
+      category: "ui",
+      data: {
+        component: "Backups",
+        function: "handleRecommendationDismiss",
+        key,
+        severity: recommendation.severity,
+      },
+    });
+
+    toast("Recommendation dismissed", {
+      description:
+        recommendation.title
+          ? `"${recommendation.title}" will stay hidden until the situation changes.`
+          : "We'll resurface it if conditions worsen.",
+    });
   }
 
   // Handle preview dialog confirmation
@@ -1058,6 +1290,10 @@
 
     // Regenerate optimization analysis
     await generateOptimization();
+
+    toast.success("Suggested policy applied", {
+      description: `${policy.name} settings are now active.`,
+    });
   }
 
   // Apply a specific recommendation
@@ -1073,8 +1309,44 @@
       },
     });
 
+    const suggestedSettings = recommendation.suggestedSettings;
+
+    if (suggestedSettings) {
+      if (suggestedSettings.sizeRetentionEnabled !== undefined) {
+        sizeRetentionEnabled = suggestedSettings.sizeRetentionEnabled;
+      }
+      if (suggestedSettings.maxSizeValue !== undefined) {
+        maxSizeValue = suggestedSettings.maxSizeValue;
+      }
+      if (suggestedSettings.maxSizeUnit) {
+        maxSizeUnit = suggestedSettings.maxSizeUnit;
+      }
+      if (suggestedSettings.ageRetentionEnabled !== undefined) {
+        ageRetentionEnabled = suggestedSettings.ageRetentionEnabled;
+      }
+      if (suggestedSettings.maxAgeValue !== undefined) {
+        maxAgeValue = suggestedSettings.maxAgeValue;
+      }
+      if (suggestedSettings.maxAgeUnit) {
+        maxAgeUnit = suggestedSettings.maxAgeUnit;
+      }
+      if (suggestedSettings.countRetentionEnabled !== undefined) {
+        countRetentionEnabled = suggestedSettings.countRetentionEnabled;
+      }
+      if (suggestedSettings.maxCountValue !== undefined) {
+        maxCountValue = suggestedSettings.maxCountValue;
+      }
+    }
+
     // Apply the recommendation based on its type
     switch (recommendation.type) {
+      case "enable-retention":
+        if (!suggestedSettings) {
+          countRetentionEnabled = true;
+          maxCountValue = recommendation.suggestedValue || Math.max(10, maxCountValue || 10);
+        }
+        break;
+
       case "enable-size-retention":
         sizeRetentionEnabled = true;
         if (recommendation.suggestedValue) {
@@ -1098,7 +1370,15 @@
         }
         break;
 
+      case "enable_policies":
+        if (!suggestedSettings) {
+          countRetentionEnabled = true;
+          maxCountValue = recommendation.suggestedValue || Math.max(5, Math.min(20, backups.length));
+        }
+        break;
+
       case "adjust-size-limit":
+      case "adjust-size-retention":
         if (recommendation.suggestedValue) {
           maxSizeValue = recommendation.suggestedValue;
           maxSizeUnit = recommendation.suggestedUnit || "GB";
@@ -1106,6 +1386,7 @@
         break;
 
       case "adjust-age-limit":
+      case "adjust-age-retention":
         if (recommendation.suggestedValue) {
           maxAgeValue = recommendation.suggestedValue;
           maxAgeUnit = recommendation.suggestedUnit || "days";
@@ -1113,6 +1394,7 @@
         break;
 
       case "adjust-count-limit":
+      case "adjust-count-retention":
         if (recommendation.suggestedValue) {
           maxCountValue = recommendation.suggestedValue;
         }
@@ -1124,6 +1406,11 @@
 
     // Regenerate optimization analysis
     await generateOptimization();
+
+    toast.success("Recommendation applied", {
+      description:
+        recommendation.title || "Retention settings have been updated.",
+    });
   }
 
   // Apply retention policy manually
@@ -2270,6 +2557,7 @@
           loading={optimizationLoading}
           on:apply-policy={applySuggestedPolicy}
           on:apply-recommendation={applyRecommendation}
+          recommendationHistory={dismissedRetentionRecommendations}
         />
       </div>
     {/if}
@@ -2592,6 +2880,8 @@
   loading={previewLoading}
   on:confirm={handlePreviewConfirm}
   on:cancel={handlePreviewCancel}
+  on:dismiss-recommendation={handleRecommendationDismiss}
+  recommendationHistory={dismissedRetentionRecommendations}
 />
 
 <style>

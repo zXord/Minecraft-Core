@@ -145,6 +145,50 @@ let tray = null;
 // Check if app should start minimized
 const shouldStartMinimized = process.argv.includes('--start-minimized');
 
+/**
+ * Resolve an asset path regardless of dev or packaged runtime.
+ * Prefers build resources when packaged while allowing root fallbacks in dev.
+ * @param {...string} filenames
+ * @returns {string|null}
+ */
+function resolveAssetPath(...filenames) {
+  const seen = new Set();
+  const candidates = [];
+
+  for (const name of filenames) {
+    if (!name) {
+      continue;
+    }
+
+    const normalized = path.normalize(name);
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+
+    if (app.isPackaged) {
+      candidates.push(path.join(process.resourcesPath, normalized));
+      candidates.push(path.join(process.resourcesPath, 'build', normalized));
+    }
+
+    candidates.push(path.join(__dirname, '..', normalized));
+    candidates.push(path.resolve(normalized));
+    candidates.push(path.resolve('build', normalized));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // ignore fs probe errors
+    }
+  }
+
+  return null;
+}
+
 
 
 /**
@@ -162,41 +206,40 @@ function createTray() {
   
   try {
     let trayIcon;
-    
-          // Use the custom Minecraft Core icon
-      const iconPath = path.join(__dirname, '../icon.png');
-      
-      if (fs.existsSync(iconPath)) {
-        trayIcon = nativeImage.createFromPath(iconPath);
-        // Resize to appropriate tray size (bigger for better visibility)
-        if (!trayIcon.isEmpty()) {
-          trayIcon = trayIcon.resize({ width: 32, height: 32 });
-          if (logger) {
-            logger.debug('Tray icon loaded and resized', {
-              category: 'core',
-              data: { iconPath, iconSize: '32x32' }
-            });
-          }
-        }
-      }
-      
-      // Fallback if icon loading fails
-      if (!trayIcon || trayIcon.isEmpty()) {
+    const trayAsset = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+    const iconPath = resolveAssetPath(trayAsset, 'icon.ico', 'icon.png');
 
-        const width = 32;
-        const height = 32;
-        const buffer = Buffer.alloc(width * height * 4);
-        
-        // Create a simple dark square as fallback
-        for (let i = 0; i < buffer.length; i += 4) {
-          buffer[i] = 64;      // Red (dark gray)
-          buffer[i + 1] = 64;  // Green (dark gray)
-          buffer[i + 2] = 64;  // Blue (dark gray)
-          buffer[i + 3] = 255; // Alpha (fully opaque)
+    if (iconPath) {
+      trayIcon = nativeImage.createFromPath(iconPath);
+
+      if (!trayIcon.isEmpty()) {
+        const targetSize = process.platform === 'win32' ? 32 : 24;
+        trayIcon = trayIcon.resize({ width: targetSize, height: targetSize });
+        if (logger) {
+          logger.debug('Tray icon loaded and resized', {
+            category: 'core',
+            data: { iconPath, iconSize: `${targetSize}x${targetSize}` }
+          });
         }
-        
-        trayIcon = nativeImage.createFromBuffer(buffer, { width, height });
       }
+    }
+
+    // Fallback if icon loading fails
+    if (!trayIcon || trayIcon.isEmpty()) {
+      const width = 32;
+      const height = 32;
+      const buffer = Buffer.alloc(width * height * 4);
+
+      // Create a simple dark square as fallback
+      for (let i = 0; i < buffer.length; i += 4) {
+        buffer[i] = 64;      // Red (dark gray)
+        buffer[i + 1] = 64;  // Green (dark gray)
+        buffer[i + 2] = 64;  // Blue (dark gray)
+        buffer[i + 3] = 255; // Alpha (fully opaque)
+      }
+
+      trayIcon = nativeImage.createFromBuffer(buffer, { width, height });
+    }
     
     // Create tray with the icon (or system default if empty)
     tray = new Tray(trayIcon);
@@ -382,21 +425,19 @@ function createWindow() {
   const preloadPath = path.join(__dirname, 'preload.cjs');
 
   // Set up the window icon
-  const iconPath = path.join(__dirname, '../icon.png');
-  let windowIcon = null;
-  
-  if (fs.existsSync(iconPath)) {
-    windowIcon = iconPath;
-    if (logger) {
-      logger.debug('Window icon loaded', {
-        category: 'core',
-        data: { iconPath }
-      });
-    }
-  } else if (logger) {
-    logger.warn('Window icon not found', {
+  const windowIconPath = resolveAssetPath(
+    process.platform === 'win32' ? 'icon.ico' : 'icon.png',
+    'icon.png'
+  );
+
+  if (!windowIconPath && logger) {
+    logger.warn('Window icon not resolved, using default', {
+      category: 'core'
+    });
+  } else if (windowIconPath && logger) {
+    logger.debug('Window icon resolved', {
       category: 'core',
-      data: { iconPath }
+      data: { windowIconPath }
     });
   }
 
@@ -404,7 +445,7 @@ function createWindow() {
     width: windowWidth,
     height: windowHeight,
     resizable: isResizable,
-    icon: windowIcon, // Set the window icon
+    icon: windowIconPath || undefined, // Set the window icon
     title: 'Minecraft Core', // Set explicit title without version
     webPreferences: {
       contextIsolation: true,
@@ -417,6 +458,24 @@ function createWindow() {
     // Don't show initially if starting minimized
     show: false
   });
+
+  // Explicitly set Windows taskbar overlay icon
+  if (process.platform === 'win32' && windowIconPath) {
+    const { nativeImage } = require('electron');
+    try {
+      const overlayIcon = nativeImage.createFromPath(windowIconPath);
+      if (!overlayIcon.isEmpty()) {
+        win.setOverlayIcon(overlayIcon, 'Minecraft Core');
+      }
+    } catch (error) {
+      if (logger) {
+        logger.warn('Failed to set overlay icon', {
+          category: 'core',
+          data: { error: error.message }
+        });
+      }
+    }
+  }
   
   const windowCreationTime = Date.now() - startTime;
   if (logger) {
@@ -427,7 +486,7 @@ function createWindow() {
         windowWidth,
         windowHeight,
         isResizable,
-        hasIcon: !!windowIcon,
+        hasIcon: !!windowIconPath,
         preloadPath
       }
     });
@@ -848,6 +907,12 @@ function createWindow() {
 
 // Set app name explicitly to avoid version display
 app.setName('Minecraft Core');
+
+// Set Windows App User Model ID for proper taskbar icon grouping
+// This must match the appId in package.json build configuration
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.minecraft-core.app');
+}
 
 // Initialize app when ready
 app.whenReady().then(() => {
