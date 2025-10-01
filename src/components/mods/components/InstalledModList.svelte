@@ -34,7 +34,7 @@
   import { formatInstallationDate, formatLastUpdated, formatTooltipDate } from '../../../utils/dateUtils.js';
   
   // Import existing API functions
-  import { loadMods, loadContent, deleteMod, deleteContent, checkForUpdates, enableAndUpdateMod, fetchModVersions, checkDisabledModUpdates } from '../../../utils/mods/modAPI.js';
+  import { loadMods, loadContent, deleteMod, deleteContent, checkForUpdates, enableAndUpdateMod, fetchModVersions, checkDisabledModUpdates, installMod } from '../../../utils/mods/modAPI.js';
   import { safeInvoke } from '../../../utils/ipcUtils.js';
   import { checkDependencyCompatibility, checkVersionCompatibility } from '../../../utils/mods/modCompatibility.js';
   import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
@@ -860,14 +860,38 @@
     try {
       let updatedCount = 0;
       
-      // Update enabled mods
+      // Clear updates list immediately to prevent UI flickering
+      modsWithUpdates.update(updates => {
+        const next = new SvelteMap(updates);
+        for (const mod of enabledModsToUpdate) {
+          next.delete(mod.modName);
+          if (mod.projectId) {
+            next.delete('project:' + mod.projectId);
+          }
+        }
+        return next;
+      });
+      
+      // Update enabled mods - use direct install instead of dispatch to avoid intermediate reloads
       for (const mod of enabledModsToUpdate) {
-        await dispatch('updateMod', {
-          modName: mod.modName,
-          projectId: mod.projectId,
-          versionId: mod.versionId
-        });
-        updatedCount++;
+        try {
+          const baseName = mod.modName.replace(/\.jar$/i, '');
+          const modObj = {
+            id: mod.projectId,
+            name: baseName,
+            title: baseName,
+            selectedVersionId: mod.versionId,
+            source: 'modrinth'
+          };
+          
+          const success = await installMod(modObj, serverPath, { contentType: $activeContentType });
+          if (success) {
+            updatedCount++;
+          }
+        } catch (error) {
+          // Log error but continue with other mods
+          console.error(`Failed to update ${mod.modName}:`, error);
+        }
       }
       
       // Enable and update disabled mods
@@ -884,7 +908,7 @@
         }
       }
       
-      // Force refresh mod list and update checks to ensure UI is current
+      // Force refresh mod list and update checks ONCE at the end to ensure UI is current
       await loadMods(serverPath);
       await checkForUpdates(serverPath, true);
       
