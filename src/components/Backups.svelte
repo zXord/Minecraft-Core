@@ -142,6 +142,7 @@
   let retentionOptimization = null;
   let optimizationLoading = false;
   let showOptimization = false;
+  let latestRetentionSavings = null;
 
   // Button state management with persistence
   let retentionButtonsDisabled = false;
@@ -388,15 +389,16 @@
     statisticsError = "";
 
     try {
-      // Calculate retention savings if retention policies are enabled
+      // Calculate retention savings using latest execution details when available
       let retentionSavings = null;
-      if (
+      if (latestRetentionSavings) {
+        retentionSavings = { ...latestRetentionSavings };
+      } else if (
         sizeRetentionEnabled ||
         ageRetentionEnabled ||
         countRetentionEnabled
       ) {
-        // This would be populated from actual retention policy execution results
-        // For now, we'll pass null and let the statistics service handle it
+        // Fallback placeholder so UI gracefully shows zero when policies are enabled
         retentionSavings = { spaceSaved: 0 };
       }
 
@@ -438,6 +440,7 @@
           useBackground,
           incremental: backupStatistics.incremental || false,
           serverPath,
+          retentionSavings: backupStatistics.retentionSavings
         },
       });
 
@@ -564,6 +567,7 @@
     });
 
     lastServerPath = serverPath;
+    latestRetentionSavings = null;
     fetchBackups();
     loadAutomationSettings();
     loadRetentionSettings();
@@ -1186,6 +1190,13 @@
         } else {
           status = "Retention policy applied: no backups needed to be deleted";
         }
+
+        latestRetentionSavings = {
+          spaceSaved,
+          backupsDeleted: deletedCount,
+          recordedAt: new Date().toISOString(),
+          serverPath
+        };
 
         // Store settings hash when policy is successfully applied
         const currentHash = getSettingsHash();
