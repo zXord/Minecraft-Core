@@ -25,6 +25,11 @@
   let previousServerPath = "";
   let serverFolderSize = null; // bytes
   let serverFolderSizeLoading = false;
+  
+  // Server config info
+  let serverConfig = null;
+  let serverConfigLoading = false;
+  let javaVersion = null;
 
   function formatBytes(bytes) {
     if (bytes === 0) return '0 B';
@@ -47,6 +52,33 @@
       // ignore size errors to keep UI responsive
     } finally {
       serverFolderSizeLoading = false;
+    }
+  }
+
+  async function loadServerConfig() {
+    if (!serverPath) return;
+    serverConfigLoading = true;
+    try {
+      const config = await window.electron.invoke('read-config', serverPath);
+      if (config) {
+        serverConfig = config;
+        console.log('Loaded server config:', config);
+        
+        // Get Java version info
+        if (config.version) {
+          const javaInfo = await window.electron.invoke('server-java-check-requirements', {
+            minecraftVersion: config.version,
+            serverPath: serverPath
+          });
+          if (javaInfo?.requiredJavaVersion) {
+            javaVersion = javaInfo.requiredJavaVersion;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load server config:', e);
+    } finally {
+      serverConfigLoading = false;
     }
   }
 
@@ -142,8 +174,10 @@
     try {
       // Simulate settings data loading
       await loadSettingsData();
-  // After data load attempt to fetch size (non-blocking)
-  loadServerFolderSize();
+      
+      // Load server info (non-blocking)
+      loadServerFolderSize();
+      loadServerConfig();
 
       pageInitialized = true;
       loadingState = "loaded";
@@ -509,6 +543,42 @@
                 {#if !serverFolderSizeLoading}
                   <button class="icon-btn" on:click={loadServerFolderSize} title="Refresh size" style="margin-left:6px;">🔄</button>
                 {/if}
+              </span>
+            </div>
+            
+            <div class="info-row enhanced" title="Minecraft version installed">
+              <div class="info-label">
+                <span class="info-icon">🎮</span>
+                <span>Minecraft</span>
+              </div>
+              <span class="info-value">
+                {serverConfigLoading ? 'Loading...' : (serverConfig?.version || '—')}
+              </span>
+            </div>
+            
+            <div class="info-row enhanced" title="Mod loader type and version">
+              <div class="info-label">
+                <span class="info-icon">⚙️</span>
+                <span>Loader</span>
+              </div>
+              <span class="info-value">
+                {#if serverConfigLoading}
+                  Loading...
+                {:else if serverConfig?.loader}
+                  {serverConfig.loader.charAt(0).toUpperCase() + serverConfig.loader.slice(1)} {serverConfig.loaderVersion || ''}
+                {:else}
+                  —
+                {/if}
+              </span>
+            </div>
+            
+            <div class="info-row enhanced" title="Java version required for this Minecraft version">
+              <div class="info-label">
+                <span class="info-icon">☕</span>
+                <span>Java</span>
+              </div>
+              <span class="info-value">
+                {serverConfigLoading ? 'Loading...' : (javaVersion ? `Java ${javaVersion}` : '—')}
               </span>
             </div>
             {/if}
