@@ -3010,10 +3010,10 @@ function createMinecraftLauncherHandlers(win) {
         const configManager = require('../utils/config-manager.cjs');
         const preferences = await configManager.getInstanceConfig(instanceId, 'downloadPreferences');
         
-        // Return saved preferences or defaults
+        // Return saved preferences or defaults (Modrinth is now default primary)
         return {
-          primarySource: preferences?.primarySource || 'server',
-          fallbackSource: preferences?.fallbackSource || 'modrinth'
+          primarySource: preferences?.primarySource || 'modrinth',
+          fallbackSource: preferences?.fallbackSource || 'server'
         };
       } catch (error) {
         logger.error(`Failed to get download preferences: ${error.message}`, {
