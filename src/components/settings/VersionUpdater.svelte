@@ -1,4 +1,4 @@
-<script>  import { onMount } from 'svelte';
+<script>  import { onMount, onDestroy } from 'svelte';
   
   import { SvelteSet } from 'svelte/reactivity';
   import { get } from 'svelte/store';
@@ -30,6 +30,7 @@
   let serverPathLocal = '';
   let showWatchSettings = false;
   let modWatchPrefs = { showWindowsNotifications: false, intervalHours: 12 };
+  let teardownIpcListeners = () => {};
   $: serverPathLocal = resolvedPath;
   $: if (serverPathLocal && !$modAvailabilityWatchStore.loaded) {
     modAvailabilityWatchStore.refresh(serverPathLocal);
@@ -89,37 +90,64 @@
   $: serverRunning = serverStatus === 'Running';
 
       $: resolvedPath = serverPath || get(settingsStore).path;
+  function handleMinecraftServerProgress(data) {
+    if (!data || typeof data !== 'object') return;
+    updateProgress = Math.round(data.percent || 0);
+    updateStatus = data.speed || '';
+    currentTask = 'Downloading Minecraft server...';
+  }
+
+  function handleFabricInstallProgress(data) {
+    if (!data || typeof data !== 'object') return;
+    updateProgress = Math.round(data.percent || 0);
+    updateStatus = data.speed || '';
+    currentTask = 'Installing Fabric loader...';
+  }
+
+  function handleDownloadProgress(data) {
+    if (!data || typeof data !== 'object') return;
+    if (data.id && typeof data.id === 'string' && data.id.startsWith('mod-')) {
+      updateProgress = Math.round(data.progress || 0);
+      updateStatus = data.speed ? `${(data.speed / 1024 / 1024).toFixed(2)} MB/s` : '';
+      currentTask = `Updating ${data.name || 'mod'}...`;
+    }
+  }
+
+  function handleServerJavaDownloadProgress(data) {
+    if (!data || typeof data !== 'object') return;
+    updateProgress = data.progress || 0;
+    updateStatus = data.downloadedMB && data.totalMB
+      ? `${data.downloadedMB}/${data.totalMB} MB`
+      : '';
+    currentTask = `Java: ${data.task}`;
+  }
+
+  function registerIpcListeners() {
+    if (!window?.electron) {
+      return () => {};
+    }
+
+    window.electron.on('minecraft-server-progress', handleMinecraftServerProgress);
+    window.electron.on('fabric-install-progress', handleFabricInstallProgress);
+    window.electron.on('download-progress', handleDownloadProgress);
+    window.electron.on('server-java-download-progress', handleServerJavaDownloadProgress);
+
+    return () => {
+      window.electron.removeListener?.('minecraft-server-progress', handleMinecraftServerProgress);
+      window.electron.removeListener?.('fabric-install-progress', handleFabricInstallProgress);
+      window.electron.removeListener?.('download-progress', handleDownloadProgress);
+      window.electron.removeListener?.('server-java-download-progress', handleServerJavaDownloadProgress);
+    };
+  }
+
   onMount(() => {
     fetchMinecraftVersions();
-      // Set up progress listeners
-    window.electron.on('minecraft-server-progress', (data) => {
-      updateProgress = Math.round(data.percent || 0);
-      updateStatus = data.speed || '';
-      currentTask = 'Downloading Minecraft server...';
-    });
-    
-    window.electron.on('fabric-install-progress', (data) => {
-      updateProgress = Math.round(data.percent || 0);
-      updateStatus = data.speed || '';
-      currentTask = 'Installing Fabric loader...';
-    });
-      window.electron.on('download-progress', (data) => {
-      if (data.id && data.id.startsWith('mod-')) {
-        updateProgress = Math.round(data.progress || 0);
-        updateStatus = data.speed ? `${(data.speed / 1024 / 1024).toFixed(2)} MB/s` : '';
-        currentTask = `Updating ${data.name || 'mod'}...`;
-      }
-    });
-    
-    window.electron.on('server-java-download-progress', (data) => {
-      if (data && typeof data === 'object') {
-        updateProgress = data.progress || 0;
-        updateStatus = data.downloadedMB && data.totalMB 
-          ? `${data.downloadedMB}/${data.totalMB} MB`
-          : '';
-        currentTask = `Java: ${data.task}`;
-      }
-    });
+    teardownIpcListeners = registerIpcListeners();
+  });
+
+  onDestroy(() => {
+    teardownIpcListeners?.();
+    teardownIpcListeners = () => {};
   });
 
   async function fetchMinecraftVersions() {
