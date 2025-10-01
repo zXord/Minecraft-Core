@@ -1133,18 +1133,32 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         if (clientVersionUpdates && clientVersionUpdates.hasChanges) {
           // Add client mod updates to a separate array instead of mixing with server mods
           if (clientVersionUpdates.updates && clientVersionUpdates.updates.length > 0) {
-            const clientUpdates = clientVersionUpdates.updates.map(update => ({
-              fileName: update.fileName,
-              name: update.name,
-              currentVersion: update.currentVersion,
-              newVersion: update.newVersion,
-              projectId: update.projectId,
-              versionId: update.versionId,
-              isClientMod: true, // Mark as client mod for special handling
-              reason: update.reason
-            }));
+            // Create a set of mods that need removal (both required and optional)
+            const removalSet = new SvelteSet();
+            if (result.requiredRemovals) {
+              result.requiredRemovals.forEach(removal => removalSet.add(removal.fileName.toLowerCase()));
+            }
+            if (result.optionalRemovals) {
+              result.optionalRemovals.forEach(removal => removalSet.add(removal.fileName.toLowerCase()));
+            }
             
-            enhancedResult.clientModUpdates = clientUpdates;
+            // Filter out any mods that are in the removal list
+            const filteredClientUpdates = clientVersionUpdates.updates
+              .filter(update => !removalSet.has(update.fileName.toLowerCase()))
+              .map(update => ({
+                fileName: update.fileName,
+                name: update.name,
+                currentVersion: update.currentVersion,
+                newVersion: update.newVersion,
+                projectId: update.projectId,
+                versionId: update.versionId,
+                isClientMod: true, // Mark as client mod for special handling
+                reason: update.reason
+              }));
+            
+            if (filteredClientUpdates.length > 0) {
+              enhancedResult.clientModUpdates = filteredClientUpdates;
+            }
           }
           
           // Add client mod disables to a special array
@@ -2330,8 +2344,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         successMessage.set(`Client download complete: ${data.message || 'Minecraft client files downloaded successfully'}`);
         setTimeout(() => successMessage.set(''), 5000);
         
-        // Preserve server info and mod lists during client download completion
-        // Don't trigger aggressive refresh that might clear mod information
+        // After client download completes, refresh mod sync status
+        // This ensures the mods section updates properly
+        setTimeout(async () => {
+          try {
+            await checkModSynchronization();
+            await checkClientModVersionCompatibility();
+          } catch (e) {
+            console.error('Error refreshing mod sync after client download:', e);
+          }
+        }, 1000);
       } else {
         errorMessage.set(`Client download failed: ${data.error || 'Unknown error'}`);
         setTimeout(() => errorMessage.set(''), 5000);
