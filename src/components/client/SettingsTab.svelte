@@ -52,9 +52,9 @@
     }
   }
   
-  // Download source preferences
-  let primaryDownloadSource = 'server';
-  let fallbackDownloadSource = 'modrinth';
+  // Download source preferences (Modrinth is now default)
+  let primaryDownloadSource = 'modrinth';
+  let fallbackDownloadSource = 'server';
   
   // Load download preferences on component mount
   import { onMount } from 'svelte';
@@ -63,8 +63,8 @@
     try {
       const preferences = await window.electron.invoke('get-download-preferences', { instanceId: instance.path });
       if (preferences) {
-        primaryDownloadSource = preferences.primarySource || 'server';
-        fallbackDownloadSource = preferences.fallbackSource || 'modrinth';
+        primaryDownloadSource = preferences.primarySource || 'modrinth';
+        fallbackDownloadSource = preferences.fallbackSource || 'server';
       }
   loadClientFolderSize();
     } catch (error) {
@@ -369,8 +369,8 @@
               <span class="label-text">Primary Source</span>
             </label>
             <select id="primary-download-source" class="modern-select compact" bind:value={primaryDownloadSource} on:change={handleDownloadSourceChange}>
-              <option value="server">Server (Recommended)</option>
-              <option value="modrinth">Modrinth</option>
+              <option value="modrinth">Modrinth (Recommended)</option>
+              <option value="server">Server</option>
             </select>
           </div>
           
@@ -386,7 +386,13 @@
         
         <div class="setting-info compact">
           <p class="info-text">
-            Server provides fastest downloads, Modrinth is used as fallback.
+            {#if primaryDownloadSource === 'modrinth'}
+              Modrinth provides reliable downloads with automatic fallback to server if needed.
+            {:else if primaryDownloadSource === 'server'}
+              Server provides direct downloads with automatic fallback to Modrinth if needed.
+            {:else}
+              Downloads will attempt from {getFallbackSourceName(primaryDownloadSource)} first, then use {getFallbackSourceName(fallbackDownloadSource)} as fallback.
+            {/if}
           </p>
         </div>
       </div>

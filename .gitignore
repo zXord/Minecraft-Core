@@ -17,6 +17,9 @@ build/icon.ico
 build/*.exe
 build/*.msi
 
+# Auto-generated build files
+electron/logger-window.html
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
