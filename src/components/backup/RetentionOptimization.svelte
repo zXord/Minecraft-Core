@@ -10,6 +10,29 @@
   export let loading = false;
   export let compact = false;
 
+  const EMPTY_EFFECTIVENESS = {
+    overallScore: 0,
+    storageEfficiency: 0,
+    retentionBalance: 0,
+    policyUtilization: 0
+  };
+
+  const EMPTY_PATTERNS = {
+    totalBackups: 0,
+    totalSize: 0,
+    growthTrend: 'unknown',
+    frequency: null
+  };
+
+  const EMPTY_METRICS = null;
+
+  $: safeOptimization = optimization ?? {};
+  $: safeEffectiveness = safeOptimization.effectiveness ?? EMPTY_EFFECTIVENESS;
+  $: safePatterns = safeOptimization.patterns ?? EMPTY_PATTERNS;
+  $: safeRecommendations = safeOptimization.recommendations ?? [];
+  $: safeSuggestedPolicies = safeOptimization.suggestedPolicies ?? [];
+  $: safeMetrics = safeOptimization.metrics ?? EMPTY_METRICS;
+
   // Get priority class for recommendations
   function getPriorityClass(priority) {
     switch (priority) {
@@ -54,7 +77,11 @@
 
   // Format effectiveness score
   function formatScore(score) {
-    return Math.round(score * 100);
+    if (typeof score !== 'number' || Number.isNaN(score)) {
+      return 0;
+    }
+    const normalized = Math.max(0, Math.min(1, score));
+    return Math.round(normalized * 100);
   }
 
 
@@ -83,9 +110,9 @@
   }
 
   // Check if optimization data is available
-  $: hasOptimization = optimization && !loading;
-  $: hasRecommendations = hasOptimization && optimization && optimization.recommendations && optimization.recommendations.length > 0;
-  $: hasSuggestedPolicies = hasOptimization && optimization && optimization.suggestedPolicies && optimization.suggestedPolicies.length > 0;
+  $: hasOptimization = !loading && !!optimization;
+  $: hasRecommendations = hasOptimization && safeRecommendations.length > 0;
+  $: hasSuggestedPolicies = hasOptimization && safeSuggestedPolicies.length > 0;
 </script>
 
 {#if loading}
@@ -100,25 +127,25 @@
       <!-- Effectiveness Overview - Compact -->
       <div class="effectiveness-overview compact">
         <div class="effectiveness-summary">
-          <span class="overall-score score-{Math.floor(optimization.effectiveness.overallScore * 5)}">
-            {formatScore(optimization.effectiveness.overallScore)}%
+          <span class="overall-score score-{Math.floor((safeEffectiveness.overallScore || 0) * 5)}">
+            {formatScore(safeEffectiveness.overallScore)}%
           </span>
           <span class="score-label">Policy Effectiveness</span>
         </div>
         <div class="effectiveness-details">
-          <span class="detail-item">Storage: {formatScore(optimization.effectiveness.storageEfficiency)}%</span>
-          <span class="detail-item">Balance: {formatScore(optimization.effectiveness.retentionBalance)}%</span>
-          <span class="detail-item">Utilization: {formatScore(optimization.effectiveness.policyUtilization)}%</span>
+          <span class="detail-item">Storage: {formatScore(safeEffectiveness.storageEfficiency)}%</span>
+          <span class="detail-item">Balance: {formatScore(safeEffectiveness.retentionBalance)}%</span>
+          <span class="detail-item">Utilization: {formatScore(safeEffectiveness.policyUtilization)}%</span>
         </div>
       </div>
 
       <!-- Backup Patterns Summary - Compact -->
       <div class="patterns-summary compact">
         <div class="patterns-inline">
-          <span class="pattern-stat">{optimization.patterns.totalBackups} backups</span>
-          <span class="pattern-stat">{formatSize(optimization.patterns.totalSize)} total</span>
-          <span class="pattern-stat">{getGrowthTrendDescription(optimization.patterns.growthTrend)}</span>
-          <span class="pattern-stat">{optimization.patterns.frequency ? getFrequencyDescription(optimization.patterns.frequency.pattern) : 'Unknown frequency'}</span>
+          <span class="pattern-stat">{safePatterns.totalBackups} backups</span>
+          <span class="pattern-stat">{formatSize(safePatterns.totalSize)} total</span>
+          <span class="pattern-stat">{getGrowthTrendDescription(safePatterns.growthTrend)}</span>
+          <span class="pattern-stat">{safePatterns.frequency ? getFrequencyDescription(safePatterns.frequency.pattern) : 'Unknown frequency'}</span>
         </div>
       </div>
     {/if}
@@ -128,14 +155,14 @@
       <div class="recommendations-section">
         <h3>Optimization Recommendations</h3>
         <div class="recommendations-list">
-          {#each optimization.recommendations as recommendation (recommendation.type)}
+          {#each safeRecommendations as recommendation (recommendation.type || recommendation.title)}
             <div class="recommendation-item {getPriorityClass(recommendation.priority)}">
               <div class="recommendation-header">
                 <span class="recommendation-icon">{getPriorityIcon(recommendation.priority)}</span>
                 <span class="recommendation-title">{recommendation.title}</span>
-                <span class="recommendation-priority">{recommendation.priority}</span>
-                {#if recommendation.confidence}
-                  <span class="recommendation-confidence">{Math.round(recommendation.confidence * 100)}%</span>
+                <span class="recommendation-priority">{recommendation.priority || 'info'}</span>
+                {#if typeof recommendation.confidence === 'number'}
+                  <span class="recommendation-confidence">{formatScore(recommendation.confidence) }%</span>
                 {/if}
               </div>
               
@@ -187,12 +214,12 @@
       <div class="suggested-policies-section">
         <h3>Suggested Policy Configurations</h3>
         <div class="policies-grid">
-          {#each optimization.suggestedPolicies as policy (policy.name)}
+          {#each safeSuggestedPolicies as policy (policy.name)}
             <div class="policy-card">
               <div class="policy-header">
                 <h4 class="policy-name">{policy.name}</h4>
-                <span class="policy-risk risk-{policy.expectedImpact.riskLevel}">
-                  {policy.expectedImpact.riskLevel} risk
+                <span class="policy-risk risk-{policy.expectedImpact?.riskLevel ?? 'unknown'}">
+                  {(policy.expectedImpact?.riskLevel ?? 'unknown')} risk
                 </span>
               </div>
               
@@ -236,11 +263,11 @@
               <div class="policy-impact">
                 <div class="impact-item">
                   <span class="impact-label">Storage Reduction:</span>
-                  <span class="impact-value">{Math.round(policy.expectedImpact.storageReduction * 100)}%</span>
+                  <span class="impact-value">{formatScore(policy.expectedImpact?.storageReduction ?? 0)}%</span>
                 </div>
                 <div class="impact-item">
                   <span class="impact-label">Backups Kept:</span>
-                  <span class="impact-value">{Math.round(policy.expectedImpact.backupsKept * 100)}%</span>
+                  <span class="impact-value">{formatScore(policy.expectedImpact?.backupsKept ?? 0)}%</span>
                 </div>
               </div>
               
@@ -259,15 +286,15 @@
     {/if}
 
     <!-- Optimization Metrics (compact view) -->
-    {#if compact && optimization.metrics}
+    {#if compact && safeMetrics}
       <div class="metrics-compact">
         <div class="metric-item">
           <span class="metric-label">Optimization Potential:</span>
-          <span class="metric-value">{formatScore(optimization.metrics.optimizationPotential)}%</span>
+          <span class="metric-value">{formatScore(safeMetrics.optimizationPotential)}%</span>
         </div>
         <div class="metric-item">
           <span class="metric-label">Storage Utilization:</span>
-          <span class="metric-value">{formatScore(optimization.metrics.storageUtilization)}%</span>
+          <span class="metric-value">{formatScore(safeMetrics.storageUtilization)}%</span>
         </div>
       </div>
     {/if}

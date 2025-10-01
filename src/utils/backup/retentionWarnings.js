@@ -3,6 +3,7 @@
 import { RetentionPolicy, TimeConstants, SizeConstants } from './retentionPolicy.js';
 import { formatSize } from './sizeCalculator.js';
 import logger from '../logger.js';
+import { optimizeRetentionPolicies as optimizeRetentionPoliciesCore } from '../../../shared/backup/retentionOptimization.js';
 
 /**
  * Retention Policy Warnings and Preview System
@@ -772,7 +773,7 @@ ptimize retention policies based on backup patterns
  * @param {Object} currentSettings - Current retention policy settings
  * @returns {Promise<Object>} Optimization recommendations
  */
-export async function optimizeRetentionPolicies(backups, currentSettings) {
+async function fallbackOptimizeRetentionPolicies(backups, currentSettings = {}) {
   // Basic optimization analysis
   const totalSize = backups.reduce((sum, backup) => sum + (backup.size || 0), 0);
   const averageSize = backups.length > 0 ? totalSize / backups.length : 0;
@@ -873,4 +874,24 @@ export async function optimizeRetentionPolicies(backups, currentSettings) {
       }
     ]
   };
+}
+
+/**
+ * Optimize retention policies using shared core logic with renderer fallback.
+ */
+export async function optimizeRetentionPolicies(backups, currentSettings = {}) {
+  try {
+    return await optimizeRetentionPoliciesCore(backups, currentSettings);
+  } catch (error) {
+    logger.error('Shared retention optimization failed, using fallback implementation', {
+      category: 'backup',
+      data: {
+        function: 'optimizeRetentionPolicies',
+        error: error.message,
+        backupCount: Array.isArray(backups) ? backups.length : 'unknown'
+      }
+    });
+
+    return await fallbackOptimizeRetentionPolicies(backups, currentSettings);
+  }
 }
