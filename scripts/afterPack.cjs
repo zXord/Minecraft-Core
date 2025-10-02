@@ -36,14 +36,23 @@ exports.default = async function(context) {
     try {
         const rcedit = require('rcedit');
         
-        console.log('Using rcedit to set icon...');
+        console.log('Using rcedit to set icon and metadata...');
         await rcedit(exePath, {
-            icon: iconPath
+            icon: iconPath,
+            'version-string': {
+                'CompanyName': 'zXord',
+                'FileDescription': 'Minecraft Core',
+                'ProductName': 'Minecraft Core',
+                'InternalName': 'Minecraft Core',
+                'OriginalFilename': 'Minecraft Core.exe'
+            },
+            'file-version': context.packager.appInfo.version,
+            'product-version': context.packager.appInfo.version
         });
         
-        console.log('Successfully embedded icon in exe');
+        console.log('Successfully embedded icon and metadata in exe');
     } catch (error) {
-        console.error('Failed to update exe icon:', error.message);
+        console.error('Failed to update exe:', error.message);
         // Don't fail the build, just log the error
     }
 };
