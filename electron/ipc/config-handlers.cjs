@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
+const { resolveServerLoader } = require('../utils/server-loader.cjs');
 
 const logger = getLoggerHandlers();
 
@@ -67,6 +68,28 @@ function createConfigHandlers() {
 
         const configContent = fs.readFileSync(configPath, 'utf-8');
         const config = JSON.parse(configContent);
+        
+        // Enrich config with detected loader information if not present
+        if (!config.loaderVersion) {
+          try {
+            const { loader, loaderVersion } = resolveServerLoader(serverPath);
+            if (loader && !config.loader) {
+              config.loader = loader;
+            }
+            if (loaderVersion) {
+              config.loaderVersion = loaderVersion;
+            }
+          } catch (loaderError) {
+            logger.warn('Failed to detect loader version', {
+              category: 'settings',
+              data: {
+                handler: 'read-config',
+                errorMessage: loaderError.message
+              }
+            });
+          }
+        }
+        
         const duration = Date.now() - startTime;
 
         logger.info('Configuration file read successfully', {
@@ -78,6 +101,8 @@ function createConfigHandlers() {
             hasVersion: !!config.version,
             hasFabric: !!config.fabric,
             hasPort: !!config.port,
+            hasLoader: !!config.loader,
+            hasLoaderVersion: !!config.loaderVersion,
             configKeys: Object.keys(config)
           }
         });
