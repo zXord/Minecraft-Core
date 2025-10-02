@@ -2,12 +2,20 @@
 const path = require('path');
 const fs = require('fs/promises');
 const sharp = require('sharp');
-const pngToIcoModule = require('png-to-ico');
-const pngToIco = typeof pngToIcoModule === 'function'
-  ? pngToIcoModule
-  : pngToIcoModule.default;
 
 const TARGET_SIZES = [256, 128, 64, 48, 32, 24, 16];
+
+// Dynamic import for ESM module
+let pngToIco;
+async function getPngToIco() {
+  if (!pngToIco) {
+    const pngToIcoModule = await import('png-to-ico');
+    pngToIco = typeof pngToIcoModule === 'function' 
+      ? pngToIcoModule 
+      : pngToIcoModule.default;
+  }
+  return pngToIco;
+}
 
 async function createPngBuffers(sourcePath) {
   const sourceBuffer = await fs.readFile(sourcePath);
@@ -59,7 +67,8 @@ async function ensureIcon() {
 
   try {
     const pngBuffers = await createPngBuffers(sourcePath);
-    const icoBuffer = await pngToIco(pngBuffers);
+    const pngToIcoFn = await getPngToIco();
+    const icoBuffer = await pngToIcoFn(pngBuffers);
     await fs.writeFile(targetPath, icoBuffer);
     const fileStats = await fs.stat(targetPath);
     const kib = (fileStats.size / 1024).toFixed(1);
