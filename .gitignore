@@ -13,7 +13,6 @@ dist-ssr
 *.local
 
 # Build artifacts
-build/icon.ico
 build/*.exe
 build/*.msi
 
