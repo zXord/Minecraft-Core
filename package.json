@@ -30,6 +30,7 @@
     "eslint-plugin-svelte": "^3.9.2",
     "globals": "^16.2.0",
     "png-to-ico": "^3.0.1",
+    "rcedit": "^4.0.1",
     "sharp": "^0.33.5",
     "typescript": "^5.8.3",
     "vite": "^6.0.0",
@@ -88,10 +89,11 @@
       "icon": "build/icon.ico",
       "signAndEditExecutable": false
     },
+    "afterPack": "scripts/afterPack.cjs",
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "include": "build/uninstaller.nsh",
       "warningsAsErrors": false,
@@ -99,7 +101,9 @@
       "displayLanguageSelector": false,
       "deleteAppDataOnUninstall": false,
       "shortcutName": "Minecraft Core",
-      "uninstallDisplayName": "Minecraft Core"
+      "uninstallDisplayName": "Minecraft Core",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
     },
     "publish": {
       "provider": "github",
