@@ -3,11 +3,20 @@ import path from 'path';
 
 const manifestPath = path.resolve('dist/.vite/manifest.json');
 const loggerTemplatePath = path.resolve('electron/logger-window.html');
+const loggerTemplateSource = path.resolve('public/logger-window.html');
 
 async function injectBuildAssets() {
   console.log('Injecting build assets into logger-window.html...');
 
   try {
+    // Copy template from public to electron if it doesn't exist
+    try {
+      await fs.access(loggerTemplatePath);
+    } catch {
+      console.log('Copying logger-window.html from public to electron...');
+      await fs.copyFile(loggerTemplateSource, loggerTemplatePath);
+    }
+
     // Read the manifest file
     const manifestContent = await fs.readFile(manifestPath, 'utf-8');
     const manifest = JSON.parse(manifestContent);
