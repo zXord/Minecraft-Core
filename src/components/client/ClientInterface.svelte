@@ -1791,33 +1791,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
-          const downloadedCount = Number(result.downloaded) || 0;
-        const skippedCount = Number(result.skipped) || 0;
-        const disabledCount = Number(result.disabled) || 0;
-        let processed = downloadedCount + skippedCount + disabledCount;
-        let message = `Successfully processed ${processed} mods`;
-        if (result.downloaded > 0) {
-          message += ` (${result.downloaded} downloaded`;
-          if (result.skipped > 0) {
-            message += `, ${result.skipped} already present`;
-          }
-          if (result.removed > 0) {
-            message += `, ${result.removed} removed`;
-          }
-          if (result.disabled > 0) {
-            message += `, ${result.disabled} disabled`;
-          }
-          message += ')';
-        } else if (result.skipped > 0 || result.removed > 0 || result.disabled > 0) {
-          message += ' (';
-          const parts = [];
-          if (result.skipped > 0) parts.push('all already present');
-          if (result.removed > 0) parts.push(`${result.removed} removed`);
-          if (result.disabled > 0) parts.push(`${result.disabled} disabled`);
-          message += parts.join(', ');
-          message += ')';
-        }
-          successMessage.set(message);
+          // Note: Individual mod download notifications are handled by DownloadProgress.svelte
+        // No need for a summary notification here to avoid duplicate notifications
         setTimeout(() => successMessage.set(''), 5000);        // Re-check mod synchronization after download with a delay to allow file I/O to complete
         // Also give time for client mod version updates to be cleared
         setTimeout(async () => {
