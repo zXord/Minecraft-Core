@@ -1364,9 +1364,10 @@ export async function checkDisabledModUpdates(serverPath) {
  * @param {string} projectId - Modrinth project ID
  * @param {string} targetVersion - Target version number
  * @param {string} targetVersionId - Target version ID
+ * @param {boolean} skipReload - Skip reloading mod list (useful for batch updates)
  * @returns {Promise<boolean>} - Success status
  */
-export async function enableAndUpdateMod(serverPath, modFileName, projectId, targetVersion, targetVersionId) {
+export async function enableAndUpdateMod(serverPath, modFileName, projectId, targetVersion, targetVersionId, skipReload = false) {
   try {
     const result = await safeInvoke('enable-and-update-mod', {
       serverPath,
@@ -1375,7 +1376,7 @@ export async function enableAndUpdateMod(serverPath, modFileName, projectId, tar
       targetVersion,
       targetVersionId
     });
-    
+
     if (result.success) {
       // Remove from disabled mod updates since it's now enabled and updated
       disabledModUpdates.update(updates => {
@@ -1383,29 +1384,36 @@ export async function enableAndUpdateMod(serverPath, modFileName, projectId, tar
         newUpdates.delete(modFileName);
         return newUpdates;
       });
-      
+
       // Remove from disabled mods store
       disabledMods.update(mods => {
         mods.delete(modFileName);
         return mods;
       });
-      
-      // Force reload the mod list to get the latest information
-      await loadMods(serverPath);
-      
-      successMessage.set(`${modFileName} successfully enabled and updated to ${targetVersion}`);
-      setTimeout(() => successMessage.set(''), 3000);
-      
+
+      // Only reload if not in batch mode
+      if (!skipReload) {
+        // Force reload the mod list to get the latest information
+        await loadMods(serverPath);
+
+        successMessage.set(`${modFileName} successfully enabled and updated to ${targetVersion}`);
+        setTimeout(() => successMessage.set(''), 3000);
+      }
+
       return true;
     } else {
-      errorMessage.set(`Failed to enable and update mod: ${result.error}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      if (!skipReload) {
+        errorMessage.set(`Failed to enable and update mod: ${result.error}`);
+        setTimeout(() => errorMessage.set(''), 5000);
+      }
       return false;
     }
-    
+
   } catch (err) {
-    errorMessage.set(`Error enabling and updating mod: ${err.message}`);
-    setTimeout(() => errorMessage.set(''), 5000);
+    if (!skipReload) {
+      errorMessage.set(`Error enabling and updating mod: ${err.message}`);
+      setTimeout(() => errorMessage.set(''), 5000);
+    }
     return false;
   }
 }

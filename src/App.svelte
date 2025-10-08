@@ -256,12 +256,24 @@
     setContext("sessionId", sessionId);
 
     // Background periodic mod/shader/resource pack update check (every 30 min)
-    const runUpdateCheck = () => {
+    const runUpdateCheck = async () => {
       try {
         if (path) {
-          checkForUpdates(path);
+          // Use force refresh to ensure the check isn't skipped
+          // The checkForUpdates function will queue this if another check is running
+          await checkForUpdates(path, false);
         }
-      } catch {}
+      } catch (err) {
+        // Log but don't crash on update check errors
+        logger.debug('Background update check failed', {
+          category: 'mods',
+          data: {
+            component: 'App',
+            function: 'runUpdateCheck',
+            error: err.message
+          }
+        });
+      }
     };
     updateIntervalId = setInterval(runUpdateCheck, 30 * 60 * 1000);
     // Initial delayed check (wait a bit for initial loads)

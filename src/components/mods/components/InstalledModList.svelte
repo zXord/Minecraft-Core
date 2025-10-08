@@ -747,6 +747,8 @@
       ]);
       // Force fresh data when user explicitly clicks "Check for Updates"
       await checkForUpdates(serverPath, true);
+      // Explicitly check disabled mods again to ensure they're included
+      await checkDisabledModUpdates(serverPath);
       successMessage.set('Update check completed successfully!');
       setTimeout(() => successMessage.set(''), 3000);
     } catch (error) {
@@ -894,14 +896,15 @@
         }
       }
       
-      // Enable and update disabled mods
+      // Enable and update disabled mods (skip reload for each to improve speed)
       for (const mod of disabledModsToUpdate) {
         const success = await enableAndUpdateMod(
           serverPath,
           mod.modName,
           mod.projectId,
           mod.targetVersion,
-          mod.targetVersionId
+          mod.targetVersionId,
+          true // skipReload = true for batch updates
         );
         if (success) {
           updatedCount++;
@@ -911,11 +914,13 @@
       // Force refresh mod list and update checks ONCE at the end to ensure UI is current
       await loadMods(serverPath);
       await checkForUpdates(serverPath, true);
-      
+      // Explicitly refresh disabled mod updates to ensure accurate counts
+      await checkDisabledModUpdates(serverPath);
+
       const enabledText = enabledModsToUpdate.length > 0 ? `${enabledModsToUpdate.length} updated` : '';
       const disabledText = disabledModsToUpdate.length > 0 ? `${disabledModsToUpdate.length} enabled and updated` : '';
       const combinedText = [enabledText, disabledText].filter(Boolean).join(', ');
-      
+
       successMessage.set(`Successfully processed ${updatedCount} mods (${combinedText})!`);
     } catch (error) {
       errorMessage.set(`Failed to update all mods: ${error.message}`);

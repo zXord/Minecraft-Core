@@ -1364,16 +1364,22 @@ function getUpdateCount() {
   if (!updateCount) {
     updateCount = derived([modsWithUpdates, disabledModUpdates, disabledMods], ([$updates, $disabledUpdates, $disabledSet]) => {
       let count = 0;
+      const counted = new Set();
+
+      // Count enabled mods (excluding project: references)
       for (const [modName] of $updates.entries()) {
-        if (!modName.startsWith('project:')) {
+        if (!modName.startsWith('project:') && !counted.has(modName)) {
           count++;
+          counted.add(modName);
         }
       }
 
+      // Count disabled mods (skip if already counted to avoid double-counting)
       if ($disabledUpdates) {
         for (const name of $disabledUpdates.keys()) {
-          if ($disabledSet && $disabledSet.has && $disabledSet.has(name)) {
+          if ($disabledSet && $disabledSet.has && $disabledSet.has(name) && !counted.has(name)) {
             count++;
+            counted.add(name);
           }
         }
       }

@@ -79,44 +79,76 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   ];
 
   // Per-content-type update counts (reactive)
+  // Fix: Use explicit dependency tracking to ensure proper reactivity
+  let modsUpdateCount = 0;
+  let shaderUpdateCount = 0;
+  let resourcePackUpdateCount = 0;
+
+  // Force recalculation by listing dependencies explicitly in the reactive declaration
   $: modsUpdateCount = (() => {
+    // Explicit dependencies - Svelte tracks these
+    const updates = $modsWithUpdates;
+    const disabled = $disabledModUpdates;
+    const disabledSet = $disabledMods;
+    const installed = $installedModInfo;
+
     let count = 0;
+    const counted = new SvelteSet();
     let modNames = null;
-    if ($installedModInfo) {
-      modNames = new Set($installedModInfo.map(m => m.fileName));
+
+    if (installed) {
+      modNames = new Set(installed.map(m => m.fileName));
     }
-    if ($modsWithUpdates && modNames) {
-      for (const [name] of $modsWithUpdates.entries()) {
+
+    // Count enabled mods with updates
+    if (updates && modNames) {
+      for (const [name] of updates.entries()) {
         if (name.startsWith('project:')) continue;
-        if (modNames.has(name)) count++;
-      }
-    }
-    if ($disabledModUpdates) {
-      const disabledSet = $disabledMods;
-      for (const name of $disabledModUpdates.keys()) {
-        if ((modNames && modNames.has(name)) || (disabledSet && disabledSet.has && disabledSet.has(name))) {
+        if (modNames.has(name) && !counted.has(name)) {
           count++;
+          counted.add(name);
         }
       }
     }
+
+    // Count disabled mods with updates (skip if already counted)
+    if (disabled) {
+      for (const name of disabled.keys()) {
+        if (!counted.has(name) && ((modNames && modNames.has(name)) || (disabledSet && disabledSet.has && disabledSet.has(name)))) {
+          count++;
+          counted.add(name);
+        }
+      }
+    }
+
     return count;
   })();
+
   $: shaderUpdateCount = (() => {
+    // Explicit dependencies
+    const updates = $modsWithUpdates;
+    const installed = $installedShaderInfo;
+
     let count = 0;
-    if ($modsWithUpdates && $installedShaderInfo) {
-      const shaderNames = new Set($installedShaderInfo.map(s => s.fileName));
-      for (const [name] of $modsWithUpdates.entries()) {
+    if (updates && installed) {
+      const shaderNames = new Set(installed.map(s => s.fileName));
+      for (const [name] of updates.entries()) {
         if (name.startsWith('project:')) continue;
         if (shaderNames.has(name)) count++;
       }
     }
     return count;
   })();
+
   $: resourcePackUpdateCount = (() => {
+    // Explicit dependencies
+    const updates = $modsWithUpdates;
+    const installed = $installedResourcePackInfo;
+
     let count = 0;
-    if ($modsWithUpdates && $installedResourcePackInfo) {
-      const rpNames = new Set($installedResourcePackInfo.map(r => r.fileName));
-      for (const [name] of $modsWithUpdates.entries()) {
+    if (updates && installed) {
+      const rpNames = new Set(installed.map(r => r.fileName));
+      for (const [name] of updates.entries()) {
         if (name.startsWith('project:')) continue;
         if (rpNames.has(name)) count++;
       }
@@ -124,14 +156,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     return count;
   })();
 
-  function getUpdateCountFor(contentTypeId) {
-    switch (contentTypeId) {
-      case CONTENT_TYPES.MODS: return modsUpdateCount;
-      case CONTENT_TYPES.SHADERS: return shaderUpdateCount;
-      case CONTENT_TYPES.RESOURCE_PACKS: return resourcePackUpdateCount;
-      default: return 0;
-    }
-  }
   
   // Initialize filter stores (only for mods to avoid version filter ping-pong on shaders/resource packs)
   $: if (
@@ -873,8 +897,12 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           {/if}
         </span>
         <span class="content-type-label">{contentType.label}</span>
-        {#if getUpdateCountFor(contentType.id) > 0}
-          <span class="update-badge" title="Updates available for this type">{getUpdateCountFor(contentType.id)}</span>
+        {#if contentType.id === CONTENT_TYPES.MODS && modsUpdateCount > 0}
+          <span class="update-badge" title="Updates available for this type">{modsUpdateCount}</span>
+        {:else if contentType.id === CONTENT_TYPES.SHADERS && shaderUpdateCount > 0}
+          <span class="update-badge" title="Updates available for this type">{shaderUpdateCount}</span>
+        {:else if contentType.id === CONTENT_TYPES.RESOURCE_PACKS && resourcePackUpdateCount > 0}
+          <span class="update-badge" title="Updates available for this type">{resourcePackUpdateCount}</span>
         {/if}
       </button>
     {/each}
