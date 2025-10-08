@@ -119,20 +119,36 @@ export function formatSize(bytes) {
   if (typeof bytes !== 'number' || bytes < 0) {
     return '0 B';
   }
-  
+
   if (bytes === 0) {
     return '0 B';
   }
-  
+
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  
-  // Ensure we don't exceed the sizes array
-  const sizeIndex = Math.min(i, sizes.length - 1);
-  const formattedValue = parseFloat((bytes / Math.pow(k, sizeIndex)).toFixed(2));
-  
-  return `${formattedValue} ${sizes[sizeIndex]}`;
+  const oneGB = k * k * k; // 1 GB in bytes
+
+  // If size is >= 1 GB, show in GB
+  if (bytes >= oneGB) {
+    const sizeInGB = bytes / oneGB;
+    return `${sizeInGB.toFixed(2)} GB`;
+  }
+
+  // If size is >= 1 MB, show in MB
+  const oneMB = k * k;
+  if (bytes >= oneMB) {
+    const sizeInMB = bytes / oneMB;
+    return `${sizeInMB.toFixed(2)} MB`;
+  }
+
+  // If size is >= 1 KB, show in KB
+  const oneKB = k;
+  if (bytes >= oneKB) {
+    const sizeInKB = bytes / oneKB;
+    return `${sizeInKB.toFixed(2)} KB`;
+  }
+
+  // Otherwise show in bytes
+  return `${bytes} B`;
 }
 
 /**

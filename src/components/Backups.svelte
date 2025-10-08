@@ -128,6 +128,7 @@
   let maxAgeUnit = "days";
   let countRetentionEnabled = false;
   let maxCountValue = 14;
+  let minBackupsToPreserve = 1; // Minimum number of recent backups to always preserve
 
   // Statistics variables
   let backupStatistics = null;
@@ -214,6 +215,7 @@
       maxAgeUnit,
       countRetentionEnabled,
       maxCountValue,
+      minBackupsToPreserve,
     };
     return JSON.stringify(settings);
   }
@@ -435,7 +437,8 @@
     maxAgeValue !== undefined &&
     maxAgeUnit !== undefined &&
     countRetentionEnabled !== undefined &&
-    maxCountValue !== undefined
+    maxCountValue !== undefined &&
+    minBackupsToPreserve !== undefined
   ) {
     const currentSettingsHash = getSettingsHash();
 
@@ -827,6 +830,7 @@
         maxAgeUnit = settings.maxAgeUnit || "days";
         countRetentionEnabled = settings.countRetentionEnabled || false;
         maxCountValue = settings.maxCountValue || 14;
+        minBackupsToPreserve = settings.minBackupsToPreserve || 1;
         settingsLoaded = true;
 
         logger.info("Retention policy settings loaded successfully", {
@@ -843,6 +847,7 @@
               maxAgeUnit,
               countRetentionEnabled,
               maxCountValue,
+              minBackupsToPreserve,
             },
           },
         });
@@ -875,6 +880,7 @@
           maxAgeUnit,
           countRetentionEnabled,
           maxCountValue,
+          minBackupsToPreserve,
         },
         serverPath,
       },
@@ -892,6 +898,7 @@
           maxAgeUnit,
           countRetentionEnabled,
           maxCountValue,
+          minBackupsToPreserve,
         },
       });
 
@@ -1436,7 +1443,7 @@
           ? convertAgeToMilliseconds(maxAgeValue, maxAgeUnit)
           : null,
         maxCount: countRetentionEnabled ? maxCountValue : null,
-        preserveRecent: 1,
+        preserveRecent: minBackupsToPreserve,
       };
 
       const result = await window.electron.invoke(
@@ -1661,7 +1668,7 @@
               maxSize: sizeRetentionEnabled ? convertSizeToBytes(maxSizeValue, maxSizeUnit) : null,
               maxAge: ageRetentionEnabled ? convertAgeToMilliseconds(maxAgeValue, maxAgeUnit) : null,
               maxCount: countRetentionEnabled ? maxCountValue : null,
-              preserveRecent: 1,
+              preserveRecent: minBackupsToPreserve,
             };
             const retentionResult = await window.electron.invoke('backups:apply-retention-policy', { serverPath, policy });
             if (retentionResult && retentionResult.deletedBackups && retentionResult.deletedBackups.length) {
@@ -2490,6 +2497,31 @@
       </div>
     </div>
 
+    <!-- Minimum Backups Preservation -->
+    <div class="retention-subsection">
+      <div class="subsection-header">
+        <span class="subsection-title">Backup Preservation</span>
+      </div>
+      <div class="retention-inline-group">
+        <div class="retention-inline-item preservation-setting">
+          <label for="min-backups-preserve" class="inline-label"
+            >Always preserve at least:</label
+          >
+          <input
+            type="number"
+            id="min-backups-preserve"
+            bind:value={minBackupsToPreserve}
+            on:change={saveRetentionSettings}
+            min="1"
+            max="10"
+            class="inline-input"
+          />
+          <span class="inline-suffix">recent backup{minBackupsToPreserve !== 1 ? 's' : ''}</span>
+          <span class="setting-help-inline" title="This many recent backups will never be deleted by retention policies, regardless of size, age, or count limits">ℹ️</span>
+        </div>
+      </div>
+    </div>
+
     <!-- Retention Warnings -->
     {#if retentionWarnings.length > 0}
       <RetentionWarnings warnings={retentionWarnings} />
@@ -2511,7 +2543,7 @@
           {/if}
           {#if countRetentionEnabled}
             more than {maxCountValue} backups exist
-          {/if}. At least 1 recent backup will always be preserved.
+          {/if}. At least {minBackupsToPreserve} recent backup{minBackupsToPreserve !== 1 ? 's' : ''} will always be preserved.
         </div>
       </div>
     {/if}
@@ -2636,7 +2668,7 @@
                 {/if}
               </td>
               <td>{backup.metadata?.type || "-"}</td>
-              <td>{(backup.size / 1024 / 1024).toFixed(2)} MB</td>
+              <td>{formatSize(backup.size)}</td>
               <td
                 >{formatTimestamp(
                   backup.metadata?.timestamp || backup.created,

@@ -2230,7 +2230,8 @@ function createBackupHandlers() {
           maxAgeValue: 30,
           maxAgeUnit: 'days',
           countRetentionEnabled: false,
-          maxCountValue: 14
+          maxCountValue: 14,
+          minBackupsToPreserve: 1
         };
 
         const duration = Date.now() - startTime;
@@ -2319,7 +2320,8 @@ function createBackupHandlers() {
           maxAgeValue: Math.max(1, parseInt(settings.maxAgeValue) || 30),
           maxAgeUnit: ['days', 'weeks', 'months'].includes(settings.maxAgeUnit) ? settings.maxAgeUnit : 'days',
           countRetentionEnabled: Boolean(settings.countRetentionEnabled),
-          maxCountValue: Math.max(1, parseInt(settings.maxCountValue) || 14)
+          maxCountValue: Math.max(1, parseInt(settings.maxCountValue) || 14),
+          minBackupsToPreserve: Math.max(1, Math.min(10, parseInt(settings.minBackupsToPreserve) || 1))
         };
 
         // Save to store with server-specific key

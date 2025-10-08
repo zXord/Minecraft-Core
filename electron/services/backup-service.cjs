@@ -419,7 +419,7 @@ async function applyAdvancedRetention({ serverPath, trigger }) {
       maxSize: adv.sizeRetentionEnabled ? toBytes(adv.maxSizeValue, adv.maxSizeUnit) : null,
       maxAge: adv.ageRetentionEnabled ? toMs(adv.maxAgeValue, adv.maxAgeUnit) : null,
       maxCount: adv.countRetentionEnabled ? adv.maxCountValue : null,
-      preserveRecent: 1
+      preserveRecent: adv.minBackupsToPreserve || 1
     };
   logger.debug('Advanced retention policy constructed', { category: 'backup', data: { serverPath, policy } });
     let engine;
