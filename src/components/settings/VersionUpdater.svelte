@@ -727,7 +727,7 @@
       </div>
 
       <!-- Action Button -->
-      <button class="close-summary-btn" on:click={() => updateSummary = null}>
+      <button class="close-summary-btn" on:click={() => { updateSummary = null; completedUpdates = []; }}>
         Close Summary
       </button>
     </div>

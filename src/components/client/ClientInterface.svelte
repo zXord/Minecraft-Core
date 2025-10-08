@@ -1636,12 +1636,26 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         }
       }      
       // Note: We don't include missingOptionalMods because those are new optional mods, not updates
-      
+
+      // Deduplicate mods by fileName to prevent downloading the same mod twice
+      const deduplicateByFileName = (mods) => {
+        const seen = new Set();
+        return mods.filter(mod => {
+          if (!mod.fileName) return true; // Keep mods without fileName for error handling
+          if (seen.has(mod.fileName.toLowerCase())) return false;
+          seen.add(mod.fileName.toLowerCase());
+          return true;
+        });
+      };
+
+      const uniqueModsNeedingUpdates = deduplicateByFileName(modsNeedingUpdates);
+      const uniqueOptionalModsNeedingUpdates = deduplicateByFileName(optionalModsNeedingUpdates);
+
       // Separate server mods from client mods
-      const serverMods = modsNeedingUpdates.filter(mod => !mod.isClientMod);
-      const clientMods = modsNeedingUpdates.filter(mod => mod.isClientMod);
-      const serverOptionalMods = optionalModsNeedingUpdates.filter(mod => !mod.isClientMod);
-      const clientOptionalMods = optionalModsNeedingUpdates.filter(mod => mod.isClientMod);
+      const serverMods = uniqueModsNeedingUpdates.filter(mod => !mod.isClientMod);
+      const clientMods = uniqueModsNeedingUpdates.filter(mod => mod.isClientMod);
+      const serverOptionalMods = uniqueOptionalModsNeedingUpdates.filter(mod => !mod.isClientMod);
+      const clientOptionalMods = uniqueOptionalModsNeedingUpdates.filter(mod => mod.isClientMod);
       
       let totalResults = { success: true, downloaded: 0, skipped: 0, removed: 0 };
       
