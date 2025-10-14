@@ -778,18 +778,18 @@ export async function searchMods(options = {}) {
  * @returns {Promise<Array>} - Array of version objects
 */
 export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false, forceRefresh = false, contentType = 'mods') {
-  // Cache key
+  // Cache key - NOTE: forceRefresh should NOT be part of the cache key
   const loader = get(loaderType);
   const gameVersion = get(minecraftVersion);
-  const cacheKey = `${modId}:${loader}:${gameVersion}:${loadLatestOnly}:${forceRefresh}`;
-  
+  const cacheKey = `${modId}:${loader}:${gameVersion}:${loadLatestOnly}`;
+
   // Check if we already have this version information cached (unless forcing refresh)
   if (!forceRefresh) {
-  const versionCache = get(modVersionsCache);
-  if (versionCache[cacheKey] && versionCache[cacheKey].length > 0) {
-    return versionCache[cacheKey];
+    const versionCache = get(modVersionsCache);
+    if (versionCache[cacheKey] && versionCache[cacheKey].length > 0) {
+      return versionCache[cacheKey];
     }
-    }
+  }
     
   // Apply rate limiting to avoid hitting API limits
   const now = Date.now();
@@ -1181,18 +1181,19 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
 
   isCheckingUpdates.set(true);
   const currentCheckId = ++updateCheckId;
-  
+
   const updatesMap = new Map();
-  
+
   try {
     if (!serverPath) {
       isCheckingUpdates.set(false);
       return updatesMap;
     }
-    
-    // If forcing refresh, clear the version cache
+
+    // If forcing refresh, clear ALL version caches to ensure fresh data
     if (forceRefresh) {
       modVersionsCache.set({});
+      installedModVersionsCache.set({});
     }
     
     // Get all content with project IDs (mods, shaders, resource packs)
