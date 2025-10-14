@@ -17,18 +17,40 @@ import logger from '../logger.js';
 
 let downloadCleanupTimer = null;
 
+// Store initialization state in globalThis to survive hot-reloads
+if (!globalThis.__downloadManagerState) {
+  globalThis.__downloadManagerState = {
+    isInitialized: false,
+    cleanup: null
+  };
+}
+
 /**
  * Initialize download manager and set up listeners
  * @returns {Function} - Cleanup function to remove listeners
  */
 export function initDownloadManager() {
+  // Prevent multiple initializations - only allow one active download manager
+  if (globalThis.__downloadManagerState.isInitialized) {
+    logger.warn('Download manager already initialized, returning existing cleanup function', {
+      category: 'mods',
+      data: {
+        function: 'initDownloadManager',
+        alreadyInitialized: true
+      }
+    });
+    return globalThis.__downloadManagerState.cleanup || (() => {});
+  }
+
   logger.info('Initializing download manager', {
     category: 'mods',
     data: {
       function: 'initDownloadManager'
     }
   });
-  
+
+  globalThis.__downloadManagerState.isInitialized = true;
+
   // Set up the download progress listener
   const cleanup = registerListener('download-progress', handleDownloadProgress);
   
@@ -43,8 +65,8 @@ export function initDownloadManager() {
     }
   });
   
-  // Return cleanup function
-  return () => {
+  // Store cleanup function for returning on duplicate initialization attempts
+  globalThis.__downloadManagerState.cleanup = () => {
     logger.debug('Cleaning up download manager', {
       category: 'mods',
       data: {
@@ -52,14 +74,21 @@ export function initDownloadManager() {
         hasCleanupTimer: !!downloadCleanupTimer
       }
     });
-    
+
     cleanup();
-    
+
     if (downloadCleanupTimer) {
       clearTimeout(downloadCleanupTimer);
       downloadCleanupTimer = null;
     }
+
+    // Reset initialization flag so it can be re-initialized later
+    globalThis.__downloadManagerState.isInitialized = false;
+    globalThis.__downloadManagerState.cleanup = null;
   };
+
+  // Return cleanup function
+  return globalThis.__downloadManagerState.cleanup;
 }
 
 /**

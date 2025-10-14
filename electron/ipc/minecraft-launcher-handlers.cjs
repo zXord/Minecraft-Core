@@ -647,29 +647,44 @@ function createMinecraftLauncherHandlers(win) {
 
     'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [] }) => {
       // (Download process started)
-      
+
       try {
         if (!clientPath) {
           // TODO: Add proper logging - Mod download failed: Invalid client path
           return { success: false, error: 'Invalid client path' };
         }
-        
-        // Combine required and optional mods for downloading
+
+        // Combine required and optional mods for downloading, with deduplication
         const allModsToDownload = [...(requiredMods || []), ...(optionalMods || [])];
-        
+
+        // Deduplicate mods by fileName to prevent downloading the same mod twice
+        const seenFileNames = new Set();
+        const deduplicatedMods = [];
+        for (const mod of allModsToDownload) {
+          const fileName = mod.fileName?.toLowerCase();
+          if (fileName && !seenFileNames.has(fileName)) {
+            seenFileNames.add(fileName);
+            deduplicatedMods.push(mod);
+          } else if (!fileName) {
+            // Keep mods without fileName for error handling
+            deduplicatedMods.push(mod);
+          }
+        }
+        const allModsToDownloadFinal = deduplicatedMods;
+
         const requiredModFileNames = new Set((requiredMods || []).map(mod => {
           const fileName = mod.fileName.toLowerCase();
           return fileName;
         }));
         
-        if (allModsToDownload.length === 0) {
+        if (allModsToDownloadFinal.length === 0) {
           return { success: true, downloaded: 0, failures: [], message: 'No mods to download' };
         }
 
         const modsDir = path.join(clientPath, 'mods');
         const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
         const manualModsAnalysis = { found: [], willUpdate: [], willDisable: [], willKeep: [] };
-        
+
         if (fs.existsSync(modsDir)) {
           const existingMods = fs.readdirSync(modsDir).filter(f => f.endsWith('.jar'));
           for (const modFile of existingMods) {
@@ -685,8 +700,8 @@ function createMinecraftLauncherHandlers(win) {
             }
               if (isManual) {
               manualModsAnalysis.found.push(modFile);
-              
-              const hasUpdate = allModsToDownload.some(reqMod => {
+
+              const hasUpdate = allModsToDownloadFinal.some(reqMod => {
                 const reqFileName = typeof reqMod === 'string' ? reqMod : reqMod.fileName;
                 const reqName = reqFileName.replace(/[-_\s]+/g, '').toLowerCase().replace('.jar', '');
                 const currentName = modFile.replace(/[-_\s]+/g, '').toLowerCase().replace('.jar', '');
@@ -714,9 +729,11 @@ function createMinecraftLauncherHandlers(win) {
 
         if (!fs.existsSync(manifestDir)) {
           fs.mkdirSync(manifestDir, { recursive: true });
-        }        for (let i = 0; i < allModsToDownload.length; i++) {
-          const mod = allModsToDownload[i];
-          
+        }
+
+        for (let i = 0; i < allModsToDownloadFinal.length; i++) {
+          const mod = allModsToDownloadFinal[i];
+
           try {
             const modPath = path.join(clientPath, 'mods', mod.fileName);
             
@@ -774,7 +791,9 @@ function createMinecraftLauncherHandlers(win) {
 
             // Try primary, then fallback if primary fails (network/HTTP error)
             for (const [source, mark] of [[primarySource, 'primary'], [fallbackSource, 'fallback']]) {
-              if ((mark === 'primary' && triedPrimary) || (mark === 'fallback' && triedFallback)) continue;
+              if ((mark === 'primary' && triedPrimary) || (mark === 'fallback' && triedFallback)) {
+                continue;
+              }
               try {
                 downloadUrl = await getUrlForSource(source);
                 sourceUsed = source;
@@ -1039,6 +1058,18 @@ function createMinecraftLauncherHandlers(win) {
             
             if (downloadUrl) {
               mod.downloadUrl = downloadUrl;
+            }
+
+            // Skip download if file already exists (already downloaded in the loop above)
+            if (fs.existsSync(modPath)) {
+              logger.debug('Skipping duplicate download - file already exists', {
+                category: 'mods',
+                data: {
+                  fileName: mod.fileName,
+                  modPath
+                }
+              });
+              continue;
             }
 
             if (mod.downloadUrl) {

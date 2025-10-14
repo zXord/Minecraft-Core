@@ -1598,9 +1598,23 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         // Search in serverInfo.allClientMods
         fullMod = serverInfo?.allClientMods?.find(m => m.fileName === fileName);
         return fullMod;
-      };      // Add outdated required mods (with full data)
+      };      // Collect client mod update filenames to prevent duplicates
+      const clientModUpdateFileNames = new Set();
+      if (modSyncStatus?.clientModUpdates) {
+        for (const clientUpdate of modSyncStatus.clientModUpdates) {
+          if (clientUpdate.fileName) {
+            clientModUpdateFileNames.add(clientUpdate.fileName.toLowerCase());
+          }
+        }
+      }
+
+      // Add outdated required mods (with full data)
       if (modSyncStatus?.outdatedMods) {
         for (const outdatedMod of modSyncStatus.outdatedMods) {
+          // Skip if this mod is already in clientModUpdates to prevent duplicates
+          if (clientModUpdateFileNames.has(outdatedMod.fileName?.toLowerCase())) {
+            continue;
+          }
           // Server mods only (client mods are handled separately now)
           const fullModData = findFullModData(outdatedMod.fileName);
           if (fullModData && fullModData.downloadUrl) {
@@ -1608,7 +1622,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           }
         }
       }
-      
+
       // Add client mod updates separately
       if (modSyncStatus?.clientModUpdates) {
         for (const clientUpdate of modSyncStatus.clientModUpdates) {
@@ -1619,16 +1633,25 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       // Add missing required mods (these should already have full data)
       if (modSyncStatus?.missingMods) {
         for (const missingMod of modSyncStatus.missingMods) {
-          const fullModData = findFullModData(missingMod.fileName || missingMod);
+          // Skip if this mod is already in clientModUpdates to prevent duplicates
+          const missingFileName = missingMod.fileName || missingMod;
+          if (clientModUpdateFileNames.has(missingFileName?.toLowerCase())) {
+            continue;
+          }
+          const fullModData = findFullModData(missingFileName);
           if (fullModData && fullModData.downloadUrl) {
             modsNeedingUpdates.push(fullModData);
           }
         }
       }
-      
+
       // Add outdated optional mods (with full data)
       if (modSyncStatus?.outdatedOptionalMods) {
         for (const outdatedOptionalMod of modSyncStatus.outdatedOptionalMods) {
+          // Skip if this mod is already in clientModUpdates to prevent duplicates
+          if (clientModUpdateFileNames.has(outdatedOptionalMod.fileName?.toLowerCase())) {
+            continue;
+          }
           const fullModData = findFullModData(outdatedOptionalMod.fileName);
           if (fullModData && fullModData.downloadUrl) {
             optionalModsNeedingUpdates.push(fullModData);
@@ -1656,16 +1679,37 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const clientMods = uniqueModsNeedingUpdates.filter(mod => mod.isClientMod);
       const serverOptionalMods = uniqueOptionalModsNeedingUpdates.filter(mod => !mod.isClientMod);
       const clientOptionalMods = uniqueOptionalModsNeedingUpdates.filter(mod => mod.isClientMod);
-      
+
       let totalResults = { success: true, downloaded: 0, skipped: 0, removed: 0 };
-      
+
       // Handle server mod downloads
       if (serverMods.length > 0 || serverOptionalMods.length > 0) {
+        // Ensure allClientMods doesn't duplicate requiredMods/optionalMods
+        let allClientModsParam = serverInfo?.allClientMods && serverInfo.allClientMods.length > 0
+          ? serverInfo.allClientMods
+          : [...serverMods, ...serverOptionalMods];
+
+        // Remove any mods from allClientMods that are already in serverMods or serverOptionalMods
+        const modsToDownloadSet = new Set();
+        [...serverMods, ...serverOptionalMods].forEach(mod => {
+          if (mod.fileName) {
+            modsToDownloadSet.add(mod.fileName.toLowerCase());
+          }
+        });
+
+        // Filter allClientMods to exclude mods that are already being downloaded
+        allClientModsParam = allClientModsParam.filter(mod => {
+          return !modsToDownloadSet.has(mod.fileName?.toLowerCase());
+        });
+
+        // Combine the filtered allClientMods with the mods to download
+        allClientModsParam = [...serverMods, ...serverOptionalMods, ...allClientModsParam];
+
         const serverResult = await window.electron.invoke('minecraft-download-mods', {
           clientPath: instance.path,
           requiredMods: serverMods,
           optionalMods: serverOptionalMods,
-          allClientMods: (serverInfo?.allClientMods && serverInfo.allClientMods.length > 0) ? serverInfo.allClientMods : [...serverMods, ...serverOptionalMods],
+          allClientMods: allClientModsParam,
           serverInfo: {
             serverIp: instance.serverIp,
             serverPort: instance.serverPort
