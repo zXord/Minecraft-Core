@@ -2198,7 +2198,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         } else if (errorMsg.includes('EMFILE') || errorMsg.includes('too many files')) {
           errorMsg = 'Too many files are open. Please close other applications and try again.';
         } else if (errorMsg.includes('ENOENT') || errorMsg.includes('not found')) {
-          errorMsg = 'Minecraft client files may be corrupted. Try re-downloading the client files.';
+          errorMsg = 'Minecraft client files may be corrupted. Try re-downloading via Settings → Repair Client.';
         } else if (errorMsg.includes('Java') || errorMsg.includes('JVM')) {
           errorMsg = 'Java runtime error. Please ensure you have Java installed.';
         }
@@ -3015,4 +3015,3 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   on:update-mods={handleCompatibilityDialogUpdateMods}
   on:disable-incompatible={handleCompatibilityDialogDisableIncompatible}
 />
-
