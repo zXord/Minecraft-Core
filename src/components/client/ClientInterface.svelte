@@ -1599,7 +1599,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         fullMod = serverInfo?.allClientMods?.find(m => m.fileName === fileName);
         return fullMod;
       };      // Collect client mod update filenames to prevent duplicates
-      const clientModUpdateFileNames = new Set();
+      const clientModUpdateFileNames = new SvelteSet();
       if (modSyncStatus?.clientModUpdates) {
         for (const clientUpdate of modSyncStatus.clientModUpdates) {
           if (clientUpdate.fileName) {
@@ -1662,7 +1662,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
       // Deduplicate mods by fileName to prevent downloading the same mod twice
       const deduplicateByFileName = (mods) => {
-        const seen = new Set();
+        const seen = new SvelteSet();
         return mods.filter(mod => {
           if (!mod.fileName) return true; // Keep mods without fileName for error handling
           if (seen.has(mod.fileName.toLowerCase())) return false;
@@ -1690,7 +1690,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           : [...serverMods, ...serverOptionalMods];
 
         // Remove any mods from allClientMods that are already in serverMods or serverOptionalMods
-        const modsToDownloadSet = new Set();
+        const modsToDownloadSet = new SvelteSet();
         [...serverMods, ...serverOptionalMods].forEach(mod => {
           if (mod.fileName) {
             modsToDownloadSet.add(mod.fileName.toLowerCase());
@@ -2198,7 +2198,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         } else if (errorMsg.includes('EMFILE') || errorMsg.includes('too many files')) {
           errorMsg = 'Too many files are open. Please close other applications and try again.';
         } else if (errorMsg.includes('ENOENT') || errorMsg.includes('not found')) {
-          errorMsg = 'Minecraft client files may be corrupted. Try re-downloading via Settings → Repair Client.';
+          errorMsg = 'Minecraft client files may be corrupted. Try re-downloading via Settings -> Repair Client.';
         } else if (errorMsg.includes('Java') || errorMsg.includes('JVM')) {
           errorMsg = 'Java runtime error. Please ensure you have Java installed.';
         }

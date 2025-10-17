@@ -37,6 +37,20 @@ class ClientDownloader {
     return requestedVersion;
   }
 
+  _normalizeFabricProfileName(fabricIdentifier, minecraftVersion) {
+    if (!fabricIdentifier || !minecraftVersion) {
+      return null;
+    }
+
+    const identifier = String(fabricIdentifier);
+
+    if (identifier.startsWith('fabric-loader-')) {
+      return identifier;
+    }
+
+    return `fabric-loader-${identifier}-${minecraftVersion}`;
+  }
+
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
     
     this.emitter.emit('client-download-start', { version: minecraftVersion });
@@ -262,7 +276,10 @@ class ClientDownloader {
             current: 100
           });
 
-          const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, needsFabric ? resolvedFabricVersion : null);
+          const currentFabricProfile = needsFabric
+            ? this._normalizeFabricProfileName(resolvedFabricVersion, minecraftVersion)
+            : null;
+          const cleanupResult = await this.cleanupOldVersions(clientPath, minecraftVersion, currentFabricProfile);
           if (cleanupResult.success) {
             // Cleanup successful
           } else {
@@ -1608,8 +1625,25 @@ Specification-Vendor: FabricMC
     }
 
     // Only keep the current Fabric version
-    if (currentFabricVersion && versionDir === currentFabricVersion) {
-      return { keep: true, reason: 'Current Fabric version' };
+    if (currentFabricVersion) {
+      const expectedProfile = this._normalizeFabricProfileName(currentFabricVersion, currentVersion);
+      if (expectedProfile && versionDir === expectedProfile) {
+        return { keep: true, reason: 'Current Fabric version' };
+      }
+
+      // Backward compatibility: safeguard against receiving just the loader identifier
+      if (
+        versionDir.startsWith('fabric-loader-') &&
+        versionDir.endsWith(`-${currentVersion}`)
+      ) {
+        const fabricValue = String(currentFabricVersion);
+        const identifier = fabricValue.startsWith('fabric-loader-')
+          ? fabricValue.split('-')[2]
+          : fabricValue;
+        if (identifier && versionDir.includes(`fabric-loader-${identifier}-`)) {
+          return { keep: true, reason: 'Current Fabric version' };
+        }
+      }
     }
 
     // Remove everything else - no exceptions
