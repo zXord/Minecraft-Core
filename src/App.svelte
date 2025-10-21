@@ -259,9 +259,9 @@
     const runUpdateCheck = async () => {
       try {
         if (path) {
-          // Use force refresh to ensure the check isn't skipped
+          // Use force refresh to bypass cache and detect new releases
           // The checkForUpdates function will queue this if another check is running
-          await checkForUpdates(path, false);
+          await checkForUpdates(path, true);
         }
       } catch (err) {
         // Log but don't crash on update check errors

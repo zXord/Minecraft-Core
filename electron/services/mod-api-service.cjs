@@ -10,6 +10,11 @@ const MODRINTH_API = 'https://api.modrinth.com/v2';
 
 // Add a rate limiter utility
 const RATE_LIMIT_MS = 500; // Delay between API requests
+const VERSION_CACHE_TTL_MS = 30 * 60 * 1000; // Refresh cached version data every 30 minutes
+
+function getVersionCacheTtlMs() {
+  return VERSION_CACHE_TTL_MS;
+}
 let lastRequestTime = 0;
 
 // Performance tracking
@@ -831,16 +836,18 @@ async function resolveModrinthDependencies(dependencies) {
  * @param {boolean} loadLatestOnly - Whether to only load the latest version
  * @returns {Promise<Array>} Array of version objects
  */
-async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnly = false) {
+async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnly = false, forceRefresh = false) {
   const versionsStartTime = Date.now();
   const traceId = `${projectId}-${Date.now()}-${Math.floor(Math.random()*1000)}`;
   
   // Check cache first
   const cacheKey = `${projectId}:${loader || ''}:${gameVersion || ''}`;
-  if (versionCache.has(cacheKey)) {
-    performanceMetrics.cacheHits++;
-    
-    logger.debug('Version cache hit', {
+  let cacheEntry = versionCache.get(cacheKey);
+  const now = Date.now();
+  let cacheAge = cacheEntry ? now - cacheEntry.fetchedAt : null;
+
+  if (forceRefresh && cacheEntry) {
+    logger.debug('Version cache bypassed due to force refresh request', {
       category: 'mods',
       data: {
         service: 'ModApiService',
@@ -850,23 +857,66 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
         gameVersion,
         loadLatestOnly,
         cacheKey,
-        totalCacheHits: performanceMetrics.cacheHits
+        cacheAge
       }
     });
-    
-    // If we only need the latest version, filter from cache
-    if (loadLatestOnly) {
-      const cachedVersions = versionCache.get(cacheKey);
-      const latestStable = cachedVersions.find(v => v.isStable);
-      if (latestStable) {
-        return [latestStable];
-      }
-      return [cachedVersions[0]];
-    }
-    
-    return versionCache.get(cacheKey);
+    versionCache.delete(cacheKey);
+    cacheEntry = undefined;
+    cacheAge = null;
   }
-  
+
+  if (!forceRefresh && cacheEntry) {
+    if (cacheAge !== null && cacheAge <= VERSION_CACHE_TTL_MS) {
+      performanceMetrics.cacheHits++;
+
+      logger.debug('Version cache hit', {
+        category: 'mods',
+        data: {
+          service: 'ModApiService',
+          operation: 'getModrinthVersions',
+          projectId,
+          loader,
+          gameVersion,
+          loadLatestOnly,
+          cacheKey,
+          cacheAge,
+          cacheTtlMs: VERSION_CACHE_TTL_MS,
+          totalCacheHits: performanceMetrics.cacheHits
+        }
+      });
+
+      const cachedVersions = cacheEntry.versions;
+      if (loadLatestOnly) {
+        const latestStable = cachedVersions.find(v => v.isStable);
+        if (latestStable) {
+          return [latestStable];
+        }
+        return [cachedVersions[0]];
+      }
+
+      return cachedVersions;
+    }
+
+    logger.debug('Version cache entry expired, refreshing', {
+      category: 'mods',
+      data: {
+        service: 'ModApiService',
+        operation: 'getModrinthVersions',
+        projectId,
+        loader,
+        gameVersion,
+        loadLatestOnly,
+        cacheKey,
+        cacheAge,
+        cacheTtlMs: VERSION_CACHE_TTL_MS
+      }
+    });
+
+    versionCache.delete(cacheKey);
+    cacheEntry = undefined;
+    cacheAge = null;
+  }
+
   performanceMetrics.cacheMisses++;
   
   logger.debug('Version cache miss, fetching from API', {
@@ -879,6 +929,9 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
       gameVersion,
       loadLatestOnly,
       cacheKey,
+      cacheAge,
+      cacheTtlMs: VERSION_CACHE_TTL_MS,
+      forceRefresh,
       totalCacheMisses: performanceMetrics.cacheMisses
     }
   });
@@ -1366,7 +1419,11 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
       return dateB - dateA;
     });
   // Cache the results
-  versionCache.set(cacheKey, mappedVersions);
+  const cacheStoredAt = Date.now();
+  versionCache.set(cacheKey, {
+    versions: mappedVersions,
+    fetchedAt: cacheStoredAt
+  });
   
   const versionsDuration = Date.now() - versionsStartTime;
   
@@ -1380,7 +1437,10 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
       versionsFound: mappedVersions.length,
       loadLatestOnly,
       cacheKey,
+      cacheStoredAt,
+      cacheTtlMs: VERSION_CACHE_TTL_MS,
       cacheSize: versionCache.size,
+      forceRefresh,
       totalApiRequests: performanceMetrics.apiRequests
     }
   });
@@ -1648,6 +1708,7 @@ async function getCurseForgeDownloadUrl() {
 module.exports = {
   rateLimit,
   clearVersionCache,
+  getVersionCacheTtlMs,
   convertSortToModrinthFormat,
   filterModsByEnvironment,
   getModrinthPopular,

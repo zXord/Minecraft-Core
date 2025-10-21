@@ -6,14 +6,18 @@ const Module = require('module');
 async function withMockedFetch(sampleVersions, fn) {
   const originalLoad = Module._load;
   let fetchCalls = 0;
+  const responseFactory = typeof sampleVersions === 'function'
+    ? sampleVersions
+    : async () => sampleVersions;
 
   const mockFetch = async () => {
     fetchCalls += 1;
+    const payload = await responseFactory(fetchCalls);
     return {
       ok: true,
       status: 200,
       async json() {
-        return sampleVersions;
+        return payload;
       }
     };
   };
@@ -46,7 +50,7 @@ async function withMockedFetch(sampleVersions, fn) {
 
   try {
     modApiService.clearVersionCache();
-    await fn(modApiService, { fetchCalls });
+    await fn(modApiService, { getFetchCalls: () => fetchCalls });
   } finally {
     Module._load = originalLoad;
     delete require.cache[servicePath];
@@ -132,4 +136,109 @@ test('getModrinthVersions rejects broad major/minor tags for higher patch upgrad
     const results = await service.getModrinthVersions('architectury', 'fabric', '1.21.9', false);
     assert.equal(results.length, 0, 'Versions lacking explicit 1.21.9 support should be ignored');
   });
+});
+
+test('getModrinthVersions bypasses cache when forceRefresh is true', async () => {
+  const responses = [
+    [
+      {
+        id: 'architectury-1',
+        version_number: '1.0.0',
+        game_versions: ['1.21.1'],
+        loaders: ['fabric'],
+        version_type: 'release',
+        date_published: '2024-01-01T00:00:00Z',
+        files: [{ size: 1024 }],
+        downloads: 10
+      }
+    ],
+    [
+      {
+        id: 'architectury-2',
+        version_number: '2.0.0',
+        game_versions: ['1.21.1'],
+        loaders: ['fabric'],
+        version_type: 'release',
+        date_published: '2024-02-01T00:00:00Z',
+        files: [{ size: 2048 }],
+        downloads: 20
+      }
+    ]
+  ];
+
+  await withMockedFetch(
+    // Cycle through responses array based on call number (1-based)
+    async call => responses[(call - 1) % responses.length],
+    async (service, helpers) => {
+      const initial = await service.getModrinthVersions('architectury', 'fabric', '1.21.1', false, false);
+      assert.equal(initial[0].versionNumber, '1.0.0');
+      assert.equal(helpers.getFetchCalls(), 1);
+
+      const cached = await service.getModrinthVersions('architectury', 'fabric', '1.21.1', false, false);
+      assert.equal(helpers.getFetchCalls(), 1, 'Second call should reuse cached data');
+      assert.equal(cached[0].versionNumber, '1.0.0');
+
+      const refreshed = await service.getModrinthVersions('architectury', 'fabric', '1.21.1', false, true);
+      assert.equal(helpers.getFetchCalls(), 2, 'Force refresh should trigger a fresh fetch');
+      assert.equal(refreshed[0].versionNumber, '2.0.0');
+    }
+  );
+});
+
+test('getModrinthVersions refreshes cached entries after the TTL expires', async () => {
+  const responses = [
+    [
+      {
+        id: 'architectury-1',
+        version_number: '1.0.0',
+        game_versions: ['1.21.1'],
+        loaders: ['fabric'],
+        version_type: 'release',
+        date_published: '2024-01-01T00:00:00Z',
+        files: [{ size: 1024 }],
+        downloads: 10
+      }
+    ],
+    [
+      {
+        id: 'architectury-2',
+        version_number: '2.0.0',
+        game_versions: ['1.21.1'],
+        loaders: ['fabric'],
+        version_type: 'release',
+        date_published: '2024-02-01T00:00:00Z',
+        files: [{ size: 2048 }],
+        downloads: 20
+      }
+    ]
+  ];
+
+  await withMockedFetch(
+    async call => responses[Math.min(call, responses.length) - 1],
+    async (service, helpers) => {
+      const realDateNow = Date.now;
+      try {
+        let currentTime = 0;
+        Date.now = () => currentTime;
+
+        currentTime = 0;
+        const first = await service.getModrinthVersions('architectury', 'fabric', '1.21.1', false, false);
+        assert.equal(first[0].versionNumber, '1.0.0');
+        assert.equal(helpers.getFetchCalls(), 1);
+
+        const ttl = service.getVersionCacheTtlMs();
+        currentTime = ttl - 1000;
+        const beforeExpiry = await service.getModrinthVersions('architectury', 'fabric', '1.21.1', false, false);
+        assert.equal(helpers.getFetchCalls(), 1, 'Cache should still be valid before TTL expires');
+        assert.equal(beforeExpiry[0].versionNumber, '1.0.0');
+
+        currentTime = ttl + 1000;
+        const afterExpiry = await service.getModrinthVersions('architectury', 'fabric', '1.21.1', false, false);
+        assert.equal(helpers.getFetchCalls(), 2, 'Expired cache should trigger a fresh fetch');
+        assert.equal(afterExpiry[0].versionNumber, '2.0.0');
+      } finally {
+        Date.now = realDateNow;
+      }
+    }
+  );
 });

@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('electron', {
       'install-resourcepack-with-fallback',
       'download-mod-from-server',
       'download-mod-from-fallback',
+      'cancel-download',
       'calculate-file-checksum',
       'install-client-mod',
   'list-client-assets',
