@@ -131,7 +131,6 @@
   let optionalModListComponent;
   let clientManualModListComponent;
 
-  let minecraftVersionOptions = [get(minecraftVersion) || '1.20.1'];
   let downloadManagerCleanup;
   let unsubscribeInstalledInfo;
   let previousPath= null;
@@ -345,8 +344,9 @@
         checkModSynchronization(instance);
       }
     });
-    // Initialize filter stores for client mod search
-    if (!get(filterMinecraftVersion)) {
+    // Initialize filter stores for client mod search (only if null/undefined, not empty string)
+    const currentFilterVer = get(filterMinecraftVersion);
+    if (currentFilterVer === null || currentFilterVer === undefined) {
       filterMinecraftVersion.set(get(minecraftVersion) || '1.20.1');
     }
     if (!get(filterModLoader)) {
@@ -379,14 +379,7 @@
   refreshAssets();
   }
 
-  // Keep filters in sync with the selected Minecraft version
-  $: {
-    if ($minecraftVersion) {
-      filterMinecraftVersion.set($minecraftVersion);
-      if (!minecraftVersionOptions.includes($minecraftVersion)) {
-        minecraftVersionOptions = [$minecraftVersion, ...minecraftVersionOptions.filter(v => v !== $minecraftVersion)];
-      }
-    }  }
+
 
   // Reload installed mod info and update synchronization status
   async function refreshMods() {
@@ -1222,7 +1215,6 @@
       <div class="mod-search-section">
         <ModSearch
           on:install={handleInstallMod}
-          {minecraftVersionOptions}
           serverPath={instance?.path || ""}
           serverManagedSet={
             $activeContentType === CONTENT_TYPES.SHADERS

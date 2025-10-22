@@ -37,6 +37,10 @@
   let updateVersionNumber = null; // Add variable declaration for update version number
   let isInstalled = false; // Add variable declaration for installed status
   let installedModData = null; // Add variable declaration for installed content data
+  import { SvelteSet } from 'svelte/reactivity';
+  
+  let groupedVersions = {}; // Versions grouped by Minecraft version
+  let expandedMcVersions = new SvelteSet(); // Track which MC versions are expanded
   // Helper to normalize names/ids for fuzzy matching
   function normalizeName(str) {
     if (!str || typeof str !== 'string') return '';
@@ -151,6 +155,29 @@
   // Event dispatcher
   const dispatch = createEventDispatcher();
   
+  // Group versions by Minecraft version
+  $: {
+    if (filteredVersions.length > 0) {
+      const grouped = {};
+      filteredVersions.forEach(version => {
+        if (version && version.gameVersions && version.gameVersions.length > 0) {
+          version.gameVersions.forEach(mcVer => {
+            if (!grouped[mcVer]) {
+              grouped[mcVer] = [];
+            }
+            // Avoid duplicates
+            if (!grouped[mcVer].find(v => v.id === version.id)) {
+              grouped[mcVer].push(version);
+            }
+          });
+        }
+      });
+      groupedVersions = grouped;
+    } else {
+      groupedVersions = {};
+    }
+  }
+  
   // Filter versions based on selected Minecraft version
   $: {
     if (versions.length > 0) {
@@ -230,45 +257,68 @@
   }
   
   // When versions change, try to auto-select the best version
-  $: if (filteredVersions.length > 0 && !selectedVersionId) {
+  $: if (versions.length > 0 && !selectedVersionId) {
     // If we're installed, try to select the installed version first
     if (isInstalled && installedVersionId) {
-      const installedVersion = filteredVersions.find(v => v.id === installedVersionId);
+      const installedVersion = versions.find(v => v.id === installedVersionId);
       if (installedVersion) {
         selectedVersionId = installedVersionId;
       } else {
-        selectedVersionId = selectBestVersion(filteredVersions);
+        // Use all versions to find the best one (not filtered by MC version)
+        selectedVersionId = selectBestVersion(versions);
       }
     } else {
-      selectedVersionId = selectBestVersion(filteredVersions);
+      // Use all versions to find the best one (not filtered by MC version)
+      selectedVersionId = selectBestVersion(versions);
     }
     // Also update the mod object
     mod.selectedVersionId = selectedVersionId;
   }
   
   /**
-   * Select the best version based on stability and release date
+   * Select the best version based on MC version (highest first), then stability and release date
    * @param {Array} versions - Available versions
    * @returns {string} - Version ID
    */
   function selectBestVersion(versions) {
-    // First filter for the selected Minecraft version if specified
+    // Don't filter by current MC version - we want the version for the HIGHEST MC version available
     let compatibleVersions = versions;
-    if (filterMinecraftVersion) {
-      const mcVersionSpecificVersions = versions.filter(v => 
-        v && v.gameVersions && v.gameVersions.includes(filterMinecraftVersion)
-      );
-      if (mcVersionSpecificVersions.length > 0) {
-        compatibleVersions = mcVersionSpecificVersions;
-      }
-    }
     
     // Then try to find stable versions
     const stableVersions = compatibleVersions.filter(v => v && v.isStable !== false);
     const versionsToUse = stableVersions.length > 0 ? stableVersions : compatibleVersions;
     
-    // Sort by date (newest first)
+    // Sort by Minecraft version (highest first), then by date (newest first)
     const sortedVersions = [...versionsToUse].sort((a, b) => {
+      // Get the highest MC version for each mod version
+      const getHighestMcVersion = (version) => {
+        if (!version || !version.gameVersions || version.gameVersions.length === 0) return [0, 0, 0];
+        
+        // Parse all MC versions and find the highest
+        const parsed = version.gameVersions.map(v => {
+          const parts = v.split('.').map(Number);
+          return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+        });
+        
+        // Sort and return highest
+        parsed.sort((x, y) => {
+          if (x[0] !== y[0]) return y[0] - x[0];
+          if (x[1] !== y[1]) return y[1] - x[1];
+          return y[2] - x[2];
+        });
+        
+        return parsed[0];
+      };
+      
+      const mcVerA = getHighestMcVersion(a);
+      const mcVerB = getHighestMcVersion(b);
+      
+      // Compare MC versions
+      if (mcVerA[0] !== mcVerB[0]) return mcVerB[0] - mcVerA[0]; // Major
+      if (mcVerA[1] !== mcVerB[1]) return mcVerB[1] - mcVerA[1]; // Minor
+      if (mcVerA[2] !== mcVerB[2]) return mcVerB[2] - mcVerA[2]; // Patch
+      
+      // If MC versions are the same, sort by date
       const dateA = a && a.datePublished ? new Date(a.datePublished).getTime() : 0;
       const dateB = b && b.datePublished ? new Date(b.datePublished).getTime() : 0;
       return dateB - dateA;
@@ -276,6 +326,18 @@
     
     // Return the ID of the first (newest) version
     return sortedVersions.length > 0 && sortedVersions[0] ? sortedVersions[0].id : null;
+  }
+  
+  /**
+   * Toggle MC version group expansion
+   */
+  function toggleMcVersion(mcVersion) {
+    if (expandedMcVersions.has(mcVersion)) {
+      expandedMcVersions.delete(mcVersion);
+    } else {
+      expandedMcVersions.add(mcVersion);
+    }
+    expandedMcVersions = expandedMcVersions; // Trigger reactivity
   }
   
   /**
@@ -314,9 +376,9 @@
   
   // When the component is mounted, conditionally load versions
   onMount(() => {
-    // Only load the latest version on mount if configured to do so
+    // Load all versions on mount to determine the best one by MC version
     if (loadOnMount && (!versions || versions.length === 0)) {
-      dispatch('loadVersions', { modId: mod.id, loadLatestOnly: true, loadAll: false });
+      dispatch('loadVersions', { modId: mod.id, loadLatestOnly: false, loadAll: true });
     }
     
     // If we have an installed version, make sure that's preselected
@@ -637,7 +699,7 @@
           {:else if selectedVersionId && versions.length > 0}
             {@const selectedVersion = versions.find(v => v.id === selectedVersionId)}
             <span class="version-tag-inline">
-              {selectedVersion ? selectedVersion.versionNumber : 'Select version'}
+              {selectedVersion ? selectedVersion.versionNumber : ''}
             </span>
           {/if}
         </div>
@@ -757,83 +819,76 @@
           No compatible versions for Minecraft {filterMinecraftVersion}
         </div>
       {:else}
-        {@const hasExactMatches = filteredVersions.some(v => v && v.gameVersions && v.gameVersions.includes(filterMinecraftVersion))}
-        
-        {#if !filterMinecraftVersion || filterMinecraftVersion === "" || hasExactMatches}
-          <!-- Show versions normally when no filter is applied or when we have exact matches -->
-          <div class="version-list">
-            {#each filteredVersions.filter(v => v && v.id) as version (version.id)}
-              <div
-                class="version-item"
-                class:selected={version.id === selectedVersionId}
-                class:installed-version={version.id === installedVersionId}
-                class:compatible={version && version.gameVersions && version.gameVersions.includes(filterMinecraftVersion)}
-                aria-selected={version.id === selectedVersionId}
+        <!-- Grouped by Minecraft version -->
+        <div class="version-groups">
+          {#each Object.keys(groupedVersions).sort((a, b) => {
+            // Sort versions in descending order (newest first)
+            const aParts = a.split('.').map(Number);
+            const bParts = b.split('.').map(Number);
+            for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+              const aVal = aParts[i] || 0;
+              const bVal = bParts[i] || 0;
+              if (aVal !== bVal) return bVal - aVal;
+            }
+            return 0;
+          }) as mcVersion (mcVersion)}
+            {@const versionsForMc = groupedVersions[mcVersion]}
+            {@const isExpanded = expandedMcVersions.has(mcVersion)}
+            {@const isCurrent = mcVersion === filterMinecraftVersion}
+            
+            <div class="mc-version-group" class:current={isCurrent}>
+              <button 
+                class="mc-version-header" 
+                on:click={() => toggleMcVersion(mcVersion)}
+                type="button"
               >
-                <div class="version-info">
-                  <span class="version-name">{version.name || version.versionNumber}</span>
-                  <span class="version-mc">{version.gameVersions ? version.gameVersions.join(', ') : 'Unknown'}</span>
-                  {#if version.id === installedVersionId}
-                    <span class="installed-badge">Installed</span>
+                <span class="mc-version-icon">{isExpanded ? '▼' : '▶'}</span>
+                <span class="mc-version-name">
+                  📦 Minecraft {mcVersion}
+                  {#if isCurrent}
+                    <span class="current-badge">Current</span>
                   {/if}
+                </span>
+                <span class="mc-version-count">({versionsForMc.length} version{versionsForMc.length !== 1 ? 's' : ''})</span>
+              </button>
+              
+              {#if isExpanded}
+                <div class="version-list">
+                  {#each versionsForMc as version (version.id)}
+                    <div
+                      class="version-item"
+                      class:selected={version.id === selectedVersionId}
+                      class:installed-version={version.id === installedVersionId}
+                      aria-selected={version.id === selectedVersionId}
+                    >
+                      <div class="version-info">
+                        <span class="version-name">{version.name || version.versionNumber}</span>
+                        {#if version.id === installedVersionId}
+                          <span class="installed-badge">Installed</span>
+                        {/if}
+                      </div>
+                      <div class="version-meta">
+                        {#if version.downloads !== undefined}
+                          <span class="download-count" title="Download count">
+                            {version.downloads.toLocaleString()} DL
+                          </span>
+                        {/if}
+                        {#if version.fileSize !== undefined}
+                          <span class="file-size" title="File size">
+                            {formatFileSize(version.fileSize)}
+                          </span>
+                        {/if}
+                      </div>
+                      <button class="select-version" on:click={() => selectVersion(version)} type="button">
+                        Select
+                      </button>
+                    </div>
+                  {/each}
                 </div>
-                <div class="version-meta">
-                  {#if version.downloads !== undefined}
-                    <span class="download-count" title="Download count">
-                      {version.downloads.toLocaleString()} DL
-                    </span>
-                  {/if}
-                  {#if version.fileSize !== undefined}
-                    <span class="file-size" title="File size">
-                      {formatFileSize(version.fileSize)}
-                    </span>
-                  {/if}
-                </div>
-                <button class="select-version" on:click={() => selectVersion(version)} type="button">
-                  Select
-                </button>
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <!-- Show compatibility note only when we have a version filter but no exact matches -->
-          <div class="version-note">
-            No versions are officially tagged for Minecraft {filterMinecraftVersion}, but these versions may be compatible:
-          </div>
-          <div class="version-list">
-            {#each filteredVersions.filter(v => v && v.id) as version (version.id)}
-              <div
-                class="version-item"
-                class:selected={version.id === selectedVersionId}
-                class:installed-version={version.id === installedVersionId}
-                aria-selected={version.id === selectedVersionId}
-              >
-                <div class="version-info">
-                  <span class="version-name">{version.name || version.versionNumber}</span>
-                  <span class="version-mc">{version.gameVersions ? version.gameVersions.join(', ') : 'Unknown'}</span>
-                  {#if version.id === installedVersionId}
-                    <span class="installed-badge">Installed</span>
-                  {/if}
-                </div>
-                <div class="version-meta">
-                  {#if version.downloads !== undefined}
-                    <span class="download-count" title="Download count">
-                      {version.downloads.toLocaleString()} DL
-                    </span>
-                  {/if}
-                  {#if version.fileSize !== undefined}
-                    <span class="file-size" title="File size">
-                      {formatFileSize(version.fileSize)}
-                    </span>
-                  {/if}
-                </div>
-                <button class="select-version" on:click={() => selectVersion(version)} type="button">
-                  Select
-                </button>
-              </div>
-            {/each}
-          </div>
-        {/if}
+              {/if}
+            </div>
+          {/each}
+        </div>
       {/if}
     </div>
   {/if}
@@ -1034,10 +1089,77 @@
     overflow-y: auto;
   }
   
+  .version-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .mc-version-group {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.2);
+  }
+  
+  .mc-version-group.current {
+    border-color: rgba(100, 108, 255, 0.4);
+    background: rgba(100, 108, 255, 0.05);
+  }
+  
+  .mc-version-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border: none;
+    color: white;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-size: 0.95rem;
+    text-align: left;
+  }
+  
+  .mc-version-header:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+  
+  .mc-version-icon {
+    font-size: 0.8rem;
+    width: 16px;
+    display: inline-block;
+  }
+  
+  .mc-version-name {
+    flex: 1;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  
+  .mc-version-count {
+    font-size: 0.85rem;
+    opacity: 0.7;
+  }
+  
+  .current-badge {
+    background: #646cff;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  
   .version-list {
     display: flex;
     flex-direction: column;
-    gap: 6px;  }
+    gap: 6px;
+    padding: 8px;
+  }
   
   .version-item {
     display: flex;
@@ -1068,12 +1190,6 @@
     background: rgba(64, 128, 255, 0.1);
   }
   
-  .version-item.compatible {
-    border-left-color: #4caf50;
-    border-left-width: 3px;
-    background: rgba(76, 175, 80, 0.1);
-  }
-
   .select-version {
     background: #646cff;
     color: white;
@@ -1090,12 +1206,6 @@
   .version-name {
     font-size: 14px;
     color: rgba(255, 255, 255, 0.8);
-  }
-  
-  .version-mc {
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.5);
-    margin-left: 6px;
   }
   
   .version-info {
@@ -1181,13 +1291,6 @@
     font-size: 12px;
     color: #a0a8ff;
     margin-left: 4px;
-  }
-  
-  .version-note {
-    margin-bottom: 12px;
-    font-size: 14px;
-    color: rgba(255, 255, 255, 0.7);
-    text-align: center;
   }
   
   .installed-badge {

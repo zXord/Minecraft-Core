@@ -26,6 +26,7 @@
     CONTENT_TYPES,
     installedShaderInfo,
     installedResourcePackInfo,
+    contentTypeCache,
   } from "../../../stores/modStore.js";
   import {
     searchContent,
@@ -36,7 +37,6 @@
   import ModFilters from "./ModFilters.svelte";
   // Props
   export const serverPath = "";
-  export let minecraftVersionOptions = [];
 
   /** @type {Set<string> | undefined} */
   export let serverManagedSet = undefined;
@@ -74,19 +74,14 @@
 
   // Set the current Minecraft version as filter on component load and check for updates
   onMount(async () => {
-    // Only set the Minecraft version filter for mods, not for shaders/resource packs
-    if ($activeContentType === CONTENT_TYPES.MODS) {
-      filterMinecraftVersion.set($minecraftVersion);
-    }
+    // Always default to current version on mount
+    filterMinecraftVersion.set($minecraftVersion);
 
     // Run an initial search with current filters when component mounts
     const initialSearchOptions = {
       sortBy,
       environmentType: filterType,
-      filterMinecraftVersion:
-        $activeContentType === CONTENT_TYPES.MODS
-          ? $minecraftVersion
-          : $filterMinecraftVersion,
+      filterMinecraftVersion: $filterMinecraftVersion,
       filterModLoader: $loaderType,
     };
 
@@ -130,13 +125,10 @@
 
   // Handle content type changes
   $: if ($activeContentType) {
-    // Reset version filter appropriately when switching content types
-    if ($activeContentType === CONTENT_TYPES.MODS) {
-      // For mods, use the current Minecraft version
+    // When switching content types, set to current version if filter is null/undefined (but not empty string)
+    if ($filterMinecraftVersion === null || $filterMinecraftVersion === undefined) {
       filterMinecraftVersion.set($minecraftVersion);
     }
-    // For shaders and resource packs, don't automatically reset the filter
-    // Let the user control the version filter manually
   }
 
   // Load mods or search results
@@ -217,17 +209,13 @@
   }
 
   // Handle filter change
-  function handleFilterChange(event) {
+  async function handleFilterChange(event) {
     // Reset expanded mod when filter changes
     expandedModId.set(null);
     currentPage.set(1);
 
-    // For mods, ensure we're using the current Minecraft version
-    // For shaders and resource packs, update the filter version from the event
-    if ($activeContentType === CONTENT_TYPES.MODS) {
-      filterMinecraftVersion.set($minecraftVersion);
-    } else if (event && event.detail && event.detail.filterMinecraftVersion !== undefined) {
-      // Update the filter version for shaders and resource packs
+    // Update the filter version from the event for all content types
+    if (event && event.detail && event.detail.filterMinecraftVersion !== undefined) {
       filterMinecraftVersion.set(event.detail.filterMinecraftVersion);
     }
 
@@ -245,16 +233,20 @@
         modsSortBy = event.detail.sortBy;
       }
 
-      // Force a re-filtering of all results
-
       // Show feedback message
       showSortMessage(event.detail.sortBy);
 
       // Dispatch event to notify parent
       dispatch("filterChange", event.detail);
 
+      // Clear the cache to force a fresh search
+      contentTypeCache.set(new Map());
+
+      // Wait for store updates to propagate
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
       // Always make a new API call when filter changes to get fresh results
-      handleSearch(null, event.detail);
+      await handleSearch(null, event.detail);
     }
   }
 
@@ -434,7 +426,6 @@
       {filterType}
       filterMinecraftVersion={$filterMinecraftVersion}
       filterModLoader={$filterModLoader}
-      {minecraftVersionOptions}
       activeContentType={$activeContentType}
       on:filterChange={handleFilterChange}
     />
@@ -724,19 +715,13 @@
               ? "resource packs"
               : "mods"}.
         </p>
-        {#if $activeContentType === CONTENT_TYPES.MODS}
-          <p>
-            Your current Minecraft version ({$minecraftVersion}) will be used
-            for searching.
-          </p>
-        {:else}
-          <p>
-            Searching from Modrinth's {$activeContentType ===
-            CONTENT_TYPES.SHADERS
-              ? "shader"
-              : "resource pack"} collection.
-          </p>
-        {/if}
+        <p>
+          {#if $filterMinecraftVersion}
+            Searching for Minecraft version {$filterMinecraftVersion}.
+          {:else}
+            Searching across all Minecraft versions.
+          {/if}
+        </p>
       </div>
     {/if}
   </div>

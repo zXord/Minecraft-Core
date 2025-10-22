@@ -450,10 +450,11 @@ export async function searchContent(contentType = 'mods', options = {}) {
   
   try {
     // Generate cache key
+    const filterVerForCache = get(filterMinecraftVersion);
     const cacheKey = generateCacheKey(contentType, {
       searchKeyword: get(searchKeyword),
       modSource: get(modSource),
-      filterMinecraftVersion: get(filterMinecraftVersion),
+      filterMinecraftVersion: filterVerForCache,
       filterModLoader: get(filterModLoader),
       currentPage: get(currentPage),
       resultsPerPage: get(resultsPerPage),
@@ -505,7 +506,6 @@ export async function searchContent(contentType = 'mods', options = {}) {
     // Read filters from the centralized stores
     const query = get(searchKeyword);
     const source = get(modSource);
-    const currentMinecraftVer = get(minecraftVersion);
     const filterVer = get(filterMinecraftVersion);
     const loader = get(filterModLoader) || get(loaderType);
     const page = get(currentPage);
@@ -514,17 +514,13 @@ export async function searchContent(contentType = 'mods', options = {}) {
     const environmentType = options.environmentType || 'all';
     
     // Use filter version if available and different from empty string
-    // For shaders/resource packs: empty string means "All Versions" (no filter)
-    // For mods: empty string means use current Minecraft version
+    // Empty string means "All Versions" (no filter) for all content types
     let versionToUse;
     if (filterVer && filterVer !== '') {
       // User selected a specific version
       versionToUse = filterVer;
-    } else if (contentType === 'mods') {
-      // For mods, always use current version when no specific version selected
-      versionToUse = currentMinecraftVer;
     } else {
-      // For shaders/resource packs, empty string means "All Versions" (no version filter)
+      // Empty string means "All Versions" (no version filter)
       versionToUse = undefined;
     }
     
@@ -539,6 +535,7 @@ export async function searchContent(contentType = 'mods', options = {}) {
       sortBy,
       environmentType
     };
+
     
     
     // Use different IPC methods based on content type
@@ -780,8 +777,21 @@ export async function searchMods(options = {}) {
 export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false, forceRefresh = false, contentType = 'mods') {
   // Cache key - NOTE: forceRefresh should NOT be part of the cache key
   const loader = get(loaderType);
-  const gameVersion = get(minecraftVersion);
-  const cacheKey = `${modId}:${loader}:${gameVersion}:${loadLatestOnly}`;
+  const filterVer = get(filterMinecraftVersion);
+  const currentVersion = get(minecraftVersion);
+  
+  // Use filter version if set, otherwise use current version
+  // Empty string means "All Versions" - use undefined to not filter
+  let gameVersion;
+  if (filterVer === '') {
+    gameVersion = undefined; // All versions
+  } else if (filterVer) {
+    gameVersion = filterVer; // Specific filter version
+  } else {
+    gameVersion = currentVersion; // Current version as fallback
+  }
+  
+  const cacheKey = `${modId}:${loader}:${gameVersion || 'all'}:${loadLatestOnly}`;
 
   // Check if we already have this version information cached (unless forcing refresh)
   if (!forceRefresh) {
@@ -807,6 +817,7 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
       loadLatestOnly: loadLatestOnly,
       forceRefresh: forceRefresh
     };
+
     
     // Invoke the IPC method to get versions
     const versions = await safeInvoke('get-mod-versions', invokeArgs);

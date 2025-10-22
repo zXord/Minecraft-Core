@@ -67,7 +67,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   export let serverPath = '';
   
   // Local state
-  let minecraftVersionOptions = [$minecraftVersion];
   let downloadManagerCleanup;
   let activeTab = 'installed'; // 'installed' or 'search' or 'categories'
   
@@ -157,14 +156,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   })();
 
   
-  // Initialize filter stores (only for mods to avoid version filter ping-pong on shaders/resource packs)
-  $: if (
-    $minecraftVersion &&
-    $activeContentType === CONTENT_TYPES.MODS &&
-    $filterMinecraftVersion === ''
-  ) {
-    filterMinecraftVersion.set($minecraftVersion);
-  }
+  // Initialize filter stores on first load only
   $: if ($loaderType && $filterModLoader === '') {
     filterModLoader.set($loaderType);
   }
@@ -700,19 +692,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     }
   }
   
-  // Watch for changes to the minecraftVersion store
-  $: {
-    if ($minecraftVersion) {
-      // Only force filter version for mods to avoid conflicts with shaders/resource packs
-      if ($activeContentType === CONTENT_TYPES.MODS) {
-        filterMinecraftVersion.set($minecraftVersion);
-      }
-      // Add the current version to options if not already included
-      if (!minecraftVersionOptions.includes($minecraftVersion)) {
-        minecraftVersionOptions = [$minecraftVersion, ...minecraftVersionOptions.filter(v => v !== $minecraftVersion)];
-      }
-    }
-  }
+
   
   // Watch for tab changes and load search results when switching to search tab
   $: if (activeTab === 'search') {
@@ -974,7 +954,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         on:install={handleInstallMod}
         on:filterChange={handleFilterChange}
         serverPath={serverPath}
-        {minecraftVersionOptions}
       />
       
       <div class="search-results">

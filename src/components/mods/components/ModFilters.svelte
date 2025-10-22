@@ -20,9 +20,6 @@
   let localSortBy = sortBy;
   let localFilterType = filterType;
 
-  // Expose options
-  export let minecraftVersionOptions = [];
-
   // Visual feedback for button click
   let isApplying = false;
 
@@ -93,43 +90,23 @@
           // Get the selected value
           const selectedValue = e.currentTarget.value;
 
-          // For shaders and resource packs, trigger filter change immediately
-          if (
-            activeContentType === CONTENT_TYPES.SHADERS ||
-            activeContentType === CONTENT_TYPES.RESOURCE_PACKS
-          ) {
-            // Create a proper event detail object and dispatch it
-            const detail = {
-              sortBy,
-              filterType,
-              filterMinecraftVersion: selectedValue,
-              filterModLoader,
-            };
-            dispatch("filterChange", detail);
-          }
+
+
+          // Trigger filter change immediately for all content types
+          const detail = {
+            sortBy: localSortBy,
+            filterType: localFilterType,
+            filterMinecraftVersion: selectedValue,
+            filterModLoader,
+          };
+          dispatch("filterChange", detail);
         }}
-        class={activeContentType === CONTENT_TYPES.MODS
-          ? "disabled-select"
-          : ""}
-        disabled={activeContentType === CONTENT_TYPES.MODS}
       >
-        <!-- For shaders and resource packs, show "All Versions" option -->
-        {#if activeContentType === CONTENT_TYPES.SHADERS || activeContentType === CONTENT_TYPES.RESOURCE_PACKS}
-          <option value="">All Versions</option>
-          <option value={$minecraftVersion}
-            >{$minecraftVersion} (Current)</option
-          >
-          {#each minecraftVersionOptions as ver (ver)}
-            {#if ver !== $minecraftVersion}
-              <option value={ver}>{ver}</option>
-            {/if}
-          {/each}
-        {:else}
-          <!-- For mods, show only available versions (disabled) -->
-          {#each minecraftVersionOptions as ver (ver)}
-            <option value={ver}>{ver}</option>
-          {/each}
-        {/if}
+        <!-- Show "All Versions" option and current version only -->
+        <option value="">All Versions</option>
+        <option value={$minecraftVersion}
+          >{$minecraftVersion} (Current)</option
+        >
       </select>
     </div>
   </div>

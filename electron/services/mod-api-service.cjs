@@ -374,7 +374,7 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
   // Execute request with retry logic
   const data = await retryWithBackoff(async () => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 10 second timeout
     
     try {
       const response = await fetch(url.toString(), {
@@ -549,7 +549,7 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   // Execute request with retry logic
   const data = await retryWithBackoff(async () => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 10 second timeout
     
     try {
       const response = await fetch(url.toString(), {
@@ -748,7 +748,7 @@ async function getModrinthProjectInfo(projectId) {
   
   return await retryWithBackoff(async () => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 10 second timeout
     
     try {
       const response = await fetch(`${MODRINTH_API}/project/${projectId}`, {
@@ -1460,7 +1460,7 @@ async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader)
   
   return await retryWithBackoff(async () => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // 10 second timeout
     
     try {
       const response = await fetch(`${MODRINTH_API}/version/${versionId}`, {
@@ -1562,7 +1562,7 @@ async function getModrinthVersionByFileHash(hashHex, algorithm = 'sha1') {
   await rateLimit();
   return await retryWithBackoff(async () => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
     try {
       const response = await fetch(`${MODRINTH_API}/version_file/${hashHex}?algorithm=${algorithm}`, {
         signal: controller.signal
