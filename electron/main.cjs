@@ -10,7 +10,7 @@ const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const fs = require('fs');
 const { ipcMain } = require('electron');
 const { getUpdateService } = require('./services/update-service.cjs');
-const devConfig = require('../dev-config.cjs');
+const devConfig = require('../config/dev-config.cjs');
 
 // Initialize logger service early
 let logger = null;

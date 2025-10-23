@@ -3,7 +3,7 @@
 import { RetentionPolicy, TimeConstants, SizeConstants } from './retentionPolicy.js';
 import { formatSize } from './sizeCalculator.js';
 import logger from '../logger.js';
-import { optimizeRetentionPolicies as optimizeRetentionPoliciesCore } from '../../../shared/backup/retentionOptimization.js';
+import { optimizeRetentionPolicies as optimizeRetentionPoliciesCore } from '../../../shared/utils/retention-optimization.js';
 
 /**
  * Retention Policy Warnings and Preview System

@@ -15,7 +15,7 @@ exports.default = async function(context) {
 
     const appOutDir = context.appOutDir;
     const exePath = path.join(appOutDir, 'Minecraft Core.exe');
-    const iconPath = path.resolve(__dirname, '../build/icon.ico');
+    const iconPath = path.resolve(__dirname, '../build-resources/icon.ico');
 
     console.log('Running afterPack hook...');
     console.log('Exe path:', exePath);

@@ -52,7 +52,7 @@ async function createPngBuffers(sourcePath) {
 
 async function ensureIcon() {
   const sourcePath = path.resolve('icon.png');
-  const targetDir = path.resolve('build');
+  const targetDir = path.resolve('build-resources');
   const targetPath = path.join(targetDir, 'icon.ico');
 
   try {

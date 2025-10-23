@@ -11,7 +11,7 @@
     "dev:vite": "vite dev",
     "dev:electron": "wait-on --timeout 30000 http-get://localhost:5173 && electron . || wait-on --timeout 30000 http-get://localhost:5174 && electron .",
     "test": "node --test",
-    "build": "vite build && node post-build.mjs",
+    "build": "vite build && node scripts/post-build.mjs",
     "build:icons": "node scripts/generate-icon.cjs",
     "start": "electron .",
     "prod": "npm run build && npm run start",
@@ -66,7 +66,7 @@
     "productName": "Minecraft Core",
     "directories": {
       "output": "dist",
-      "buildResources": "build"
+      "buildResources": "build-resources"
     },
     "extraMetadata": {
       "name": "minecraft-core",
@@ -77,8 +77,8 @@
       "electron/**/*",
       "package.json",
       "icon.png",
-      "build/icon.ico",
-      "dev-config.cjs"
+      "build-resources/icon.ico",
+      "config/dev-config.cjs"
     ],
     "copyright": "Copyright © 2025 zXord",
     "win": {
@@ -86,7 +86,7 @@
       "requestedExecutionLevel": "asInvoker",
       "verifyUpdateCodeSignature": false,
       "executableName": "Minecraft Core",
-      "icon": "build/icon.ico",
+      "icon": "build-resources/icon.ico",
       "signAndEditExecutable": false
     },
     "afterPack": "scripts/afterPack.cjs",
@@ -95,15 +95,15 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
-      "include": "build/uninstaller.nsh",
+      "include": "build-resources/uninstaller.nsh",
       "warningsAsErrors": false,
       "artifactName": "Minecraft-Core-Setup-${version}.exe",
       "displayLanguageSelector": false,
       "deleteAppDataOnUninstall": false,
       "shortcutName": "Minecraft Core",
       "uninstallDisplayName": "Minecraft Core",
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico"
+      "installerIcon": "build-resources/icon.ico",
+      "uninstallerIcon": "build-resources/icon.ico"
     },
     "publish": {
       "provider": "github",

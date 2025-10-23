@@ -5,7 +5,7 @@ const EventEmitter = require('events');
 const instanceContext = require('../utils/instance-context.cjs');
 let devConfig = null;
 try {
-  devConfig = require('../../dev-config.cjs');
+  devConfig = require('../../config/dev-config.cjs');
 } catch {
   devConfig = { enableDevConsole: false, enableVerboseLogging: false };
 }

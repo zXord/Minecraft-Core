@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { optimizeRetentionPolicies, SizeConstants } from '../shared/backup/retentionOptimization.js';
+import { optimizeRetentionPolicies, SizeConstants } from '../shared/utils/retention-optimization.js';
 
 test('optimizeRetentionPolicies returns stable defaults with no backups', async () => {
   const result = await optimizeRetentionPolicies([], {});

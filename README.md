@@ -52,6 +52,26 @@ A comprehensive Minecraft Server and Client Management Application built with El
 3. Follow the installation wizard
 4. Launch Minecraft Core from your desktop or start menu
 
+## 🏗️ Project Structure
+
+This project follows a structured organization to maintain clarity and ease of development. For a detailed explanation of the directory layout and file organization, see [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md).
+
+Key directories:
+- `src/` - Frontend Svelte application
+- `electron/` - Electron main process code
+- `scripts/` - Build and utility scripts
+- `config/` - Configuration files
+- `shared/` - Code shared between renderer and main processes
+- `build-resources/` - Source files for building installers
+- `docs/` - Project documentation
+
+## 🛠️ Development Setup
+
+Want to contribute or run the project locally? Check out our [Development Setup Guide](docs/IDE_SETUP.md) for:
+- IDE configuration recommendations
+- Required extensions and tools
+- Development workflow tips
+- Build and test commands
 
 ## 🐛 Bug Reports
 

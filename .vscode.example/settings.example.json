@@ -1,0 +1,40 @@
+{
+  "eslint.validate": [
+    "javascript",
+    "javascriptreact",
+    "svelte"
+  ],
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "always"
+  },
+  "svelte.enable-ts-plugin": true,
+  "svelte.plugin.typescript.enable": true,
+  "svelte.plugin.typescript.diagnostics.enable": true,
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/dist-ssr": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/dist-ssr": true
+  },
+  "typescript.preferences.exclude": [
+    "**/node_modules",
+    "**/dist",
+    "**/dist-ssr"
+  ],
+  "javascript.preferences.exclude": [
+    "**/node_modules",
+    "**/dist", 
+    "**/dist-ssr"
+  ],
+  "javascript.validate.enable": true,
+  "typescript.validate.enable": true,
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/dist-ssr/**": true
+  }
+}

@@ -10,3 +10,4 @@ const store = new Store({
 
 // Clear all data
 store.clear();
+
