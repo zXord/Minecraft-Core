@@ -5,10 +5,36 @@
   import { serverState } from "./stores/serverState.js";
   import { errorMessage } from "./stores/modStore.js";
   import { route, navigate } from "./router.js";
-  import ServerDashboard from "./routes/ServerDashboard.svelte";
-  import ModsPage from "./routes/ModsPage.svelte";
-  import SettingsPage from "./routes/SettingsPage.svelte";
   import { setupIpcListeners } from "./modules/serverListeners.js";
+
+  // Dynamic route imports - components loaded on demand
+  let ServerDashboard;
+  let ModsPage;
+  let SettingsPage;
+
+  // Cache for loaded route components to prevent re-fetching
+  async function loadRoute(routeName) {
+    switch(routeName) {
+      case 'dashboard':
+        if (!ServerDashboard) {
+          const module = await import('./routes/ServerDashboard.svelte');
+          ServerDashboard = module.default;
+        }
+        return ServerDashboard;
+      case 'mods':
+        if (!ModsPage) {
+          const module = await import('./routes/ModsPage.svelte');
+          ModsPage = module.default;
+        }
+        return ModsPage;
+      case 'settings':
+        if (!SettingsPage) {
+          const module = await import('./routes/SettingsPage.svelte');
+          SettingsPage = module.default;
+        }
+        return SettingsPage;
+    }
+  }
   import { saveInstances } from "./modules/instanceUtils.js";
   import logger from "./utils/logger.js";
 
@@ -1446,7 +1472,25 @@
           <div class="tab-content">
             {#if $route === "/dashboard"}
               <div class="content-panel">
-                <ServerDashboard serverPath={path} />
+                {#await loadRoute('dashboard')}
+                  <div class="route-loading">
+                    <div class="loading-spinner"></div>
+                    <p>Loading Dashboard...</p>
+                  </div>
+                {:then Component}
+                  <svelte:component this={Component} serverPath={path} />
+                {:catch error}
+                  <div class="route-error">
+                    <p>Failed to load Dashboard. Please try again.</p>
+                    <button on:click={() => {
+                      logger.error(`Dashboard chunk load failed: ${error.message}`, {
+                        category: "ui",
+                        data: { component: "App", route: "dashboard", error: error.message }
+                      });
+                      window.location.reload();
+                    }}>Refresh</button>
+                  </div>
+                {/await}
               </div>
             {:else if $route === "/players"}
               <div class="content-panel">
@@ -1454,7 +1498,25 @@
               </div>
             {:else if $route === "/mods"}
               <div class="content-panel">
-                <ModsPage serverPath={path} />
+                {#await loadRoute('mods')}
+                  <div class="route-loading">
+                    <div class="loading-spinner"></div>
+                    <p>Loading Mods...</p>
+                  </div>
+                {:then Component}
+                  <svelte:component this={Component} serverPath={path} />
+                {:catch error}
+                  <div class="route-error">
+                    <p>Failed to load Mods page. Please try again.</p>
+                    <button on:click={() => {
+                      logger.error(`Mods chunk load failed: ${error.message}`, {
+                        category: "ui",
+                        data: { component: "App", route: "mods", error: error.message }
+                      });
+                      window.location.reload();
+                    }}>Refresh</button>
+                  </div>
+                {/await}
               </div>
             {:else if $route === "/backups"}
               <div class="content-panel">
@@ -1462,58 +1524,76 @@
               </div>
             {:else if $route === "/settings"}
               <div class="content-panel">
-                <SettingsPage
-                  serverPath={path}
-                  {currentInstance}
-                  on:deleted={(e) => {
-                    logger.info("Instance deleted from settings", {
-                      category: "core",
-                      data: {
-                        component: "App",
-                        deletedInstanceId: e.detail.id,
-                        remainingInstances: instances.length - 1,
-                      },
-                    });
+                {#await loadRoute('settings')}
+                  <div class="route-loading">
+                    <div class="loading-spinner"></div>
+                    <p>Loading Settings...</p>
+                  </div>
+                {:then Component}
+                  <svelte:component this={Component}
+                    serverPath={path}
+                    {currentInstance}
+                    on:deleted={(e) => {
+                      logger.info("Instance deleted from settings", {
+                        category: "core",
+                        data: {
+                          component: "App",
+                          deletedInstanceId: e.detail.id,
+                          remainingInstances: instances.length - 1,
+                        },
+                      });
 
-                    // Remove the instance from the list
-                    instances = instances.filter((i) => i.id !== e.detail.id);
+                      // Remove the instance from the list
+                      instances = instances.filter((i) => i.id !== e.detail.id);
 
-                    // Switch to a different instance if available, otherwise show empty state
-                    if (instances.length > 0) {
-                      currentInstance = instances[0];
-                      storeCurrentInstance(instances[0]);
-                      logger.info(
-                        "Switched to remaining instance after deletion",
-                        {
-                          category: "core",
-                          data: {
-                            component: "App",
-                            newInstanceId: currentInstance.id,
-                            newInstanceType: currentInstance.type,
+                      // Switch to a different instance if available, otherwise show empty state
+                      if (instances.length > 0) {
+                        currentInstance = instances[0];
+                        storeCurrentInstance(instances[0]);
+                        logger.info(
+                          "Switched to remaining instance after deletion",
+                          {
+                            category: "core",
+                            data: {
+                              component: "App",
+                              newInstanceId: currentInstance.id,
+                              newInstanceType: currentInstance.type,
+                            },
                           },
-                        },
-                      );
-                      if (currentInstance.type === "server") {
-                        path = currentInstance.path;
-                        instanceType = "server";
+                        );
+                        if (currentInstance.type === "server") {
+                          path = currentInstance.path;
+                          instanceType = "server";
+                        } else {
+                          instanceType = "client";
+                        }
                       } else {
-                        instanceType = "client";
+                        logger.info(
+                          "No instances remaining after deletion, showing empty state",
+                          {
+                            category: "core",
+                            data: { component: "App" },
+                          },
+                        );
+                        // Show empty state instead of forcing instance selector
+                        currentInstance = null;
+                        storeCurrentInstance(null);
+                        step = "done";
                       }
-                    } else {
-                      logger.info(
-                        "No instances remaining after deletion, showing empty state",
-                        {
-                          category: "core",
-                          data: { component: "App" },
-                        },
-                      );
-                      // Show empty state instead of forcing instance selector
-                      currentInstance = null;
-                      storeCurrentInstance(null);
-                      step = "done";
-                    }
-                  }}
-                />
+                    }}
+                  />
+                {:catch error}
+                  <div class="route-error">
+                    <p>Failed to load Settings page. Please try again.</p>
+                    <button on:click={() => {
+                      logger.error(`Settings chunk load failed: ${error.message}`, {
+                        category: "ui",
+                        data: { component: "App", route: "settings", error: error.message }
+                      });
+                      window.location.reload();
+                    }}>Refresh</button>
+                  </div>
+                {/await}
               </div>
             {/if}
           </div>
@@ -2252,4 +2332,63 @@
       background-color: #40a9ff;
     }
     .nav-update-badge {background:#ef4444;color:#fff;font-size:0.55rem;padding:2px 6px;border-radius:10px;font-weight:600;margin-left:4px;display:inline-block;min-width:18px;text-align:center;}
+
+  /* Route loading and error states */
+  .route-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4rem 2rem;
+    color: rgba(255, 255, 255, 0.8);
+  }
+
+  .route-loading p {
+    margin-top: 1rem;
+    font-size: 1rem;
+  }
+
+  .loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid rgba(59, 130, 246, 0.2);
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .route-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4rem 2rem;
+    text-align: center;
+  }
+
+  .route-error p {
+    color: #ef4444;
+    font-size: 1.1rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .route-error button {
+    background-color: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .route-error button:hover {
+    background-color: #2563eb;
+    transform: translateY(-1px);
+  }
   </style>
