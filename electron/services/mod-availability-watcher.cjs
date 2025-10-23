@@ -205,7 +205,8 @@ async function checkSingleWatch(serverPath, watch) {
     const modApiService = require('./mod-api-service.cjs');
     const target = watch.target || {};
     const targetLoaderNormalized = target.loader ? normalizeLoaderName(target.loader) : (target.fabric ? 'fabric' : null);
-    const versions = await modApiService.getModrinthVersions(watch.projectId, targetLoaderNormalized, target.mc, false);
+    // Force refresh to bypass cache and detect new releases during interval checks
+    const versions = await modApiService.getModrinthVersions(watch.projectId, targetLoaderNormalized, target.mc, false, true);
     if (Array.isArray(versions) && versions.length > 0) {
       // Filter for matching minecraft version and loader if specified
       const matching = versions.filter(v => {

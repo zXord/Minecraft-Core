@@ -18,9 +18,9 @@ function createModInfoHandlers() {
       throw new Error(`Invalid source: ${source}`);
     },
 
-    'get-mod-versions': async (_e, { modId, loader, mcVersion, source, loadLatestOnly }) => {
+    'get-mod-versions': async (_e, { modId, loader, mcVersion, source, loadLatestOnly, forceRefresh = false }) => {
       if (source === 'modrinth') {
-        return await modApiService.getModrinthVersions(modId, loader, mcVersion, loadLatestOnly);
+        return await modApiService.getModrinthVersions(modId, loader, mcVersion, loadLatestOnly, forceRefresh);
       }
       throw new Error('Only Modrinth version fetching is currently fully supported via modApiService.');
     },

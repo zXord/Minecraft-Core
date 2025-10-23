@@ -146,47 +146,107 @@ let tray = null;
 const shouldStartMinimized = process.argv.includes('--start-minimized');
 
 /**
+ * Normalize filenames array.
+ * @param {string[]} filenames
+ * @returns {string[]}
+ */
+function normalizeFilenames(filenames) {
+  const normalizedNames = [];
+  const seenNames = new Set();
+  for (const name of filenames) {
+    if (!name) continue;
+    const normalized = path.normalize(name);
+    if (seenNames.has(normalized)) continue;
+    seenNames.add(normalized);
+    normalizedNames.push(normalized);
+  }
+  return normalizedNames;
+}
+
+/**
+ * Collect candidate directories for asset resolution.
+ * @returns {Set<string>}
+ */
+function collectCandidateDirs() {
+  const candidateDirs = new Set();
+
+  const addCandidateDir = (value) => {
+    if (!value) return;
+    try {
+      candidateDirs.add(path.resolve(value));
+    } catch {
+      // ignore invalid paths
+    }
+  };
+
+  // Core search locations (dev + packaged)
+  addCandidateDir(path.join(__dirname, '..'));
+  addCandidateDir(process.cwd());
+
+  if (typeof app?.getAppPath === 'function') {
+    try {
+      addCandidateDir(app.getAppPath());
+    } catch {
+      // ignore app path resolution errors
+    }
+  }
+
+  if (app.isPackaged) {
+    const resourcesRoot = process.resourcesPath || path.join(process.cwd(), 'resources');
+    addCandidateDir(resourcesRoot);
+    addCandidateDir(path.join(resourcesRoot, 'build'));
+    addCandidateDir(path.join(resourcesRoot, 'app.asar.unpacked'));
+    addCandidateDir(path.join(resourcesRoot, 'app.asar.unpacked', 'build'));
+  } else {
+    addCandidateDir(path.resolve('build'));
+    addCandidateDir(path.join(__dirname));
+  }
+
+  return candidateDirs;
+}
+
+function findExistingFile(candidateDirs, normalizedNames) {
+  for (const baseDir of candidateDirs) {
+    for (const name of normalizedNames) {
+      const candidate = path.join(baseDir, name);
+      try {
+        if (fs.existsSync(candidate)) {
+          return candidate;
+        }
+      } catch {
+        // ignore fs probe errors
+      }
+    }
+  }
+  return null;
+}
+
+function findAbsoluteFallback(normalizedNames) {
+  for (const name of normalizedNames) {
+    const absolutePath = path.resolve(name);
+    try {
+      if (fs.existsSync(absolutePath)) {
+        return absolutePath;
+      }
+    } catch {
+      // ignore fs probe errors
+    }
+  }
+  return null;
+}
+
+/**
  * Resolve an asset path regardless of dev or packaged runtime.
  * Prefers build resources when packaged while allowing root fallbacks in dev.
  * @param {...string} filenames
  * @returns {string|null}
  */
 function resolveAssetPath(...filenames) {
-  const seen = new Set();
-  const candidates = [];
-
-  for (const name of filenames) {
-    if (!name) {
-      continue;
-    }
-
-    const normalized = path.normalize(name);
-    if (seen.has(normalized)) {
-      continue;
-    }
-    seen.add(normalized);
-
-    if (app.isPackaged) {
-      candidates.push(path.join(process.resourcesPath, normalized));
-      candidates.push(path.join(process.resourcesPath, 'build', normalized));
-    }
-
-    candidates.push(path.join(__dirname, '..', normalized));
-    candidates.push(path.resolve(normalized));
-    candidates.push(path.resolve('build', normalized));
-  }
-
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    } catch {
-      // ignore fs probe errors
-    }
-  }
-
-  return null;
+  const normalizedNames = normalizeFilenames(filenames);
+  const candidateDirs = collectCandidateDirs();
+  const found = findExistingFile(candidateDirs, normalizedNames);
+  if (found) return found;
+  return findAbsoluteFallback(normalizedNames);
 }
 
 
