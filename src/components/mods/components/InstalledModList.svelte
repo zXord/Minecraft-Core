@@ -911,9 +911,8 @@
         }
       }
       
-      // Force refresh mod list and update checks ONCE at the end to ensure UI is current
+      // Force refresh mod list ONCE at the end to ensure UI is current
       await loadMods(serverPath);
-      await checkForUpdates(serverPath, true);
       // Explicitly refresh disabled mod updates to ensure accurate counts
       await checkDisabledModUpdates(serverPath);
 
