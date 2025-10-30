@@ -103,7 +103,8 @@
       "shortcutName": "Minecraft Core",
       "uninstallDisplayName": "Minecraft Core",
       "installerIcon": "build-resources/icon.ico",
-      "uninstallerIcon": "build-resources/icon.ico"
+      "uninstallerIcon": "build-resources/icon.ico",
+      "differentialPackage": true
     },
     "publish": {
       "provider": "github",
