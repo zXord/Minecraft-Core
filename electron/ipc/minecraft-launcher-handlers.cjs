@@ -672,6 +672,83 @@ function createMinecraftLauncherHandlers(win) {
         }
         const allModsToDownloadFinal = deduplicatedMods;
 
+        // Cache server availability so we don't block each mod on a dead server
+        const serverAvailability = {
+          checked: false,
+          available: true,
+          lastError: null
+        };
+        const SERVER_HEALTH_TIMEOUT_MS = 5000;
+        const SERVER_DOWNLOAD_TIMEOUT_MS = 15000;
+        const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60000;
+
+        function markServerUnavailable(error) {
+          serverAvailability.available = false;
+          serverAvailability.checked = true;
+          serverAvailability.lastError = error ? (error.message || String(error)) : serverAvailability.lastError;
+        }
+
+        async function ensureServerAvailable() {
+          if (serverAvailability.checked) {
+            return serverAvailability.available;
+          }
+
+          const serverUrlCandidate = allModsToDownloadFinal.find(mod =>
+            mod && typeof mod.downloadUrl === 'string' && mod.downloadUrl.includes('/api/mods/download/')
+          );
+
+          if (!serverUrlCandidate) {
+            serverAvailability.checked = true;
+            serverAvailability.available = true;
+            return true;
+          }
+
+          try {
+            const baseUrl = new URL(serverUrlCandidate.downloadUrl);
+            const healthUrl = `${baseUrl.origin}/health`;
+
+            serverAvailability.available = await new Promise((resolve) => {
+              const protocol = healthUrl.startsWith('https:') ? https : http;
+              let settled = false;
+              const finish = (value) => {
+                if (settled) return;
+                settled = true;
+                resolve(value);
+              };
+
+              const req = protocol.get(healthUrl, (res) => {
+                res.resume(); // Drain response to free socket
+                finish(res.statusCode >= 200 && res.statusCode < 500);
+              });
+              req.on('error', () => finish(false));
+              req.setTimeout(SERVER_HEALTH_TIMEOUT_MS, () => {
+                try { req.destroy(); } catch { /* noop */ }
+                finish(false);
+              });
+            });
+          } catch (error) {
+            markServerUnavailable(error);
+          } finally {
+            serverAvailability.checked = true;
+          }
+
+          if (!serverAvailability.available && !serverAvailability.lastError) {
+            serverAvailability.lastError = 'health-check-failed';
+          }
+
+          if (!serverAvailability.available) {
+            logger.warn('Server download unavailable, switching to fallback sources for this session', {
+              category: 'mods',
+              data: {
+                clientPath,
+                reason: serverAvailability.lastError
+              }
+            });
+          }
+
+          return serverAvailability.available;
+        }
+
         const requiredModFileNames = new Set((requiredMods || []).map(mod => {
           const fileName = mod.fileName.toLowerCase();
           return fileName;
@@ -769,6 +846,18 @@ function createMinecraftLauncherHandlers(win) {
               }
             });
             
+            let sourcesToTry = [[primarySource, 'primary'], [fallbackSource, 'fallback']];
+            if (primarySource === 'server' || fallbackSource === 'server') {
+              const serverCanBeUsed = await ensureServerAvailable();
+              if (!serverCanBeUsed) {
+                sourcesToTry = sourcesToTry.filter(([source]) => source !== 'server');
+              }
+            }
+
+            if (sourcesToTry.length === 0) {
+              sourcesToTry.push(['modrinth', 'primary']);
+            }
+            
             let downloadUrl = null;
             let sourceUsed = null;
             let triedPrimary = false;
@@ -790,7 +879,7 @@ function createMinecraftLauncherHandlers(win) {
             const modName = mod.name || mod.fileName;
 
             // Try primary, then fallback if primary fails (network/HTTP error)
-            for (const [source, mark] of [[primarySource, 'primary'], [fallbackSource, 'fallback']]) {
+            for (const [source, mark] of sourcesToTry) {
               if ((mark === 'primary' && triedPrimary) || (mark === 'fallback' && triedFallback)) {
                 continue;
               }
@@ -1007,7 +1096,8 @@ function createMinecraftLauncherHandlers(win) {
                     }
                     reject(err);
                   });
-                  request.setTimeout(60000, () => {
+                  const requestTimeout = source === 'server' ? SERVER_DOWNLOAD_TIMEOUT_MS : DEFAULT_DOWNLOAD_TIMEOUT_MS;
+                  request.setTimeout(requestTimeout, () => {
                     request.abort();
                     reject(new Error(`Download timeout for ${mod.fileName}`));
                   });
@@ -1015,6 +1105,12 @@ function createMinecraftLauncherHandlers(win) {
                 // If we got here, download succeeded
                 break;
               } catch (err) {
+                const isNetworkFailure = ['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENOTFOUND', 'ETIMEDOUT'].includes(err.code) ||
+                  (err.message && err.message.toLowerCase().includes('timeout')) ||
+                  (err.message && err.message.toLowerCase().includes('socket hang up'));
+                if (source === 'server' && isNetworkFailure) {
+                  markServerUnavailable(err);
+                }
                 lastError = err;
                 if (mark === 'primary') triedPrimary = true;
                 if (mark === 'fallback') triedFallback = true;
@@ -1331,8 +1427,9 @@ function createMinecraftLauncherHandlers(win) {
                   }
                   reject(err);
                 });
-                
-                request.setTimeout(60000, () => { // Increased timeout to 60 seconds
+
+                const requestTimeout = sourceUsed === 'server' ? SERVER_DOWNLOAD_TIMEOUT_MS : DEFAULT_DOWNLOAD_TIMEOUT_MS;
+                request.setTimeout(requestTimeout, () => {
                   request.abort();
                   reject(new Error(`Download timeout for ${mod.fileName}`));
                 });

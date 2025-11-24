@@ -29,6 +29,8 @@ class ManagementServer {
     this.activeSockets = new Set();
     this.appVersion = this.getAppVersion(); // Get current app version
     this.externalHost = null; // External host IP for mod downloads
+    this.lastExternalHostCheck = 0; // Timestamp of last external IP detection
+    this.externalHostTtlMs = 5 * 60 * 1000; // Refresh external IP detection every 5 minutes when needed
     this.configuredHost = null; // Manually configured host override
     this.detectedPublicHost = null; // Public host detected from client connections
     
@@ -97,6 +99,35 @@ class ManagementServer {
     }
   }
 
+  updateDetectedPublicHost(hostHeader) {
+    if (!hostHeader) return;
+    const host = hostHeader.split(':')[0];
+    if (!host || host === 'localhost' || host === '127.0.0.1') return;
+    if (this.detectedPublicHost !== host) {
+      this.detectedPublicHost = host;
+    }
+  }
+
+  refreshExternalHostIfStale() {
+    const now = Date.now();
+    const isStale = !this.externalHost || (now - this.lastExternalHostCheck) > this.externalHostTtlMs;
+    if (isStale) {
+      this.externalHost = this.detectExternalIP();
+      this.lastExternalHostCheck = now;
+    }
+    return this.externalHost;
+  }
+
+  getRequestAwareDownloadHost(req) {
+    const hostHeader = req && typeof req.get === 'function' ? req.get('host') : null;
+    this.updateDetectedPublicHost(hostHeader);
+    const hostFromRequest = hostHeader ? hostHeader.split(':')[0] : null;
+    if (hostFromRequest && hostFromRequest !== 'localhost' && hostFromRequest !== '127.0.0.1') {
+      return hostFromRequest;
+    }
+    return this.getModDownloadHost();
+  }
+
   // Get the host to use for mod download URLs
   getModDownloadHost() {
     // Priority: manually configured > detected from client connections > detected external IP > localhost fallback
@@ -109,9 +140,7 @@ class ManagementServer {
       return this.detectedPublicHost;
     }
     
-    if (!this.externalHost) {
-      this.externalHost = this.detectExternalIP();
-    }
+    this.refreshExternalHostIfStale();
     
     return this.externalHost || 'localhost';
   }
@@ -136,15 +165,7 @@ class ManagementServer {
     this.app.use((req, _, next) => {
       // Extract host from request headers (what clients used to connect)
       const hostHeader = req.get('host');
-      if (hostHeader && !this.detectedPublicHost) {
-        // Extract IP/hostname without port
-        const host = hostHeader.split(':')[0];
-        // Only set if it's not localhost/127.0.0.1 (means it's external)
-        if (host !== 'localhost' && host !== '127.0.0.1') {
-          this.detectedPublicHost = host;
-          // TODO: Add proper logging - Detected public host from client connection
-        }
-      }
+      this.updateDetectedPublicHost(hostHeader);
       next();
     });
     
@@ -273,7 +294,7 @@ class ManagementServer {
     });
     
     // Get server information
-    this.app.get('/api/server/info', async (_, res) => {
+    this.app.get('/api/server/info', async (req, res) => {
       if (!this.serverPath) {
         return res.status(404).json({ error: 'No server configured' });
       }
@@ -417,14 +438,14 @@ class ManagementServer {
             }
                     }
           
-          // If version is still unknown after all detection methods, 
-          // users can manually create .minecraft-core.json with their version
+        // If version is still unknown after all detection methods, 
+        // users can manually create .minecraft-core.json with their version
 
         // Get required mods for clients
-        const requiredMods = await this.getRequiredMods();
+        const requiredMods = await this.getRequiredMods(req);
         
         // Get all client mods (required + optional)
-        const allClientMods = await this.getAllClientMods();
+        const allClientMods = await this.getAllClientMods(req);
         
         // Check Minecraft server status
         const minecraftServerStatus = await this.checkMinecraftServerStatus();
@@ -613,6 +634,10 @@ class ManagementServer {
       
       const { fileName } = req.params;
       const { location = 'server' } = req.query;
+      const locationParam = typeof location === 'string' ? location : 'server';
+      const requestHost = req.get('host') || 'unknown';
+      this.updateDetectedPublicHost(requestHost);
+      const downloadHost = this.getModDownloadHost();
       
       if (!fileName || !fileName.endsWith('.jar')) {
         return res.status(400).json({ error: 'Invalid file name' });
@@ -620,22 +645,26 @@ class ManagementServer {
       
       try {
         let modPath;
-        if (location === 'client') {
+        if (locationParam === 'client') {
           modPath = path.join(this.serverPath, 'client', 'mods', fileName);
         } else {
           modPath = path.join(this.serverPath, 'mods', fileName);
         }
         
         if (!fs.existsSync(modPath)) {
+          console.warn('[mods-download] file not found', { fileName, location: locationParam, requestHost, downloadHost });
           return res.status(404).json({ error: 'Mod file not found' });
         }
+
+        console.info('[mods-download] serving', { fileName, location: locationParam, requestHost, downloadHost, modPath });
         
         res.setHeader('Content-Type', 'application/java-archive');
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
         
         const fileStream = fs.createReadStream(modPath);
         
-        fileStream.on('error', () => {
+        fileStream.on('error', (err) => {
+          console.warn('[mods-download] stream error', { fileName, location: locationParam, requestHost, downloadHost, error: err?.message });
           if (!res.headersSent) {
             res.status(500).json({ error: 'Failed to serve mod file' });
           }
@@ -695,7 +724,7 @@ class ManagementServer {
             fileName: file,
             size: (() => { try { return fs.statSync(path.join(assetsDir, file)).size; } catch { return 0; } })(),
             lastModified: (() => { try { return fs.statSync(path.join(assetsDir, file)).mtime; } catch { return new Date(0); } })(),
-            downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/assets/download/${type}/${encodeURIComponent(file)}`,
+            downloadUrl: `http://${this.getRequestAwareDownloadHost(req)}:${this.port}/api/assets/download/${type}/${encodeURIComponent(file)}`,
             versionNumber: extractVersionFromFilename(file),
             name: cleanName(file),
             checksum: (() => { try { return this.calculateFileChecksum(path.join(assetsDir, file)); } catch { return null; } })()
@@ -749,9 +778,9 @@ class ManagementServer {
     });
     
     // Get required mods endpoint
-    this.app.get('/api/debug/required-mods', async (_, res) => {
+    this.app.get('/api/debug/required-mods', async (req, res) => {
       try {
-        const requiredMods = await this.getRequiredMods();
+        const requiredMods = await this.getRequiredMods(req);
         res.json({
           success: true,
           count: requiredMods.length,
@@ -1035,12 +1064,13 @@ class ManagementServer {
   }
   
   // Get list of required mods for clients
-  async getRequiredMods() {
+  async getRequiredMods(req = null) {
     if (!this.serverPath) {
       return [];
     }
         
     try {
+      const downloadHost = this.getRequestAwareDownloadHost(req);
       const clientModsDir = path.join(this.serverPath, 'client', 'mods');
       const serverModsDir = path.join(this.serverPath, 'mods');
       
@@ -1101,7 +1131,7 @@ class ManagementServer {
               lastModified: stats.mtime,
               required: isRequired,
               checksum: this.calculateFileChecksum(modPath),
-              downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
+              downloadUrl: `http://${downloadHost}:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
               projectId: projectId,
               versionId: versionId,
               versionNumber: versionNumber,
@@ -1153,7 +1183,7 @@ class ManagementServer {
                 lastModified: stats.mtime,
                 required: isRequired,
                 checksum: this.calculateFileChecksum(modPath),
-                downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
+                downloadUrl: `http://${downloadHost}:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
                 projectId: projectId,
                 versionId: versionId,
                 versionNumber: versionNumber,
@@ -1173,12 +1203,13 @@ class ManagementServer {
     }
   }
   // Get all client mods (both required and optional)
-  async getAllClientMods() {
+  async getAllClientMods(req = null) {
     if (!this.serverPath) {
       return [];
     }
     
-    try {      const clientModsDir = path.join(this.serverPath, 'client', 'mods');
+    try {      const downloadHost = this.getRequestAwareDownloadHost(req);
+      const clientModsDir = path.join(this.serverPath, 'client', 'mods');
       const serverModsDir = path.join(this.serverPath, 'mods');
 
       // Load saved mod categories to check requirement status
@@ -1238,7 +1269,7 @@ class ManagementServer {
               lastModified: stats.mtime,
               required: isRequired,
               checksum: this.calculateFileChecksum(modPath),
-              downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
+              downloadUrl: `http://${downloadHost}:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
               projectId: projectId,
               versionId: versionId,
               versionNumber: versionNumber,
@@ -1290,7 +1321,7 @@ class ManagementServer {
                 lastModified: stats.mtime,
                 required: isRequired,
                 checksum: this.calculateFileChecksum(modPath),
-                downloadUrl: `http://${this.getModDownloadHost()}:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
+                downloadUrl: `http://${downloadHost}:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
                 projectId: projectId,
                 versionId: versionId,
                 versionNumber: versionNumber,
