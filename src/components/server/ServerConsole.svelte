@@ -86,120 +86,6 @@
     }
   })();
   
-  // Virtual scrolling variables with error handling
-  let startIndex = 0;
-  let visibleCount = 50; // Show 50 items at a time
-  
-  $: totalLogs = (() => {
-    try {
-      return Array.isArray(formattedLogs) ? formattedLogs.length : 0;
-    } catch (error) {
-      logger.warn('Error calculating total logs', {
-        category: 'ui',
-        data: {
-          component: 'ServerConsole',
-          function: 'totalLogs',
-          errorMessage: error.message
-        }
-      });
-      return 0;
-    }
-  })();
-  
-  $: endIndex = (() => {
-    try {
-      return Math.min(startIndex + visibleCount, totalLogs);
-    } catch (error) {
-      logger.warn('Error calculating end index', {
-        category: 'ui',
-        data: {
-          component: 'ServerConsole',
-          function: 'endIndex',
-          startIndex,
-          visibleCount,
-          totalLogs,
-          errorMessage: error.message
-        }
-      });
-      return Math.min(50, totalLogs); // Fallback to first 50 items
-    }
-  })();
-  
-  $: visibleLogs = (() => {
-    try {
-      if (!Array.isArray(formattedLogs)) {
-        logger.warn('Formatted logs is not an array for slicing', {
-          category: 'ui',
-          data: {
-            component: 'ServerConsole',
-            function: 'visibleLogs',
-            formattedLogsType: typeof formattedLogs
-          }
-        });
-        return [];
-      }
-      
-      // Ensure indices are valid
-      const safeStartIndex = Math.max(0, Math.min(startIndex, totalLogs));
-      const safeEndIndex = Math.max(safeStartIndex, Math.min(endIndex, totalLogs));
-      
-      return formattedLogs.slice(safeStartIndex, safeEndIndex);
-    } catch (error) {
-      logger.error('Error slicing visible logs', {
-        category: 'ui',
-        data: {
-          component: 'ServerConsole',
-          function: 'visibleLogs',
-          startIndex,
-          endIndex,
-          totalLogs,
-          errorMessage: error.message
-        }
-      });
-      return []; // Return empty array on error
-    }
-  })();
-  
-  // Calculate the height for spacers with error handling
-  const itemHeight = 21; // Approximate height of each log line in pixels
-  
-  $: topSpacerHeight = (() => {
-    try {
-      return Math.max(0, startIndex * itemHeight);
-    } catch (error) {
-      logger.warn('Error calculating top spacer height', {
-        category: 'ui',
-        data: {
-          component: 'ServerConsole',
-          function: 'topSpacerHeight',
-          startIndex,
-          itemHeight,
-          errorMessage: error.message
-        }
-      });
-      return 0;
-    }
-  })();
-  
-  $: bottomSpacerHeight = (() => {
-    try {
-      return Math.max(0, (totalLogs - endIndex) * itemHeight);
-    } catch (error) {
-      logger.warn('Error calculating bottom spacer height', {
-        category: 'ui',
-        data: {
-          component: 'ServerConsole',
-          function: 'bottomSpacerHeight',
-          totalLogs,
-          endIndex,
-          itemHeight,
-          errorMessage: error.message
-        }
-      });
-      return 0;
-    }
-  })();
-  
   function onConsoleScroll() {
     try {
       // Add null check to prevent error
@@ -232,8 +118,6 @@
         return;
       }
       
-      const wasAutoScroll = autoScroll;
-      
       // If user scrolls up, disable autoScroll with error handling
       try {
         autoScroll = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 5;
@@ -247,41 +131,6 @@
           }
         });
         // Keep current autoScroll state on error
-      }
-      
-      // Update virtual scrolling indices based on scroll position
-      if (!autoScroll) {
-        try {
-          const scrollTop = Math.max(0, consoleEl.scrollTop);
-          const newStartIndex = Math.floor(scrollTop / itemHeight);
-          const maxStartIndex = Math.max(0, totalLogs - visibleCount);
-          startIndex = Math.max(0, Math.min(newStartIndex, maxStartIndex));
-          
-          if (wasAutoScroll !== autoScroll) {
-            logger.debug('Auto-scroll disabled by user interaction', {
-              category: 'ui',
-              data: {
-                component: 'ServerConsole',
-                function: 'onConsoleScroll',
-                scrollTop,
-                startIndex,
-                totalLogs
-              }
-            });
-          }
-        } catch (indexError) {
-          logger.warn('Error updating virtual scroll indices', {
-            category: 'ui',
-            data: {
-              component: 'ServerConsole',
-              function: 'onConsoleScroll.indices',
-              errorMessage: indexError.message,
-              scrollTop: consoleEl.scrollTop,
-              totalLogs
-            }
-          });
-          // Keep current startIndex on error
-        }
       }
     } catch (error) {
       logger.error('Critical error in console scroll handler', {
@@ -314,47 +163,15 @@
         
         // When auto-scrolling, show the most recent logs
         try {
-          const newStartIndex = Math.max(0, totalLogs - visibleCount);
-          
-          if (newStartIndex !== startIndex) {
-            // Disabled debug logging to prevent excessive logs
-            // logger.debug('Auto-scrolling to latest logs', {
-            //   category: 'ui',
-            //   data: {
-            //     component: 'ServerConsole',
-            //     function: 'afterUpdate',
-            //     oldStartIndex: startIndex,
-            //     newStartIndex,
-            //     totalLogs
-            //   }
-            // });
-          }
-          
-          startIndex = newStartIndex;
-          
-          // Safely set scroll position
-          try {
-            consoleEl.scrollTop = consoleEl.scrollHeight;
-          } catch (scrollError) {
-            logger.warn('Error setting scroll position in afterUpdate', {
-              category: 'ui',
-              data: {
-                component: 'ServerConsole',
-                function: 'afterUpdate.scroll',
-                errorMessage: scrollError.message,
-                scrollHeight: consoleEl.scrollHeight
-              }
-            });
-          }
-        } catch (indexError) {
-          logger.warn('Error calculating start index in afterUpdate', {
+          consoleEl.scrollTop = consoleEl.scrollHeight;
+        } catch (scrollError) {
+          logger.warn('Error setting scroll position in afterUpdate', {
             category: 'ui',
             data: {
               component: 'ServerConsole',
-              function: 'afterUpdate.index',
-              errorMessage: indexError.message,
-              totalLogs,
-              visibleCount
+              function: 'afterUpdate.scroll',
+              errorMessage: scrollError.message,
+              scrollHeight: consoleEl.scrollHeight
             }
           });
         }
@@ -528,8 +345,7 @@
       data: {
         component: 'ServerConsole',
         function: 'onMount',
-        autoScroll,
-        visibleCount
+        autoScroll
       }
     });
     
@@ -569,28 +385,19 @@
   <!-- Static black background -->
   <div class="console-background"></div>
   
-  <!-- Scrollable console content with virtual scrolling -->
+  <!-- Scrollable console content -->
   <div class="scrollable-console" bind:this={consoleEl} on:scroll={onConsoleScroll}>
-    <!-- Top spacer -->
-    {#if topSpacerHeight > 0}
-      <div class="virtual-spacer" style="height: {topSpacerHeight}px;"></div>
-    {/if}
-      <!-- Visible log lines with enhanced formatting -->
-    {#if visibleLogs.length === 0}
+    <!-- Visible log lines -->
+    {#if !formattedLogs || formattedLogs.length === 0}
       <div class="console-line console-empty">
         Server console ready. [{new Date().toLocaleString()}]
       </div>
     {:else}
-      {#each visibleLogs as line, index (startIndex + index)}
+      {#each formattedLogs as line, index (index)}
         <div class="console-line" class:date-separator={line.startsWith('---')}>
           {line}
         </div>
       {/each}
-    {/if}
-    
-    <!-- Bottom spacer -->
-    {#if bottomSpacerHeight > 0}
-      <div class="virtual-spacer" style="height: {bottomSpacerHeight}px;"></div>
     {/if}
   </div>
 
@@ -719,12 +526,6 @@
   .console-line:not(.date-separator):not(.console-empty)::before {
     /* This will help distinguish timestamp brackets visually */
     content: '';
-  }
-  
-  /* Virtual scrolling spacers */
-  .virtual-spacer {
-    min-height: 0;
-    width: 100%;
   }
   
   /* Command input area */
