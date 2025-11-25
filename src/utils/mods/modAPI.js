@@ -1437,19 +1437,20 @@ export async function enableAndUpdateMod(serverPath, modFileName, projectId, tar
  * @returns {Object|null} - The update version or null
  */
 function checkForUpdate(modInfo, versions) {
-  if (!versions || versions.length === 0 || !modInfo || !modInfo.versionNumber) {
+  const installedVersionRaw = modInfo?.versionNumber || modInfo?.version || '';
+  if (!versions || versions.length === 0 || !modInfo || !installedVersionRaw) {
     return null;
   }
   // Loose numeric comparator: returns <0 if a<b, 0 if equal, >0 if a>b
   const compareLoose = (a, b) => {
     try {
       const norm = (v) => String(v || '').trim().toLowerCase().replace(/^v/, '');
-      const extract = (v) => {
-        const m = norm(v).match(/\d+(?:\.\d+){0,3}/);
-        return m ? m[0] : '';
+      const extractNumbers = (v) => {
+        const matches = norm(v).match(/\d+/g);
+        return matches ? matches.map(n => parseInt(n, 10)).filter(n => !Number.isNaN(n)) : [];
       };
-      const as = extract(a).split('.').filter(Boolean).map(n => parseInt(n, 10));
-      const bs = extract(b).split('.').filter(Boolean).map(n => parseInt(n, 10));
+      const as = extractNumbers(a);
+      const bs = extractNumbers(b);
       if (!as.length || !bs.length) return 0;
       const len = Math.max(as.length, bs.length);
       for (let i = 0; i < len; i++) {
@@ -1503,15 +1504,36 @@ function checkForUpdate(modInfo, versions) {
   // Offer update only if the latest compatible version is strictly newer than installed.
   if (latestVersion) {
     const norm = (v) => (typeof v === 'string' ? v.trim().replace(/^v/i, '') : v);
-    const installedVer = norm(modInfo.versionNumber || '');
+    const installedVer = norm(installedVersionRaw);
     const latestVer = norm(latestVersion.versionNumber || latestVersion.name || '');
     const cmp = compareLoose(installedVer, latestVer);
     if (cmp < 0) return latestVersion; // only if strictly newer numerically
-    // If installed version string missing, fall back to id compare
+
     const installedId = modInfo.versionId;
     const latestId = latestVersion.id;
-    if (!installedVer && installedId && latestId && installedId !== latestId) {
-      return latestVersion;
+    const idsDiffer = installedId && latestId && installedId !== latestId;
+
+    // If numeric parts are equal, only treat as update when there's a meaningful difference:
+    // - raw strings differ (e.g., different build tag), OR
+    // - IDs differ AND published date of the candidate is newer than the installed entry (when known)
+    if (cmp === 0) {
+      const rawStringsDiffer = installedVer && latestVer && installedVer !== latestVer;
+      if (rawStringsDiffer) return latestVersion;
+
+      if (idsDiffer) {
+        // Try to locate the installed entry to compare dates
+        const installedEntry = versions.find(v =>
+          (installedId && v.id === installedId) ||
+          v.versionNumber === installedVersionRaw ||
+          v.version_number === installedVersionRaw
+        );
+        const installedDate = installedEntry?.datePublished ? new Date(installedEntry.datePublished).getTime() : null;
+        const latestDate = latestVersion.datePublished ? new Date(latestVersion.datePublished).getTime() : null;
+
+        if (installedDate && latestDate && latestDate > installedDate) {
+          return latestVersion; // newer build with same number
+        }
+      }
     }
   }
   
