@@ -45,8 +45,9 @@ logger.info('Server manager service initialized', {
   }
 });
 
-// Add a buffer to store the last log line
+// Track last log line and buffer partial stdout chunks
 let lastLine = '';
+let stdoutBuffer = '';
 let lastListCommandTime = 0;
 const LIST_COMMAND_THROTTLE = 30000; // Only send list command every 30 seconds by default
 
@@ -985,10 +986,11 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       }
     });
 
-    serverProcess.stdout.on('data', chunk => {
-      const text = chunk.toString();
-      
-      // Check if this is a response to a list command
+    // Reset log tracking for a fresh server session
+    lastLine = '';
+    stdoutBuffer = '';
+
+    const handleServerLogLine = (text) => {
       const isListResponse = /There are \d+ of a max of \d+ players online/.test(text);
       
       if (text !== lastLine) {
@@ -1049,6 +1051,25 @@ async function startMinecraftServer(targetPath, port, maxRam) {
           });
         }
       }
+    };
+
+    serverProcess.stdout.on('data', chunk => {
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop();
+      
+      lines
+        .map(line => line.trimEnd())
+        .filter(line => line.length > 0)
+        .forEach(handleServerLogLine);
+    });
+
+    serverProcess.stdout.on('end', () => {
+      const remaining = stdoutBuffer.trim();
+      if (remaining) {
+        handleServerLogLine(remaining);
+      }
+      stdoutBuffer = '';
     });
 
     serverProcess.stderr.on('data', chunk => {

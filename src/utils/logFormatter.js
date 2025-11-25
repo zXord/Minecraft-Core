@@ -101,8 +101,10 @@ export class LogFormatter {
       }
 
       // Performance optimization: Check cache first
-      const cacheKey = `${logLine}|${timestamp}`;
-      if (this._timestampCache.has(cacheKey)) {
+      // Only cache when an explicit timestamp is provided; "now" would make cached entries stale
+      const canUseCache = timestamp !== null && timestamp !== undefined;
+      const cacheKey = canUseCache ? `${logLine}|${timestamp}` : null;
+      if (canUseCache && this._timestampCache.has(cacheKey)) {
         return this._timestampCache.get(cacheKey);
       }
 
@@ -138,13 +140,15 @@ export class LogFormatter {
         const now = this._createSafeDate(timestamp);
         const dateStr = this._getCachedFormattedDate(now);
         const timeStr = this._getCachedFormattedTime(now);
-        
+
         result = `[${dateStr} ${timeStr}] ${logLine}`;
       }
 
       // Cache the result for future use
-      this._timestampCache.set(cacheKey, result);
-      this._manageCacheSize();
+      if (canUseCache) {
+        this._timestampCache.set(cacheKey, result);
+        this._manageCacheSize();
+      }
       
       return result;
       
