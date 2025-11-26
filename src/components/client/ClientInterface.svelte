@@ -1207,13 +1207,32 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
     // Check if Minecraft client files are synchronized
   async function checkClientSynchronization(silentRefresh = false) {
+    const syncLogContext = {
+      silentRefresh,
+      instancePath: instance?.path || null,
+      serverVersion: serverInfo?.minecraftVersion || null,
+      loaderType: serverInfo?.loaderType || null,
+      loaderVersion: serverInfo?.loaderVersion || null,
+      isDownloadingMods,
+      isDownloadingClient
+    };
+    let fabricScanAttempted = false;
+
     if (isDownloadingMods || isDownloadingClient) {
-      return;
+      logger.debug('Skipped client sync check: downloads in progress', {
+        category: 'client',
+        data: syncLogContext
+      });
+      return { skipped: true, reason: 'downloads-in-progress' };
     }
     
     if (!instance.path || !serverInfo?.minecraftVersion) {
+      logger.debug('Skipped client sync check: missing instance path or server version', {
+        category: 'client',
+        data: syncLogContext
+      });
       clientSyncStatus = 'ready';
-      return;
+      return { skipped: true, reason: 'missing-context' };
     }
     
     // Only log when client sync actually changes, not every check
@@ -1238,18 +1257,90 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       
       
       if (result.success) {
+        logger.debug('Client sync fabric detection result', {
+          category: 'client',
+          data: {
+            synchronized: result.synchronized,
+            reason: result.reason,
+            fabricRequested: serverInfo?.loaderType || null,
+            serverLoaderVersion: serverInfo?.loaderVersion || null,
+            resolvedFabricVersion: result.fabricVersion || null,
+            installedFabricVersion: result.installedFabricVersion || null,
+            installedFabricProfile: result.installedFabricProfile || result.fabricProfileName || null,
+            targetVersion: result.targetVersion || null,
+            detectedFabricProfiles: result.detectedFabricProfiles || [],
+            versionsDirPath: result.versionsDirPath || null,
+            versionsDirExists: result.versionsDirExists,
+            versionsDirEntries: Array.isArray(result.versionsDirEntries) ? result.versionsDirEntries.slice(0, 10) : result.versionsDirEntries
+          }
+        });
+
         clientSyncInfo = result;
-        
-        if (result.synchronized) {
+        const requiresFabric = serverInfo?.loaderType === 'fabric';
+        const serverLoaderVersion = serverInfo?.loaderVersion;
+        const resolvedLoaderVersion = result.fabricVersion || null;
+        const requiredLoaderVersion =
+          !serverLoaderVersion || (typeof serverLoaderVersion === 'string' && serverLoaderVersion.trim().toLowerCase() === 'latest')
+            ? resolvedLoaderVersion
+            : serverLoaderVersion;
+        const installedLoaderVersion = result.installedFabricVersion || null;
+        fabricScanAttempted = result.fabricScanAttempted === true;
+        const loaderMismatch = fabricScanAttempted && requiresFabric && (!!requiredLoaderVersion && !!installedLoaderVersion && installedLoaderVersion !== requiredLoaderVersion);
+        const loaderMissing = fabricScanAttempted && requiresFabric && !installedLoaderVersion;
+        const detectedProfilesText = Array.isArray(result.detectedFabricProfiles) && result.detectedFabricProfiles.length > 0
+          ? result.detectedFabricProfiles.join(', ')
+          : 'none';
+        const versionsDirInfo = result.versionsDirExists === false
+          ? 'versions dir missing'
+          : (Array.isArray(result.versionsDirEntries) ? `versions entries: ${result.versionsDirEntries.join(', ')}` : '');
+        const versionsDirPath = result.versionsDirPath ? `versions path: ${result.versionsDirPath}` : '';
+        const expectedProfileInfo = result.expectedFabricProfilePath ? `expected profile path: ${result.expectedFabricProfilePath}` : '';
+
+        if (result.synchronized && !loaderMismatch && !loaderMissing) {
           clientSyncStatus = 'ready';
         } else {
+          // Override reason to surface loader gap if that's the cause
+          if (requiresFabric && fabricScanAttempted && (loaderMismatch || loaderMissing)) {
+            const friendlyReason = loaderMissing
+              ? `Fabric loader ${requiredLoaderVersion || '(unspecified)'} required by server is not installed on this client.`
+              : `Fabric loader mismatch: client has ${installedLoaderVersion || 'unknown'}, server requires ${requiredLoaderVersion}.`;
+            clientSyncInfo = {
+              ...clientSyncInfo,
+              reason: friendlyReason
+            };
+          }
           clientSyncStatus = 'needed';
+
+          if (requiresFabric && (!installedLoaderVersion || loaderMismatch)) {
+            logger.warn('Client Fabric version missing or mismatched', {
+              category: 'client',
+              data: {
+                requiredLoaderVersion,
+                installedLoaderVersion,
+                loaderMismatch,
+                loaderMissing,
+                detectedFabricProfiles: result.detectedFabricProfiles || [],
+                versionsDirPath: versionsDirPath || null,
+                reason: clientSyncInfo?.reason || result.reason || null
+              }
+            });
+          }
         }
       } else {
+        logger.warn('Client sync check returned unsuccessful response', {
+          category: 'client',
+          data: syncLogContext
+        });
         clientSyncStatus = 'ready'; // Assume ready if check fails
-      }    } catch (err) {
+      }
+    } catch (err) {
+      logger.error('Client sync check failed', {
+        category: 'client',
+        data: { ...syncLogContext, error: err?.message || String(err) }
+      });
       clientSyncStatus = 'ready';
     }
+    return { skipped: false, fabricScanAttempted };
   }  // Handle refresh button in dashboard - refresh both server status AND mod information
   async function handleRefreshFromDashboard() {
     // Show checking state for user feedback
@@ -2981,6 +3072,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {promptDelete}
         {serverInfo}
         {clientSyncStatus}
+        {clientSyncInfo}
         {clientDownloadProgress}
         {checkClientSynchronization}
         {redownloadClient}

@@ -147,6 +147,117 @@ class XMCLClientDownloader {
   }
 
   /**
+   * Extract the Fabric loader version from a profile name like
+   * fabric-loader-0.16.0-1.21 (simple parser, no Unicode).
+   */
+  _extractLoaderVersionFromProfile(profileName) {
+    if (!profileName || typeof profileName !== 'string') return null;
+    const prefix = 'fabric-loader-';
+    if (!profileName.startsWith(prefix)) return null;
+
+    const remainder = profileName.slice(prefix.length);
+    const dash = remainder.lastIndexOf('-');
+    if (dash === -1) return remainder || null;
+    const loader = remainder.slice(0, dash);
+    return loader || null;
+  }
+
+  /**
+   * Find the best matching Fabric profile for a given Minecraft version.
+   */
+  _getInstalledFabricProfile(clientPath, minecraftVersion) {
+    try {
+      const versionsDir = path.join(clientPath, 'versions');
+      if (!fs.existsSync(versionsDir)) {
+        return { profile: null, loaderVersion: null, detectedProfiles: [], versionsDirPath: versionsDir, versionsDirExists: false };
+      }
+
+      const targetMc = String(minecraftVersion || '').trim();
+      const entries = fs.readdirSync(versionsDir, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => dirent.name)
+        .filter(name => name.startsWith('fabric-loader-'));
+
+      const detectedProfiles = [...entries];
+      const versionsDirEntries = fs.readdirSync(versionsDir, { withFileTypes: true }).map(d => d.name);
+      const matching = entries.filter(name => targetMc && name.endsWith(`-${targetMc}`));
+      const candidates = matching.length > 0 ? matching : entries;
+
+      const parseLoader = (name) => this._extractLoaderVersionFromProfile(name);
+      const compareVersions = (a, b) => {
+        const toParts = (v) => {
+          const [mainRaw, preRaw] = String(v || '').split('-', 2);
+          const main = mainRaw.split('.').map(num => {
+            const parsed = parseInt(num, 10);
+            return Number.isNaN(parsed) ? 0 : parsed;
+          });
+          const pre = typeof preRaw === 'string'
+            ? preRaw.split('.').map(id => {
+              const parsed = parseInt(id, 10);
+              return Number.isNaN(parsed) ? id : parsed;
+            })
+            : null;
+          return { main, pre };
+        };
+
+        const ap = toParts(a);
+        const bp = toParts(b);
+        const len = Math.max(ap.main.length, bp.main.length);
+        for (let i = 0; i < len; i++) {
+          const ai = ap.main[i] ?? 0;
+          const bi = bp.main[i] ?? 0;
+          if (ai !== bi) return ai - bi;
+        }
+
+        const aPre = ap.pre;
+        const bPre = bp.pre;
+        if (aPre === null && bPre === null) return 0;
+        if (aPre === null) return 1; // release beats prerelease
+        if (bPre === null) return -1;
+
+        const preLen = Math.max(aPre.length, bPre.length);
+        for (let i = 0; i < preLen; i++) {
+          const ai = aPre[i];
+          const bi = bPre[i];
+          if (ai === undefined) return -1;
+          if (bi === undefined) return 1;
+          if (ai === bi) continue;
+
+          const aiNum = typeof ai === 'number';
+          const biNum = typeof bi === 'number';
+          if (aiNum && biNum) return ai - bi;
+          if (aiNum !== biNum) return aiNum ? -1 : 1; // numeric identifiers sort lower than text
+          return String(ai).localeCompare(String(bi));
+        }
+
+        return 0;
+      };
+
+      let bestProfile = null;
+      let bestVersion = null;
+      for (const candidate of candidates) {
+        const v = parseLoader(candidate);
+        if (!v) continue;
+        if (!bestVersion || compareVersions(v, bestVersion) > 0) {
+          bestProfile = candidate;
+          bestVersion = v;
+        }
+      }
+
+      return {
+        profile: bestProfile,
+        loaderVersion: bestVersion,
+        detectedProfiles,
+        versionsDirEntries,
+        versionsDirPath: versionsDir,
+        versionsDirExists: true
+      };
+    } catch {
+      return { profile: null, loaderVersion: null, detectedProfiles: [], versionsDirEntries: [], versionsDirPath: null, versionsDirExists: true };
+    }
+  }
+
+  /**
    * Main download method - replaces the complex downloadMinecraftClientSimple
    */
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
@@ -665,22 +776,91 @@ class XMCLClientDownloader {
   /**
    * Legacy method compatibility - check if client is synchronized
    */
-  async checkMinecraftClient(clientPath, version) {
+  async checkMinecraftClient(clientPath, version, options = {}) {
     try {
+      const { requiredMods = [], serverInfo = null } = options;
+      const needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
+      const requestedLoaderVersion = serverInfo?.loaderVersion || 'latest';
+
       // Check if version has changed since last check
       const versionChangeDetected = await this._checkForVersionChange(clientPath, version);
       if (versionChangeDetected) {
         // Clean up old versions when server version changes
         await this._cleanupOldVersionsOnChange(clientPath, version);
       }
-      
-      const verification = await this.verifyInstallation(clientPath, version);
+
+      // Resolve Fabric context if needed
+      let resolvedFabricVersion = null;
+      let expectedFabricProfile = null;
+      if (needsFabric) {
+        resolvedFabricVersion = await this.resolveFabricVersion(requestedLoaderVersion);
+        expectedFabricProfile = `fabric-loader-${resolvedFabricVersion}-${version}`;
+      }
+
+      // Detect installed Fabric profiles
+      const fabricDetection = this._getInstalledFabricProfile(clientPath, version);
+      const versionsDirPath = fabricDetection.versionsDirPath;
+      const versionsDirExists = fabricDetection.versionsDirExists;
+      const detectedFabricProfiles = fabricDetection.detectedProfiles || [];
+      const versionsDirEntries = fabricDetection.versionsDirEntries || [];
+
+      // Prefer the exact required Fabric profile if it already exists on disk,
+      // otherwise fall back to the best available profile detected above.
+      const expectedProfileDir = expectedFabricProfile && versionsDirPath
+        ? path.join(versionsDirPath, expectedFabricProfile)
+        : null;
+      const expectedProfileExists = expectedProfileDir && fs.existsSync(expectedProfileDir);
+
+      const installedFabricProfile = expectedProfileExists ? expectedFabricProfile : fabricDetection.profile;
+      const installedFabricVersion = expectedProfileExists
+        ? (resolvedFabricVersion || this._extractLoaderVersionFromProfile(expectedFabricProfile))
+        : fabricDetection.loaderVersion;
+
+      // Pick target version for verification: prefer installed Fabric profile, else expected profile, else vanilla version
+      let targetVersion = version;
+      if (needsFabric) {
+        if (installedFabricProfile) {
+          targetVersion = installedFabricProfile;
+        } else if (expectedFabricProfile) {
+          targetVersion = expectedFabricProfile;
+        }
+      }
+
+      const verification = await this.verifyInstallation(clientPath, targetVersion);
+      let synchronized = verification.success;
+      let reason = verification.error || 'Client is properly installed';
+
+      // Enforce Fabric presence and version match when required
+      if (needsFabric) {
+        const loaderMismatch = installedFabricVersion && resolvedFabricVersion && installedFabricVersion !== resolvedFabricVersion;
+        if (!installedFabricVersion || loaderMismatch) {
+          synchronized = false;
+          if (!installedFabricVersion) {
+            reason = 'Fabric loader not detected for this client';
+          } else {
+            reason = `Fabric loader mismatch: client has ${installedFabricVersion}, server requires ${resolvedFabricVersion}`;
+          }
+        }
+      }
+
       return {
-        synchronized: verification.success,
-        reason: verification.error || 'Client is properly installed'
+        success: true,
+        synchronized,
+        reason,
+        fabricScanAttempted: needsFabric,
+        fabricVersion: needsFabric ? resolvedFabricVersion : null,
+        installedFabricVersion: needsFabric ? installedFabricVersion : null,
+        installedFabricProfile: needsFabric ? installedFabricProfile : null,
+        fabricProfileName: needsFabric ? targetVersion : null,
+        targetVersion,
+        detectedFabricProfiles,
+        versionsDirPath,
+        versionsDirExists,
+        versionsDirEntries
       };
     } catch (error) {
       return {
+        success: false,
         synchronized: false,
         reason: `Check failed: ${error.message}`
       };

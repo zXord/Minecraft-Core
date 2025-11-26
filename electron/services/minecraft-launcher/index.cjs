@@ -1615,6 +1615,49 @@ Starting Minecraft with console output...
     try {
       const result = await this.clientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
 
+      const fabricSnapshot = {
+        needsFabric: options?.serverInfo?.loaderType === 'fabric' || (options?.requiredMods?.length || 0) > 0,
+        requestedLoaderVersion: options?.serverInfo?.loaderVersion || null,
+        resolvedFabricVersion: result.fabricVersion || null,
+        installedFabricVersion: result.installedFabricVersion || null,
+        installedFabricProfile: result.installedFabricProfile || result.fabricProfileName || null,
+        targetVersion: result.targetVersion || null,
+        detectedFabricProfiles: Array.isArray(result.detectedFabricProfiles) ? result.detectedFabricProfiles.slice(0, 10) : result.detectedFabricProfiles,
+        versionsDirPath: result.versionsDirPath || null,
+        versionsDirExists: result.versionsDirExists,
+        versionsDirEntries: Array.isArray(result.versionsDirEntries) ? result.versionsDirEntries.slice(0, 10) : result.versionsDirEntries,
+        synchronized: result.synchronized,
+        reason: result.reason
+      };
+
+      logger.debug('Fabric detection snapshot', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'checkMinecraftClient',
+          clientPath: clientPath ? path.basename(clientPath) : null,
+          ...fabricSnapshot
+        }
+      });
+
+      if (fabricSnapshot.needsFabric && !fabricSnapshot.installedFabricVersion) {
+        logger.warn('Fabric loader missing during client check', {
+          category: 'client',
+          data: {
+            service: 'MinecraftLauncher',
+            operation: 'checkMinecraftClient',
+            clientPath: clientPath ? path.basename(clientPath) : null,
+            loaderType: options?.serverInfo?.loaderType || null,
+            requestedLoaderVersion: fabricSnapshot.requestedLoaderVersion,
+            resolvedFabricVersion: fabricSnapshot.resolvedFabricVersion,
+            detectedFabricProfiles: fabricSnapshot.detectedFabricProfiles || [],
+            versionsDirPath: fabricSnapshot.versionsDirPath || null,
+            versionsDirExists: fabricSnapshot.versionsDirExists,
+            reason: fabricSnapshot.reason || null
+          }
+        });
+      }
+
       logger.info('Minecraft client check completed', {
         category: 'client',
         data: {

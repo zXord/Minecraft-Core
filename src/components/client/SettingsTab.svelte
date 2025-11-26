@@ -12,6 +12,7 @@
   export let promptDelete;
   export let serverInfo;
   export let clientSyncStatus;
+  export let clientSyncInfo;
   export let clientDownloadProgress = { type: '', task: '', total: 0, current: 0 };
   export let checkClientSynchronization;
   export let redownloadClient;
@@ -182,6 +183,76 @@
       // Failed to save preferences, user will see no visual feedback but can try again
     }
   }
+
+  // Derive client loader info for quick display (fallback to profile name parsing)
+  function extractLoaderVersionFromProfile(profileName) {
+    if (!profileName || typeof profileName !== 'string') return null;
+    const prefix = 'fabric-loader-';
+    if (!profileName.startsWith(prefix)) return null;
+
+    const remainder = profileName.slice(prefix.length);
+    const lastDash = remainder.lastIndexOf('-');
+    if (lastDash === -1) return remainder || null;
+
+    const loaderVersion = remainder.slice(0, lastDash);
+    const suffix = remainder.slice(lastDash + 1);
+    return suffix && /^[0-9]/.test(suffix) ? (loaderVersion || null) : (remainder || null);
+  }
+  $: derivedProfileLoaderVersion = extractLoaderVersionFromProfile(
+    clientSyncInfo?.installedFabricProfile ||
+    clientSyncInfo?.fabricProfileName ||
+    clientSyncInfo?.targetVersion
+  );
+  $: clientLoaderVersion = clientSyncInfo?.installedFabricVersion
+    || clientSyncInfo?.fabricVersion
+    || derivedProfileLoaderVersion
+    || null;
+
+  // Auto-trigger a silent client check to populate Fabric detection when missing
+  let fabricAutoChecked = false;
+  let fabricAutoCheckInProgress = false;
+  let fabricAutoCheckCooldown = false;
+
+  // Retry the automatic Fabric detection after a short delay when a sync check is skipped
+  function scheduleFabricAutoRetry() {
+    if (fabricAutoCheckCooldown) return;
+    fabricAutoCheckCooldown = true;
+    setTimeout(() => {
+      fabricAutoCheckCooldown = false;
+    }, 1200);
+  }
+
+  $: if (
+    !fabricAutoChecked &&
+    !fabricAutoCheckInProgress &&
+    !fabricAutoCheckCooldown &&
+    serverInfo?.loaderType === 'fabric' &&
+    !clientLoaderVersion &&
+    typeof checkClientSynchronization === 'function'
+  ) {
+    fabricAutoCheckInProgress = true;
+    Promise.resolve(checkClientSynchronization(true))
+      .then((result) => {
+        if (result?.skipped) {
+          scheduleFabricAutoRetry();
+        } else {
+          fabricAutoChecked = true;
+        }
+      })
+      .catch(() => {
+        scheduleFabricAutoRetry();
+      })
+      .finally(() => {
+        fabricAutoCheckInProgress = false;
+      });
+  }
+  $: serverLoaderVersion = serverInfo?.loaderType === 'fabric' ? (serverInfo.loaderVersion || null) : null;
+  $: comparableServerLoaderVersion =
+    serverLoaderVersion && typeof serverLoaderVersion === 'string' && serverLoaderVersion.trim().toLowerCase() === 'latest'
+      ? (clientSyncInfo?.fabricVersion || clientLoaderVersion || null)
+      : serverLoaderVersion;
+  $: loaderMismatch = comparableServerLoaderVersion && clientLoaderVersion && comparableServerLoaderVersion !== clientLoaderVersion;
+  $: loaderMissing = serverLoaderVersion && !clientLoaderVersion && clientSyncStatus !== 'ready';
 </script>
 
       <div class="settings-container">
@@ -296,6 +367,14 @@
               <h4>🎮 Client Management</h4>
               {#if serverInfo?.minecraftVersion}
                 <div class="version-badge">{serverInfo.minecraftVersion}</div>
+              {/if}
+              {#if serverLoaderVersion}
+                <div class="loader-badges">
+                  <span class="loader-pill">Server Fabric: {serverLoaderVersion}</span>
+                  <span class="loader-pill {loaderMismatch || loaderMissing ? 'warn' : 'ok'}">
+                    Client Fabric: {clientLoaderVersion || 'not detected'}
+                  </span>
+                </div>
               {/if}
             </div>
             <div class="section-content">
@@ -741,6 +820,33 @@
 
   .version-badge:hover {
     transform: scale(1.05);
+  }
+
+  .loader-badges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .loader-pill {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #e5e7eb;
+    padding: 0.2rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  }
+
+  .loader-pill.ok {
+    border-color: #22c55e33;
+    color: #bbf7d0;
+  }
+
+  .loader-pill.warn {
+    border-color: #f9731633;
+    color: #fecdd3;
   }
 
   .warning-badge {
