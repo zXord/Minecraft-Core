@@ -195,10 +195,15 @@ function collectCandidateDirs() {
     const resourcesRoot = process.resourcesPath || path.join(process.cwd(), 'resources');
     addCandidateDir(resourcesRoot);
     addCandidateDir(path.join(resourcesRoot, 'build'));
+    addCandidateDir(path.join(resourcesRoot, 'build-resources'));
     addCandidateDir(path.join(resourcesRoot, 'app.asar.unpacked'));
     addCandidateDir(path.join(resourcesRoot, 'app.asar.unpacked', 'build'));
+    addCandidateDir(path.join(resourcesRoot, 'app.asar.unpacked', 'build-resources'));
   } else {
+    // Dev: include project root and build-resources explicitly
+    addCandidateDir(path.resolve('.'));
     addCandidateDir(path.resolve('build'));
+    addCandidateDir(path.resolve('build-resources'));
     addCandidateDir(path.join(__dirname));
   }
 
