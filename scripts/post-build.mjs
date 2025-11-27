@@ -9,13 +9,8 @@ async function injectBuildAssets() {
   console.log('Injecting build assets into logger-window.html...');
 
   try {
-    // Copy template from public to electron if it doesn't exist
-    try {
-      await fs.access(loggerTemplatePath);
-    } catch {
-      console.log('Copying logger-window.html from public to electron...');
-      await fs.copyFile(loggerTemplateSource, loggerTemplatePath);
-    }
+    // Always start from the template in /public to avoid stale asset references
+    let htmlContent = await fs.readFile(loggerTemplateSource, 'utf-8');
 
     // Read the manifest file
     const manifestContent = await fs.readFile(manifestPath, 'utf-8');
@@ -29,23 +24,36 @@ async function injectBuildAssets() {
       throw new Error("Could not find logger's JavaScript file in manifest.json");
     }
 
-    // Read the HTML template
-    let htmlContent = await fs.readFile(loggerTemplatePath, 'utf-8');
-
-    // Replace placeholders with actual asset paths
+    // Ensure the stylesheet tag exists and points to the built asset
     if (loggerCSS) {
+      if (/<link rel="stylesheet" href="[^"]*">/.test(htmlContent)) {
         htmlContent = htmlContent.replace(
-            /<link rel="stylesheet" href="[^"]*">/,
-            `<link rel="stylesheet" href="../dist/${loggerCSS}">`
+          /<link rel="stylesheet" href="[^"]*">/,
+          `<link rel="stylesheet" href="../dist/${loggerCSS}">`
         );
+      } else {
+        htmlContent = htmlContent.replace(
+          '</head>',
+          `  <link rel="stylesheet" href="../dist/${loggerCSS}">\n</head>`
+        );
+      }
     } else {
-         htmlContent = htmlContent.replace(/<link rel="stylesheet" href="[^"]*">/, '');
+      // Remove any lingering stylesheet tag if present
+      htmlContent = htmlContent.replace(/<link rel="stylesheet" href="[^"]*">/, '');
     }
 
-    htmlContent = htmlContent.replace(
+    // Ensure the script tag exists and points to the built asset
+    if (/<script type="module" src="[^"]*"><\/script>/.test(htmlContent)) {
+      htmlContent = htmlContent.replace(
         /<script type="module" src="[^"]*"><\/script>/,
         `<script type="module" src="../dist/${loggerJS}"></script>`
-    );
+      );
+    } else {
+      htmlContent = htmlContent.replace(
+        '</body>',
+        `  <script type="module" src="../dist/${loggerJS}"></script>\n</body>`
+      );
+    }
 
     // Write the updated HTML back to the file
     await fs.writeFile(loggerTemplatePath, htmlContent, 'utf-8');
