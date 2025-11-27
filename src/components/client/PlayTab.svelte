@@ -49,6 +49,8 @@
     isDownloading: false,
     isComplete: false,
     progress: 0,
+    downloadedBytes: 0,
+    totalBytes: 0,
     downloadedMB: 0,
     totalMB: 0,
     version: null,
@@ -74,6 +76,18 @@
   $: if (typeof window !== 'undefined' && window.localStorage && maxMemory && memoryLoaded) {
     localStorage.setItem('minecraft-client-max-memory', maxMemory.toString());
   }
+
+  // Format file sizes for display
+  function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    if (!bytes || bytes < 0 || Number.isNaN(bytes)) return 'Unknown size';
+    
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    const size = (bytes / Math.pow(1024, i)).toFixed(1);
+    
+    return `${size} ${units[i]}`;
+  }
   
   // Modified launch function that passes debug terminal setting and memory allocation
   function launchMinecraftWithDebug() {
@@ -88,6 +102,8 @@
         isDownloading: false,
         isComplete: false,
         progress: 0,
+        downloadedBytes: 0,
+        totalBytes: 0,
         downloadedMB: 0,
         totalMB: 0,
         version: serverVersion,
@@ -99,6 +115,18 @@
       const result = await window.electron.invoke('check-for-specific-version', serverVersion);
       
       if (result.success && result.needsUpdate) {
+        // Pre-load expected download size from release metadata so the UI can show totals immediately
+        const releaseAssets = result.releaseInfo?.assets || [];
+        const windowsAsset = releaseAssets.find((asset) => {
+          const name = (asset.name || '').toLowerCase();
+          return name.includes('.exe') && (name.includes('setup') || name.includes('installer'));
+        });
+        if (windowsAsset?.size) {
+          specificVersionDownload.totalBytes = windowsAsset.size;
+          specificVersionDownload.totalMB = windowsAsset.size / 1024 / 1024;
+          specificVersionDownload.downloadedBytes = 0;
+        }
+
         // Start download tracking
         specificVersionDownload.isDownloading = true;
         specificVersionDownload = { ...specificVersionDownload };
@@ -225,8 +253,17 @@
       // Listen for specific version download progress
       window.electron.on('specific-version-download-progress', (progress) => {
         specificVersionDownload.progress = progress.progress || 0;
-        specificVersionDownload.downloadedMB = parseFloat(progress.downloadedMB || 0);
-        specificVersionDownload.totalMB = parseFloat(progress.totalMB || 0) || 0;
+        specificVersionDownload.downloadedBytes = progress.downloadedSize || specificVersionDownload.downloadedBytes || 0;
+        specificVersionDownload.totalBytes = progress.totalSize || specificVersionDownload.totalBytes || 0;
+        specificVersionDownload.downloadedMB = parseFloat(progress.downloadedMB || (specificVersionDownload.downloadedBytes / 1024 / 1024) || 0);
+        const parsedTotalMB = parseFloat(progress.totalMB);
+        if (!Number.isNaN(parsedTotalMB) && parsedTotalMB > 0) {
+          specificVersionDownload.totalMB = parsedTotalMB;
+        } else if (specificVersionDownload.totalBytes > 0) {
+          specificVersionDownload.totalMB = specificVersionDownload.totalBytes / 1024 / 1024;
+        } else {
+          specificVersionDownload.totalMB = 0;
+        }
         specificVersionDownload = { ...specificVersionDownload };
       });
       
@@ -235,6 +272,8 @@
         specificVersionDownload.isDownloading = false;
         specificVersionDownload.isComplete = true;
         specificVersionDownload.filePath = info.filePath;
+        specificVersionDownload.downloadedBytes = specificVersionDownload.totalBytes || specificVersionDownload.downloadedBytes;
+        specificVersionDownload.downloadedMB = specificVersionDownload.totalMB || specificVersionDownload.downloadedMB;
         specificVersionDownload.progress = 100;
         specificVersionDownload = { ...specificVersionDownload };
         
@@ -834,10 +873,10 @@
                               <div class="progress-details">
                                 <span class="progress-text">{specificVersionDownload.progress}%</span>
                                 <span class="download-size">
-                                  {#if specificVersionDownload.totalMB > 0}
-                                    {specificVersionDownload.downloadedMB.toFixed(1)} MB / {specificVersionDownload.totalMB.toFixed(1)} MB
+                                  {#if specificVersionDownload.totalBytes > 0}
+                                    {formatFileSize(specificVersionDownload.downloadedBytes)} / {formatFileSize(specificVersionDownload.totalBytes)}
                                   {:else}
-                                    {specificVersionDownload.downloadedMB.toFixed(1)} MB downloaded
+                                    {formatFileSize(specificVersionDownload.downloadedBytes)} downloaded
                                   {/if}
                                 </span>
                               </div>

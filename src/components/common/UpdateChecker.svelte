@@ -274,6 +274,17 @@
     return `${size} ${units[i]}`;
   }
 
+  // Format file sizes for display
+  function formatFileSize(bytes) {
+    if (!bytes || bytes <= 0) return 'Unknown';
+    
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    const size = (bytes / Math.pow(1024, i)).toFixed(1);
+    
+    return `${size} ${units[i]}`;
+  }
+
   // Test update notification (development only)
   function testUpdateNotification() {
     logger.info('Testing update notification UI', {
@@ -661,7 +672,16 @@
           <div class="progress-bar">
             <div class="progress-fill" style="width: {downloadProgress.percent}%"></div>
           </div>
-          <span class="download-speed">{formatSpeed(downloadProgress.bytesPerSecond)}</span>
+          <div class="download-meta">
+            <span class="download-speed">{formatSpeed(downloadProgress.bytesPerSecond)}</span>
+            <span class="download-size">
+              {#if downloadProgress.total}
+                {formatFileSize(downloadProgress.transferred)} / {formatFileSize(downloadProgress.total)}
+              {:else}
+                {formatFileSize(downloadProgress.transferred)} downloaded
+              {/if}
+            </span>
+          </div>
         </div>
       </div>
     {:else}
@@ -882,8 +902,22 @@
   .download-speed {
     font-size: 0.75rem;
     color: #9ca3af;
-    margin-top: 0.25rem;
     display: block;
+  }
+
+  .download-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    color: #9ca3af;
+    margin-top: 0.25rem;
+  }
+
+  .download-size {
+    color: #e5e7eb;
+    font-weight: 500;
   }
 
   .progress-bar {
