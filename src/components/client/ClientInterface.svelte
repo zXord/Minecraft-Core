@@ -1054,21 +1054,41 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             });
           }
         } catch (error) {
-          disables.push({
-            name: mod.name || mod.fileName,
-            fileName: mod.fileName,
-            currentVersion: mod.versionNumber || 'Unknown',
-            status: 'incompatible',
-            reason: 'Could not verify compatibility - disabled for safety. Manual check recommended.'
-          });
+          const message = (error?.message || '').toLowerCase();
+          const modrinthMissing = message.includes('mod not found on modrinth') || message.includes('project not found on modrinth');
+          const apiUnavailable = message.includes('api request failed') || message.includes('network') || message.includes('fetch failed') || message.includes('timeout') || message.includes('econn') || message.includes('connect') || message.includes('dns');
+
+          if (modrinthMissing || apiUnavailable) {
+            // Non-blocking: the mod isn't on Modrinth or the API was unreachable, so skip forcing an update
+            compatible.push({
+              name: mod.name || mod.fileName,
+              fileName: mod.fileName,
+              currentVersion: mod.versionNumber || 'Unknown',
+              status: 'unverified',
+              reason: modrinthMissing
+                ? 'Not on Modrinth - skipping automatic update checks'
+                : 'Modrinth unavailable - skipping automatic update checks',
+              nonBlocking: true
+            });
+          } else {
+            disables.push({
+              name: mod.name || mod.fileName,
+              fileName: mod.fileName,
+              currentVersion: mod.versionNumber || 'Unknown',
+              status: 'incompatible',
+              reason: 'Could not verify compatibility - disabled for safety. Manual check recommended.'
+            });
+          }
         }      }
-          const versionUpdates = {
+          const blockingDisables = disables.filter(disable => !disable.nonBlocking);
+      const versionUpdates = {
         minecraftVersion: serverInfo.minecraftVersion,
         updates: updates,
         disables: disables,
         compatible: compatible,        hasUpdates: updates.length > 0,
         hasDisables: disables.length > 0,
-        hasChanges: updates.length > 0 || disables.length > 0
+        hasBlockingDisables: blockingDisables.length > 0,
+        hasChanges: updates.length > 0 || blockingDisables.length > 0
       };
         
       setClientModVersionUpdates(versionUpdates);
@@ -1129,10 +1149,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         // Integrate client mod version updates into main mod sync status
         let enhancedResult = { ...result };
         const clientVersionUpdates = $clientState.clientModVersionUpdates;
+        const clientUpdateList = clientVersionUpdates?.updates || [];
+        const clientBlockingDisables = (clientVersionUpdates?.disables || []).filter(disable => !disable.nonBlocking);
+        const hasClientActions = clientUpdateList.length > 0 || clientBlockingDisables.length > 0;
         
-        if (clientVersionUpdates && clientVersionUpdates.hasChanges) {
+        if (clientVersionUpdates && hasClientActions) {
           // Add client mod updates to a separate array instead of mixing with server mods
-          if (clientVersionUpdates.updates && clientVersionUpdates.updates.length > 0) {
+          if (clientUpdateList.length > 0) {
             // Create a set of mods that need removal (both required and optional)
             const removalSet = new SvelteSet();
             if (result.requiredRemovals) {
@@ -1143,7 +1166,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             }
             
             // Filter out any mods that are in the removal list
-            const filteredClientUpdates = clientVersionUpdates.updates
+            const filteredClientUpdates = clientUpdateList
               .filter(update => !removalSet.has(update.fileName.toLowerCase()))
               .map(update => ({
                 fileName: update.fileName,
@@ -1162,13 +1185,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           }
           
           // Add client mod disables to a special array
-          if (clientVersionUpdates.disables && clientVersionUpdates.disables.length > 0) {
-            enhancedResult.clientModDisables = clientVersionUpdates.disables;
+          if (clientBlockingDisables.length > 0) {
+            enhancedResult.clientModDisables = clientBlockingDisables;
           }
         }
         
         // Recalculate work needed with client mods included
-        const hasClientUpdates = clientVersionUpdates?.hasChanges || false;
+        const hasClientUpdates = hasClientActions;
 
         // Use filtered acknowledgments instead of raw acknowledgments
         const hasUnacknowledgedDeps = filteredAcknowledgments.length > 0;
@@ -1904,8 +1927,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           }
         }
       }      // Handle client mod disables (incompatible mods)
-      if (modSyncStatus?.clientModDisables && modSyncStatus.clientModDisables.length > 0) {
-        for (const modToDisable of modSyncStatus.clientModDisables) {
+      const clientDisables = (modSyncStatus?.clientModDisables || []).filter(mod => !mod.nonBlocking);
+      if (clientDisables.length > 0) {
+        for (const modToDisable of clientDisables) {
           try {
             const disableResult = await window.electron.invoke('toggle-client-mod', {
               clientPath: instance.path,
