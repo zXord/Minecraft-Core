@@ -518,11 +518,12 @@
                   <!-- Show mod sync details when needed -->
                   {#if modSyncStatus}
                     {@const validClientUpdates = modSyncStatus.clientModUpdates?.filter(update => update && update.fileName && update.name) || []}
-                    {@const totalUpdatesNeeded = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0) + validClientUpdates.length}
+                    {@const downloadWork = (modSyncStatus.missingMods?.length || 0) + (modSyncStatus.outdatedMods?.length || 0) + (modSyncStatus.outdatedOptionalMods?.length || 0) + validClientUpdates.length}
                     {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
+                    {@const totalChangesNeeded = downloadWork + actualRemovals.length}
                     {@const acknowledgments = filteredAcknowledgments || []}
                     
-                    <h3>Mods Need Update ({totalUpdatesNeeded})</h3>
+                    <h3>Mods Need Update ({totalChangesNeeded})</h3>
                     
                     <!-- Compact mod lists -->
                     {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
@@ -611,12 +612,16 @@
                     
                     <!-- Action buttons -->
                     <div class="mod-actions-compact">
-                    {#if totalUpdatesNeeded > 0}
-                        <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
-                          📥 Download & Update ({totalUpdatesNeeded})
+                    {#if downloadWork > 0 && actualRemovals.length > 0}
+                        <button class="mod-action-btn primary" on:click={() => onDownloadModsClick({ applyRemovals: true })}>
+                          📥 Download & Apply ({totalChangesNeeded})
+                        </button>
+                    {:else if downloadWork > 0}
+                        <button class="mod-action-btn primary" on:click={() => onDownloadModsClick({ applyRemovals: false })}>
+                          📥 Download & Update ({downloadWork})
                         </button>
                     {:else if actualRemovals.length > 0}
-                        <button class="mod-action-btn primary" on:click={onDownloadModsClick}>
+                        <button class="mod-action-btn primary" on:click={() => onDownloadModsClick({ applyRemovals: true })}>
                           🔄 Apply Changes ({actualRemovals.length})
                         </button>
                     {/if}

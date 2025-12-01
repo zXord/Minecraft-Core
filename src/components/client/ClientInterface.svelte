@@ -1575,12 +1575,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
   // Download required mods
-  async function onDownloadModsClick() {
+  async function onDownloadModsClick(options = {}) {
+    const { applyRemovals = false } = options || {};
     logger.info('Starting mod download process', {
       category: 'ui',
       data: {
         component: 'ClientInterface',
         function: 'onDownloadModsClick',
+        applyRemovals,
         currentDownloadStatus: downloadStatus,
         modSyncStatus: modSyncStatus ? {
           synchronized: modSyncStatus.synchronized,
@@ -1595,7 +1597,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     downloadProgress = 0;
     
     try {
-      await downloadMods();
+      await downloadMods(applyRemovals);
     } catch (error) {
       logger.error('Mod download failed', {
         category: 'ui',
@@ -1610,7 +1612,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       downloadStatus = 'needed'; // Reset status on error
     }
   }  // Download required mods
-  async function downloadMods() {
+  async function downloadMods(applyRemovals = false) {
     // Validate required parameters
     if (!instance?.path) {
       errorMessage.set('No client path configured');
@@ -1621,18 +1623,24 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Check if we have mods to remove
     const modsToRemove = [...(modSyncStatus?.requiredRemovals || []), ...(modSyncStatus?.optionalRemovals || [])];
       
-    // If we only have removals and no downloads needed, handle removals directly
     const totalDownloadsNeeded = ((modSyncStatus?.missingMods?.length || 0) + (modSyncStatus?.outdatedMods?.length || 0) + (modSyncStatus?.missingOptionalMods?.length || 0) + (modSyncStatus?.outdatedOptionalMods?.length || 0) + (modSyncStatus?.clientModUpdates?.length || 0));
+    const hasRemovals = modsToRemove.length > 0;
+    const hasDownloads = totalDownloadsNeeded > 0;
+    const shouldApplyRemovals = applyRemovals || (!hasDownloads && hasRemovals);
+
+    const performRemovals = async () => {
+      return window.electron.invoke('minecraft-remove-server-managed-mods', {
+        clientPath: instance.path,
+        modsToRemove: modsToRemove.map(m => m.fileName)
+      });
+    };
     
-    if (modsToRemove.length > 0 && (!requiredMods || requiredMods.length === 0 || totalDownloadsNeeded === 0)) {
+    if (hasRemovals && !hasDownloads && shouldApplyRemovals) {
       // Set removing state
       isDownloadingMods = true;
       downloadStatus = 'downloading';
-        try {
-        const result = await window.electron.invoke('minecraft-remove-server-managed-mods', {
-          clientPath: instance.path,
-          modsToRemove: modsToRemove.map(m => m.fileName)
-        });
+      try {
+        const result = await performRemovals();
 
         if (result.success && result.removed && result.removed.length > 0) {
           downloadStatus = 'ready';
@@ -1666,7 +1674,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         errorMessage.set('Error removing mods: ' + err.message);
         setTimeout(() => errorMessage.set(''), 5000);
       } finally {
-        isDownloadingMods = false;      }
+        isDownloadingMods = false;
+      }
       return;
     }
 
@@ -1947,7 +1956,40 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         setClientModVersionUpdates(null);
         localStorage.removeItem('clientModVersionUpdates');
       }
-      
+
+      // Apply removals after downloads when requested so the user doesn't need a second click
+      if (shouldApplyRemovals && hasRemovals && hasDownloads) {
+        try {
+          const removalResult = await performRemovals();
+          
+          if (removalResult.success) {
+            if (removalResult.removed && removalResult.removed.length > 0) {
+              removeServerManagedFiles(removalResult.removed);
+              totalResults.removed = (totalResults.removed || 0) + removalResult.removed.length;
+              totalResults.removedMods = [
+                ...(totalResults.removedMods || []),
+                ...removalResult.removed
+              ];
+            }
+
+            // Clear pending removal indicators so the UI reflects the applied changes immediately
+            if (modSyncStatus) {
+              modSyncStatus = {
+                ...modSyncStatus,
+                requiredRemovals: [],
+                optionalRemovals: []
+              };
+            }
+          } else {
+            totalResults.success = false;
+            totalResults.error = (totalResults.error ? totalResults.error + '; ' : '') + (removalResult.error || 'Failed to remove mods');
+          }
+        } catch (error) {
+          totalResults.success = false;
+          totalResults.error = (totalResults.error ? totalResults.error + '; ' : '') + error.message;
+        }
+      }
+
       const result = totalResults;
       
         if (result.success) {
