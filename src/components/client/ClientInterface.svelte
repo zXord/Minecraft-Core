@@ -1076,7 +1076,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               fileName: mod.fileName,
               currentVersion: mod.versionNumber || 'Unknown',
               status: 'incompatible',
-              reason: 'Could not verify compatibility - disabled for safety. Manual check recommended.'
+              reason: 'Could not verify compatibility - disabled for safety. Manual check recommended.',
+              nonBlocking: false
             });
           }
         }      }
@@ -1310,14 +1311,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         fabricScanAttempted = result.fabricScanAttempted === true;
         const loaderMismatch = fabricScanAttempted && requiresFabric && (!!requiredLoaderVersion && !!installedLoaderVersion && installedLoaderVersion !== requiredLoaderVersion);
         const loaderMissing = fabricScanAttempted && requiresFabric && !installedLoaderVersion;
-        const detectedProfilesText = Array.isArray(result.detectedFabricProfiles) && result.detectedFabricProfiles.length > 0
-          ? result.detectedFabricProfiles.join(', ')
-          : 'none';
-        const versionsDirInfo = result.versionsDirExists === false
-          ? 'versions dir missing'
-          : (Array.isArray(result.versionsDirEntries) ? `versions entries: ${result.versionsDirEntries.join(', ')}` : '');
         const versionsDirPath = result.versionsDirPath ? `versions path: ${result.versionsDirPath}` : '';
-        const expectedProfileInfo = result.expectedFabricProfilePath ? `expected profile path: ${result.expectedFabricProfilePath}` : '';
 
         if (result.synchronized && !loaderMismatch && !loaderMissing) {
           clientSyncStatus = 'ready';
@@ -2790,9 +2784,17 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         const state = await window.electron.invoke('load-expected-mod-state', {
           clientPath: instance.path
         });
-        if (state.success && Array.isArray(state.expectedMods)) {
+        if (state.success) {
+          // Merge required + optional mods from persisted state; keep legacy support
+          const persistedMods = [
+            ...(Array.isArray(state.requiredMods) ? state.requiredMods : []),
+            ...(Array.isArray(state.optionalMods) ? state.optionalMods : []),
+            ...(Array.isArray(state.expectedMods) ? state.expectedMods : []) // legacy schema
+          ];
+
+          // Always update, even if empty, so removals clear the set
           serverManagedFiles.set(
-            new SvelteSet(state.expectedMods.map((m) => m.toLowerCase()))
+            new SvelteSet(persistedMods.map((m) => m.toLowerCase()))
           );
         }
       } catch (err) {
