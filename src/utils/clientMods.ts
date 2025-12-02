@@ -338,7 +338,7 @@ export async function downloadSingleOptionalMod(instance: Instance, mod: any) {
       serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
     });
     if (result.success) {
-      // Don't show success message here - the download progress handler will show "Download Complete" message
+      // Avoid duplicate success toasts; the downloads UI already shows completion
       if (result.removedMods?.length) removeServerManagedFiles(result.removedMods);
       setTimeout(async () => {
         await checkModSynchronization(instance);
@@ -365,7 +365,7 @@ export async function downloadSingleRequiredMod(instance: Instance, mod: any) {
       serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
     });
     if (result.success) {
-      // Don't show success message here - the download progress handler will show "Download Complete" message
+      // Avoid duplicate success toasts; the downloads UI already shows completion
       if (result.removedMods?.length) removeServerManagedFiles(result.removedMods);
       setTimeout(async () => {
         await checkModSynchronization(instance);

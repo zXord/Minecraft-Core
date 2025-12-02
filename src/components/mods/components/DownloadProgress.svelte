@@ -194,14 +194,7 @@
       // Only show notifications for actual state changes, not initial states
       if (previousState && previousState !== download.state && previousState !== undefined) {
         // Show toast for significant state changes
-        if (download.state === DOWNLOAD_STATES.COMPLETED) {
-          addToast({
-            type: "download-state",
-            state: download.state,
-            message: `${download.name} downloaded successfully`,
-            duration: 3000,
-          });
-        } else if (download.state === DOWNLOAD_STATES.FAILED) {
+        if (download.state === DOWNLOAD_STATES.FAILED) {
           addToast({
             type: "download-state",
             state: download.state,
