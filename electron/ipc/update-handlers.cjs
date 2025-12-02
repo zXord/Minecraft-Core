@@ -65,6 +65,13 @@ function createUpdateHandlers(win) {
     }
   });
 
+  // Forward update log events for user-visible diagnostics
+  updateService.on('update-log', (entry) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('update-log', entry);
+    }
+  });
+
   return {
     // Check for updates manually
     'check-for-updates': async () => {

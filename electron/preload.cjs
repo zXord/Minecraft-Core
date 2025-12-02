@@ -332,6 +332,7 @@ contextBridge.exposeInMainWorld('electron', {
       'update-download-progress',
       'update-downloaded',
       'update-ignored',
+      'update-log',
       // Specific version download events
       'specific-version-download-progress',
       'specific-version-download-complete',
@@ -401,6 +402,7 @@ contextBridge.exposeInMainWorld('electron', {
       'update-download-progress',
       'update-downloaded',
       'update-ignored',
+      'update-log',
       // Specific version download events
       'specific-version-download-progress',
       'specific-version-download-complete',
@@ -472,6 +474,7 @@ contextBridge.exposeInMainWorld('electron', {
       'update-download-progress',
       'update-downloaded',
       'update-ignored',
+      'update-log',
       // Specific version download events
       'specific-version-download-progress',
       'specific-version-download-complete',

@@ -607,6 +607,20 @@
         });
       }
     });
+
+    // Pipe main-process update logs into the in-app logger for visibility
+    window.electron.on('update-log', (entry) => {
+      const level = (entry?.level || 'info').toLowerCase();
+      const logFn = logger[level] || logger.info;
+      logFn(`Updater: ${entry?.message || 'event'}`, {
+        category: 'update',
+        data: {
+          entry,
+          source: 'main-update-service',
+          logFile: entry?.logFile
+        }
+      });
+    });
   });
 </script>
 

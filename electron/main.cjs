@@ -1,6 +1,6 @@
 // Main electron entry point
 const path = require('path');
-const { app, BrowserWindow, Menu, Tray } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, shell } = require('electron');
 const { setupIpcHandlers } = require('./ipc-handlers.cjs');
 const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
 const { setMainWindow } = require('./utils/safe-send.cjs');
@@ -8,7 +8,6 @@ const appStore = require('./utils/app-store.cjs');
 const { ensureConfigFile } = require('./utils/config-manager.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const fs = require('fs');
-const { ipcMain } = require('electron');
 const { getUpdateService } = require('./services/update-service.cjs');
 const devConfig = require('../config/dev-config.cjs');
 
@@ -38,8 +37,8 @@ try {
 }
 
 // Utility function to open folders directly using child_process
-function openFolderDirectly(folderPath) {
-  const { exec } = require('child_process');
+async function openFolderDirectly(folderPath) {
+  const { exec, execFile } = require('child_process');
   const normalizedPath = path.normalize(folderPath);
   
   if (logger) {
@@ -52,20 +51,62 @@ function openFolderDirectly(folderPath) {
     });
   }
   
+  // Try Electron's shell helper first to avoid false negatives from explorer.exe exit codes
+  try {
+    const shellResult = await shell.openPath(normalizedPath);
+    if (!shellResult) {
+      if (logger) {
+        logger.info('Folder opened successfully via shell', {
+          category: 'storage',
+          data: {
+            folderPath: normalizedPath,
+            platform: process.platform,
+            method: 'shell.openPath'
+          }
+        });
+      }
+      return true;
+    }
+    
+    if (logger) {
+      logger.warn('shell.openPath returned a message, falling back to OS command', {
+        category: 'storage',
+        data: {
+          folderPath: normalizedPath,
+          platform: process.platform,
+          result: shellResult
+        }
+      });
+    }
+  } catch (shellError) {
+    if (logger) {
+      logger.warn(`shell.openPath failed, attempting OS command: ${shellError.message}`, {
+        category: 'storage',
+        data: {
+          folderPath: normalizedPath,
+          platform: process.platform,
+          errorType: shellError.constructor?.name || 'Error'
+        }
+      });
+    }
+  }
+  
   return new Promise((resolve, reject) => {
     if (process.platform === 'win32') {
       // Windows - use explorer with proper escaping
-      const command = `explorer.exe "${normalizedPath.replace(/\//g, '\\')}"`;
-      exec(command, (error) => {
+      const windowsPath = normalizedPath.replace(/\//g, '\\');
+      execFile('explorer.exe', [windowsPath], { windowsHide: true }, (error) => {
         if (error) {
           if (logger) {
             logger.error(`Failed to open folder on Windows: ${error.message}`, {
               category: 'storage',
               data: {
-                folderPath: normalizedPath,
+                folderPath: windowsPath,
                 platform: 'win32',
-                command: command,
-                errorType: error.constructor.name
+                method: 'execFile',
+                errorType: error.constructor.name,
+                exitCode: error.code || null,
+                signal: error.signal || null
               }
             });
           }
@@ -74,7 +115,11 @@ function openFolderDirectly(folderPath) {
           if (logger) {
             logger.info('Folder opened successfully on Windows', {
               category: 'storage',
-              data: { folderPath: normalizedPath, platform: 'win32' }
+              data: {
+                folderPath: windowsPath,
+                platform: 'win32',
+                method: 'execFile'
+              }
             });
           }
           resolve(true);

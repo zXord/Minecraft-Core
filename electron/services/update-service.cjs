@@ -2,6 +2,19 @@ const { autoUpdater } = require('electron-updater');
 const { EventEmitter } = require('events');
 const path = require('path');
 const fs = require('fs');
+const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+const { app } = require('electron');
+const { getAppCacheDir } = require('electron-updater/out/AppAdapter');
+
+// Guarded require so startup won't fail if electron-log is missing for any reason
+let log = console;
+try {
+  // eslint-disable-next-line import/no-extraneous-dependencies
+  log = require('electron-log');
+} catch {
+  // Fallback to console; we still emit update-log events downstream
+  log = console;
+}
 
 class UpdateService extends EventEmitter {
   constructor() {
@@ -23,9 +36,154 @@ class UpdateService extends EventEmitter {
     this.lastSpecificVersionProgress = 0; // Track progress to prevent backwards movement
     this.lastEmittedProgress = 0; // Track last emitted progress
     this.lastProgressTime = 0; // Track last progress emission time
+    this.logFilePath = null;
+    this.loggerHandlers = getLoggerHandlers(); // Central logger (main process)
+    this.lastLoggedProgressPercent = -1;
+    this.lastLoggedProgressTime = 0;
 
+    this.setupLogger();
     this.setupAutoUpdater();
     this.loadIgnoredVersion();
+  }
+
+  getUpdaterCacheDirs() {
+    const cacheBase = getAppCacheDir();
+    const appName = app.getName();
+    return [
+      path.join(cacheBase, appName),
+      path.join(cacheBase, `${appName}-updater`)
+    ];
+  }
+
+  clearUpdaterCache(reason) {
+    try {
+      const dirs = this.getUpdaterCacheDirs();
+      dirs.forEach((dir) => {
+        try {
+          if (fs.existsSync(dir)) {
+            fs.rmSync(dir, { recursive: true, force: true });
+            this.logUpdate('warn', 'Updater cache cleared', {
+              reason,
+              dir
+            });
+          }
+        } catch (err) {
+          this.logUpdate('error', 'Failed to clear updater cache', {
+            reason,
+            dir,
+            error: err?.message
+          });
+        }
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  setupLogger() {
+    try {
+      log.transports.file.level = 'debug';
+
+      // Wrap autoUpdater logger so we can mirror everything into the central logger
+      const self = this;
+      const makeForwarder = (level) => (...args) => {
+        try {
+          if (log[level]) {
+            log[level](...args);
+          } else {
+            log.info(...args);
+          }
+        } catch {
+          // ignore
+        }
+
+        try {
+          const message = args && args.length ? args[0] : '';
+          self.loggerHandlers?.logFromMain?.(level, message || 'updater log', {
+            category: 'update-upstream',
+            instanceId: 'system',
+            data: { args }
+          });
+        } catch {
+          // ignore
+        }
+      };
+
+      autoUpdater.logger = {
+        info: makeForwarder('info'),
+        warn: makeForwarder('warn'),
+        error: makeForwarder('error'),
+        debug: makeForwarder('debug')
+      };
+
+      this.logFilePath = log.transports.file.getFile().path;
+
+      // Mirror electron-updater scoped logs into the central logger for visibility (e.g., differential fallback reasons)
+      if (Array.isArray(log.hooks)) {
+        log.hooks.push((message) => {
+          try {
+            const scopeName = message?.scope?.name || '';
+            const text =
+              (Array.isArray(message?.data) ? message.data.join(' ') : message?.data) ||
+              message?.message ||
+              '';
+
+            if (scopeName.toLowerCase().includes('electron-updater')) {
+              const level = (message?.level || 'info').toLowerCase();
+              if (this.loggerHandlers && this.loggerHandlers.logFromMain) {
+                this.loggerHandlers.logFromMain(level, text || 'updater log', {
+                  category: 'update-upstream',
+                  instanceId: 'system',
+                  data: {
+                    scope: scopeName,
+                    message
+                  }
+                });
+              }
+            }
+          } catch {
+            // ignore hook errors
+          }
+          return message;
+        });
+      }
+
+      this.logUpdate('info', 'UpdateService initialized', {
+        logFile: this.logFilePath
+      });
+    } catch (error) {
+      // Swallow logger setup errors; updates should still work
+    }
+  }
+
+  logUpdate(level, message, data = {}) {
+    try {
+      if (log[level]) {
+        log[level](message, data);
+      } else {
+        log.info(message, data);
+      }
+      // Persist to main logger so it shows in the in-app Logger UI
+      if (this.loggerHandlers && this.loggerHandlers.logFromMain) {
+        this.loggerHandlers.logFromMain(level, message, {
+          category: 'update',
+          instanceId: 'system',
+          data: {
+            ...data,
+            forceLog: true // bypass background suppression
+          }
+        });
+      }
+      this.emit('update-log', {
+        timestamp: new Date().toISOString(),
+        level,
+        message,
+        data,
+        logFile: this.logFilePath
+      });
+    } catch {
+      // Do not throw from logging
+    }
   }
 
   // Check if we're in development mode or have invalid config
@@ -64,10 +222,13 @@ class UpdateService extends EventEmitter {
     // Configure auto-updater
     autoUpdater.autoDownload = false; // We'll control when to download
     autoUpdater.autoInstallOnAppQuit = false; // We'll control when to install
+    autoUpdater.disableDifferentialDownload = false; // Enable differential updates
+    autoUpdater.disableWebInstaller = true; // Stick to full installer artifacts
 
     // Set up event listeners
     autoUpdater.on('checking-for-update', () => {
       this.isCheckingForUpdates = true;
+      this.logUpdate('info', 'Checking for update...');
       this.emit('checking-for-update');
     });
 
@@ -75,6 +236,10 @@ class UpdateService extends EventEmitter {
       this.isCheckingForUpdates = false;
       this.latestVersion = info.version;
       this.updateAvailable = true;
+      this.logUpdate('info', 'Update available', {
+        version: info.version,
+        files: info.files?.map(f => ({ url: f.url, size: f.size, blockMapSize: f.blockMapSize }))
+      });
       
       // Check if this version is ignored
       if (this.ignoredVersion === info.version) {
@@ -93,6 +258,15 @@ class UpdateService extends EventEmitter {
 
     autoUpdater.on('error', (error) => {
       this.isCheckingForUpdates = false;
+      this.logUpdate('error', 'Auto-updater error', {
+        message: error?.message,
+        stack: error?.stack
+      });
+
+      const errMsg = (error?.message || '').toLowerCase();
+      if (errMsg.includes('cannot download differentially') || errMsg.includes('checksum mismatch')) {
+        this.clearUpdaterCache('checksum-mismatch-differential');
+      }
       
       // Create user-friendly error message
       const friendlyError = this.createFriendlyError(error);
@@ -111,10 +285,27 @@ class UpdateService extends EventEmitter {
         total: progress.total,
         transferred: progress.transferred
       };
+
+      // Throttle logging to avoid flooding the Logger UI
+      const now = Date.now();
+      const percentChanged = this.lastLoggedProgressPercent !== this.downloadProgress.percent;
+      const percentJump = Math.abs(this.downloadProgress.percent - this.lastLoggedProgressPercent) >= 5;
+      const timeElapsed = now - this.lastLoggedProgressTime >= 1500; // 1.5s
+      const atEdge = this.downloadProgress.percent === 0 || this.downloadProgress.percent === 100;
+
+      if (percentChanged && (percentJump || timeElapsed || atEdge)) {
+        this.lastLoggedProgressPercent = this.downloadProgress.percent;
+        this.lastLoggedProgressTime = now;
+        this.logUpdate('debug', 'Download progress', this.downloadProgress);
+      }
+
       this.emit('download-progress', this.downloadProgress);
     });
 
     autoUpdater.on('update-downloaded', (info) => {
+      this.logUpdate('info', 'Update downloaded', {
+        version: info.version
+      });
       this.emit('update-downloaded', info);
       
       // Auto-install if enabled
@@ -196,6 +387,7 @@ class UpdateService extends EventEmitter {
   // Check for updates
   async checkForUpdates() {
     if (this.isCheckingForUpdates) {
+      this.logUpdate('debug', 'Skipped check: already checking');
       return { checking: true };
     }
 
@@ -232,9 +424,11 @@ class UpdateService extends EventEmitter {
   // Start downloading the update
   async downloadUpdate() {
     try {
+      this.logUpdate('info', 'Starting download of available update');
       await autoUpdater.downloadUpdate();
       return { success: true, message: 'Download started' };
     } catch (error) {
+      this.logUpdate('error', 'Download failed', { message: error.message });
       return { success: false, error: error.message };
     }
   }
