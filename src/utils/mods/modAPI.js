@@ -4,6 +4,7 @@
 import { safeInvoke } from '../ipcUtils.js';
 import { get } from 'svelte/store';
 import { SvelteSet } from 'svelte/reactivity';
+import logger from '../logger.js';
 import {
   installedMods,
   installedModInfo,
@@ -67,6 +68,47 @@ const MIN_SEARCH_INTERVAL = 500; // Minimum time between searches in ms
 let lastVersionFetchTime = 0;
 const MIN_VERSION_FETCH_INTERVAL = 500; // Minimum time between version fetches in ms
 const normalizePathForUpdates = (p) => (typeof p === 'string' ? p.trim().toLowerCase() : '');
+
+// Helper to decide if a Modrinth game version entry is compatible with the current server version
+function isGameVersionCompatible(targetVersion, candidateVersion) {
+  if (!targetVersion || !candidateVersion) return false;
+  const toParts = (v) => {
+    const str = String(v || '').toLowerCase().trim();
+    const nums = str.match(/\d+/g);
+    if (!nums || nums.length < 2) return null; // need at least major.minor
+    const [major, minor, patch] = nums.map((n) => parseInt(n, 10));
+    return {
+      major,
+      minor,
+      patch: Number.isFinite(patch) ? patch : null,
+      raw: str,
+    };
+  };
+
+  const target = toParts(targetVersion);
+  const candidate = toParts(candidateVersion);
+  if (!target || !candidate) return false;
+
+  if (candidate.major !== target.major || candidate.minor !== target.minor) {
+    return false;
+  }
+
+  const candStr = String(candidateVersion || '').toLowerCase().trim();
+  const wildcardPatch =
+    candStr.endsWith('.x') ||
+    candStr.endsWith('.*');
+
+  if (wildcardPatch || candidate.patch === null) {
+    // Only allow patchless/wildcard if target patch is also unspecified or we're explicitly wildcarding
+    return target.patch === null || wildcardPatch;
+  }
+
+  if (target.patch === null) {
+    return true; // target missing patch info, accept matching major/minor
+  }
+
+  return candidate.patch === target.patch;
+}
 
 /**
  * Load content (mods, shaders, resource packs) from the server directory
@@ -1506,20 +1548,45 @@ function checkForUpdate(modInfo, versions) {
   let latestVersion = null;
   try {
     const currentMc = get(minecraftVersion);
+    if (!currentMc) {
+      logger.info('Skipping update check without minecraftVersion context', {
+        category: 'mods',
+        data: {
+          component: 'modAPI',
+          function: 'checkForUpdate',
+          modFile: modInfo.fileName,
+          modName: modInfo.name || null,
+          forceLog: true
+        }
+      });
+      return null;
+    }
     if (currentMc) {
-      const parts = currentMc.split('.');
-      const majorMinor = parts.length >= 2 ? `${parts[0]}.${parts[1]}` : currentMc;
       const compatible = sortedVersions.filter(v => {
         if (!v || !Array.isArray(v.gameVersions)) return false;
-        return v.gameVersions.some(gv => {
-          if (typeof gv !== 'string') return false;
-          return gv === currentMc || gv.startsWith(majorMinor) || gv.includes(majorMinor);
-        });
+        return v.gameVersions.some(gv => isGameVersionCompatible(currentMc, gv));
       });
       if (compatible.length > 0) {
         latestVersion = compatible[0];
       } else {
         // No compatible versions -> treat as NO update even if newer future versions exist
+        logger.info('No compatible mod versions for current Minecraft', {
+          category: 'mods',
+          data: {
+            component: 'modAPI',
+            function: 'checkForUpdate',
+            modFile: modInfo.fileName,
+            modName: modInfo.name || null,
+            installedVersion: installedVersionRaw,
+            minecraftVersion: currentMc,
+            candidateCount: versionsToCheck.length,
+            sampleCandidates: versionsToCheck.slice(0, 3).map(v => ({
+              version: v.versionNumber || v.name || null,
+              gameVersions: v.gameVersions || []
+            })),
+            forceLog: true
+          }
+        });
         return null;
       }
     }
@@ -1535,7 +1602,24 @@ function checkForUpdate(modInfo, versions) {
     const installedVer = norm(installedVersionRaw);
     const latestVer = norm(latestVersion.versionNumber || latestVersion.name || '');
     const cmp = compareLoose(installedVer, latestVer);
-    if (cmp < 0) return latestVersion; // only if strictly newer numerically
+    if (cmp < 0) {
+      logger.info('Update available (newer version number)', {
+        category: 'mods',
+        data: {
+          component: 'modAPI',
+          function: 'checkForUpdate',
+          modFile: modInfo.fileName,
+          modName: modInfo.name || null,
+          installedVersion: installedVersionRaw,
+          candidateVersion: latestVersion.versionNumber || latestVersion.name,
+          minecraftVersion: get(minecraftVersion),
+          candidateGameVersions: latestVersion.gameVersions || [],
+          candidateId: latestVersion.id || null,
+          forceLog: true
+        }
+      });
+      return latestVersion; // only if strictly newer numerically
+    }
 
     const installedId = modInfo.versionId;
     const latestId = latestVersion.id;
@@ -1546,7 +1630,25 @@ function checkForUpdate(modInfo, versions) {
     // - IDs differ AND published date of the candidate is newer than the installed entry (when known)
     if (cmp === 0) {
       const rawStringsDiffer = installedVer && latestVer && installedVer !== latestVer;
-      if (rawStringsDiffer) return latestVersion;
+      if (rawStringsDiffer) {
+        logger.info('Update available (string mismatch with equal numeric parts)', {
+          category: 'mods',
+          data: {
+            component: 'modAPI',
+            function: 'checkForUpdate',
+            modFile: modInfo.fileName,
+            modName: modInfo.name || null,
+            installedVersion: installedVersionRaw,
+            candidateVersion: latestVersion.versionNumber || latestVersion.name,
+            minecraftVersion: get(minecraftVersion),
+            candidateGameVersions: latestVersion.gameVersions || [],
+            candidateId: latestVersion.id || null,
+            installedId: installedId || null,
+            forceLog: true
+          }
+        });
+        return latestVersion;
+      }
 
       if (idsDiffer) {
         // Try to locate the installed entry to compare dates
@@ -1559,11 +1661,45 @@ function checkForUpdate(modInfo, versions) {
         const latestDate = latestVersion.datePublished ? new Date(latestVersion.datePublished).getTime() : null;
 
         if (installedDate && latestDate && latestDate > installedDate) {
+          logger.info('Update available (newer publish date with same numeric)', {
+            category: 'mods',
+            data: {
+              component: 'modAPI',
+              function: 'checkForUpdate',
+              modFile: modInfo.fileName,
+              modName: modInfo.name || null,
+              installedVersion: installedVersionRaw,
+              candidateVersion: latestVersion.versionNumber || latestVersion.name,
+              minecraftVersion: get(minecraftVersion),
+              candidateGameVersions: latestVersion.gameVersions || [],
+              candidateId: latestVersion.id || null,
+              installedId: installedId || null,
+              forceLog: true
+            }
+          });
           return latestVersion; // newer build with same number
         }
       }
     }
+
+    // No update needed: current version is latest or equivalent for this MC version
+    logger.info('No update needed (already latest/compatible for MC)', {
+      category: 'mods',
+      data: {
+        component: 'modAPI',
+        function: 'checkForUpdate',
+        modFile: modInfo.fileName,
+        modName: modInfo.name || null,
+        installedVersion: installedVersionRaw,
+        candidateVersion: latestVersion ? (latestVersion.versionNumber || latestVersion.name) : null,
+        minecraftVersion: get(minecraftVersion),
+        candidateGameVersions: latestVersion ? (latestVersion.gameVersions || []) : [],
+        installedId: modInfo.versionId || null,
+        candidateId: latestVersion ? latestVersion.id || null : null,
+        forceLog: true
+      }
+    });
   }
   
   return null;
-} 
+}

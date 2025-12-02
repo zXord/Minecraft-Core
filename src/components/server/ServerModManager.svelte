@@ -48,7 +48,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     loadMods, 
     loadServerConfig,
     installMod,
-    checkForUpdates,
     loadContent,
     searchContent
   } from '../../utils/mods/modAPI.js';
@@ -638,10 +637,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       if (success) {
         // Force a full reload of installed mods to refresh version information
         await loadMods(serverPath);
-        
-        // Check for updates immediately to update UI state if we installed an older version
-        await checkForUpdates(serverPath);
-        
+
         // Don't automatically expand the dropdown - let the user choose to open it
         // This avoids the "loading versions" issue
         expandedInstalledMod.set(null);
