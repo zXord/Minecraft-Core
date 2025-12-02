@@ -209,6 +209,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
   
   // Acknowledged dependencies tracking comes from the shared store
+  const ACK_DEPS_RELOAD_INTERVAL = 30000; // Refresh acknowledged deps at most every 30s
+  let lastAckDepsLoad = 0;
   
   // Memory/RAM settings - moved to PlayTab.svelte for proper persistence
   
@@ -223,8 +225,24 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   const VERSION_CHECK_COOLDOWN = 5000; // 5 second cooldown between checks
   // Client mod compatibility dialog state
   let showCompatibilityDialog = false;
-  let compatibilityReport = null;  // Download progress tracking
-    // Computed property to filter out already acknowledged mods from acknowledgments  $: filteredAcknowledgments = (() => {  // Computed property to filter out already acknowledged mods from acknowledgments
+  let compatibilityReport = null;
+  function handleCompatibilityReportEvent(data) {
+    const report = data?.report ?? data;
+    if (!report) return;
+
+    compatibilityReport = report;
+    const hasIssues =
+      report.hasIncompatible ||
+      report.hasUpdatable ||
+      (Array.isArray(report.incompatible) && report.incompatible.length > 0) ||
+      (Array.isArray(report.needsUpdate) && report.needsUpdate.length > 0);
+
+    if (hasIssues) {
+      showCompatibilityDialog = true;
+    }
+  }
+  // Download progress tracking
+  // Computed property to filter out already acknowledged mods from acknowledgments
   $: filteredAcknowledgments = (() => {
     if (!modSyncStatus?.acknowledgments) return [];
 
@@ -235,8 +253,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     return filtered;  })();
 
   // Function to load acknowledged dependencies from persistent storage
-  async function loadAcknowledgedDependencies() {
+  async function loadAcknowledgedDependencies(force = false) {
     if (!instance?.path) return;
+    const now = Date.now();
+    if (!force && now - lastAckDepsLoad < ACK_DEPS_RELOAD_INTERVAL) return;
     
     try {
       const result = await window.electron.invoke('load-expected-mod-state', {
@@ -257,6 +277,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       } else {
       }
     } catch (error) {
+    } finally {
+      lastAckDepsLoad = now;
     }
   }
 
@@ -315,7 +337,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         
         // Check server status and get server info
         await checkServerStatus();
-        await getServerInfo();
         await checkAuthentication();
         
       } else {
@@ -1125,8 +1146,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       );
       // Don't filter acknowledged deps from allClientMods - they should remain visible
       // for potential re-acknowledgment when removed from server requirements
-      const filteredAll = serverInfo?.allClientMods || [];
-        const result = await window.electron.invoke('minecraft-check-mods', {
+        const filteredAll = serverInfo?.allClientMods || [];
+          const result = await window.electron.invoke('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods: filteredRequired,
         allClientMods: filteredAll,
@@ -1136,7 +1157,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         modSyncStatus = result;
         
         // Refresh acknowledged dependencies to ensure UI filtering is up to date
-        await loadAcknowledgedDependencies();
+        await loadAcknowledgedDependencies(!silentRefresh);
           // Remove any mods that were deleted on the server
         if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
           removeServerManagedFiles(result.successfullyRemovedMods);
@@ -2550,14 +2571,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       setTimeout(() => errorMessage.set(''), 5000);
     });
       // Client mod compatibility events
-    window.electron.on('client-mod-compatibility-report', (report) => {
-      compatibilityReport = report;
-      
-      // Show dialog if there are compatibility issues
-      if (report.hasIncompatible || report.hasUpdatable) {
-        showCompatibilityDialog = true;
-      }
-    });
+    window.electron.on('client-mod-compatibility-report', handleCompatibilityReportEvent);
     
     // Listen for server version changes to re-check app compatibility
     window.electron.on('server-version-changed', (data) => {
@@ -2573,6 +2587,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   // Clean up event listeners
   function cleanupLauncherEvents() {
     const events = [
+      'server-status',
       'launcher-download-start',
       'launcher-download-progress', 
       'launcher-download-complete',
@@ -2647,10 +2662,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         }
       }
     }, 15000); // Every 15 seconds when running
-      // Store intervals for cleanup
-    connectionCheckInterval = connectionCheckInterval;
-    statusCheckInterval = statusCheckInterval;
-    
     // Return cleanup function
     return () => {
       if (connectionCheckInterval) clearInterval(connectionCheckInterval);
@@ -2779,7 +2790,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     (async () => {
       try {
         // Load acknowledged dependencies FIRST
-        await loadAcknowledgedDependencies();
+        await loadAcknowledgedDependencies(true);
         
         const state = await window.electron.invoke('load-expected-mod-state', {
           clientPath: instance.path
@@ -2802,13 +2813,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     })();
 
     const cleanupChecks = setupChecks();
-      window.electron.on('client-mod-compatibility-report', (data) => {
-      if (data && data.report && data.newMinecraftVersion && data.oldMinecraftVersion) {
-        compatibilityReport = data.report;
-        showCompatibilityDialog = true; 
-      } else {
-      }
-    });
     
     // Handle persistent mod state errors
     window.electron.on('mod-state-persistence-error', (errorData) => {
