@@ -249,9 +249,11 @@
     // Enable saving after loading is complete
     memoryLoaded = true;
     
+    let progressHandler;
+    let completeHandler;
+    let errorHandler;
     if (typeof window !== 'undefined' && window.electron) {
-      // Listen for specific version download progress
-      window.electron.on('specific-version-download-progress', (progress) => {
+      progressHandler = (progress) => {
         specificVersionDownload.progress = progress.progress || 0;
         specificVersionDownload.downloadedBytes = progress.downloadedSize || specificVersionDownload.downloadedBytes || 0;
         specificVersionDownload.totalBytes = progress.totalSize || specificVersionDownload.totalBytes || 0;
@@ -265,10 +267,10 @@
           specificVersionDownload.totalMB = 0;
         }
         specificVersionDownload = { ...specificVersionDownload };
-      });
+      };
+      window.electron.on('specific-version-download-progress', progressHandler);
       
-      // Listen for specific version download completion
-      window.electron.on('specific-version-download-complete', (info) => {
+      completeHandler = (info) => {
         specificVersionDownload.isDownloading = false;
         specificVersionDownload.isComplete = true;
         specificVersionDownload.filePath = info.filePath;
@@ -277,14 +279,14 @@
         specificVersionDownload.progress = 100;
         specificVersionDownload = { ...specificVersionDownload };
         
-        toast.success('Download Complete! 🎉', {
+        toast.success('Download Complete!', {
           description: `Version ${info.version} is ready to install. Install button should appear now.`,
           duration: 10000
         });
-      });
+      };
+      window.electron.on('specific-version-download-complete', completeHandler);
       
-      // Listen for specific version download errors
-      window.electron.on('specific-version-download-error', (error) => {
+      errorHandler = (error) => {
         specificVersionDownload.isDownloading = false;
         specificVersionDownload.error = error.error || 'Download failed';
         specificVersionDownload = { ...specificVersionDownload };
@@ -293,10 +295,21 @@
           description: error.error || 'An error occurred during download',
           duration: 8000
         });
-      });
+      };
+      window.electron.on('specific-version-download-error', errorHandler);
     }
     downloadManagerCleanup = initDownloadManager();
     return () => {
+      if (typeof window !== 'undefined' && window.electron && typeof window.electron.removeListener === 'function') {
+        if (progressHandler) window.electron.removeListener('specific-version-download-progress', progressHandler);
+        if (completeHandler) window.electron.removeListener('specific-version-download-complete', completeHandler);
+        if (errorHandler) window.electron.removeListener('specific-version-download-error', errorHandler);
+      } else if (typeof window !== 'undefined' && window.electron && typeof window.electron.removeAllListeners === 'function') {
+        // Fallback cleanup for environments exposing only removeAllListeners
+        window.electron.removeAllListeners('specific-version-download-progress');
+        window.electron.removeAllListeners('specific-version-download-complete');
+        window.electron.removeAllListeners('specific-version-download-error');
+      }
       if (downloadManagerCleanup) downloadManagerCleanup();
     };
   });
