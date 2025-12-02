@@ -57,6 +57,7 @@ let searchId = 0;
 let updateCheckId = 0;
 // Track a pending update check request if one comes in while a check is running
 let pendingUpdateCheck = null;
+let lastUpdateCheckPath = '';
 
 // Rate limiting protection
 let lastSearchRequestTime = 0;
@@ -65,6 +66,7 @@ const MIN_SEARCH_INTERVAL = 500; // Minimum time between searches in ms
 // Rate limiting protection for version fetching
 let lastVersionFetchTime = 0;
 const MIN_VERSION_FETCH_INTERVAL = 500; // Minimum time between version fetches in ms
+const normalizePathForUpdates = (p) => (typeof p === 'string' ? p.trim().toLowerCase() : '');
 
 /**
  * Load content (mods, shaders, resource packs) from the server directory
@@ -1190,6 +1192,26 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     return new Map();
   }
 
+  // Clear stale update indicators while a fresh check runs, but keep a snapshot to restore on failure
+  const previousUpdatesSnapshot = (() => {
+    try {
+      const existing = get(modsWithUpdates);
+      return existing ? new Map(existing) : null;
+    } catch {
+      return null;
+    }
+  })();
+  const normalizedPath = normalizePathForUpdates(serverPath);
+  const pathChanged = normalizedPath && lastUpdateCheckPath && normalizedPath !== lastUpdateCheckPath;
+  let clearedUpdatesForCheck = false;
+  if (pathChanged || (previousUpdatesSnapshot && previousUpdatesSnapshot.size > 0)) {
+    modsWithUpdates.set(new Map());
+    clearedUpdatesForCheck = true;
+  }
+  if (normalizedPath) {
+    lastUpdateCheckPath = normalizedPath;
+  }
+
   isCheckingUpdates.set(true);
   const currentCheckId = ++updateCheckId;
 
@@ -1197,6 +1219,9 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
 
   try {
     if (!serverPath) {
+      if (clearedUpdatesForCheck && previousUpdatesSnapshot && !pathChanged) {
+        modsWithUpdates.set(previousUpdatesSnapshot);
+      }
       isCheckingUpdates.set(false);
       return updatesMap;
     }
@@ -1283,6 +1308,9 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     try { lastUpdateCheckTime.set(Date.now()); } catch { /* ignore timestamp errors */ }
     return updatesMap;
   } catch {
+    if (clearedUpdatesForCheck && previousUpdatesSnapshot && !pathChanged) {
+      modsWithUpdates.set(previousUpdatesSnapshot);
+    }
     return updatesMap;
   } finally {
     isCheckingUpdates.set(false);

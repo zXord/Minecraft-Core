@@ -2086,7 +2086,9 @@
         <td class="upd">
           {#if isDisabled}
             {@const disabledUpdateInfo = findDisabledUpdate($disabledModUpdates, mod)}
-            {#if disabledUpdateInfo}
+            {#if $isCheckingUpdates}
+              <span class="tag ok" title="Checking for updates...">Checking...</span>
+            {:else if disabledUpdateInfo}
               <div class="update-actions compact">
                 <button class="tag new clickable upd-btn"
                         disabled={serverRunning}
@@ -2114,8 +2116,10 @@
                 </button>
               </div>
             {:else}
-              <span class="tag ok" title="Enable to check for updates">—</span>
+              <span class="tag ok" title="Enable to check for updates">-</span>
             {/if}
+          {:else if $isCheckingUpdates}
+            <span class="tag ok" title="Checking for updates...">Checking...</span>
           {:else if $modsWithUpdates.has(mod)}
             {@const updateInfo = $modsWithUpdates.get(mod)}
             <div class="update-actions compact">
@@ -2292,7 +2296,9 @@
 
             <!-- update column -->
             <td class="upd">
-              {#if $modsWithUpdates.has(item)}
+              {#if $isCheckingUpdates}
+                <span class="tag ok" title="Checking for updates...">Checking...</span>
+              {:else if $modsWithUpdates.has(item)}
         {@const updateInfo = $modsWithUpdates.get(item)}
                 <div class="update-actions compact">
                   <button class="tag new clickable upd-btn" 
