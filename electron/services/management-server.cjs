@@ -7,8 +7,12 @@ const path = require('path');
 const { createHash } = require('crypto');
 const { wmicExecAsync } = require('../utils/wmic-utils.cjs');
 const eventBus = require('../utils/event-bus.cjs');
+const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const process = require('process');
 const os = require('os');
+
+// Reuse centralized in-app logger
+const logger = getLoggerHandlers();
 
 class ManagementServer {
   /** @type {ReturnType<typeof express>} */
@@ -40,6 +44,32 @@ class ManagementServer {
 
     this.setupMiddleware();
     this.setupRoutes();
+
+    // Initial lifecycle log for visibility in the in-app logger
+    this.log('info', 'Management server instance created', {
+      defaultPort: this.port,
+      externalHostTtlMs: this.externalHostTtlMs
+    });
+  }
+
+  // Centralized logger with standard context so management server issues appear in-app
+  log(level, message, data = {}) {
+    try {
+      if (logger && typeof logger[level] === 'function') {
+        logger[level](message, {
+          category: 'management-server',
+          data: {
+            port: this.port,
+            serverPath: this.serverPath,
+            isRunning: this.isRunning,
+            clientCount: this.clients ? this.clients.size : 0,
+            ...data
+          }
+        });
+      }
+    } catch {
+      // Never let logging failures impact the server
+    }
   }
 
   // Get current app version from package.json
@@ -47,8 +77,10 @@ class ManagementServer {
     try {
       const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
       return packageJson.version || '1.0.0';
-    } catch {
-      // TODO: Add proper logging - Failed to read app version
+    } catch (error) {
+      this.log('warn', 'Failed to read app version for management server', {
+        error: error.message
+      });
       return '1.0.0'; // Fallback version
     }
   }
@@ -93,8 +125,10 @@ class ManagementServer {
       }
       
       return null;
-    } catch {
-      // TODO: Add proper logging - Failed to detect external IP
+    } catch (error) {
+      this.log('warn', 'Failed to detect external IP', {
+        error: error.message
+      });
       return null;
     }
   }
@@ -148,7 +182,9 @@ class ManagementServer {
   // Set a manual host override for external clients
   setExternalHost(host) {
     this.configuredHost = host;
-    // TODO: Add proper logging - Management server external host set
+    this.log('info', 'Management server external host override set', {
+      configuredHost: host
+    });
   }
   
   setupMiddleware() {
@@ -652,11 +688,22 @@ class ManagementServer {
         }
         
         if (!fs.existsSync(modPath)) {
-          console.warn('[mods-download] file not found', { fileName, location: locationParam, requestHost, downloadHost });
+          this.log('warn', 'Mod download requested but file not found', {
+            fileName,
+            location: locationParam,
+            requestHost,
+            downloadHost
+          });
           return res.status(404).json({ error: 'Mod file not found' });
         }
 
-        console.info('[mods-download] serving', { fileName, location: locationParam, requestHost, downloadHost, modPath });
+        this.log('info', 'Serving mod download', {
+          fileName,
+          location: locationParam,
+          requestHost,
+          downloadHost,
+          modPath
+        });
         
         res.setHeader('Content-Type', 'application/java-archive');
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
@@ -664,7 +711,13 @@ class ManagementServer {
         const fileStream = fs.createReadStream(modPath);
         
         fileStream.on('error', (err) => {
-          console.warn('[mods-download] stream error', { fileName, location: locationParam, requestHost, downloadHost, error: err?.message });
+          this.log('warn', 'Mod download stream error', {
+            fileName,
+            location: locationParam,
+            requestHost,
+            downloadHost,
+            error: err && err.message ? err.message : 'unknown'
+          });
           if (!res.headersSent) {
             res.status(500).json({ error: 'Failed to serve mod file' });
           }
@@ -819,15 +872,42 @@ class ManagementServer {
       });
     });
 
+    // Surface unexpected route errors into the in-app logger
+    this.app.use((err, req, res, next) => {
+      this.log('error', 'Management server request error', {
+        path: req && (req.originalUrl || req.url),
+        method: req && req.method,
+        error: err && err.message ? err.message : 'unknown'
+      });
+
+      if (res && res.headersSent) {
+        return next(err);
+      }
+
+      try {
+        res.status(500).json({ error: 'Internal server error' });
+      } catch {
+        next(err);
+      }
+    });
   }
   
   async start(port = 8080, serverPath = null) {
     if (this.isRunning) {
+      this.log('debug', 'Start called but management server is already running', {
+        port: this.port,
+        serverPath: this.serverPath
+      });
       return { success: true, port: this.port };
     }
     
-  this.port = port;
+    this.port = port;
     this.serverPath = serverPath;
+
+    this.log('info', 'Starting management server', {
+      requestedPort: port,
+      serverPath
+    });
     
     return new Promise((resolve) => {
       this.server = this.app.listen(this.port, () => {
@@ -852,12 +932,17 @@ class ManagementServer {
 
         // Detect external IP for mod downloads
         this.externalHost = this.detectExternalIP();
-        // Startup info (reduced)
-        // TODO: Add proper logging - Management server started
+        this.log('info', 'Management server started', {
+          externalHost: this.externalHost,
+          downloadHost: this.getModDownloadHost(),
+          detectedPublicHost: this.detectedPublicHost
+        });
         
         const currentDownloadHost = this.getModDownloadHost();
         if (currentDownloadHost === 'localhost') {
-          // TODO: Add proper logging - Currently using localhost
+          this.log('warn', 'Management server currently using localhost for downloads', {
+            downloadHost: currentDownloadHost
+          });
         }
 
         // Start version watcher and check versions
@@ -877,6 +962,12 @@ class ManagementServer {
       
       this.server.on('error', (error) => {
         this.isRunning = false;
+        this.log(error && error['code'] === 'EADDRINUSE' ? 'warn' : 'error', 'Failed to start management server', {
+          error: error && error.message ? error.message : 'Unknown server error',
+          code: error && error['code'],
+          requestedPort: this.port,
+          serverPath: this.serverPath
+        });
         if (error && error['code'] === 'EADDRINUSE') {
           resolve({ success: false, error: `Port ${this.port} is already in use` });
         } else {
@@ -888,9 +979,16 @@ class ManagementServer {
   
   async stop() {
     if (!this.isRunning || !this.server) {
+      this.log('debug', 'Stop called but management server is not running');
       return { success: true };
     }
     
+    this.log('info', 'Stopping management server', {
+      activeSockets: this.activeSockets.size,
+      sseClients: Array.isArray(this.sseClients) ? this.sseClients.length : 0,
+      clientCount: this.clients.size
+    });
+
     return new Promise((resolve) => {
       const serverRef = this.server;
 
@@ -911,12 +1009,18 @@ class ManagementServer {
         settled = true;
         this.isRunning = false;
         this.server = null;
+        const remainingSockets = this.activeSockets ? this.activeSockets.size : 0;
         this.clients.clear();
         // Clear any tracked sockets
         try { this.activeSockets.clear(); } catch { /* ignore */ }
         // Stop client cleanup interval and watchers
         this.stopClientCleanup();
         this.stopVersionWatcher();
+        this.log(forced ? 'warn' : 'info', 'Management server stopped', {
+          forced,
+          reason,
+          remainingSockets
+        });
         resolve({ success: !forced, forced, reason });
       };
 
@@ -933,6 +1037,9 @@ class ManagementServer {
       const FORCE_TIMEOUT_MS = 5000;
       setTimeout(() => {
         if (settled) return;
+        this.log('warn', 'Force-destroying remaining management server sockets during shutdown', {
+          activeSockets: this.activeSockets.size
+        });
         for (const socket of this.activeSockets) {
           try { socket.destroy(); } catch { /* noop */ }
         }
@@ -943,6 +1050,9 @@ class ManagementServer {
   }
     updateServerPath(newPath) {
     this.serverPath = newPath;
+    this.log('info', 'Management server path updated', {
+      serverPath: newPath
+    });
     this.stopVersionWatcher();
     
     // Only start version watcher if we have a valid path
@@ -1198,7 +1308,11 @@ class ManagementServer {
       const actuallyRequiredMods = requiredMods.filter(mod => mod.required);
       
       return actuallyRequiredMods;
-    } catch {
+    } catch (error) {
+      this.log('warn', 'Failed to build required mods list', {
+        error: error && error.message ? error.message : 'unknown',
+        serverPath: this.serverPath
+      });
       return [];
     }
   }
@@ -1332,8 +1446,11 @@ class ManagementServer {
       }
       
       return allClientMods;
-    } catch {
-      // TODO: Add proper logging - getAllClientMods failed
+    } catch (error) {
+      this.log('warn', 'Failed to build full client mods list', {
+        error: error && error.message ? error.message : 'unknown',
+        serverPath: this.serverPath
+      });
       return [];
     }
   }
@@ -1412,6 +1529,9 @@ class ManagementServer {
     try {
       // Check if path exists before watching
       if (!fs.existsSync(this.serverPath)) {
+        this.log('warn', 'Version watcher not started because server path is missing', {
+          serverPath: this.serverPath
+        });
         return;
       }
       
@@ -1421,22 +1541,38 @@ class ManagementServer {
           this.checkVersionChange();
         }
       });
+
+      this.log('debug', 'Management server version watcher started', {
+        serverPath: this.serverPath
+      });
       
       // Handle watcher errors (like EPERM when directory is deleted)
-      this.versionWatcher.on('error', () => {
-        // TODO: Add proper logging - Version watcher error
+      this.versionWatcher.on('error', (error) => {
+        this.log('warn', 'Management server version watcher error', {
+          error: error && error.message ? error.message : 'unknown',
+          serverPath: this.serverPath
+        });
       });
-    } catch {
-      // TODO: Add proper logging - Failed to start version watcher
+    } catch (error) {
+      this.log('warn', 'Failed to start management server version watcher', {
+        error: error && error.message ? error.message : 'unknown',
+        serverPath: this.serverPath
+      });
     }
   }
   stopVersionWatcher() {
     if (this.versionWatcher) {
       try {
         this.versionWatcher.close();
-      } catch {
+        this.log('debug', 'Management server version watcher stopped', {
+          serverPath: this.serverPath
+        });
+      } catch (error) {
         // Ignore close errors - watcher might already be closed
-        // TODO: Add proper logging - Version watcher close error
+        this.log('warn', 'Management server version watcher close error', {
+          error: error && error.message ? error.message : 'unknown',
+          serverPath: this.serverPath
+        });
       }
       this.versionWatcher = null;
     }
