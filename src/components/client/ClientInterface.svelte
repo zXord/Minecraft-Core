@@ -10,6 +10,7 @@
   import ModsTab from './ModsTab.svelte';
   import SettingsTab from './SettingsTab.svelte';
   import logger from '../../utils/logger.js';
+  import { buildAuthHeaders, ensureSessionToken } from '../../utils/managementAuth.js';
 import {
   errorMessage,
   successMessage,
@@ -124,7 +125,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     path: '',
     id: '',
     name: '',
-    type: 'client'
+    type: 'client',
+    sessionToken: ''
   }; // Client instance with serverIp, serverPort, path  // Component references
   let clientModManagerComponent;
   
@@ -319,6 +321,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const response = await fetch(managementUrl, {
         method: 'GET',
         headers: {
+          ...buildAuthHeaders(instance),
           'Content-Type': 'application/json'
         },
         signal: AbortSignal.timeout(5000) // 5 second timeout
@@ -353,37 +356,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   // Register with the management server
   async function registerWithServer() {
     try {
-      const clientId = instance.clientId || `client-${Date.now()}`;
-      const clientName = instance.clientName || instance.name || 'Minecraft Client';
-      
-      const registerUrl = `http://${instance.serverIp}:${instance.serverPort}/api/client/register`;
-      const response = await fetch(registerUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          clientId,
-          name: clientName
-        })
-      });        if (response.ok) {
-        
-        
-        // Update instance with client info if needed
-        if (!instance.clientId) {
-          instance.clientId = clientId;
-          instance.clientName = clientName;
-          
-          // Save the updated client configuration
-          await window.electron.invoke('save-client-config', {
-            path: instance.path,
-            serverIp: instance.serverIp,
-            serverPort: instance.serverPort,
-            clientId,
-            clientName
-          });
-        }
-      }
+      await ensureSessionToken(instance, true);
     } catch (err) {
     }  }
 
@@ -398,6 +371,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const appVersionUrl = `http://${instance.serverIp}:${instance.serverPort}/api/app/version`;
       const response = await fetch(appVersionUrl, {
         method: 'GET',
+        headers: buildAuthHeaders(instance),
         signal: AbortSignal.timeout(5000)
       });
 
@@ -440,6 +414,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const managementUrl = `http://${instance.serverIp}:${instance.serverPort}/api/test`;
       const managementResponse = await fetch(managementUrl, {
         method: 'GET',
+        headers: buildAuthHeaders(instance),
         signal: AbortSignal.timeout(3000)
       });
       
@@ -466,9 +441,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Get server information including Minecraft version and required mods
   async function getServerInfo(silentRefresh = false) {
     try {
+      await ensureSessionToken(instance);
       const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
       const response = await fetch(serverInfoUrl, {
         method: 'GET',
+        headers: buildAuthHeaders(instance),
         signal: AbortSignal.timeout(5000)
       });
       
@@ -485,6 +462,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
             const modsResponse = await fetch(modsUrl, {
               method: 'GET',
+              headers: buildAuthHeaders(instance),
               signal: AbortSignal.timeout(5000)
             });
               if (modsResponse.ok) {
@@ -544,8 +522,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const base = `http://${instance.serverIp}:${instance.serverPort}`;
       // Fetch server items
       const [srvShadersRes, srvRpsRes] = await Promise.all([
-        fetch(`${base}/api/assets/list/shaderpacks`, { method: 'GET', signal: AbortSignal.timeout(10000) }).catch(() => null),
-        fetch(`${base}/api/assets/list/resourcepacks`, { method: 'GET', signal: AbortSignal.timeout(10000) }).catch(() => null)
+        fetch(`${base}/api/assets/list/shaderpacks`, {
+          method: 'GET',
+          headers: buildAuthHeaders(instance),
+          signal: AbortSignal.timeout(10000)
+        }).catch(() => null),
+        fetch(`${base}/api/assets/list/resourcepacks`, {
+          method: 'GET',
+          headers: buildAuthHeaders(instance),
+          signal: AbortSignal.timeout(10000)
+        }).catch(() => null)
       ]);
       const srvShaders = srvShadersRes && srvShadersRes.ok ? await srvShadersRes.json() : { success: false, items: [] };
       const srvRps = srvRpsRes && srvRpsRes.ok ? await srvRpsRes.json() : { success: false, items: [] };
@@ -621,7 +607,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
       });
   await checkAssetSynchronization();
       successMessage.set(`Downloaded ${items.length} shader${items.length > 1 ? 's' : ''}`);
@@ -644,7 +630,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
       });
       await checkAssetSynchronization();
       const n = items.length;
@@ -668,7 +654,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
       });
   await checkAssetSynchronization();
       successMessage.set(`Downloaded ${items.length} resource pack${items.length > 1 ? 's' : ''}`);
@@ -691,7 +677,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
       });
       await checkAssetSynchronization();
       const n = items.length;
@@ -1850,7 +1836,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           allClientMods: allClientModsParam,
           serverInfo: {
             serverIp: instance.serverIp,
-            serverPort: instance.serverPort
+            serverPort: instance.serverPort,
+            sessionToken: instance.sessionToken
           }
         });
         
@@ -2682,7 +2669,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       for (const p of panelPortsToTry) {
         try {
           const statusUrl = `http://${instance.serverIp}:${p}/api/server/status`;
-          const res = await fetch(statusUrl, { method: 'GET', signal: AbortSignal.timeout(2200) });
+          const res = await fetch(statusUrl, {
+            method: 'GET',
+            headers: buildAuthHeaders(instance),
+            signal: AbortSignal.timeout(2200)
+          });
           if (res.status === 404) continue; // skip to next port
           if (res.ok) {
             const data = await res.json();

@@ -38,7 +38,7 @@ try {
 
 // Utility function to open folders directly using child_process
 async function openFolderDirectly(folderPath) {
-  const { exec, execFile } = require('child_process');
+  const { execFile } = require('child_process');
   const normalizedPath = path.normalize(folderPath);
   
   if (logger) {
@@ -127,7 +127,7 @@ async function openFolderDirectly(folderPath) {
       });
     } else if (process.platform === 'darwin') {
       // macOS - use open
-      exec(`open "${normalizedPath}"`, (error) => {
+      execFile('open', [normalizedPath], (error) => {
         if (error) {
           if (logger) {
             logger.error(`Failed to open folder on macOS: ${error.message}`, {
@@ -152,7 +152,7 @@ async function openFolderDirectly(folderPath) {
       });
     } else {
       // Linux - use xdg-open
-      exec(`xdg-open "${normalizedPath}"`, (error) => {
+      execFile('xdg-open', [normalizedPath], (error) => {
         if (error) {
           if (logger) {
             logger.error(`Failed to open folder on Linux: ${error.message}`, {
@@ -178,6 +178,45 @@ async function openFolderDirectly(folderPath) {
     }
   });
 }
+
+function isAllowedNavigation(targetUrl) {
+  if (!targetUrl || typeof targetUrl !== 'string') return false;
+  try {
+    const parsed = new URL(targetUrl);
+    if (parsed.protocol === 'file:' || parsed.protocol === 'about:') return true;
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      const host = parsed.hostname;
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function openExternalSafely(targetUrl) {
+  try {
+    if (targetUrl) {
+      shell.openExternal(targetUrl);
+    }
+  } catch {
+    // ignore shell failures
+  }
+}
+
+app.on('web-contents-created', (_event, contents) => {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedNavigation(url)) return { action: 'allow' };
+    openExternalSafely(url);
+    return { action: 'deny' };
+  });
+
+  contents.on('will-navigate', (event, url) => {
+    if (isAllowedNavigation(url)) return;
+    event.preventDefault();
+    openExternalSafely(url);
+  });
+});
 
 let handlersInitialized = false;
 
@@ -563,7 +602,7 @@ function createWindow() {
       webSecurity: true,
       allowRunningInsecureContent: false,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     },
     // Don't show initially if starting minimized
     show: false

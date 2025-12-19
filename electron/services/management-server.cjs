@@ -4,7 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const { createHash } = require('crypto');
+const { createHash, randomBytes } = require('crypto');
 const { wmicExecAsync } = require('../utils/wmic-utils.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
@@ -25,6 +25,8 @@ class ManagementServer {
     this.isRunning = false;
     this.serverPath = null;
     this.clients = new Map(); // Track connected clients
+    this.clientTokens = new Map(); // token -> clientId mapping
+    this.rateLimits = new Map(); // per-IP rate limiting
     this.clientCleanupInterval = null; // Interval for cleaning up stale clients
     this.versionInfo = { minecraftVersion: null, loaderType: null, loaderVersion: null };
     this.versionWatcher = null;
@@ -70,6 +72,73 @@ class ManagementServer {
     } catch {
       // Never let logging failures impact the server
     }
+  }
+
+  generateToken() {
+    return randomBytes(32).toString('hex');
+  }
+
+  getRequestIp(req) {
+    const forwarded = req && req.headers && req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      return forwarded.split(',')[0].trim();
+    }
+    return (req && req.ip) || (req && req.connection && req.connection.remoteAddress) || 'unknown';
+  }
+
+  getTokenFromRequest(req) {
+    if (!req) return '';
+    const headerToken = req.get && (req.get('x-session-token') || req.get('x-auth-token'));
+    if (headerToken && typeof headerToken === 'string') return headerToken.trim();
+    const authHeader = req.get && req.get('authorization');
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      return authHeader.slice(7).trim();
+    }
+    if (req.query && typeof req.query.token === 'string') {
+      return req.query.token.trim();
+    }
+    return '';
+  }
+
+  getClientByToken(token) {
+    if (!token) return null;
+    const clientId = this.clientTokens.get(token);
+    if (!clientId) return null;
+    return this.clients.get(clientId) || null;
+  }
+
+  isPublicRoute(req) {
+    const routePath = req && req.path ? req.path : '';
+    return routePath === '/health' || routePath === '/api/test' || routePath === '/api/client/register';
+  }
+
+  applyRateLimit(req, res) {
+    const ip = this.getRequestIp(req);
+    const windowMs = 60 * 1000;
+    const max = 120;
+    const now = Date.now();
+    let entry = this.rateLimits.get(ip);
+    if (!entry || now - entry.start > windowMs) {
+      entry = { start: now, count: 0 };
+    }
+    entry.count += 1;
+    this.rateLimits.set(ip, entry);
+    if (entry.count > max) {
+      try {
+        const retryAfter = Math.max(1, Math.ceil((windowMs - (now - entry.start)) / 1000));
+        res.setHeader('Retry-After', String(retryAfter));
+      } catch { /* ignore */ }
+      return false;
+    }
+    return true;
+  }
+
+  sanitizeFileName(fileName) {
+    if (!fileName || typeof fileName !== 'string') return null;
+    if (fileName.includes('\0')) return null;
+    const safeName = path.basename(fileName);
+    if (safeName !== fileName) return null;
+    return safeName;
   }
 
   // Get current app version from package.json
@@ -190,12 +259,35 @@ class ManagementServer {
   setupMiddleware() {
     // Enable CORS for client connections
     this.app.use(cors({
-      origin: true, // Allow all origins for now
-      credentials: true
+      origin: (origin, callback) => {
+        if (!origin) return callback(null, true);
+        const normalized = origin.toLowerCase();
+        if (normalized === 'null') return callback(null, true);
+        if (
+          normalized.startsWith('http://localhost') ||
+          normalized.startsWith('http://127.0.0.1') ||
+          normalized.startsWith('http://[::1]') ||
+          normalized.startsWith('https://localhost') ||
+          normalized.startsWith('https://127.0.0.1') ||
+          normalized.startsWith('https://[::1]')
+        ) {
+          return callback(null, true);
+        }
+        return callback(null, false);
+      },
+      credentials: false
     }));
     
     // Parse JSON requests
     this.app.use(express.json({ limit: '50mb' }));
+
+    // Basic rate limiting to slow down brute-force/abuse
+    this.app.use((req, res, next) => {
+      if (!this.applyRateLimit(req, res)) {
+        return res.status(429).json({ error: 'Too many requests' });
+      }
+      next();
+    });
     
     // Middleware to detect public host from client connections
     this.app.use((req, _, next) => {
@@ -207,6 +299,23 @@ class ManagementServer {
     
     // Logging middleware
     this.app.use((_, __, next) => {
+      next();
+    });
+
+    // Enforce auth for non-public routes
+    this.app.use((req, res, next) => {
+      if (this.isPublicRoute(req)) return next();
+      const token = this.getTokenFromRequest(req);
+      if (!token) {
+        return res.status(401).json({ error: 'Missing session token' });
+      }
+      const client = this.getClientByToken(token);
+      if (!client) {
+        return res.status(401).json({ error: 'Invalid session token' });
+      }
+      client.lastSeen = new Date();
+      this.clients.set(client.id, client);
+      req.authClient = client;
       next();
     });
   }
@@ -259,9 +368,11 @@ class ManagementServer {
       }
       
       // Generate a session token
-      const token = createHash('sha256')
-        .update(`${clientId}-${Date.now()}-${Math.random()}`)
-        .digest('hex');
+      const token = this.generateToken();
+      const existingClient = this.clients.get(clientId);
+      if (existingClient && existingClient.token) {
+        this.clientTokens.delete(existingClient.token);
+      }
       
       // Store client info
       this.clients.set(clientId, {
@@ -271,6 +382,7 @@ class ManagementServer {
         registeredAt: new Date(),
         lastSeen: new Date()
       });
+      this.clientTokens.set(token, clientId);
       
       // Start cleanup interval when first client connects
       if (this.clients.size === 1 && !this.clientCleanupInterval) {
@@ -289,16 +401,10 @@ class ManagementServer {
       });
   });    // Client heartbeat/ping to keep connection alive
     this.app.post('/api/client/ping', (req, res) => {
-      const { clientId } = req.body;
-      
-      if (!clientId) {
-        return res.status(400).json({ error: 'Client ID required' });
-      }
-      
-      const client = this.clients.get(clientId);
+      const client = req.authClient;
       if (client) {
         client.lastSeen = new Date();
-        this.clients.set(clientId, client);
+        this.clients.set(client.id, client);
         res.json({ success: true });
       } else {
         res.status(404).json({ error: 'Client not found' });
@@ -307,15 +413,12 @@ class ManagementServer {
     
     // Client disconnection
     this.app.post('/api/client/disconnect', (req, res) => {
-      const { clientId } = req.body;
-      
-      if (!clientId) {
-        return res.status(400).json({ error: 'Client ID required' });
-      }
-      
-      const client = this.clients.get(clientId);
+      const client = req.authClient;
       if (client) {
-        this.clients.delete(clientId);
+        this.clients.delete(client.id);
+        if (client.token) {
+          this.clientTokens.delete(client.token);
+        }
         
         // Stop cleanup interval when no clients remain
         if (this.clients.size === 0 && this.clientCleanupInterval) {
@@ -675,21 +778,25 @@ class ManagementServer {
       this.updateDetectedPublicHost(requestHost);
       const downloadHost = this.getModDownloadHost();
       
-      if (!fileName || !fileName.endsWith('.jar')) {
+      const safeFileName = this.sanitizeFileName(fileName);
+      if (!safeFileName || !safeFileName.endsWith('.jar')) {
         return res.status(400).json({ error: 'Invalid file name' });
       }
       
       try {
-        let modPath;
-        if (locationParam === 'client') {
-          modPath = path.join(this.serverPath, 'client', 'mods', fileName);
-        } else {
-          modPath = path.join(this.serverPath, 'mods', fileName);
+        const baseDir = locationParam === 'client'
+          ? path.join(this.serverPath, 'client', 'mods')
+          : path.join(this.serverPath, 'mods');
+        const modPath = path.join(baseDir, safeFileName);
+        const resolvedBase = path.resolve(baseDir);
+        const resolvedPath = path.resolve(modPath);
+        if (!resolvedPath.startsWith(resolvedBase + path.sep)) {
+          return res.status(400).json({ error: 'Invalid file path' });
         }
         
         if (!fs.existsSync(modPath)) {
           this.log('warn', 'Mod download requested but file not found', {
-            fileName,
+            fileName: safeFileName,
             location: locationParam,
             requestHost,
             downloadHost
@@ -698,7 +805,7 @@ class ManagementServer {
         }
 
         this.log('info', 'Serving mod download', {
-          fileName,
+          fileName: safeFileName,
           location: locationParam,
           requestHost,
           downloadHost,
@@ -706,13 +813,13 @@ class ManagementServer {
         });
         
         res.setHeader('Content-Type', 'application/java-archive');
-        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${safeFileName}"`);
         
         const fileStream = fs.createReadStream(modPath);
         
         fileStream.on('error', (err) => {
           this.log('warn', 'Mod download stream error', {
-            fileName,
+            fileName: safeFileName,
             location: locationParam,
             requestHost,
             downloadHost,
@@ -800,23 +907,30 @@ class ManagementServer {
       if (!validTypes.has(type)) {
         return res.status(400).json({ error: 'Invalid asset type' });
       }
-      if (!fileName) {
+      const safeFileName = this.sanitizeFileName(fileName);
+      if (!safeFileName) {
         return res.status(400).json({ error: 'Invalid file name' });
       }
 
       try {
-        const assetPath = path.join(this.serverPath, 'client', type, fileName);
+        const baseDir = path.join(this.serverPath, 'client', type);
+        const assetPath = path.join(baseDir, safeFileName);
+        const resolvedBase = path.resolve(baseDir);
+        const resolvedPath = path.resolve(assetPath);
+        if (!resolvedPath.startsWith(resolvedBase + path.sep)) {
+          return res.status(400).json({ error: 'Invalid file path' });
+        }
         if (!fs.existsSync(assetPath)) {
           return res.status(404).json({ error: 'Asset not found' });
         }
 
         // Set appropriate content type based on file extension
-        if (fileName.toLowerCase().endsWith('.zip')) {
+        if (safeFileName.toLowerCase().endsWith('.zip')) {
           res.setHeader('Content-Type', 'application/zip');
         } else {
           res.setHeader('Content-Type', 'application/octet-stream');
         }
-        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${safeFileName}"`);
 
         const fileStream = fs.createReadStream(assetPath);
         fileStream.on('error', () => {
@@ -1011,6 +1125,8 @@ class ManagementServer {
         this.server = null;
         const remainingSockets = this.activeSockets ? this.activeSockets.size : 0;
         this.clients.clear();
+        this.clientTokens.clear();
+        this.rateLimits.clear();
         // Clear any tracked sockets
         try { this.activeSockets.clear(); } catch { /* ignore */ }
         // Stop client cleanup interval and watchers
@@ -1502,6 +1618,9 @@ class ManagementServer {
         const client = this.clients.get(clientId);
         if (client) {
           this.clients.delete(clientId);
+          if (client.token) {
+            this.clientTokens.delete(client.token);
+          }
         }
       });
       

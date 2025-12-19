@@ -645,6 +645,7 @@ function createSettingsHandlers() {
               if (instance.serverPort) validInstance.serverPort = instance.serverPort;
               if (instance.clientId) validInstance.clientId = instance.clientId;
               if (instance.clientName) validInstance.clientName = instance.clientName;
+              if (instance.sessionToken) validInstance.sessionToken = instance.sessionToken;
               if (instance.lastConnected) validInstance.lastConnected = instance.lastConnected;
             }
             
@@ -1315,7 +1316,7 @@ function createSettingsHandlers() {
     },
     
     // Save client configuration
-    'save-client-config': async (_e, { path: clientPath, serverIp, serverPort, clientId, clientName }) => {
+    'save-client-config': async (_e, { path: clientPath, serverIp, serverPort, clientId, clientName, sessionToken }) => {
       const startTime = Date.now();
       
       logger.debug('IPC handler invoked', {
@@ -1327,7 +1328,8 @@ function createSettingsHandlers() {
           hasServerIp: !!serverIp,
           hasServerPort: !!serverPort,
           hasClientId: !!clientId,
-          hasClientName: !!clientName
+          hasClientName: !!clientName,
+          hasSessionToken: !!sessionToken
         }
       });
 
@@ -1399,6 +1401,17 @@ function createSettingsHandlers() {
 
         // Save client configuration to a JSON file
         const configFile = path.join(clientPath, 'client-config.json');
+        let existingConfig = {};
+        if (fs.existsSync(configFile)) {
+          try {
+            existingConfig = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+          } catch {
+            existingConfig = {};
+          }
+        }
+        const storedToken = typeof sessionToken === 'string' && sessionToken.trim()
+          ? sessionToken.trim()
+          : (typeof existingConfig.sessionToken === 'string' ? existingConfig.sessionToken : '');
         const config = {
           serverIp,
           serverPort: serverPort || '8080', // Default to management server port
@@ -1406,6 +1419,9 @@ function createSettingsHandlers() {
           clientName: clientName || 'Unnamed Client',
           lastConnected: new Date().toISOString()
         };
+        if (storedToken) {
+          config.sessionToken = storedToken;
+        }
 
         logger.debug('Writing client configuration file', {
           category: 'settings',
@@ -1444,7 +1460,7 @@ function createSettingsHandlers() {
             }
           });
 
-          await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName);
+          await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName, null, false, config.sessionToken || null);
           
           // Create flag file to indicate servers.dat has been initialized
           fs.writeFileSync(serversInitializedFile, JSON.stringify({
@@ -1503,6 +1519,7 @@ function createSettingsHandlers() {
             serverPort: serverPort || '8080',
             clientId: config.clientId,
             clientName: config.clientName,
+            sessionToken: config.sessionToken || instances[clientInstanceIndex].sessionToken,
             path: clientPath,
             lastConnected: config.lastConnected
           };
@@ -1531,6 +1548,7 @@ function createSettingsHandlers() {
             serverPort: serverPort || '8080',
             clientId: config.clientId,
             clientName: config.clientName,
+            sessionToken: config.sessionToken,
             lastConnected: config.lastConnected
           };
           instances.push(newInstance);

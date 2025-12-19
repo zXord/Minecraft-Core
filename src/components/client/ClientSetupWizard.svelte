@@ -14,6 +14,7 @@
   let installProgress = 0;
   let installSpeed = '0 MB/s';
   let installLogs = [];
+  let sessionToken = '';
   let step = 'chooseFolder'; // chooseFolder → configureConnection → done
   let ipValid = false;
   let connectionStatus = 'disconnected'; // disconnected, connecting, connected
@@ -146,6 +147,7 @@
         installLogs = [...installLogs, `Successfully registered as: ${clientName}`];
         installLogs = [...installLogs, `Client ID: ${clientId}`];
         if (registrationData.token) {
+          sessionToken = registrationData.token;
           installLogs = [...installLogs, `Session token received`];
         }
       } catch (regError) {
@@ -160,7 +162,8 @@
         serverIp,
         serverPort,
         clientId,
-        clientName
+        clientName,
+        sessionToken
       });
       
       // For now, we're just setting up the connection

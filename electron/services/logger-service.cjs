@@ -1073,7 +1073,8 @@ class LoggerService extends EventEmitter {
         nodeIntegration: false,
         contextIsolation: true,
         preload: path.join(__dirname, '../preload.cjs'),
-        webSecurity: true
+        webSecurity: true,
+        sandbox: true
       },
       show: false, // Don't show until ready
       backgroundColor: '#101a23',

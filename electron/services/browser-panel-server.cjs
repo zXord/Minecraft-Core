@@ -39,31 +39,106 @@ class BrowserPanelServer {
   this.sseClients = new Set();
   this.backupWatchers = new Map(); // serverPath -> fs.FSWatcher
   this.serverJavaManager = new (ServerJavaManager)();
+  this.authFailures = new Map();
+  this.authWindowMs = 10 * 60 * 1000;
+  this.authMaxFailures = 6;
+  this.authLockMs = 15 * 60 * 1000;
     this.setupMiddleware();
     this.setupRoutes();
+  }
+
+  getRequestIp(req) {
+    const forwarded = req && req.headers && req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      return forwarded.split(',')[0].trim();
+    }
+    return (req && req.ip) || (req && req.connection && req.connection.remoteAddress) || 'unknown';
+  }
+
+  getPanelCredentials() {
+    const settings = appStore.get('appSettings') || {};
+    const bp = settings.browserPanel || {};
+    const username = typeof bp.username === 'string' ? bp.username.trim() : '';
+    const password = typeof bp.password === 'string' ? bp.password : '';
+    const isDefault = username === 'user' && password === 'password';
+    const isConfigured = !!username && !!password && !isDefault;
+    return { username, password, isDefault, isConfigured };
+  }
+
+  isAuthLocked(ip) {
+    if (!ip) return false;
+    const entry = this.authFailures.get(ip);
+    if (!entry || !entry.lockedUntil) return false;
+    if (Date.now() >= entry.lockedUntil) {
+      this.authFailures.delete(ip);
+      return false;
+    }
+    return true;
+  }
+
+  registerAuthFailure(ip) {
+    if (!ip) return null;
+    const now = Date.now();
+    let entry = this.authFailures.get(ip);
+    if (!entry || now - entry.start > this.authWindowMs) {
+      entry = { start: now, count: 0, lockedUntil: 0 };
+    }
+    entry.count += 1;
+    if (entry.count >= this.authMaxFailures) {
+      entry.lockedUntil = now + this.authLockMs;
+    }
+    this.authFailures.set(ip, entry);
+    return entry;
+  }
+
+  clearAuthFailures(ip) {
+    if (ip) this.authFailures.delete(ip);
   }
 
   setupMiddleware() {
     this.app.use(cors({ origin: true, credentials: true }));
     this.app.use(express.json({ limit: '10mb' }));
 
-    // Basic Auth always on for panel
+    // Basic Auth always on for panel with lockout
     this.app.use((req, res, next) => {
       try {
-        const settings = appStore.get('appSettings') || {};
-        const bp = settings.browserPanel || {};
+        const { username, password, isConfigured } = this.getPanelCredentials();
+        if (!isConfigured) {
+          return res.status(403).send('Browser panel credentials are not configured. Set a unique username and password in App Settings.');
+        }
+
+        const ip = this.getRequestIp(req);
+        if (this.isAuthLocked(ip)) {
+          const entry = this.authFailures.get(ip);
+          const retryAfter = entry && entry.lockedUntil
+            ? Math.max(1, Math.ceil((entry.lockedUntil - Date.now()) / 1000))
+            : Math.ceil(this.authLockMs / 1000);
+          res.set('Retry-After', String(retryAfter));
+          return res.status(429).send('Too many failed login attempts. Try again later.');
+        }
+
         const header = req.headers['authorization'];
         if (!header || !header.startsWith('Basic ')) {
           res.set('WWW-Authenticate', 'Basic realm="Minecraft Core"');
           return res.status(401).send('Authentication required');
         }
+
         const decoded = Buffer.from(header.substring(6), 'base64').toString('utf8');
-        const [user, pass] = decoded.split(':');
-        const ok = user === (bp.username || 'user') && pass === (bp.password || 'password');
+        const separator = decoded.indexOf(':');
+        const user = separator >= 0 ? decoded.slice(0, separator) : decoded;
+        const pass = separator >= 0 ? decoded.slice(separator + 1) : '';
+        const ok = user === username && pass === password;
         if (!ok) {
+          const entry = this.registerAuthFailure(ip);
+          if (entry && entry.lockedUntil) {
+            const retryAfter = Math.max(1, Math.ceil((entry.lockedUntil - Date.now()) / 1000));
+            res.set('Retry-After', String(retryAfter));
+          }
           res.set('WWW-Authenticate', 'Basic realm="Minecraft Core"');
           return res.status(401).send('Invalid credentials');
         }
+
+        this.clearAuthFailures(ip);
         next();
       } catch {
         return res.status(500).send('Auth error');
@@ -1338,6 +1413,10 @@ class BrowserPanelServer {
 
   async start(port = 8081) {
     if (this.isRunning) return { success: true, port: this.port };
+    const creds = this.getPanelCredentials();
+    if (!creds.isConfigured) {
+      return { success: false, error: 'Browser panel credentials are not configured. Set a unique username and password in App Settings.' };
+    }
     // Require at least one visible server instance to be configured
     try {
       const settings = appStore.get('appSettings') || {};

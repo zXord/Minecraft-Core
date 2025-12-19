@@ -1028,7 +1028,8 @@ class MinecraftLauncher extends EventEmitter {
             webPreferences: {
               nodeIntegration: false,
               contextIsolation: true,
-              preload: path.join(__dirname, '../../preload.cjs')
+              preload: path.join(__dirname, '../../preload.cjs'),
+              sandbox: true
             },
             icon: path.join(__dirname, '../../icon.png'),
             show: false,

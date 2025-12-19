@@ -15,6 +15,20 @@ const { ensureServersDat } = require('../utils/servers-dat.cjs');
 // In-memory lock to prevent race conditions during state operations
 let stateLockPromise = Promise.resolve();
 
+function getServerDownloadHeaders(url, serverInfo) {
+  if (!serverInfo || !serverInfo.sessionToken || !url) return null;
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname || '';
+    if (pathname.startsWith('/api/mods/download/') || pathname.startsWith('/api/assets/download/')) {
+      return { 'X-Session-Token': serverInfo.sessionToken };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 /**
  * Save the expected mod state to a persistent JSON file
  * Uses async fs operations and includes error handling with UI notifications * @param {string} clientPath - Path to the client directory
@@ -894,13 +908,21 @@ function createMinecraftLauncherHandlers(win) {
                   let downloadedBytes = 0;
                   let totalBytes = 0;
                   let lastProgressUpdate = Date.now();
-                  const request = protocol.get(downloadUrl, (response) => {
+                  const downloadHeaders = getServerDownloadHeaders(downloadUrl, serverInfo);
+                  const requestOptions = downloadHeaders ? { headers: downloadHeaders } : {};
+                  const request = protocol.get(downloadUrl, requestOptions, (response) => {
                     if (response.statusCode === 302 || response.statusCode === 301) {
                       file.close();
                       fs.unlinkSync(modPath);
                       const redirectUrl = response.headers.location;
+                      if (!redirectUrl) {
+                        reject(new Error(`Failed to download ${mod.fileName}: missing redirect location`));
+                        return;
+                      }
+                      const redirectHeaders = getServerDownloadHeaders(redirectUrl, serverInfo);
                       const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
-                      redirectProtocol.get(redirectUrl, (redirectResponse) => {
+                      const redirectOptions = redirectHeaders ? { headers: redirectHeaders } : {};
+                      const redirectRequest = redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
                         if (redirectResponse.statusCode === 200) {
                           const file2 = fs.createWriteStream(modPath);
                           totalBytes = parseInt(redirectResponse.headers['content-length'], 10) || 0;
@@ -994,7 +1016,8 @@ function createMinecraftLauncherHandlers(win) {
                         } else {
                           reject(new Error(`Failed to download ${mod.fileName}: HTTP ${redirectResponse.statusCode}`));
                         }
-                      }).on('error', reject);
+                      });
+                      redirectRequest.on('error', reject);
                     } else if (response.statusCode === 200) {
                       totalBytes = parseInt(response.headers['content-length'], 10) || 0;
                       downloadedBytes = 0;
@@ -1089,7 +1112,8 @@ function createMinecraftLauncherHandlers(win) {
                       fs.unlinkSync(modPath);
                       reject(new Error(`Failed to download ${mod.fileName}: HTTP ${response.statusCode}`));
                     }
-                  }).on('error', (err) => {
+                  });
+                  request.on('error', (err) => {
                     file.close();
                     if (fs.existsSync(modPath)) {
                       fs.unlinkSync(modPath);
@@ -1195,16 +1219,18 @@ function createMinecraftLauncherHandlers(win) {
                 let downloadedBytes = 0;
                 let totalBytes = 0;
                 let lastProgressUpdate = Date.now();
-                
-                const request = protocol.get(mod.downloadUrl, (response) => {
+                const downloadHeaders = getServerDownloadHeaders(mod.downloadUrl, serverInfo);
+                const requestOptions = downloadHeaders ? { headers: downloadHeaders } : {};
+                const request = protocol.get(mod.downloadUrl, requestOptions, (response) => {
                   if (response.statusCode === 302 || response.statusCode === 301) {
                     file.close();
                     fs.unlinkSync(modPath);
                     
                     const redirectUrl = response.headers.location;
                     const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
-                    
-                    redirectProtocol.get(redirectUrl, (redirectResponse) => {
+                    const redirectHeaders = getServerDownloadHeaders(redirectUrl, serverInfo);
+                    const redirectOptions = redirectHeaders ? { headers: redirectHeaders } : {};
+                    redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
                       if (redirectResponse.statusCode === 200) {
                         const file2 = fs.createWriteStream(modPath);
                         
@@ -1610,7 +1636,9 @@ function createMinecraftLauncherHandlers(win) {
 
           return new Promise((resolve, reject) => {
             const fileStream = fs.createWriteStream(tmpPath);
-            const request = protocol.get(url, (response) => {
+            const downloadHeaders = getServerDownloadHeaders(url, serverInfo);
+            const requestOptions = downloadHeaders ? { headers: downloadHeaders } : {};
+            const request = protocol.get(url, requestOptions, (response) => {
               // Handle redirects
               if (response.statusCode === 302 || response.statusCode === 301) {
                 const redirectUrl = response.headers.location;
@@ -1622,7 +1650,9 @@ function createMinecraftLauncherHandlers(win) {
                 fileStream.close();
                 const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
                 const fileStream2 = fs.createWriteStream(tmpPath);
-                const redirected = redirectProtocol.get(redirectUrl, (redirectResponse) => {
+                const redirectHeaders = getServerDownloadHeaders(redirectUrl, serverInfo);
+                const redirectOptions = redirectHeaders ? { headers: redirectHeaders } : {};
+                const redirected = redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
                   if (redirectResponse.statusCode !== 200) {
                     fileStream2.close();
                     return reject(new Error(`HTTP ${redirectResponse.statusCode}`));
@@ -1826,7 +1856,8 @@ function createMinecraftLauncherHandlers(win) {
           managementPort,
           clientName || 'Minecraft Server',
           serverPort,
-            false // Don't preserve - we want to add our server on first launch
+            false, // Don't preserve - we want to add our server on first launch
+            serverInfo?.sessionToken || null
           );
           
           // Create flag file to indicate servers.dat has been initialized

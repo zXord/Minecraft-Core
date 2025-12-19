@@ -8,8 +8,7 @@ const MODRINTH_API = 'https://api.modrinth.com/v2';
 
 // CurseForge API base URL and key
 const CURSEFORGE_API = 'https://api.curseforge.com/v1';
-// This is a public API key for demo purposes - in production, you'd want to use environment variables
-const CF_API_KEY = '$2a$10$6h9Ca8GTUGBZp7/X3TVTC.9tLCIg5.ry0O0L7NQxDo2Lj0dGPm2HO';
+const CF_API_KEY = '';
 
 /**
  * Fetch with retry mechanism for handling rate limits
@@ -515,6 +514,14 @@ export async function getModrinthDownloadUrl(projectId, version, loader) {
  * @returns {Promise<Array>} Array of mod objects
  */
 export async function getCurseForgePopular({ loader, version }) {
+  if (!CF_API_KEY) {
+    logger.warn('CurseForge API key not configured - skipping popular mods fetch', {
+      category: 'utils',
+      data: { function: 'getCurseForgePopular' }
+    });
+    return [];
+  }
+
   logger.info('Fetching popular mods from CurseForge', {
     category: 'utils',
     data: {
@@ -620,6 +627,14 @@ export async function getCurseForgePopular({ loader, version }) {
  * @returns {Promise<Array>} Array of mod objects
  */
 export async function searchCurseForgeMods({ query, loader, version }) {
+  if (!CF_API_KEY) {
+    logger.warn('CurseForge API key not configured - skipping search', {
+      category: 'utils',
+      data: { function: 'searchCurseForgeMods' }
+    });
+    return [];
+  }
+
   logger.info('Searching mods on CurseForge', {
     category: 'utils',
     data: {
@@ -728,6 +743,15 @@ export async function searchCurseForgeMods({ query, loader, version }) {
  * @returns {Promise<string>} Download URL
  */
 export async function getCurseForgeDownloadUrl(modId, version, loader) {
+  if (!CF_API_KEY) {
+    const error = new Error('CurseForge API key not configured');
+    logger.warn('CurseForge download requested without API key', {
+      category: 'utils',
+      data: { function: 'getCurseForgeDownloadUrl' }
+    });
+    throw error;
+  }
+
   logger.info('Getting CurseForge download URL', {
     category: 'utils',
     data: {

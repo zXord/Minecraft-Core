@@ -16,6 +16,7 @@ const zlib = require('zlib');
  *   If not provided, the function will attempt to retrieve it from the
  *   management server's /api/server/info endpoint.
  * @param {boolean} [preserveExistingServers] - If true, only creates server entry if it doesn't exist, preserving user modifications
+ * @param {string|null} [sessionToken] - Optional management server session token
  * @returns {Promise<{success: boolean, error?: string, preserved?: boolean}>}
  */
 async function ensureServersDat(
@@ -24,7 +25,8 @@ async function ensureServersDat(
   managementPort,
   serverName = 'Minecraft Server',
   minecraftPortOverride = null,
-  preserveExistingServers = false
+  preserveExistingServers = false,
+  sessionToken = null
 ) {
   try {
     let minecraftPort = minecraftPortOverride || 25565;
@@ -32,7 +34,10 @@ async function ensureServersDat(
     if (!minecraftPortOverride && managementPort) {
       const infoRes = await fetch(
         `http://${serverIp}:${managementPort}/api/server/info`,
-        { timeout: 5000 }
+        {
+          timeout: 5000,
+          headers: sessionToken ? { 'X-Session-Token': sessionToken } : undefined
+        }
       ).catch(() => null);
       if (infoRes?.ok) {
         const info = await infoRes.json();

@@ -31,6 +31,7 @@
   import { checkModDependencies, showDependencyModal, installWithDependencies } from '../../utils/mods/modDependencyHelper.js';
   import { checkDependencyCompatibility } from '../../utils/mods/modCompatibility.js';
   import { safeInvoke } from '../../utils/ipcUtils.js';
+  import { buildAuthHeaders, ensureSessionToken } from '../../utils/managementAuth.js';
   // Content-type aware stores for shaders/resource packs search and tabs
   import {
     activeContentType,
@@ -415,10 +416,19 @@
       // Also fetch server-required items for assets to compute Required status
       if (instance?.serverIp && instance?.serverPort) {
         try {
+          await ensureSessionToken(instance);
           const base = `http://${instance.serverIp}:${instance.serverPort}`;
           const [srvShaders, srvRps] = await Promise.all([
-            fetch(`${base}/api/assets/list/shaderpacks`, { method: 'GET', signal: AbortSignal.timeout(10000) }).then(r => r.ok ? r.json() : null).catch(() => null),
-            fetch(`${base}/api/assets/list/resourcepacks`, { method: 'GET', signal: AbortSignal.timeout(10000) }).then(r => r.ok ? r.json() : null).catch(() => null)
+            fetch(`${base}/api/assets/list/shaderpacks`, {
+              method: 'GET',
+              headers: buildAuthHeaders(instance),
+              signal: AbortSignal.timeout(10000)
+            }).then(r => r.ok ? r.json() : null).catch(() => null),
+            fetch(`${base}/api/assets/list/resourcepacks`, {
+              method: 'GET',
+              headers: buildAuthHeaders(instance),
+              signal: AbortSignal.timeout(10000)
+            }).then(r => r.ok ? r.json() : null).catch(() => null)
           ]);
           serverShaderItems = srvShaders?.success ? (srvShaders.items || []) : [];
           serverResourcePackItems = srvRps?.success ? (srvRps.items || []) : [];
@@ -558,7 +568,7 @@
         clientPath: instance.path,
         type,
         requiredItems,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
       });
   await refreshAssets();
   notifyAssetsChanged();
@@ -1159,7 +1169,7 @@
               description="These shaders are managed by the server. Items marked To Remove will be deleted."
               items={requiredShaderItemsExtended}
               installedItems={shaderAssets}
-              on:download={(async (e) => { const it = e.detail.item; try { console.log('[ClientModManager] Download click (shader)', it.fileName); } catch {} await window.electron.invoke('minecraft-download-assets', { clientPath: instance.path, type: 'shaderpacks', requiredItems: [it], serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }}); try { console.log('[ClientModManager] Download done (shader)', it.fileName); } catch {} await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'shaderpacks', action: 'download', fileName: it.fileName }); })}
+              on:download={(async (e) => { const it = e.detail.item; try { console.log('[ClientModManager] Download click (shader)', it.fileName); } catch {} await window.electron.invoke('minecraft-download-assets', { clientPath: instance.path, type: 'shaderpacks', requiredItems: [it], serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }}); try { console.log('[ClientModManager] Download done (shader)', it.fileName); } catch {} await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'shaderpacks', action: 'download', fileName: it.fileName }); })}
               on:remove={(async (e) => { const it = e.detail.item; try { console.log('[ClientModManager] Remove click (shader)', it.fileName); } catch {} await window.electron.invoke('delete-client-asset', { clientPath: instance.path, type: 'shaderpacks', fileName: it.fileName }); try { console.log('[ClientModManager] Remove done (shader)', it.fileName); } catch {} await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'shaderpacks', action: 'remove', fileName: it.fileName }); })}
               on:install-asset-version={handleInstallAssetVersion}
             />
@@ -1189,7 +1199,7 @@
               description="These resource packs are managed by the server. Items marked To Remove will be deleted."
               items={requiredResourcePackItemsExtended}
               installedItems={resourcePackAssets}
-              on:download={(async (e) => { const it = e.detail.item; try { console.log('[ClientModManager] Download click (rp)', it.fileName); } catch {} await window.electron.invoke('minecraft-download-assets', { clientPath: instance.path, type: 'resourcepacks', requiredItems: [it], serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort }}); try { console.log('[ClientModManager] Download done (rp)', it.fileName); } catch {} await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'resourcepacks', action: 'download', fileName: it.fileName }); })}
+              on:download={(async (e) => { const it = e.detail.item; try { console.log('[ClientModManager] Download click (rp)', it.fileName); } catch {} await window.electron.invoke('minecraft-download-assets', { clientPath: instance.path, type: 'resourcepacks', requiredItems: [it], serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }}); try { console.log('[ClientModManager] Download done (rp)', it.fileName); } catch {} await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'resourcepacks', action: 'download', fileName: it.fileName }); })}
               on:remove={(async (e) => { const it = e.detail.item; try { console.log('[ClientModManager] Remove click (rp)', it.fileName); } catch {} await window.electron.invoke('delete-client-asset', { clientPath: instance.path, type: 'resourcepacks', fileName: it.fileName }); try { console.log('[ClientModManager] Remove done (rp)', it.fileName); } catch {} await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'resourcepacks', action: 'remove', fileName: it.fileName }); })}
               on:install-asset-version={handleInstallAssetVersion}
             />
