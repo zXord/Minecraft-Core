@@ -1399,18 +1399,23 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
   });
     
     // Map to a more user-friendly format
-    let mappedVersions = compatibleVersions.map(v => ({
-      id: v.id,
-      name: v.name,
-      versionNumber: v.version_number,
-      gameVersions: v.game_versions,
-      loaders: v.loaders,
-      dependencies: v.dependencies || [],
-      datePublished: v.date_published,
-      isStable: !v.version_type.includes('alpha') && !v.version_type.includes('beta'),
-      fileSize: v.files && v.files.length > 0 ? v.files[0].size : undefined,
-      downloads: v.downloads || 0
-    }));
+    let mappedVersions = compatibleVersions.map(v => {
+      const versionType = typeof v.version_type === 'string' ? v.version_type : 'release';
+
+      return ({
+        id: v.id,
+        name: v.name,
+        versionNumber: v.version_number,
+        versionType,
+        gameVersions: v.game_versions,
+        loaders: v.loaders,
+        dependencies: v.dependencies || [],
+        datePublished: v.date_published,
+        isStable: versionType === 'release',
+        fileSize: v.files && v.files.length > 0 ? v.files[0].size : undefined,
+        downloads: v.downloads || 0
+      });
+    });
     
     // Sort versions (newest first)
     mappedVersions.sort((a, b) => {

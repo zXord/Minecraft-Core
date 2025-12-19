@@ -31,7 +31,7 @@
   // Local state
   let selectedVersionId = mod.selectedVersionId || installedVersionId;
   let filteredVersions = [];
-  let unfilteredVersions = []; // To store all stable versions
+  let unfilteredVersions = []; // To store all versions
   let hasUpdate = false; // Add variable declaration for update status
   let updateInfo = null; // Add variable declaration for update information
   let updateVersionNumber = null; // Add variable declaration for update version number
@@ -181,14 +181,14 @@
   // Filter versions based on selected Minecraft version
   $: {
     if (versions.length > 0) {
-      // First, get all stable versions (non-alpha, non-beta)
-      unfilteredVersions = versions.filter(v => v && v.isStable !== false);
+      // Keep a safe, non-null list for fallback logic
+      unfilteredVersions = versions.filter(v => v);
       
       if (filterMinecraftVersion && filterMinecraftVersion !== "") {
         // Show versions compatible with selected Minecraft version
         // Use more lenient matching that includes versions likely to work
         const exactMatches = versions.filter(v => 
-          v && v.gameVersions && v.gameVersions.includes(filterMinecraftVersion) && v.isStable !== false
+          v && v.gameVersions && v.gameVersions.includes(filterMinecraftVersion)
         );
         
         // If we have exact matches, use those
@@ -202,7 +202,7 @@
             
             // Find versions that match the major.minor version or are broadly compatible
             const likelyCompatible = versions.filter(v => {
-              if (!v || !v.gameVersions || v.isStable === false) return false;
+              if (!v || !v.gameVersions) return false;
               
               return v.gameVersions.some(gameVer => {
                 if (!gameVer) return false;
@@ -231,11 +231,11 @@
             if (likelyCompatible.length > 0) {
               filteredVersions = likelyCompatible;
             } else {
-              // No exact or likely matches, fall back to all stable versions
+              // No exact or likely matches, fall back to all versions
               filteredVersions = unfilteredVersions;
             }
           } else {
-            // For non-standard versions, fall back to all stable versions
+            // For non-standard versions, fall back to all versions
             filteredVersions = unfilteredVersions;
           }
         }
@@ -245,10 +245,10 @@
           filteredVersions = versions;
         }
       } else {
-        // Show all stable versions when no specific version is selected
+        // Show all versions when no specific version is selected
         filteredVersions = unfilteredVersions;
         
-        // If no stable versions, show all versions
+        // If no versions, show all versions
         if (filteredVersions.length === 0) {
           filteredVersions = versions;
         }
@@ -256,6 +256,63 @@
     }
   }
   
+  function pickPreferredVersion(candidateVersions) {
+    if (!candidateVersions || candidateVersions.length === 0) return null;
+
+    const stableVersions = candidateVersions.filter(v => v && v.isStable !== false);
+    const versionsToUse = stableVersions.length > 0 ? stableVersions : candidateVersions;
+
+    const sorted = [...versionsToUse].sort((a, b) => {
+      const dateA = a && a.datePublished ? new Date(a.datePublished).getTime() : 0;
+      const dateB = b && b.datePublished ? new Date(b.datePublished).getTime() : 0;
+      return dateB - dateA;
+    });
+
+    return sorted[0] ? sorted[0].id : null;
+  }
+
+  function selectBestVersionForFilter(allVersions) {
+    if (!filterMinecraftVersion || filterMinecraftVersion === '') {
+      return selectBestVersion(allVersions);
+    }
+
+    const exactMatches = (allVersions || []).filter(v =>
+      v && v.gameVersions && v.gameVersions.includes(filterMinecraftVersion)
+    );
+    const exactPick = pickPreferredVersion(exactMatches);
+    if (exactPick) return exactPick;
+
+    const mcVersionParts = filterMinecraftVersion.split('.');
+    if (mcVersionParts.length >= 2 && mcVersionParts[0] === '1') {
+      const majorMinorPrefix = `${mcVersionParts[0]}.${mcVersionParts[1]}`;
+
+      const likelyCompatible = (allVersions || []).filter(v => {
+        if (!v || !v.gameVersions) return false;
+
+        return v.gameVersions.some(gameVer => {
+          if (!gameVer) return false;
+
+          if (gameVer.startsWith(majorMinorPrefix)) return true;
+          if (gameVer.includes(majorMinorPrefix)) return true;
+
+          const gameVerParts = gameVer.split('.');
+          if (gameVerParts.length >= 2 && gameVerParts[0] === mcVersionParts[0]) {
+            const gameMinor = parseInt(gameVerParts[1]);
+            const targetMinor = parseInt(mcVersionParts[1]);
+            return Math.abs(gameMinor - targetMinor) <= 2;
+          }
+
+          return false;
+        });
+      });
+
+      const likelyPick = pickPreferredVersion(likelyCompatible);
+      if (likelyPick) return likelyPick;
+    }
+
+    return selectBestVersion(allVersions);
+  }
+
   // When versions change, try to auto-select the best version
   $: if (versions.length > 0 && !selectedVersionId) {
     // If we're installed, try to select the installed version first
@@ -265,11 +322,11 @@
         selectedVersionId = installedVersionId;
       } else {
         // Use all versions to find the best one (not filtered by MC version)
-        selectedVersionId = selectBestVersion(versions);
+        selectedVersionId = selectBestVersionForFilter(versions);
       }
     } else {
       // Use all versions to find the best one (not filtered by MC version)
-      selectedVersionId = selectBestVersion(versions);
+      selectedVersionId = selectBestVersionForFilter(versions);
     }
     // Also update the mod object
     mod.selectedVersionId = selectedVersionId;
@@ -816,7 +873,11 @@
         <div class="version-error">Error loading versions: {error}</div>
       {:else if filteredVersions.length === 0}
         <div class="no-versions">
-          No compatible versions for Minecraft {filterMinecraftVersion}
+          {#if filterMinecraftVersion}
+            No compatible versions for Minecraft {filterMinecraftVersion}
+          {:else}
+            No versions found
+          {/if}
         </div>
       {:else}
         <!-- Grouped by Minecraft version -->
@@ -863,9 +924,24 @@
                     >
                       <div class="version-info">
                         <span class="version-name">{version.name || version.versionNumber}</span>
-                        {#if version.id === installedVersionId}
-                          <span class="installed-badge">Installed</span>
-                        {/if}
+                        <div class="version-badges">
+                          {#if (version.versionType || version.version_type) && ((version.versionType || version.version_type) !== 'release')}
+                            <span
+                              class="release-type-badge {(version.versionType || version.version_type)}"
+                              title="{(version.versionType || version.version_type)} release"
+                            >
+                              {(version.versionType || version.version_type).toUpperCase()}
+                            </span>
+                          {:else if version.isStable === false}
+                            <span class="release-type-badge prerelease" title="Pre-release (alpha/beta)">
+                              Pre-release
+                            </span>
+                          {/if}
+
+                          {#if version.id === installedVersionId}
+                            <span class="installed-badge">Installed</span>
+                          {/if}
+                        </div>
                       </div>
                       <div class="version-meta">
                         {#if version.downloads !== undefined}
@@ -1213,6 +1289,44 @@
     flex-direction: column;
     gap: 2px;
   }
+
+  .version-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .release-type-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.85);
+    text-transform: uppercase;
+  }
+
+  .release-type-badge.beta {
+    background: rgba(255, 193, 7, 0.2);
+    border-color: rgba(255, 193, 7, 0.35);
+    color: rgba(255, 193, 7, 0.95);
+  }
+
+  .release-type-badge.alpha {
+    background: rgba(255, 107, 107, 0.2);
+    border-color: rgba(255, 107, 107, 0.35);
+    color: rgba(255, 107, 107, 0.95);
+  }
+
+  .release-type-badge.prerelease {
+    background: rgba(255, 152, 0, 0.2);
+    border-color: rgba(255, 152, 0, 0.35);
+    color: rgba(255, 152, 0, 0.95);
+  }
   
   .version-meta {
     display: flex;
@@ -1295,7 +1409,6 @@
   
   .installed-badge {
     display: inline-block;
-    margin-left: 8px;
     font-size: 11px;
     padding: 2px 6px;
     background: rgba(64, 128, 255, 0.2);
