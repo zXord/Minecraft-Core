@@ -22,6 +22,7 @@
   let browserPanelPort = 8080;
   let browserPanelUsername = 'user';
   let browserPanelPassword = 'password';
+  let showBrowserPanelPassword = false;
   // Per-instance visibility (id -> boolean). Only server instances matter server-side.
   let instanceVisibility = {};
   let instances = [];
@@ -232,10 +233,28 @@
     }
   }
 
+  function validateBrowserPanelCredentials() {
+    const user = (browserPanelUsername || '').trim();
+    const pass = browserPanelPassword || '';
+    if (!user || !pass) {
+      return { ok: false, error: 'Set a username and password for the browser panel.' };
+    }
+    if (user === 'user' && pass === 'password') {
+      return { ok: false, error: 'Default credentials are not allowed. Choose a custom username and password.' };
+    }
+    return { ok: true };
+  }
+
   // Start/Stop the web panel (separate server)
   async function startWebPanel() {
     panelError = '';
     panelBusy = true;
+    const credsCheck = validateBrowserPanelCredentials();
+    if (!credsCheck.ok) {
+      panelBusy = false;
+      panelError = credsCheck.error;
+      return;
+    }
     // Require at least one visible server
     if (!(instances || []).some(i => i.type === 'server' && instanceVisibility[i.id] !== false)) {
       panelBusy = false;
@@ -487,7 +506,25 @@
             </div>
             <div>
               <label for="browser-password" class="field-label">Password</label>
-              <input id="browser-password" type="password" bind:value={browserPanelPassword} class="size-input" placeholder="password" disabled={panelIsRunning || panelBusy} />
+              <div class="password-input-row">
+                <input
+                  id="browser-password"
+                  type={showBrowserPanelPassword ? 'text' : 'password'}
+                  bind:value={browserPanelPassword}
+                  class="size-input"
+                  placeholder="password"
+                  disabled={panelIsRunning || panelBusy}
+                />
+                <button
+                  class="small-btn toggle-btn"
+                  type="button"
+                  aria-pressed={showBrowserPanelPassword}
+                  disabled={panelIsRunning || panelBusy}
+                  on:click={() => { showBrowserPanelPassword = !showBrowserPanelPassword; }}
+                >
+                  {showBrowserPanelPassword ? 'Hide' : 'Show'}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -816,6 +853,17 @@
   }
   .compact-panel .size-input::placeholder { color: #9aa1ad; opacity: 0.85; }
   .compact-panel .panel-grid-3 > div { min-width: 0; position: relative; }
+  .compact-panel .password-input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+  }
+  .compact-panel .password-input-row .size-input { margin-top: 0; }
+  .compact-panel .toggle-btn {
+    white-space: nowrap;
+    line-height: 1.2;
+  }
   /* Prevent visual collision of long placeholder strings by allowing them to fade */
   .compact-panel .size-input {
     background: linear-gradient(to right, rgba(45,55,72,1), rgba(45,55,72,0.9));
