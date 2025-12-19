@@ -1402,7 +1402,7 @@ function getCategorizedMods() {
           const categoryInfo = $modCategories.get(modFileName);
 
           // If no category info found, provide safe defaults
-          const defaultCategory = 'server-only';
+          const defaultCategory = 'unassigned';
           const defaultRequired = true;
 
           const result = {
@@ -1839,7 +1839,7 @@ export async function loadModCategories() {
       categoriesArray.forEach(item => {
         if (item && item.modId) {
           categoriesMap.set(item.modId, {
-            category: item.category || 'server-only',
+            category: item.category || 'unassigned',
             required: item.required !== false // Default to true if not specified
           });
           validItems++;
@@ -2100,7 +2100,7 @@ export async function updateModRequired(modId, required) {
     let oldRequired = null;
 
     modCategories.update($categories => {
-      const current = $categories.get(modId) || { category: 'server-only' };
+      const current = $categories.get(modId) || { category: 'unassigned' };
       oldRequired = current.required;
 
       if (current.required !== required) {

@@ -378,6 +378,36 @@
     return null;
   }
 
+  const UNASSIGNED_CATEGORY = 'unassigned';
+  const UNASSIGNED_DIR = 'mods_unassigned';
+
+  let categoryByFile = new Map();
+
+  $: categoryByFile = new Map(($categorizedModsStore || []).map(entry => [entry.fileName, entry.category]));
+
+  function resolveModCategory(modName) {
+    if (!modName) return UNASSIGNED_CATEGORY;
+    const direct = categoryByFile.get(modName);
+    if (direct) return direct;
+    const normalized = normalizeFileName(modName);
+    if (normalized && normalized !== modName) {
+      const normalizedCategory = categoryByFile.get(normalized);
+      if (normalizedCategory) return normalizedCategory;
+    }
+    return UNASSIGNED_CATEGORY;
+  }
+
+  function getModFilePath(fileName, category, isDisabled) {
+    const suffix = isDisabled ? '.disabled' : '';
+    if (category === 'client-only') {
+      return `${serverPath}/client/mods/${fileName}${suffix}`;
+    }
+    if (category === 'both' || category === 'server-only') {
+      return `${serverPath}/mods/${fileName}${suffix}`;
+    }
+    return `${serverPath}/${UNASSIGNED_DIR}/${fileName}${suffix}`;
+  }
+
   // Reactive values for content-type specific data
   $: currentInstalledItems = $activeContentType === CONTENT_TYPES.SHADERS ? $installedShaders :
                             $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? $installedResourcePacks :
@@ -411,6 +441,24 @@
     return count;
   })();
   $: serverRunning = $serverState.status === 'Running';
+
+  let allUpdatesClientOnly = false;
+  let updateAllBlockedByServer = false;
+
+  $: {
+    const updateTargets = [];
+    for (const [modName] of $modsWithUpdates.entries()) {
+      if (modName.startsWith('project:')) continue;
+      if ($disabledMods.has(modName)) continue;
+      updateTargets.push(modName);
+    }
+    for (const [modName] of $disabledModUpdates.entries()) {
+      updateTargets.push(modName);
+    }
+    allUpdatesClientOnly = updateTargets.length > 0 &&
+      updateTargets.every(modName => resolveModCategory(modName) === 'client-only');
+  }
+  $: updateAllBlockedByServer = serverRunning && !allUpdatesClientOnly;
   
   // Reactive statement to load content when content type changes
   $: if ($activeContentType && serverPath) {
@@ -659,7 +707,9 @@
   async function handleTriggerAutoSearch(event) {
     const { fileName } = event.detail;
     
-    const modPath = `${serverPath}/mods/${fileName}`;
+    const category = resolveModCategory(fileName);
+    const isDisabled = $disabledMods && $disabledMods.has(fileName);
+    const modPath = getModFilePath(fileName, category, isDisabled);
     await triggerModrinthMatching(fileName, modPath);
   }
 
@@ -701,7 +751,9 @@
         await modrinthMatchingActions.loadConfirmedMatches();
         
         // Re-trigger Modrinth matching for this mod
-        const modPath = `${serverPath}/mods/${fileName}`;
+        const category = resolveModCategory(fileName);
+        const isDisabled = $disabledMods && $disabledMods.has(fileName);
+        const modPath = getModFilePath(fileName, category, isDisabled);
         await triggerModrinthMatching(fileName, modPath);
       }
     } catch (error) {
@@ -712,7 +764,8 @@
   const locColor = { 
     'server-only': '#2c82ff', 
     'client-only': '#34d58a', 
-    'both': '#f5aa28' 
+    'both': '#f5aa28',
+    'unassigned': '#6b7280'
   };
 
   function toggleSelect(modName) {
@@ -856,6 +909,11 @@
     
     const totalMods = enabledModsToUpdate.length + disabledModsToUpdate.length;
     if (totalMods === 0) return;
+
+    if (serverRunning && !allUpdatesClientOnly) {
+      errorMessage.set('Stop the server to update server or shared mods.');
+      return;
+    }
     
     updateAllInProgress = true;
     
@@ -1711,8 +1769,11 @@
   </div>
 
   {#if updateCount > 0}
-    <button class="primary sm" on:click={updateAllMods} disabled={updateAllInProgress || serverRunning} title="Update all outdated mods">
-      {#if serverRunning}🔒{/if} ⬆️ {updateAllInProgress ? 'Updating...' : `Update All (${updateCount})`}
+    <button class="primary sm"
+            on:click={updateAllMods}
+            disabled={updateAllInProgress || updateAllBlockedByServer}
+            title={updateAllBlockedByServer ? 'Stop the server to update server or shared mods.' : 'Update all outdated mods'}>
+      {#if updateAllBlockedByServer}🔒{/if} ⬆️ {updateAllInProgress ? 'Updating...' : `Update All (${updateCount})`}
     </button>
   {/if}
 
@@ -1928,9 +1989,12 @@
     {:else}
       {#each filteredMods as mod (mod)}
       {@const modInfo = currentInfoList.find(m => m && m.fileName === mod)}
-              {@const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod)}
-      {@const location = modCategoryInfo?.category || 'server-only'}
+      {@const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod)}
+      {@const location = modCategoryInfo?.category || UNASSIGNED_CATEGORY}
         {@const isDisabled = $disabledMods.has(mod)}
+        {@const canUpdateWhileRunning = location === 'client-only'}
+        {@const updateBlockedByServer = serverRunning && !canUpdateWhileRunning}
+        {@const locationSelectionDisabled = isDisabled || (serverRunning && location !== UNASSIGNED_CATEGORY)}
         {@const borderColor = locColor[location] || '#2c82ff'}
         
         <tr class:selected={selectedMods.has(mod)} 
@@ -1964,9 +2028,10 @@
         <td>
           <select
             class="loc-select"
-              disabled={serverRunning || isDisabled}
+            disabled={locationSelectionDisabled}
             value={location}
             on:change={(e) => handleCategoryChange(mod, e)}>
+            <option value={UNASSIGNED_CATEGORY}>Select location</option>
             <option value="server-only">Server Only</option>
             <option value="client-only">Client Only</option>
             <option value="both">Client & Server</option>
@@ -2091,13 +2156,13 @@
             {:else if disabledUpdateInfo}
               <div class="update-actions compact">
                 <button class="tag new clickable upd-btn"
-                        disabled={serverRunning}
+                        disabled={updateBlockedByServer}
                         on:click={() => handleEnableAndUpdate(mod)}
-                        title={serverRunning ? 'Server must be stopped to enable and update mods' : `Enable and update to ${disabledUpdateInfo.latestVersion}`}>
-                  {#if serverRunning}🔒{/if} ↑ <span class="ver-label">{disabledUpdateInfo.latestVersion}</span>
+                        title={updateBlockedByServer ? 'Stop the server to enable and update server or shared mods.' : `Enable and update to ${disabledUpdateInfo.latestVersion}`}>
+                  {#if updateBlockedByServer}🔒{/if} ↑ <span class="ver-label">{disabledUpdateInfo.latestVersion}</span>
                 </button>
                 <button class="ghost sm ignore-btn"
-                        disabled={serverRunning}
+                        disabled={updateBlockedByServer}
                         aria-label="Ignore this version"
                         title="Ignore this version (won't show until a newer one exists)"
                         on:click={() => {
@@ -2124,13 +2189,13 @@
             {@const updateInfo = $modsWithUpdates.get(mod)}
             <div class="update-actions compact">
               <button class="tag new clickable upd-btn"
-                      disabled={serverRunning}
+                      disabled={updateBlockedByServer}
                       on:click={() => updateModToLatest(mod)}
-                      title={serverRunning ? 'Server must be stopped to update mods' : `Update to ${updateInfo.versionNumber}`}>
-                {#if serverRunning}🔒{/if} ↑ <span class="ver-label">{updateInfo.versionNumber}</span>
+                      title={updateBlockedByServer ? 'Stop the server to update server or shared mods.' : `Update to ${updateInfo.versionNumber}`}>
+                {#if updateBlockedByServer}🔒{/if} ↑ <span class="ver-label">{updateInfo.versionNumber}</span>
               </button>
               <button class="ghost sm ignore-btn"
-                      disabled={serverRunning}
+                      disabled={updateBlockedByServer}
                       aria-label="Ignore this version"
                       title="Ignore this version (won't show until a newer one exists)"
                       on:click={() => {

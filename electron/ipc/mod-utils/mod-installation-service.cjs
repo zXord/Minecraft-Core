@@ -9,6 +9,7 @@ const pipelineAsync = promisify(pipeline);
 // Import JAR analysis utility
 const { extractDependenciesFromJar } = require('./mod-analysis-utils.cjs');
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
+const { UNASSIGNED_MODS_DIRNAME, UNASSIGNED_MANIFEST_DIRNAME } = require('./mod-file-manager.cjs');
 
 // Placeholder for API service functions - these will be imported later
 // For now, we might have to define minimal stubs or expect them to be passed if complex
@@ -66,6 +67,8 @@ async function installModToServer(win, serverPath, modDetails) {
     
     // Determine directories based on content type
     let modsDir, clientModsDir, targetSubDir;
+    let unassignedModsDir = null;
+    let unassignedManifestDir = null;
     
     if (modDetails.contentType === 'shaders') {
       targetSubDir = 'shaderpacks';
@@ -102,6 +105,8 @@ async function installModToServer(win, serverPath, modDetails) {
       targetSubDir = 'mods';
       modsDir = path.join(serverPath, 'mods');
       clientModsDir = path.join(clientPath, 'mods');
+      unassignedModsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
+      unassignedManifestDir = path.join(serverPath, UNASSIGNED_MANIFEST_DIRNAME);
       
       logger.debug('MOD INSTALL: Using default mod directories', {
         category: 'storage',
@@ -127,6 +132,12 @@ async function installModToServer(win, serverPath, modDetails) {
 
     await fs.mkdir(modsDir, { recursive: true });
     await fs.mkdir(clientModsDir, { recursive: true });
+    if (unassignedModsDir) {
+      await fs.mkdir(unassignedModsDir, { recursive: true });
+    }
+    if (unassignedManifestDir) {
+      await fs.mkdir(unassignedManifestDir, { recursive: true });
+    }
 
     // Sanitize the name and determine file extension based on content type
     const sanitizedBase = modDetails.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
@@ -183,6 +194,11 @@ async function installModToServer(win, serverPath, modDetails) {
     let currentModLocation = null;
     let destinationPath = path.join(modsDir, fileName); // Default to server
 
+    if (unassignedModsDir) {
+      currentModLocation = 'unassigned';
+      destinationPath = path.join(unassignedModsDir, fileName);
+    }
+
     if (modDetails.forceReinstall) {
       logger.debug('Processing mod reinstall/update', {
         category: 'mods',
@@ -197,8 +213,12 @@ async function installModToServer(win, serverPath, modDetails) {
       const checkFileName = modDetails.oldFileName || fileName;
       const serverModPath = path.join(modsDir, checkFileName);
       const clientModPath = path.join(clientModsDir, checkFileName);
+      const unassignedModPath = unassignedModsDir ? path.join(unassignedModsDir, checkFileName) : null;
       const serverExists = await fs.access(serverModPath).then(() => true).catch(() => false);
       const clientExists = await fs.access(clientModPath).then(() => true).catch(() => false);
+      const unassignedExists = unassignedModPath
+        ? await fs.access(unassignedModPath).then(() => true).catch(() => false)
+        : false;
 
       logger.debug('Checking existing mod locations', {
         category: 'storage',
@@ -206,7 +226,8 @@ async function installModToServer(win, serverPath, modDetails) {
           service: 'mod-installation-service',
           checkFileName: checkFileName,
           serverExists: serverExists,
-          clientExists: clientExists
+          clientExists: clientExists,
+          unassignedExists: unassignedExists
         }
       });
 
@@ -333,6 +354,45 @@ async function installModToServer(win, serverPath, modDetails) {
             }
           });
           // Ignore cleanup errors
+        }
+      }
+      else if (unassignedExists && !serverExists && !clientExists) {
+        currentModLocation = 'unassigned';
+        destinationPath = path.join(unassignedModsDir, fileName);
+
+        logger.debug('Mod exists in unassigned location, cleaning up old file', {
+          category: 'storage',
+          data: {
+            service: 'mod-installation-service',
+            currentModLocation: 'unassigned',
+            unassignedModPath: unassignedModPath
+          }
+        });
+
+        try {
+          await fs.unlink(unassignedModPath);
+
+          if (unassignedManifestDir) {
+            const oldManifestPath = `${checkFileName}.json`;
+            await fs.unlink(path.join(unassignedManifestDir, oldManifestPath)).catch(() => { });
+          }
+
+          logger.debug('Cleaned up old unassigned mod file', {
+            category: 'storage',
+            data: {
+              service: 'mod-installation-service',
+              unassignedModPath: unassignedModPath
+            }
+          });
+        } catch (error) {
+          logger.warn(`Error during unassigned mod cleanup: ${error.message}`, {
+            category: 'storage',
+            data: {
+              service: 'mod-installation-service',
+              unassignedModPath: unassignedModPath,
+              errorType: error.constructor.name
+            }
+          });
         }
       }
 
@@ -694,7 +754,19 @@ async function installModToServer(win, serverPath, modDetails) {
                 clientManifestPath: clientManifestPath
               }
             });
-          } else { // server-only or new install default
+          } else if (currentModLocation === 'unassigned' && unassignedManifestDir) {
+            await fs.mkdir(unassignedManifestDir, { recursive: true });
+            const unassignedManifestPath = path.join(unassignedManifestDir, `${finalFileName}.json`);
+            await fs.writeFile(unassignedManifestPath, JSON.stringify(manifest, null, 2));
+
+            logger.debug('Saved unassigned manifest', {
+              category: 'storage',
+              data: {
+                service: 'mod-installation-service',
+                manifestPath: unassignedManifestPath
+              }
+            });
+          } else { // server-only fallback
             await fs.mkdir(serverManifestDir, { recursive: true });
             const serverManifestPath = path.join(serverManifestDir, `${finalFileName}.json`);
             await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));

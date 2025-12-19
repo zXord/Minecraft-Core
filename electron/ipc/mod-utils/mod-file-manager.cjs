@@ -9,6 +9,8 @@ const AdmZip = require('adm-zip');
 // Simple store implementation to persist mod categories
 const configDir = path.join(app.getPath('userData'), 'config');
 const configFile = path.join(configDir, 'mod-categories.json');
+const UNASSIGNED_MODS_DIRNAME = 'mods_unassigned';
+const UNASSIGNED_MANIFEST_DIRNAME = 'minecraft-core-manifests-unassigned';
 
 // Create config directory if it doesn't exist
 if (!fsSync.existsSync(configDir)) {
@@ -138,11 +140,13 @@ async function listMods(serverPath) {
   
     const serverModsDir = path.join(serverPath, 'mods');
   const clientModsDir = path.join(clientPath, 'mods');
+  const unassignedModsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
   
   await fs.mkdir(serverModsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true }).catch(() => {
     // Ignore client mods directory creation errors
   });
+  await fs.mkdir(unassignedModsDir, { recursive: true });
   
   const serverFiles = await fs.readdir(serverModsDir);
   const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));  const serverDisabledModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
@@ -157,6 +161,14 @@ async function listMods(serverPath) {
       .map(file => file.replace('.disabled', '')); // Remove .disabled extension for display
   } catch {
     // Ignore client directory read errors
+  }
+
+  let unassignedModFiles = [];
+  try {
+    const unassignedFiles = await fs.readdir(unassignedModsDir);
+    unassignedModFiles = unassignedFiles.filter(file => file.toLowerCase().endsWith('.jar'));
+  } catch {
+    // Ignore unassigned directory read errors
   }
   
   // Migration: Also check old mods_disabled folder for any remaining files
@@ -196,6 +208,7 @@ async function listMods(serverPath) {
     ...serverOnlyMods.map(mod => ({ fileName: mod, locations: ['server'], category: 'server-only' })),
     ...clientOnlyMods.map(mod => ({ fileName: mod, locations: ['client'], category: 'client-only' })),
     ...modsInBoth.map(mod => ({ fileName: mod, locations: ['server', 'client'], category: 'both' })),
+    ...unassignedModFiles.map(mod => ({ fileName: mod, locations: ['unassigned'], category: 'unassigned' })),
     // Disabled mods - preserve their original location categories
     ...disabledServerOnlyMods.map(mod => ({ fileName: mod, locations: ['server'], category: 'server-only' })),
     ...disabledClientOnlyMods.map(mod => ({ fileName: mod, locations: ['client'], category: 'client-only' })),
@@ -204,7 +217,7 @@ async function listMods(serverPath) {
     ...disabledLegacyMods.map(mod => ({ fileName: mod, locations: ['server'], category: 'server-only' }))
   ];
   
-  const allModFiles = [...new Set([...serverModFiles, ...clientModFiles, ...allDisabledModFiles])];
+  const allModFiles = [...new Set([...serverModFiles, ...clientModFiles, ...allDisabledModFiles, ...unassignedModFiles])];
   
   return {
     mods: allMods,
@@ -223,8 +236,10 @@ async function getInstalledModInfo(serverPath) {
   const clientPath = path.join(serverPath, 'client');
   const modsDir = path.join(serverPath, 'mods');
   const clientModsDir = path.join(clientPath, 'mods');
+  const unassignedModsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
   await fs.mkdir(modsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true });
+  await fs.mkdir(unassignedModsDir, { recursive: true });
     const enabledFiles = await fs.readdir(modsDir);
   const enabledMods = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));
   
@@ -241,6 +256,16 @@ async function getInstalledModInfo(serverPath) {
   } catch {
     // Ignore client mods directory read errors
   }
+
+  let unassignedMods = [];
+  try {
+    const unassignedFiles = await fs.readdir(unassignedModsDir);
+    unassignedMods = unassignedFiles
+      .filter(file => file.toLowerCase().endsWith('.jar'))
+      .map(file => file.replace('.disabled', ''));
+  } catch {
+    // Ignore unassigned mods directory read errors
+  }
   
   // Migration: Also check old mods_disabled folder for any remaining files
   let legacyDisabledFiles = [];
@@ -254,19 +279,22 @@ async function getInstalledModInfo(serverPath) {
     // Combine current disabled mods with any legacy ones
   const allDisabledFiles = [...new Set([...disabledModFiles, ...clientDisabledMods, ...legacyDisabledFiles])];
   
-  const allModFiles = [...new Set([...enabledMods, ...clientMods, ...allDisabledFiles])];
+  const allModFiles = [...new Set([...enabledMods, ...clientMods, ...allDisabledFiles, ...unassignedMods])];
   
   const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
   const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
+  const unassignedManifestDir = path.join(serverPath, UNASSIGNED_MANIFEST_DIRNAME);
   let modInfo = [];
   
   try {
     await fs.mkdir(serverManifestDir, { recursive: true });
     await fs.mkdir(clientManifestDir, { recursive: true });
+    await fs.mkdir(unassignedManifestDir, { recursive: true });
     
     for (const modFile of allModFiles) {
       const serverManifestPath = path.join(serverManifestDir, `${modFile}.json`);
       const clientManifestPath = path.join(clientManifestDir, `${modFile}.json`);
+      const unassignedManifestPath = path.join(unassignedManifestDir, `${modFile}.json`);
       let manifest = null;      try {
         const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
         manifest = JSON.parse(clientManifestContent);
@@ -275,7 +303,12 @@ async function getInstalledModInfo(serverPath) {
           const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
           manifest = JSON.parse(serverManifestContent);
         } catch {
-          // Ignore manifest parsing errors
+          try {
+            const unassignedManifestContent = await fs.readFile(unassignedManifestPath, 'utf8');
+            manifest = JSON.parse(unassignedManifestContent);
+          } catch {
+            // Ignore manifest parsing errors
+          }
         }
       }
         if (manifest) {
@@ -286,7 +319,9 @@ async function getInstalledModInfo(serverPath) {
             path.join(modsDir, modFile), // Server enabled
             path.join(modsDir, modFile + '.disabled'), // Server disabled
             path.join(clientModsDir, modFile), // Client enabled
-            path.join(clientModsDir, modFile + '.disabled') // Client disabled
+            path.join(clientModsDir, modFile + '.disabled'), // Client disabled
+            path.join(unassignedModsDir, modFile), // Unassigned
+            path.join(unassignedModsDir, modFile + '.disabled') // Unassigned disabled
           ];
           
           let jarPath = null;
@@ -334,7 +369,9 @@ async function getInstalledModInfo(serverPath) {
               path.join(modsDir, modFile), // Server enabled
               path.join(modsDir, modFile + '.disabled'), // Server disabled
               path.join(clientModsDir, modFile), // Client enabled
-              path.join(clientModsDir, modFile + '.disabled') // Client disabled
+              path.join(clientModsDir, modFile + '.disabled'), // Client disabled
+              path.join(unassignedModsDir, modFile), // Unassigned
+              path.join(unassignedModsDir, modFile + '.disabled') // Unassigned disabled
             ];
             
             let jarPath = null;
@@ -747,7 +784,7 @@ async function addMod(serverPath, modPath) {
     throw new Error(`Source file not accessible: ${statErr.message}`);
   }
   
-  const modsDir = path.join(serverPath, 'mods');
+  const modsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
   const fileName = path.basename(modPath);
   const targetPath = path.join(modsDir, fileName);
   
@@ -789,7 +826,9 @@ async function deleteMod(serverPath, modName) {
     path.join(serverPath, 'client', 'mods', fileName),
     path.join(serverPath, 'mods', fileName + '.disabled'), // Check for disabled mods with .disabled extension
     path.join(serverPath, 'client', 'mods', fileName + '.disabled'), // Check for disabled mods in client directory
-    path.join(serverPath, 'mods_disabled', fileName) // Legacy: Also check old disabled folder for migration
+    path.join(serverPath, 'mods_disabled', fileName), // Legacy: Also check old disabled folder for migration
+    path.join(serverPath, UNASSIGNED_MODS_DIRNAME, fileName),
+    path.join(serverPath, UNASSIGNED_MODS_DIRNAME, fileName + '.disabled')
   ];
   
   let deletedFromPaths = [];
@@ -812,7 +851,8 @@ async function deleteMod(serverPath, modName) {
   // Also try to delete associated manifest files
   const manifestPaths = [
     path.join(serverPath, 'minecraft-core-manifests', `${fileName}.json`),
-    path.join(serverPath, 'client', 'minecraft-core-manifests', `${fileName}.json`)
+    path.join(serverPath, 'client', 'minecraft-core-manifests', `${fileName}.json`),
+    path.join(serverPath, UNASSIGNED_MANIFEST_DIRNAME, `${fileName}.json`)
   ];
   
   for (const manifestPath of manifestPaths) {
@@ -881,7 +921,7 @@ async function directAddMod({ serverPath, fileName, buffer }) {
     throw new Error('Valid file buffer is required');
   }
   
-  const modsDir = path.join(serverPath, 'mods');
+  const modsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
   const targetPath = path.join(modsDir, fileName);
     await fs.mkdir(modsDir, { recursive: true });
   await fs.writeFile(targetPath, new Uint8Array(buffer));
@@ -902,6 +942,8 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   const clientModsDir = path.join(clientPath, 'mods');
   const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
   const clientManifestDir = path.join(clientPath, 'minecraft-core-manifests');
+  const unassignedModsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
+  const unassignedManifestDir = path.join(serverPath, UNASSIGNED_MANIFEST_DIRNAME);
 
   await fs.mkdir(serverModsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true }).catch(err => {
@@ -909,20 +951,28 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   });
   await fs.mkdir(serverManifestDir, { recursive: true });
   await fs.mkdir(clientManifestDir, { recursive: true });
+  await fs.mkdir(unassignedModsDir, { recursive: true });
+  await fs.mkdir(unassignedManifestDir, { recursive: true });
 
   const serverModPath = path.join(serverModsDir, fileName);
   const clientModPath = path.join(clientModsDir, fileName);
+  const unassignedModPath = path.join(unassignedModsDir, fileName);
   const disabledModPath = path.join(serverModsDir, fileName + '.disabled');
+  const unassignedDisabledPath = path.join(unassignedModsDir, fileName + '.disabled');
   const serverManifestPath = path.join(serverManifestDir, `${fileName}.json`);
   const clientManifestPath = path.join(clientManifestDir, `${fileName}.json`);
+  const unassignedManifestPath = path.join(unassignedManifestDir, `${fileName}.json`);
 
   const fileExists = async (filePath) => fs.access(filePath).then(() => true).catch(() => false);
 
   const serverFileExists = await fileExists(serverModPath);
   const clientFileExists = await fileExists(clientModPath);
   const disabledFileExists = await fileExists(disabledModPath);
+  const unassignedFileExists = await fileExists(unassignedModPath);
+  const unassignedDisabledExists = await fileExists(unassignedDisabledPath);
   const serverManifestExists = await fileExists(serverManifestPath);
   const clientManifestExists = await fileExists(clientManifestPath);
+  const unassignedManifestExists = await fileExists(unassignedManifestPath);
 
   const copyAndUnlink = async (source, dest) => {
     await fs.copyFile(source, dest);
@@ -937,6 +987,14 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
         if (!serverManifestExists) await copyAndUnlink(clientManifestPath, serverManifestPath);
         else await fs.unlink(clientManifestPath);
       }
+    } else if (unassignedFileExists || unassignedDisabledExists) {
+      const sourcePath = unassignedFileExists ? unassignedModPath : unassignedDisabledPath;
+      if (!serverFileExists) await copyAndUnlink(sourcePath, serverModPath);
+      else await fs.unlink(sourcePath);
+      if (unassignedManifestExists) {
+        if (!serverManifestExists) await copyAndUnlink(unassignedManifestPath, serverManifestPath);
+        else await fs.unlink(unassignedManifestPath);
+      }
     } else if (disabledFileExists && !serverFileExists) {
       await copyAndUnlink(disabledModPath, serverModPath);
       // Manifest for disabled mods is usually in serverManifestDir, so no manifest move needed here
@@ -948,6 +1006,14 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
       if (serverManifestExists) {
         if (!clientManifestExists) await copyAndUnlink(serverManifestPath, clientManifestPath);
         else await fs.unlink(serverManifestPath);
+      }
+    } else if (unassignedFileExists || unassignedDisabledExists) {
+      const sourcePath = unassignedFileExists ? unassignedModPath : unassignedDisabledPath;
+      if (!clientFileExists) await copyAndUnlink(sourcePath, clientModPath);
+      else await fs.unlink(sourcePath);
+      if (unassignedManifestExists) {
+        if (!clientManifestExists) await copyAndUnlink(unassignedManifestPath, clientManifestPath);
+        else await fs.unlink(unassignedManifestPath);
       }
     } else if (disabledFileExists && !clientFileExists) {
       await copyAndUnlink(disabledModPath, clientModPath);
@@ -962,6 +1028,16 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
     } else if (!serverFileExists && clientFileExists) {
       await fs.copyFile(clientModPath, serverModPath);
       if (clientManifestExists && !serverManifestExists) await fs.copyFile(clientManifestPath, serverManifestPath);
+    } else if (unassignedFileExists || unassignedDisabledExists) {
+      const sourcePath = unassignedFileExists ? unassignedModPath : unassignedDisabledPath;
+      if (!serverFileExists) await fs.copyFile(sourcePath, serverModPath);
+      if (!clientFileExists) await fs.copyFile(sourcePath, clientModPath);
+      await fs.unlink(sourcePath);
+      if (unassignedManifestExists) {
+        if (!serverManifestExists) await fs.copyFile(unassignedManifestPath, serverManifestPath);
+        if (!clientManifestExists) await fs.copyFile(unassignedManifestPath, clientManifestPath);
+        await fs.unlink(unassignedManifestPath);
+      }
     } else if (disabledFileExists) {
       if(!serverFileExists) await fs.copyFile(disabledModPath, serverModPath);
       if(!clientFileExists) await fs.copyFile(disabledModPath, clientModPath);
@@ -969,6 +1045,33 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
       if (serverManifestExists) { // Assuming manifest for disabled was in server
           if(!clientManifestExists) await fs.copyFile(serverManifestPath, clientManifestPath);
       }
+    }
+  } else if (newCategory === 'unassigned') {
+    if (serverFileExists) {
+      if (!unassignedFileExists) await copyAndUnlink(serverModPath, unassignedModPath);
+      else await fs.unlink(serverModPath);
+      if (clientFileExists) await fs.unlink(clientModPath);
+      if (serverManifestExists) {
+        if (!unassignedManifestExists) await copyAndUnlink(serverManifestPath, unassignedManifestPath);
+        else await fs.unlink(serverManifestPath);
+      }
+      if (clientManifestExists) await fs.unlink(clientManifestPath);
+    } else if (clientFileExists) {
+      if (!unassignedFileExists) await copyAndUnlink(clientModPath, unassignedModPath);
+      else await fs.unlink(clientModPath);
+      if (clientManifestExists) {
+        if (!unassignedManifestExists) await copyAndUnlink(clientManifestPath, unassignedManifestPath);
+        else await fs.unlink(clientManifestPath);
+      }
+    } else if (disabledFileExists) {
+      if (!unassignedFileExists) await copyAndUnlink(disabledModPath, unassignedModPath);
+      else await fs.unlink(disabledModPath);
+      if (serverManifestExists) {
+        if (!unassignedManifestExists) await copyAndUnlink(serverManifestPath, unassignedManifestPath);
+        else await fs.unlink(serverManifestPath);
+      }
+    } else if (unassignedDisabledExists && !unassignedFileExists) {
+      await copyAndUnlink(unassignedDisabledPath, unassignedModPath);
     }
   } else if (newCategory === 'disabled') {
     if (serverFileExists) {
@@ -1039,5 +1142,7 @@ module.exports = {
   moveModFile,
   readModMetadataFromJar,
   getIgnoredModUpdates,
-  saveIgnoredModUpdates
+  saveIgnoredModUpdates,
+  UNASSIGNED_MODS_DIRNAME,
+  UNASSIGNED_MANIFEST_DIRNAME
 };
