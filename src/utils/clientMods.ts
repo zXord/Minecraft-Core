@@ -23,15 +23,18 @@ import {
 } from '../stores/clientModManager.js';
 import { minecraftVersion } from '../stores/modStore.js';
 import { safeInvoke } from './ipcUtils.js';
-import { buildAuthHeaders, ensureSessionToken } from './managementAuth.js';
+import { buildAuthHeaders, ensureSessionToken, getManagementBaseUrl, resolveManagementUrl } from './managementAuth.js';
 
 interface Instance {
   serverIp?: string;
   serverPort?: string;
+  serverProtocol?: string;
   path?: string;
   clientId?: string;
   clientName?: string;
   sessionToken?: string;
+  inviteSecret?: string;
+  managementCertFingerprint?: string;
 }
 
 export async function loadInstalledInfo(instance: Instance) {
@@ -67,13 +70,14 @@ export async function loadInstalledInfo(instance: Instance) {
 }
 
 export async function loadModsFromServer(instance: Instance) {
-  if (!instance || !instance.serverIp || !instance.serverPort) {
+  const baseUrl = getManagementBaseUrl(instance);
+  if (!instance || !baseUrl) {
     serverManagedFiles.set(new SvelteSet());
     return;
   }
   isLoadingMods.set(true);
   try {
-    const testUrl = `http://${instance.serverIp}:${instance.serverPort}/api/test`;
+    const testUrl = resolveManagementUrl(instance, '/api/test');
     const testResponse = await fetch(testUrl, {
       method: 'GET',
       headers: buildAuthHeaders(instance),
@@ -86,7 +90,7 @@ export async function loadModsFromServer(instance: Instance) {
     }
     connectionStatus.set('connected');
     await ensureSessionToken(instance);
-  const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
+    const serverInfoUrl = resolveManagementUrl(instance, '/api/server/info');
     const serverInfoResponse = await fetch(serverInfoUrl, {
       method: 'GET',
       headers: buildAuthHeaders(instance),
@@ -124,7 +128,7 @@ export async function loadModsFromServer(instance: Instance) {
           return combined;
         });
         await loadInstalledInfo(instance);
-        const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
+        const modsUrl = resolveManagementUrl(instance, '/api/mods/list');
         const modsResponse = await fetch(modsUrl, {
           method: 'GET',
           headers: buildAuthHeaders(instance),
@@ -240,7 +244,7 @@ export async function downloadRequiredMods(instance: Instance) {
       clientPath: instance.path,
       requiredMods: modsToDownload,
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
     });
     if (result.success) {
       successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
@@ -324,7 +328,7 @@ export async function downloadOptionalMods(instance: Instance) {
       requiredMods: [],
       optionalMods: modsToDownload,
       allClientMods: allMods,
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
     });
     if (result.success) {
       successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
@@ -352,7 +356,7 @@ export async function downloadSingleOptionalMod(instance: Instance, mod: any) {
       requiredMods: mod.required ? [mod] : [],
       optionalMods: mod.required ? [] : [mod],
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
     });
     if (result.success) {
       // Avoid duplicate success toasts; the downloads UI already shows completion
@@ -379,7 +383,7 @@ export async function downloadSingleRequiredMod(instance: Instance, mod: any) {
       requiredMods: [mod],
       optionalMods: [],
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
     });
     if (result.success) {
       // Avoid duplicate success toasts; the downloads UI already shows completion
@@ -536,7 +540,7 @@ export async function updateServerMod(instance: Instance, event: any) {
       requiredMods: modRequiredMods,
       optionalMods: modOptionalMods,
       allClientMods: allMods,
-      serverInfo: { serverIp: instance?.serverIp, serverPort: instance?.serverPort, sessionToken: instance?.sessionToken }
+      serverInfo: { serverIp: instance?.serverIp, serverPort: instance?.serverPort, serverProtocol: instance?.serverProtocol, sessionToken: instance?.sessionToken }
     });
     if (result?.success) {
       successMessage.set(`Successfully updated ${name} from v${currentVersion} to v${newVersion}`);

@@ -10,6 +10,18 @@ const instanceContext = require('../utils/instance-context.cjs');
 
 const logger = getLoggerHandlers();
 
+function normalizeHost(value) {
+  if (!value || typeof value !== 'string') return '';
+  return value.replace(/^\[|\]$/g, '').trim().toLowerCase();
+}
+
+function buildPendingPinKey(host, port) {
+  const normalizedHost = normalizeHost(host);
+  const normalizedPort = String(port || '8080');
+  if (!normalizedHost || !normalizedPort) return '';
+  return `${normalizedHost}|${normalizedPort}`;
+}
+
 /**
  * Create settings IPC handlers
  */
@@ -22,6 +34,22 @@ function createSettingsHandlers() {
   return {
     'update-settings': async (_e, { port, maxRam, managementPort, serverPath, autoStartMinecraft, autoStartManagement }) => {
       const startTime = Date.now();
+
+      const coerceNumber = (value) => {
+        if (value === null || value === undefined) return value;
+        if (typeof value === 'number') return value;
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          if (!trimmed) return NaN;
+          const parsed = Number(trimmed);
+          return Number.isFinite(parsed) ? parsed : NaN;
+        }
+        return NaN;
+      };
+
+      const normalizedPort = coerceNumber(port);
+      const normalizedMaxRam = coerceNumber(maxRam);
+      const normalizedManagementPort = coerceNumber(managementPort);
       
       logger.debug('IPC handler invoked', {
         category: 'settings',
@@ -55,7 +83,7 @@ function createSettingsHandlers() {
           }
         });
 
-        if (port !== undefined && (typeof port !== 'number' || port < 1 || port > 65535)) {
+        if (port !== undefined && (typeof normalizedPort !== 'number' || !Number.isFinite(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535)) {
           logger.error('Configuration validation failed', {
             category: 'settings',
             data: {
@@ -65,13 +93,13 @@ function createSettingsHandlers() {
               type: typeof port,
               valid: false,
               validRange: '1-65535',
-              errorReason: typeof port !== 'number' ? 'invalid_type' : 'out_of_range'
+              errorReason: typeof normalizedPort !== 'number' || !Number.isFinite(normalizedPort) ? 'invalid_type' : 'out_of_range'
             }
           });
           return { success: false, error: 'Invalid port number' };
         }
         
-        if (maxRam !== undefined && (typeof maxRam !== 'number' || maxRam <= 0)) {
+        if (maxRam !== undefined && (typeof normalizedMaxRam !== 'number' || !Number.isFinite(normalizedMaxRam) || normalizedMaxRam <= 0)) {
           logger.error('Configuration validation failed', {
             category: 'settings',
             data: {
@@ -81,13 +109,13 @@ function createSettingsHandlers() {
               type: typeof maxRam,
               valid: false,
               validRange: '>0',
-              errorReason: typeof maxRam !== 'number' ? 'invalid_type' : 'invalid_value'
+              errorReason: typeof normalizedMaxRam !== 'number' || !Number.isFinite(normalizedMaxRam) ? 'invalid_type' : 'invalid_value'
             }
           });
           return { success: false, error: 'Invalid memory allocation' };
         }
         
-        if (managementPort !== undefined && (typeof managementPort !== 'number' || managementPort < 1025 || managementPort > 65535)) {
+        if (managementPort !== undefined && (typeof normalizedManagementPort !== 'number' || !Number.isFinite(normalizedManagementPort) || normalizedManagementPort < 1025 || normalizedManagementPort > 65535)) {
           logger.error('Configuration validation failed', {
             category: 'settings',
             data: {
@@ -97,7 +125,7 @@ function createSettingsHandlers() {
               type: typeof managementPort,
               valid: false,
               validRange: '1025-65535',
-              errorReason: typeof managementPort !== 'number' ? 'invalid_type' : 'out_of_range'
+              errorReason: typeof normalizedManagementPort !== 'number' || !Number.isFinite(normalizedManagementPort) ? 'invalid_type' : 'out_of_range'
             }
           });
           return { success: false, error: 'Invalid management port number' };
@@ -185,9 +213,9 @@ function createSettingsHandlers() {
         // Update settings with new values
         const updatedSettings = {
           ...currentSettings,
-          port: port !== undefined ? port : currentSettings.port,
-          maxRam: maxRam !== undefined ? maxRam : currentSettings.maxRam,
-          managementPort: managementPort !== undefined ? managementPort : currentSettings.managementPort,
+          port: port !== undefined ? normalizedPort : currentSettings.port,
+          maxRam: maxRam !== undefined ? normalizedMaxRam : currentSettings.maxRam,
+          managementPort: managementPort !== undefined ? normalizedManagementPort : currentSettings.managementPort,
           autoStartMinecraft: autoStartMinecraft !== undefined ? autoStartMinecraft : currentSettings.autoStartMinecraft,
           autoStartManagement: autoStartManagement !== undefined ? autoStartManagement : currentSettings.autoStartManagement
         };
@@ -579,6 +607,8 @@ function createSettingsHandlers() {
           }
         });
 
+        const currentInstances = appStore.get('instances') || [];
+
         // Filter out invalid instances and ensure required fields
         const validInstances = instances
           .filter(instance => {
@@ -632,21 +662,45 @@ function createSettingsHandlers() {
               name: instance.name || `Instance ${Date.now()}`,
               type: instance.type || 'server'
             };
+
+            const existingInstance = currentInstances.find(existing =>
+              existing && existing.id === instance.id && existing.type === instance.type
+            );
             
             // Include type-specific fields
             if (instance.type === 'server') {
               if (instance.path) {
                 validInstance.path = instance.path;
               }
+              if (existingInstance && existingInstance.managementInviteSecret) {
+                validInstance.managementInviteSecret = existingInstance.managementInviteSecret;
+              }
+              if (typeof instance.managementInviteHost === 'string') {
+                validInstance.managementInviteHost = instance.managementInviteHost;
+              } else if (existingInstance && typeof existingInstance.managementInviteHost === 'string') {
+                validInstance.managementInviteHost = existingInstance.managementInviteHost;
+              }
             } else if (instance.type === 'client') {
               // Include client-specific fields
               if (instance.path) validInstance.path = instance.path;
               if (instance.serverIp) validInstance.serverIp = instance.serverIp;
               if (instance.serverPort) validInstance.serverPort = instance.serverPort;
+              if (instance.serverProtocol) validInstance.serverProtocol = instance.serverProtocol;
               if (instance.clientId) validInstance.clientId = instance.clientId;
               if (instance.clientName) validInstance.clientName = instance.clientName;
               if (instance.sessionToken) validInstance.sessionToken = instance.sessionToken;
+              if (instance.inviteSecret) validInstance.inviteSecret = instance.inviteSecret;
+              if (instance.managementCertFingerprint) validInstance.managementCertFingerprint = instance.managementCertFingerprint;
               if (instance.lastConnected) validInstance.lastConnected = instance.lastConnected;
+              if (existingInstance && existingInstance.inviteSecret && !validInstance.inviteSecret) {
+                validInstance.inviteSecret = existingInstance.inviteSecret;
+              }
+              if (existingInstance && existingInstance.serverProtocol && !validInstance.serverProtocol) {
+                validInstance.serverProtocol = existingInstance.serverProtocol;
+              }
+              if (existingInstance && existingInstance.managementCertFingerprint && !validInstance.managementCertFingerprint) {
+                validInstance.managementCertFingerprint = existingInstance.managementCertFingerprint;
+              }
             }
             
             return validInstance;
@@ -689,9 +743,6 @@ function createSettingsHandlers() {
             }
           });
 
-          // Get current instances for change tracking
-          const currentInstances = appStore.get('instances') || [];
-          
           // Save instances to the store
           appStore.set('instances', validInstances);
           
@@ -1315,8 +1366,32 @@ function createSettingsHandlers() {
       }
     },
     
+    // Cache a pending management server certificate pin (for setup/testing before save)
+    'cache-management-cert-pin': async (_e, payload = {}) => {
+      const host = typeof payload.host === 'string' ? payload.host.trim() : '';
+      const port = payload.port || '8080';
+      const fingerprint = typeof payload.fingerprint === 'string' ? payload.fingerprint.trim() : '';
+      if (!host) {
+        return { success: false, error: 'Host is required' };
+      }
+      const key = buildPendingPinKey(host, port);
+      if (!key) {
+        return { success: false, error: 'Invalid host or port' };
+      }
+      const pendingPins = appStore.get('pendingManagementPins') || {};
+      const existing = pendingPins[key] || {};
+      pendingPins[key] = {
+        host,
+        port: String(port || '8080'),
+        fingerprint: fingerprint || existing.fingerprint || '',
+        updatedAt: new Date().toISOString()
+      };
+      appStore.set('pendingManagementPins', pendingPins);
+      return { success: true };
+    },
+
     // Save client configuration
-    'save-client-config': async (_e, { path: clientPath, serverIp, serverPort, clientId, clientName, sessionToken }) => {
+    'save-client-config': async (_e, { path: clientPath, serverIp, serverPort, clientId, clientName, sessionToken, serverProtocol, inviteSecret, managementCertFingerprint }) => {
       const startTime = Date.now();
       
       logger.debug('IPC handler invoked', {
@@ -1329,7 +1404,10 @@ function createSettingsHandlers() {
           hasServerPort: !!serverPort,
           hasClientId: !!clientId,
           hasClientName: !!clientName,
-          hasSessionToken: !!sessionToken
+          hasSessionToken: !!sessionToken,
+          hasServerProtocol: !!serverProtocol,
+          hasInviteSecret: !!inviteSecret,
+          hasManagementCertFingerprint: !!managementCertFingerprint
         }
       });
 
@@ -1363,6 +1441,20 @@ function createSettingsHandlers() {
             }
           });
           return { success: false, error: 'Invalid server IP address' };
+        }
+
+        const normalizedProtocol = typeof serverProtocol === 'string' ? serverProtocol.trim().toLowerCase() : '';
+        if (normalizedProtocol && normalizedProtocol !== 'http' && normalizedProtocol !== 'https') {
+          logger.error('Configuration validation failed', {
+            category: 'settings',
+            data: {
+              handler: 'save-client-config',
+              validation: 'server_protocol',
+              value: serverProtocol,
+              valid: false
+            }
+          });
+          return { success: false, error: 'Invalid server protocol' };
         }
         
         logger.debug('Starting client configuration save process', {
@@ -1409,18 +1501,52 @@ function createSettingsHandlers() {
             existingConfig = {};
           }
         }
+        const resolvedPort = serverPort || '8080';
         const storedToken = typeof sessionToken === 'string' && sessionToken.trim()
           ? sessionToken.trim()
           : (typeof existingConfig.sessionToken === 'string' ? existingConfig.sessionToken : '');
+        const storedProtocol = normalizedProtocol
+          ? normalizedProtocol
+          : (typeof existingConfig.serverProtocol === 'string' ? existingConfig.serverProtocol : 'https');
+        const storedInviteSecret = typeof inviteSecret === 'string' && inviteSecret.trim()
+          ? inviteSecret.trim()
+          : (typeof existingConfig.inviteSecret === 'string' ? existingConfig.inviteSecret : '');
+        const existingHost = normalizeHost(existingConfig.serverIp || '');
+        const existingPort = String(existingConfig.serverPort || '8080');
+        const incomingHost = normalizeHost(serverIp || '');
+        const incomingPort = String(resolvedPort);
+        const serverChanged = !!existingHost && (existingHost !== incomingHost || existingPort !== incomingPort);
+        let storedManagementFingerprint = '';
+        if (typeof managementCertFingerprint === 'string' && managementCertFingerprint.trim()) {
+          storedManagementFingerprint = managementCertFingerprint.trim();
+        } else if (!serverChanged && typeof existingConfig.managementCertFingerprint === 'string') {
+          storedManagementFingerprint = existingConfig.managementCertFingerprint;
+        }
+        if (!storedManagementFingerprint) {
+          const pendingPins = appStore.get('pendingManagementPins') || {};
+          const pinKey = buildPendingPinKey(serverIp, resolvedPort);
+          const pendingEntry = pinKey ? pendingPins[pinKey] : null;
+          if (pendingEntry && typeof pendingEntry.fingerprint === 'string' && pendingEntry.fingerprint.trim()) {
+            storedManagementFingerprint = pendingEntry.fingerprint.trim();
+          }
+        }
+        const shouldClearFingerprint = serverChanged && !storedManagementFingerprint;
         const config = {
           serverIp,
-          serverPort: serverPort || '8080', // Default to management server port
+          serverPort: resolvedPort, // Default to management server port
           clientId: clientId || `client-${Date.now()}`,
           clientName: clientName || 'Unnamed Client',
-          lastConnected: new Date().toISOString()
+          lastConnected: new Date().toISOString(),
+          serverProtocol: storedProtocol || 'https'
         };
         if (storedToken) {
           config.sessionToken = storedToken;
+        }
+        if (storedInviteSecret) {
+          config.inviteSecret = storedInviteSecret;
+        }
+        if (storedManagementFingerprint) {
+          config.managementCertFingerprint = storedManagementFingerprint;
         }
 
         logger.debug('Writing client configuration file', {
@@ -1460,7 +1586,16 @@ function createSettingsHandlers() {
             }
           });
 
-          await ensureServersDat(clientPath, serverIp, config.serverPort, config.clientName, null, false, config.sessionToken || null);
+          await ensureServersDat(
+            clientPath,
+            serverIp,
+            config.serverPort,
+            config.clientName,
+            null,
+            false,
+            config.sessionToken || null,
+            config.serverProtocol || 'https'
+          );
           
           // Create flag file to indicate servers.dat has been initialized
           fs.writeFileSync(serversInitializedFile, JSON.stringify({
@@ -1516,10 +1651,15 @@ function createSettingsHandlers() {
           instances[clientInstanceIndex] = {
             ...instances[clientInstanceIndex],
             serverIp,
-            serverPort: serverPort || '8080',
+            serverPort: resolvedPort,
+            serverProtocol: config.serverProtocol || instances[clientInstanceIndex].serverProtocol,
             clientId: config.clientId,
             clientName: config.clientName,
             sessionToken: config.sessionToken || instances[clientInstanceIndex].sessionToken,
+            inviteSecret: config.inviteSecret || instances[clientInstanceIndex].inviteSecret,
+            managementCertFingerprint: storedManagementFingerprint
+              ? storedManagementFingerprint
+              : (shouldClearFingerprint ? '' : instances[clientInstanceIndex].managementCertFingerprint),
             path: clientPath,
             lastConnected: config.lastConnected
           };
@@ -1545,10 +1685,13 @@ function createSettingsHandlers() {
             type: 'client',
             path: clientPath,
             serverIp,
-            serverPort: serverPort || '8080',
+            serverPort: resolvedPort,
+            serverProtocol: config.serverProtocol,
             clientId: config.clientId,
             clientName: config.clientName,
             sessionToken: config.sessionToken,
+            inviteSecret: config.inviteSecret,
+            managementCertFingerprint: config.managementCertFingerprint,
             lastConnected: config.lastConnected
           };
           instances.push(newInstance);

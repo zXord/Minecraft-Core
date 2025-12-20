@@ -79,6 +79,7 @@ contextBridge.exposeInMainWorld('electron', {
       'get-auto-restart',
       'set-auto-restart',
       'save-client-config',
+      'cache-management-cert-pin',
       // Player management channels
       'read-players',
       'add-player',
@@ -130,12 +131,15 @@ contextBridge.exposeInMainWorld('electron', {
   'get-ignored-mod-updates',
   'save-ignored-mod-updates',
       // Management server channels
-          'start-management-server',
+      'start-management-server',
     'stop-management-server',
     'get-management-server-status',
     'update-management-server-path',
     'set-management-server-external-host',
     'get-management-server-host-info',
+    'get-management-invite-info',
+    'set-management-invite-host',
+    'regenerate-management-invite-secret',
   // Browser panel channels
   'browser-panel:start',
   'browser-panel:stop',

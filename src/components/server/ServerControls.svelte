@@ -70,7 +70,34 @@
   // Access global serverPath when local prop is empty
   $: {
     if (!serverPath && window.serverPath) {
-      serverPath = window.serverPath.get();
+      const candidate = /** @type {unknown} */ (window.serverPath.get());
+      let handled = false;
+      if (candidate && typeof candidate === 'object' && 'then' in candidate) {
+        const promiseCandidate = /** @type {{ then?: unknown }} */ (candidate);
+        if (typeof promiseCandidate.then === 'function') {
+          handled = true;
+          promiseCandidate.then((result) => {
+            if (typeof result === 'string' && result) {
+              serverPath = result;
+            } else if (result && typeof result === 'object' && 'path' in result) {
+              const resultPath = /** @type {{ path?: unknown }} */ (result).path;
+              if (typeof resultPath === 'string' && resultPath) {
+                serverPath = resultPath;
+              }
+            }
+          }).catch(() => {});
+        }
+      }
+      if (!handled) {
+        if (typeof candidate === 'string' && candidate) {
+          serverPath = candidate;
+        } else if (candidate && typeof candidate === 'object' && 'path' in candidate) {
+          const candidatePath = /** @type {{ path?: unknown }} */ (candidate).path;
+          if (typeof candidatePath === 'string' && candidatePath) {
+            serverPath = candidatePath;
+          }
+        }
+      }
     }
   }
 
@@ -96,7 +123,15 @@
   // Management server state
   let managementServerStatus = 'unknown'; // stopped, starting, running, stopping, unknown
   let managementPort = 8080;
+  let managementSettingsLoaded = false;
   let connectedClients = 0;
+  let inviteLink = '';
+  let inviteHostInput = '';
+  let inviteWarning = '';
+  let inviteError = '';
+  let inviteCopied = false;
+  let inviteStatus = 'idle';
+  let lastInviteKey = '';
   const MANAGEMENT_STATUS_VALUES = new Set(['running', 'stopped', 'starting', 'stopping', 'unknown', 'error']);
   let managementStatusSyncLock = false;
 
@@ -127,10 +162,35 @@
       managementServerStatus = storeStatus;
     }
   }
+
+  function coercePort(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const parsed = Number.parseInt(String(value), 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  $: if (serverPath && managementPort && managementSettingsLoaded) {
+    const inviteKey = `${serverPath}|${managementPort}`;
+    if (inviteKey !== lastInviteKey) {
+      lastInviteKey = inviteKey;
+      loadInviteInfo();
+    }
+  } else if (!serverPath && (inviteLink || inviteHostInput)) {
+    inviteLink = '';
+    inviteHostInput = '';
+    inviteWarning = '';
+    inviteError = '';
+  }
   
   // Auto-start settings
   let autoStartMinecraft = false;
   let autoStartManagement = false;
+  let pendingAutoStart = false;
+  let autoStartInProgress = false;
+
+  $: if (pendingAutoStart && serverPath && managementSettingsLoaded && !window.appStartupCompleted) {
+    void runAutoStartOnce();
+  }
   
   // Help text dismissal
   let helpTextDismissed = false;
@@ -413,6 +473,98 @@
       }
     }
   }
+
+  async function loadInviteInfo() {
+    inviteError = '';
+    inviteWarning = '';
+    inviteCopied = false;
+    if (!serverPath) {
+      inviteLink = '';
+      inviteHostInput = '';
+      return;
+    }
+    inviteStatus = 'loading';
+    try {
+      const result = await window.electron.invoke('get-management-invite-info', {
+        serverPath,
+        port: coercePort(managementPort) || undefined
+      });
+      if (result && result.success) {
+        inviteLink = result.inviteLink || '';
+        inviteHostInput = result.configuredHost || '';
+        inviteWarning = result.usesPublicHost
+          ? 'Public IPs can change. Use a static domain for a stable invite link.'
+          : '';
+      } else {
+        inviteError = result?.error || 'Failed to load invite link';
+      }
+    } catch (error) {
+      inviteError = error.message || 'Failed to load invite link';
+    } finally {
+      inviteStatus = 'idle';
+    }
+  }
+
+  async function saveInviteHost() {
+    if (!serverPath) return;
+    inviteStatus = 'saving';
+    inviteError = '';
+    try {
+      const result = await window.electron.invoke('set-management-invite-host', {
+        serverPath,
+        host: inviteHostInput
+      });
+      if (result && result.success) {
+        await loadInviteInfo();
+      } else {
+        inviteError = result?.error || 'Failed to save invite host';
+      }
+    } catch (error) {
+      inviteError = error.message || 'Failed to save invite host';
+    } finally {
+      inviteStatus = 'idle';
+    }
+  }
+
+  async function regenerateInviteSecret() {
+    if (!serverPath) return;
+    inviteStatus = 'saving';
+    inviteError = '';
+    try {
+      const result = await window.electron.invoke('regenerate-management-invite-secret', {
+        serverPath
+      });
+      if (result && result.success) {
+        await loadInviteInfo();
+      } else {
+        inviteError = result?.error || 'Failed to regenerate invite secret';
+      }
+    } catch (error) {
+      inviteError = error.message || 'Failed to regenerate invite secret';
+    } finally {
+      inviteStatus = 'idle';
+    }
+  }
+
+  async function copyInviteLink() {
+    if (!inviteLink) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(inviteLink);
+      } else {
+        const input = document.createElement('input');
+        input.value = inviteLink;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        document.body.removeChild(input);
+      }
+      inviteCopied = true;
+      setTimeout(() => { inviteCopied = false; }, 1500);
+    } catch {
+      inviteError = 'Failed to copy invite link';
+    }
+  }
   function startServer() {
     logger.info('Starting Minecraft server', {
       category: 'ui',
@@ -555,9 +707,18 @@
         if (settingsResult && settingsResult.success) {
           const { settings } = settingsResult;
           // Update local variables with settings
-          if (settings.port !== undefined) port = settings.port;
-          if (settings.maxRam !== undefined) maxRam = settings.maxRam;
-          if (settings.managementPort !== undefined) managementPort = settings.managementPort;
+          if (settings.port !== undefined) {
+            const parsedPort = coercePort(settings.port);
+            if (parsedPort !== null) port = parsedPort;
+          }
+          if (settings.maxRam !== undefined) {
+            const parsedMaxRam = coercePort(settings.maxRam);
+            if (parsedMaxRam !== null) maxRam = parsedMaxRam;
+          }
+          if (settings.managementPort !== undefined) {
+            const parsedManagementPort = coercePort(settings.managementPort);
+            if (parsedManagementPort !== null) managementPort = parsedManagementPort;
+          }
           if (settings.autoStartMinecraft !== undefined) autoStartMinecraft = settings.autoStartMinecraft;
           if (settings.autoStartManagement !== undefined) autoStartManagement = settings.autoStartManagement;
           // Update server state store with loaded values
@@ -579,7 +740,12 @@
           const result = await window.electron.invoke('get-management-server-status');
           if (result.success && result.status) {
             applyManagementStatus(result.status.isRunning ? 'running' : 'stopped');
-            // Don't override managementPort - it was already loaded from saved settings above
+            if (result.status.isRunning) {
+              const statusPort = coercePort(result.status.port);
+              if (statusPort !== null && statusPort !== coercePort(managementPort)) {
+                managementPort = statusPort;
+              }
+            }
             connectedClients = result.status.clientCount || 0;
           }
         } catch (error) {
@@ -599,11 +765,12 @@
         
         // Handle auto-start servers if enabled (only on actual app startup, not tab switches)
         if (!window.appStartupCompleted) {
-          await handleAutoStart();
-          window.appStartupCompleted = true;
+          await runAutoStartOnce();
         }
       } catch (err) {
         // Failed to get settings or server status
+      } finally {
+        managementSettingsLoaded = true;
       }
     })();
 
@@ -645,7 +812,13 @@
     const handleManagementServerStatus = (data) => {
       if (data.isRunning) {
         applyManagementStatus('running');
-        // Don't override managementPort here - user may have changed it from saved settings
+        const statusPort = coercePort(data.port);
+        if (statusPort !== null && statusPort !== coercePort(managementPort)) {
+          managementPort = statusPort;
+        }
+        if (serverPath && managementSettingsLoaded) {
+          void loadInviteInfo();
+        }
       } else {
         applyManagementStatus('stopped');
         connectedClients = 0;
@@ -698,11 +871,14 @@
       port: port,
       maxRam: maxRam
     }));
+    const normalizedPort = coercePort(port);
+    const normalizedMaxRam = coercePort(maxRam);
+    const normalizedManagementPort = coercePort(managementPort);
     // Save settings to electron store
     window.electron.invoke('update-settings', {
-      port: port,
-      maxRam: maxRam,
-      managementPort: managementPort,
+      port: normalizedPort ?? port,
+      maxRam: normalizedMaxRam ?? maxRam,
+      managementPort: normalizedManagementPort ?? managementPort,
       autoStartMinecraft: autoStartMinecraft,
       autoStartManagement: autoStartManagement
     }).catch((error) => {
@@ -717,6 +893,24 @@
     });
   }
   
+  async function runAutoStartOnce() {
+    if (autoStartInProgress || window.appStartupCompleted) {
+      return;
+    }
+    if (!validateServerPath(serverPath)) {
+      pendingAutoStart = true;
+      return;
+    }
+    autoStartInProgress = true;
+    pendingAutoStart = false;
+    try {
+      await handleAutoStart();
+      window.appStartupCompleted = true;
+    } finally {
+      autoStartInProgress = false;
+    }
+  }
+
   // Handle auto-start functionality
   async function handleAutoStart() {
     if (!validateServerPath(serverPath)) {
@@ -772,12 +966,13 @@
     applyManagementStatus('starting');
     try {
       const result = await window.electron.invoke('start-management-server', {
-        port: managementPort,
+        port: coercePort(managementPort) || managementPort,
         serverPath: serverPath
       });
       
       if (result.success) {
         applyManagementStatus('running');
+        await loadInviteInfo();
         logger.info('Management server started successfully', {
           category: 'ui',
           data: {
@@ -1061,10 +1256,55 @@
       <!-- Help text - compact -->
       {#if !helpTextDismissed}
         <div class="management-help-compact">
-          <span>Remote clients connect to: <strong>your-server-ip:{managementPort}</strong></span>
+          <span>Share the invite link below with your clients.</span>
           <button class="dismiss-btn" on:click={dismissHelpText} title="Dismiss this message">×</button>
         </div>
       {/if}
+
+      <div class="management-invite">
+        <div class="invite-row">
+          <label class="invite-label" for="invite-link-input">Invite link</label>
+          <div class="invite-actions">
+            <input
+              id="invite-link-input"
+              class="invite-input"
+              type="text"
+              readonly
+              value={inviteLink}
+              placeholder="Loading invite link..."
+            />
+            <button class="btn-compact" type="button" on:click={copyInviteLink} disabled={!inviteLink}>
+              {inviteCopied ? 'Copied' : 'Copy'}
+            </button>
+            <button class="btn-compact" type="button" on:click={regenerateInviteSecret} disabled={inviteStatus === 'saving'}>
+              Regenerate
+            </button>
+          </div>
+          {#if inviteWarning}
+            <div class="invite-warning">{inviteWarning}</div>
+          {/if}
+          {#if inviteError}
+            <div class="invite-error">{inviteError}</div>
+          {/if}
+        </div>
+
+        <div class="invite-row">
+          <label class="invite-label" for="invite-host-input">Static host (optional)</label>
+          <div class="invite-actions">
+            <input
+              id="invite-host-input"
+              class="invite-input"
+              type="text"
+              bind:value={inviteHostInput}
+              placeholder="mc.example.com"
+              disabled={inviteStatus === 'saving'}
+            />
+            <button class="btn-compact" type="button" on:click={saveInviteHost} disabled={inviteStatus === 'saving'}>
+              Save
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
   
@@ -1515,11 +1755,6 @@
     gap: 0.5rem;
   }
 
-  .management-help-compact strong {
-    color: #f59e0b;
-    font-family: monospace;
-  }
-
   .dismiss-btn {
     background: none;
     border: none;
@@ -1535,6 +1770,52 @@
     justify-content: center;
     border-radius: 50%;
     transition: background-color 0.2s;
+  }
+
+  .management-invite {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+  }
+
+  .invite-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .invite-label {
+    font-size: 0.85rem;
+    color: #cbd5f5;
+  }
+
+  .invite-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .invite-input {
+    flex: 1 1 260px;
+    min-width: 220px;
+    background-color: #1f2937;
+    color: #e5e7eb;
+    border: 1px solid #374151;
+    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.85rem;
+  }
+
+  .invite-warning {
+    color: #fbbf24;
+    font-size: 0.8rem;
+  }
+
+  .invite-error {
+    color: #f87171;
+    font-size: 0.8rem;
   }
 
   .dismiss-btn:hover {
@@ -1844,3 +2125,4 @@
     }
   }
 </style>
+

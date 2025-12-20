@@ -223,6 +223,36 @@
 
   // Save instances to persistent storage
 
+  let managementAutoStartTriggered = false;
+
+  async function autoStartManagementIfNeeded(instancesList) {
+    if (managementAutoStartTriggered) return;
+    if (!Array.isArray(instancesList) || instancesList.length === 0) return;
+    const serverInstance = instancesList.find((inst) => inst && inst.type === "server" && inst.path);
+    if (!serverInstance) return;
+    managementAutoStartTriggered = true;
+    try {
+      const settingsResult = await window.electron.invoke("get-settings");
+      if (!settingsResult || !settingsResult.success || !settingsResult.settings) return;
+      const settings = settingsResult.settings;
+      if (!settings.autoStartManagement) return;
+      const parsedPort = Number.parseInt(String(settings.managementPort || ""), 10);
+      const portToUse = Number.isFinite(parsedPort) ? parsedPort : 8080;
+      await window.electron.invoke("start-management-server", {
+        port: portToUse,
+        serverPath: serverInstance.path,
+      });
+    } catch (error) {
+      logger.debug("Auto-start management server failed", {
+        category: "core",
+        data: {
+          component: "App",
+          errorMessage: error.message,
+        },
+      });
+    }
+  }
+
   onMount(() => {
     // Enhanced component lifecycle logging
     logger.debug("App component mounted", {
@@ -572,6 +602,8 @@
               })();
             }
           }
+          // Ensure management server auto-starts even if user lands on client first
+          autoStartManagementIfNeeded(instances);
         } else {
           logger.info("No valid instances found during setup check", {
             category: "core",
@@ -975,7 +1007,7 @@
 
   // Handle client setup completion
   function handleClientSetupComplete(event) {
-    const { path, serverIp, serverPort } = event.detail;
+    const { path, serverIp, serverPort, serverProtocol, inviteSecret, managementCertFingerprint } = event.detail;
 
     logger.info("Client setup completed", {
       category: "core",
@@ -985,6 +1017,7 @@
         hasPath: !!path,
         hasServerIp: !!serverIp,
         serverPort,
+        serverProtocol,
       },
     });
 
@@ -996,6 +1029,9 @@
       path: path,
       serverIp: serverIp,
       serverPort: serverPort,
+      serverProtocol: serverProtocol || "https",
+      inviteSecret: inviteSecret || "",
+      managementCertFingerprint: managementCertFingerprint || "",
     };
 
     // Add to instances array and set as current
@@ -1089,6 +1125,41 @@
           instanceId: instance?.id,
         },
       });
+    }
+  }
+
+  function handleClientInstanceUpdated(event) {
+    const detail = event?.detail || {};
+    const targetId = detail.id;
+    const targetPath = detail.path;
+    if (!targetId && !targetPath) return;
+
+    instances = instances.map((inst) => {
+      if (!inst || inst.type !== "client") return inst;
+      if (targetId && inst.id !== targetId && inst.path !== targetPath) return inst;
+      if (!targetId && targetPath && inst.path !== targetPath) return inst;
+
+      return {
+        ...inst,
+        ...(typeof detail.serverIp === "string" ? { serverIp: detail.serverIp } : {}),
+        ...(detail.serverPort !== undefined ? { serverPort: detail.serverPort } : {}),
+        ...(typeof detail.serverProtocol === "string" ? { serverProtocol: detail.serverProtocol } : {}),
+        ...(typeof detail.inviteSecret === "string" ? { inviteSecret: detail.inviteSecret } : {}),
+        ...(typeof detail.managementCertFingerprint === "string"
+          ? { managementCertFingerprint: detail.managementCertFingerprint }
+          : {})
+      };
+    });
+
+    const updated = instances.find(
+      (inst) =>
+        inst &&
+        inst.type === "client" &&
+        ((targetId && inst.id === targetId) || (targetPath && inst.path === targetPath)),
+    );
+    if (updated) {
+      currentInstance = updated;
+      storeCurrentInstance(updated);
     }
   }
 
@@ -1602,6 +1673,7 @@
             <ClientInterface
               instance={currentInstance}
               onOpenAppSettings={() => (showAppSettings = true)}
+              on:instance-updated={handleClientInstanceUpdated}
               on:deleted={(e) => {
                 logger.info("Client instance deleted", {
                   category: "core",

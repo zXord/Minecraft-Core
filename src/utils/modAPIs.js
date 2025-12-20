@@ -8,7 +8,7 @@ const MODRINTH_API = 'https://api.modrinth.com/v2';
 
 // CurseForge API base URL and key
 const CURSEFORGE_API = 'https://api.curseforge.com/v1';
-const CF_API_KEY = '';
+const CF_API_KEY = null;
 
 /**
  * Fetch with retry mechanism for handling rate limits

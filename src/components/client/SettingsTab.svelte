@@ -56,6 +56,12 @@
   // Download source preferences (Modrinth is now default)
   let primaryDownloadSource = 'modrinth';
   let fallbackDownloadSource = 'server';
+
+  // Invite link updates (client connection info)
+  let inviteLinkInput = '';
+  let inviteLinkStatus = 'idle'; // idle, saving
+  let inviteLinkError = '';
+  let inviteLinkSeed = '';
   
   // Load download preferences on component mount
   import { onMount } from 'svelte';
@@ -181,6 +187,143 @@
       // Preferences updated successfully
     } catch (error) {
       // Failed to save preferences, user will see no visual feedback but can try again
+    }
+  }
+
+  function isValidIpv4(host) {
+    const ipv4Regex = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+    return ipv4Regex.test(host);
+  }
+
+  function isValidIpv6(host) {
+    if (!host || !host.includes(':')) return false;
+    return /^[0-9a-fA-F:]+$/.test(host);
+  }
+
+  function formatInviteHost(host) {
+    if (isValidIpv6(host) && !host.startsWith('[')) {
+      return `[${host}]`;
+    }
+    return host;
+  }
+
+  function validateInviteHost(host) {
+    if (!host) return false;
+    const hostRegex = /^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$/;
+    return hostRegex.test(host) || isValidIpv4(host) || isValidIpv6(host);
+  }
+
+  function validateInvitePort(port) {
+    const portNum = parseInt(port, 10);
+    return !isNaN(portNum) && portNum >= 1 && portNum <= 65535;
+  }
+
+  function parseInviteLink(value) {
+    const trimmed = (value || '').trim();
+    if (!trimmed) return { ok: false, error: 'Invite link is required.' };
+
+    let parsed;
+    try {
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+        parsed = new URL(trimmed);
+      } else {
+        parsed = new URL(`https://${trimmed}`);
+      }
+    } catch {
+      return { ok: false, error: 'Invalid invite link format.' };
+    }
+
+    let protocol = (parsed.protocol || '').replace(':', '').toLowerCase();
+    if (protocol === 'mccore' || protocol === 'minecraft-core' || protocol === 'mc') {
+      protocol = 'https';
+    }
+    if (protocol !== 'http' && protocol !== 'https') {
+      protocol = 'https';
+    }
+
+    const host = parsed.hostname || '';
+    const port = parsed.port || '8080';
+    const secret = parsed.searchParams.get('secret') || parsed.searchParams.get('s') || '';
+    const fingerprint = parsed.searchParams.get('fp') || parsed.searchParams.get('fingerprint') || '';
+
+    if (!host || !validateInviteHost(host)) {
+      return { ok: false, error: 'Invite link host is invalid.' };
+    }
+    if (!validateInvitePort(port)) {
+      return { ok: false, error: 'Invite link port is invalid.' };
+    }
+    if (!secret) {
+      return { ok: false, error: 'Invite link is missing the secret.' };
+    }
+
+    return { ok: true, host, port, protocol, secret, fingerprint };
+  }
+
+  function buildInviteLinkFromInstance() {
+    const host = instance?.serverIp ? String(instance.serverIp).trim() : '';
+    const port = instance?.serverPort ? String(instance.serverPort).trim() : '8080';
+    const protocol = instance?.serverProtocol && String(instance.serverProtocol).trim().toLowerCase() === 'http' ? 'http' : 'https';
+    const secret = instance?.inviteSecret ? String(instance.inviteSecret).trim() : '';
+    const fingerprint = instance?.managementCertFingerprint ? String(instance.managementCertFingerprint).trim() : '';
+    if (!host || !secret) return '';
+    const fpParam = fingerprint ? `&fp=${encodeURIComponent(fingerprint)}` : '';
+    const formattedHost = formatInviteHost(host);
+    return `${protocol}://${formattedHost}:${port}/?secret=${encodeURIComponent(secret)}${fpParam}`;
+  }
+
+  $: {
+    const currentInvite = buildInviteLinkFromInstance();
+    if (currentInvite && (inviteLinkInput === '' || inviteLinkInput === inviteLinkSeed)) {
+      inviteLinkSeed = currentInvite;
+      inviteLinkInput = currentInvite;
+    }
+  }
+
+  async function handleInviteLinkSave() {
+    inviteLinkError = '';
+    inviteLinkStatus = 'saving';
+
+    const parsed = parseInviteLink(inviteLinkInput);
+    if (!parsed.ok) {
+      inviteLinkError = parsed.error;
+      inviteLinkStatus = 'idle';
+      return;
+    }
+
+    try {
+      const res = await window.electron.invoke('save-client-config', {
+        path: instance?.path,
+        serverIp: parsed.host,
+        serverPort: parsed.port,
+        serverProtocol: parsed.protocol,
+        inviteSecret: parsed.secret,
+        managementCertFingerprint: parsed.fingerprint || '',
+        clientId: instance?.clientId || instance?.id,
+        clientName: instance?.clientName || instance?.name,
+        sessionToken: instance?.sessionToken
+      });
+
+      if (!res || !res.success) {
+        inviteLinkError = res?.error || 'Failed to update invite link.';
+      } else {
+        const updatedLink = `${parsed.protocol}://${formatInviteHost(parsed.host)}:${parsed.port}/?secret=${encodeURIComponent(parsed.secret)}`;
+        inviteLinkSeed = updatedLink;
+        inviteLinkInput = updatedLink;
+        dispatch('invite-link-updated', {
+          id: instance?.id,
+          path: instance?.path,
+          serverIp: parsed.host,
+          serverPort: parsed.port,
+          serverProtocol: parsed.protocol,
+          inviteSecret: parsed.secret,
+          managementCertFingerprint: parsed.fingerprint || ''
+        });
+        dispatch('show-message', { type: 'success', message: 'Invite link updated.' });
+      }
+    } catch (error) {
+      inviteLinkError = error?.message || 'Failed to update invite link.';
+    } finally {
+      inviteLinkStatus = 'idle';
     }
   }
 
@@ -473,6 +616,44 @@
               Downloads will attempt from {getFallbackSourceName(primaryDownloadSource)} first, then use {getFallbackSourceName(fallbackDownloadSource)} as fallback.
             {/if}
           </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Invite Link Card -->
+    <div class="settings-card compact-card">
+      <div class="card-header">
+        <h3>Invite Link</h3>
+      </div>
+      <div class="card-content">
+        <div class="setting-group compact">
+          <label class="setting-label compact" for="invite-link-input">
+            <span class="label-text">Current Invite Link</span>
+          </label>
+          <input
+            id="invite-link-input"
+            class="modern-input"
+            type="text"
+            bind:value={inviteLinkInput}
+            placeholder="https://host:port/?secret=..."
+          />
+        </div>
+        {#if inviteLinkError}
+          <div class="setting-info error">
+            <p class="info-text">{inviteLinkError}</p>
+          </div>
+        {/if}
+        <div class="action-row">
+          <button
+            class="modern-btn primary sm"
+            on:click={handleInviteLinkSave}
+            disabled={inviteLinkStatus === 'saving' || !instance?.path}
+          >
+            {inviteLinkStatus === 'saving' ? 'Saving...' : 'Update Invite Link'}
+          </button>
+        </div>
+        <div class="setting-info compact">
+          <p class="info-text">Paste a new invite link here if the server owner rotates the secret.</p>
         </div>
       </div>
     </div>
@@ -1257,6 +1438,17 @@
     font-size: 0.9rem;
   }
 
+  .modern-input {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    box-sizing: border-box;
+  }
+
   .modern-select.compact {
     padding: 0.4rem;
     font-size: 0.85rem;
@@ -1275,6 +1467,11 @@
     border-radius: 4px;
   }
 
+  .setting-info.error {
+    background: rgba(239, 68, 68, 0.1);
+    border-left-color: #ef4444;
+  }
+
   .setting-info.compact {
     margin-top: 0.5rem;
     padding: 0.5rem;
@@ -1290,5 +1487,11 @@
     font-size: 0.8rem;
     color: var(--text-secondary);
     line-height: 1.4;
+  }
+
+  .action-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0.5rem;
   }
 </style>

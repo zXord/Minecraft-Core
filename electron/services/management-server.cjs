@@ -5,9 +5,12 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { createHash, randomBytes } = require('crypto');
+const https = require('https');
+const fetch = require('node-fetch');
 const { wmicExecAsync } = require('../utils/wmic-utils.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+const { getManagementTlsConfig } = require('../utils/tls-utils.cjs');
 const process = require('process');
 const os = require('os');
 
@@ -23,6 +26,7 @@ class ManagementServer {
     this.app = express();
     this.port = 8080; // Default management port (different from Minecraft)
     this.isRunning = false;
+    this.useHttps = true;
     this.serverPath = null;
     this.clients = new Map(); // Track connected clients
     this.clientTokens = new Map(); // token -> clientId mapping
@@ -31,12 +35,16 @@ class ManagementServer {
     this.versionInfo = { minecraftVersion: null, loaderType: null, loaderVersion: null };
     this.versionWatcher = null;
     this.sseClients = [];
+    this.inviteSecret = '';
     // Track active sockets to enable forceful shutdown if needed
     this.activeSockets = new Set();
     this.appVersion = this.getAppVersion(); // Get current app version
     this.externalHost = null; // External host IP for mod downloads
     this.lastExternalHostCheck = 0; // Timestamp of last external IP detection
     this.externalHostTtlMs = 5 * 60 * 1000; // Refresh external IP detection every 5 minutes when needed
+    this.publicHost = null;
+    this.publicHostLastCheck = 0;
+    this.publicHostTtlMs = 10 * 60 * 1000;
     this.configuredHost = null; // Manually configured host override
     this.detectedPublicHost = null; // Public host detected from client connections
     
@@ -76,6 +84,18 @@ class ManagementServer {
 
   generateToken() {
     return randomBytes(32).toString('hex');
+  }
+
+  setInviteSecret(secret) {
+    if (typeof secret === 'string') {
+      this.inviteSecret = secret.trim();
+    } else {
+      this.inviteSecret = '';
+    }
+  }
+
+  getInviteSecret() {
+    return this.inviteSecret || '';
   }
 
   getRequestIp(req) {
@@ -202,6 +222,31 @@ class ManagementServer {
     }
   }
 
+  async fetchPublicIP() {
+    try {
+      const response = await fetch('https://api.ipify.org?format=json', { timeout: 5000 });
+      if (!response.ok) return null;
+      const data = await response.json();
+      if (data && typeof data.ip === 'string') {
+        return data.ip.trim();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  async refreshPublicHostIfStale() {
+    const now = Date.now();
+    const isStale = !this.publicHost || (now - this.publicHostLastCheck) > this.publicHostTtlMs;
+    if (isStale) {
+      const publicIp = await this.fetchPublicIP();
+      this.publicHost = publicIp || this.detectExternalIP();
+      this.publicHostLastCheck = now;
+    }
+    return this.publicHost;
+  }
+
   updateDetectedPublicHost(hostHeader) {
     if (!hostHeader) return;
     const host = hostHeader.split(':')[0];
@@ -231,18 +276,13 @@ class ManagementServer {
     return this.getModDownloadHost();
   }
 
-  // Get the host to use for mod download URLs
+  // Get the host to use for status/info (not for download URLs)
   getModDownloadHost() {
-    // Priority: manually configured > detected from client connections > detected external IP > localhost fallback
+    // Priority: manually configured > detected external IP > localhost fallback
     if (this.configuredHost) {
       return this.configuredHost;
     }
-    
-    // If we have clients connected, use the host they connected to
-    if (this.detectedPublicHost) {
-      return this.detectedPublicHost;
-    }
-    
+
     this.refreshExternalHostIfStale();
     
     return this.externalHost || 'localhost';
@@ -362,6 +402,16 @@ class ManagementServer {
   });    // Client registration
     this.app.post('/api/client/register', (req, res) => {
       const { clientId, name } = req.body;
+      const requiredSecret = this.getInviteSecret();
+      if (requiredSecret) {
+        const providedSecret =
+          (req.body && typeof req.body.secret === 'string' ? req.body.secret : '') ||
+          (req.get && req.get('x-invite-secret')) ||
+          (req.query && typeof req.query.secret === 'string' ? req.query.secret : '');
+        if (!providedSecret || providedSecret.trim() !== requiredSecret) {
+          return res.status(401).json({ error: 'Invalid invite secret' });
+        }
+      }
       
       if (!clientId || !name) {
         return res.status(400).json({ error: 'Client ID and name required' });
@@ -658,6 +708,7 @@ class ManagementServer {
     let lastIsRunning = null;
     let lastTransitionTs = 0;
     this.app.get('/api/server/status', (_req, res) => {
+      void _req;
       try {
         const serverManager = require('./server-manager.cjs');
         const state = serverManager.getServerState();
@@ -884,7 +935,7 @@ class ManagementServer {
             fileName: file,
             size: (() => { try { return fs.statSync(path.join(assetsDir, file)).size; } catch { return 0; } })(),
             lastModified: (() => { try { return fs.statSync(path.join(assetsDir, file)).mtime; } catch { return new Date(0); } })(),
-            downloadUrl: `http://${this.getRequestAwareDownloadHost(req)}:${this.port}/api/assets/download/${type}/${encodeURIComponent(file)}`,
+            downloadUrl: `/api/assets/download/${type}/${encodeURIComponent(file)}`,
             versionNumber: extractVersionFromFilename(file),
             name: cleanName(file),
             checksum: (() => { try { return this.calculateFileChecksum(path.join(assetsDir, file)); } catch { return null; } })()
@@ -1020,11 +1071,26 @@ class ManagementServer {
 
     this.log('info', 'Starting management server', {
       requestedPort: port,
-      serverPath
+      serverPath,
+      protocol: this.useHttps ? 'https' : 'http'
     });
+
+    let tlsConfig = null;
+    if (this.useHttps) {
+      try {
+        tlsConfig = await getManagementTlsConfig();
+      } catch (error) {
+        const message = error && error.message ? error.message : 'unknown';
+        this.log('error', 'Failed to initialize management server TLS', {
+          error: message,
+          stack: error && error.stack ? error.stack : undefined
+        });
+        return { success: false, error: `TLS initialization failed: ${message}` };
+      }
+    }
     
     return new Promise((resolve) => {
-      this.server = this.app.listen(this.port, () => {
+      const onListening = () => {
         this.isRunning = true;
 
         // Configure shorter keep-alive to help shutdowns complete faster
@@ -1044,12 +1110,14 @@ class ManagementServer {
           socket.on('error', remove);
         });
 
-        // Detect external IP for mod downloads
+        // Detect external IP for status info
         this.externalHost = this.detectExternalIP();
+        this.refreshPublicHostIfStale().catch(() => {});
         this.log('info', 'Management server started', {
           externalHost: this.externalHost,
           downloadHost: this.getModDownloadHost(),
-          detectedPublicHost: this.detectedPublicHost
+          detectedPublicHost: this.detectedPublicHost,
+          publicHost: this.publicHost
         });
         
         const currentDownloadHost = this.getModDownloadHost();
@@ -1070,9 +1138,17 @@ class ManagementServer {
           port: this.port, 
           externalHost: this.externalHost, 
           detectedPublicHost: this.detectedPublicHost,
-          downloadHost: this.getModDownloadHost()
+          downloadHost: this.getModDownloadHost(),
+          protocol: this.useHttps ? 'https' : 'http'
         });
-      });
+      };
+
+      if (this.useHttps) {
+        this.server = https.createServer({ key: tlsConfig.key, cert: tlsConfig.cert }, this.app);
+        this.server.listen(this.port, onListening);
+      } else {
+        this.server = this.app.listen(this.port, onListening);
+      }
       
       this.server.on('error', (error) => {
         this.isRunning = false;
@@ -1290,13 +1366,12 @@ class ManagementServer {
   }
   
   // Get list of required mods for clients
-  async getRequiredMods(req = null) {
+  async getRequiredMods() {
     if (!this.serverPath) {
       return [];
     }
         
     try {
-      const downloadHost = this.getRequestAwareDownloadHost(req);
       const clientModsDir = path.join(this.serverPath, 'client', 'mods');
       const serverModsDir = path.join(this.serverPath, 'mods');
       
@@ -1357,7 +1432,7 @@ class ManagementServer {
               lastModified: stats.mtime,
               required: isRequired,
               checksum: this.calculateFileChecksum(modPath),
-              downloadUrl: `http://${downloadHost}:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
+              downloadUrl: `/api/mods/download/${encodeURIComponent(file)}?location=client`,
               projectId: projectId,
               versionId: versionId,
               versionNumber: versionNumber,
@@ -1409,7 +1484,7 @@ class ManagementServer {
                 lastModified: stats.mtime,
                 required: isRequired,
                 checksum: this.calculateFileChecksum(modPath),
-                downloadUrl: `http://${downloadHost}:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
+                downloadUrl: `/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
                 projectId: projectId,
                 versionId: versionId,
                 versionNumber: versionNumber,
@@ -1433,12 +1508,12 @@ class ManagementServer {
     }
   }
   // Get all client mods (both required and optional)
-  async getAllClientMods(req = null) {
+  async getAllClientMods() {
     if (!this.serverPath) {
       return [];
     }
     
-    try {      const downloadHost = this.getRequestAwareDownloadHost(req);
+    try {
       const clientModsDir = path.join(this.serverPath, 'client', 'mods');
       const serverModsDir = path.join(this.serverPath, 'mods');
 
@@ -1499,7 +1574,7 @@ class ManagementServer {
               lastModified: stats.mtime,
               required: isRequired,
               checksum: this.calculateFileChecksum(modPath),
-              downloadUrl: `http://${downloadHost}:${this.port}/api/mods/download/${encodeURIComponent(file)}?location=client`,
+              downloadUrl: `/api/mods/download/${encodeURIComponent(file)}?location=client`,
               projectId: projectId,
               versionId: versionId,
               versionNumber: versionNumber,
@@ -1551,7 +1626,7 @@ class ManagementServer {
                 lastModified: stats.mtime,
                 required: isRequired,
                 checksum: this.calculateFileChecksum(modPath),
-                downloadUrl: `http://${downloadHost}:${this.port}/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
+                downloadUrl: `/api/mods/download/${encodeURIComponent(serverMod)}?location=client`,
                 projectId: projectId,
                 versionId: versionId,
                 versionNumber: versionNumber,
@@ -1772,8 +1847,10 @@ class ManagementServer {
       clientCount: this.clients.size,
       version: this.versionInfo,
       appVersion: this.appVersion, // Include app version in status
+      protocol: this.useHttps ? 'https' : 'http',
       downloadHost: this.getModDownloadHost(),
       externalHost: this.externalHost,
+      publicHost: this.publicHost,
       detectedPublicHost: this.detectedPublicHost,
       configuredHost: this.configuredHost
     };

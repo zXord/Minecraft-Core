@@ -3,6 +3,7 @@ const path = require('path');
 const fetch = require('node-fetch');
 const nbt = require('prismarine-nbt');
 const zlib = require('zlib');
+const { getManagementHttpsAgent } = require('./tls-utils.cjs');
 
 /**
  * Create or update the servers.dat and options.txt files so the given server
@@ -17,6 +18,7 @@ const zlib = require('zlib');
  *   management server's /api/server/info endpoint.
  * @param {boolean} [preserveExistingServers] - If true, only creates server entry if it doesn't exist, preserving user modifications
  * @param {string|null} [sessionToken] - Optional management server session token
+ * @param {string} [managementProtocol] - Optional management server protocol (http/https)
  * @returns {Promise<{success: boolean, error?: string, preserved?: boolean}>}
  */
 async function ensureServersDat(
@@ -26,17 +28,21 @@ async function ensureServersDat(
   serverName = 'Minecraft Server',
   minecraftPortOverride = null,
   preserveExistingServers = false,
-  sessionToken = null
+  sessionToken = null,
+  managementProtocol = 'https'
 ) {
   try {
     let minecraftPort = minecraftPortOverride || 25565;
 
     if (!minecraftPortOverride && managementPort) {
+      const protocol = managementProtocol === 'http' ? 'http' : 'https';
+      const agent = protocol === 'https' ? await getManagementHttpsAgent() : undefined;
       const infoRes = await fetch(
-        `http://${serverIp}:${managementPort}/api/server/info`,
+        `${protocol}://${serverIp}:${managementPort}/api/server/info`,
         {
           timeout: 5000,
-          headers: sessionToken ? { 'X-Session-Token': sessionToken } : undefined
+          headers: sessionToken ? { 'X-Session-Token': sessionToken } : undefined,
+          agent
         }
       ).catch(() => null);
       if (infoRes?.ok) {

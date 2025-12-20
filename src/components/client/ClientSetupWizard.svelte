@@ -8,21 +8,26 @@
   
   // State variables
   let path = '';
+  let inviteLink = '';
   let serverIp = '';
   let serverPort = '8080'; // Default management server port
+  let serverProtocol = 'https';
+  let inviteSecret = '';
+  let managementCertFingerprint = '';
   let installing = false;
   let installProgress = 0;
   let installSpeed = '0 MB/s';
   let installLogs = [];
   let sessionToken = '';
   let step = 'chooseFolder'; // chooseFolder → configureConnection → done
-  let ipValid = false;
+  let inviteValid = false;
+  let inviteError = '';
   let connectionStatus = 'disconnected'; // disconnected, connecting, connected
   
   // Functions
   async function selectFolder() {
     try {
-      const result = await window.electron.invoke('select-folder');
+      const result = await window.electron.invoke('select-folder', { instanceType: 'client' });
       if (!result) {
         return;
       }      path = result;
@@ -36,30 +41,116 @@
     }
   }
   
+  function isValidIpv4(host) {
+    const ipv4Regex = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+    return ipv4Regex.test(host);
+  }
+
+  function isValidIpv6(host) {
+    if (!host || !host.includes(':')) return false;
+    return /^[0-9a-fA-F:]+$/.test(host);
+  }
+
   function validateIp(ip) {
-    // Simple IP validation regex - matches IPv4 addresses and hostnames
-    const ipRegex = /^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$/;
-    return ipRegex.test(ip);
+    // Matches IPv4, IPv6, or hostname
+    const hostRegex = /^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$/;
+    return hostRegex.test(ip) || isValidIpv4(ip) || isValidIpv6(ip);
+  }
+
+  function formatHostForUrl(host) {
+    if (isValidIpv6(host) && !host.startsWith('[')) {
+      return `[${host}]`;
+    }
+    return host;
   }
   
   function validatePort(port) {
     const portNum = parseInt(port, 10);
     return !isNaN(portNum) && portNum >= 1 && portNum <= 65535;
   }
+
+  function parseInviteLink(value) {
+    const trimmed = (value || '').trim();
+    if (!trimmed) return { ok: false, error: 'Invite link is required.' };
+
+    let parsed;
+    try {
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+        parsed = new URL(trimmed);
+      } else {
+        parsed = new URL(`https://${trimmed}`);
+      }
+    } catch {
+      return { ok: false, error: 'Invalid invite link format.' };
+    }
+
+    let protocol = (parsed.protocol || '').replace(':', '').toLowerCase();
+    if (protocol === 'mccore' || protocol === 'minecraft-core' || protocol === 'mc') {
+      protocol = 'https';
+    }
+    if (protocol !== 'http' && protocol !== 'https') {
+      protocol = 'https';
+    }
+
+    const host = parsed.hostname || '';
+    const port = parsed.port || '8080';
+    const secret = parsed.searchParams.get('secret') || parsed.searchParams.get('s') || '';
+    const fingerprint = parsed.searchParams.get('fp') || parsed.searchParams.get('fingerprint') || '';
+
+    if (!host || !validateIp(host)) {
+      return { ok: false, error: 'Invite link host is invalid.' };
+    }
+    if (!validatePort(port)) {
+      return { ok: false, error: 'Invite link port is invalid.' };
+    }
+    if (!secret) {
+      return { ok: false, error: 'Invite link is missing the secret.' };
+    }
+
+    return { ok: true, host, port, protocol, secret, fingerprint };
+  }
   
-  function onIpChange() {
-    ipValid = validateIp(serverIp) && validatePort(serverPort);
+  function onInviteLinkChange() {
+    inviteError = '';
+    inviteValid = false;
+    serverIp = '';
+    serverPort = '8080';
+    serverProtocol = 'https';
+    inviteSecret = '';
+    managementCertFingerprint = '';
+
+    const parsed = parseInviteLink(inviteLink);
+    if (!parsed.ok) {
+      inviteError = parsed.error;
+      return;
+    }
+    serverIp = parsed.host;
+    serverPort = parsed.port;
+    serverProtocol = parsed.protocol;
+    inviteSecret = parsed.secret;
+    managementCertFingerprint = parsed.fingerprint || '';
+    inviteValid = true;
   }
   
   async function testConnection() {
-    if (!ipValid) return;
+    if (!inviteValid) return;
     
     connectionStatus = 'connecting';
     installLogs = [...installLogs, `Testing connection to ${serverIp}:${serverPort}...`];
     
     try {
+      try {
+        await window.electron.invoke('cache-management-cert-pin', {
+          host: serverIp,
+          port: serverPort,
+          fingerprint: managementCertFingerprint || ''
+        });
+      } catch {
+        // ignore pin caching failures during connection test
+      }
+
       // Try to connect to the management server
-      const managementUrl = `http://${serverIp}:${serverPort}/api/test`;
+      const managementUrl = `${serverProtocol}://${formatHostForUrl(serverIp)}:${serverPort}/api/test`;
       
       const response = await fetch(managementUrl, {
         method: 'GET',
@@ -122,7 +213,7 @@
       const clientName = `Client-${new Date().toLocaleTimeString()}`;
       
       try {
-        const registrationUrl = `http://${serverIp}:${serverPort}/api/client/register`;
+        const registrationUrl = `${serverProtocol}://${formatHostForUrl(serverIp)}:${serverPort}/api/client/register`;
         const registrationResponse = await fetch(registrationUrl, {
           method: 'POST',
           headers: {
@@ -130,7 +221,8 @@
           },
           body: JSON.stringify({
             clientId: clientId,
-            name: clientName
+            name: clientName,
+            secret: inviteSecret
           }),
           signal: AbortSignal.timeout(10000)
         });
@@ -163,7 +255,10 @@
         serverPort,
         clientId,
         clientName,
-        sessionToken
+        sessionToken,
+        serverProtocol,
+        inviteSecret,
+        managementCertFingerprint
       });
       
       // For now, we're just setting up the connection
@@ -221,7 +316,10 @@
       dispatch('setup-complete', { 
         path, 
         serverIp,
-        serverPort
+        serverPort,
+        serverProtocol,
+        inviteSecret,
+        managementCertFingerprint
       });
     }, 0);
   }
@@ -251,32 +349,24 @@
     <div class="connection-config">
       <h2>Configure Server Connection</h2>
       <div class="form-group">
-        <label for="server-ip">Server Address</label>
+        <label for="invite-link">Invite Link</label>
         <input 
           type="text" 
-          id="server-ip" 
-          bind:value={serverIp} 
-          on:input={onIpChange}
-          placeholder="Enter server IP or hostname"
+          id="invite-link" 
+          bind:value={inviteLink} 
+          on:input={onInviteLinkChange}
+          placeholder="https://host:port/?secret=..."
         />
-      </div>
-      
-      <div class="form-group">
-        <label for="server-port">Server Port</label>
-        <input 
-          type="text" 
-          id="server-port" 
-          bind:value={serverPort} 
-          on:input={onIpChange}
-          placeholder="8080"
-        />
+        {#if inviteError}
+          <small class="input-error">{inviteError}</small>
+        {/if}
       </div>
       
       <div class="button-group">
         <button 
           class="test-button" 
           on:click={testConnection}
-          disabled={!ipValid || connectionStatus === 'connecting'}
+          disabled={!inviteValid || connectionStatus === 'connecting'}
         >
           {#if connectionStatus === 'connecting'}
             Testing Connection...
@@ -289,7 +379,7 @@
         
         <button 
           class="action-button" 
-          disabled={!ipValid || installing || connectionStatus !== 'connected'} 
+          disabled={!inviteValid || installing || connectionStatus !== 'connected'} 
           on:click={saveClientConfiguration}
         >
           {installing ? 'Setting Up Client...' : 'Save & Continue'}
@@ -384,6 +474,13 @@
   input:focus {
     outline: none;
     border-color: #3b82f6;
+  }
+
+  .input-error {
+    display: block;
+    margin-top: 0.35rem;
+    color: #f87171;
+    font-size: 0.85rem;
   }
   
   .button-group {

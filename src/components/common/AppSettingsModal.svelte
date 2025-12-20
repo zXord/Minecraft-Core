@@ -30,6 +30,7 @@
   // Browser panel status for Start/Stop UX (decoupled from management server)
   let panelIsRunning = false;
   let panelPort = null;
+  let panelProtocol = 'https';
   let panelStatusText = 'Unknown';
   let panelError = '';
   let panelBusy = false;
@@ -220,15 +221,18 @@
       if (res && res.success && res.status) {
         panelIsRunning = !!res.status.isRunning;
         panelPort = res.status.port || null;
+        panelProtocol = res.status.protocol || 'https';
         panelStatusText = panelIsRunning ? `Running on port ${panelPort}` : 'Stopped';
       } else {
         panelIsRunning = false;
         panelPort = null;
+        panelProtocol = 'https';
         panelStatusText = 'Stopped';
       }
     } catch {
       panelIsRunning = false;
       panelPort = null;
+      panelProtocol = 'https';
       panelStatusText = 'Stopped';
     }
   }
@@ -333,13 +337,15 @@
     window.electron.on('browser-panel-status', (_evt, payload) => {
       panelIsRunning = !!(payload && payload.isRunning);
       panelPort = payload && payload.port ? payload.port : panelPort;
+      if (payload && payload.protocol) panelProtocol = payload.protocol;
       panelStatusText = panelIsRunning ? `Running on port ${panelPort}` : 'Stopped';
     });
   }
 
   async function openPanelInBrowser() {
     try {
-      const url = `http://localhost:${panelPort || browserPanelPort}/`;
+      const protocol = panelProtocol || 'https';
+      const url = `${protocol}://localhost:${panelPort || browserPanelPort}/`;
       const result = await window.electron.invoke('open-external-url', url);
       if (!result || !result.success) {
         await window.electron.invoke('show-error-dialog', { title: 'Open in Browser', message: 'Failed to open the web panel in your browser.', detail: result?.error || 'Unknown error' });

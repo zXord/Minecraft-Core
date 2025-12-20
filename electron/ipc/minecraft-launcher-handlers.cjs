@@ -11,14 +11,58 @@ const https = require('https');
 const { readModMetadataFromJar } = require('./mod-utils/mod-file-manager.cjs');
 const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
+const { getManagementHttpsAgent } = require('../utils/tls-utils.cjs');
 
 // In-memory lock to prevent race conditions during state operations
 let stateLockPromise = Promise.resolve();
 
-function getServerDownloadHeaders(url, serverInfo) {
-  if (!serverInfo || !serverInfo.sessionToken || !url) return null;
+function normalizeManagementProtocol(value) {
+  if (typeof value !== 'string') return 'https';
+  const normalized = value.trim().toLowerCase();
+  return normalized === 'http' ? 'http' : 'https';
+}
+
+function getManagementBaseUrl(serverInfo) {
+  if (!serverInfo || !serverInfo.serverIp || !serverInfo.serverPort) return '';
+  const protocol = normalizeManagementProtocol(serverInfo.serverProtocol);
+  return `${protocol}://${serverInfo.serverIp}:${serverInfo.serverPort}`;
+}
+
+function resolveDownloadUrl(url, serverInfo) {
+  if (!url || typeof url !== 'string') return '';
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  const base = getManagementBaseUrl(serverInfo);
+  if (!base) return '';
+  return url.startsWith('/') ? `${base}${url}` : `${base}/${url}`;
+}
+
+async function buildManagementRequestOptions(url, serverInfo) {
+  const options = {};
+  const headers = getServerDownloadHeaders(url, serverInfo);
+  if (headers) {
+    options.headers = headers;
+  }
   try {
-    const parsed = new URL(url);
+    const base = getManagementBaseUrl(serverInfo);
+    const resolved = resolveDownloadUrl(url, serverInfo);
+    if (base && resolved) {
+      const baseOrigin = new URL(base).origin;
+      const resolvedOrigin = new URL(resolved).origin;
+      if (baseOrigin === resolvedOrigin && resolved.startsWith('https:')) {
+        options.agent = await getManagementHttpsAgent();
+      }
+    }
+  } catch {
+    // ignore agent setup errors
+  }
+  return options;
+}
+
+function getServerDownloadHeaders(url, serverInfo) {
+  const resolvedUrl = resolveDownloadUrl(url, serverInfo);
+  if (!serverInfo || !serverInfo.sessionToken || !resolvedUrl) return null;
+  try {
+    const parsed = new URL(resolvedUrl);
     const pathname = parsed.pathname || '';
     if (pathname.startsWith('/api/mods/download/') || pathname.startsWith('/api/assets/download/')) {
       return { 'X-Session-Token': serverInfo.sessionToken };
@@ -718,9 +762,15 @@ function createMinecraftLauncherHandlers(win) {
           }
 
           try {
-            const baseUrl = new URL(serverUrlCandidate.downloadUrl);
+            const candidateUrl = resolveDownloadUrl(serverUrlCandidate.downloadUrl, serverInfo);
+            if (!candidateUrl) {
+              markServerUnavailable('invalid-download-url');
+              return false;
+            }
+            const baseUrl = new URL(candidateUrl);
             const healthUrl = `${baseUrl.origin}/health`;
 
+            const requestOptions = await buildManagementRequestOptions(healthUrl, serverInfo);
             serverAvailability.available = await new Promise((resolve) => {
               const protocol = healthUrl.startsWith('https:') ? https : http;
               let settled = false;
@@ -730,7 +780,7 @@ function createMinecraftLauncherHandlers(win) {
                 resolve(value);
               };
 
-              const req = protocol.get(healthUrl, (res) => {
+              const req = protocol.get(healthUrl, requestOptions, (res) => {
                 res.resume(); // Drain response to free socket
                 finish(res.statusCode >= 200 && res.statusCode < 500);
               });
@@ -881,7 +931,7 @@ function createMinecraftLauncherHandlers(win) {
             // Helper to get download URL for a given source
             async function getUrlForSource(source) {
               if (source === 'server' && mod.downloadUrl && mod.downloadUrl.includes('/api/mods/download/')) {
-                return mod.downloadUrl;
+                return resolveDownloadUrl(mod.downloadUrl, serverInfo);
               } else if (source === 'modrinth' && mod.projectId) {
                 return await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
               }
@@ -900,17 +950,17 @@ function createMinecraftLauncherHandlers(win) {
               try {
                 downloadUrl = await getUrlForSource(source);
                 sourceUsed = source;
+                downloadUrl = resolveDownloadUrl(downloadUrl, serverInfo);
                 if (!downloadUrl) throw new Error('No download URL for source: ' + source);
                 // Try download
+                const requestOptions = await buildManagementRequestOptions(downloadUrl, serverInfo);
                 await new Promise((resolve, reject) => {
                   const protocol = downloadUrl.startsWith('https:') ? https : http;
                   const file = fs.createWriteStream(modPath);
                   let downloadedBytes = 0;
                   let totalBytes = 0;
                   let lastProgressUpdate = Date.now();
-                  const downloadHeaders = getServerDownloadHeaders(downloadUrl, serverInfo);
-                  const requestOptions = downloadHeaders ? { headers: downloadHeaders } : {};
-                  const request = protocol.get(downloadUrl, requestOptions, (response) => {
+                  const request = protocol.get(downloadUrl, requestOptions, async (response) => {
                     if (response.statusCode === 302 || response.statusCode === 301) {
                       file.close();
                       fs.unlinkSync(modPath);
@@ -919,9 +969,14 @@ function createMinecraftLauncherHandlers(win) {
                         reject(new Error(`Failed to download ${mod.fileName}: missing redirect location`));
                         return;
                       }
-                      const redirectHeaders = getServerDownloadHeaders(redirectUrl, serverInfo);
                       const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
-                      const redirectOptions = redirectHeaders ? { headers: redirectHeaders } : {};
+                      let redirectOptions;
+                      try {
+                        redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
+                      } catch (err) {
+                        reject(err);
+                        return;
+                      }
                       const redirectRequest = redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
                         if (redirectResponse.statusCode === 200) {
                           const file2 = fs.createWriteStream(modPath);
@@ -1193,6 +1248,10 @@ function createMinecraftLauncherHandlers(win) {
             }
 
             if (mod.downloadUrl) {
+              const resolvedUrl = resolveDownloadUrl(mod.downloadUrl, serverInfo);
+              if (resolvedUrl) {
+                mod.downloadUrl = resolvedUrl;
+              }
               // Create download progress tracking
               const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
               const modName = mod.name || mod.fileName;
@@ -1212,6 +1271,7 @@ function createMinecraftLauncherHandlers(win) {
               }
               
               // (⬇️  Downloading ${mod.fileName} from: ${mod.downloadUrl})
+              const requestOptions = await buildManagementRequestOptions(mod.downloadUrl, serverInfo);
               await new Promise((resolve, reject) => {
                 const protocol = mod.downloadUrl.startsWith('https:') ? https : http;
                 const file = fs.createWriteStream(modPath);
@@ -1219,17 +1279,20 @@ function createMinecraftLauncherHandlers(win) {
                 let downloadedBytes = 0;
                 let totalBytes = 0;
                 let lastProgressUpdate = Date.now();
-                const downloadHeaders = getServerDownloadHeaders(mod.downloadUrl, serverInfo);
-                const requestOptions = downloadHeaders ? { headers: downloadHeaders } : {};
-                const request = protocol.get(mod.downloadUrl, requestOptions, (response) => {
+                const request = protocol.get(mod.downloadUrl, requestOptions, async (response) => {
                   if (response.statusCode === 302 || response.statusCode === 301) {
                     file.close();
                     fs.unlinkSync(modPath);
                     
                     const redirectUrl = response.headers.location;
                     const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
-                    const redirectHeaders = getServerDownloadHeaders(redirectUrl, serverInfo);
-                    const redirectOptions = redirectHeaders ? { headers: redirectHeaders } : {};
+                    let redirectOptions;
+                    try {
+                      redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
+                    } catch (err) {
+                      reject(err);
+                      return;
+                    }
                     redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
                       if (redirectResponse.statusCode === 200) {
                         const file2 = fs.createWriteStream(modPath);
@@ -1629,16 +1692,16 @@ function createMinecraftLauncherHandlers(win) {
 
         // Internal helper to download with progress and redirect support
         async function downloadFileWithProgress(url, tmpPath, name, id) {
-          const protocol = url.startsWith('https:') ? https : http;
+          const resolvedUrl = resolveDownloadUrl(url, serverInfo) || url;
+          const protocol = resolvedUrl.startsWith('https:') ? https : http;
           const startTime = Date.now();
           let totalBytes = 0;
           let downloadedBytes = 0;
 
+          const requestOptions = await buildManagementRequestOptions(resolvedUrl, serverInfo);
           return new Promise((resolve, reject) => {
             const fileStream = fs.createWriteStream(tmpPath);
-            const downloadHeaders = getServerDownloadHeaders(url, serverInfo);
-            const requestOptions = downloadHeaders ? { headers: downloadHeaders } : {};
-            const request = protocol.get(url, requestOptions, (response) => {
+            const request = protocol.get(resolvedUrl, requestOptions, async (response) => {
               // Handle redirects
               if (response.statusCode === 302 || response.statusCode === 301) {
                 const redirectUrl = response.headers.location;
@@ -1650,8 +1713,12 @@ function createMinecraftLauncherHandlers(win) {
                 fileStream.close();
                 const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
                 const fileStream2 = fs.createWriteStream(tmpPath);
-                const redirectHeaders = getServerDownloadHeaders(redirectUrl, serverInfo);
-                const redirectOptions = redirectHeaders ? { headers: redirectHeaders } : {};
+                let redirectOptions;
+                try {
+                  redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
+                } catch (err) {
+                  return reject(err);
+                }
                 const redirected = redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
                   if (redirectResponse.statusCode !== 200) {
                     fileStream2.close();
@@ -1736,9 +1803,7 @@ function createMinecraftLauncherHandlers(win) {
             // Prefer server download URL, else construct default
             let downloadUrl = item.downloadUrl;
             if (!downloadUrl) {
-              const host = serverInfo.serverIp;
-              const port = serverInfo.serverPort;
-              downloadUrl = `http://${host}:${port}/api/assets/download/${subdir}/${encodeURIComponent(fileName)}`;
+              downloadUrl = `/api/assets/download/${subdir}/${encodeURIComponent(fileName)}`;
             }
 
             const tmpPath = destPath + '.part';
@@ -1857,7 +1922,8 @@ function createMinecraftLauncherHandlers(win) {
           clientName || 'Minecraft Server',
           serverPort,
             false, // Don't preserve - we want to add our server on first launch
-            serverInfo?.sessionToken || null
+            serverInfo?.sessionToken || null,
+            serverInfo?.serverProtocol || 'https'
           );
           
           // Create flag file to indicate servers.dat has been initialized

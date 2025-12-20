@@ -1,12 +1,13 @@
 // Main electron entry point
 const path = require('path');
-const { app, BrowserWindow, Menu, Tray, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, shell, session } = require('electron');
 const { setupIpcHandlers } = require('./ipc-handlers.cjs');
 const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
 const { setMainWindow } = require('./utils/safe-send.cjs');
 const appStore = require('./utils/app-store.cjs');
 const { ensureConfigFile } = require('./utils/config-manager.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
+const { getTlsFingerprint, normalizeFingerprint } = require('./utils/tls-utils.cjs');
 const fs = require('fs');
 const { getUpdateService } = require('./services/update-service.cjs');
 const devConfig = require('../config/dev-config.cjs');
@@ -204,6 +205,238 @@ function openExternalSafely(targetUrl) {
   }
 }
 
+function normalizeHost(value) {
+  if (!value || typeof value !== 'string') return '';
+  return value.replace(/^\[|\]$/g, '').trim().toLowerCase();
+}
+
+function formatHostForUrl(value) {
+  if (!value || typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (trimmed.includes(':') && !trimmed.startsWith('[')) {
+    return `[${trimmed}]`;
+  }
+  return trimmed;
+}
+
+function resolveTrustTarget(targetUrl, portOverride) {
+  if (!targetUrl || typeof targetUrl !== 'string') {
+    return { host: '', port: '', isHttps: false };
+  }
+  const raw = targetUrl.trim();
+  if (!raw) return { host: '', port: '', isHttps: false };
+
+  const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw);
+  let parsed = null;
+  if (hasScheme) {
+    try {
+      parsed = new URL(raw);
+    } catch {
+      parsed = null;
+    }
+  } else {
+    try {
+      parsed = new URL(`https://${formatHostForUrl(raw)}`);
+    } catch {
+      parsed = null;
+    }
+  }
+
+  if (!parsed) {
+    return { host: raw, port: portOverride ? String(portOverride) : '', isHttps: true };
+  }
+
+  const isHttps = parsed.protocol === 'https:';
+  let port = parsed.port || '';
+  if (hasScheme && isHttps && !port) {
+    port = '443';
+  }
+  if (portOverride) {
+    port = String(portOverride);
+  }
+  return { host: parsed.hostname || '', port, isHttps };
+}
+
+function buildPendingPinKey(host, port) {
+  const normalizedHost = normalizeHost(host);
+  const normalizedPort = String(port || '8080');
+  if (!normalizedHost || !normalizedPort) return '';
+  return `${normalizedHost}|${normalizedPort}`;
+}
+
+function getPendingManagementPin(host, port) {
+  const normalizedHost = normalizeHost(host);
+  if (!normalizedHost) return null;
+  const pins = appStore.get('pendingManagementPins') || {};
+  const normalizedPort = port ? String(port || '') : '';
+  if (normalizedPort) {
+    const key = buildPendingPinKey(host, normalizedPort);
+    if (!key) return null;
+    return pins[key] || null;
+  }
+  const entries = Object.values(pins).filter((entry) => normalizeHost(entry && entry.host ? entry.host : '') === normalizedHost);
+  if (!entries.length) return null;
+  return entries.find((entry) => normalizeFingerprint(entry && entry.fingerprint ? entry.fingerprint : '')) || entries[0];
+}
+
+function updatePendingManagementPin(host, port, fingerprint) {
+  const pins = appStore.get('pendingManagementPins') || {};
+  const normalizedHost = normalizeHost(host);
+  if (!normalizedHost) return;
+  const normalizedPort = port ? String(port || '') : '';
+  if (normalizedPort) {
+    const key = buildPendingPinKey(host, normalizedPort);
+    if (!key) return;
+    const existing = pins[key] || {};
+    pins[key] = {
+      host,
+      port: String(port || '8080'),
+      fingerprint: fingerprint || existing.fingerprint || '',
+      updatedAt: new Date().toISOString()
+    };
+  } else {
+    const keys = Object.keys(pins);
+    if (!keys.length) return;
+    for (const key of keys) {
+      const entry = pins[key];
+      if (normalizeHost(entry && entry.host ? entry.host : '') !== normalizedHost) continue;
+      pins[key] = {
+        host: entry.host || host,
+        port: String(entry.port || '8080'),
+        fingerprint: fingerprint || entry.fingerprint || '',
+        updatedAt: new Date().toISOString()
+      };
+    }
+  }
+  appStore.set('pendingManagementPins', pins);
+}
+
+function findClientInstanceForHost(host, port) {
+  const normalizedHost = normalizeHost(host);
+  const normalizedPort = port ? String(port || '') : '';
+  if (!normalizedHost) return null;
+  const instances = appStore.get('instances') || [];
+  if (normalizedPort) {
+    return instances.find((inst) =>
+      inst &&
+      inst.type === 'client' &&
+      normalizeHost(inst.serverIp || '') === normalizedHost &&
+      String(inst.serverPort || '') === normalizedPort
+    ) || null;
+  }
+  return instances.find((inst) =>
+    inst &&
+    inst.type === 'client' &&
+    normalizeHost(inst.serverIp || '') === normalizedHost
+  ) || null;
+}
+
+function storeClientInstanceFingerprint(match, fingerprint) {
+  if (!match || !fingerprint) return;
+  const instances = appStore.get('instances') || [];
+  const idx = instances.findIndex((inst) =>
+    inst &&
+    inst.type === 'client' &&
+    ((match.id && inst.id === match.id) || (match.path && inst.path === match.path))
+  );
+  if (idx === -1) return;
+  const updated = { ...instances[idx], managementCertFingerprint: fingerprint };
+  instances[idx] = updated;
+  appStore.set('instances', instances);
+}
+
+function shouldTrustAppCertificate(targetUrl, certificate, portOverride) {
+  if (!targetUrl || !certificate) return false;
+  const { host, port, isHttps } = resolveTrustTarget(targetUrl, portOverride);
+  if (!isHttps || !host) return false;
+  const certFingerprint = normalizeFingerprint(certificate.fingerprint256 || certificate.fingerprint || '');
+  if (!certFingerprint) return false;
+  const managementFingerprint = getTlsFingerprint('management');
+  const panelFingerprint = getTlsFingerprint('browserPanel');
+
+  if (managementFingerprint && certFingerprint === managementFingerprint) {
+    return true;
+  }
+
+  if (panelFingerprint && certFingerprint === panelFingerprint) {
+    return true;
+  }
+
+  const clientInstance = findClientInstanceForHost(host, port);
+  if (clientInstance) {
+    const storedFingerprint = normalizeFingerprint(clientInstance.managementCertFingerprint || '');
+    if (storedFingerprint) {
+      return certFingerprint === storedFingerprint;
+    }
+    const pendingPin = getPendingManagementPin(host, port);
+    const pendingFingerprint = normalizeFingerprint(pendingPin && pendingPin.fingerprint ? pendingPin.fingerprint : '');
+    if (pendingFingerprint) {
+      if (certFingerprint !== pendingFingerprint) {
+        return false;
+      }
+      storeClientInstanceFingerprint(clientInstance, certFingerprint);
+      return true;
+    }
+    storeClientInstanceFingerprint(clientInstance, certFingerprint);
+    if (logger) {
+      logger.info('Pinned management server certificate for client instance', {
+        category: 'security',
+        data: {
+          serverIp: clientInstance.serverIp,
+          serverPort: clientInstance.serverPort,
+          clientId: clientInstance.id || clientInstance.clientId
+        }
+      });
+    }
+    return true;
+  }
+
+  const pendingPin = getPendingManagementPin(host, port);
+  if (pendingPin) {
+    const pendingFingerprint = normalizeFingerprint(pendingPin.fingerprint || '');
+    if (pendingFingerprint) {
+      return certFingerprint === pendingFingerprint;
+    }
+    updatePendingManagementPin(host, port, certFingerprint);
+    return true;
+  }
+
+  return false;
+}
+
+let certVerifyProcInstalled = false;
+
+function setupCertificateVerification() {
+  if (certVerifyProcInstalled) return;
+  if (!session || !session.defaultSession) return;
+  certVerifyProcInstalled = true;
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    try {
+      if (request && request.verificationResult === 'net::OK') {
+        callback(0);
+        return;
+      }
+      if (request && request.errorCode === 0) {
+        callback(0);
+        return;
+      }
+      const targetHost = request && request.hostname ? request.hostname : '';
+      const targetPort = request && request.port ? String(request.port) : '';
+      const shouldTrust = shouldTrustAppCertificate(
+        targetHost,
+        request ? request.certificate : null,
+        targetPort || undefined
+      );
+      callback(shouldTrust ? 0 : -2);
+      return;
+    } catch {
+      callback(-2);
+      return;
+    }
+  });
+}
+
 app.on('web-contents-created', (_event, contents) => {
   contents.setWindowOpenHandler(({ url }) => {
     if (isAllowedNavigation(url)) return { action: 'allow' };
@@ -216,6 +449,15 @@ app.on('web-contents-created', (_event, contents) => {
     event.preventDefault();
     openExternalSafely(url);
   });
+});
+
+app.on('certificate-error', (event, _webContents, url, _error, certificate, callback) => {
+  if (shouldTrustAppCertificate(url, certificate)) {
+    event.preventDefault();
+    callback(true);
+    return;
+  }
+  callback(false);
 });
 
 let handlersInitialized = false;
@@ -1067,6 +1309,8 @@ if (process.platform === 'win32') {
 app.whenReady().then(() => {
   // Clean up any old runtime files from previous sessions
   cleanupRuntimeFiles();
+
+  setupCertificateVerification();
   
   Menu.setApplicationMenu(null);
   
@@ -1139,7 +1383,15 @@ app.whenReady().then(() => {
   // IMPORTANT: Wait for the web contents to be ready before sending data
   win.webContents.once('did-finish-load', () => {
     try {
-      const lastServerPath = appStore.get('lastServerPath');
+      let lastServerPath = appStore.get('lastServerPath');
+      const instances = appStore.get('instances') || [];
+      const serverInstance = instances.find((inst) => inst && inst.type === 'server' && inst.path);
+      if (serverInstance && serverInstance.path && serverInstance.path !== lastServerPath) {
+        if (fs.existsSync(serverInstance.path)) {
+          appStore.set('lastServerPath', serverInstance.path);
+          lastServerPath = serverInstance.path;
+        }
+      }
       
       if (lastServerPath && win && win.webContents) {
         // Ensure config file exists with defaults

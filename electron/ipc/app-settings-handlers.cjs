@@ -1,6 +1,7 @@
 // App-wide settings IPC handlers
 const appStore = require('../utils/app-store.cjs');
 const { app, BrowserWindow } = require('electron');
+const { ensureEncryptionAvailable, packSecret, unpackSecret, ENCRYPTED_PREFIX } = require('../utils/secure-store.cjs');
 
 /**
  * Create app settings IPC handlers
@@ -61,13 +62,20 @@ function createAppSettingsHandlers() {
           const bpCurrent = currentSettings.browserPanel || {};
           const portNum = parseInt(bp.port);
           const safePort = !isNaN(portNum) && portNum >= 1 && portNum <= 65535 ? portNum : (bpCurrent.port || 8080);
+          let passwordValue = typeof bp.password === 'string' && bp.password.trim().length > 0
+            ? bp.password.trim()
+            : (bpCurrent.password || 'password');
+          if (typeof passwordValue === 'string' && !passwordValue.startsWith(ENCRYPTED_PREFIX)) {
+            ensureEncryptionAvailable();
+            passwordValue = packSecret(passwordValue);
+          }
 
           updatedSettings.browserPanel = {
             enabled: Boolean(bp.enabled),
             autoStart: Boolean(bp.autoStart),
             port: safePort,
             username: typeof bp.username === 'string' && bp.username.trim().length > 0 ? bp.username.trim() : (bpCurrent.username || 'user'),
-            password: typeof bp.password === 'string' && bp.password.trim().length > 0 ? bp.password.trim() : (bpCurrent.password || 'password'),
+            password: passwordValue,
             instanceVisibility: (bp.instanceVisibility && typeof bp.instanceVisibility === 'object') ? bp.instanceVisibility : (bpCurrent.instanceVisibility || {})
           };
         }
@@ -123,9 +131,17 @@ function createAppSettingsHandlers() {
           }
         };
 
-        const settings = appStore.get('appSettings') || defaultSettings;
+        const stored = appStore.get('appSettings') || {};
+        const settings = {
+          ...defaultSettings,
+          ...stored,
+          browserPanel: { ...defaultSettings.browserPanel, ...(stored.browserPanel || {}) }
+        };
         if (!settings.modWatch) {
           settings.modWatch = { showWindowsNotifications: false, intervalHours: 12 };
+        }
+        if (typeof settings.browserPanel.password === 'string' && settings.browserPanel.password.startsWith(ENCRYPTED_PREFIX)) {
+          settings.browserPanel.password = unpackSecret(settings.browserPanel.password);
         }
 
         // Only verify startup setting with system if we don't have a stored value

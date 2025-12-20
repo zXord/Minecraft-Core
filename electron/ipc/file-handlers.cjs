@@ -445,12 +445,14 @@ function createFileHandlers(win) {
       }
     },
     
-    'select-folder': async () => {
+    'select-folder': async (_e, options = {}) => {
       const startTime = Date.now();
+      const selectionType = options && typeof options === 'object' ? options.instanceType : '';
+      const isClientSelection = selectionType === 'client';
       
       logger.debug('Folder selection dialog requested', {
         category: 'storage',
-        data: { handler: 'select-folder' }
+        data: { handler: 'select-folder', selectionType: selectionType || 'server' }
       });
 
       try {
@@ -475,9 +477,35 @@ function createFileHandlers(win) {
           data: {
             handler: 'select-folder',
             folder,
-            folderName: path.basename(folder)
+            folderName: path.basename(folder),
+            selectionType: selectionType || 'server'
           }
         });
+
+        if (isClientSelection) {
+          logger.debug('Client folder selected, skipping server initialization', {
+            category: 'storage',
+            data: {
+              handler: 'select-folder',
+              folder,
+              selectionType: 'client'
+            }
+          });
+
+          const duration = Date.now() - startTime;
+          logger.info('Client folder selection completed successfully', {
+            category: 'performance',
+            data: {
+              handler: 'select-folder',
+              duration,
+              success: true,
+              folder,
+              selectionType: 'client'
+            }
+          });
+
+          return folder;
+        }
 
         // Create needed directories
         const requiredDirs = ['mods', 'logs', 'config'];

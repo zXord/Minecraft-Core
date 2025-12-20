@@ -10,7 +10,7 @@
   import ModsTab from './ModsTab.svelte';
   import SettingsTab from './SettingsTab.svelte';
   import logger from '../../utils/logger.js';
-  import { buildAuthHeaders, ensureSessionToken } from '../../utils/managementAuth.js';
+  import { buildAuthHeaders, ensureSessionToken, getManagementBaseUrl, resolveManagementUrl } from '../../utils/managementAuth.js';
 import {
   errorMessage,
   successMessage,
@@ -316,7 +316,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     setConnectionStatus('connecting');
     
     try {
-      const managementUrl = `http://${instance.serverIp}:${instance.serverPort}/api/test`;
+      const managementUrl = resolveManagementUrl(instance, '/api/test');
       
       const response = await fetch(managementUrl, {
         method: 'GET',
@@ -368,7 +368,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const clientVersion = clientVersionResult?.success ? clientVersionResult.version : '1.0.0';
 
       // Get server app version
-      const appVersionUrl = `http://${instance.serverIp}:${instance.serverPort}/api/app/version`;
+      const appVersionUrl = resolveManagementUrl(instance, '/api/app/version');
       const response = await fetch(appVersionUrl, {
         method: 'GET',
         headers: buildAuthHeaders(instance),
@@ -411,7 +411,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     try {
       // Check management server status
-      const managementUrl = `http://${instance.serverIp}:${instance.serverPort}/api/test`;
+      const managementUrl = resolveManagementUrl(instance, '/api/test');
       const managementResponse = await fetch(managementUrl, {
         method: 'GET',
         headers: buildAuthHeaders(instance),
@@ -442,7 +442,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   async function getServerInfo(silentRefresh = false) {
     try {
       await ensureSessionToken(instance);
-      const serverInfoUrl = `http://${instance.serverIp}:${instance.serverPort}/api/server/info`;
+      const serverInfoUrl = resolveManagementUrl(instance, '/api/server/info');
       const response = await fetch(serverInfoUrl, {
         method: 'GET',
         headers: buildAuthHeaders(instance),
@@ -459,7 +459,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           
           // **FIX**: Also fetch complete mod list from server to get optional mods info
           try {
-            const modsUrl = `http://${instance.serverIp}:${instance.serverPort}/api/mods/list`;
+            const modsUrl = resolveManagementUrl(instance, '/api/mods/list');
             const modsResponse = await fetch(modsUrl, {
               method: 'GET',
               headers: buildAuthHeaders(instance),
@@ -519,7 +519,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   async function checkAssetSynchronization() {
     if (!instance?.path || !$clientState.connectionStatus || $clientState.connectionStatus !== 'connected') return;
     try {
-      const base = `http://${instance.serverIp}:${instance.serverPort}`;
+      const base = getManagementBaseUrl(instance);
+      if (!base) return;
       // Fetch server items
       const [srvShadersRes, srvRpsRes] = await Promise.all([
         fetch(`${base}/api/assets/list/shaderpacks`, {
@@ -607,7 +608,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
       });
   await checkAssetSynchronization();
       successMessage.set(`Downloaded ${items.length} shader${items.length > 1 ? 's' : ''}`);
@@ -630,7 +631,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
       });
       await checkAssetSynchronization();
       const n = items.length;
@@ -654,7 +655,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
       });
   await checkAssetSynchronization();
       successMessage.set(`Downloaded ${items.length} resource pack${items.length > 1 ? 's' : ''}`);
@@ -677,7 +678,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, sessionToken: instance.sessionToken }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
       });
       await checkAssetSynchronization();
       const n = items.length;
@@ -1837,6 +1838,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           serverInfo: {
             serverIp: instance.serverIp,
             serverPort: instance.serverPort,
+            serverProtocol: instance.serverProtocol,
             sessionToken: instance.sessionToken
           }
         });
@@ -2106,15 +2108,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           clientDownloadProgress = { type: 'Preparing', task: 'Starting download...', total: 0, current: 0 };
     
     try {
-      const result = await window.electron.invoke('minecraft-download-client', {
-        clientPath: instance.path,
-        minecraftVersion: serverInfo.minecraftVersion,
-        requiredMods: requiredMods || [],
-        serverInfo: {
-          ...serverInfo,
-          serverIp: instance.serverIp // Add the server IP for server list addition
-        }
-      });
+        const result = await window.electron.invoke('minecraft-download-client', {
+          clientPath: instance.path,
+          minecraftVersion: serverInfo.minecraftVersion,
+          requiredMods: requiredMods || [],
+          serverInfo: {
+            ...serverInfo,
+            serverIp: instance.serverIp,
+            serverProtocol: instance.serverProtocol
+          }
+        });
       
       
       if (result.success) {
@@ -2668,7 +2671,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       let lastMapped = null;
       for (const p of panelPortsToTry) {
         try {
-          const statusUrl = `http://${instance.serverIp}:${p}/api/server/status`;
+          const protocol = instance.serverProtocol === 'http' ? 'http' : 'https';
+          const statusUrl = `${protocol}://${instance.serverIp}:${p}/api/server/status`;
           const res = await fetch(statusUrl, {
             method: 'GET',
             headers: buildAuthHeaders(instance),
@@ -2841,6 +2845,31 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     authStatus = newAuthStatus;
     username = newUsername;
     authData = newAuthData;
+  }
+
+  function handleInviteLinkUpdated(event) {
+    const updates = event.detail || {};
+    instance = {
+      ...instance,
+      serverIp: updates.serverIp || instance.serverIp,
+      serverPort: updates.serverPort || instance.serverPort,
+      serverProtocol: updates.serverProtocol || instance.serverProtocol,
+      inviteSecret: updates.inviteSecret || instance.inviteSecret,
+      managementCertFingerprint: typeof updates.managementCertFingerprint === 'string'
+        ? updates.managementCertFingerprint
+        : instance.managementCertFingerprint
+    };
+    dispatch('instance-updated', {
+      id: instance.id,
+      path: instance.path,
+      serverIp: instance.serverIp,
+      serverPort: instance.serverPort,
+      serverProtocol: instance.serverProtocol,
+      inviteSecret: instance.inviteSecret,
+      managementCertFingerprint: instance.managementCertFingerprint
+    });
+    setConnectionStatus('disconnected');
+    connectToServer();
   }
   
   async function confirmDelete() {
@@ -3141,6 +3170,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {redownloadClient}
         {redownloadClientFull}
         on:auth-state-changed={handleAuthStateChanged}
+        on:invite-link-updated={handleInviteLinkUpdated}
         on:show-message={handleShowMessage}
       />
     {/if}

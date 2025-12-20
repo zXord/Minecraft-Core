@@ -1,11 +1,13 @@
 // @ts-nocheck
 // Browser Panel Server - decoupled from Management Server
 const express = require('express');
-const cors = require('cors');
+const https = require('https');
 // No fs/path needed here currently
 const appStore = require('../utils/app-store.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
 const { getManagementServer } = require('./management-server.cjs');
+const { getBrowserPanelTlsConfig } = require('../utils/tls-utils.cjs');
+const { ensureEncryptionAvailable, packSecret, unpackSecret, ENCRYPTED_PREFIX } = require('../utils/secure-store.cjs');
 // Reuse existing server manager for start/stop/commands/status
 const {
   startMinecraftServer,
@@ -35,6 +37,7 @@ class BrowserPanelServer {
     this.server = null;
     this.port = 8081; // separate default
     this.isRunning = false;
+    this.useHttps = true;
   this.connections = new Set();
   this.sseClients = new Set();
   this.backupWatchers = new Map(); // serverPath -> fs.FSWatcher
@@ -59,10 +62,21 @@ class BrowserPanelServer {
     const settings = appStore.get('appSettings') || {};
     const bp = settings.browserPanel || {};
     const username = typeof bp.username === 'string' ? bp.username.trim() : '';
-    const password = typeof bp.password === 'string' ? bp.password : '';
+    let password = '';
+    let error = '';
+    if (typeof bp.password === 'string') {
+      try {
+        password = bp.password.startsWith(ENCRYPTED_PREFIX)
+          ? unpackSecret(bp.password)
+          : bp.password;
+      } catch {
+        error = 'Failed to decrypt browser panel password';
+        password = '';
+      }
+    }
     const isDefault = username === 'user' && password === 'password';
-    const isConfigured = !!username && !!password && !isDefault;
-    return { username, password, isDefault, isConfigured };
+    const isConfigured = !!username && !!password && !isDefault && !error;
+    return { username, password, isDefault, isConfigured, error };
   }
 
   isAuthLocked(ip) {
@@ -96,13 +110,15 @@ class BrowserPanelServer {
   }
 
   setupMiddleware() {
-    this.app.use(cors({ origin: true, credentials: true }));
     this.app.use(express.json({ limit: '10mb' }));
 
     // Basic Auth always on for panel with lockout
     this.app.use((req, res, next) => {
       try {
-        const { username, password, isConfigured } = this.getPanelCredentials();
+        const { username, password, isConfigured, error } = this.getPanelCredentials();
+        if (error) {
+          return res.status(500).send(error);
+        }
         if (!isConfigured) {
           return res.status(403).send('Browser panel credentials are not configured. Set a unique username and password in App Settings.');
         }
@@ -393,7 +409,7 @@ class BrowserPanelServer {
     });
 
   // APIs for UI
-    this.app.get('/api/panel/status', (_req, res) => res.json({ success: true, isRunning: this.isRunning, port: this.port }));
+    this.app.get('/api/panel/status', (_req, res) => res.json({ success: true, isRunning: this.isRunning, port: this.port, protocol: this.useHttps ? 'https' : 'http' }));
     this.app.get('/api/instances', (_req, res) => {
       try {
         const settings = appStore.get('appSettings') || {};
@@ -465,7 +481,15 @@ class BrowserPanelServer {
           customHeight: 800,
           browserPanel: { enabled: false, autoStart: false, port: 8081, username: 'user', password: 'password', instanceVisibility: {} }
         };
-        const settings = appStore.get('appSettings') || defaults;
+        const stored = appStore.get('appSettings') || {};
+        const settings = {
+          ...defaults,
+          ...stored,
+          browserPanel: { ...defaults.browserPanel, ...(stored.browserPanel || {}) }
+        };
+        if (typeof settings.browserPanel.password === 'string' && settings.browserPanel.password.startsWith(ENCRYPTED_PREFIX)) {
+          settings.browserPanel.password = unpackSecret(settings.browserPanel.password);
+        }
         res.json({ success: true, settings });
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
@@ -485,12 +509,19 @@ class BrowserPanelServer {
     if (incoming.browserPanel && typeof incoming.browserPanel === 'object') {
           const bp = incoming.browserPanel; const cur = current.browserPanel || {};
           const portNum = parseInt(bp.port);
+          let passwordValue = typeof bp.password === 'string' && bp.password.trim()
+            ? bp.password.trim()
+            : (cur.password || 'password');
+          if (typeof passwordValue === 'string' && !passwordValue.startsWith(ENCRYPTED_PREFIX)) {
+            ensureEncryptionAvailable();
+            passwordValue = packSecret(passwordValue);
+          }
           updated.browserPanel = {
       enabled: bp.enabled !== undefined ? !!bp.enabled : (cur.enabled || false),
       autoStart: bp.autoStart !== undefined ? !!bp.autoStart : (cur.autoStart || false),
             port: !isNaN(portNum) && portNum >= 1 && portNum <= 65535 ? portNum : (cur.port || 8081),
             username: typeof bp.username === 'string' && bp.username.trim() ? bp.username.trim() : (cur.username || 'user'),
-            password: typeof bp.password === 'string' && bp.password.trim() ? bp.password.trim() : (cur.password || 'password'),
+            password: passwordValue,
             instanceVisibility: (bp.instanceVisibility && typeof bp.instanceVisibility === 'object') ? bp.instanceVisibility : (cur.instanceVisibility || {})
           };
           // Ensure at least one server instance stays visible
@@ -1412,8 +1443,13 @@ class BrowserPanelServer {
   }
 
   async start(port = 8081) {
-    if (this.isRunning) return { success: true, port: this.port };
+    if (this.isRunning) {
+      return { success: true, port: this.port, protocol: this.useHttps ? 'https' : 'http' };
+    }
     const creds = this.getPanelCredentials();
+    if (creds.error) {
+      return { success: false, error: creds.error };
+    }
     if (!creds.isConfigured) {
       return { success: false, error: 'Browser panel credentials are not configured. Set a unique username and password in App Settings.' };
     }
@@ -1427,18 +1463,33 @@ class BrowserPanelServer {
       }
     } catch { /* ignore and proceed */ }
     this.port = port;
+    let tlsConfig = null;
+    if (this.useHttps) {
+      try {
+        tlsConfig = await getBrowserPanelTlsConfig();
+      } catch (error) {
+        return { success: false, error: error && error.message ? error.message : 'TLS initialization failed' };
+      }
+    }
     return new Promise((resolve) => {
-      this.server = this.app.listen(this.port, () => {
+      const onListening = () => {
         this.isRunning = true;
-        resolve({ success: true, port: this.port });
-      });
+        resolve({ success: true, port: this.port, protocol: this.useHttps ? 'https' : 'http' });
+      };
+
+      if (this.useHttps) {
+        this.server = https.createServer({ key: tlsConfig.key, cert: tlsConfig.cert }, this.app);
+        this.server.listen(this.port, onListening);
+      } else {
+        this.server = this.app.listen(this.port, onListening);
+      }
       // Track connections for fast shutdown
       this.server.on('connection', (socket) => {
         this.connections.add(socket);
         socket.on('close', () => this.connections.delete(socket));
       });
       // Lower keep-alive timeout to speed up shutdowns
-  try { this.server.keepAliveTimeout = 1000; } catch { /* keepAlive not supported */ }
+      try { this.server.keepAliveTimeout = 1000; } catch { /* keepAlive not supported */ }
       this.server.on('error', (error) => {
         this.isRunning = false;
         if (error && error.code === 'EADDRINUSE') {
@@ -1480,7 +1531,7 @@ class BrowserPanelServer {
   }
 
   getStatus() {
-    return { isRunning: this.isRunning, port: this.port };
+    return { isRunning: this.isRunning, port: this.port, protocol: this.useHttps ? 'https' : 'http' };
   }
 }
 

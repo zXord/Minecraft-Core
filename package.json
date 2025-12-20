@@ -58,6 +58,7 @@
     "prismarine-nbt": "^2.7.0",
     "progress-stream": "^2.0.0",
     "rimraf": "^5.0.0",
+    "selfsigned": "^5.2.0",
     "svelte": "^5.36.8",
     "svelte-sonner": "^1.0.1",
     "uuid": "^9.0.1"

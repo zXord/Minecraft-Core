@@ -8,7 +8,8 @@ function createBrowserPanelHandlers(win) {
       try {
         const res = await panel.start(port);
         if (win && win.webContents) {
-          win.webContents.send('browser-panel-status', { isRunning: !!res.success, port: res.port || port });
+          const protocol = res && res.protocol ? res.protocol : panel.getStatus().protocol;
+          win.webContents.send('browser-panel-status', { isRunning: !!res.success, port: res.port || port, protocol });
         }
         return res;
       } catch (err) {
@@ -19,7 +20,7 @@ function createBrowserPanelHandlers(win) {
       try {
         const res = await panel.stop();
         if (win && win.webContents) {
-          win.webContents.send('browser-panel-status', { isRunning: false, port: null });
+          win.webContents.send('browser-panel-status', { isRunning: false, port: null, protocol: panel.getStatus().protocol });
         }
         return res;
       } catch (err) {
