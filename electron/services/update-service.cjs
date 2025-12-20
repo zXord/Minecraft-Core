@@ -189,11 +189,9 @@ class UpdateService extends EventEmitter {
       if (electronLog && Array.isArray(electronLog.hooks)) {
         electronLog.hooks.push((message) => {
           try {
-            const scopeName = message?.scope?.name || '';
-            const text =
-              (Array.isArray(message?.data) ? message.data.join(' ') : message?.data) ||
-              message?.message ||
-              '';
+            const scopeName = typeof message?.scope === 'string' ? message.scope : '';
+            const data = Array.isArray(message?.data) ? message.data : [];
+            const text = data.length ? data.map((item) => String(item)).join(' ') : '';
 
             if (scopeName.toLowerCase().includes('electron-updater')) {
               const level = (message?.level || 'info').toLowerCase();
