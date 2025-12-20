@@ -1,7 +1,7 @@
 {
   "name": "minecraft-core",
   "private": true,
-  "version": "25.12.1",
+  "version": "25.12.2",
   "description": "Minecraft Core",
   "author": "zXord",
   "main": "electron/main.cjs",
