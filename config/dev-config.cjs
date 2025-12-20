@@ -22,6 +22,10 @@ module.exports = {
   // Enable/disable development features
   enableDevShortcuts: false, // DISABLED FOR PRODUCTION
 
+  // Allow update checks while running `npm run dev`
+  // Use this to test auto-updater behavior without packaging
+  enableDevUpdates: true, // ENABLED FOR DEV TESTING
+
   // Add more dev features here as needed...
   // enableSomeOtherFeature: false,
 }; 

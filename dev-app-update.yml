@@ -1,0 +1,5 @@
+# Dev update configuration for electron-updater
+provider: github
+owner: zXord
+repo: Minecraft-Core
+updaterCacheDirName: minecraft-core-updater

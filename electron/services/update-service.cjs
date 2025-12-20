@@ -5,12 +5,29 @@ const fs = require('fs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { app } = require('electron');
 const { getAppCacheDir } = require('electron-updater/out/AppAdapter');
+let devConfig = {};
+try {
+  // Optional dev overrides for update behavior
+  devConfig = require('../../config/dev-config.cjs');
+} catch {
+  devConfig = {};
+}
 
 // Guarded require so startup won't fail if electron-log is missing for any reason
+/** @type {import('electron-log').MainLogger | Console} */
 let log = console;
+
+/**
+ * @param {unknown} value
+ * @returns {value is import('electron-log').MainLogger}
+ */
+function isElectronLog(value) {
+  return Boolean(value && typeof value === 'object' && 'transports' in value);
+}
+
 try {
-  // eslint-disable-next-line import/no-extraneous-dependencies
-  log = require('electron-log');
+  const loadedLog = require('electron-log');
+  log = loadedLog?.default || loadedLog || console;
 } catch {
   // Fallback to console; we still emit update-log events downstream
   log = console;
@@ -40,19 +57,64 @@ class UpdateService extends EventEmitter {
     this.loggerHandlers = getLoggerHandlers(); // Central logger (main process)
     this.lastLoggedProgressPercent = -1;
     this.lastLoggedProgressTime = 0;
+    this.lastUpdateInfo = null;
+    this.isDownloadingUpdate = false;
+    this.downloadAttemptId = 0;
+    this.activeDownloadAttemptId = null;
+    this.lastDownloadStart = 0;
+    this.lastProgressTotal = null;
+    this.lastProgressTransferred = null;
+    this.lastProgressPercent = null;
 
     this.setupLogger();
     this.setupAutoUpdater();
     this.loadIgnoredVersion();
   }
 
+  getUpdateConfigPath() {
+    if (autoUpdater.updateConfigPath) {
+      return autoUpdater.updateConfigPath;
+    }
+    if (app.isPackaged) {
+      return path.join(process.resourcesPath, 'app-update.yml');
+    }
+    return path.join(app.getAppPath(), 'dev-app-update.yml');
+  }
+
+  readUpdateConfigValue(key) {
+    try {
+      const configPath = this.getUpdateConfigPath();
+      const content = fs.readFileSync(configPath, 'utf8');
+      const match = content.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
+      if (!match || !match[1]) return null;
+      return match[1].trim().replace(/^['"]|['"]$/g, '');
+    } catch {
+      return null;
+    }
+  }
+
+  getUpdaterCacheDirName() {
+    return this.readUpdateConfigValue('updaterCacheDirName');
+  }
+
+  getUpdaterCacheDir() {
+    const cacheBase = getAppCacheDir();
+    const dirName = this.getUpdaterCacheDirName() || app.getName();
+    return path.join(cacheBase, dirName);
+  }
+
   getUpdaterCacheDirs() {
     const cacheBase = getAppCacheDir();
     const appName = app.getName();
-    return [
+    const dirs = new Set([
       path.join(cacheBase, appName),
       path.join(cacheBase, `${appName}-updater`)
-    ];
+    ]);
+    const configDirName = this.getUpdaterCacheDirName();
+    if (configDirName) {
+      dirs.add(path.join(cacheBase, configDirName));
+    }
+    return Array.from(dirs);
   }
 
   clearUpdaterCache(reason) {
@@ -82,7 +144,10 @@ class UpdateService extends EventEmitter {
 
   setupLogger() {
     try {
-      log.transports.file.level = 'debug';
+      const electronLog = isElectronLog(log) ? log : null;
+      if (electronLog?.transports?.file) {
+        electronLog.transports.file.level = 'debug';
+      }
 
       // Wrap autoUpdater logger so we can mirror everything into the central logger
       const self = this;
@@ -116,11 +181,13 @@ class UpdateService extends EventEmitter {
         debug: makeForwarder('debug')
       };
 
-      this.logFilePath = log.transports.file.getFile().path;
+      if (electronLog?.transports?.file) {
+        this.logFilePath = electronLog.transports.file.getFile().path;
+      }
 
       // Mirror electron-updater scoped logs into the central logger for visibility (e.g., differential fallback reasons)
-      if (Array.isArray(log.hooks)) {
-        log.hooks.push((message) => {
+      if (electronLog && Array.isArray(electronLog.hooks)) {
+        electronLog.hooks.push((message) => {
           try {
             const scopeName = message?.scope?.name || '';
             const text =
@@ -151,7 +218,7 @@ class UpdateService extends EventEmitter {
       this.logUpdate('info', 'UpdateService initialized', {
         logFile: this.logFilePath
       });
-    } catch (error) {
+    } catch {
       // Swallow logger setup errors; updates should still work
     }
   }
@@ -186,11 +253,150 @@ class UpdateService extends EventEmitter {
     }
   }
 
+  summarizeUpdateFiles(files) {
+    if (!Array.isArray(files)) return [];
+    return files.map((file) => {
+      const url = typeof file?.url === 'string' ? file.url : '';
+      const name = url ? url.split('/').pop() : null;
+      const size = Number.isFinite(file?.size) ? file.size : null;
+      const blockMapSize = Number.isFinite(file?.blockMapSize) ? file.blockMapSize : null;
+      return {
+        name,
+        size,
+        sizeMB: size === null ? null : Number((size / 1024 / 1024).toFixed(2)),
+        blockMapSize,
+        blockMapSizeMB: blockMapSize === null ? null : Number((blockMapSize / 1024 / 1024).toFixed(2))
+      };
+    });
+  }
+
+  getCachedInstallerInfo() {
+    try {
+      const cacheDir = this.getUpdaterCacheDir();
+      const installerPath = path.join(cacheDir, 'installer.exe');
+      if (!fs.existsSync(installerPath)) {
+        return { exists: false, path: installerPath };
+      }
+      const stats = fs.statSync(installerPath);
+      return {
+        exists: true,
+        path: installerPath,
+        size: stats.size,
+        sizeMB: Number((stats.size / 1024 / 1024).toFixed(2)),
+        modified: stats.mtime
+      };
+    } catch {
+      return { exists: false, path: null };
+    }
+  }
+
+  getPublishInfo() {
+    try {
+      const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
+      const publish = packageJson.build?.publish || {};
+      return {
+        owner: publish.owner || 'zXord',
+        repo: publish.repo || 'Minecraft-Core'
+      };
+    } catch {
+      return { owner: 'zXord', repo: 'Minecraft-Core' };
+    }
+  }
+
+  getUpdateFileName(info) {
+    const urlValue = info?.files?.[0]?.url || info?.path;
+    if (!urlValue || typeof urlValue !== 'string') return null;
+    try {
+      const parsed = new URL(urlValue);
+      return path.basename(parsed.pathname);
+    } catch {
+      return path.basename(urlValue);
+    }
+  }
+
+  async headContentLength(url) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(url, { method: 'HEAD', signal: controller.signal });
+      if (!response.ok) return null;
+      const length = response.headers.get('content-length');
+      return length ? Number.parseInt(length, 10) : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  async getReleaseAssetSize(version, fileName) {
+    if (!version || !fileName) return null;
+    const { owner, repo } = this.getPublishInfo();
+    const tags = [`v${version}`, version];
+    for (const tag of tags) {
+      const url = `https://github.com/${owner}/${repo}/releases/download/${tag}/${fileName}`;
+      const size = await this.headContentLength(url);
+      if (Number.isFinite(size)) {
+        return { url, size };
+      }
+    }
+    return null;
+  }
+
+  async shouldDisableDifferentialDownload() {
+    const updateInfo = this.lastUpdateInfo;
+    const newVersion = updateInfo?.version || this.latestVersion;
+    const currentVersion = this.getCurrentVersion();
+    const fileName = this.getUpdateFileName(updateInfo);
+
+    if (!newVersion || !currentVersion || !fileName) {
+      return false;
+    }
+
+    const oldFileName = fileName.includes(newVersion)
+      ? fileName.replace(newVersion, currentVersion)
+      : fileName;
+
+    const cached = this.getCachedInstallerInfo();
+    if (!cached.exists || !cached.size) {
+      this.logUpdate('info', 'Cached installer missing; skipping differential download', {
+        installerPath: cached.path,
+        currentVersion
+      });
+      return true;
+    }
+
+    const remote = await this.getReleaseAssetSize(currentVersion, oldFileName);
+    if (!remote || !Number.isFinite(remote.size)) {
+      return false;
+    }
+
+    if (cached.size !== remote.size) {
+      this.logUpdate('warn', 'Cached installer size mismatch; skipping differential download', {
+        currentVersion,
+        expectedSize: remote.size,
+        expectedSizeMB: Number((remote.size / 1024 / 1024).toFixed(2)),
+        actualSize: cached.size,
+        actualSizeMB: cached.sizeMB,
+        installerPath: cached.path,
+        releaseUrl: remote.url
+      });
+      return true;
+    }
+
+    return false;
+  }
+
   // Check if we're in development mode or have invalid config
   isDevelopmentMode() {
     try {
       // Allow forcing updates in development with environment variable
       if (process.env.FORCE_UPDATES === 'true') {
+        return false;
+      }
+
+      // Allow updates in dev when explicitly enabled in config
+      if (devConfig && devConfig.enableDevUpdates === true) {
         return false;
       }
       
@@ -216,7 +422,21 @@ class UpdateService extends EventEmitter {
   setupAutoUpdater() {
     // Check if we're in development or have invalid repository config
     if (this.isDevelopmentMode()) {
+      this.logUpdate('info', 'Auto-updater disabled (development mode)', {
+        nodeEnv: process.env.NODE_ENV || null,
+        forceUpdates: process.env.FORCE_UPDATES === 'true',
+        isPackaged: app.isPackaged
+      });
       return;
+    }
+
+    if (!app.isPackaged && (process.env.FORCE_UPDATES === 'true' || devConfig?.enableDevUpdates === true)) {
+      this.logUpdate('info', 'Auto-updater enabled in development mode', {
+        nodeEnv: process.env.NODE_ENV || null,
+        forceUpdates: process.env.FORCE_UPDATES === 'true',
+        enableDevUpdates: devConfig?.enableDevUpdates === true,
+        isPackaged: app.isPackaged
+      });
     }
 
     // Configure auto-updater
@@ -224,6 +444,11 @@ class UpdateService extends EventEmitter {
     autoUpdater.autoInstallOnAppQuit = false; // We'll control when to install
     autoUpdater.disableDifferentialDownload = false; // Enable differential updates
     autoUpdater.disableWebInstaller = true; // Stick to full installer artifacts
+
+    if (!app.isPackaged) {
+      autoUpdater.forceDevUpdateConfig = true;
+      autoUpdater.updateConfigPath = path.join(app.getAppPath(), 'dev-app-update.yml');
+    }
 
     // Set up event listeners
     autoUpdater.on('checking-for-update', () => {
@@ -236,9 +461,10 @@ class UpdateService extends EventEmitter {
       this.isCheckingForUpdates = false;
       this.latestVersion = info.version;
       this.updateAvailable = true;
+      this.lastUpdateInfo = info;
       this.logUpdate('info', 'Update available', {
         version: info.version,
-        files: info.files?.map(f => ({ url: f.url, size: f.size, blockMapSize: f.blockMapSize }))
+        files: this.summarizeUpdateFiles(info.files)
       });
       
       // Check if this version is ignored
@@ -253,14 +479,24 @@ class UpdateService extends EventEmitter {
     autoUpdater.on('update-not-available', (info) => {
       this.isCheckingForUpdates = false;
       this.updateAvailable = false;
+      this.logUpdate('info', 'No update available', {
+        currentVersion: this.getCurrentVersion(),
+        latestVersion: info?.version || null
+      });
       this.emit('update-not-available', info);
     });
 
     autoUpdater.on('error', (error) => {
       this.isCheckingForUpdates = false;
+      const wasDownloading = this.isDownloadingUpdate;
+      const attemptId = this.activeDownloadAttemptId;
+      this.isDownloadingUpdate = false;
+      this.activeDownloadAttemptId = null;
       this.logUpdate('error', 'Auto-updater error', {
         message: error?.message,
-        stack: error?.stack
+        stack: error?.stack,
+        wasDownloading,
+        downloadAttemptId: attemptId
       });
 
       const errMsg = (error?.message || '').toLowerCase();
@@ -286,6 +522,35 @@ class UpdateService extends EventEmitter {
         transferred: progress.transferred
       };
 
+      const previousTotal = this.lastProgressTotal;
+      const previousPercent = this.lastProgressPercent;
+      const previousTransferred = this.lastProgressTransferred;
+      const hasPreviousTotal = Number.isFinite(previousTotal) && previousTotal > 0;
+      const hasCurrentTotal = Number.isFinite(this.downloadProgress.total) && this.downloadProgress.total > 0;
+      const totalChanged = hasPreviousTotal && hasCurrentTotal && this.downloadProgress.total !== previousTotal;
+      const percentDropped = Number.isFinite(previousPercent) && this.downloadProgress.percent + 2 < previousPercent;
+      const transferredDropped = Number.isFinite(previousTransferred) && this.downloadProgress.transferred + (1024 * 1024) < previousTransferred;
+
+      if (totalChanged) {
+        this.logUpdate('info', 'Download target size changed', {
+          downloadAttemptId: this.activeDownloadAttemptId,
+          previousTotal,
+          previousTotalMB: Number((previousTotal / 1024 / 1024).toFixed(2)),
+          newTotal: this.downloadProgress.total,
+          newTotalMB: Number((this.downloadProgress.total / 1024 / 1024).toFixed(2)),
+          previousPercent,
+          newPercent: this.downloadProgress.percent
+        });
+      } else if (percentDropped || transferredDropped) {
+        this.logUpdate('info', 'Download progress reset detected', {
+          downloadAttemptId: this.activeDownloadAttemptId,
+          previousPercent,
+          newPercent: this.downloadProgress.percent,
+          previousTransferred,
+          newTransferred: this.downloadProgress.transferred
+        });
+      }
+
       // Throttle logging to avoid flooding the Logger UI
       const now = Date.now();
       const percentChanged = this.lastLoggedProgressPercent !== this.downloadProgress.percent;
@@ -299,13 +564,23 @@ class UpdateService extends EventEmitter {
         this.logUpdate('debug', 'Download progress', this.downloadProgress);
       }
 
+      this.lastProgressTotal = this.downloadProgress.total;
+      this.lastProgressPercent = this.downloadProgress.percent;
+      this.lastProgressTransferred = this.downloadProgress.transferred;
       this.emit('download-progress', this.downloadProgress);
     });
 
     autoUpdater.on('update-downloaded', (info) => {
+      const elapsedMs = this.lastDownloadStart ? Date.now() - this.lastDownloadStart : null;
       this.logUpdate('info', 'Update downloaded', {
-        version: info.version
+        version: info.version,
+        downloadAttemptId: this.activeDownloadAttemptId,
+        elapsedMs,
+        totalBytes: this.downloadProgress.total,
+        totalMB: Number((this.downloadProgress.total / 1024 / 1024).toFixed(2))
       });
+      this.isDownloadingUpdate = false;
+      this.activeDownloadAttemptId = null;
       this.emit('update-downloaded', info);
       
       // Auto-install if enabled
@@ -423,13 +698,57 @@ class UpdateService extends EventEmitter {
 
   // Start downloading the update
   async downloadUpdate() {
+    const previousDisableDifferential = autoUpdater.disableDifferentialDownload;
+    let appliedDifferentialOverride = false;
     try {
-      this.logUpdate('info', 'Starting download of available update');
+      const nextAttemptId = this.downloadAttemptId + 1;
+      const alreadyDownloading = this.isDownloadingUpdate;
+      if (alreadyDownloading) {
+        this.logUpdate('warn', 'Download requested while another download is active', {
+          activeDownloadAttemptId: this.activeDownloadAttemptId,
+          newDownloadAttemptId: nextAttemptId
+        });
+      } else {
+        this.downloadAttemptId = nextAttemptId;
+        this.activeDownloadAttemptId = nextAttemptId;
+        this.isDownloadingUpdate = true;
+        this.lastDownloadStart = Date.now();
+        this.lastProgressTotal = null;
+        this.lastProgressPercent = null;
+        this.lastProgressTransferred = null;
+      }
+      if (!autoUpdater.disableDifferentialDownload) {
+        const shouldDisable = await this.shouldDisableDifferentialDownload();
+        if (shouldDisable) {
+          autoUpdater.disableDifferentialDownload = true;
+          appliedDifferentialOverride = true;
+        }
+      }
+      this.logUpdate('info', 'Starting download of available update', {
+        downloadAttemptId: this.activeDownloadAttemptId || nextAttemptId,
+        currentVersion: this.getCurrentVersion(),
+        latestVersion: this.latestVersion,
+        updateAvailable: this.updateAvailable,
+        files: this.summarizeUpdateFiles(this.lastUpdateInfo?.files),
+        alreadyDownloading,
+        differentialDisabled: autoUpdater.disableDifferentialDownload,
+        differentialOverride: appliedDifferentialOverride
+      });
       await autoUpdater.downloadUpdate();
       return { success: true, message: 'Download started' };
     } catch (error) {
-      this.logUpdate('error', 'Download failed', { message: error.message });
+      const attemptId = this.activeDownloadAttemptId;
+      this.isDownloadingUpdate = false;
+      this.activeDownloadAttemptId = null;
+      this.logUpdate('error', 'Download failed', {
+        message: error.message,
+        downloadAttemptId: attemptId
+      });
       return { success: false, error: error.message };
+    } finally {
+      if (appliedDifferentialOverride) {
+        autoUpdater.disableDifferentialDownload = previousDisableDifferential;
+      }
     }
   }
 
