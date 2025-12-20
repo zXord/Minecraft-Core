@@ -14,8 +14,179 @@ const logger = {
 
 const Store = ElectronStore;
 
+const STORE_FILENAME = 'minecraft-core-config.json';
+const LEGACY_USER_DATA_NAMES = ['minecraft-core', 'Minecraft Core', 'Minecraft-Core'];
+
+const getStorePathForUserData = (userDataDir) => path.join(userDataDir, 'config', STORE_FILENAME);
+
+const selectUserDataDir = () => {
+  const fallbackUserData = path.join(os.homedir(), '.minecraft-core');
+  if (!app || typeof app.getPath !== 'function') {
+    return {
+      userData: fallbackUserData,
+      candidates: [fallbackUserData]
+    };
+  }
+
+  const defaultUserData = app.getPath('userData');
+  const appDataBase = app.getPath('appData');
+  const candidates = new Set([defaultUserData]);
+
+  for (const name of LEGACY_USER_DATA_NAMES) {
+    candidates.add(path.join(appDataBase, name));
+  }
+
+  const candidateList = Array.from(candidates);
+  const existingStores = candidateList
+    .map((dir) => ({ dir, storePath: getStorePathForUserData(dir) }))
+    .filter((entry) => fs.existsSync(entry.storePath))
+    .map((entry) => ({ ...entry, mtimeMs: fs.statSync(entry.storePath).mtimeMs }));
+
+  const stableUserData = appDataBase ? path.join(appDataBase, 'minecraft-core') : defaultUserData;
+  let selectedUserData = defaultUserData;
+
+  if (existingStores.some((entry) => path.normalize(entry.dir) === path.normalize(stableUserData))) {
+    selectedUserData = stableUserData;
+  } else if (existingStores.length) {
+    existingStores.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    selectedUserData = existingStores[0].dir;
+  } else {
+    selectedUserData = stableUserData || defaultUserData;
+  }
+
+  try {
+    if (typeof app.setPath === 'function') {
+      app.setPath('userData', selectedUserData);
+    }
+  } catch {
+    // ignore inability to set userData path
+  }
+
+  return {
+    userData: selectedUserData,
+    candidates: candidateList
+  };
+};
+
+const readStoreFile = (filePath) => {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+};
+
+const mergeInstances = (baseInstances, incomingInstances) => {
+  const base = Array.isArray(baseInstances) ? baseInstances.map((inst) => ({ ...inst })) : [];
+  const incoming = Array.isArray(incomingInstances) ? incomingInstances : [];
+  if (!incoming.length) {
+    return { instances: base, changed: false };
+  }
+
+  let changed = false;
+  const indexById = new Map();
+  const indexByPath = new Map();
+
+  base.forEach((inst, idx) => {
+    if (inst && inst.id) {
+      indexById.set(inst.id, idx);
+    }
+    if (inst && inst.path) {
+      indexByPath.set(inst.path, idx);
+    }
+  });
+
+  const applyMerge = (current, legacy) => {
+    let updated = current;
+    if (legacy && typeof legacy === 'object') {
+      if (current.type === 'server' || legacy.type === 'server') {
+        if (!current.managementInviteSecret && legacy.managementInviteSecret) {
+          updated = { ...updated, managementInviteSecret: legacy.managementInviteSecret };
+          changed = true;
+        }
+        if (!current.managementInviteHost && legacy.managementInviteHost) {
+          updated = { ...updated, managementInviteHost: legacy.managementInviteHost };
+          changed = true;
+        }
+      }
+      if (current.type === 'client' || legacy.type === 'client') {
+        if (!current.inviteSecret && legacy.inviteSecret) {
+          updated = { ...updated, inviteSecret: legacy.inviteSecret };
+          changed = true;
+        }
+        if (!current.managementCertFingerprint && legacy.managementCertFingerprint) {
+          updated = { ...updated, managementCertFingerprint: legacy.managementCertFingerprint };
+          changed = true;
+        }
+      }
+    }
+    return updated;
+  };
+
+  for (const legacy of incoming) {
+    if (!legacy || typeof legacy !== 'object') continue;
+    const idx = (legacy.id && indexById.get(legacy.id)) ?? (legacy.path && indexByPath.get(legacy.path));
+    if (idx === undefined) {
+      base.push(legacy);
+      if (legacy && legacy.id) indexById.set(legacy.id, base.length - 1);
+      if (legacy && legacy.path) indexByPath.set(legacy.path, base.length - 1);
+      changed = true;
+      continue;
+    }
+    base[idx] = applyMerge(base[idx], legacy);
+  }
+
+  return { instances: base, changed };
+};
+
+const migrateLegacyStores = (currentStorePath, candidateDirs) => {
+  const legacyStores = candidateDirs
+    .map((dir) => getStorePathForUserData(dir))
+    .filter((storePath) => storePath !== currentStorePath && fs.existsSync(storePath));
+
+  if (!legacyStores.length) return;
+
+  const currentData = readStoreFile(currentStorePath) || {};
+  let merged = { ...currentData };
+  let changed = false;
+
+  for (const legacyPath of legacyStores) {
+    const legacyData = readStoreFile(legacyPath);
+    if (!legacyData || typeof legacyData !== 'object') continue;
+
+    const mergeResult = mergeInstances(merged.instances, legacyData.instances);
+    if (mergeResult.changed) {
+      merged.instances = mergeResult.instances;
+      changed = true;
+    }
+
+    for (const key of Object.keys(legacyData)) {
+      if (merged[key] === undefined || merged[key] === null) {
+        merged[key] = legacyData[key];
+        changed = true;
+      }
+    }
+  }
+
+  if (!Object.keys(merged).length) {
+    return;
+  }
+
+  if (changed || !fs.existsSync(currentStorePath)) {
+    try {
+      fs.mkdirSync(path.dirname(currentStorePath), { recursive: true });
+      fs.writeFileSync(currentStorePath, JSON.stringify(merged, null, 2));
+    } catch {
+      // ignore migration failures
+    }
+  }
+};
+
+const appDataSelection = selectUserDataDir();
+
 const getAppDataDir = () => {
-  const userData = app ? app.getPath('userData') : path.join(os.homedir(), '.minecraft-core');
+  const userData = appDataSelection.userData || path.join(os.homedir(), '.minecraft-core');
   const configDir = path.join(userData, 'config');
 
   logger.debug('Getting app data directory', {
@@ -110,7 +281,8 @@ const ensureDataDir = () => {
 };
 
 ensureDataDir();
-const storePath = path.join(appDataDir, 'minecraft-core-config.json');
+const storePath = path.join(appDataDir, STORE_FILENAME);
+migrateLegacyStores(storePath, appDataSelection.candidates);
 const storeConfig = {
   name: 'minecraft-core-config',
   cwd: appDataDir,
