@@ -42,7 +42,7 @@ const selectUserDataDir = () => {
     .filter((entry) => fs.existsSync(entry.storePath))
     .map((entry) => ({ ...entry, mtimeMs: fs.statSync(entry.storePath).mtimeMs }));
 
-  const stableUserData = appDataBase ? path.join(appDataBase, 'minecraft-core') : defaultUserData;
+  const stableUserData = appDataBase ? path.join(appDataBase, 'Minecraft Core') : defaultUserData;
   let selectedUserData = defaultUserData;
 
   if (existingStores.some((entry) => path.normalize(entry.dir) === path.normalize(stableUserData))) {
