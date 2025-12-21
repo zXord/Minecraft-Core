@@ -1594,7 +1594,8 @@ function createSettingsHandlers() {
             null,
             false,
             config.sessionToken || null,
-            config.serverProtocol || 'https'
+            config.serverProtocol || 'https',
+            config.managementCertFingerprint || null
           );
           
           // Create flag file to indicate servers.dat has been initialized

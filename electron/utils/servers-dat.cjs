@@ -3,7 +3,7 @@ const path = require('path');
 const fetch = require('node-fetch');
 const nbt = require('prismarine-nbt');
 const zlib = require('zlib');
-const { getManagementHttpsAgent } = require('./tls-utils.cjs');
+const { getManagementHttpsAgent, getPinnedHttpsAgent } = require('./tls-utils.cjs');
 
 /**
  * Create or update the servers.dat and options.txt files so the given server
@@ -19,6 +19,7 @@ const { getManagementHttpsAgent } = require('./tls-utils.cjs');
  * @param {boolean} [preserveExistingServers] - If true, only creates server entry if it doesn't exist, preserving user modifications
  * @param {string|null} [sessionToken] - Optional management server session token
  * @param {string} [managementProtocol] - Optional management server protocol (http/https)
+ * @param {string|null} [managementCertFingerprint] - Optional pinned TLS fingerprint
  * @returns {Promise<{success: boolean, error?: string, preserved?: boolean}>}
  */
 async function ensureServersDat(
@@ -29,14 +30,27 @@ async function ensureServersDat(
   minecraftPortOverride = null,
   preserveExistingServers = false,
   sessionToken = null,
-  managementProtocol = 'https'
+  managementProtocol = 'https',
+  managementCertFingerprint = null
 ) {
   try {
     let minecraftPort = minecraftPortOverride || 25565;
 
     if (!minecraftPortOverride && managementPort) {
       const protocol = managementProtocol === 'http' ? 'http' : 'https';
-      const agent = protocol === 'https' ? await getManagementHttpsAgent() : undefined;
+      let agent;
+      if (protocol === 'https') {
+        try {
+          if (managementCertFingerprint) {
+            agent = await getPinnedHttpsAgent(serverIp, managementPort, managementCertFingerprint);
+          }
+        } catch {
+          agent = undefined;
+        }
+        if (!agent) {
+          agent = await getManagementHttpsAgent();
+        }
+      }
       const infoRes = await fetch(
         `${protocol}://${serverIp}:${managementPort}/api/server/info`,
         {

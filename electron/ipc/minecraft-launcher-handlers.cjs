@@ -3,15 +3,17 @@ const logger = getLoggerHandlers();
 
 const { getMinecraftLauncher } = require('../services/minecraft-launcher/index.cjs');
 const utils = require('../services/minecraft-launcher/utils.cjs');
+const appStore = require('../utils/app-store.cjs');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { net, session } = require('electron');
 const { readModMetadataFromJar } = require('./mod-utils/mod-file-manager.cjs');
 const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
-const { getManagementHttpsAgent } = require('../utils/tls-utils.cjs');
+const { getManagementHttpsAgent, getPinnedHttpsAgent, fetchPeerFingerprint } = require('../utils/tls-utils.cjs');
 
 // In-memory lock to prevent race conditions during state operations
 let stateLockPromise = Promise.resolve();
@@ -22,10 +24,143 @@ function normalizeManagementProtocol(value) {
   return normalized === 'http' ? 'http' : 'https';
 }
 
+function normalizeHost(value) {
+  if (!value || typeof value !== 'string') return '';
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function isLoopbackHost(value) {
+  const host = normalizeHost(value);
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+function isManagementRequestPath(pathname) {
+  if (!pathname || typeof pathname !== 'string') return false;
+  if (pathname === '/health' || pathname === '/api/test') return true;
+  if (pathname.startsWith('/api/mods/download/')) return true;
+  if (pathname.startsWith('/api/assets/download/')) return true;
+  if (pathname.startsWith('/api/client/')) return true;
+  return false;
+}
+
+function shouldUseElectronNet(url, serverInfo) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
+    if (isManagementRequestPath(parsed.pathname)) return true;
+    const baseHost = normalizeHost(serverInfo?.serverIp || '');
+    const basePort = serverInfo?.serverPort ? String(serverInfo.serverPort) : '';
+    const targetHost = normalizeHost(parsed.hostname);
+    const targetPort = parsed.port || '443';
+    return baseHost && targetHost === baseHost && (!basePort || basePort === targetPort);
+  } catch {
+    return false;
+  }
+}
+
+function createGetRequest(url, options, serverInfo, onResponse) {
+  if (shouldUseElectronNet(url, serverInfo) && net && session && session.defaultSession) {
+    const request = net.request({ method: 'GET', url, session: session.defaultSession });
+    const headers = options && options.headers ? options.headers : null;
+    if (headers) {
+      for (const [key, value] of Object.entries(headers)) {
+        if (typeof value !== 'undefined') request.setHeader(key, value);
+      }
+    }
+    request.on('response', onResponse);
+    request.end();
+    return request;
+  }
+
+  const protocol = url.startsWith('https:') ? https : http;
+  return protocol.get(url, options || {}, onResponse);
+}
+
+function abortRequest(request) {
+  if (!request) return;
+  if (typeof request.abort === 'function') {
+    try { request.abort(); } catch { /* noop */ }
+    return;
+  }
+  if (typeof request.destroy === 'function') {
+    try { request.destroy(); } catch { /* noop */ }
+    return;
+  }
+}
+
+function setRequestTimeout(request, timeoutMs, onTimeout) {
+  if (!request || !timeoutMs || timeoutMs <= 0 || typeof onTimeout !== 'function') return;
+  let fired = false;
+  const safeTimeout = () => {
+    if (fired) return;
+    fired = true;
+    onTimeout();
+  };
+  if (typeof request.setTimeout === 'function') {
+    request.setTimeout(timeoutMs, safeTimeout);
+    return;
+  }
+  const timer = setTimeout(safeTimeout, timeoutMs);
+  const clearTimer = () => {
+    if (timer) clearTimeout(timer);
+  };
+  request.on('response', (response) => {
+    response.on('end', clearTimer);
+    response.on('close', clearTimer);
+    response.on('error', clearTimer);
+    clearTimer();
+  });
+  request.on('error', clearTimer);
+  request.on('abort', clearTimer);
+  request.on('close', clearTimer);
+}
+
 function getManagementBaseUrl(serverInfo) {
   if (!serverInfo || !serverInfo.serverIp || !serverInfo.serverPort) return '';
   const protocol = normalizeManagementProtocol(serverInfo.serverProtocol);
   return `${protocol}://${serverInfo.serverIp}:${serverInfo.serverPort}`;
+}
+
+function getStoredManagementFingerprint(serverInfo) {
+  if (!serverInfo || !serverInfo.serverIp || !serverInfo.serverPort) return '';
+  try {
+    const instances = appStore.get('instances') || [];
+    const targetPort = String(serverInfo.serverPort);
+    const targetHost = normalizeHost(serverInfo.serverIp);
+    const match = instances.find((inst) =>
+      inst &&
+      inst.type === 'client' &&
+      normalizeHost(inst.serverIp || '') === targetHost &&
+      String(inst.serverPort || '') === targetPort
+    );
+    return typeof match?.managementCertFingerprint === 'string' ? match.managementCertFingerprint.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function storeManagementFingerprint(serverInfo, fingerprint) {
+  if (!serverInfo || !fingerprint) return;
+  try {
+    const instances = appStore.get('instances') || [];
+    const targetPort = String(serverInfo.serverPort || '');
+    const targetHost = normalizeHost(serverInfo.serverIp);
+    const idx = instances.findIndex((inst) =>
+      inst &&
+      inst.type === 'client' &&
+      normalizeHost(inst.serverIp || '') === targetHost &&
+      String(inst.serverPort || '') === targetPort
+    );
+    if (idx === -1) return;
+    instances[idx] = { ...instances[idx], managementCertFingerprint: fingerprint };
+    appStore.set('instances', instances);
+  } catch {
+    // ignore persistence failures
+  }
 }
 
 function resolveDownloadUrl(url, serverInfo) {
@@ -43,13 +178,53 @@ async function buildManagementRequestOptions(url, serverInfo) {
     options.headers = headers;
   }
   try {
-    const base = getManagementBaseUrl(serverInfo);
     const resolved = resolveDownloadUrl(url, serverInfo);
-    if (base && resolved) {
-      const baseOrigin = new URL(base).origin;
-      const resolvedOrigin = new URL(resolved).origin;
-      if (baseOrigin === resolvedOrigin && resolved.startsWith('https:')) {
-        options.agent = await getManagementHttpsAgent();
+    if (resolved) {
+      const resolvedUrl = new URL(resolved);
+      const isHttps = resolvedUrl.protocol === 'https:';
+      if (isHttps) {
+        const targetHost = normalizeHost(resolvedUrl.hostname);
+        const targetPort = resolvedUrl.port || '443';
+        const baseHost = normalizeHost(serverInfo?.serverIp || '');
+        const basePort = serverInfo?.serverPort ? String(serverInfo.serverPort) : '';
+        const isManagementTarget = baseHost && targetHost === baseHost && (!basePort || basePort === targetPort);
+        const isManagementPath = isManagementRequestPath(resolvedUrl.pathname);
+        const shouldPin = isManagementTarget || isManagementPath;
+
+        if (shouldPin) {
+          let fingerprint =
+            (typeof serverInfo?.managementCertFingerprint === 'string'
+              ? serverInfo.managementCertFingerprint.trim()
+              : '') || getStoredManagementFingerprint(serverInfo);
+
+          if (!fingerprint) {
+            fingerprint = await fetchPeerFingerprint(resolvedUrl.hostname, targetPort);
+            if (fingerprint) {
+              storeManagementFingerprint(serverInfo, fingerprint);
+              try {
+                serverInfo.managementCertFingerprint = fingerprint;
+              } catch {
+                // ignore assignment failures
+              }
+            }
+          }
+
+          if (fingerprint) {
+            try {
+              const pinnedAgent = await getPinnedHttpsAgent(resolvedUrl.hostname, targetPort, fingerprint);
+              if (pinnedAgent) {
+                options.agent = pinnedAgent;
+                return options;
+              }
+            } catch {
+              // fall back to default agent
+            }
+          }
+
+          if (isLoopbackHost(resolvedUrl.hostname)) {
+            options.agent = await getManagementHttpsAgent();
+          }
+        }
       }
     }
   } catch {
@@ -770,26 +945,25 @@ function createMinecraftLauncherHandlers(win) {
             const baseUrl = new URL(candidateUrl);
             const healthUrl = `${baseUrl.origin}/health`;
 
-            const requestOptions = await buildManagementRequestOptions(healthUrl, serverInfo);
-            serverAvailability.available = await new Promise((resolve) => {
-              const protocol = healthUrl.startsWith('https:') ? https : http;
-              let settled = false;
-              const finish = (value) => {
-                if (settled) return;
-                settled = true;
-                resolve(value);
-              };
+              const requestOptions = await buildManagementRequestOptions(healthUrl, serverInfo);
+              serverAvailability.available = await new Promise((resolve) => {
+                let settled = false;
+                const finish = (value) => {
+                  if (settled) return;
+                  settled = true;
+                  resolve(value);
+                };
 
-              const req = protocol.get(healthUrl, requestOptions, (res) => {
-                res.resume(); // Drain response to free socket
-                finish(res.statusCode >= 200 && res.statusCode < 500);
+                const req = createGetRequest(healthUrl, requestOptions, serverInfo, (res) => {
+                  res.resume(); // Drain response to free socket
+                  finish(res.statusCode >= 200 && res.statusCode < 500);
+                });
+                req.on('error', () => finish(false));
+                setRequestTimeout(req, SERVER_HEALTH_TIMEOUT_MS, () => {
+                  abortRequest(req);
+                  finish(false);
+                });
               });
-              req.on('error', () => finish(false));
-              req.setTimeout(SERVER_HEALTH_TIMEOUT_MS, () => {
-                try { req.destroy(); } catch { /* noop */ }
-                finish(false);
-              });
-            });
           } catch (error) {
             markServerUnavailable(error);
           } finally {
@@ -954,13 +1128,12 @@ function createMinecraftLauncherHandlers(win) {
                 if (!downloadUrl) throw new Error('No download URL for source: ' + source);
                 // Try download
                 const requestOptions = await buildManagementRequestOptions(downloadUrl, serverInfo);
-                await new Promise((resolve, reject) => {
-                  const protocol = downloadUrl.startsWith('https:') ? https : http;
-                  const file = fs.createWriteStream(modPath);
-                  let downloadedBytes = 0;
-                  let totalBytes = 0;
-                  let lastProgressUpdate = Date.now();
-                  const request = protocol.get(downloadUrl, requestOptions, async (response) => {
+                  await new Promise((resolve, reject) => {
+                    const file = fs.createWriteStream(modPath);
+                    let downloadedBytes = 0;
+                    let totalBytes = 0;
+                    let lastProgressUpdate = Date.now();
+                    const request = createGetRequest(downloadUrl, requestOptions, serverInfo, async (response) => {
                     if (response.statusCode === 302 || response.statusCode === 301) {
                       file.close();
                       fs.unlinkSync(modPath);
@@ -969,15 +1142,14 @@ function createMinecraftLauncherHandlers(win) {
                         reject(new Error(`Failed to download ${mod.fileName}: missing redirect location`));
                         return;
                       }
-                      const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
-                      let redirectOptions;
-                      try {
-                        redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
-                      } catch (err) {
-                        reject(err);
-                        return;
-                      }
-                      const redirectRequest = redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
+                        let redirectOptions;
+                        try {
+                          redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
+                        } catch (err) {
+                          reject(err);
+                          return;
+                        }
+                        const redirectRequest = createGetRequest(redirectUrl, redirectOptions, serverInfo, (redirectResponse) => {
                         if (redirectResponse.statusCode === 200) {
                           const file2 = fs.createWriteStream(modPath);
                           totalBytes = parseInt(redirectResponse.headers['content-length'], 10) || 0;
@@ -1175,11 +1347,11 @@ function createMinecraftLauncherHandlers(win) {
                     }
                     reject(err);
                   });
-                  const requestTimeout = source === 'server' ? SERVER_DOWNLOAD_TIMEOUT_MS : DEFAULT_DOWNLOAD_TIMEOUT_MS;
-                  request.setTimeout(requestTimeout, () => {
-                    request.abort();
-                    reject(new Error(`Download timeout for ${mod.fileName}`));
-                  });
+                    const requestTimeout = source === 'server' ? SERVER_DOWNLOAD_TIMEOUT_MS : DEFAULT_DOWNLOAD_TIMEOUT_MS;
+                    setRequestTimeout(request, requestTimeout, () => {
+                      abortRequest(request);
+                      reject(new Error(`Download timeout for ${mod.fileName}`));
+                    });
                 });
                 // If we got here, download succeeded
                 break;
@@ -1273,19 +1445,17 @@ function createMinecraftLauncherHandlers(win) {
               // (⬇️  Downloading ${mod.fileName} from: ${mod.downloadUrl})
               const requestOptions = await buildManagementRequestOptions(mod.downloadUrl, serverInfo);
               await new Promise((resolve, reject) => {
-                const protocol = mod.downloadUrl.startsWith('https:') ? https : http;
                 const file = fs.createWriteStream(modPath);
                 
                 let downloadedBytes = 0;
                 let totalBytes = 0;
                 let lastProgressUpdate = Date.now();
-                const request = protocol.get(mod.downloadUrl, requestOptions, async (response) => {
+                const request = createGetRequest(mod.downloadUrl, requestOptions, serverInfo, async (response) => {
                   if (response.statusCode === 302 || response.statusCode === 301) {
                     file.close();
                     fs.unlinkSync(modPath);
                     
                     const redirectUrl = response.headers.location;
-                    const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
                     let redirectOptions;
                     try {
                       redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
@@ -1293,7 +1463,7 @@ function createMinecraftLauncherHandlers(win) {
                       reject(err);
                       return;
                     }
-                    redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
+                    createGetRequest(redirectUrl, redirectOptions, serverInfo, (redirectResponse) => {
                       if (redirectResponse.statusCode === 200) {
                         const file2 = fs.createWriteStream(modPath);
                         
@@ -1518,8 +1688,8 @@ function createMinecraftLauncherHandlers(win) {
                 });
 
                 const requestTimeout = sourceUsed === 'server' ? SERVER_DOWNLOAD_TIMEOUT_MS : DEFAULT_DOWNLOAD_TIMEOUT_MS;
-                request.setTimeout(requestTimeout, () => {
-                  request.abort();
+                setRequestTimeout(request, requestTimeout, () => {
+                  abortRequest(request);
                   reject(new Error(`Download timeout for ${mod.fileName}`));
                 });
               });
@@ -1693,7 +1863,6 @@ function createMinecraftLauncherHandlers(win) {
         // Internal helper to download with progress and redirect support
         async function downloadFileWithProgress(url, tmpPath, name, id) {
           const resolvedUrl = resolveDownloadUrl(url, serverInfo) || url;
-          const protocol = resolvedUrl.startsWith('https:') ? https : http;
           const startTime = Date.now();
           let totalBytes = 0;
           let downloadedBytes = 0;
@@ -1701,7 +1870,7 @@ function createMinecraftLauncherHandlers(win) {
           const requestOptions = await buildManagementRequestOptions(resolvedUrl, serverInfo);
           return new Promise((resolve, reject) => {
             const fileStream = fs.createWriteStream(tmpPath);
-            const request = protocol.get(resolvedUrl, requestOptions, async (response) => {
+            const request = createGetRequest(resolvedUrl, requestOptions, serverInfo, async (response) => {
               // Handle redirects
               if (response.statusCode === 302 || response.statusCode === 301) {
                 const redirectUrl = response.headers.location;
@@ -1711,7 +1880,6 @@ function createMinecraftLauncherHandlers(win) {
                 }
                 // Close stream before re-request
                 fileStream.close();
-                const redirectProtocol = redirectUrl.startsWith('https:') ? https : http;
                 const fileStream2 = fs.createWriteStream(tmpPath);
                 let redirectOptions;
                 try {
@@ -1719,7 +1887,7 @@ function createMinecraftLauncherHandlers(win) {
                 } catch (err) {
                   return reject(err);
                 }
-                const redirected = redirectProtocol.get(redirectUrl, redirectOptions, (redirectResponse) => {
+                const redirected = createGetRequest(redirectUrl, redirectOptions, serverInfo, (redirectResponse) => {
                   if (redirectResponse.statusCode !== 200) {
                     fileStream2.close();
                     return reject(new Error(`HTTP ${redirectResponse.statusCode}`));
@@ -1746,7 +1914,10 @@ function createMinecraftLauncherHandlers(win) {
                   });
                 });
                 redirected.on('error', (err) => reject(err));
-                redirected.setTimeout(60000, () => { try { redirected.abort(); } catch { /* noop */ } ; reject(new Error('Download timeout')); });
+                setRequestTimeout(redirected, 60000, () => {
+                  abortRequest(redirected);
+                  reject(new Error('Download timeout'));
+                });
                 return;
               }
 
@@ -1776,7 +1947,10 @@ function createMinecraftLauncherHandlers(win) {
               });
             });
             request.on('error', (err) => reject(err));
-            request.setTimeout(60000, () => { try { request.abort(); } catch { /* noop */ } ; reject(new Error('Download timeout')); });
+            setRequestTimeout(request, 60000, () => {
+              abortRequest(request);
+              reject(new Error('Download timeout'));
+            });
           });
         }
 
@@ -1923,7 +2097,8 @@ function createMinecraftLauncherHandlers(win) {
           serverPort,
             false, // Don't preserve - we want to add our server on first launch
             serverInfo?.sessionToken || null,
-            serverInfo?.serverProtocol || 'https'
+            serverInfo?.serverProtocol || 'https',
+            serverInfo?.managementCertFingerprint || null
           );
           
           // Create flag file to indicate servers.dat has been initialized

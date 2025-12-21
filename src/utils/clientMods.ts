@@ -244,7 +244,7 @@ export async function downloadRequiredMods(instance: Instance) {
       clientPath: instance.path,
       requiredMods: modsToDownload,
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
     });
     if (result.success) {
       successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
@@ -328,7 +328,7 @@ export async function downloadOptionalMods(instance: Instance) {
       requiredMods: [],
       optionalMods: modsToDownload,
       allClientMods: allMods,
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
     });
     if (result.success) {
       successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
@@ -356,7 +356,7 @@ export async function downloadSingleOptionalMod(instance: Instance, mod: any) {
       requiredMods: mod.required ? [mod] : [],
       optionalMods: mod.required ? [] : [mod],
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
     });
     if (result.success) {
       // Avoid duplicate success toasts; the downloads UI already shows completion
@@ -383,7 +383,7 @@ export async function downloadSingleRequiredMod(instance: Instance, mod: any) {
       requiredMods: [mod],
       optionalMods: [],
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
     });
     if (result.success) {
       // Avoid duplicate success toasts; the downloads UI already shows completion
@@ -540,7 +540,7 @@ export async function updateServerMod(instance: Instance, event: any) {
       requiredMods: modRequiredMods,
       optionalMods: modOptionalMods,
       allClientMods: allMods,
-      serverInfo: { serverIp: instance?.serverIp, serverPort: instance?.serverPort, serverProtocol: instance?.serverProtocol, sessionToken: instance?.sessionToken }
+      serverInfo: { serverIp: instance?.serverIp, serverPort: instance?.serverPort, serverProtocol: instance?.serverProtocol, sessionToken: instance?.sessionToken, managementCertFingerprint: instance?.managementCertFingerprint }
     });
     if (result?.success) {
       successMessage.set(`Successfully updated ${name} from v${currentVersion} to v${newVersion}`);

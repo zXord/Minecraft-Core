@@ -1,4 +1,5 @@
 const https = require('https');
+const tls = require('tls');
 const { createHash } = require('crypto');
 const nodeCrypto = require('crypto');
 const selfsigned = require('selfsigned');
@@ -213,6 +214,94 @@ function buildHttpsAgent(cert) {
   });
 }
 
+function getPeerFingerprint(peer) {
+  if (!peer) return '';
+  const direct = normalizeFingerprint(peer.fingerprint256 || peer.fingerprint || '');
+  if (direct) return direct;
+  if (peer.raw && Buffer.isBuffer(peer.raw)) {
+    return normalizeFingerprint(createHash('sha256').update(peer.raw).digest('hex'));
+  }
+  return '';
+}
+
+const pinnedAgentCache = new Map();
+
+async function fetchPeerFingerprint(host, port) {
+  if (!host) return '';
+  const targetPort = port ? Number(port) : 443;
+  return await new Promise((resolve) => {
+    const socket = tls.connect(
+      {
+        host,
+        port: targetPort,
+        servername: host,
+        rejectUnauthorized: false
+      },
+      () => {
+        try {
+          const cert = socket.getPeerCertificate(true);
+          const fingerprint = getPeerFingerprint(cert);
+          resolve(fingerprint);
+        } catch {
+          resolve('');
+        } finally {
+          socket.end();
+        }
+      }
+    );
+    socket.setTimeout(8000, () => {
+      try { socket.destroy(); } catch { /* noop */ }
+      resolve('');
+    });
+    socket.on('error', () => resolve(''));
+  });
+}
+
+async function getPinnedHttpsAgent(host, port, expectedFingerprint) {
+  const normalized = normalizeFingerprint(expectedFingerprint || '');
+  if (!host || !normalized) return null;
+  const targetPort = port ? Number(port) : 443;
+  const cacheKey = `${host}:${targetPort}:${normalized}`;
+  if (pinnedAgentCache.has(cacheKey)) {
+    return pinnedAgentCache.get(cacheKey);
+  }
+
+  const agent = new https.Agent({
+    keepAlive: true,
+    createConnection: (options, callback) => {
+      const socket = tls.connect(
+        {
+          ...options,
+          host,
+          port: targetPort,
+          servername: host,
+          rejectUnauthorized: false
+        },
+        () => {
+          try {
+            const cert = socket.getPeerCertificate(true);
+            const actualFingerprint = getPeerFingerprint(cert);
+            if (!actualFingerprint || actualFingerprint !== normalized) {
+              const err = new Error('Pinned certificate fingerprint mismatch');
+              socket.destroy(err);
+              callback(err);
+              return;
+            }
+            callback(null, socket);
+          } catch (err) {
+            socket.destroy(err);
+            callback(err);
+          }
+        }
+      );
+      socket.on('error', (err) => callback(err));
+      return socket;
+    }
+  });
+  pinnedAgentCache.set(cacheKey, agent);
+  return agent;
+}
+
 async function getManagementTlsConfig(extraHosts = []) {
   return getOrCreateTlsConfig(MANAGEMENT_KEY, extraHosts);
 }
@@ -239,5 +328,7 @@ module.exports = {
   getBrowserPanelTlsConfig,
   getManagementHttpsAgent,
   getBrowserPanelHttpsAgent,
-  getTlsFingerprint
+  getTlsFingerprint,
+  getPinnedHttpsAgent,
+  fetchPeerFingerprint
 };

@@ -608,7 +608,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
   await checkAssetSynchronization();
       successMessage.set(`Downloaded ${items.length} shader${items.length > 1 ? 's' : ''}`);
@@ -631,7 +631,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
       await checkAssetSynchronization();
       const n = items.length;
@@ -655,7 +655,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
   await checkAssetSynchronization();
       successMessage.set(`Downloaded ${items.length} resource pack${items.length > 1 ? 's' : ''}`);
@@ -678,7 +678,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken }
+        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
       await checkAssetSynchronization();
       const n = items.length;
@@ -1839,7 +1839,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             serverIp: instance.serverIp,
             serverPort: instance.serverPort,
             serverProtocol: instance.serverProtocol,
-            sessionToken: instance.sessionToken
+            sessionToken: instance.sessionToken,
+            managementCertFingerprint: instance.managementCertFingerprint
           }
         });
         
