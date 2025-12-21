@@ -974,6 +974,8 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       commandLineIdentifier: `${path.basename(launchJar)} nogui --port ${port}`,
       targetPath: targetPath
     };
+    const serverInfoSnapshot = { ...serverProcess['serverInfo'] };
+    const serverPid = serverProcess.pid;
     
     logger.info('Server process spawned successfully', {
       category: 'server',
@@ -1084,8 +1086,8 @@ async function startMinecraftServer(targetPath, port, maxRam) {
           service: 'ServerManager',
           operation: 'serverProcess.error',
           errorType: err.constructor.name,
-          pid: serverProcess?.pid,
-          serverInfo: serverProcess?.['serverInfo'],
+          pid: serverPid,
+          serverInfo: serverInfoSnapshot,
           stack: err.stack
         }
       });
@@ -1117,8 +1119,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       const exitTime = Date.now();
       const uptime = serverStartMs ? exitTime - serverStartMs : 0;
       const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
-      
-      const serverInfo = serverProcess ? { ...serverProcess['serverInfo'] } : null;
+      const exitServerInfo = serverInfoSnapshot ? { ...serverInfoSnapshot } : null;
       
       logger.info('Server process exited', {
         category: 'server',
@@ -1129,21 +1130,21 @@ async function startMinecraftServer(targetPath, port, maxRam) {
           signal,
           isNormalExit,
           uptime,
-          pid: serverProcess?.pid,
-          serverInfo
+          pid: serverPid,
+          serverInfo: exitServerInfo
         }
       });
       
       if (!isNormalExit) {
         const restartInfo = {
           serverInfo: {
-            targetPath: serverProcess && serverProcess['serverInfo'] ? serverProcess['serverInfo'].targetPath : null,
-            port: serverProcess && serverProcess['serverInfo'] ? serverProcess['serverInfo'].port : 25565,
-            maxRam: serverProcess && serverProcess['serverInfo'] ? serverProcess['serverInfo'].maxRam : 4,
-            jar: serverProcess && serverProcess['serverInfo'] ? serverProcess['serverInfo'].jar : null,
-            ...serverInfo
+            targetPath: exitServerInfo ? exitServerInfo.targetPath : null,
+            port: exitServerInfo && exitServerInfo.port ? exitServerInfo.port : 25565,
+            maxRam: exitServerInfo && exitServerInfo.maxRam ? exitServerInfo.maxRam : 4,
+            jar: exitServerInfo ? exitServerInfo.jar : null,
+            ...(exitServerInfo || {})
           },
-          pid: serverProcess ? serverProcess.pid : null,
+          pid: serverPid,
           exitCode: code,
           signal: signal
         };

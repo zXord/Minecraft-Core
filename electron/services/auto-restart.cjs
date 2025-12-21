@@ -65,6 +65,18 @@ function scheduleAutoRestart(restartInfo) {
         maxRamToRestart = restartInfo.serverInfo.maxRam || 4;
         
         if (!targetPathToRestart) {
+          const lastServerPath = appStore.get('lastServerPath');
+          if (lastServerPath) {
+            if (fs.existsSync(lastServerPath)) {
+              targetPathToRestart = lastServerPath;
+              safeSend('server-log', `[INFO] Using last known server path: ${targetPathToRestart}`);
+            } else {
+              safeSend('server-log', `[WARNING] Stored server path not found: ${lastServerPath}`);
+            }
+          }
+        }
+
+        if (!targetPathToRestart) {
           const possiblePath = path.join(process.cwd(), 'test');
           if (fs.existsSync(possiblePath)) {
             targetPathToRestart = possiblePath;
