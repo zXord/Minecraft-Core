@@ -397,6 +397,17 @@
     return UNASSIGNED_CATEGORY;
   }
 
+  function isClientOnlyMod(modName) {
+    return resolveModCategory(modName) === 'client-only';
+  }
+
+  function selectionHasNonClientOnly(mods) {
+    for (const modName of mods) {
+      if (!isClientOnlyMod(modName)) return true;
+    }
+    return false;
+  }
+
   function getModFilePath(fileName, category, isDisabled) {
     const suffix = isDisabled ? '.disabled' : '';
     if (category === 'client-only') {
@@ -988,6 +999,13 @@
 
   async function handleDeleteSelected() {
     if (selectedMods.size === 0) return;
+    if (serverRunning && $activeContentType === CONTENT_TYPES.MODS) {
+      const selectedModsArray = Array.from(selectedMods);
+      if (selectionHasNonClientOnly(selectedModsArray)) {
+        errorMessage.set('Stop the server to delete server or shared mods.');
+        return;
+      }
+    }
     
     try {
       for (const itemName of selectedMods) {
@@ -1021,6 +1039,10 @@
     
     // Determine what action to take based on selected mods
     const selectedModsArray = Array.from(selectedMods);
+    if (serverRunning && selectionHasNonClientOnly(selectedModsArray)) {
+      errorMessage.set('Stop the server to enable or disable server or shared mods.');
+      return;
+    }
     const enabledSelected = selectedModsArray.filter(mod => !$disabledMods.has(mod));
     const disabledSelected = selectedModsArray.filter(mod => $disabledMods.has(mod));
     
@@ -1193,6 +1215,12 @@
 
   async function confirmDeleteMod() {
     if (modToDelete) {
+      if (serverRunning && $activeContentType === CONTENT_TYPES.MODS && !isClientOnlyMod(modToDelete)) {
+        errorMessage.set('Stop the server to delete server or shared mods.');
+        modToDelete = null;
+        confirmDeleteVisible = false;
+        return;
+      }
       let deleteSuccess;
       
       if ($activeContentType === CONTENT_TYPES.MODS) {
@@ -1225,6 +1253,10 @@
 
   async function confirmToggleModStatus(modName, isDisabled) {
     try {
+      if (serverRunning && !isClientOnlyMod(modName)) {
+        errorMessage.set('Stop the server to enable or disable server or shared mods.');
+        return;
+      }
         disabledMods.update(mods => {
           const newMods = new SvelteSet(mods);
         if (isDisabled) {
@@ -1781,6 +1813,8 @@
     {@const selectedModsArray = Array.from(selectedMods)}
     {@const enabledSelected = selectedModsArray.filter(mod => !$disabledMods.has(mod))}
     {@const disabledSelected = selectedModsArray.filter(mod => $disabledMods.has(mod))}
+    {@const selectionHasNonClientOnlyMods = $activeContentType === CONTENT_TYPES.MODS && selectionHasNonClientOnly(selectedModsArray)}
+    {@const bulkActionBlockedByServer = serverRunning && ($activeContentType !== CONTENT_TYPES.MODS || selectionHasNonClientOnlyMods)}
     {@const buttonText = disabledSelected.length > 0 && enabledSelected.length === 0 ? 'Enable' : 
                         enabledSelected.length > 0 && disabledSelected.length === 0 ? 'Disable' : 
                         'Toggle'}
@@ -1788,13 +1822,13 @@
                           enabledSelected.length > 0 && disabledSelected.length === 0 ? 'warn' :
                           'primary'}
     <div class="bulk">
-      <button class="danger sm" on:click={handleDeleteSelected} disabled={serverRunning}>
-        {#if serverRunning}🔒{/if} 🗑 Delete Selected ({selectedMods.size})
+      <button class="danger sm" on:click={handleDeleteSelected} disabled={bulkActionBlockedByServer}>
+        {#if bulkActionBlockedByServer}🔒{/if} 🗑 Delete Selected ({selectedMods.size})
       </button>
       <!-- Only show disable/enable for mods, not for shaders or resource packs -->
       {#if $activeContentType === CONTENT_TYPES.MODS}
-        <button class="{buttonClass} sm" on:click={handleBulkToggle} disabled={serverRunning}>
-          {#if serverRunning}🔒{/if} 
+        <button class="{buttonClass} sm" on:click={handleBulkToggle} disabled={bulkActionBlockedByServer}>
+          {#if bulkActionBlockedByServer}🔒{/if} 
           {buttonText === 'Enable' ? '✅' : buttonText === 'Disable' ? '🚫' : '⚡'} 
           {buttonText} Selected ({selectedMods.size})
         </button>
@@ -1994,7 +2028,8 @@
         {@const isDisabled = $disabledMods.has(mod)}
         {@const canUpdateWhileRunning = location === 'client-only'}
         {@const updateBlockedByServer = serverRunning && !canUpdateWhileRunning}
-        {@const locationSelectionDisabled = isDisabled || (serverRunning && location !== UNASSIGNED_CATEGORY)}
+        {@const manageBlockedByServer = serverRunning && !canUpdateWhileRunning}
+        {@const locationSelectionDisabled = isDisabled || (serverRunning && location !== UNASSIGNED_CATEGORY && location !== 'client-only')}
         {@const borderColor = locColor[location] || '#2c82ff'}
         
         <tr class:selected={selectedMods.has(mod)} 
@@ -2039,7 +2074,7 @@
           {#if (location === 'client-only' || location === 'both')}
             <label class="req">
               <input type="checkbox"
-                       disabled={serverRunning || isDisabled}
+                       disabled={isDisabled}
                      checked={modCategoryInfo?.required}
                      on:change={(e) => handleRequirementChange(mod, e)} />
               required
@@ -2223,32 +2258,32 @@
         <!-- action buttons -->
         <td class="act">
           <button class="danger sm"
-                  disabled={serverRunning}
-                  title={serverRunning ? 'Stop the server to delete mods' : 'Delete mod'}
+                  disabled={manageBlockedByServer}
+                  title={manageBlockedByServer ? 'Stop the server to delete server or shared mods' : 'Delete mod'}
                   on:click={() => showDeleteConfirmation(mod)}>
-            {#if serverRunning}🔒{/if} 🗑
+            {#if manageBlockedByServer}🔒{/if} 🗑
           </button>
 
             {#if isDisabled}
               <button class="primary sm"
-                      disabled={serverRunning}
-                      title={serverRunning ? 'Stop the server to enable mods' : 'Enable mod'}
+                      disabled={manageBlockedByServer}
+                      title={manageBlockedByServer ? 'Stop the server to enable server or shared mods' : 'Enable mod'}
                       on:click={() => confirmToggleModStatus(mod, true)}>
-                {#if serverRunning}🔒{/if} Enable
+                {#if manageBlockedByServer}🔒{/if} Enable
               </button>
             {:else}
           <button class="warn sm"
-                  disabled={serverRunning}
-                  title={serverRunning ? 'Stop the server to disable mods' : 'Disable mod'}
+                  disabled={manageBlockedByServer}
+                  title={manageBlockedByServer ? 'Stop the server to disable server or shared mods' : 'Disable mod'}
                       on:click={() => confirmToggleModStatus(mod, false)}>
-                {#if serverRunning}🔒{/if} Disable
+                {#if manageBlockedByServer}🔒{/if} Disable
           </button>
               
               <button class="ghost sm" 
                       title="Change version" 
-                      disabled={serverRunning}
+                      disabled={manageBlockedByServer}
                       on:click={() => toggleVersionSelector(mod)}>
-                {#if serverRunning}🔒{/if} {$expandedInstalledMod === mod ? '▲' : '▼'}
+                {#if manageBlockedByServer}🔒{/if} {$expandedInstalledMod === mod ? '▲' : '▼'}
               </button>
             {/if}
         </td>
