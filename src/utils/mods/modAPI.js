@@ -1414,8 +1414,8 @@ export async function checkDisabledModUpdates(serverPath) {
     
     for (const result of results) {
       if (result.isCompatibleUpdate && result.hasUpdate) {
-  const rawFileName = result.fileName || '';
-  const normalizedName = rawFileName.split(/[\\/]/).pop() || rawFileName;
+        const rawFileName = result.fileName || '';
+        const normalizedName = rawFileName.split(/[\\/]/).pop() || rawFileName;
         // Skip if user has ignored this update/version
         const ignored = isUpdateIgnored(normalizedName, result.latestVersionId, result.latestVersion);
         if (ignored) continue;

@@ -474,13 +474,13 @@
   // Reactive statement to load content when content type changes
   $: if ($activeContentType && serverPath) {
     (async () => {
-      try {
-        if ($activeContentType === CONTENT_TYPES.MODS) {
-          await loadMods(serverPath);
-          try { await checkDisabledModUpdates(serverPath); } catch {}
-        } else {
-          await loadContent(serverPath, $activeContentType);
-        }
+        try {
+          if ($activeContentType === CONTENT_TYPES.MODS) {
+            await loadMods(serverPath);
+            try { await checkDisabledModUpdates(serverPath); } catch {}
+          } else {
+            await loadContent(serverPath, $activeContentType);
+          }
       } catch (error) {
         // Silently handle content loading errors
       }
@@ -980,10 +980,10 @@
         }
       }
       
-      // Force refresh mod list ONCE at the end to ensure UI is current
-      await loadMods(serverPath);
-      // Explicitly refresh disabled mod updates to ensure accurate counts
-      await checkDisabledModUpdates(serverPath);
+        // Force refresh mod list ONCE at the end to ensure UI is current
+        await loadMods(serverPath);
+        // Explicitly refresh disabled mod updates to ensure accurate counts
+        await checkDisabledModUpdates(serverPath);
 
       const enabledText = enabledModsToUpdate.length > 0 ? `${enabledModsToUpdate.length} updated` : '';
       const disabledText = disabledModsToUpdate.length > 0 ? `${disabledModsToUpdate.length} enabled and updated` : '';
@@ -1267,9 +1267,9 @@
           return newMods;
         });
       
-        await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
-        try { await checkDisabledModUpdates(serverPath); } catch {}
-        
+      await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+      try { await checkDisabledModUpdates(serverPath); } catch {}
+      
       const action = isDisabled ? 'enabled' : 'disabled';
       successMessage.set(`Mod ${modName} ${action} successfully.`);
         setTimeout(() => successMessage.set(''), 3000);
@@ -1651,14 +1651,14 @@
       
       // Load disabled mods from storage
       if (serverPath) {
-        try {
-          const disabledModsList = await safeInvoke('get-disabled-mods', serverPath);
-          if (Array.isArray(disabledModsList)) {
-            disabledMods.set(new SvelteSet(disabledModsList));
-            try { await checkDisabledModUpdates(serverPath); } catch {}
+          try {
+            const disabledModsList = await safeInvoke('get-disabled-mods', serverPath);
+            if (Array.isArray(disabledModsList)) {
+              disabledMods.set(new SvelteSet(disabledModsList));
+              try { await checkDisabledModUpdates(serverPath); } catch {}
+            }
+          } catch (error) {
           }
-        } catch (error) {
-        }
 
         // Load Modrinth matching data
         try {

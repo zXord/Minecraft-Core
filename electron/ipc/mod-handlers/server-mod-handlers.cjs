@@ -2392,15 +2392,16 @@ function createServerModHandlers(win) {
           try {
             const norm = v => String(v || '').trim().toLowerCase().replace(/^v/, '');
             const extractNumeric = v => {
-              const m = norm(v).match(/\d+(?:\.\d+){0,3}/); // capture up to 4 numeric segments
-              return m ? m[0] : '';
+              const matches = norm(v).match(/\d+/g);
+              return matches ? matches.map(n => parseInt(n, 10)).filter(n => !Number.isNaN(n)) : [];
             };
-            const as = extractNumeric(a).split('.').filter(Boolean).map(n => parseInt(n, 10));
-            const bs = extractNumeric(b).split('.').filter(Boolean).map(n => parseInt(n, 10));
+            const as = extractNumeric(a);
+            const bs = extractNumeric(b);
             if (as.length === 0 || bs.length === 0) return 0; // can't compare meaningfully
             const len = Math.max(as.length, bs.length);
             for (let i = 0; i < len; i++) {
-              const ai = as[i] || 0; const bi = bs[i] || 0;
+              const ai = as[i] || 0;
+              const bi = bs[i] || 0;
               if (ai !== bi) return ai - bi;
             }
             return 0;
@@ -2504,7 +2505,10 @@ function createServerModHandlers(win) {
             
             if (currentVersionExists) {
               // Current version is available for target MC version
-              if (latest && latest.versionNumber !== currentVersion && compareLooseVersions(currentVersion, latest.versionNumber) < 0) {
+              const latestVersionNumber = latest?.versionNumber;
+              const cmp = latestVersionNumber ? compareLooseVersions(currentVersion, latestVersionNumber) : 0;
+              const rawDiffers = !!(latestVersionNumber && currentVersion && latestVersionNumber !== currentVersion);
+              if (latest && (cmp < 0 || (cmp === 0 && rawDiffers))) {
                 // There's a newer version available
                 logger.debug('Update available for disabled mod', {
                   category: 'mods',
@@ -2512,7 +2516,7 @@ function createServerModHandlers(win) {
                     modName: name,
                     currentVersion: currentVersion,
                     latestVersion: latest.versionNumber,
-                    updateType: 'newer_version'
+                    updateType: cmp < 0 ? 'newer_version' : 'string_mismatch'
                   }
                 });
                 
@@ -2553,8 +2557,10 @@ function createServerModHandlers(win) {
             } else if (latest) {
               // Current version doesn't exist for target MC, but there's a compatible version available.
               // Guard: avoid suggesting a downgrade if installed version appears newer semantically.
-              const cmp = compareLooseVersions(currentVersion, latest.versionNumber);
-              if (cmp >= 0) { // installed is newer or equal numerically
+              const latestVersionNumber = latest.versionNumber;
+              const cmp = compareLooseVersions(currentVersion, latestVersionNumber);
+              const rawDiffers = !!(latestVersionNumber && currentVersion && latestVersionNumber !== currentVersion);
+              if (cmp > 0 || (cmp === 0 && !rawDiffers)) { // installed is newer or equal numerically
                 logger.debug('Skipping disabled mod update - would be downgrade across MC branches', {
                   category: 'mods',
                   data: { modName: name, currentVersion: currentVersion, targetVersion: latest.versionNumber, updateType: 'downgrade_skip' }
