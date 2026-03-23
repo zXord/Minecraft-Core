@@ -10,6 +10,7 @@ const { resetCrashCount } = require('./auto-restart.cjs');
 const { ServerJavaManager } = require('./server-java-manager.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const instanceContext = require('../utils/instance-context.cjs');
+const { FABRIC_LAUNCH_JAR, getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
 
 // Initialize logger
 const logger = getLoggerHandlers();
@@ -578,7 +579,7 @@ eventBus.on('request-server-start', async ({ targetPath, port, maxRam }) => {
   
   const result = await startMinecraftServer(targetPath, port, maxRam);
   
-  if (result) {
+  if (result && result.success) {
     logger.info('Server start successful via event', {
       category: 'server',
       data: {
@@ -600,12 +601,33 @@ eventBus.on('request-server-start', async ({ targetPath, port, maxRam }) => {
         success: false,
         targetPath,
         port,
-        maxRam
+        maxRam,
+        result
       }
     });
-    safeSend('server-log', `[ERROR] Server start failed via event`);
+    safeSend('server-log', `[ERROR] ${result?.message || 'Server start failed via event'}`);
   }
 });
+
+function createStartFailure(code, message, repairable = false, extra = {}) {
+  return {
+    success: false,
+    code,
+    message,
+    repairable,
+    ...extra
+  };
+}
+
+function createStartSuccess(extra = {}) {
+  return {
+    success: true,
+    code: 'SERVER_STARTED',
+    message: 'Server started successfully.',
+    repairable: false,
+    ...extra
+  };
+}
 
 /**
  * Start the Minecraft server
@@ -613,10 +635,12 @@ eventBus.on('request-server-start', async ({ targetPath, port, maxRam }) => {
  * @param {string} targetPath - Path to the server directory
  * @param {number} port - The port number to run the server on
  * @param {number} maxRam - Maximum RAM allocation in GB
- * @returns {Promise<boolean>} Success status
+ * @returns {Promise<{success: boolean, code: string, message: string, repairable: boolean}>} Structured start result
  */
 async function startMinecraftServer(targetPath, port, maxRam) {
   const startOperationTime = Date.now();
+  const normalizedPort = Number.isFinite(port) ? port : 25565;
+  const normalizedMaxRam = Number.isFinite(maxRam) && maxRam > 0 ? maxRam : 4;
   
   if (serverProcess) {
     logger.warn('Server start attempted while server already running', {
@@ -627,11 +651,11 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         serverAlreadyRunning: true,
         existingPid: serverProcess.pid,
         targetPath,
-        port,
-        maxRam
+        port: normalizedPort,
+        maxRam: normalizedMaxRam
       }
     });
-    return false;
+    return createStartFailure('ALREADY_RUNNING', 'Server is already running.');
   }
   
   // Set instance context based on server path
@@ -644,15 +668,13 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       service: 'ServerManager',
       operation: 'startMinecraftServer',
       targetPath,
-      port,
-      maxRam,
+      port: normalizedPort,
+      maxRam: normalizedMaxRam,
       platform: process.platform,
       instanceName
     }
   });
   
-  serverStartMs = Date.now();
-  serverMaxRam = maxRam;
   performanceMetrics.serverStarts++;
 
   // First, detect the Minecraft version and ensure correct Java is available
@@ -671,7 +693,10 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       }
     });
     safeSend('server-log', '[ERROR] Could not determine Minecraft version. Cannot ensure correct Java version.');
-    return false;
+    return createStartFailure(
+      'VERSION_UNKNOWN',
+      'Could not determine the Minecraft version from this server folder.'
+    );
   }
 
   logger.info('Minecraft version detected for server start', {
@@ -707,81 +732,31 @@ async function startMinecraftServer(targetPath, port, maxRam) {
   let javaPath = javaRequirements.javaPath;
 
   if (!javaRequirements.isAvailable) {
-    logger.info('Java not available, starting download', {
+    const javaFailureCode = javaRequirements.installationState === 'broken'
+      ? 'JAVA_BROKEN'
+      : 'JAVA_MISSING';
+    const javaFailureMessage = javaRequirements.validationMessage
+      || (javaRequirements.installationState === 'broken'
+        ? `Java ${javaRequirements.requiredJavaVersion} is installed but incomplete or broken. Repair Java from Server Maintenance before starting the server.`
+        : `Java ${javaRequirements.requiredJavaVersion} is not installed for this server. Repair Java from Server Maintenance before starting the server.`);
+
+    logger.warn('Java runtime is not ready for server start', {
       category: 'server',
       data: {
         service: 'ServerManager',
         operation: 'startMinecraftServer',
         requiredJavaVersion: javaRequirements.requiredJavaVersion,
-        stage: 'java_download'
+        installationState: javaRequirements.installationState,
+        validationCode: javaRequirements.validationCode,
+        validationMessage: javaRequirements.validationMessage,
+        javaPath,
+        stage: 'java_requirements'
       }
     });
-    safeSend('server-log', `[INFO] Java ${javaRequirements.requiredJavaVersion} not found. Downloading...`);
-    
-    try {
-      const javaDownloadStart = Date.now();
-      const javaResult = await serverJavaManager.ensureJavaForMinecraft(
-        minecraftVersion,
-        (progress) => {
-          // Send progress updates
-          safeSend('server-log', `[JAVA] ${progress.task}`);
-          if (progress.progress) {
-            const progressMsg = progress.downloadedMB && progress.totalMB 
-              ? `${progress.progress}% (${progress.downloadedMB}/${progress.totalMB} MB)`
-              : `${progress.progress}%`;
-            safeSend('server-log', `[JAVA] Progress: ${progressMsg}`);
-          }
-        }
-      );
-
-      const javaDownloadDuration = Date.now() - javaDownloadStart;
-
-      if (!javaResult.success) {
-        logger.error('Java download failed', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'startMinecraftServer',
-            duration: javaDownloadDuration,
-            requiredJavaVersion: javaRequirements.requiredJavaVersion,
-            error: javaResult.error,
-            stage: 'java_download'
-          }
-        });
-        safeSend('server-log', `[ERROR] Failed to download Java ${javaRequirements.requiredJavaVersion}: ${javaResult.error}`);
-        return false;
-      }
-
-      javaPath = javaResult.javaPath;
-      logger.info('Java download completed successfully', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'startMinecraftServer',
-          duration: javaDownloadDuration,
-          requiredJavaVersion: javaRequirements.requiredJavaVersion,
-          javaPath,
-          stage: 'java_download'
-        }
-      });
-      safeSend('server-log', `[INFO] Java ${javaRequirements.requiredJavaVersion} downloaded successfully`);
-    } catch (error) {
-      const operationDuration = Date.now() - startOperationTime;
-      logger.error(`Java download failed: ${error.message}`, {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'startMinecraftServer',
-          duration: operationDuration,
-          errorType: error.constructor.name,
-          requiredJavaVersion: javaRequirements.requiredJavaVersion,
-          stage: 'java_download',
-          stack: error.stack
-        }
-      });
-      safeSend('server-log', `[ERROR] Java download failed: ${error.message}`);
-      return false;
-    }
+    safeSend('server-log', `[ERROR] ${javaFailureMessage}`);
+    return createStartFailure(javaFailureCode, javaFailureMessage, true, {
+      requiredJavaVersion: javaRequirements.requiredJavaVersion
+    });
   } else {
     logger.info('Using existing Java installation', {
       category: 'server',
@@ -790,10 +765,33 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         operation: 'startMinecraftServer',
         javaPath,
         requiredJavaVersion: javaRequirements.requiredJavaVersion,
+        installationState: javaRequirements.installationState,
         stage: 'java_requirements'
       }
     });
     safeSend('server-log', `[INFO] Using Java at: ${javaPath}`);
+  }
+
+  if (!javaPath) {
+    const operationDuration = Date.now() - startOperationTime;
+    logger.error('Java runtime reported available but no executable path was resolved', {
+      category: 'server',
+      data: {
+        service: 'ServerManager',
+        operation: 'startMinecraftServer',
+        duration: operationDuration,
+        minecraftVersion,
+        requiredJavaVersion: javaRequirements.requiredJavaVersion,
+        installationState: javaRequirements.installationState,
+        stage: 'java_requirements'
+      }
+    });
+    return createStartFailure(
+      'JAVA_BROKEN',
+      'Java runtime could not be resolved for this server. Repair Java from Server Maintenance before starting the server.',
+      true,
+      { requiredJavaVersion: javaRequirements.requiredJavaVersion }
+    );
   }
 
   // Determine the correct server JAR to use based on configuration
@@ -834,8 +832,33 @@ async function startMinecraftServer(targetPath, port, maxRam) {
   }
   
   if (useFabric) {
+    const fabricStatus = getFabricRuntimeStatus(targetPath);
+
+    if (fabricStatus.hasBlockingIssues) {
+      const operationDuration = Date.now() - startOperationTime;
+      const issueMessages = fabricStatus.blockingIssues.map(issue => issue.message);
+      const failureMessage = `${issueMessages[0]}. Repair Fabric from Server Maintenance before starting the server.`;
+
+      logger.warn('Fabric runtime is not ready for server start', {
+        category: 'server',
+        data: {
+          service: 'ServerManager',
+          operation: 'startMinecraftServer',
+          duration: operationDuration,
+          targetPath,
+          issues: fabricStatus.blockingIssues,
+          stage: 'jar_detection'
+        }
+      });
+
+      safeSend('server-log', `[ERROR] ${failureMessage}`);
+      return createStartFailure('FABRIC_BROKEN', failureMessage, true, {
+        fabricIssues: issueMessages
+      });
+    }
+
     // Try to use Fabric launcher
-    const fabricJar = path.join(targetPath, 'fabric-server-launch.jar');
+    const fabricJar = path.join(targetPath, FABRIC_LAUNCH_JAR);
     if (fs.existsSync(fabricJar)) {
       launchJar = fabricJar;
       logger.info('Using Fabric server launcher', {
@@ -932,17 +955,50 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         stage: 'jar_detection'
       }
     });
-    return false;
+    return createStartFailure(
+      'SERVER_JAR_MISSING',
+      'No valid server jar was found in the selected server folder.'
+    );
+  }
+
+  if (path.basename(launchJar) === FABRIC_LAUNCH_JAR) {
+    const fabricStatus = getFabricRuntimeStatus(targetPath);
+
+    if (fabricStatus.hasBlockingIssues) {
+      const operationDuration = Date.now() - startOperationTime;
+      const issueMessages = fabricStatus.blockingIssues.map(issue => issue.message);
+      const failureMessage = `${issueMessages[0]}. Repair Fabric from Server Maintenance before starting the server.`;
+
+      logger.warn('Fabric launch jar selected but runtime is incomplete', {
+        category: 'server',
+        data: {
+          service: 'ServerManager',
+          operation: 'startMinecraftServer',
+          duration: operationDuration,
+          targetPath,
+          launchJar,
+          issues: fabricStatus.blockingIssues,
+          stage: 'jar_detection'
+        }
+      });
+
+      safeSend('server-log', `[ERROR] ${failureMessage}`);
+      return createStartFailure('FABRIC_BROKEN', failureMessage, true, {
+        fabricIssues: issueMessages
+      });
+    }
   }
 
   try {
+    serverStartMs = Date.now();
+    serverMaxRam = normalizedMaxRam;
     const serverIdentifier = `minecraft-core-server-${Date.now()}`;
     const spawnArgs = [
-      `-Xmx${maxRam}G`,
+      `-Xmx${normalizedMaxRam}G`,
       `-Dminecraft.core.server.id=${serverIdentifier}`,
       '-jar', launchJar,
       'nogui',
-      '--port', `${port}`
+      '--port', `${normalizedPort}`
     ];
     
     logger.info('Spawning server process', {
@@ -968,10 +1024,10 @@ async function startMinecraftServer(targetPath, port, maxRam) {
     serverProcess['serverInfo'] = {
       id: serverIdentifier,
       jar: launchJar,
-      port: port,
-      maxRam: maxRam,
+      port: normalizedPort,
+      maxRam: normalizedMaxRam,
       startTime: serverStartMs,
-      commandLineIdentifier: `${path.basename(launchJar)} nogui --port ${port}`,
+      commandLineIdentifier: `${path.basename(launchJar)} nogui --port ${normalizedPort}`,
       targetPath: targetPath
     };
     const serverInfoSnapshot = { ...serverProcess['serverInfo'] };
@@ -1198,7 +1254,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       cpuPct: 0.1,
       memUsedMB: 1,
       systemTotalRamMB: parseFloat((os.totalmem() / 1024 / 1024).toFixed(1)),
-      maxRamMB: maxRam * 1024,
+      maxRamMB: normalizedMaxRam * 1024,
       uptime: '0h 0m 0s',
       players: 0,
       names: []
@@ -1210,8 +1266,14 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       }
     }, 300);
     
-    return true;
+    return createStartSuccess({
+      pid: serverPid,
+      requiredJavaVersion: javaRequirements.requiredJavaVersion,
+      javaPath,
+      jar: launchJar
+    });
   } catch (error) {
+    serverStartMs = null;
     const operationDuration = Date.now() - startOperationTime;
     logger.error(`Server start failed: ${error.message}`, {
       category: 'server',
@@ -1221,14 +1283,17 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         duration: operationDuration,
         errorType: error.constructor.name,
         targetPath,
-        port,
-        maxRam,
+        port: normalizedPort,
+        maxRam: normalizedMaxRam,
         launchJar,
         javaPath,
         stack: error.stack
       }
     });
-    return false;
+    return createStartFailure(
+      'SERVER_START_FAILED',
+      error.message || 'Server failed to start.'
+    );
   }
 }
 

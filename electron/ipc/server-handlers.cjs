@@ -159,9 +159,9 @@ function createServerHandlers(win) {
           category: 'performance',
           data: {
             handler: 'start-server',
-            success: true,
+            success: !!result?.success,
             duration,
-            result: typeof result
+            result
           }
         });
 

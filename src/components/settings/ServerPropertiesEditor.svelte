@@ -286,7 +286,10 @@
       
       // Start it again with current settings
       const { port, maxRam } = $serverState;
-      await safeInvoke('start-server', { targetPath: serverPath, port, maxRam });
+      const result = await safeInvoke('start-server', { targetPath: serverPath, port, maxRam });
+      if (!result?.success) {
+        throw new Error(result?.message || result?.error || 'Failed to restart server');
+      }
       
       // Update UI status to show server is starting again
       serverState.update(state => ({ ...state, status: 'Running' }));
@@ -824,4 +827,4 @@
     font-weight: 500 !important;
     padding: 0.4rem !important;
   }
-</style> 
+</style>

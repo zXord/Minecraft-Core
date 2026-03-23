@@ -7,8 +7,49 @@ const {
 } = require('../services/download-manager.cjs');
 const { ServerJavaManager } = require('../services/server-java-manager.cjs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
+const { readServerConfig, getDefaultServerConfig } = require('../utils/config-manager.cjs');
+const { getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
 
 const logger = getLoggerHandlers();
+
+async function ensureServerJavaReady(win, targetPath, mcVersion) {
+  const serverJavaManager = new ServerJavaManager(targetPath);
+  let javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
+
+  if (javaRequirements.needsDownload) {
+    const javaResult = await serverJavaManager.ensureJavaForMinecraft(
+      mcVersion,
+      (progress) => {
+        if (win && win.webContents) {
+          win.webContents.send('server-java-download-progress', {
+            minecraftVersion: mcVersion,
+            serverPath: targetPath,
+            ...progress
+          });
+        }
+      }
+    );
+
+    if (!javaResult.success) {
+      throw new Error(javaResult.error || 'Java installation failed');
+    }
+
+    javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
+  }
+
+  if (!javaRequirements.isAvailable || !javaRequirements.javaPath) {
+    throw new Error(
+      javaRequirements.validationMessage
+      || `Java ${javaRequirements.requiredJavaVersion} is not available for Minecraft ${mcVersion}`
+    );
+  }
+
+  return {
+    serverJavaManager,
+    javaRequirements,
+    javaPath: javaRequirements.javaPath
+  };
+}
 
 /**
  * Create installation and download IPC handlers
@@ -301,7 +342,10 @@ function createInstallHandlers(win) {
           }
         });
 
-        await installFabric(targetPath, mcVersion, fabricVersion);
+        const { javaPath } = await ensureServerJavaReady(win, targetPath, mcVersion);
+        await installFabric(targetPath, mcVersion, fabricVersion, 'install-log', 'fabric-install-progress', {
+          javaPath
+        });
         const duration = Date.now() - startTime;
 
         logger.info('Fabric installation completed successfully', {
@@ -402,7 +446,7 @@ function createInstallHandlers(win) {
         }
 
         const missing = [];
-        const files = ['server.jar', 'fabric-installer.jar', 'fabric-server-launch.jar'];
+        const files = ['server.jar'];
 
         logger.debug('Starting server files health check', {
           category: 'storage',
@@ -437,6 +481,23 @@ function createInstallHandlers(win) {
           }
         });
 
+        const fabricStatus = getFabricRuntimeStatus(targetPath);
+        if (fabricStatus.issues.length > 0) {
+          logger.debug('Fabric runtime health check result', {
+            category: 'mods',
+            data: {
+              handler: 'check-health',
+              operation: 'fabric_health_check',
+              targetPath,
+              totalIssues: fabricStatus.issues.length,
+              blockingIssues: fabricStatus.blockingIssues,
+              allIssues: fabricStatus.issues
+            }
+          });
+
+          missing.push(...fabricStatus.issues.map(issue => issue.message));
+        }
+
         // Check Java requirements
         logger.debug('Starting Java requirements check', {
           category: 'core',
@@ -462,7 +523,7 @@ function createInstallHandlers(win) {
           });
 
           if (fs.existsSync(configPath)) {
-            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            const config = readServerConfig(targetPath, getDefaultServerConfig());
 
             logger.debug('Server configuration loaded', {
               category: 'storage',
@@ -491,7 +552,9 @@ function createInstallHandlers(win) {
               });
 
               if (javaRequirements.needsDownload) {
-                const javaRequirement = `Java ${javaRequirements.requiredJavaVersion} (for Minecraft ${config.version})`;
+                const javaRequirement = javaRequirements.installationState === 'broken'
+                  ? `Java ${javaRequirements.requiredJavaVersion} runtime is broken (for Minecraft ${config.version})`
+                  : `Java ${javaRequirements.requiredJavaVersion} (for Minecraft ${config.version})`;
                 missing.push(javaRequirement);
 
                 logger.info('Java requirement missing', {
@@ -644,7 +707,8 @@ function createInstallHandlers(win) {
           }
         });
 
-        const files = ['server.jar', 'fabric-installer.jar', 'fabric-server-launch.jar'];
+        const FABRIC_REPAIR_TOKEN = 'Fabric runtime';
+        const files = ['server.jar'];
 
         logger.debug('Analyzing files for repair', {
           category: 'storage',
@@ -687,6 +751,24 @@ function createInstallHandlers(win) {
           }
         });
 
+        const fabricStatus = getFabricRuntimeStatus(targetPath);
+        const needsFabricRepair = fabricStatus.issues.length > 0;
+
+        logger.info('Fabric repair analysis completed', {
+          category: 'mods',
+          data: {
+            handler: 'repair-health',
+            operation: 'fabric_analysis_complete',
+            targetPath,
+            needsFabricRepair,
+            issues: fabricStatus.issues
+          }
+        });
+
+        if (needsFabricRepair) {
+          toRepair.push(FABRIC_REPAIR_TOKEN);
+        }
+
         // Check Java requirements
         logger.debug('Starting Java requirements analysis', {
           category: 'core',
@@ -699,8 +781,9 @@ function createInstallHandlers(win) {
         });
 
         const serverJavaManager = new ServerJavaManager(targetPath);
-        const javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
+        let javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
         const needsJava = javaRequirements.needsDownload;
+        let javaPathForFabric = javaRequirements.javaPath || null;
 
         logger.info('Java requirements analysis completed', {
           category: 'core',
@@ -869,6 +952,12 @@ function createInstallHandlers(win) {
           }
         }
 
+        if (toRepair.includes(FABRIC_REPAIR_TOKEN)) {
+          const javaReady = await ensureServerJavaReady(win, targetPath, mcVersion);
+          javaRequirements = javaReady.javaRequirements;
+          javaPathForFabric = javaReady.javaPath;
+        }
+
         // Repair server files
         logger.info('Starting server files repair process', {
           category: 'storage',
@@ -969,7 +1058,7 @@ function createInstallHandlers(win) {
               }
               throw downloadErr;
             }
-          } else if (file.includes('fabric')) {
+          } else if (file === FABRIC_REPAIR_TOKEN) {
             try {
               logger.debug('Starting Fabric installation for repair', {
                 category: 'mods',
@@ -983,7 +1072,9 @@ function createInstallHandlers(win) {
                 }
               });
 
-              await installFabric(targetPath, mcVersion, fabricVersion);
+              await installFabric(targetPath, mcVersion, fabricVersion, 'repair-log', 'repair-progress', {
+                javaPath: javaPathForFabric
+              });
 
               const fileDuration = Date.now() - fileStartTime;
 
@@ -1026,8 +1117,10 @@ function createInstallHandlers(win) {
           }
 
           // Verify file was actually created
-          const filePath = path.join(targetPath, file);
-          const fileExists = fs.existsSync(filePath);
+          const filePath = file === FABRIC_REPAIR_TOKEN ? null : path.join(targetPath, file);
+          const fileExists = file === FABRIC_REPAIR_TOKEN
+            ? getFabricRuntimeStatus(targetPath).issues.length === 0
+            : fs.existsSync(filePath);
           const fileDuration = Date.now() - fileStartTime;
 
           logger.info('File repair verification completed', {

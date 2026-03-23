@@ -756,6 +756,7 @@
     try {
       const result = await window.electron.invoke(
         "backups:get-automation-settings",
+        { serverPath },
       );
       if (result && result.success && result.settings) {
         const settings = result.settings;

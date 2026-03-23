@@ -1007,7 +1007,18 @@
 
   // Handle client setup completion
   function handleClientSetupComplete(event) {
-    const { path, serverIp, serverPort, serverProtocol, inviteSecret, managementCertFingerprint } = event.detail;
+    const {
+      path,
+      serverIp,
+      serverPort,
+      serverProtocol,
+      inviteSecret,
+      managementCertFingerprint,
+      clientId,
+      clientName,
+      sessionToken,
+      lastConnected,
+    } = event.detail;
 
     logger.info("Client setup completed", {
       category: "core",
@@ -1018,24 +1029,34 @@
         hasServerIp: !!serverIp,
         serverPort,
         serverProtocol,
+        hasClientId: !!clientId,
       },
     });
 
-    // Create a new fully configured client instance
+    const existingInstance =
+      instances.find((instance) => instance.type === "client" && instance.path === path) || null;
+
     const newInstance = {
-      id: `client-${Date.now()}`,
-      name: "Minecraft Client",
+      ...(existingInstance || {}),
+      id: clientId || existingInstance?.id || `client-${Date.now()}`,
+      name: clientName || existingInstance?.name || "Minecraft Client",
       type: "client",
-      path: path,
-      serverIp: serverIp,
-      serverPort: serverPort,
-      serverProtocol: serverProtocol || "https",
-      inviteSecret: inviteSecret || "",
-      managementCertFingerprint: managementCertFingerprint || "",
+      path,
+      serverIp,
+      serverPort,
+      serverProtocol: serverProtocol || existingInstance?.serverProtocol || "https",
+      inviteSecret: inviteSecret || existingInstance?.inviteSecret || "",
+      managementCertFingerprint:
+        managementCertFingerprint || existingInstance?.managementCertFingerprint || "",
+      clientId: clientId || existingInstance?.clientId || "",
+      clientName: clientName || existingInstance?.clientName || "",
+      sessionToken: sessionToken || existingInstance?.sessionToken || "",
+      lastConnected: lastConnected || existingInstance?.lastConnected || "",
     };
 
-    // Add to instances array and set as current
-    instances = [...instances, newInstance];
+    instances = existingInstance
+      ? instances.map((instance) => (instance.path === path ? newInstance : instance))
+      : [...instances, newInstance];
     currentInstance = newInstance;
     storeCurrentInstance(newInstance);
 

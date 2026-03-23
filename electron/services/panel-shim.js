@@ -238,7 +238,12 @@
         }
         // Auto-Restart (browser bridge)
         case 'get-auto-restart': {
-          const r = await fetch('/api/auto-restart');
+          const targetPath = args[0];
+          const url = new URL(window.location.origin + '/api/auto-restart');
+          if (typeof targetPath === 'string' && targetPath) {
+            url.searchParams.set('serverPath', targetPath);
+          }
+          const r = await fetch(url.toString());
           return await r.json();
         }
         case 'set-auto-restart': {
@@ -328,7 +333,12 @@
         }
         // Backups: automation settings
         case 'backups:get-automation-settings': {
-          const r = await fetch('/api/backups/automation');
+          const { serverPath } = args[0] || {};
+          const url = new URL(window.location.origin + '/api/backups/automation');
+          if (serverPath) {
+            url.searchParams.set('serverPath', serverPath);
+          }
+          const r = await fetch(url.toString());
           return await r.json();
         }
         case 'backups:configure-automation': {

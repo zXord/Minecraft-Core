@@ -565,7 +565,7 @@
       inviteError = 'Failed to copy invite link';
     }
   }
-  function startServer() {
+  async function startServer() {
     logger.info('Starting Minecraft server', {
       category: 'ui',
       data: {
@@ -576,14 +576,48 @@
         maxRam
       }
     });
-    
-    // Optimistic update: mark server as running immediately
-    serverState.update(state => ({ ...state, status: 'Running' }));
-    window.electron.invoke('start-server', { 
-      targetPath: serverPath, 
-      port: port, 
-      maxRam: maxRam 
-    }); 
+
+    try {
+      const result = await window.electron.invoke('start-server', {
+        targetPath: serverPath,
+        port: port,
+        maxRam: maxRam
+      });
+
+      if (result && result.success) {
+        errorMessage.set('');
+        await checkServerStatus();
+        return;
+      }
+
+      if (result?.code === 'ALREADY_RUNNING') {
+        errorMessage.set('');
+        await checkServerStatus();
+        return;
+      }
+
+      serverState.update(state => ({ ...state, status: 'Stopped' }));
+      const message = result?.message || result?.error || 'Failed to start server';
+      errorMessage.set(message);
+      setTimeout(() => errorMessage.set(''), 7000);
+
+      if (result?.repairable) {
+        maintenanceExpanded = true;
+        await checkHealth();
+      }
+    } catch (error) {
+      logger.error('Failed to start server', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'startServer',
+          errorMessage: error.message
+        }
+      });
+      serverState.update(state => ({ ...state, status: 'Stopped' }));
+      errorMessage.set(`Failed to start server: ${error.message}`);
+      setTimeout(() => errorMessage.set(''), 7000);
+    }
   }
 
   function stopServer() {
@@ -928,7 +962,7 @@
     // Auto-start Minecraft server if enabled
     if (autoStartMinecraft && status === 'Stopped') {
       try {
-        startServer();
+        await startServer();
       } catch (error) {
       }
     }

@@ -610,7 +610,7 @@
           <h3>🔄 Auto-Restart</h3>
         </div>
         <div class="card-content">
-          <AutoRestartSettings />
+          <AutoRestartSettings serverPath={serverPath} />
         </div>
       </div>
 

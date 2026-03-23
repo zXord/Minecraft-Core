@@ -7,8 +7,94 @@ const fsPromises = require('fs/promises');
 const { rm } = require('fs/promises');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
 const instanceContext = require('../utils/instance-context.cjs');
+const {
+  getDefaultServerConfig,
+  readServerConfig,
+  updateServerConfig,
+  readClientConfig
+} = require('../utils/config-manager.cjs');
+const {
+  ensureEncryptionAvailable,
+  packSecret,
+  unpackSecret
+} = require('../utils/secure-store.cjs');
 
 const logger = getLoggerHandlers();
+
+const DEFAULT_SERVER_SETTINGS = {
+  port: 25565,
+  maxRam: 4,
+  managementPort: 8080,
+  autoStartMinecraft: false,
+  autoStartManagement: false
+};
+
+function getServerConfigDefaults(serverPath = '') {
+  const serverSettings = appStore.get('serverSettings') || DEFAULT_SERVER_SETTINGS;
+  const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
+  const backupSettings = appStore.get('backupSettings') || {};
+  const instances = appStore.get('instances') || [];
+  const existingServer = serverPath
+    ? instances.find((inst) => inst && inst.type === 'server' && inst.path === serverPath)
+    : null;
+
+  let folderSecret = '';
+  if (existingServer && existingServer.managementInviteSecret) {
+    try {
+      ensureEncryptionAvailable();
+      folderSecret = unpackSecret(existingServer.managementInviteSecret);
+    } catch {
+      folderSecret = '';
+    }
+  }
+
+  return getDefaultServerConfig({
+    port: serverSettings.port,
+    maxRam: serverSettings.maxRam,
+    managementPort: serverSettings.managementPort,
+    autoStartMinecraft: !!serverSettings.autoStartMinecraft,
+    autoStartManagement: !!serverSettings.autoStartManagement,
+    autoRestart,
+    managementInviteHost: typeof existingServer?.managementInviteHost === 'string'
+      ? existingServer.managementInviteHost
+      : '',
+    managementInviteSecret: folderSecret,
+    managementTls: existingServer && existingServer.managementTls ? existingServer.managementTls : null,
+    backupAutomation: backupSettings
+  });
+}
+
+function getMergedServerSettings(serverPath) {
+  const storedSettings = appStore.get('serverSettings') || DEFAULT_SERVER_SETTINGS;
+  const config = serverPath ? readServerConfig(serverPath, getServerConfigDefaults(serverPath)) : null;
+  return {
+    ...storedSettings,
+    ...(config ? {
+      port: config.port,
+      maxRam: config.maxRam,
+      managementPort: config.managementPort,
+      autoStartMinecraft: !!config.autoStartMinecraft,
+      autoStartManagement: !!config.autoStartManagement
+    } : {})
+  };
+}
+
+function getPackedInviteSecretFromFolder(serverPath) {
+  if (!serverPath) return '';
+  const config = readServerConfig(serverPath, getServerConfigDefaults(serverPath));
+  const plainSecret = config && typeof config.managementInviteSecret === 'string'
+    ? config.managementInviteSecret.trim()
+    : '';
+  if (!plainSecret) {
+    return '';
+  }
+  try {
+    ensureEncryptionAvailable();
+    return packSecret(plainSecret);
+  } catch {
+    return '';
+  }
+}
 
 function normalizeHost(value) {
   if (!value || typeof value !== 'string') return '';
@@ -168,13 +254,8 @@ function createSettingsHandlers() {
           }
         });
 
-        const currentSettings = appStore.get('serverSettings') || { 
-          port: 25565, 
-          maxRam: 4, 
-          managementPort: 8080,
-          autoStartMinecraft: false, 
-          autoStartManagement: false 
-        };
+        const resolvedServerPath = serverPath || appStore.get('lastServerPath') || '';
+        const currentSettings = getMergedServerSettings(resolvedServerPath);
 
         const isDefaultConfig = !appStore.get('serverSettings');
         
@@ -344,85 +425,40 @@ function createSettingsHandlers() {
         }
         
         // Also update the server's config file if we have a path
-        const usePath = serverPath || appStore.get('lastServerPath');
+        const usePath = resolvedServerPath || appStore.get('lastServerPath');
         if (usePath) {
           try {
-            const configPath = path.join(usePath, '.minecraft-core.json');
-            let config = { port: updatedSettings.port, maxRam: updatedSettings.maxRam };
-
             logger.debug('Updating server configuration file', {
               category: 'settings',
               data: {
                 handler: 'update-settings',
                 operation: 'server_config_file_update',
-                configPath,
+                configPath: path.join(usePath, '.minecraft-core.json'),
                 serverPath: usePath
               }
             });
-
-            if (fs.existsSync(configPath)) {
-              try {
-                logger.debug('Reading existing server configuration file', {
-                  category: 'settings',
-                  data: {
-                    handler: 'update-settings',
-                    operation: 'config_file_read',
-                    configPath
-                  }
-                });
-
-                const fileContent = fs.readFileSync(configPath, 'utf-8');
-                const existingConfig = JSON.parse(fileContent);
-                config = { ...existingConfig };
-
-                logger.debug('Existing server configuration loaded', {
-                  category: 'settings',
-                  data: {
-                    handler: 'update-settings',
-                    operation: 'config_file_loaded',
-                    configKeys: Object.keys(existingConfig)
-                  }
-                });
-              } catch (readError) {
-                logger.warn('Failed to read existing server configuration, using defaults', {
-                  category: 'settings',
-                  data: {
-                    handler: 'update-settings',
-                    operation: 'config_file_read_failure',
-                    configPath,
-                    error: readError.message,
-                    errorType: readError.constructor.name,
-                    recovery: 'using_defaults'
-                  }
-                });
-                config = { port: updatedSettings.port, maxRam: updatedSettings.maxRam };
-              }
-            } else {
-              logger.debug('Server configuration file does not exist, creating new', {
-                category: 'settings',
-                data: {
-                  handler: 'update-settings',
-                  operation: 'config_file_create',
-                  configPath
-                }
-              });
-            }
-
-            const previousConfig = { ...config };
-            config.port = updatedSettings.port;
-            config.maxRam = updatedSettings.maxRam;
-
-            fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+            const previousConfig = readServerConfig(usePath, getServerConfigDefaults(usePath)) || {};
+            const config = updateServerConfig(usePath, {
+              ...previousConfig,
+              port: updatedSettings.port,
+              maxRam: updatedSettings.maxRam,
+              managementPort: updatedSettings.managementPort,
+              autoStartMinecraft: !!updatedSettings.autoStartMinecraft,
+              autoStartManagement: !!updatedSettings.autoStartManagement
+            }, getServerConfigDefaults(usePath));
 
             logger.info('Server configuration file updated', {
               category: 'settings',
               data: {
                 handler: 'update-settings',
                 operation: 'server_config_file_success',
-                configPath,
+                configPath: path.join(usePath, '.minecraft-core.json'),
                 changes: {
                   port: { before: previousConfig.port, after: config.port },
-                  maxRam: { before: previousConfig.maxRam, after: config.maxRam }
+                  maxRam: { before: previousConfig.maxRam, after: config.maxRam },
+                  managementPort: { before: previousConfig.managementPort, after: config.managementPort },
+                  autoStartMinecraft: { before: previousConfig.autoStartMinecraft, after: config.autoStartMinecraft },
+                  autoStartManagement: { before: previousConfig.autoStartManagement, after: config.autoStartManagement }
                 }
               }
             });
@@ -443,6 +479,71 @@ function createSettingsHandlers() {
           }
         }
         
+        const hydratedInstances = validInstances.map((instance) => {
+          if (instance.type === 'server' && instance.path) {
+            const config = readServerConfig(instance.path, getServerConfigDefaults(instance.path));
+            let packedSecret = config && config.managementInviteSecret
+              ? getPackedInviteSecretFromFolder(instance.path)
+              : '';
+
+            if ((!config || !config.managementInviteSecret) && instance.managementInviteSecret) {
+              try {
+                ensureEncryptionAvailable();
+                const plainSecret = unpackSecret(instance.managementInviteSecret);
+                if (plainSecret) {
+                  const updatedConfig = updateServerConfig(instance.path, {
+                    ...(config || {}),
+                    managementInviteSecret: plainSecret,
+                    managementInviteHost: typeof config?.managementInviteHost === 'string' && config.managementInviteHost
+                      ? config.managementInviteHost
+                      : (typeof instance.managementInviteHost === 'string' ? instance.managementInviteHost : '')
+                  }, getServerConfigDefaults(instance.path));
+                  packedSecret = updatedConfig && updatedConfig.managementInviteSecret
+                    ? getPackedInviteSecretFromFolder(instance.path)
+                    : packedSecret;
+                }
+              } catch {
+                packedSecret = '';
+              }
+            }
+
+            return {
+              ...instance,
+              ...(config && typeof config.managementInviteHost === 'string'
+                ? { managementInviteHost: config.managementInviteHost }
+                : {}),
+              ...(packedSecret ? { managementInviteSecret: packedSecret } : {})
+            };
+          }
+
+          if (instance.type === 'client' && instance.path) {
+            const clientConfig = readClientConfig(instance.path);
+            if (clientConfig) {
+              return {
+                ...instance,
+                id: clientConfig.clientId || instance.id,
+                name: clientConfig.clientName || instance.name,
+                serverIp: clientConfig.serverIp,
+                serverPort: clientConfig.serverPort,
+                serverProtocol: clientConfig.serverProtocol || instance.serverProtocol,
+                clientId: clientConfig.clientId,
+                clientName: clientConfig.clientName,
+                sessionToken: clientConfig.sessionToken || instance.sessionToken,
+                inviteSecret: clientConfig.inviteSecret || instance.inviteSecret,
+                managementCertFingerprint: clientConfig.managementCertFingerprint || instance.managementCertFingerprint,
+                lastConnected: clientConfig.lastConnected || instance.lastConnected
+              };
+            }
+          }
+
+          return instance;
+        });
+
+        if (JSON.stringify(hydratedInstances) !== JSON.stringify(validInstances)) {
+          appStore.set('instances', hydratedInstances);
+          instanceContext.updateInstances(hydratedInstances);
+        }
+
         const duration = Date.now() - startTime;
         
         logger.info('Settings update completed successfully', {
@@ -503,14 +604,8 @@ function createSettingsHandlers() {
           }
         });
 
-        const settings = appStore.get('serverSettings') || { 
-          port: 25565, 
-          maxRam: 4, 
-          managementPort: 8080,
-          autoStartMinecraft: false, 
-          autoStartManagement: false 
-        };
         const serverPath = appStore.get('lastServerPath');
+        const settings = getMergedServerSettings(serverPath);
         
         const isDefaultConfig = !appStore.get('serverSettings');
         
@@ -657,41 +752,88 @@ function createSettingsHandlers() {
             return true;
           })
           .map(instance => {
+            const existingInstance = currentInstances.find(existing =>
+              existing && (
+                (existing.id === instance.id && existing.type === instance.type)
+                || (instance.path && existing.type === instance.type && existing.path === instance.path)
+              )
+            );
+            const folderServerConfig = instance.type === 'server' && instance.path
+              ? readServerConfig(instance.path, getServerConfigDefaults(instance.path))
+              : null;
+            const folderClientConfig = instance.type === 'client' && instance.path
+              ? readClientConfig(instance.path)
+              : null;
             const validInstance = {
-              id: instance.id || `instance-${Date.now()}`,
-              name: instance.name || `Instance ${Date.now()}`,
+              id: folderClientConfig?.clientId || instance.id || existingInstance?.id || `instance-${Date.now()}`,
+              name: folderClientConfig?.clientName || instance.name || existingInstance?.name || `Instance ${Date.now()}`,
               type: instance.type || 'server'
             };
-
-            const existingInstance = currentInstances.find(existing =>
-              existing && existing.id === instance.id && existing.type === instance.type
-            );
             
             // Include type-specific fields
             if (instance.type === 'server') {
               if (instance.path) {
                 validInstance.path = instance.path;
               }
-              if (existingInstance && existingInstance.managementInviteSecret) {
+
+              let migratedSecret = '';
+              if ((!folderServerConfig || !folderServerConfig.managementInviteSecret) && existingInstance?.managementInviteSecret && instance.path) {
+                try {
+                  ensureEncryptionAvailable();
+                  migratedSecret = unpackSecret(existingInstance.managementInviteSecret);
+                  if (migratedSecret) {
+                    updateServerConfig(instance.path, {
+                      ...(folderServerConfig || {}),
+                      managementInviteSecret: migratedSecret,
+                      managementInviteHost: typeof folderServerConfig?.managementInviteHost === 'string' && folderServerConfig.managementInviteHost
+                        ? folderServerConfig.managementInviteHost
+                        : (typeof existingInstance.managementInviteHost === 'string' ? existingInstance.managementInviteHost : '')
+                    }, getServerConfigDefaults(instance.path));
+                  }
+                } catch {
+                  migratedSecret = '';
+                }
+              }
+
+              const packedFolderSecret = instance.path ? getPackedInviteSecretFromFolder(instance.path) : '';
+              if (packedFolderSecret) {
+                validInstance.managementInviteSecret = packedFolderSecret;
+              } else if (existingInstance && existingInstance.managementInviteSecret) {
                 validInstance.managementInviteSecret = existingInstance.managementInviteSecret;
               }
-              if (typeof instance.managementInviteHost === 'string') {
+
+              const folderInviteHost = typeof folderServerConfig?.managementInviteHost === 'string'
+                ? folderServerConfig.managementInviteHost
+                : '';
+              if (folderInviteHost) {
+                validInstance.managementInviteHost = folderInviteHost;
+              } else if (typeof instance.managementInviteHost === 'string') {
                 validInstance.managementInviteHost = instance.managementInviteHost;
+                if (instance.path) {
+                  updateServerConfig(instance.path, {
+                    ...(folderServerConfig || {}),
+                    managementInviteHost: instance.managementInviteHost
+                  }, getServerConfigDefaults(instance.path));
+                }
               } else if (existingInstance && typeof existingInstance.managementInviteHost === 'string') {
                 validInstance.managementInviteHost = existingInstance.managementInviteHost;
               }
             } else if (instance.type === 'client') {
               // Include client-specific fields
               if (instance.path) validInstance.path = instance.path;
-              if (instance.serverIp) validInstance.serverIp = instance.serverIp;
-              if (instance.serverPort) validInstance.serverPort = instance.serverPort;
-              if (instance.serverProtocol) validInstance.serverProtocol = instance.serverProtocol;
-              if (instance.clientId) validInstance.clientId = instance.clientId;
-              if (instance.clientName) validInstance.clientName = instance.clientName;
-              if (instance.sessionToken) validInstance.sessionToken = instance.sessionToken;
-              if (instance.inviteSecret) validInstance.inviteSecret = instance.inviteSecret;
-              if (instance.managementCertFingerprint) validInstance.managementCertFingerprint = instance.managementCertFingerprint;
-              if (instance.lastConnected) validInstance.lastConnected = instance.lastConnected;
+              validInstance.id = folderClientConfig?.clientId || instance.clientId || instance.id || existingInstance?.clientId || validInstance.id;
+              validInstance.name = folderClientConfig?.clientName || instance.clientName || instance.name || existingInstance?.clientName || validInstance.name;
+              validInstance.clientId = folderClientConfig?.clientId || instance.clientId || existingInstance?.clientId || validInstance.id;
+              validInstance.clientName = folderClientConfig?.clientName || instance.clientName || existingInstance?.clientName || validInstance.name;
+              if (folderClientConfig?.serverIp || instance.serverIp) validInstance.serverIp = folderClientConfig?.serverIp || instance.serverIp;
+              if (folderClientConfig?.serverPort || instance.serverPort) validInstance.serverPort = folderClientConfig?.serverPort || instance.serverPort;
+              if (folderClientConfig?.serverProtocol || instance.serverProtocol) validInstance.serverProtocol = folderClientConfig?.serverProtocol || instance.serverProtocol;
+              if (folderClientConfig?.sessionToken || instance.sessionToken) validInstance.sessionToken = folderClientConfig?.sessionToken || instance.sessionToken;
+              if (folderClientConfig?.inviteSecret || instance.inviteSecret) validInstance.inviteSecret = folderClientConfig?.inviteSecret || instance.inviteSecret;
+              if (folderClientConfig?.managementCertFingerprint || instance.managementCertFingerprint) {
+                validInstance.managementCertFingerprint = folderClientConfig?.managementCertFingerprint || instance.managementCertFingerprint;
+              }
+              if (folderClientConfig?.lastConnected || instance.lastConnected) validInstance.lastConnected = folderClientConfig?.lastConnected || instance.lastConnected;
               if (existingInstance && existingInstance.inviteSecret && !validInstance.inviteSecret) {
                 validInstance.inviteSecret = existingInstance.inviteSecret;
               }
@@ -911,6 +1053,86 @@ function createSettingsHandlers() {
           return isValid;
         });
 
+        const hydratedInstances = validInstances.map((instance) => {
+          const existingInstance = instances.find((existing) =>
+            existing && (
+              (existing.id === instance.id && existing.type === instance.type)
+              || (instance.path && existing.type === instance.type && existing.path === instance.path)
+            )
+          );
+
+          if (instance.type === 'server' && instance.path) {
+            const config = readServerConfig(instance.path, getServerConfigDefaults(instance.path));
+            let packedSecret = config && config.managementInviteSecret
+              ? getPackedInviteSecretFromFolder(instance.path)
+              : '';
+
+            if ((!config || !config.managementInviteSecret) && instance.managementInviteSecret) {
+              try {
+                ensureEncryptionAvailable();
+                const plainSecret = unpackSecret(instance.managementInviteSecret);
+                if (plainSecret) {
+                  const updatedConfig = updateServerConfig(instance.path, {
+                    ...(config || {}),
+                    managementInviteSecret: plainSecret,
+                    managementInviteHost: typeof config?.managementInviteHost === 'string' && config.managementInviteHost
+                      ? config.managementInviteHost
+                      : (typeof instance.managementInviteHost === 'string' ? instance.managementInviteHost : '')
+                  }, getServerConfigDefaults(instance.path));
+                  packedSecret = updatedConfig && updatedConfig.managementInviteSecret
+                    ? getPackedInviteSecretFromFolder(instance.path)
+                    : packedSecret;
+                }
+              } catch {
+                packedSecret = '';
+              }
+            }
+
+            return {
+              ...instance,
+              ...(config && typeof config.managementInviteHost === 'string'
+                ? { managementInviteHost: config.managementInviteHost }
+                : {}),
+              ...(packedSecret
+                ? { managementInviteSecret: packedSecret }
+                : (existingInstance?.managementInviteSecret ? { managementInviteSecret: existingInstance.managementInviteSecret } : {}))
+            };
+          }
+
+          if (instance.type === 'client' && instance.path) {
+            const clientConfig = readClientConfig(instance.path);
+            if (clientConfig) {
+              return {
+                ...instance,
+                id: clientConfig.clientId || instance.id,
+                name: clientConfig.clientName || instance.name,
+                serverIp: clientConfig.serverIp,
+                serverPort: clientConfig.serverPort,
+                serverProtocol: clientConfig.serverProtocol || instance.serverProtocol,
+                clientId: clientConfig.clientId,
+                clientName: clientConfig.clientName,
+                sessionToken: clientConfig.sessionToken || instance.sessionToken,
+                inviteSecret: clientConfig.inviteSecret || instance.inviteSecret,
+                managementCertFingerprint: clientConfig.managementCertFingerprint || instance.managementCertFingerprint,
+                lastConnected: clientConfig.lastConnected || instance.lastConnected
+              };
+            }
+          }
+
+          return instance;
+        });
+
+        if (JSON.stringify(hydratedInstances) !== JSON.stringify(validInstances)) {
+          appStore.set('instances', hydratedInstances);
+        }
+
+        instanceContext.updateInstances(hydratedInstances);
+
+        const serverInstance = hydratedInstances.find((instance) => instance && instance.type === 'server' && instance.path);
+        if (serverInstance && serverInstance.path) {
+          appStore.set('lastServerPath', serverInstance.path);
+        }
+
         const duration = Date.now() - startTime;
         
         logger.debug('Instances retrieval completed', {
@@ -920,12 +1142,12 @@ function createSettingsHandlers() {
             operation: 'complete_success',
             duration,
             totalInstances: instances.length,
-            validInstances: validInstances.length,
+            validInstances: hydratedInstances.length,
             filteredCount: instances.length - validInstances.length
           }
         });
         
-        return validInstances;
+        return hydratedInstances;
       } catch (err) {
         const duration = Date.now() - startTime;
         
@@ -1388,6 +1610,21 @@ function createSettingsHandlers() {
       };
       appStore.set('pendingManagementPins', pendingPins);
       return { success: true };
+    },
+
+    'read-client-config': async (_e, clientPath) => {
+      try {
+        if (!clientPath || typeof clientPath !== 'string' || clientPath.trim() === '') {
+          return { success: false, error: 'Invalid client path' };
+        }
+        const config = readClientConfig(clientPath);
+        if (!config) {
+          return { success: false, error: 'Client configuration not found' };
+        }
+        return { success: true, config };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
     },
 
     // Save client configuration

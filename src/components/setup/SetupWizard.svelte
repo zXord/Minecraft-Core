@@ -101,6 +101,9 @@
         // Skip to completion
         dispatchSetupComplete();
       } else {
+        selectedMC = config?.version || null;
+        selectedFabric = config?.fabric || null;
+
         // Need to configure
         logger.info(
           "No existing configuration found, proceeding to version selection",
@@ -109,6 +112,8 @@
             data: {
               component: "SetupWizard",
               function: "selectFolder",
+              detectedVersion: selectedMC,
+              detectedFabric: selectedFabric,
               flow: "new_config",
             },
           },
@@ -116,6 +121,12 @@
 
         step = "chooseVersion";
         await fetchMinecraftVersions();
+        if (selectedMC) {
+          if (!mcVersions.includes(selectedMC)) {
+            mcVersions = [selectedMC, ...mcVersions];
+          }
+          await onMCVersionChange(selectedFabric);
+        }
       }
     } catch (err) {
       logger.error("Error during folder selection", {
@@ -184,7 +195,7 @@
     }
   }
 
-  async function onMCVersionChange() {
+  async function onMCVersionChange(eventOrPreferredFabric = null) {
     logger.info("Minecraft version changed, fetching Fabric versions", {
       category: "ui",
       data: {
@@ -195,6 +206,10 @@
       },
     });
 
+    const preservedFabric =
+      typeof eventOrPreferredFabric === "string"
+        ? eventOrPreferredFabric
+        : selectedFabric;
     selectedFabric = null;
     try {
       const res = await fetch(
@@ -220,6 +235,9 @@
 
       const data = await res.json();
       fabricVersions = data.map((v) => v.loader.version);
+      if (preservedFabric && fabricVersions.includes(preservedFabric)) {
+        selectedFabric = preservedFabric;
+      }
 
       logger.info("Fabric versions fetched successfully", {
         category: "ui",
@@ -380,10 +398,10 @@
             },
           });
         } else {
-          // Java download failed, but don't fail the whole setup - it will download on first start
+          // Java setup failed, but don't fail the whole setup - repair can reinstall it later
           installLogs = [
             ...installLogs,
-            `Java setup skipped: ${javaResult.error || "Will download on first server start"}`,
+            `Java setup skipped: ${javaResult.error || "Use Server Maintenance to repair Java before starting if needed"}`,
           ];
           logger.warn("Java setup failed but continuing with installation", {
             category: "ui",
@@ -397,10 +415,10 @@
           });
         }
       } catch (javaError) {
-        // Java download failed, but don't fail the whole setup
+        // Java setup failed, but don't fail the whole setup
         installLogs = [
           ...installLogs,
-          "Java setup skipped - will download on first server start",
+          "Java setup skipped - use Server Maintenance to repair Java before starting if needed",
         ];
         logger.warn("Java setup failed with exception but continuing", {
           category: "ui",

@@ -4,6 +4,7 @@ const path = require('path');
 const progress = require('progress-stream');
 const { safeSend } = require('../utils/safe-send.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+const { getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
 
 // Initialize logger
 const logger = getLoggerHandlers();
@@ -321,7 +322,7 @@ async function downloadWithProgress(url, destPath, channel) {
  * @param {string} progressChannel - IPC channel for progress reports
  * @returns {Promise<void>} - Promise that resolves when installation is complete
  */
-async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = 'install-log', progressChannel = 'fabric-install-progress') {
+async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = 'install-log', progressChannel = 'fabric-install-progress', options = {}) {
   const installStartTime = Date.now();
   performanceMetrics.fabricInstalls++;
   
@@ -339,23 +340,40 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
     }
   });
   
-  const { spawn, exec } = require('child_process');
+  const { spawn, execFile } = require('child_process');
   const installerUrl = 'https://maven.fabricmc.net/net/fabricmc/fabric-installer/0.11.2/fabric-installer-0.11.2.jar';
   const installerJar = path.join(targetPath, 'fabric-installer.jar');
+  const explicitJavaPath = typeof options.javaPath === 'string' ? options.javaPath : null;
+  const javaCommand = (() => {
+    if (!explicitJavaPath || typeof explicitJavaPath !== 'string') {
+      return 'java';
+    }
+
+    const normalizedJavaPath = path.normalize(explicitJavaPath);
+    const isJavaw = path.basename(normalizedJavaPath).toLowerCase() === 'javaw.exe';
+
+    if (!isJavaw) {
+      return normalizedJavaPath;
+    }
+
+    const consoleJavaPath = path.join(path.dirname(normalizedJavaPath), 'java.exe');
+    return fs.existsSync(consoleJavaPath) ? consoleJavaPath : normalizedJavaPath;
+  })();
   // Check if Java is installed
   logger.debug('Checking Java installation for Fabric', {
     category: 'mods',
     data: {
       service: 'DownloadManager',
       operation: 'installFabric',
-      stage: 'java_check'
+      stage: 'java_check',
+      javaCommand
     }
   });
   
   safeSend(logChannel, '🔍 Checking Java installation...');
   
   await new Promise((resolve, reject) => {
-    exec('java -version', (error, stdout, stderr) => {
+    execFile(javaCommand, ['-version'], (error, stdout, stderr) => {
       if (error) {
         logger.error('Java not found for Fabric installation', {
           category: 'mods',
@@ -363,13 +381,14 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
             service: 'DownloadManager',
             operation: 'installFabric',
             stage: 'java_check',
+            javaCommand,
             errorType: error.constructor.name,
             errorMessage: error.message
           }
         });
         
-        safeSend(logChannel, '❌ Java not found. Please install Java to use Fabric.');
-        reject(new Error('Java is not installed or not in PATH. Please install Java to use Fabric.'));
+        safeSend(logChannel, '❌ Java not found. Please install or repair Java before installing Fabric.');
+        reject(new Error('Java is not available for Fabric installation. Install or repair Java first.'));
         return;
       }
       
@@ -383,6 +402,7 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
           service: 'DownloadManager',
           operation: 'installFabric',
           stage: 'java_check',
+          javaCommand,
           javaVersion
         }
       });
@@ -433,6 +453,7 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
         service: 'DownloadManager',
         operation: 'installFabric',
         stage: 'installer_execution',
+        javaCommand,
         args: installArgs,
         cwd: targetPath
       }
@@ -443,7 +464,26 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
     // Send progress update for starting installation
     safeSend(progressChannel, { percent: 50, speed: 'Installing...' });
     
-    const proc = spawn('java', installArgs, { cwd: targetPath });
+    const proc = spawn(javaCommand, installArgs, { cwd: targetPath });
+    let settled = false;
+
+    const rejectOnce = (error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      reject(error);
+    };
+
+    const resolveOnce = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolve();
+    };
 
     proc.stdout.on('data', data => {
       const message = data.toString();
@@ -472,11 +512,51 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
       });
       safeSend(logChannel, `[ERROR] ${message}`);
     });
+
+    proc.on('error', error => {
+      logger.error(`Fabric installer process failed to start: ${error.message}`, {
+        category: 'mods',
+        data: {
+          service: 'DownloadManager',
+          operation: 'installFabric',
+          stage: 'installer_execution',
+          javaCommand,
+          errorType: error.constructor.name,
+          errorMessage: error.message
+        }
+      });
+
+      rejectOnce(new Error(`Failed to launch Fabric installer: ${error.message}`));
+    });
     
     proc.on('close', code => {
       const installDuration = Date.now() - installStartTime;
       
       if (code === 0) {
+        const fabricStatus = getFabricRuntimeStatus(targetPath);
+
+        if (fabricStatus.hasBlockingIssues) {
+          const verificationMessage = fabricStatus.blockingIssues[0]?.message || 'Fabric runtime is incomplete after installation';
+
+          logger.error('Fabric installation verification failed', {
+            category: 'mods',
+            data: {
+              service: 'DownloadManager',
+              operation: 'installFabric',
+              duration: installDuration,
+              exitCode: code,
+              mcVersion,
+              fabricLoader,
+              targetPath,
+              issues: fabricStatus.blockingIssues
+            }
+          });
+
+          safeSend(logChannel, `❌ ${verificationMessage}`);
+          rejectOnce(new Error(verificationMessage));
+          return;
+        }
+
         logger.info('Fabric installation completed successfully', {
           category: 'mods',
           data: {
@@ -486,7 +566,8 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
             exitCode: code,
             mcVersion,
             fabricLoader,
-            targetPath
+            targetPath,
+            javaCommand
           }
         });
         
@@ -495,7 +576,7 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
         // Send 100% progress on completion
         safeSend(progressChannel, { percent: 100, speed: 'Completed' });
         
-        resolve();
+        resolveOnce();
       } else {
         logger.error('Fabric installation failed', {
           category: 'mods',
@@ -506,11 +587,12 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
             exitCode: code,
             mcVersion,
             fabricLoader,
-            targetPath
+            targetPath,
+            javaCommand
           }
         });
         
-        reject(new Error(`Fabric installer exited with code ${code}`));
+        rejectOnce(new Error(`Fabric installer exited with code ${code}`));
       }
     });
   });

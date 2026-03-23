@@ -19,21 +19,63 @@
   let installSpeed = '0 MB/s';
   let installLogs = [];
   let sessionToken = '';
+  let clientId = '';
+  let clientName = '';
+  let lastConnected = '';
   let step = 'chooseFolder'; // chooseFolder → configureConnection → done
   let inviteValid = false;
   let inviteError = '';
   let connectionStatus = 'disconnected'; // disconnected, connecting, connected
   
   // Functions
+  function hasPortableClientConfig(config) {
+    return !!(
+      config &&
+      typeof config.serverIp === 'string' &&
+      config.serverIp.trim() &&
+      config.serverPort !== undefined &&
+      config.serverProtocol &&
+      typeof config.inviteSecret === 'string' &&
+      config.inviteSecret.trim()
+    );
+  }
+
+  function applyClientConfig(config) {
+    serverIp = config.serverIp || '';
+    serverPort = String(config.serverPort || '8080');
+    serverProtocol = config.serverProtocol || 'https';
+    inviteSecret = config.inviteSecret || '';
+    managementCertFingerprint = config.managementCertFingerprint || '';
+    clientId = config.clientId || '';
+    clientName = config.clientName || '';
+    sessionToken = config.sessionToken || '';
+    lastConnected = config.lastConnected || '';
+    inviteValid = true;
+    inviteError = '';
+  }
+
   async function selectFolder() {
     try {
       const result = await window.electron.invoke('select-folder', { instanceType: 'client' });
       if (!result) {
         return;
-      }      path = result;
+      }
+      path = result;
       
       // Note: Client paths should not update the global serverPath
       // The client instance will store its own path separately
+
+      try {
+        const configResult = await window.electron.invoke('read-client-config', path);
+        if (configResult?.success && hasPortableClientConfig(configResult.config)) {
+          applyClientConfig(configResult.config);
+          step = 'done';
+          dispatchSetupComplete();
+          return;
+        }
+      } catch {
+        // Fall back to manual setup when no valid portable client config exists
+      }
 
       // Move to server IP configuration
       step = 'configureConnection';
@@ -209,8 +251,8 @@
       
       // First, register with the management server
       installLogs = [...installLogs, 'Registering with management server...'];
-      const clientId = `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const clientName = `Client-${new Date().toLocaleTimeString()}`;
+      clientId = clientId || `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      clientName = clientName || `Client-${new Date().toLocaleTimeString()}`;
       
       try {
         const registrationUrl = `${serverProtocol}://${formatHostForUrl(serverIp)}:${serverPort}/api/client/register`;
@@ -220,7 +262,7 @@
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            clientId: clientId,
+            clientId,
             name: clientName,
             secret: inviteSecret
           }),
@@ -270,6 +312,7 @@
       // Complete setup
       installLogs = [...installLogs, 'Client setup completed successfully!'];
       installing = false;
+      lastConnected = new Date().toISOString();
       dispatchSetupComplete();
     } catch (err) {
       installing = false;
@@ -319,7 +362,11 @@
         serverPort,
         serverProtocol,
         inviteSecret,
-        managementCertFingerprint
+        managementCertFingerprint,
+        clientId,
+        clientName,
+        sessionToken,
+        lastConnected
       });
     }, 0);
   }

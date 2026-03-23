@@ -9,6 +9,21 @@
   let autoRestartDelay = 10; // seconds
   let maxCrashes = 3;
   let crashCount = 0;
+
+  async function loadAutoRestartSettings() {
+    try {
+      const autoRestartSettings = await window.electron.invoke('get-auto-restart', serverPath);
+      autoRestartEnabled = autoRestartSettings.enabled;
+      autoRestartDelay = autoRestartSettings.delay;
+      maxCrashes = autoRestartSettings.maxCrashes;
+      crashCount = autoRestartSettings.crashCount;
+    } catch (err) {
+      autoRestartEnabled = false;
+      autoRestartDelay = 10;
+      maxCrashes = 3;
+      crashCount = 0;
+    }
+  }
   
   async function toggleAutoRestart() {
     const newState = !autoRestartEnabled;
@@ -45,26 +60,6 @@
   }
   
   onMount(() => {
-    // Load initial auto-restart settings
-    (async () => {
-      try {
-        // Get auto-restart settings from main process
-        const autoRestartSettings = await window.electron.invoke('get-auto-restart');
-        
-        // Apply settings to component state
-        autoRestartEnabled = autoRestartSettings.enabled;
-        autoRestartDelay = autoRestartSettings.delay;
-        maxCrashes = autoRestartSettings.maxCrashes;
-        crashCount = autoRestartSettings.crashCount;
-      } catch (err) {
-        // Initialize with defaults if settings can't be loaded
-        autoRestartEnabled = false;
-        autoRestartDelay = 10;
-        maxCrashes = 3;
-        crashCount = 0;
-      }
-    })();
-    
     // Listen for auto-restart status updates
     const statusHandler = (status) => {
       autoRestartEnabled = status.enabled;
@@ -80,6 +75,10 @@
       window.electron.removeListener('auto-restart-status', statusHandler);
     };
   });
+
+  $: if (serverPath !== undefined) {
+    loadAutoRestartSettings();
+  }
 </script>
 
 <h3>Auto-Restart Settings</h3>
@@ -198,4 +197,4 @@
     margin: 0.5rem 0 0 0 !important;
     text-align: center !important;
   }
-</style> 
+</style>

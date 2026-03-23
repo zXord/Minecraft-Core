@@ -31,6 +31,86 @@ const {
   setAutoRestartOptions,
   getAutoRestartState
 } = require('./auto-restart.cjs');
+const {
+  DEFAULT_BACKUP_AUTOMATION,
+  getDefaultServerConfig,
+  readServerConfig,
+  updateServerConfig
+} = require('../utils/config-manager.cjs');
+
+const DEFAULT_SERVER_SETTINGS = {
+  port: 25565,
+  maxRam: 4,
+  managementPort: 8080,
+  autoStartMinecraft: false,
+  autoStartManagement: false
+};
+
+function getServerConfigDefaults(serverPath = '') {
+  const appSettings = appStore.get('serverSettings') || DEFAULT_SERVER_SETTINGS;
+  return getDefaultServerConfig({
+    managementPort: appSettings.managementPort,
+    autoStartMinecraft: appSettings.autoStartMinecraft,
+    autoStartManagement: appSettings.autoStartManagement
+  });
+}
+
+function getMergedServerSettings(serverPath = '') {
+  const appSettings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    ...(appStore.get('serverSettings') || {})
+  };
+
+  if (!serverPath) {
+    return appSettings;
+  }
+
+  const config = readServerConfig(serverPath, getServerConfigDefaults(serverPath));
+  return {
+    ...appSettings,
+    managementPort: config?.managementPort ?? appSettings.managementPort,
+    autoStartMinecraft: config?.autoStartMinecraft ?? appSettings.autoStartMinecraft,
+    autoStartManagement: config?.autoStartManagement ?? appSettings.autoStartManagement
+  };
+}
+
+function getBackupSettings(serverPath = '') {
+  const appSettings = {
+    ...DEFAULT_BACKUP_AUTOMATION,
+    ...(appStore.get('backupSettings') || {})
+  };
+
+  if (!serverPath) {
+    return appSettings;
+  }
+
+  const config = readServerConfig(
+    serverPath,
+    getDefaultServerConfig({ backupAutomation: appSettings })
+  );
+  return {
+    ...appSettings,
+    ...(config?.backupAutomation || {})
+  };
+}
+
+function saveBackupSettings(serverPath, settings) {
+  const merged = {
+    ...DEFAULT_BACKUP_AUTOMATION,
+    ...(appStore.get('backupSettings') || {}),
+    ...settings
+  };
+
+  appStore.set('backupSettings', merged);
+  if (serverPath) {
+    updateServerConfig(
+      serverPath,
+      { backupAutomation: merged },
+      getDefaultServerConfig({ backupAutomation: merged })
+    );
+  }
+  return merged;
+}
 class BrowserPanelServer {
   constructor() {
     this.app = express();
@@ -456,14 +536,8 @@ class BrowserPanelServer {
     // Settings APIs to mirror get-settings / update-settings
     this.app.get('/api/settings', (_req, res) => {
       try {
-        const serverSettings = appStore.get('serverSettings') || {
-          port: 25565,
-          maxRam: 4,
-          managementPort: 8080,
-          autoStartMinecraft: false,
-          autoStartManagement: false
-        };
         const serverPath = appStore.get('lastServerPath') || '';
+        const serverSettings = getMergedServerSettings(serverPath);
         res.json({ success: true, settings: { ...serverSettings, serverPath } });
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
@@ -548,7 +622,10 @@ class BrowserPanelServer {
     // -------------- Auto-Restart APIs --------------
     this.app.get('/api/auto-restart', (_req, res) => {
       try {
-        const state = getAutoRestartState();
+        const serverPath = (_req && _req.query && typeof _req.query.serverPath === 'string')
+          ? _req.query.serverPath
+          : null;
+        const state = getAutoRestartState(serverPath);
         res.json(state);
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
@@ -580,8 +657,9 @@ class BrowserPanelServer {
         if (serverPath !== undefined && (typeof serverPath !== 'string' || serverPath.trim() === '')) {
           return res.status(400).json({ success: false, error: 'Invalid server path' });
         }
-        const current = appStore.get('serverSettings') || {
-          port: 25565, maxRam: 4, managementPort: 8080, autoStartMinecraft: false, autoStartManagement: false
+        const current = {
+          ...DEFAULT_SERVER_SETTINGS,
+          ...(appStore.get('serverSettings') || {})
         };
         const updated = {
           ...current,
@@ -595,7 +673,15 @@ class BrowserPanelServer {
         if (serverPath !== undefined) {
           appStore.set('lastServerPath', serverPath);
         }
-        res.json({ success: true, settings: { ...updated, serverPath: appStore.get('lastServerPath') || '' } });
+        const effectiveServerPath = appStore.get('lastServerPath') || '';
+        if (effectiveServerPath) {
+          updateServerConfig(effectiveServerPath, {
+            managementPort: updated.managementPort,
+            autoStartMinecraft: updated.autoStartMinecraft,
+            autoStartManagement: updated.autoStartManagement
+          }, getServerConfigDefaults(effectiveServerPath));
+        }
+        res.json({ success: true, settings: { ...getMergedServerSettings(effectiveServerPath), serverPath: effectiveServerPath } });
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
@@ -606,11 +692,7 @@ class BrowserPanelServer {
       try {
         const serverPath = req.query.serverPath || req.query.path;
         if (!serverPath || typeof serverPath !== 'string') return res.json(null);
-        const fs = require('fs'); const path = require('path');
-        const configPath = path.join(serverPath, '.minecraft-core.json');
-        if (!fs.existsSync(configPath)) return res.json(null);
-        const content = fs.readFileSync(configPath, 'utf8');
-        try { return res.json(JSON.parse(content)); } catch { return res.json(null); }
+        return res.json(readServerConfig(serverPath, getServerConfigDefaults(serverPath)));
       } catch { res.json(null); }
     });
 
@@ -672,9 +754,9 @@ class BrowserPanelServer {
           const updated = { ...current, ...(port !== null ? { port } : {}), ...(maxRam !== null ? { maxRam } : {}) };
           appStore.set('serverSettings', updated);
         } catch { /* ignore store error */ }
-  const ok = await startMinecraftServer(targetPath, port, maxRam);
-  try { if (ok) { safeSend('server-status', 'running'); } } catch { /* ignore */ }
-  res.json({ success: !!ok });
+  const result = await startMinecraftServer(targetPath, port, maxRam);
+  try { if (result?.success) { safeSend('server-status', 'running'); } } catch { /* ignore */ }
+  res.json(result);
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
     this.app.post('/api/server/stop', async (_req, res) => {
@@ -755,8 +837,9 @@ class BrowserPanelServer {
           const updated = { ...current, ...(port !== null ? { port } : {}), ...(maxRam !== null ? { maxRam } : {}) };
           appStore.set('serverSettings', updated);
         } catch { /* ignore store error */ }
-        const ok = await startMinecraftServer(inst.path, port, maxRam);
-        res.json({ success: !!ok });
+        const result = await startMinecraftServer(inst.path, port, maxRam);
+        try { if (result?.success) { safeSend('server-status', 'running'); } } catch { /* ignore */ }
+        res.json(result);
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
@@ -944,27 +1027,22 @@ class BrowserPanelServer {
 
     this.app.get('/api/backups/automation', (_req, res) => {
       try {
-        const defaults = {
-          enabled: false,
-          frequency: 86400000,
-          type: 'world',
-          retentionCount: 100,
-          runOnLaunch: false,
-          hour: 3,
-          minute: 0,
-          day: 0,
-          lastRun: null
-        };
-        const settings = appStore.get('backupSettings') || defaults;
-        res.json({ success: true, settings: { ...defaults, ...settings, nextBackupTime: computeNextBackupTime(settings) } });
+        const serverPath = (_req && _req.query && typeof _req.query.serverPath === 'string')
+          ? _req.query.serverPath
+          : (appStore.get('lastServerPath') || '');
+        const settings = getBackupSettings(serverPath);
+        res.json({ success: true, settings: { ...settings, nextBackupTime: computeNextBackupTime(settings) } });
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
 
     this.app.post('/api/backups/automation', express.json(), (req, res) => {
       try {
-        const { enabled, frequency, type, retentionCount, runOnLaunch, hour, minute, day } = req.body || {};
-        const prev = appStore.get('backupSettings') || {};
-        const updated = {
+        const { enabled, frequency, type, retentionCount, runOnLaunch, hour, minute, day, serverPath } = req.body || {};
+        const effectiveServerPath = typeof serverPath === 'string' && serverPath
+          ? serverPath
+          : (appStore.get('lastServerPath') || '');
+        const prev = getBackupSettings(effectiveServerPath);
+        const updated = saveBackupSettings(effectiveServerPath, {
           enabled: !!enabled,
           frequency: Number.isFinite(frequency) ? frequency : (prev.frequency || 86400000),
           type: typeof type === 'string' ? type : (prev.type || 'world'),
@@ -974,9 +1052,8 @@ class BrowserPanelServer {
           minute: Number.isFinite(minute) ? minute : (prev.minute || 0),
           day: Number.isFinite(day) ? day : (prev.day || 0),
           lastRun: prev.lastRun || null
-        };
-        appStore.set('backupSettings', updated);
-        res.json({ success: true });
+        });
+        res.json({ success: true, settings: updated });
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
 

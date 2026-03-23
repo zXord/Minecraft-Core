@@ -1336,17 +1336,30 @@ app.whenReady().then(() => {
     if (appWatchdogProcess) {
       return;
     }
-    appWatchdogProcess = spawn('node', [
-      appWatchdogPath,
-      process.pid.toString(),
-      'minecraft-core-app'
-    ], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      shell: false
-    });
-    appWatchdogProcess.unref();
+    try {
+      appWatchdogProcess = spawn(process.execPath, [
+        appWatchdogPath,
+        process.pid.toString(),
+        'minecraft-core-app'
+      ], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        shell: false,
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: '1'
+        }
+      });
+      appWatchdogProcess.on('error', (error) => {
+        console.warn(`Failed to start app watchdog: ${error.message}`);
+        appWatchdogProcess = null;
+      });
+      appWatchdogProcess.unref();
+    } catch (error) {
+      console.warn(`Failed to spawn app watchdog: ${error.message}`);
+      appWatchdogProcess = null;
+    }
   });
   
   // Stop the app watchdog when the server stops or crashes
