@@ -4,11 +4,60 @@ const path = require('path');
 const fsPromises = require('fs/promises');
 const { dialog, shell } = require('electron');
 const appStore = require('../utils/app-store.cjs');
-const { ensureConfigFile } = require('../utils/config-manager.cjs');
+const {
+  ensureConfigFile,
+  readServerConfig,
+  updateServerConfig
+} = require('../utils/config-manager.cjs');
 const { createZip } = require('../utils/backup-util.cjs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
 
 const logger = getLoggerHandlers();
+
+function getPortableServerConfigDefaults(serverPath = '') {
+  const serverSettings = appStore.get('serverSettings') || {
+    port: 25565,
+    maxRam: 4,
+    managementPort: 8080,
+    autoStartMinecraft: false,
+    autoStartManagement: false
+  };
+  const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
+  const backupSettings = appStore.get('backupSettings') || {};
+  const instances = appStore.get('instances') || [];
+  const existingInstance = serverPath
+    ? instances.find((inst) => inst && inst.type === 'server' && inst.path === serverPath)
+    : null;
+
+  return {
+    version: null,
+    fabric: null,
+    port: serverSettings.port,
+    maxRam: serverSettings.maxRam,
+    managementPort: serverSettings.managementPort,
+    autoStartMinecraft: !!serverSettings.autoStartMinecraft,
+    autoStartManagement: !!serverSettings.autoStartManagement,
+    autoRestart: {
+      enabled: !!autoRestart.enabled,
+      delay: autoRestart.delay,
+      maxCrashes: autoRestart.maxCrashes
+    },
+    managementInviteHost: typeof existingInstance?.managementInviteHost === 'string'
+      ? existingInstance.managementInviteHost
+      : '',
+    backupAutomation: {
+      enabled: !!backupSettings.enabled,
+      frequency: backupSettings.frequency,
+      type: backupSettings.type,
+      retentionCount: backupSettings.retentionCount,
+      runOnLaunch: backupSettings.runOnLaunch,
+      hour: backupSettings.hour,
+      minute: backupSettings.minute,
+      day: backupSettings.day,
+      lastRun: backupSettings.lastRun || null
+    }
+  };
+}
 
 /**
  * Create file and folder management IPC handlers
@@ -546,25 +595,7 @@ function createFileHandlers(win) {
         }
         
         // Ensure config file exists with defaults
-        const serverSettings = appStore.get('serverSettings') || {
-          port: 25565,
-          maxRam: 4,
-          autoStartMinecraft: false,
-          autoStartManagement: false
-        };
-        const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
-        
-        const configData = {
-          version: null,
-          fabric: null,
-          port: serverSettings.port,
-          maxRam: serverSettings.maxRam,
-          autoRestart: {
-            enabled: autoRestart.enabled,
-            delay: autoRestart.delay, 
-            maxCrashes: autoRestart.maxCrashes
-          }
-        };
+        const configData = getPortableServerConfigDefaults(folder);
 
         logger.debug('Creating config file with defaults', {
           category: 'settings',
@@ -722,32 +753,20 @@ function createFileHandlers(win) {
           return null;
         }
 
-        const configPath = path.join(targetPath, '.minecraft-core.json');
-        
-        if (!fs.existsSync(configPath)) {
+        const config = readServerConfig(targetPath, getPortableServerConfigDefaults(targetPath));
+
+        if (!config) {
           logger.debug('Config file does not exist', {
             category: 'settings',
             data: {
               handler: 'read-config',
               duration: Date.now() - startTime,
-              configPath,
+              configPath: targetPath ? path.join(targetPath, '.minecraft-core.json') : null,
               fileExists: false
             }
           });
           return null;
         }
-
-        logger.debug('Reading config file', {
-          category: 'storage',
-          data: {
-            handler: 'read-config',
-            configPath,
-            fileExists: true
-          }
-        });
-
-        const configContent = fs.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(configContent);
         const duration = Date.now() - startTime;
 
         logger.info('Configuration file read successfully', {
@@ -809,57 +828,9 @@ function createFileHandlers(win) {
       
       try {
         const configFile = path.join(targetPath, '.minecraft-core.json');
-        let config = {};
-        
-        if (fs.existsSync(configFile)) {
-          logger.debug('Reading existing config file', {
-            category: 'storage',
-            data: {
-              handler: 'save-version-selection',
-              configFile,
-              fileExists: true
-            }
-          });
-
-          try {
-            config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
-            logger.debug('Existing config loaded successfully', {
-              category: 'settings',
-              data: {
-                handler: 'save-version-selection',
-                existingKeys: Object.keys(config),
-                existingVersion: config.version,
-                existingFabric: config.fabric
-              }
-            });
-          } catch (parseError) {
-            logger.warn('Failed to parse existing config, using empty config', {
-              category: 'settings',
-              data: {
-                handler: 'save-version-selection',
-                configFile,
-                parseError: parseError.message
-              }
-            });
-            // Continue with empty config
-          }
-        } else {
-          logger.debug('No existing config file found, creating new', {
-            category: 'settings',
-            data: {
-              handler: 'save-version-selection',
-              configFile,
-              fileExists: false
-            }
-          });
-        }
-        
-        // Preserve any existing settings and update version info
-        const previousVersion = config.version;
-        const previousFabric = config.fabric;
-        
-        config.version = mcVersion;
-        config.fabric = fabricVersion;
+        const existingConfig = readServerConfig(targetPath, getPortableServerConfigDefaults(targetPath)) || {};
+        const previousVersion = existingConfig.version;
+        const previousFabric = existingConfig.fabric;
         
         logger.info('Updating version configuration', {
           category: 'settings',
@@ -873,7 +844,11 @@ function createFileHandlers(win) {
           }
         });
 
-        fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+        updateServerConfig(targetPath, {
+          ...existingConfig,
+          version: mcVersion,
+          fabric: fabricVersion
+        }, getPortableServerConfigDefaults(targetPath));
         const duration = Date.now() - startTime;
 
         logger.info('Version selection saved successfully', {

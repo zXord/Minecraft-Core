@@ -6,6 +6,7 @@ const selfsigned = require('selfsigned');
 const { cryptoProvider } = require('@peculiar/x509');
 const appStore = require('./app-store.cjs');
 const { packSecret, unpackSecret } = require('./secure-store.cjs');
+const { readServerConfig, updateServerConfig, getDefaultServerConfig } = require('./config-manager.cjs');
 
 const TLS_STORE_KEY = 'tls';
 const MANAGEMENT_KEY = 'management';
@@ -79,6 +80,46 @@ function safeSetTlsStore(store) {
   }
 }
 
+function unpackStoredTlsKey(value) {
+  if (!value || typeof value !== 'string') return '';
+  try {
+    return unpackSecret(value);
+  } catch {
+    return value;
+  }
+}
+
+function getManagementTlsFromFolder(serverPath) {
+  if (!serverPath) return null;
+  const config = readServerConfig(serverPath, getDefaultServerConfig());
+  const entry = config && config.managementTls ? config.managementTls : null;
+  if (!entry || !entry.cert || !entry.key) {
+    return null;
+  }
+  return {
+    cert: entry.cert,
+    key: entry.key,
+    fingerprint: entry.fingerprint || getFingerprintForCert(entry.cert),
+    createdAt: entry.createdAt || '',
+    keyEncrypted: typeof entry.keyEncrypted === 'boolean' ? entry.keyEncrypted : false
+  };
+}
+
+function setManagementTlsInFolder(serverPath, entry) {
+  if (!serverPath || !entry || !entry.cert || !entry.key) {
+    return;
+  }
+  updateServerConfig(serverPath, {
+    managementTls: {
+      cert: entry.cert,
+      key: entry.key,
+      fingerprint: entry.fingerprint || getFingerprintForCert(entry.cert),
+      createdAt: entry.createdAt || new Date().toISOString(),
+      keyEncrypted: typeof entry.keyEncrypted === 'boolean' ? entry.keyEncrypted : false
+    }
+  }, getDefaultServerConfig());
+}
+
 function getAltNames(extraHosts = []) {
   const hosts = new Set(['localhost', '127.0.0.1', '::1', ...extraHosts]);
   const altNames = [];
@@ -132,12 +173,34 @@ function getFingerprintForCert(cert) {
   return normalizeFingerprint(createHash('sha256').update(String(cert)).digest('hex'));
 }
 
-async function getOrCreateTlsConfig(kind, extraHosts = []) {
+async function getOrCreateTlsConfig(kind, extraHosts = [], options = {}) {
   const store = safeGetTlsStore();
-  const existing = store[kind];
+  const serverPath = kind === MANAGEMENT_KEY && options && typeof options.serverPath === 'string'
+    ? options.serverPath
+    : null;
+  let existing = store[kind];
+
+  if (kind === MANAGEMENT_KEY && serverPath) {
+    const folderEntry = getManagementTlsFromFolder(serverPath);
+    if (folderEntry) {
+      const folderFingerprint = folderEntry.fingerprint || getFingerprintForCert(folderEntry.cert);
+      store[kind] = {
+        ...folderEntry,
+        fingerprint: folderFingerprint
+      };
+      safeSetTlsStore(store);
+      existing = store[kind];
+    } else if (existing && existing.cert && existing.key) {
+      setManagementTlsInFolder(serverPath, {
+        ...existing,
+        fingerprint: existing.fingerprint || getFingerprintForCert(existing.cert)
+      });
+    }
+  }
+
   if (existing && existing.cert && existing.key) {
     try {
-      const key = unpackSecret(existing.key);
+      const key = unpackStoredTlsKey(existing.key);
       const computedFingerprint = getFingerprintForCert(existing.cert);
       const fingerprint = computedFingerprint || existing.fingerprint || '';
       if (computedFingerprint) {
@@ -148,6 +211,9 @@ async function getOrCreateTlsConfig(kind, extraHosts = []) {
             fingerprint: computedFingerprint
           };
           safeSetTlsStore(store);
+          if (kind === MANAGEMENT_KEY && serverPath) {
+            setManagementTlsInFolder(serverPath, store[kind]);
+          }
         }
       }
       return { cert: existing.cert, key, fingerprint };
@@ -182,6 +248,9 @@ async function getOrCreateTlsConfig(kind, extraHosts = []) {
     keyEncrypted
   };
   safeSetTlsStore(store);
+  if (kind === MANAGEMENT_KEY && serverPath) {
+    setManagementTlsInFolder(serverPath, store[kind]);
+  }
   return { cert, key, fingerprint };
 }
 
@@ -302,16 +371,42 @@ async function getPinnedHttpsAgent(host, port, expectedFingerprint) {
   return agent;
 }
 
-async function getManagementTlsConfig(extraHosts = []) {
-  return getOrCreateTlsConfig(MANAGEMENT_KEY, extraHosts);
+function parseManagementTlsArgs(serverPathOrExtraHosts, maybeExtraHosts) {
+  if (Array.isArray(serverPathOrExtraHosts)) {
+    return {
+      serverPath: null,
+      extraHosts: serverPathOrExtraHosts
+    };
+  }
+
+  if (serverPathOrExtraHosts && typeof serverPathOrExtraHosts === 'object') {
+    return {
+      serverPath: typeof serverPathOrExtraHosts.serverPath === 'string'
+        ? serverPathOrExtraHosts.serverPath
+        : null,
+      extraHosts: Array.isArray(serverPathOrExtraHosts.extraHosts)
+        ? serverPathOrExtraHosts.extraHosts
+        : []
+    };
+  }
+
+  return {
+    serverPath: typeof serverPathOrExtraHosts === 'string' ? serverPathOrExtraHosts : null,
+    extraHosts: Array.isArray(maybeExtraHosts) ? maybeExtraHosts : []
+  };
+}
+
+async function getManagementTlsConfig(serverPathOrExtraHosts = null, maybeExtraHosts = []) {
+  const { serverPath, extraHosts } = parseManagementTlsArgs(serverPathOrExtraHosts, maybeExtraHosts);
+  return getOrCreateTlsConfig(MANAGEMENT_KEY, extraHosts, { serverPath });
 }
 
 async function getBrowserPanelTlsConfig(extraHosts = []) {
   return getOrCreateTlsConfig(PANEL_KEY, extraHosts);
 }
 
-async function getManagementHttpsAgent() {
-  const cfg = await getOrCreateTlsConfig(MANAGEMENT_KEY);
+async function getManagementHttpsAgent(serverPath = null) {
+  const cfg = await getOrCreateTlsConfig(MANAGEMENT_KEY, [], { serverPath });
   return buildHttpsAgent(cfg.cert);
 }
 

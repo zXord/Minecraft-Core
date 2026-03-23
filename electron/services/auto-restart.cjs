@@ -4,6 +4,11 @@ const path = require('path');
 const { safeSend } = require('../utils/safe-send.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const appStore = require('../utils/app-store.cjs');
+const {
+  readServerConfig,
+  updateServerConfig,
+  getDefaultServerConfig
+} = require('../utils/config-manager.cjs');
 
 // Load initial auto-restart state from persistent store
 const storedAutoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
@@ -140,6 +145,24 @@ function resetCrashCount() {
   serverCrashCount = 0;
 }
 
+function persistAutoRestartState(targetPath) {
+  appStore.set('autoRestart', {
+    enabled: autoRestartEnabled,
+    delay: autoRestartDelay,
+    maxCrashes: maxCrashesBeforeDisable
+  });
+
+  if (targetPath) {
+    updateServerConfig(targetPath, {
+      autoRestart: {
+        enabled: autoRestartEnabled,
+        delay: autoRestartDelay,
+        maxCrashes: maxCrashesBeforeDisable
+      }
+    }, getDefaultServerConfig());
+  }
+}
+
 /**
  * Configure the auto-restart settings
  * 
@@ -157,28 +180,10 @@ function setAutoRestartOptions(options) {
   
   if (typeof options.maxCrashes === 'number' && options.maxCrashes >= 1 && options.maxCrashes <= 10) {
     maxCrashesBeforeDisable = options.maxCrashes;
-  }  // Save settings to the app-level persistent store
-  appStore.set('autoRestart', {
-    enabled: autoRestartEnabled,
-    delay: autoRestartDelay,
-    maxCrashes: maxCrashesBeforeDisable
-  });  // Also save these settings to the server's config file
-  // First try targetPath if provided, otherwise use lastServerPath 
-  const targetPath = options.targetPath || appStore.get('lastServerPath');
-  if (targetPath) {
-    const configPath = path.join(targetPath, '.minecraft-core.json');
-    const config = fs.existsSync(configPath) 
-      ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) 
-      : {};
-      
-    config.autoRestart = {
-      enabled: autoRestartEnabled,
-      delay: autoRestartDelay,
-      maxCrashes: maxCrashesBeforeDisable
-    };
-    
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   }
+
+  const targetPath = options.targetPath || appStore.get('lastServerPath');
+  persistAutoRestartState(targetPath);
   
   // Reset crash count when enabling
   if (options.enabled) {
@@ -198,7 +203,10 @@ function setAutoRestartOptions(options) {
  * 
  * @returns {object} The current auto-restart state
  */
-function getAutoRestartState() {
+function getAutoRestartState(targetPath = null) {
+  if (targetPath) {
+    initFromServerConfig(targetPath);
+  }
   return {
     enabled: autoRestartEnabled, 
     delay: autoRestartDelay,
@@ -246,37 +254,25 @@ function handleServerStarted() {
  */
 function initFromServerConfig(serverPath) {
   if (!serverPath) return;
-  
-  const configPath = path.join(serverPath, '.minecraft-core.json');
-  
-  if (fs.existsSync(configPath)) {
-    let config;
-    try {
-      config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    } catch {
-      return;
-    }
-    
-    if (config && config.autoRestart) {
-      if (typeof config.autoRestart.enabled === 'boolean') {
-        autoRestartEnabled = config.autoRestart.enabled;
-      }
-      
-      if (typeof config.autoRestart.delay === 'number') {
-        autoRestartDelay = config.autoRestart.delay;
-      }
-      
-      if (typeof config.autoRestart.maxCrashes === 'number') {
-        maxCrashesBeforeDisable = config.autoRestart.maxCrashes;
-      }
-      
-      appStore.set('autoRestart', {
-        enabled: autoRestartEnabled,
-        delay: autoRestartDelay,
-        maxCrashes: maxCrashesBeforeDisable
-      });
-    }
+
+  const config = readServerConfig(serverPath, getDefaultServerConfig());
+  if (!config || !config.autoRestart) {
+    return;
   }
+
+  if (typeof config.autoRestart.enabled === 'boolean') {
+    autoRestartEnabled = config.autoRestart.enabled;
+  }
+
+  if (typeof config.autoRestart.delay === 'number') {
+    autoRestartDelay = config.autoRestart.delay;
+  }
+
+  if (typeof config.autoRestart.maxCrashes === 'number') {
+    maxCrashesBeforeDisable = config.autoRestart.maxCrashes;
+  }
+
+  persistAutoRestartState(serverPath);
 }
 
 module.exports = {

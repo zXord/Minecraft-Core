@@ -4,6 +4,12 @@ const { safeSend } = require('../utils/safe-send.cjs');
 const path = require('path');
 const fs = require('fs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
+const {
+  DEFAULT_BACKUP_AUTOMATION,
+  getDefaultServerConfig,
+  readServerConfig,
+  updateServerConfig
+} = require('../utils/config-manager.cjs');
 
 // Enhanced backup size tracking system
 class BackupSizeTracker {
@@ -553,6 +559,48 @@ function formatSizeBytes(bytes) {
   return `${formattedValue} ${sizes[sizeIndex]}`;
 }
 
+function getDefaultBackupAutomationSettings() {
+  return { ...DEFAULT_BACKUP_AUTOMATION };
+}
+
+function getBackupSettings(serverPath = '') {
+  const appSettings = appStore.get('backupSettings') || getDefaultBackupAutomationSettings();
+  if (!serverPath) {
+    return {
+      ...getDefaultBackupAutomationSettings(),
+      ...appSettings
+    };
+  }
+
+  const config = readServerConfig(serverPath, getDefaultServerConfig({ backupAutomation: appSettings }));
+  const folderSettings = config && config.backupAutomation ? config.backupAutomation : null;
+  const merged = {
+    ...getDefaultBackupAutomationSettings(),
+    ...appSettings,
+    ...(folderSettings || {})
+  };
+
+  if (JSON.stringify(merged) !== JSON.stringify(appSettings)) {
+    appStore.set('backupSettings', merged);
+  }
+
+  return merged;
+}
+
+function saveBackupSettings(serverPath, settings) {
+  const merged = {
+    ...getDefaultBackupAutomationSettings(),
+    ...(settings || {})
+  };
+  appStore.set('backupSettings', merged);
+  if (serverPath) {
+    updateServerConfig(serverPath, {
+      backupAutomation: merged
+    }, getDefaultServerConfig({ backupAutomation: merged }));
+  }
+  return merged;
+}
+
 function createBackupHandlers() {
   logger.info('Backup handlers initialized', {
     category: 'backup',
@@ -1039,7 +1087,7 @@ function createBackupHandlers() {
 
         // Apply retention policy if it's an automated backup (scheduled, app launch, or manual-auto)
         if (trigger === 'auto' || trigger === 'app-launch' || trigger === 'manual-auto') {
-          const backupSettings = appStore.get('backupSettings') || {};
+          const backupSettings = getBackupSettings(serverPath);
           // Preload advanced settings to decide whether to skip legacy retention
             const advKeyPre = `retentionSettings_${Buffer.from(serverPath).toString('base64')}`;
             const advPre = appStore.get(advKeyPre);
@@ -1050,8 +1098,7 @@ function createBackupHandlers() {
           if (retentionCount && retentionCount < 50) {
             retentionCount = 100;
             // Update the stored setting
-            const updatedSettings = { ...backupSettings, retentionCount: 100 };
-            appStore.set('backupSettings', updatedSettings);
+            saveBackupSettings(serverPath, { ...backupSettings, retentionCount: 100 });
             logger.info('Upgraded low retention count to prevent unwanted backup deletion', {
               category: 'backup',
               data: {
@@ -1264,7 +1311,8 @@ function createBackupHandlers() {
         }
 
         // Get previous settings
-        const previousSettings = appStore.get('backupSettings') || {};
+        const targetServerPath = serverPath || appStore.get('lastServerPath') || '';
+        const previousSettings = getBackupSettings(targetServerPath);
 
         logger.debug('Previous backup settings retrieved', {
           category: 'settings',
@@ -1306,7 +1354,7 @@ function createBackupHandlers() {
           }
         });
 
-        appStore.set('backupSettings', backupSettings);
+        saveBackupSettings(targetServerPath, backupSettings);
 
         // If enabled, start the new scheduler
         if (enabled && frequency && serverPath) {
@@ -1366,7 +1414,7 @@ function createBackupHandlers() {
         return { success: false, error: formattedError };
       }
     },
-    'backups:get-automation-settings': () => {
+    'backups:get-automation-settings': (_e, payload = {}) => {
       const startTime = Date.now();
 
       logger.debug('Backup automation settings requested', {
@@ -1375,17 +1423,10 @@ function createBackupHandlers() {
       });
 
       try {
-        const settings = appStore.get('backupSettings') || {
-          enabled: false,
-          frequency: 86400000, // 24 hours in milliseconds (default)
-          type: 'world',       // default to world-only backups
-          retentionCount: 100,  // keep last 100 automated backups (high default to avoid unwanted deletion)
-          runOnLaunch: false,  // don't run on app launch by default
-          hour: 3,             // default to 3 AM
-          minute: 0,           // default to 00 minutes
-          day: 0,              // default to Sunday
-          lastRun: null        // never run yet
-        };
+        const serverPath = typeof payload === 'string'
+          ? payload
+          : (payload && typeof payload.serverPath === 'string' ? payload.serverPath : (appStore.get('lastServerPath') || ''));
+        const settings = getBackupSettings(serverPath);
 
         logger.debug('Backup settings retrieved from store', {
           category: 'settings',
@@ -1507,7 +1548,7 @@ function createBackupHandlers() {
           throw new Error('Invalid server path');
         }
 
-        const settings = appStore.get('backupSettings') || {};
+        const settings = getBackupSettings(serverPath);
         const backupType = type || settings.type || 'world';
 
         logger.debug('Running immediate auto-backup', {
@@ -1527,8 +1568,7 @@ function createBackupHandlers() {
         });
 
         // Update last run time in settings
-        const updatedSettings = { ...settings, lastRun: new Date().toISOString() };
-        appStore.set('backupSettings', updatedSettings);
+        const updatedSettings = saveBackupSettings(serverPath, { ...settings, lastRun: new Date().toISOString() });
 
         logger.debug('Updated last run time in settings', {
           category: 'settings',
@@ -1545,8 +1585,7 @@ function createBackupHandlers() {
           if (retentionCount && retentionCount < 50) {
             retentionCount = 100;
             // Update the stored setting
-            const updatedSettings = { ...settings, retentionCount: 100 };
-            appStore.set('backupSettings', updatedSettings);
+            saveBackupSettings(serverPath, { ...settings, retentionCount: 100 });
             logger.info('Upgraded low retention count to prevent unwanted backup deletion', {
               category: 'backup',
               data: {
@@ -2844,7 +2883,7 @@ function startAutomatedBackups(settings, serverPath) {
   function scheduleNextBackup() {
     const now = new Date();
     // Always use the latest settings from the store (in case they changed since the last run)
-    const currentSettings = appStore.get('backupSettings') || settings;
+    const currentSettings = getBackupSettings(serverPath || '') || settings;
 
     logger.debug('Calculating next backup schedule', {
       category: 'backup',
@@ -2929,7 +2968,7 @@ function startAutomatedBackups(settings, serverPath) {
     // Schedule the backup to run at the exact time
     autoBackupTimeoutId = setTimeout(async () => {
       try {
-        const currentSettings = appStore.get('backupSettings') || settings;
+        const currentSettings = getBackupSettings(serverPath || '') || settings;
 
         logger.info('Executing scheduled backup', {
           category: 'backup',
@@ -2968,7 +3007,7 @@ function startAutomatedBackups(settings, serverPath) {
 
         // Update last run time
         const updatedSettings = { ...currentSettings, lastRun: now.toISOString() };
-        appStore.set('backupSettings', updatedSettings);
+        saveBackupSettings(serverPath, updatedSettings);
 
         logger.info('Scheduled backup completed successfully', {
           category: 'performance',
@@ -3077,17 +3116,12 @@ function loadBackupManager() {
   backupManagerInitialized = true;
 
   // Load backup settings
-  const settings = appStore.get('backupSettings') || {
-    enabled: false,
-    frequency: 86400000, // 24 hours in milliseconds (default)
-    type: 'world',       // default to world-only backups
-    retentionCount: 100,  // keep last 100 automated backups (high default to avoid unwanted deletion)
-    runOnLaunch: false,  // don't run on app launch by default
-    hour: 3,             // default to 3 AM
-    minute: 0,           // default to 00 minutes
-    day: 0,              // default to Sunday
-    lastRun: null        // never run yet
-  };
+  // Get server path
+  const serverSettings = appStore.get('serverSettings') || {};
+  const lastServerPath = appStore.get('lastServerPath');
+  const serverPath = serverSettings.path || lastServerPath;
+
+  const settings = getBackupSettings(serverPath || '');
 
   logger.debug('Backup settings loaded', {
     category: 'settings',
@@ -3101,11 +3135,6 @@ function loadBackupManager() {
       hasLastRun: !!settings.lastRun
     }
   });
-
-  // Get server path
-  const serverSettings = appStore.get('serverSettings') || {};
-  const lastServerPath = appStore.get('lastServerPath');
-  const serverPath = serverSettings.path || lastServerPath;
 
   logger.debug('Server path resolved for backup manager', {
     category: 'backup',
@@ -3214,7 +3243,7 @@ function loadBackupManager() {
 
           // Update last run time
           const updatedSettings = { ...settings, lastRun: new Date().toISOString() };
-          appStore.set('backupSettings', updatedSettings);
+          saveBackupSettings(serverPath, updatedSettings);
 
           logger.info('App-launch backup completed successfully', {
             category: 'performance',

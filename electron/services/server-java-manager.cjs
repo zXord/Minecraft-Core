@@ -86,15 +86,19 @@ class ServerJavaManager extends JavaManager {
    */
   getJavaRequirementsForMinecraft(minecraftVersion) {
     const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
-    const isAvailable = this.isJavaInstalled(requiredJavaVersion);
-    const javaPath = isAvailable ? this.getBestJavaPath(requiredJavaVersion) : null;
+    const validationStatus = this.getJavaValidationStatus(requiredJavaVersion);
+    const isAvailable = validationStatus.isInstalled;
+    const javaPath = validationStatus.javaPath || null;
     
     return {
       minecraftVersion,
       requiredJavaVersion,
       isAvailable,
       javaPath,
-      needsDownload: !isAvailable
+      needsDownload: !isAvailable,
+      installationState: validationStatus.state || (isAvailable ? 'available' : 'missing'),
+      validationMessage: validationStatus.validation ? validationStatus.validation.message : '',
+      validationCode: validationStatus.validation ? validationStatus.validation.code : ''
     };
   }
   
@@ -120,4 +124,4 @@ class ServerJavaManager extends JavaManager {
   }
 }
 
-module.exports = { ServerJavaManager }; 
+module.exports = { ServerJavaManager };

@@ -162,7 +162,7 @@ function setupIpcHandlers(win) {
     
     // Register auto-restart handlers
     registerIpcHandlers({
-      'get-auto-restart': () => getAutoRestartState(),
+      'get-auto-restart': (_e, targetPath) => getAutoRestartState(targetPath),
       'set-auto-restart': (_e, options) => setAutoRestartOptions(options)
     });
     

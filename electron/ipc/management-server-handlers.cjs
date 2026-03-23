@@ -4,6 +4,11 @@ const appStore = require('../utils/app-store.cjs');
 const { ensureEncryptionAvailable, packSecret, unpackSecret } = require('../utils/secure-store.cjs');
 const { getManagementTlsConfig } = require('../utils/tls-utils.cjs');
 const { randomBytes } = require('crypto');
+const {
+  getDefaultServerConfig,
+  readServerConfig,
+  updateServerConfig
+} = require('../utils/config-manager.cjs');
 
 function getServerInstances() {
   return appStore.get('instances') || [];
@@ -29,12 +34,66 @@ function generateInviteSecret() {
   return randomBytes(24).toString('base64url');
 }
 
+function getServerConfigDefaults() {
+  const settings = appStore.get('serverSettings') || {};
+  return getDefaultServerConfig({
+    managementPort: settings.managementPort || 8080
+  });
+}
+
+function readPortableServerConfig(serverPath) {
+  if (!serverPath) return null;
+  return readServerConfig(serverPath, getServerConfigDefaults());
+}
+
+function persistInviteMetadata(serverPath, { host, secret }) {
+  if (!serverPath) return null;
+  return updateServerConfig(serverPath, {
+    managementInviteHost: typeof host === 'string' ? host : undefined,
+    managementInviteSecret: typeof secret === 'string' ? secret : undefined
+  }, getServerConfigDefaults());
+}
+
+function getConfiguredInviteHost(serverPath, instance = null) {
+  const config = readPortableServerConfig(serverPath);
+  if (config && typeof config.managementInviteHost === 'string' && config.managementInviteHost.trim()) {
+    return config.managementInviteHost.trim();
+  }
+  if (instance && typeof instance.managementInviteHost === 'string' && instance.managementInviteHost.trim()) {
+    const trimmed = instance.managementInviteHost.trim();
+    persistInviteMetadata(serverPath, { host: trimmed });
+    return trimmed;
+  }
+  return '';
+}
+
+function getManagementPortForServer(serverPath) {
+  const status = getManagementServer().getStatus ? getManagementServer().getStatus() : null;
+  const runningPort = status && status.port ? Number.parseInt(String(status.port), 10) : NaN;
+  if (Number.isFinite(runningPort)) {
+    return runningPort;
+  }
+
+  const config = readPortableServerConfig(serverPath);
+  if (config && Number.isFinite(Number(config.managementPort))) {
+    return Number(config.managementPort);
+  }
+
+  const settings = appStore.get('serverSettings') || {};
+  const settingsPort = settings.managementPort ? Number.parseInt(String(settings.managementPort), 10) : NaN;
+  return Number.isFinite(settingsPort) ? settingsPort : 8080;
+}
+
 function ensureInviteSecret(serverPath) {
   ensureEncryptionAvailable();
   const instance = findServerInstanceByPath(serverPath);
-  if (!instance) return { instance: null, secret: '' };
+  const config = readPortableServerConfig(serverPath);
+  if (!instance && !config) return { instance: null, secret: '' };
   let secret = '';
-  if (instance.managementInviteSecret) {
+  if (config && typeof config.managementInviteSecret === 'string' && config.managementInviteSecret.trim()) {
+    secret = config.managementInviteSecret.trim();
+  }
+  if (!secret && instance && instance.managementInviteSecret) {
     try {
       secret = unpackSecret(instance.managementInviteSecret);
     } catch {
@@ -43,7 +102,18 @@ function ensureInviteSecret(serverPath) {
   }
   if (!secret) {
     secret = generateInviteSecret();
-    updateServerInstance(serverPath, { managementInviteSecret: packSecret(secret) });
+  }
+  if (serverPath) {
+    persistInviteMetadata(serverPath, {
+      host: getConfiguredInviteHost(serverPath, instance),
+      secret
+    });
+  }
+  if (instance) {
+    updateServerInstance(serverPath, {
+      managementInviteSecret: packSecret(secret),
+      managementInviteHost: getConfiguredInviteHost(serverPath, instance)
+    });
   }
   return { instance: findServerInstanceByPath(serverPath), secret };
 }
@@ -79,10 +149,8 @@ function createManagementServerHandlers(win) {
         if (secret) {
           managementServer.setInviteSecret(secret);
         }
-        if (instance && typeof instance.managementInviteHost === 'string') {
-          const host = instance.managementInviteHost.trim();
-          managementServer.setExternalHost(host || null);
-        }
+        const configuredHost = getConfiguredInviteHost(targetPath, instance);
+        managementServer.setExternalHost(configuredHost || null);
 
         const result = await managementServer.start(port, targetPath);
         
@@ -142,10 +210,8 @@ function createManagementServerHandlers(win) {
         if (secret) {
           managementServer.setInviteSecret(secret);
         }
-        if (instance && typeof instance.managementInviteHost === 'string') {
-          const host = instance.managementInviteHost.trim();
-          managementServer.setExternalHost(host || null);
-        }
+        const configuredHost = getConfiguredInviteHost(targetPath, instance);
+        managementServer.setExternalHost(configuredHost || null);
         managementServer.updateServerPath(targetPath);
         
         // Notify renderer about path update
@@ -168,6 +234,7 @@ function createManagementServerHandlers(win) {
         const host = typeof hostIP === 'string' ? hostIP.trim() : '';
         if (targetPath) {
           updateServerInstance(targetPath, { managementInviteHost: host || '' });
+          persistInviteMetadata(targetPath, { host: host || '' });
         }
         managementServer.setExternalHost(host || null);
         
@@ -214,29 +281,20 @@ function createManagementServerHandlers(win) {
         await managementServer.refreshPublicHostIfStale();
         let fingerprint = '';
         try {
-          const tlsConfig = await getManagementTlsConfig();
+          const tlsConfig = await getManagementTlsConfig(targetPath);
           fingerprint = tlsConfig && tlsConfig.fingerprint ? tlsConfig.fingerprint : '';
         } catch {
           fingerprint = '';
         }
-        const configuredHost = typeof instance.managementInviteHost === 'string'
-          ? instance.managementInviteHost.trim()
-          : '';
+        const configuredHost = getConfiguredInviteHost(targetPath, instance);
         const publicHost = managementServer.publicHost;
         const fallbackHost = managementServer.detectExternalIP() || 'localhost';
         const host = configuredHost || publicHost || fallbackHost;
         const hostSource = configuredHost ? 'configured' : publicHost ? 'public' : 'local';
         const protocol = managementServer.useHttps ? 'https' : 'http';
-        const settings = appStore.get('serverSettings') || {};
         const requestedPort = typeof port === 'number' ? port : Number.parseInt(port, 10);
-        const status = managementServer.getStatus ? managementServer.getStatus() : null;
-        const runningPort = status && status.port ? Number.parseInt(String(status.port), 10) : NaN;
-        const settingsPort = settings.managementPort ? Number.parseInt(String(settings.managementPort), 10) : NaN;
-        const portValue = Number.isFinite(runningPort)
-          ? runningPort
-          : (Number.isFinite(settingsPort)
-            ? settingsPort
-            : (Number.isFinite(requestedPort) ? Number(requestedPort) : 8080));
+        const configuredPort = getManagementPortForServer(targetPath);
+        const portValue = Number.isFinite(requestedPort) ? Number(requestedPort) : configuredPort;
         const fpParam = fingerprint ? `&fp=${encodeURIComponent(fingerprint)}` : '';
         const inviteLink = `${protocol}://${host}:${portValue}/?secret=${encodeURIComponent(secret)}${fpParam}`;
         const usesPublicHost = hostSource === 'public' && !isPrivateIp(host);
@@ -268,6 +326,7 @@ function createManagementServerHandlers(win) {
         }
         const trimmed = typeof host === 'string' ? host.trim() : '';
         updateServerInstance(targetPath, { managementInviteHost: trimmed || '' });
+        persistInviteMetadata(targetPath, { host: trimmed || '' });
         managementServer.setExternalHost(trimmed || null);
         return { success: true, host: trimmed || null };
       } catch (error) {
@@ -285,6 +344,10 @@ function createManagementServerHandlers(win) {
         ensureEncryptionAvailable();
         const secret = generateInviteSecret();
         updateServerInstance(targetPath, { managementInviteSecret: packSecret(secret) });
+        persistInviteMetadata(targetPath, {
+          host: getConfiguredInviteHost(targetPath, findServerInstanceByPath(targetPath)),
+          secret
+        });
         managementServer.setInviteSecret(secret);
         return { success: true, secret };
       } catch (error) {

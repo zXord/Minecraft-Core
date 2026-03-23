@@ -1078,7 +1078,7 @@ class ManagementServer {
     let tlsConfig = null;
     if (this.useHttps) {
       try {
-        tlsConfig = await getManagementTlsConfig();
+        tlsConfig = await getManagementTlsConfig(serverPath);
       } catch (error) {
         const message = error && error.message ? error.message : 'unknown';
         this.log('error', 'Failed to initialize management server TLS', {
