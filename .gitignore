@@ -32,6 +32,7 @@ electron/logger-window.html
 .kiro/*
 .claude/
 .tools/
+.codex/
 
 # Runtime files (should be in app data directory, not source code)
 *.pid

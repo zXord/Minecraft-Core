@@ -1280,7 +1280,7 @@ class BrowserPanelServer {
       try {
         const { minecraftVersion, serverPath } = req.query || {};
         if (serverPath) this.serverJavaManager.setServerPath(serverPath);
-        const jp = this.serverJavaManager.getBestJavaPathForMinecraft(minecraftVersion);
+        const jp = await this.serverJavaManager.getBestJavaPathForMinecraft(minecraftVersion);
         const out = { success: true, javaPath: jp, available: !!jp };
         res.json(out);
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -1298,7 +1298,7 @@ class BrowserPanelServer {
       try {
         const { minecraftVersion, serverPath } = req.query || {};
         if (serverPath) this.serverJavaManager.setServerPath(serverPath);
-        const available = this.serverJavaManager.isCorrectJavaAvailableForMinecraft(minecraftVersion);
+        const available = await this.serverJavaManager.isCorrectJavaAvailableForMinecraft(minecraftVersion);
         const out = { success: true, available, minecraftVersion };
         res.json(out);
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }

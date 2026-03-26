@@ -372,7 +372,7 @@ function createServerHandlers(win) {
         const statusResponse = {
           isRunning: state.isRunning,
           serverSettings,
-          status: state.isRunning ? "running" : "stopped",
+          status: state.status || (state.isRunning ? "running" : "stopped"),
           serverStartMs: state.serverStartMs || null,
           playersInfo: state.playersInfo || { online: 0, max: 0, list: [] },
         };

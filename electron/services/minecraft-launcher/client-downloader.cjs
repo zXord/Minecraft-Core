@@ -188,6 +188,8 @@ class ClientDownloader {
   }
 
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
+    this.javaManager.setClientPath(clientPath);
+
     
     this.emitter.emit('client-download-start', { version: minecraftVersion });
     
@@ -215,7 +217,7 @@ class ClientDownloader {
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
         
-        const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
+        const { requiredJavaVersion } = await utils.resolveRequiredJavaVersion(minecraftVersion);
         
         this.emitter.emit('client-download-progress', {
           type: 'Java',
@@ -770,6 +772,8 @@ class ClientDownloader {
   }
 
   async installFabricLoader(clientPath, minecraftVersion, fabricVersion = 'latest') {
+    this.javaManager.setClientPath(clientPath);
+
     try {
       const fabricInstallerUrl = 'https://maven.fabricmc.net/net/fabricmc/fabric-installer/0.11.2/fabric-installer-0.11.2.jar';
       const installerPath = path.join(clientPath, 'fabric-installer.jar');
@@ -803,7 +807,7 @@ class ClientDownloader {
       }
       }
       
-      const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
+      const { requiredJavaVersion } = await utils.resolveRequiredJavaVersion(minecraftVersion);
       let javaResult;
       try {
         javaResult = await this.javaManager.ensureJava(requiredJavaVersion);
@@ -1395,7 +1399,7 @@ Specification-Vendor: FabricMC
         fabricProfileName = `fabric-loader-${resolvedFabricVersion}-${mcVersion}`;
         targetVersion = fabricProfileName;
       }
-      const requiredJavaVersion = utils.getRequiredJavaVersion(requiredVersion); // Use imported utils
+      const { requiredJavaVersion } = await utils.resolveRequiredJavaVersion(requiredVersion);
       if (!this.javaManager.isJavaInstalled(requiredJavaVersion)) {
         return { 
           success: true,

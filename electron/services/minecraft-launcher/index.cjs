@@ -576,8 +576,10 @@ class MinecraftLauncher extends EventEmitter {
         });
       }
 
+      this.javaManager.setClientPath(clientPath);
+
       // Get Java path
-      const requiredJavaVersion = require('./utils.cjs').getRequiredJavaVersion(minecraftVersion);
+      const { requiredJavaVersion } = await require('./utils.cjs').resolveRequiredJavaVersion(minecraftVersion);
 
       logger.debug('Ensuring Java availability', {
         category: 'client',

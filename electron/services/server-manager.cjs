@@ -24,6 +24,9 @@ let serverStartMs = null;
 let serverMaxRam = 4; // Default in GB
 let playersInfo = { count: 0, names: [] };
 let listInterval = null;
+let serverLifecycleStatus = 'stopped';
+let shutdownRequest = null;
+let cloudSyncWarningSent = false;
 
 // Performance tracking
 let performanceMetrics = {
@@ -34,6 +37,66 @@ let performanceMetrics = {
   playerEvents: 0,
   metricsUpdates: 0
 };
+
+function setServerLifecycleStatus(status, options = {}) {
+  const normalized = typeof status === 'string' ? status.toLowerCase() : 'unknown';
+  const nextStatus = ['starting', 'running', 'stopping', 'stopped', 'error', 'unknown'].includes(normalized)
+    ? normalized
+    : 'unknown';
+  const forceEmit = options.forceEmit === true;
+  const changed = serverLifecycleStatus !== nextStatus;
+  serverLifecycleStatus = nextStatus;
+
+  if (changed || forceEmit) {
+    safeSend('server-status', nextStatus);
+  }
+}
+
+function emitStoppedState(options = {}) {
+  const forceStatusEvent = options.forceStatusEvent === true;
+  playersInfo = { count: 0, names: [] };
+  serverStartMs = null;
+  setServerLifecycleStatus('stopped', { forceEmit: forceStatusEvent });
+  sendMetricsUpdate({
+    cpuPct: 0,
+    memUsedMB: 0,
+    maxRamMB: serverMaxRam * 1024,
+    uptime: '0h 0m 0s',
+    players: 0,
+    names: []
+  });
+}
+
+function resetRuntimeIssueFlags() {
+  cloudSyncWarningSent = false;
+}
+
+function maybeSendCloudSyncWarning(text, serverPath) {
+  if (cloudSyncWarningSent || typeof text !== 'string' || !text.trim()) {
+    return;
+  }
+
+  const normalized = text.toLowerCase();
+  const hasHardlinkCloudError = normalized.includes('incompatible hardlinks')
+    || normalized.includes('error_cloud_files_incompatible_hardlinks');
+
+  if (!hasHardlinkCloudError) {
+    return;
+  }
+
+  cloudSyncWarningSent = true;
+  safeSend('server-cloud-sync-warning', {
+    title: 'Cloud-synced folder blocked the world upgrade',
+    summary: 'Minecraft could not finish the world upgrade because Windows blocked hardlinks inside this synced folder.',
+    serverPath,
+    guidance: [
+      'Copy the live server to a plain local folder such as C:\\Minecraft\\Server.',
+      'Start it there once so the world upgrade can finish.',
+      'Stop the server, then copy the upgraded server back if you still want it stored in your cloud-sync folder.'
+    ],
+    rawMessage: text.trim()
+  });
+}
 
 // Log service initialization
 logger.info('Server manager service initialized', {
@@ -641,26 +704,32 @@ async function startMinecraftServer(targetPath, port, maxRam) {
   const startOperationTime = Date.now();
   const normalizedPort = Number.isFinite(port) ? port : 25565;
   const normalizedMaxRam = Number.isFinite(maxRam) && maxRam > 0 ? maxRam : 4;
+  const failStart = (...args) => {
+    setServerLifecycleStatus('stopped', { forceEmit: true });
+    return createStartFailure(...args);
+  };
   
-  if (serverProcess) {
+  if (serverProcess || serverLifecycleStatus === 'starting' || serverLifecycleStatus === 'stopping') {
     logger.warn('Server start attempted while server already running', {
       category: 'server',
       data: {
         service: 'ServerManager',
         operation: 'startMinecraftServer',
         serverAlreadyRunning: true,
-        existingPid: serverProcess.pid,
+        existingPid: serverProcess?.pid,
+        lifecycleStatus: serverLifecycleStatus,
         targetPath,
         port: normalizedPort,
         maxRam: normalizedMaxRam
       }
     });
-    return createStartFailure('ALREADY_RUNNING', 'Server is already running.');
+    return createStartFailure('ALREADY_RUNNING', `Server is already ${serverLifecycleStatus === 'starting' ? 'starting' : serverLifecycleStatus === 'stopping' ? 'stopping' : 'running'}.`);
   }
   
   // Set instance context based on server path
   const instanceName = instanceContext.getInstanceNameByPath(targetPath);
-  
+
+  try {
   logger.info('Starting Minecraft server', {
     instanceId: instanceName,
     category: 'server',
@@ -676,6 +745,9 @@ async function startMinecraftServer(targetPath, port, maxRam) {
   });
   
   performanceMetrics.serverStarts++;
+  shutdownRequest = null;
+  resetRuntimeIssueFlags();
+  setServerLifecycleStatus('starting', { forceEmit: true });
 
   // First, detect the Minecraft version and ensure correct Java is available
   const minecraftVersion = await detectMinecraftVersion(targetPath);
@@ -693,7 +765,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       }
     });
     safeSend('server-log', '[ERROR] Could not determine Minecraft version. Cannot ensure correct Java version.');
-    return createStartFailure(
+    return failStart(
       'VERSION_UNKNOWN',
       'Could not determine the Minecraft version from this server folder.'
     );
@@ -713,7 +785,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
 
   // Set server path for Java manager and check if correct Java is available
   serverJavaManager.setServerPath(targetPath);
-  const javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(minecraftVersion);
+  const javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(minecraftVersion);
   
   logger.info('Java requirements determined', {
     category: 'server',
@@ -754,7 +826,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       }
     });
     safeSend('server-log', `[ERROR] ${javaFailureMessage}`);
-    return createStartFailure(javaFailureCode, javaFailureMessage, true, {
+    return failStart(javaFailureCode, javaFailureMessage, true, {
       requiredJavaVersion: javaRequirements.requiredJavaVersion
     });
   } else {
@@ -786,7 +858,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         stage: 'java_requirements'
       }
     });
-    return createStartFailure(
+    return failStart(
       'JAVA_BROKEN',
       'Java runtime could not be resolved for this server. Repair Java from Server Maintenance before starting the server.',
       true,
@@ -852,7 +924,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       });
 
       safeSend('server-log', `[ERROR] ${failureMessage}`);
-      return createStartFailure('FABRIC_BROKEN', failureMessage, true, {
+      return failStart('FABRIC_BROKEN', failureMessage, true, {
         fabricIssues: issueMessages
       });
     }
@@ -955,7 +1027,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         stage: 'jar_detection'
       }
     });
-    return createStartFailure(
+    return failStart(
       'SERVER_JAR_MISSING',
       'No valid server jar was found in the selected server folder.'
     );
@@ -983,7 +1055,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       });
 
       safeSend('server-log', `[ERROR] ${failureMessage}`);
-      return createStartFailure('FABRIC_BROKEN', failureMessage, true, {
+      return failStart('FABRIC_BROKEN', failureMessage, true, {
         fabricIssues: issueMessages
       });
     }
@@ -1050,6 +1122,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
 
     const handleServerLogLine = (text) => {
       const isListResponse = /There are \d+ of a max of \d+ players online/.test(text);
+      maybeSendCloudSyncWarning(text, targetPath);
       
       if (text !== lastLine) {
         lastLine = text;
@@ -1132,6 +1205,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
 
     serverProcess.stderr.on('data', chunk => {
       const text = chunk.toString();
+      maybeSendCloudSyncWarning(text, targetPath);
       safeSend('server-log', `[STDERR] ${text}`);
     });
 
@@ -1165,7 +1239,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
     });
     
     eventBus.emit('server-started');
-    safeSend('server-status', 'running');
+    setServerLifecycleStatus('running', { forceEmit: true });
     
     // Start metrics reporting when server starts
     const { startMetricsReporting } = require('./system-metrics.cjs');
@@ -1174,7 +1248,8 @@ async function startMinecraftServer(targetPath, port, maxRam) {
     serverProcess.on('exit', (code, signal) => {
       const exitTime = Date.now();
       const uptime = serverStartMs ? exitTime - serverStartMs : 0;
-      const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
+      const wasManualShutdown = shutdownRequest === 'stop' || shutdownRequest === 'kill';
+      const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT' || wasManualShutdown;
       const exitServerInfo = serverInfoSnapshot ? { ...serverInfoSnapshot } : null;
       
       logger.info('Server process exited', {
@@ -1234,8 +1309,13 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         clearInterval(listInterval);
         listInterval = null;
       }
-      // Reset serverProcess after exit to allow auto-restart
+      clearIntensiveChecking();
       serverProcess = null;
+      shutdownRequest = null;
+      emitStoppedState({ forceStatusEvent: true });
+      setTimeout(() => {
+        safeSend('server-status', 'stopped');
+      }, 300);
     });
 
     if (listInterval) clearInterval(listInterval);
@@ -1248,8 +1328,6 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       }
     }, 120000); // Check only every 2 minutes by default
 
-    safeSend('server-status', 'running');
-    
     sendMetricsUpdate({
       cpuPct: 0.1,
       memUsedMB: 1,
@@ -1262,7 +1340,7 @@ async function startMinecraftServer(targetPath, port, maxRam) {
     
     setTimeout(() => {
       if (serverProcess) {
-        safeSend('server-status', 'running');
+        setServerLifecycleStatus('running', { forceEmit: true });
       }
     }, 300);
     
@@ -1273,7 +1351,9 @@ async function startMinecraftServer(targetPath, port, maxRam) {
       jar: launchJar
     });
   } catch (error) {
-    serverStartMs = null;
+    serverProcess = null;
+    shutdownRequest = null;
+    emitStoppedState({ forceStatusEvent: true });
     const operationDuration = Date.now() - startOperationTime;
     logger.error(`Server start failed: ${error.message}`, {
       category: 'server',
@@ -1287,6 +1367,29 @@ async function startMinecraftServer(targetPath, port, maxRam) {
         maxRam: normalizedMaxRam,
         launchJar,
         javaPath,
+        stack: error.stack
+      }
+    });
+    return createStartFailure(
+      'SERVER_START_FAILED',
+      error.message || 'Server failed to start.'
+    );
+  }
+  } catch (error) {
+    serverProcess = null;
+    shutdownRequest = null;
+    emitStoppedState({ forceStatusEvent: true });
+    const operationDuration = Date.now() - startOperationTime;
+    logger.error(`Server start failed before process launch: ${error.message}`, {
+      category: 'server',
+      data: {
+        service: 'ServerManager',
+        operation: 'startMinecraftServer',
+        duration: operationDuration,
+        errorType: error.constructor.name,
+        targetPath,
+        port: normalizedPort,
+        maxRam: normalizedMaxRam,
         stack: error.stack
       }
     });
@@ -1332,6 +1435,8 @@ function stopMinecraftServer() {
     }
   });
   
+  shutdownRequest = 'stop';
+  setServerLifecycleStatus('stopping', { forceEmit: true });
   serverProcess.stdin.write('stop\n');
   performanceMetrics.serverStops++;
 
@@ -1341,14 +1446,9 @@ function stopMinecraftServer() {
     listInterval = null;
   }
   clearIntensiveChecking();
-  
-  // Reset all server state immediately
-  serverProcess = null;
-  serverStartMs = null;
-  playersInfo = { count: 0, names: [] };
-  
+
   const stopDuration = Date.now() - stopStartTime;
-  logger.info('Server stopped successfully', {
+  logger.info('Server stop command sent successfully', {
     category: 'server',
     data: {
       service: 'ServerManager',
@@ -1356,30 +1456,11 @@ function stopMinecraftServer() {
       duration: stopDuration,
       uptime,
       totalServerStops: performanceMetrics.serverStops,
-      stopMethod: 'graceful'
+      stopMethod: 'graceful',
+      awaitingExit: true
     }
   });
-  
-  // Emit normal exit event
-  eventBus.emit('server-normal-exit');
-  // Notify renderer with zeroed metrics
-  safeSend('server-status', 'stopped');
-  
-  // Send zeroed metrics immediately
-  sendMetricsUpdate({
-    cpuPct: 0,
-    memUsedMB: 0,
-    maxRamMB: serverMaxRam * 1024,
-    uptime: '0h 0m 0s',
-    players: 0,
-    names: []
-  });
-  
-  // Send a second status update after a small delay to ensure the UI updates
-  setTimeout(() => {
-    safeSend('server-status', 'stopped');
-  }, 300);
-  
+
   return true;
 }
 
@@ -1420,6 +1501,8 @@ function killMinecraftServer() {
     }
   });
 
+  shutdownRequest = 'kill';
+  setServerLifecycleStatus('stopping', { forceEmit: true });
   try {
     if (process.platform === 'win32') {
       spawn('taskkill', ['/PID', pid.toString(), '/F', '/T']);
@@ -1481,15 +1564,7 @@ function killMinecraftServer() {
     listInterval = null;
   }
   clearIntensiveChecking();
-  
-  // Clear server state
-  serverProcess = null;
-  serverStartMs = null;
-  playersInfo = { count: 0, names: [] };
-  
-  // Emit normal exit event
-  eventBus.emit('server-normal-exit');
-  
+
   // Reset crash counter on manual kill
   if (typeof resetCrashCount === 'function') {
     resetCrashCount();
@@ -1504,26 +1579,11 @@ function killMinecraftServer() {
       duration: killDuration,
       uptime,
       totalServerKills: performanceMetrics.serverKills,
-      stopMethod: 'force_kill'
+      stopMethod: 'force_kill',
+      awaitingExit: true
     }
   });
-  
-  // Notify renderer of stopped status and send zeroed metrics
-  safeSend('server-status', 'stopped');
-  sendMetricsUpdate({
-    cpuPct: 0,
-    memUsedMB: 0,
-    maxRamMB: serverMaxRam * 1024,
-    uptime: '0h 0m 0s',
-    players: 0,
-    names: []
-  });
-  
-  // Send a second status update after a small delay to ensure the UI updates
-  setTimeout(() => {
-    safeSend('server-status', 'stopped');
-  }, 300);
-  
+
   return true;
 }
 
@@ -1590,7 +1650,8 @@ function getServerState() {
     serverProcess: serverProcess,
     serverStartMs: serverStartMs,
     serverMaxRam: serverMaxRam,
-    playersInfo: playersInfo
+    playersInfo: playersInfo,
+    status: serverLifecycleStatus
   };
   
   logger.debug('Server state requested', {
@@ -1599,6 +1660,7 @@ function getServerState() {
       service: 'ServerManager',
       operation: 'getServerState',
       isRunning: state.isRunning,
+      status: state.status,
       pid: serverProcess?.pid,
       uptime: serverStartMs ? Date.now() - serverStartMs : 0,
       playersOnline: playersInfo.count,

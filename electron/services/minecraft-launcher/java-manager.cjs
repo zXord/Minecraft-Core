@@ -11,6 +11,7 @@ class JavaManager {
     this.platform = this.getPlatformString();
     this.architecture = this.getArchitectureString();
     this.clientPath = clientPath;
+    this.isScopedJavaDir = Boolean(clientPath);
     
     // Use client-specific Java directory if clientPath is provided
     if (clientPath) {
@@ -29,7 +30,10 @@ class JavaManager {
   // Update client path and Java directory
   setClientPath(clientPath) {
     this.clientPath = clientPath;
-    this.javaBaseDir = path.join(clientPath, 'java');
+    this.isScopedJavaDir = Boolean(clientPath);
+    this.javaBaseDir = clientPath
+      ? path.join(clientPath, 'java')
+      : path.join(os.homedir(), '.minecraft-core', 'java');
     
     // Ensure Java directory exists
     if (!fs.existsSync(this.javaBaseDir)) {
@@ -267,6 +271,92 @@ class JavaManager {
     return this.getJavaValidationStatus(requiredJavaVersion).javaPath;
   }
 
+  getManagedJavaVersionFromPath(javaExecutablePath) {
+    if (!javaExecutablePath || !this.javaBaseDir) {
+      return null;
+    }
+
+    const relativePath = path.relative(this.javaBaseDir, javaExecutablePath);
+    if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+      return null;
+    }
+
+    const [topLevelSegment] = relativePath.split(path.sep);
+    const versionMatch = typeof topLevelSegment === 'string'
+      ? topLevelSegment.match(/^java-(\d+)$/)
+      : null;
+
+    return versionMatch ? versionMatch[1] : null;
+  }
+
+  async cleanupUnusedJavaVersions(requiredJavaVersion, javaPath = null) {
+    if (!this.isScopedJavaDir) {
+      return {
+        success: true,
+        skipped: true,
+        reason: 'shared-java-directory',
+        cleanedVersions: [],
+        keptVersions: []
+      };
+    }
+
+    if (!fs.existsSync(this.javaBaseDir)) {
+      return {
+        success: true,
+        cleanedVersions: [],
+        keptVersions: []
+      };
+    }
+
+    const activeJavaVersion = this.getManagedJavaVersionFromPath(javaPath);
+    if (!activeJavaVersion) {
+      return {
+        success: true,
+        skipped: true,
+        reason: 'active-java-version-unknown',
+        requiredJavaVersion,
+        cleanedVersions: [],
+        keptVersions: []
+      };
+    }
+
+    const javaDirs = fs.readdirSync(this.javaBaseDir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && /^java-\d+$/.test(entry.name))
+      .map(entry => entry.name.replace('java-', ''));
+
+    const cleanedVersions = [];
+    const failedVersions = [];
+    const keptVersions = javaDirs.filter(version => version === activeJavaVersion);
+
+    for (const version of javaDirs) {
+      if (version === activeJavaVersion) {
+        continue;
+      }
+
+      const versionDir = path.join(this.javaBaseDir, `java-${version}`);
+
+      try {
+        await this.removeDirectoryWithRetry(versionDir, 3);
+        if (!fs.existsSync(versionDir)) {
+          cleanedVersions.push(version);
+        } else {
+          failedVersions.push(version);
+        }
+      } catch {
+        failedVersions.push(version);
+      }
+    }
+
+    return {
+      success: failedVersions.length === 0,
+      requiredJavaVersion,
+      activeJavaVersion,
+      cleanedVersions,
+      failedVersions,
+      keptVersions
+    };
+  }
+
     async downloadJava(javaVersion, progressCallback) {
     if (progressCallback) {
       progressCallback({ type: 'Preparing', task: `Preparing to download Java ${javaVersion}...`, progress: 0 });
@@ -484,21 +574,27 @@ class JavaManager {
   }
   
   async ensureJava(requiredJavaVersion, progressCallback) {
-    
-    const javaInstalled = this.isJavaInstalled(requiredJavaVersion);
-    
-    if (javaInstalled) {
-      // Find the best compatible Java version to use
-      const javaPath = this.getBestJavaPath(requiredJavaVersion);
-      if (javaPath) {
-        return { success: true, javaPath: javaPath };
-      }
+    const validationStatus = this.getJavaValidationStatus(requiredJavaVersion);
+
+    if (validationStatus.isInstalled && validationStatus.javaPath) {
+      const cleanup = await this.cleanupUnusedJavaVersions(requiredJavaVersion, validationStatus.javaPath);
+      return {
+        success: true,
+        javaPath: validationStatus.javaPath,
+        cleanup
+      };
     }
-    
+
     const result = await this.downloadJava(requiredJavaVersion, progressCallback);
-    
-    
-    return result;
+    if (!result?.success || !result.javaPath) {
+      return result;
+    }
+
+    const cleanup = await this.cleanupUnusedJavaVersions(requiredJavaVersion, result.javaPath);
+    return {
+      ...result,
+      cleanup
+    };
   }
 
 

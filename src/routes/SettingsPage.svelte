@@ -30,6 +30,14 @@
   let serverConfig = null;
   let serverConfigLoading = false;
   let javaVersion = null;
+  let javaStatus = null;
+  $: javaStatusLabel = javaVersion
+    ? (javaStatus?.isAvailable
+      ? `Java ${javaVersion} ready`
+      : javaStatus?.installationState === 'broken'
+        ? `Java ${javaVersion} broken`
+        : `Java ${javaVersion} missing`)
+    : '—';
 
   function formatBytes(bytes) {
     if (bytes === 0) return '0 B';
@@ -58,6 +66,8 @@
   async function loadServerConfig() {
     if (!serverPath) return;
     serverConfigLoading = true;
+    javaVersion = null;
+    javaStatus = null;
     try {
       const config = await window.electron.invoke('read-config', serverPath);
       if (config) {
@@ -72,6 +82,7 @@
           });
           if (javaInfo?.requiredJavaVersion) {
             javaVersion = javaInfo.requiredJavaVersion;
+            javaStatus = javaInfo;
           }
         }
       }
@@ -578,7 +589,7 @@
                 <span>Java</span>
               </div>
               <span class="info-value">
-                {serverConfigLoading ? 'Loading...' : (javaVersion ? `Java ${javaVersion}` : '—')}
+                {serverConfigLoading ? 'Loading...' : javaStatusLabel}
               </span>
             </div>
             {/if}

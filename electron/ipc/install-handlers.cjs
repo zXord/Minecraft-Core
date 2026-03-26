@@ -14,7 +14,7 @@ const logger = getLoggerHandlers();
 
 async function ensureServerJavaReady(win, targetPath, mcVersion) {
   const serverJavaManager = new ServerJavaManager(targetPath);
-  let javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
+  let javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
 
   if (javaRequirements.needsDownload) {
     const javaResult = await serverJavaManager.ensureJavaForMinecraft(
@@ -34,7 +34,7 @@ async function ensureServerJavaReady(win, targetPath, mcVersion) {
       throw new Error(javaResult.error || 'Java installation failed');
     }
 
-    javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
+    javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
   }
 
   if (!javaRequirements.isAvailable || !javaRequirements.javaPath) {
@@ -538,7 +538,7 @@ function createInstallHandlers(win) {
 
             if (config.version) {
               const serverJavaManager = new ServerJavaManager(targetPath);
-              const javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(config.version);
+              const javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(config.version);
 
               logger.debug('Java requirements determined', {
                 category: 'core',
@@ -781,7 +781,7 @@ function createInstallHandlers(win) {
         });
 
         const serverJavaManager = new ServerJavaManager(targetPath);
-        let javaRequirements = serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
+        let javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
         const needsJava = javaRequirements.needsDownload;
         let javaPathForFabric = javaRequirements.javaPath || null;
 
@@ -895,6 +895,7 @@ function createInstallHandlers(win) {
             const javaDuration = Date.now() - javaStartTime;
 
             if (javaResult.success) {
+              const cleanedJavaVersions = javaResult.cleanup?.cleanedVersions || [];
               logger.info('Java installation completed successfully', {
                 category: 'core',
                 data: {
@@ -908,7 +909,12 @@ function createInstallHandlers(win) {
               });
 
               if (win && win.webContents) {
-                win.webContents.send('repair-log', `✔ Java ${javaRequirements.requiredJavaVersion} installed`);
+                win.webContents.send(
+                  'repair-log',
+                  cleanedJavaVersions.length > 0
+                    ? `✔ Java ${javaRequirements.requiredJavaVersion} installed (removed old local Java ${cleanedJavaVersions.join(', ')})`
+                    : `✔ Java ${javaRequirements.requiredJavaVersion} installed`
+                );
               }
             } else {
               logger.error('Java installation failed', {

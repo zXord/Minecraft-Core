@@ -24,6 +24,7 @@ class ServerJavaManager extends JavaManager {
    */
   setServerPath(serverPath) {
     this.serverPath = serverPath;
+    this.isScopedJavaDir = Boolean(serverPath);
     
     if (serverPath) {
       // Use server-specific Java directory
@@ -44,8 +45,8 @@ class ServerJavaManager extends JavaManager {
    * @param {string} minecraftVersion - Minecraft version (e.g., "1.21.4")
    * @returns {boolean} - True if correct Java version is available
    */
-  isCorrectJavaAvailableForMinecraft(minecraftVersion) {
-    const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
+  async isCorrectJavaAvailableForMinecraft(minecraftVersion) {
+    const { requiredJavaVersion } = await utils.resolveRequiredJavaVersion(minecraftVersion);
     return this.isJavaInstalled(requiredJavaVersion);
   }
   
@@ -54,8 +55,8 @@ class ServerJavaManager extends JavaManager {
    * @param {string} minecraftVersion - Minecraft version (e.g., "1.21.4")
    * @returns {string|null} - Path to Java executable or null if not available
    */
-  getBestJavaPathForMinecraft(minecraftVersion) {
-    const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
+  async getBestJavaPathForMinecraft(minecraftVersion) {
+    const { requiredJavaVersion } = await utils.resolveRequiredJavaVersion(minecraftVersion);
     return this.getBestJavaPath(requiredJavaVersion);
   }
   
@@ -67,14 +68,24 @@ class ServerJavaManager extends JavaManager {
    * @returns {Promise<{success: boolean, javaPath?: string, error?: string}>}
    */
   async ensureJavaForMinecraft(minecraftVersion, progressCallback) {
-    const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
+    const javaRequirement = await utils.resolveRequiredJavaVersion(minecraftVersion);
+    const requiredJavaVersion = javaRequirement.requiredJavaVersion;
     
     try {
-      return await this.ensureJava(requiredJavaVersion, progressCallback);
+      const result = await this.ensureJava(requiredJavaVersion, progressCallback);
+      return {
+        ...result,
+        requiredJavaVersion,
+        source: javaRequirement.source,
+        javaComponent: javaRequirement.javaComponent || null
+      };
     } catch (error) {
       return {
         success: false,
-        error: error.message
+        error: error.message,
+        requiredJavaVersion,
+        source: javaRequirement.source,
+        javaComponent: javaRequirement.javaComponent || null
       };
     }
   }
@@ -84,8 +95,9 @@ class ServerJavaManager extends JavaManager {
    * @param {string} minecraftVersion - Minecraft version (e.g., "1.21.4")
    * @returns {object} - Java requirement information
    */
-  getJavaRequirementsForMinecraft(minecraftVersion) {
-    const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
+  async getJavaRequirementsForMinecraft(minecraftVersion) {
+    const javaRequirement = await utils.resolveRequiredJavaVersion(minecraftVersion);
+    const requiredJavaVersion = javaRequirement.requiredJavaVersion;
     const validationStatus = this.getJavaValidationStatus(requiredJavaVersion);
     const isAvailable = validationStatus.isInstalled;
     const javaPath = validationStatus.javaPath || null;
@@ -93,6 +105,9 @@ class ServerJavaManager extends JavaManager {
     return {
       minecraftVersion,
       requiredJavaVersion,
+      source: javaRequirement.source,
+      javaComponent: javaRequirement.javaComponent || null,
+      metadataError: javaRequirement.error || null,
       isAvailable,
       javaPath,
       needsDownload: !isAvailable,

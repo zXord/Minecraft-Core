@@ -261,6 +261,8 @@ class XMCLClientDownloader {
    * Main download method - replaces the complex downloadMinecraftClientSimple
    */
   async downloadMinecraftClientSimple(clientPath, minecraftVersion, options = {}) {
+    this.javaManager.setClientPath(clientPath);
+
     this.emitter.emit('client-download-start', { version: minecraftVersion });
     
     const { 
@@ -289,7 +291,7 @@ class XMCLClientDownloader {
         }
 
         // Step 1: Ensure Java is available
-        const requiredJavaVersion = utils.getRequiredJavaVersion(minecraftVersion);
+        const { requiredJavaVersion } = await utils.resolveRequiredJavaVersion(minecraftVersion);
         
         this.emitter.emit('client-download-progress', {
           type: 'Java',

@@ -15,6 +15,9 @@
   let fabricVersions = [];
   let selectedMC = null;
   let selectedFabric = null;  let checking = false;
+  let targetJavaInfo = null;
+  let targetJavaInfoLoading = false;
+  let javaInfoRequestId = 0;
   let updating = false;
   let compatChecked = false;
   let incompatibleMods = [];
@@ -90,6 +93,28 @@
   $: serverRunning = serverStatus === 'Running';
 
       $: resolvedPath = serverPath || get(settingsStore).path;
+  $: if (selectedMC && resolvedPath) {
+    void loadTargetJavaInfo();
+  } else if (!selectedMC) {
+    targetJavaInfo = null;
+    targetJavaInfoLoading = false;
+  }
+
+  $: updateConfirmationMessage = [
+    selectedMC && selectedFabric
+      ? `Update server to Minecraft ${selectedMC} with Fabric ${selectedFabric}?`
+      : 'Update server version?',
+    targetJavaInfo?.requiredJavaVersion
+      ? (targetJavaInfo.isAvailable
+        ? ` Java ${targetJavaInfo.requiredJavaVersion} is already available.`
+        : ` Java ${targetJavaInfo.requiredJavaVersion} will also be installed.`)
+      : '',
+    targetJavaInfo?.requiredJavaVersion
+      ? ' Older local Java runtimes for this server will be cleaned up automatically.'
+      : '',
+    incompatibleMods.length > 0 ? ' Incompatible mods will be disabled.' : ''
+  ].join('');
+
   function handleMinecraftServerProgress(data) {
     if (!data || typeof data !== 'object') return;
     updateProgress = Math.round(data.percent || 0);
@@ -163,12 +188,38 @@
   async function onMCChange() {
     selectedFabric = null;
     fabricVersions = [];
+    compatChecked = false;
+    targetJavaInfo = null;
     if (!selectedMC) return;
     try {
       fabricVersions = await fetchAllFabricVersions(selectedMC);
     } catch (err) {
     }
-  }    async function checkCompatibility() {
+  }
+
+  async function loadTargetJavaInfo() {
+    const requestId = ++javaInfoRequestId;
+    targetJavaInfoLoading = true;
+
+    try {
+      const javaInfo = await safeInvoke('server-java-check-requirements', {
+        minecraftVersion: selectedMC,
+        serverPath: resolvedPath
+      });
+
+      if (requestId !== javaInfoRequestId) return;
+      targetJavaInfo = javaInfo?.success === false ? null : javaInfo;
+    } catch (err) {
+      if (requestId !== javaInfoRequestId) return;
+      targetJavaInfo = null;
+    } finally {
+      if (requestId === javaInfoRequestId) {
+        targetJavaInfoLoading = false;
+      }
+    }
+  }
+
+  async function checkCompatibility() {
     if (!selectedMC || !selectedFabric) return;
     checking = true;
     compatChecked = false;
@@ -308,7 +359,13 @@
         });
         
         if (javaResult.success) {
-          currentTask = 'Java ready for server!';
+          const readyJavaVersion = javaResult.requiredJavaVersion || targetJavaInfo?.requiredJavaVersion;
+          const cleanedJavaVersions = javaResult.cleanup?.cleanedVersions || [];
+          currentTask = readyJavaVersion
+            ? (cleanedJavaVersions.length > 0
+              ? `Java ${readyJavaVersion} ready. Cleaned old local Java ${cleanedJavaVersions.join(', ')}.`
+              : `Java ${readyJavaVersion} ready for server!`)
+            : 'Java ready for server!';
         } else {
           // Java download failed, but don't fail the whole update - it will download on server start
           currentTask = `Java setup skipped - will download on server start`;
@@ -454,6 +511,17 @@
   
   <div class="check-info">
     <p>Note: Only enabled mods are checked for compatibility. Disabled mods will remain disabled and unchanged.</p>
+    {#if selectedMC}
+      <p class="java-requirement" class:pending-java={targetJavaInfoLoading} class:missing-java={targetJavaInfo && !targetJavaInfo.isAvailable}>
+        {#if targetJavaInfoLoading}
+          Checking Java requirement for Minecraft {selectedMC}...
+        {:else if targetJavaInfo?.requiredJavaVersion}
+          Minecraft {selectedMC} requires Java {targetJavaInfo.requiredJavaVersion}.
+          {targetJavaInfo.isAvailable ? ' This runtime is already available.' : ' The updater will install it automatically.'}
+          Older local Java runtimes for this server are cleaned up automatically.
+        {/if}
+      </p>
+    {/if}
   </div>
   {#if compatChecked}
     <div class="compat-results-container">
@@ -605,8 +673,8 @@
   <button
     class="update-btn"
     on:click={updateServerVersion}
-    disabled={!compatChecked || serverRunning || updating}
-    title={serverRunning ? 'Stop the server before updating.' : ''}
+    disabled={!compatChecked || serverRunning || updating || targetJavaInfoLoading}
+    title={serverRunning ? 'Stop the server before updating.' : (targetJavaInfoLoading ? 'Checking Java requirement...' : '')}
   >
     {updating ? 'Updating...' : 'Update Server Version'}
   </button>
@@ -757,7 +825,7 @@
 <ConfirmationDialog
   bind:visible={showUpdateConfirmation}
   title="Update Server Version"
-  message="Update server to Minecraft {selectedMC} with Fabric {selectedFabric}?{incompatibleMods.length > 0 ? ' Incompatible mods will be disabled.' : ''}"
+  message={updateConfirmationMessage}
   confirmText="Update"
   cancelText="Cancel"
   confirmType="primary"
@@ -1407,10 +1475,25 @@
     border: 1px solid rgba(52, 213, 138, 0.3);
     border-radius: 4px;
     font-size: 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
   
   .check-info p {
     margin: 0;
     color: #34d58a;
+  }
+
+  .java-requirement {
+    color: #93c5fd !important;
+  }
+
+  .java-requirement.pending-java {
+    color: #fbbf24 !important;
+  }
+
+  .java-requirement.missing-java {
+    color: #f59e0b !important;
   }
 </style>

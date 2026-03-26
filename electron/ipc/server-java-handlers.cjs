@@ -24,7 +24,7 @@ function createServerJavaHandlers(win) {
           serverJavaManager.setServerPath(serverPath);
         }
         
-        return serverJavaManager.getJavaRequirementsForMinecraft(minecraftVersion);
+        return await serverJavaManager.getJavaRequirementsForMinecraft(minecraftVersion);
       } catch (error) {
         return {
           success: false,
@@ -82,7 +82,7 @@ function createServerJavaHandlers(win) {
           serverJavaManager.setServerPath(serverPath);
         }
         
-        const javaPath = serverJavaManager.getBestJavaPathForMinecraft(minecraftVersion);
+        const javaPath = await serverJavaManager.getBestJavaPathForMinecraft(minecraftVersion);
         
         return {
           success: true,
@@ -136,7 +136,7 @@ function createServerJavaHandlers(win) {
           serverJavaManager.setServerPath(serverPath);
         }
         
-        const isAvailable = serverJavaManager.isCorrectJavaAvailableForMinecraft(minecraftVersion);
+        const isAvailable = await serverJavaManager.isCorrectJavaAvailableForMinecraft(minecraftVersion);
         
         return {
           success: true,

@@ -61,8 +61,14 @@
   // Initialize local variables and store subscriptions
   let port = 25565;
   let maxRam = 4;
+  const ACTIVE_SERVER_STATUSES = new Set(['Starting', 'Running', 'Stopping']);
+  const TRANSITIONAL_SERVER_STATUSES = new Set(['Starting', 'Stopping']);
   $: status = $serverState.status;
   $: isServerRunning = status === 'Running';
+  $: isServerStarting = status === 'Starting';
+  $: isServerStopping = status === 'Stopping';
+  $: isServerBusy = TRANSITIONAL_SERVER_STATUSES.has(status);
+  $: isServerActive = ACTIVE_SERVER_STATUSES.has(status);
   $: playerNames = $playerState.onlinePlayers;
 
   let statusCheckInterval;
@@ -212,13 +218,123 @@
   let repairLogs = [];
   let selectedMC;
   let selectedFabric;
+  let healthChecking = false;
+  let healthChecked = false;
+  let maintenanceJavaInfo = null;
+  let cloudSyncWarning = null;
+  let cloudSyncWarningDismissed = false;
+
+  function normalizeServerStatus(value) {
+    const raw = typeof value === 'string'
+      ? value
+      : value && typeof value === 'object' && 'status' in value
+        ? value.status
+        : null;
+
+    if (!raw && value && typeof value === 'object' && 'isRunning' in value) {
+      return value.isRunning ? 'Running' : 'Stopped';
+    }
+
+    if (!raw) {
+      return null;
+    }
+
+    switch (String(raw).toLowerCase()) {
+      case 'starting':
+        return 'Starting';
+      case 'running':
+        return 'Running';
+      case 'stopping':
+        return 'Stopping';
+      case 'stopped':
+        return 'Stopped';
+      case 'error':
+        return 'Error';
+      case 'unknown':
+        return 'Unknown';
+      default:
+        return null;
+    }
+  }
+
+  function applyServerStatus(nextStatus, options = {}) {
+    const normalizedStatus = normalizeServerStatus(nextStatus);
+    if (!normalizedStatus) {
+      return;
+    }
+
+    serverState.update(state => ({
+      ...state,
+      status: normalizedStatus
+    }));
+
+    if (normalizedStatus === 'Stopped' && options.clearPlayers !== false) {
+      updateOnlinePlayers([]);
+      enableInputFields();
+      setTimeout(enableInputFields, 100);
+      setTimeout(enableInputFields, 500);
+    }
+  }
+
+  function applyCloudSyncWarning(payload) {
+    cloudSyncWarning = {
+      title: payload?.title || 'Cloud-synced folder blocked the world upgrade',
+      summary: payload?.summary || 'Minecraft could not finish the world upgrade because this server folder blocks hardlinks.',
+      serverPath: payload?.serverPath || serverPath,
+      guidance: Array.isArray(payload?.guidance) ? payload.guidance : [],
+      rawMessage: payload?.rawMessage || ''
+    };
+    cloudSyncWarningDismissed = false;
+    maintenanceExpanded = true;
+  }
+
+  function dismissCloudSyncWarning() {
+    cloudSyncWarningDismissed = true;
+  }
+
+  async function refreshMaintenanceContext() {
+    if (!serverPath) {
+      selectedMC = null;
+      selectedFabric = null;
+      maintenanceJavaInfo = null;
+      return;
+    }
+
+    try {
+      const config = await window.electron.invoke('read-config', serverPath);
+      if (!config) {
+        selectedMC = null;
+        selectedFabric = null;
+        maintenanceJavaInfo = null;
+        return;
+      }
+
+      selectedMC = config.version || null;
+      selectedFabric = config.fabric || 'latest';
+
+      if (selectedMC) {
+        const javaInfo = await window.electron.invoke('server-java-check-requirements', {
+          minecraftVersion: selectedMC,
+          serverPath
+        });
+        maintenanceJavaInfo = javaInfo?.success === false ? null : javaInfo;
+      } else {
+        maintenanceJavaInfo = null;
+      }
+    } catch (error) {
+      maintenanceJavaInfo = null;
+    }
+  }
   
   // Toggle maintenance section
-  function toggleMaintenance() {
+  async function toggleMaintenance() {
     maintenanceExpanded = !maintenanceExpanded;
-    // Auto-check health when opened
-    if (maintenanceExpanded && healthReport.length === 0) {
-      checkHealth();
+    if (maintenanceExpanded) {
+      await refreshMaintenanceContext();
+
+      if (!healthChecked && !healthChecking) {
+        await checkHealth();
+      }
     }
   }
   
@@ -234,7 +350,10 @@
     });
     
     try {
+      healthChecking = true;
+      await refreshMaintenanceContext();
       healthReport = (await window.electron.invoke('check-health', serverPath)) || [];
+      healthChecked = true;
       
       logger.info('Server health check completed', {
         category: 'ui',
@@ -256,6 +375,9 @@
         }
       });
       healthReport = [];
+      healthChecked = false;
+    } finally {
+      healthChecking = false;
     }
   }
 
@@ -266,6 +388,7 @@
       repairProgress = 0;
       
       setupRepairListeners();
+      await refreshMaintenanceContext();
       
       if (!selectedMC || !selectedFabric) {
         repairLogs = [...repairLogs, 'Looking for server configuration...'];
@@ -330,7 +453,8 @@
         repairProgress = 100;
         setTimeout(() => {
           repairing = false;
-          checkHealth();
+          void refreshMaintenanceContext();
+          void checkHealth();
         }, 1000);
       }
     });
@@ -426,7 +550,7 @@
 
   // Update input states based on server status
   $: {
-    if (isServerRunning) {
+    if (isServerActive) {
       disableInputFields();
     } else {
       enableInputFields();
@@ -438,11 +562,10 @@
     try {
       const statusResult = await window.electron.invoke('get-server-status');
       if (statusResult) {
-        const normalizedStatus = statusResult.status === 'running' ? 'Running' : 'Stopped';
-        serverState.update(state => ({
-          ...state,
-          status: normalizedStatus
-        }));
+        const normalizedStatus = normalizeServerStatus(statusResult);
+        if (normalizedStatus) {
+          applyServerStatus(normalizedStatus, { clearPlayers: normalizedStatus === 'Stopped' });
+        }
         
         if (normalizedStatus === 'Running' && statusResult.playersInfo?.names) {
           updateOnlinePlayers(statusResult.playersInfo.names);
@@ -451,12 +574,9 @@
         }
       }
     } catch (err) {
-      // Failed to check status, assume stopped
-      serverState.update(state => ({
-        ...state,
-        status: 'Stopped'
-      }));
-      updateOnlinePlayers([]);
+      if (!isServerBusy) {
+        applyServerStatus('Stopped');
+      }
     }
   }
 
@@ -578,6 +698,7 @@
     });
 
     try {
+      applyServerStatus('Starting', { clearPlayers: false });
       const result = await window.electron.invoke('start-server', {
         targetPath: serverPath,
         port: port,
@@ -596,7 +717,7 @@
         return;
       }
 
-      serverState.update(state => ({ ...state, status: 'Stopped' }));
+      applyServerStatus('Stopped');
       const message = result?.message || result?.error || 'Failed to start server';
       errorMessage.set(message);
       setTimeout(() => errorMessage.set(''), 7000);
@@ -614,13 +735,13 @@
           errorMessage: error.message
         }
       });
-      serverState.update(state => ({ ...state, status: 'Stopped' }));
+      applyServerStatus('Stopped');
       errorMessage.set(`Failed to start server: ${error.message}`);
       setTimeout(() => errorMessage.set(''), 7000);
     }
   }
 
-  function stopServer() {
+  async function stopServer() {
     logger.info('Stopping Minecraft server', {
       category: 'ui',
       data: {
@@ -629,33 +750,33 @@
       }
     });
     
-    window.electron.invoke('stop-server')
-      .then(() => {
-        logger.debug('Server stop command sent successfully', {
-          category: 'ui',
-          data: {
-            component: 'ServerControls',
-            function: 'stopServer'
-          }
-        });
-        
-        // Force-enable inputs after the stop command is sent
-        setTimeout(enableInputFields, 100);
-        setTimeout(enableInputFields, 500);
-      })
-      .catch(error => {
-        logger.error('Failed to stop server', {
-          category: 'ui',
-          data: {
-            component: 'ServerControls',
-            function: 'stopServer',
-            errorMessage: error.message
-          }
-        });
+    try {
+      applyServerStatus('Stopping', { clearPlayers: false });
+      await window.electron.invoke('stop-server');
+      await checkServerStatus();
+      logger.debug('Server stop command sent successfully', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'stopServer'
+        }
       });
+    } catch (error) {
+      applyServerStatus('Running', { clearPlayers: false });
+      logger.error('Failed to stop server', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'stopServer',
+          errorMessage: error.message
+        }
+      });
+      errorMessage.set(`Failed to stop server: ${error.message}`);
+      setTimeout(() => errorMessage.set(''), 7000);
+    }
   }
 
-  function killServer() {
+  async function killServer() {
     logger.warn('Force killing Minecraft server', {
       category: 'ui',
       data: {
@@ -664,34 +785,35 @@
       }
     });
     
-    window.electron.invoke('kill-server')
-      .then(() => {
-        logger.debug('Server kill command sent successfully', {
-          category: 'ui',
-          data: {
-            component: 'ServerControls',
-            function: 'killServer'
-          }
-        });
-        
-        // Force-enable inputs after the kill command is sent
-        setTimeout(enableInputFields, 100);
-        setTimeout(enableInputFields, 500);
-      })
-      .catch(error => {
-        logger.error('Failed to kill server', {
-          category: 'ui',
-          data: {
-            component: 'ServerControls',
-            function: 'killServer',
-            errorMessage: error.message
-          }
-        });
+    try {
+      applyServerStatus('Stopping', { clearPlayers: false });
+      await window.electron.invoke('kill-server');
+      await checkServerStatus();
+      logger.debug('Server kill command sent successfully', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'killServer'
+        }
       });
+    } catch (error) {
+      applyServerStatus('Running', { clearPlayers: false });
+      logger.error('Failed to kill server', {
+        category: 'ui',
+        data: {
+          component: 'ServerControls',
+          function: 'killServer',
+          errorMessage: error.message
+        }
+      });
+      errorMessage.set(`Failed to kill server: ${error.message}`);
+      setTimeout(() => errorMessage.set(''), 7000);
+    }
   }
 
   let statusHandler;
   let metricsHandler;
+  let cloudSyncWarningHandler;
 
   // Handle visibility change
   function handleVisibilityChange() {
@@ -785,17 +907,7 @@
         } catch (error) {
         }
         
-        // Load configuration for maintenance
-        if (serverPath) {
-          try {
-            const config = await window.electron.invoke('read-config', serverPath);
-            if (config) {
-              selectedMC = config.version;
-              selectedFabric = config.fabric || 'latest';
-            }
-          } catch (error) {
-          }
-        }
+        await refreshMaintenanceContext();
         
         // Handle auto-start servers if enabled (only on actual app startup, not tab switches)
         if (!window.appStartupCompleted) {
@@ -810,25 +922,7 @@
 
     // Set up a server status listener
     statusHandler = (status) => {
-      // Convert status string to proper format ('running' → 'Running', everything else → 'Stopped')
-      const normalizedStatus = typeof status === 'string' 
-          ? (status === 'running' ? 'Running' : 'Stopped')
-          : (status?.status === 'running' ? 'Running' : 'Stopped');
-      // Update store
-      serverState.update(state => ({
-        ...state,
-        status: normalizedStatus
-      }));
-      // If server stopped, empty the player list and enable inputs
-      if (normalizedStatus === 'Stopped') {
-        // Reset player list
-        updateOnlinePlayers([]);
-        // Force enable port and RAM inputs when server stops
-        enableInputFields();
-        // And after small delays to ensure UI catches up
-        setTimeout(enableInputFields, 100);
-        setTimeout(enableInputFields, 500);
-      }
+      applyServerStatus(status);
     };
 
     // Listen for metrics updates
@@ -841,6 +935,10 @@
 
     window.electron.on('server-status', statusHandler);
     window.electron.on('metrics-update', metricsHandler);
+    cloudSyncWarningHandler = (payload) => {
+      applyCloudSyncWarning(payload);
+    };
+    window.electron.on('server-cloud-sync-warning', cloudSyncWarningHandler);
 
     // Listen for management server status updates
     const handleManagementServerStatus = (data) => {
@@ -877,6 +975,9 @@
     }
     if (metricsHandler) {
       window.electron.removeListener('metrics-update', metricsHandler);
+    }
+    if (cloudSyncWarningHandler) {
+      window.electron.removeListener('server-cloud-sync-warning', cloudSyncWarningHandler);
     }
     // Clean up maintenance repair listeners
     window.electron.removeAllListeners('repair-progress');
@@ -1131,7 +1232,13 @@
       <h4>Minecraft Server</h4>
       <div class="status-compact">
         <span class="status-label">Status:</span>
-        <span class="status-value" class:status-running={status === 'Running'} class:status-stopped={status !== 'Running'}>
+        <span
+          class="status-value"
+          class:status-running={status === 'Running'}
+          class:status-stopped={status === 'Stopped'}
+          class:status-starting={status === 'Starting'}
+          class:status-stopping={status === 'Stopping'}
+        >
           {status}
         </span>
       </div>
@@ -1151,8 +1258,8 @@
           max="65535" 
           bind:value={port}
           on:change={updateSettings}
-          disabled={isServerRunning}
-          class:disabled-input={isServerRunning}
+          disabled={isServerActive}
+          class:disabled-input={isServerActive}
         />
       </div>
       
@@ -1165,8 +1272,8 @@
           max="128" 
           bind:value={maxRam}
           on:change={updateSettings}
-          disabled={isServerRunning}
-          class:disabled-input={isServerRunning}
+          disabled={isServerActive}
+          class:disabled-input={isServerActive}
         />
         <span class="unit">GB</span>
       </div>
@@ -1188,27 +1295,57 @@
       <button 
         class="btn-compact start-button" 
         on:click={startServer}
-        disabled={isServerRunning || !serverPath}
+        disabled={isServerActive || !serverPath}
       >
-        Start
+        {isServerStarting ? 'Starting...' : 'Start'}
       </button>
       <button 
         class="btn-compact stop-button" 
         on:click={stopServer}
-        disabled={!isServerRunning}
+        disabled={status !== 'Running'}
       >
-        Stop
+        {isServerStopping ? 'Stopping...' : 'Stop'}
       </button>
       <button 
         class="btn-compact kill-button" 
         on:click={killServer}
-        disabled={!isServerRunning}
+        disabled={status !== 'Running' && status !== 'Stopping'}
       >
         Kill
       </button>
     </div>
     </div>
   </div>
+
+  {#if cloudSyncWarning && !cloudSyncWarningDismissed}
+    <div class="server-warning-banner">
+      <div class="warning-banner-header">
+        <div class="warning-copy">
+          <h4>{cloudSyncWarning.title}</h4>
+          <p>{cloudSyncWarning.summary}</p>
+        </div>
+        <button class="warning-close" type="button" on:click={dismissCloudSyncWarning} aria-label="Dismiss warning">
+          ×
+        </button>
+      </div>
+
+      {#if cloudSyncWarning.serverPath}
+        <div class="warning-path">{cloudSyncWarning.serverPath}</div>
+      {/if}
+
+      {#if cloudSyncWarning.guidance.length > 0}
+        <ul class="warning-guidance">
+          {#each cloudSyncWarning.guidance as step (step)}
+            <li>{step}</li>
+          {/each}
+        </ul>
+      {/if}
+
+      {#if cloudSyncWarning.rawMessage}
+        <div class="warning-raw">{cloudSyncWarning.rawMessage}</div>
+      {/if}
+    </div>
+  {/if}
   
   <!-- COMPACT MANAGEMENT SERVER - Horizontal layout -->
   <div class="management-compact">
@@ -1350,8 +1487,12 @@
         <span class="toggle-icon" class:expanded={maintenanceExpanded}>
           {maintenanceExpanded ? '▼' : '▶'}
         </span>
-        {#if healthReport.length > 0 && !maintenanceExpanded}
+        {#if healthChecking && !maintenanceExpanded}
+          <span class="status-indicator-small">Checking...</span>
+        {:else if healthChecked && healthReport.length > 0 && !maintenanceExpanded}
           <span class="issue-indicator">⚠️ {healthReport.length} issues</span>
+        {:else if healthChecked && !maintenanceExpanded}
+          <span class="all-good">✅ All good</span>
         {:else if !maintenanceExpanded}
           <span class="status-indicator-small">Check components</span>
         {/if}
@@ -1360,24 +1501,47 @@
     
     {#if maintenanceExpanded}
       <div class="maintenance-content">
-        <p class="maintenance-description">Check and repair essential server components: Java runtime, server jar, and Fabric (not world data or mods)</p>
+        <p class="maintenance-description">Check and repair essential server components: Java runtime, server jar, and Fabric (not world data or mods). Old local Java runtimes are cleaned up automatically.</p>
+        <div class="maintenance-meta">
+          <span class="meta-pill">Minecraft: {selectedMC || 'Unknown'}</span>
+          <span class="meta-pill">Fabric: {selectedFabric || 'Unknown'}</span>
+          <span
+            class="meta-pill java-pill"
+            class:ready={maintenanceJavaInfo?.isAvailable}
+            class:missing={maintenanceJavaInfo && !maintenanceJavaInfo.isAvailable && maintenanceJavaInfo.installationState !== 'broken'}
+            class:broken={maintenanceJavaInfo?.installationState === 'broken'}
+          >
+            {#if maintenanceJavaInfo?.requiredJavaVersion}
+              Java {maintenanceJavaInfo.requiredJavaVersion}
+              {maintenanceJavaInfo.isAvailable ? ' ready' : maintenanceJavaInfo.installationState === 'broken' ? ' broken' : ' missing'}
+            {:else if selectedMC}
+              Checking Java requirement...
+            {:else}
+              Java requirement unknown
+            {/if}
+          </span>
+        </div>
         
         <div class="maintenance-actions">
-          <button class="btn-compact check-button" on:click={checkHealth}>
-            🔍 Check Components
+          <button class="btn-compact check-button" on:click={checkHealth} disabled={healthChecking || repairing}>
+            {healthChecking ? '🔄 Checking...' : '🔍 Check Components'}
           </button>
           
-          {#if healthReport.length > 0}
+          {#if healthChecking}
+            <span class="status-indicator-small">Inspecting Java, server jar, and Fabric...</span>
+          {:else if healthChecked && healthReport.length > 0}
             <span class="issues-found">⚠️ {healthReport.length} missing components</span>
             <button class="btn-compact repair-button" on:click={startRepair} disabled={repairing}>
               {repairing ? '🔄 Repairing...' : '🔧 Install Missing'}
             </button>
-          {:else if healthReport.length === 0 && selectedMC}
+          {:else if healthChecked && healthReport.length === 0 && selectedMC}
             <span class="all-good">✅ All components ready</span>
+          {:else if selectedMC}
+            <span class="status-indicator-small">Run a check to verify Java and Fabric.</span>
           {/if}
         </div>
         
-        {#if healthReport.length > 0}
+        {#if healthChecked && healthReport.length > 0}
           <div class="missing-files">
             <h5>Missing Components:</h5>
             <ul class="file-list">
@@ -1439,6 +1603,74 @@
     width: 100%;
     margin: 0 0 1rem 0;
     box-sizing: border-box;
+  }
+
+  .server-warning-banner {
+    margin: 0 0 0.75rem 0;
+    padding: 0.9rem 1rem;
+    border: 1px solid rgba(245, 158, 11, 0.45);
+    border-radius: 8px;
+    background: linear-gradient(180deg, rgba(82, 45, 10, 0.45), rgba(49, 24, 7, 0.62));
+  }
+
+  .warning-banner-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .warning-copy h4 {
+    margin: 0 0 0.25rem 0;
+    color: #fbbf24;
+    font-size: 0.95rem;
+  }
+
+  .warning-copy p {
+    margin: 0;
+    color: #f8e7c2;
+    line-height: 1.45;
+    font-size: 0.85rem;
+  }
+
+  .warning-close {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    border: 1px solid rgba(251, 191, 36, 0.35);
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.35);
+    color: #fde68a;
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+  }
+
+  .warning-close:hover {
+    background: rgba(15, 23, 42, 0.55);
+  }
+
+  .warning-path,
+  .warning-raw {
+    margin-top: 0.65rem;
+    padding: 0.55rem 0.7rem;
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.35);
+    color: #f3f4f6;
+    font-family: 'Consolas', 'SFMono-Regular', monospace;
+    font-size: 0.76rem;
+    word-break: break-word;
+  }
+
+  .warning-guidance {
+    margin: 0.75rem 0 0 0;
+    padding-left: 1rem;
+    color: #f8e7c2;
+    font-size: 0.82rem;
+  }
+
+  .warning-guidance li + li {
+    margin-top: 0.35rem;
   }
 
   /* Header - horizontal layout */
@@ -1601,10 +1833,10 @@
   .start-button {
     background-color: #10b981;
     color: white;
-    width: 65px !important;
+    width: 92px !important;
     height: 28px !important;
-    min-width: 65px !important;
-    max-width: 65px !important;
+    min-width: 92px !important;
+    max-width: 92px !important;
     padding: 0 !important;
     text-overflow: ellipsis;
     overflow: hidden;
@@ -1618,10 +1850,10 @@
   .stop-button {
     background-color: #6b7280;
     color: white;
-    width: 65px !important;
+    width: 92px !important;
     height: 28px !important;
-    min-width: 65px !important;
-    max-width: 65px !important;
+    min-width: 92px !important;
+    max-width: 92px !important;
     padding: 0 !important;
     text-overflow: ellipsis;
     overflow: hidden;
@@ -1992,6 +2224,37 @@
     font-size: 0.75rem;
     margin: 0 0 0.75rem 0;
     line-height: 1.4;
+  }
+
+  .maintenance-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .meta-pill {
+    background: rgba(17, 24, 39, 0.8);
+    border: 1px solid #374151;
+    border-radius: 999px;
+    color: #d1d5db;
+    font-size: 0.7rem;
+    padding: 0.2rem 0.55rem;
+  }
+
+  .java-pill.ready {
+    border-color: rgba(16, 185, 129, 0.45);
+    color: #10b981;
+  }
+
+  .java-pill.missing {
+    border-color: rgba(245, 158, 11, 0.45);
+    color: #f59e0b;
+  }
+
+  .java-pill.broken {
+    border-color: rgba(239, 68, 68, 0.45);
+    color: #ef4444;
   }
 
   .maintenance-actions {
