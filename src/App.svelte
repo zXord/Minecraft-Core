@@ -174,9 +174,6 @@
           storeCurrentInstance(currentInstance);
         }
 
-        // Explicitly save instances to ensure persistence
-        await saveInstances(instances);
-        saveInstancesIfNeeded();
       } else {
         logger.error("Instance rename failed", {
           category: "core",

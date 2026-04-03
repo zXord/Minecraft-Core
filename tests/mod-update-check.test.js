@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { isGameVersionCompatible } from '../src/utils/mods/modAPI.js';
 
 /**
  * Tests for mod update checking functionality
@@ -38,6 +39,17 @@ test('Update Check Concurrency - handles concurrent update checks without droppi
 
   assert.equal(checkForUpdatesCalls, 2);
   assert.ok(lastCheckTimestamp >= secondCheckTime);
+});
+
+test('Game Version Compatibility - rejects patch-specific tags for patchless targets', () => {
+  assert.equal(isGameVersionCompatible('26.1', '26.1.1'), false);
+  assert.equal(isGameVersionCompatible('26.1', '26.1.0'), false);
+});
+
+test('Game Version Compatibility - still accepts exact and wildcard matches', () => {
+  assert.equal(isGameVersionCompatible('26.1', '26.1'), true);
+  assert.equal(isGameVersionCompatible('26.1', '26.1.x'), true);
+  assert.equal(isGameVersionCompatible('26.1.1', '26.1.1'), true);
 });
 
 test('Update Check Concurrency - prioritizes forceRefresh in queued checks', async () => {

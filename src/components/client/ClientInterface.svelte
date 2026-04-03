@@ -492,12 +492,28 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
                       });
                     }
                   }
-                    serverInfo.allClientMods = mergedClientMods;
+                   serverInfo.allClientMods = mergedClientMods;
                 }
               }
             }
           } catch (modsErr) {
           }
+
+            serverManagedFiles.update((current) => {
+              const next = new SvelteSet(current);
+              for (const mod of requiredMods || []) {
+                if (mod?.fileName) {
+                  next.add(mod.fileName.toLowerCase());
+                }
+              }
+              for (const mod of serverInfo?.allClientMods || []) {
+                if (mod?.fileName) {
+                  next.add(mod.fileName.toLowerCase());
+                }
+              }
+              return next;
+            });
+
             // Track server info changes for UI updates only (no console spam)
             if (!previousServerInfo || 
                 previousServerInfo.minecraftVersion !== serverInfo.minecraftVersion || 
@@ -519,6 +535,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   async function checkAssetSynchronization() {
     if (!instance?.path || !$clientState.connectionStatus || $clientState.connectionStatus !== 'connected') return;
     try {
+      await ensureSessionToken(instance);
       const base = getManagementBaseUrl(instance);
       if (!base) return;
       // Fetch server items
@@ -534,10 +551,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           signal: AbortSignal.timeout(10000)
         }).catch(() => null)
       ]);
-      const srvShaders = srvShadersRes && srvShadersRes.ok ? await srvShadersRes.json() : { success: false, items: [] };
-      const srvRps = srvRpsRes && srvRpsRes.ok ? await srvRpsRes.json() : { success: false, items: [] };
-      const serverShaderItems = srvShaders?.success ? (srvShaders.items || []) : [];
-      const serverResourcePackItems = srvRps?.success ? (srvRps.items || []) : [];
+      const srvShaders = srvShadersRes && srvShadersRes.ok ? await srvShadersRes.json() : null;
+      const srvRps = srvRpsRes && srvRpsRes.ok ? await srvRpsRes.json() : null;
+      const shaderListLoaded = !!srvShaders?.success;
+      const resourcePackListLoaded = !!srvRps?.success;
+      const previousShaderItems = assetsWork?.shaders?.serverItems || [];
+      const previousResourcePackItems = assetsWork?.resourcepacks?.serverItems || [];
+      const serverShaderItems = shaderListLoaded ? (srvShaders.items || []) : previousShaderItems;
+      const serverResourcePackItems = resourcePackListLoaded ? (srvRps.items || []) : previousResourcePackItems;
 
       // Fetch local items
       const [localShaders, localRps] = await Promise.all([
@@ -586,8 +607,12 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       });
 
       // Removals: local items with source === 'server' that are no longer on server lists
-  const removableShaders = shaderAssets.filter(a => (a.source === 'server') && !serverShaderSet.has(baseName(a.fileName)));
-  const removableRps = resourcePackAssets.filter(a => (a.source === 'server') && !serverRpSet.has(baseName(a.fileName)));
+  const removableShaders = shaderListLoaded
+    ? shaderAssets.filter(a => (a.source === 'server') && !serverShaderSet.has(baseName(a.fileName)))
+    : [];
+  const removableRps = resourcePackListLoaded
+    ? resourcePackAssets.filter(a => (a.source === 'server') && !serverRpSet.has(baseName(a.fileName)))
+    : [];
 
       assetsWork = {
         shaders: { missingItems: missingShaders, updates: shaderUpdates, removable: removableShaders, serverItems: serverShaderItems, localItems: shaderAssets },
@@ -1377,14 +1402,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       // Use silent refresh to prevent content flickering, but keep button feedback
       await checkServerStatus(true);
       
-      // Force a mod synchronization check to detect changes
-      if ($clientState.connectionStatus === 'connected') {
-        await checkModSynchronization(true);
-  await checkAssetSynchronization();
-          // Also trigger mod manager refresh if we have the component
-        if (clientModManagerComponent?.refreshFromDashboard) {
-          await clientModManagerComponent.refreshFromDashboard();
-        }
+      if ($clientState.connectionStatus === 'connected' && clientModManagerComponent?.refreshFromDashboard) {
+        await clientModManagerComponent.refreshFromDashboard();
       }
     } finally {
       isChecking = false;

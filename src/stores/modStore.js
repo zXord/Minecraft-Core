@@ -1342,6 +1342,16 @@ function clearIgnoredUpdates(fileName) {
 
 function getIgnoredUpdatesStore() { return ignoredUpdates; }
 
+function isActionableDisabledUpdate(updateInfo) {
+  return !!(
+    updateInfo &&
+    typeof updateInfo === 'object' &&
+    updateInfo.projectId &&
+    updateInfo.latestVersionId &&
+    updateInfo.latestVersion
+  );
+}
+
 // Functions to create derived stores when needed (within component context)
 function getHasUpdates() {
   if (!hasUpdates) {
@@ -1368,7 +1378,11 @@ function getUpdateCount() {
 
       // Count enabled mods (excluding project: references)
       for (const [modName] of $updates.entries()) {
-        if (!modName.startsWith('project:') && !counted.has(modName)) {
+        if (
+          !modName.startsWith('project:') &&
+          !($disabledSet && $disabledSet.has && $disabledSet.has(modName)) &&
+          !counted.has(modName)
+        ) {
           count++;
           counted.add(modName);
         }
@@ -1376,7 +1390,8 @@ function getUpdateCount() {
 
       // Count disabled mods (skip if already counted to avoid double-counting)
       if ($disabledUpdates) {
-        for (const name of $disabledUpdates.keys()) {
+        for (const [name, updateInfo] of $disabledUpdates.entries()) {
+          if (!isActionableDisabledUpdate(updateInfo)) continue;
           if ($disabledSet && $disabledSet.has && $disabledSet.has(name) && !counted.has(name)) {
             count++;
             counted.add(name);

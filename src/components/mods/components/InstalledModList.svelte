@@ -378,6 +378,18 @@
     return null;
   }
 
+  function isDisabledUpdateActionable(updateInfo, modName = '') {
+    if (!updateInfo || typeof updateInfo !== 'object') return false;
+    if (!updateInfo.projectId || !updateInfo.latestVersionId || !updateInfo.latestVersion) {
+      return false;
+    }
+
+    const normalizedTarget = normalizeFileName(updateInfo.fileName || modName);
+    const normalizedModName = normalizeFileName(modName);
+
+    return !normalizedModName || !normalizedTarget || normalizedTarget === normalizedModName;
+  }
+
   const UNASSIGNED_CATEGORY = 'unassigned';
   const UNASSIGNED_DIR = 'mods_unassigned';
 
@@ -434,6 +446,7 @@
     let count = 0;
     for (const [fileName] of allUpdates.entries()) {
       if (fileName.startsWith('project:')) continue;
+      if ($activeContentType === CONTENT_TYPES.MODS && $disabledMods.has(fileName)) continue;
       if (currentItems.includes(fileName)) {
         count++;
       }
@@ -442,7 +455,8 @@
     if ($activeContentType === CONTENT_TYPES.MODS && $disabledModUpdates) {
       const disabledSet = $disabledMods;
       const modNames = $installedModInfo ? new Set($installedModInfo.map(m => m.fileName)) : null;
-      for (const name of $disabledModUpdates.keys()) {
+      for (const [name, updateInfo] of $disabledModUpdates.entries()) {
+        if (!isDisabledUpdateActionable(updateInfo, name)) continue;
         if ((modNames && modNames.has(name)) || (disabledSet && disabledSet.has && disabledSet.has(name))) {
           count++;
         }
@@ -463,7 +477,8 @@
       if ($disabledMods.has(modName)) continue;
       updateTargets.push(modName);
     }
-    for (const [modName] of $disabledModUpdates.entries()) {
+    for (const [modName, updateInfo] of $disabledModUpdates.entries()) {
+      if (!isDisabledUpdateActionable(updateInfo, modName)) continue;
       updateTargets.push(modName);
     }
     allUpdatesClientOnly = updateTargets.length > 0 &&
@@ -910,6 +925,7 @@
     
     // Collect disabled mods with updates
     for (const [modName, updateInfo] of $disabledModUpdates.entries()) {
+      if (!isDisabledUpdateActionable(updateInfo, modName)) continue;
       disabledModsToUpdate.push({
         modName,
         projectId: updateInfo.projectId,
@@ -2188,7 +2204,7 @@
             {@const disabledUpdateInfo = findDisabledUpdate($disabledModUpdates, mod)}
             {#if $isCheckingUpdates}
               <span class="tag ok" title="Checking for updates...">Checking...</span>
-            {:else if disabledUpdateInfo}
+            {:else if disabledUpdateInfo && isDisabledUpdateActionable(disabledUpdateInfo, mod)}
               <div class="update-actions compact">
                 <button class="tag new clickable upd-btn"
                         disabled={updateBlockedByServer}

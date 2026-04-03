@@ -70,7 +70,7 @@ const MIN_VERSION_FETCH_INTERVAL = 500; // Minimum time between version fetches 
 const normalizePathForUpdates = (p) => (typeof p === 'string' ? p.trim().toLowerCase() : '');
 
 // Helper to decide if a Modrinth game version entry is compatible with the current server version
-function isGameVersionCompatible(targetVersion, candidateVersion) {
+export function isGameVersionCompatible(targetVersion, candidateVersion) {
   if (!targetVersion || !candidateVersion) return false;
   const toParts = (v) => {
     const str = String(v || '').toLowerCase().trim();
@@ -98,13 +98,16 @@ function isGameVersionCompatible(targetVersion, candidateVersion) {
     candStr.endsWith('.x') ||
     candStr.endsWith('.*');
 
-  if (wildcardPatch || candidate.patch === null) {
-    // Only allow patchless/wildcard if target patch is also unspecified or we're explicitly wildcarding
-    return target.patch === null || wildcardPatch;
+  if (wildcardPatch) {
+    return true;
+  }
+
+  if (candidate.patch === null) {
+    return target.patch === null;
   }
 
   if (target.patch === null) {
-    return true; // target missing patch info, accept matching major/minor
+    return false;
   }
 
   return candidate.patch === target.patch;

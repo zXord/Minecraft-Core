@@ -1243,7 +1243,12 @@ function createSettingsHandlers() {
         }
 
         const oldName = instances[idx].name;
+        const instanceToRename = instances[idx];
+        const isClientInstance = instanceToRename?.type === 'client';
         instances[idx].name = newName;
+        if (isClientInstance) {
+          instances[idx].clientName = newName;
+        }
 
         logger.debug('Starting instance rename persistence', {
           category: 'settings',
@@ -1260,6 +1265,29 @@ function createSettingsHandlers() {
           }
         });
         
+        if (isClientInstance && instanceToRename?.path) {
+          const clientConfigPath = path.join(instanceToRename.path, 'client-config.json');
+          let existingClientConfig = {};
+          try {
+            const folderClientConfig = readClientConfig(instanceToRename.path);
+            if (folderClientConfig && typeof folderClientConfig === 'object') {
+              existingClientConfig = { ...folderClientConfig };
+            } else if (fs.existsSync(clientConfigPath)) {
+              existingClientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
+            }
+          } catch {
+            existingClientConfig = {};
+          }
+
+          const nextClientConfig = {
+            ...existingClientConfig,
+            clientId: existingClientConfig.clientId || instanceToRename.clientId || instanceToRename.id,
+            clientName: newName
+          };
+
+          await fsPromises.writeFile(clientConfigPath, JSON.stringify(nextClientConfig, null, 2));
+        }
+
         appStore.set('instances', instances);
 
         const duration = Date.now() - startTime;
