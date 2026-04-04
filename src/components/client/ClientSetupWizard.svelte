@@ -306,7 +306,7 @@
       // For now, we're just setting up the connection
       // In future updates, we'll implement:
       // 1. Download Minecraft client
-      // 2. Download Fabric (matching server)
+      // 2. Download the matching loader runtime
       // 3. Download required mods from server
       
       // Complete setup
@@ -324,6 +324,7 @@
     // Remove any existing listeners first to prevent duplicates
     window.electron.removeAllListeners('minecraft-client-progress');
     window.electron.removeAllListeners('fabric-install-progress');
+    window.electron.removeAllListeners('loader-install-progress');
     window.electron.removeAllListeners('install-log');
     
     // Add new listeners
@@ -335,6 +336,13 @@
     });
     
     window.electron.on('fabric-install-progress', (data) => {
+      if (data && typeof data === 'object') {
+        installProgress = data.percent || 0;
+        installSpeed = data.speed || '0 MB/s';
+      }
+    });
+
+    window.electron.on('loader-install-progress', (data) => {
       if (data && typeof data === 'object') {
         installProgress = data.percent || 0;
         installSpeed = data.speed || '0 MB/s';
@@ -379,6 +387,7 @@
     return () => {
       window.electron.removeAllListeners('minecraft-client-progress');
       window.electron.removeAllListeners('fabric-install-progress');
+      window.electron.removeAllListeners('loader-install-progress');
       window.electron.removeAllListeners('install-log');
     };
   });

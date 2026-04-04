@@ -1,6 +1,7 @@
 // Config file management utilities
 const fs = require('fs');
 const path = require('path');
+const AdmZip = require('adm-zip');
 const { resolveServerLoader } = require('./server-loader.cjs');
 
 const SERVER_CONFIG_FILENAME = '.minecraft-core.json';
@@ -173,20 +174,268 @@ function normalizeBackupAutomationConfig(value, fallback = DEFAULT_BACKUP_AUTOMA
   };
 }
 
-function enrichServerConfig(config, serverPath) {
-  const enriched = { ...config };
+function normalizeVersionCandidate(value) {
+  return typeof value === 'string' && value.trim()
+    ? value.trim()
+    : null;
+}
 
-  if (!enriched.version) {
-    const detectedVersion = detectMinecraftVersion(serverPath);
-    if (detectedVersion) {
-      enriched.version = detectedVersion;
-      if (!enriched.detectedAt) {
-        enriched.detectedAt = new Date().toISOString();
+function parseJavaVersionCandidate(value) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : null;
+}
+
+function getClassJavaVersionFromBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 8) {
+    return null;
+  }
+
+  // Java class header: CAFEBABE + minor + major
+  if (buffer.readUInt32BE(0) !== 0xCAFEBABE) {
+    return null;
+  }
+
+  const classMajorVersion = buffer.readUInt16BE(6);
+  const javaVersion = classMajorVersion - 44;
+  return Number.isFinite(javaVersion) && javaVersion > 0
+    ? javaVersion
+    : null;
+}
+
+function extractVersionFromVersionList(content) {
+  if (typeof content !== 'string' || !content.trim()) {
+    return null;
+  }
+
+  const explicitEntryMatch = content.match(/META-INF\/versions\/([0-9]+(?:\.[0-9]+){1,2})\//i);
+  if (explicitEntryMatch?.[1]) {
+    return explicitEntryMatch[1];
+  }
+
+  const lineMatch = content.match(/(^|[\r\n])([0-9]+(?:\.[0-9]+){1,2})(?=$|[\r\n])/);
+  if (lineMatch?.[2]) {
+    return lineMatch[2];
+  }
+
+  return null;
+}
+
+function getServerJarCandidates(serverPath) {
+  const candidates = new Set();
+
+  const launcherPropertiesPath = path.join(serverPath, 'fabric-server-launcher.properties');
+  if (fs.existsSync(launcherPropertiesPath)) {
+    try {
+      const launcherProperties = fs.readFileSync(launcherPropertiesPath, 'utf8');
+      const serverJarMatch = launcherProperties.match(/^\s*serverJar\s*=\s*(.+?)\s*$/m);
+      const configuredJar = normalizeVersionCandidate(serverJarMatch?.[1]);
+      if (configuredJar) {
+        candidates.add(path.resolve(serverPath, configuredJar));
       }
-      if (!enriched.detectionMethod) {
-        enriched.detectionMethod = 'automatic';
+    } catch (error) {
+      getLogger().debug('Failed to parse fabric server launcher properties', {
+        category: 'settings',
+        data: {
+          function: 'getServerJarCandidates',
+          serverPath,
+          errorType: error.constructor.name,
+          errorMessage: error.message
+        }
+      });
+    }
+  }
+
+  candidates.add(path.join(serverPath, 'server.jar'));
+
+  try {
+    const files = fs.readdirSync(serverPath);
+    for (const file of files) {
+      if (!file.toLowerCase().endsWith('.jar')) {
+        continue;
+      }
+
+      const normalizedFileName = file.toLowerCase();
+      if (
+        normalizedFileName.includes('server')
+        || normalizedFileName.includes('minecraft')
+        || normalizedFileName.includes('paper')
+        || normalizedFileName.includes('forge')
+        || normalizedFileName.includes('fabric')
+      ) {
+        candidates.add(path.join(serverPath, file));
       }
     }
+  } catch (error) {
+    getLogger().debug('Failed to enumerate server jar candidates', {
+      category: 'settings',
+      data: {
+        function: 'getServerJarCandidates',
+        serverPath,
+        errorType: error.constructor.name,
+        errorMessage: error.message
+      }
+    });
+  }
+
+  return Array.from(candidates).filter(candidate => fs.existsSync(candidate));
+}
+
+function readBundledServerMetadata(jarPath) {
+  if (!jarPath || !fs.existsSync(jarPath)) {
+    return null;
+  }
+
+  try {
+    const zip = new AdmZip(jarPath);
+    let version = null;
+    let javaVersion = null;
+    let javaComponent = null;
+
+    const versionEntry = zip.getEntry('version.json');
+    if (versionEntry) {
+      try {
+        const versionData = JSON.parse(zip.readAsText(versionEntry));
+        version = normalizeVersionCandidate(versionData?.id || versionData?.name);
+        javaVersion = parseJavaVersionCandidate(
+          versionData?.java_version
+          || versionData?.javaVersion?.majorVersion
+        );
+        javaComponent = normalizeVersionCandidate(
+          versionData?.java_component
+          || versionData?.javaVersion?.component
+        );
+      } catch (error) {
+        getLogger().debug('Failed to parse bundled version.json', {
+          category: 'settings',
+          data: {
+            function: 'readBundledServerMetadata',
+            jarPath,
+            errorType: error.constructor.name,
+            errorMessage: error.message
+          }
+        });
+      }
+    }
+
+    if (!version) {
+      const versionsListEntry = zip.getEntry('META-INF/versions.list');
+      if (versionsListEntry) {
+        version = extractVersionFromVersionList(zip.readAsText(versionsListEntry));
+      }
+    }
+
+    if (!version) {
+      const versionEntryName = zip
+        .getEntries()
+        .map(entry => entry.entryName)
+        .find(entryName => /^META-INF\/versions\/[0-9]+(?:\.[0-9]+){1,2}\/server-[^/]+\.jar$/i.test(entryName));
+      if (versionEntryName) {
+        const versionMatch = versionEntryName.match(/^META-INF\/versions\/([0-9]+(?:\.[0-9]+){1,2})\//i);
+        version = versionMatch?.[1] || null;
+      }
+    }
+
+    if (!javaVersion) {
+      const bundlerMainEntry = zip.getEntry('net/minecraft/bundler/Main.class');
+      if (bundlerMainEntry) {
+        javaVersion = getClassJavaVersionFromBuffer(bundlerMainEntry.getData());
+      }
+    }
+
+    if (!version && !javaVersion && !javaComponent) {
+      return null;
+    }
+
+    return {
+      version,
+      javaVersion,
+      javaComponent,
+      source: 'bundled-server-jar',
+      sourcePath: jarPath
+    };
+  } catch (error) {
+    getLogger().debug('Failed to inspect bundled server jar metadata', {
+      category: 'settings',
+      data: {
+        function: 'readBundledServerMetadata',
+        jarPath,
+        errorType: error.constructor.name,
+        errorMessage: error.message
+      }
+    });
+    return null;
+  }
+}
+
+function detectServerRuntimeMetadata(serverPath) {
+  if (!serverPath || !fs.existsSync(serverPath)) {
+    return null;
+  }
+
+  for (const jarPath of getServerJarCandidates(serverPath)) {
+    const metadata = readBundledServerMetadata(jarPath);
+    if (metadata?.version || metadata?.javaVersion) {
+      return metadata;
+    }
+  }
+
+  return null;
+}
+
+function isLikelyMinecraftVersion(value) {
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (/^1\.\d+(?:\.\d+)?$/.test(normalized) || /^\d{2}w\d+[a-z]$/.test(normalized)) {
+    return true;
+  }
+
+  if (!/^\d+(?:\.\d+){1,2}$/.test(normalized)) {
+    return false;
+  }
+
+  const [majorPart] = normalized.split('.');
+  const major = parseInt(majorPart, 10);
+  return Number.isFinite(major) && major >= 2 && major < 40;
+}
+
+function enrichServerConfig(config, serverPath) {
+  const enriched = { ...config };
+  const runtimeMetadata = detectServerRuntimeMetadata(serverPath);
+  const detectedVersion = runtimeMetadata?.version || detectMinecraftVersion(serverPath);
+  const currentVersion = normalizeVersionCandidate(enriched.version);
+  const shouldPreferRuntimeMetadata =
+    !!runtimeMetadata
+    && runtimeMetadata.source === 'bundled-server-jar'
+    && (
+      !currentVersion
+      || !isLikelyMinecraftVersion(currentVersion)
+      || (enriched.detectionMethod === 'automatic' && currentVersion !== detectedVersion)
+    );
+
+  if (
+    detectedVersion
+    && (
+      shouldPreferRuntimeMetadata
+      || !currentVersion
+      || (isLikelyMinecraftVersion(detectedVersion) && !isLikelyMinecraftVersion(currentVersion))
+    )
+  ) {
+    enriched.version = detectedVersion;
+    enriched.detectedAt = new Date().toISOString();
+    enriched.detectionMethod = 'automatic';
+  }
+
+  if (runtimeMetadata?.javaVersion) {
+    enriched.javaVersion = runtimeMetadata.javaVersion;
+  }
+
+  if (runtimeMetadata?.javaComponent) {
+    enriched.javaComponent = runtimeMetadata.javaComponent;
   }
 
   try {
@@ -316,6 +565,11 @@ function detectMinecraftVersion(serverPath) {
         }
       });
       return null;
+    }
+
+    const runtimeMetadata = detectServerRuntimeMetadata(serverPath);
+    if (runtimeMetadata?.version) {
+      return runtimeMetadata.version;
     }
 
     const files = fs.readdirSync(serverPath);

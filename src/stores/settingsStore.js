@@ -9,8 +9,10 @@ const DEFAULT_SETTINGS = {
   maxRam: 4,
   path: '',
   
-  // Minecraft and Fabric versions
+  // Minecraft and loader versions
   mcVersion: null,
+  loader: 'vanilla',
+  loaderVersion: null,
   fabricVersion: null,
   
   // Auto-restart configuration
@@ -369,49 +371,67 @@ export function updateServerSettings(/** @type {any} */ settings) {
   }
 }
 
-export function updateVersions(/** @type {any} */ mcVersion, /** @type {any} */ fabricVersion) {
+export function updateVersions(/** @type {any} */ mcVersion, /** @type {any} */ loaderVersion, /** @type {any} */ loader = 'vanilla') {
   try {
     // Validate version strings
     const mcVersionValid = !mcVersion || (typeof mcVersion === 'string' && mcVersion.trim().length > 0);
-    const fabricVersionValid = !fabricVersion || (typeof fabricVersion === 'string' && fabricVersion.trim().length > 0);
+    const loaderVersionValid = !loaderVersion || (typeof loaderVersion === 'string' && loaderVersion.trim().length > 0);
+    const loaderValid = !loader || (typeof loader === 'string' && loader.trim().length > 0);
+    const normalizedLoader = loaderValid ? (loader || 'vanilla') : 'vanilla';
+    const normalizedLoaderVersion = normalizedLoader === 'vanilla'
+      ? null
+      : (loaderVersionValid ? loaderVersion : null);
     
-    if (!mcVersionValid || !fabricVersionValid) {
-      logger.warn('Invalid version strings provided', {
+    if (!mcVersionValid || !loaderVersionValid || !loaderValid) {
+      logger.warn('Invalid version data provided', {
         category: 'settings',
         data: {
           store: 'settingsStore',
           function: 'updateVersions',
           mcVersion,
-          fabricVersion,
+          loader,
+          loaderVersion,
           mcVersionValid,
-          fabricVersionValid
+          loaderValid,
+          loaderVersionValid
         }
       });
     }
     
-    logger.info('Updating Minecraft and Fabric versions', {
+    logger.info('Updating Minecraft and loader versions', {
       category: 'settings',
       data: {
         store: 'settingsStore',
         function: 'updateVersions',
         mcVersion,
-        fabricVersion,
-        validationPassed: mcVersionValid && fabricVersionValid
+        loader: normalizedLoader,
+        loaderVersion: normalizedLoaderVersion,
+        validationPassed: mcVersionValid && loaderValid && loaderVersionValid
       }
     });
     
     settingsStore.update(/** @type {any} */ state => {
       const oldMcVersion = state.mcVersion;
+      const oldLoader = state.loader;
+      const oldLoaderVersion = state.loaderVersion;
       const oldFabricVersion = state.fabricVersion;
       const newState = {
         ...state,
         mcVersion: (mcVersionValid && mcVersion) ? mcVersion : state.mcVersion,
-        fabricVersion: (fabricVersionValid && fabricVersion) ? fabricVersion : state.fabricVersion
+        loader: normalizedLoader,
+        loaderVersion: normalizedLoaderVersion,
+        fabricVersion: normalizedLoader === 'fabric' ? normalizedLoaderVersion : null
       };
       
       const changes = [];
       if (oldMcVersion !== newState.mcVersion) {
         changes.push(`mcVersion: ${oldMcVersion} -> ${newState.mcVersion}`);
+      }
+      if (oldLoader !== newState.loader) {
+        changes.push(`loader: ${oldLoader} -> ${newState.loader}`);
+      }
+      if (oldLoaderVersion !== newState.loaderVersion) {
+        changes.push(`loaderVersion: ${oldLoaderVersion} -> ${newState.loaderVersion}`);
       }
       if (oldFabricVersion !== newState.fabricVersion) {
         changes.push(`fabricVersion: ${oldFabricVersion} -> ${newState.fabricVersion}`);
@@ -425,6 +445,8 @@ export function updateVersions(/** @type {any} */ mcVersion, /** @type {any} */ 
             function: 'updateVersions',
             changes,
             newMcVersion: newState.mcVersion,
+            newLoader: newState.loader,
+            newLoaderVersion: newState.loaderVersion,
             newFabricVersion: newState.fabricVersion
           }
         });
@@ -444,14 +466,15 @@ export function updateVersions(/** @type {any} */ mcVersion, /** @type {any} */ 
   } catch (error) {
     logger.error(`Failed to update versions: ${error.message}`, {
       category: 'settings',
-      data: {
-        store: 'settingsStore',
-        function: 'updateVersions',
-        errorType: error.constructor.name,
-        mcVersion,
-        fabricVersion
-      }
-    });
+        data: {
+          store: 'settingsStore',
+          function: 'updateVersions',
+          errorType: error.constructor.name,
+          mcVersion,
+          loader,
+          loaderVersion
+        }
+      });
   }
 }
 
@@ -569,9 +592,12 @@ export function loadSettings(/** @type {any} */ config) {
     }
     
     // Validate config structure
+    const resolvedLoader = config.loader || (config.fabric ? 'fabric' : 'vanilla');
+    const resolvedLoaderVersion = config.loaderVersion || config.fabric || null;
     const configValidation = {
       version: !config.version || (typeof config.version === 'string' && config.version.trim().length > 0),
-      fabric: !config.fabric || (typeof config.fabric === 'string' && config.fabric.trim().length > 0),
+      loader: !resolvedLoader || (typeof resolvedLoader === 'string' && resolvedLoader.trim().length > 0),
+      loaderVersion: !resolvedLoaderVersion || (typeof resolvedLoaderVersion === 'string' && resolvedLoaderVersion.trim().length > 0),
       autoRestart: !config.autoRestart || validateAutoRestartSettings(config.autoRestart)
     };
     
@@ -595,7 +621,9 @@ export function loadSettings(/** @type {any} */ config) {
         store: 'settingsStore',
         function: 'loadSettings',
         mcVersion: config.version,
-        fabricVersion: config.fabric,
+        loader: resolvedLoader,
+        loaderVersion: resolvedLoaderVersion,
+        fabricVersion: resolvedLoader === 'fabric' ? resolvedLoaderVersion : null,
         hasAutoRestart: !!config.autoRestart,
         validationPassed: !hasValidationErrors
       }
@@ -607,7 +635,11 @@ export function loadSettings(/** @type {any} */ config) {
       const newState = {
         ...state,
         mcVersion: (configValidation.version && config.version) ? config.version : state.mcVersion,
-        fabricVersion: (configValidation.fabric && config.fabric) ? config.fabric : state.fabricVersion,
+        loader: configValidation.loader ? resolvedLoader : state.loader,
+        loaderVersion: configValidation.loaderVersion ? resolvedLoaderVersion : state.loaderVersion,
+        fabricVersion: (configValidation.loader && resolvedLoader === 'fabric' && configValidation.loaderVersion)
+          ? resolvedLoaderVersion
+          : (configValidation.loader && resolvedLoader !== 'fabric' ? null : state.fabricVersion),
         autoRestart: {
           ...state.autoRestart,
           enabled: (configValidation.autoRestart && config.autoRestart?.enabled !== undefined) 
@@ -623,6 +655,12 @@ export function loadSettings(/** @type {any} */ config) {
       const loadedSettings = [];
       if (oldState.mcVersion !== newState.mcVersion) {
         loadedSettings.push(`mcVersion: ${newState.mcVersion}`);
+      }
+      if (oldState.loader !== newState.loader) {
+        loadedSettings.push(`loader: ${newState.loader}`);
+      }
+      if (oldState.loaderVersion !== newState.loaderVersion) {
+        loadedSettings.push(`loaderVersion: ${newState.loaderVersion}`);
       }
       if (oldState.fabricVersion !== newState.fabricVersion) {
         loadedSettings.push(`fabricVersion: ${newState.fabricVersion}`);

@@ -196,7 +196,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let connectionCheckInterval;
   let statusCheckInterval;
   let visibilityListenerAdded = false;
+  let visibilityChangeHandler = null;
   let lastQuickStatusCheck = 0;
+  let connectionFailureCount = 0;
+  let asyncScopeVersion = 0;
+  let activeFetchControllers = new Set();
   
   // Active tab tracking
   const tabs = ['play', 'mods', 'settings'];
@@ -285,7 +289,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   // Connect to the Management Server (port 8080)
-  async function connectToServer() {
+  async function connectToServer({ backgroundRetry = false } = {}) {
+    const scope = getAsyncScope();
     logger.info('Connecting to management server', {
       category: 'ui',
       data: {
@@ -308,75 +313,95 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           hasServerPort: !!(instance?.serverPort)
         }
       });
-      setConnectionStatus('disconnected');
-      clearAppVersions();
+      if (isCurrentAsyncScope(scope)) {
+        setConnectionStatus('disconnected');
+        clearAppVersions();
+      }
       return;
     }
 
-    setConnectionStatus('connecting');
+    if (!backgroundRetry || get(clientState).connectionStatus !== 'connected') {
+      setConnectionStatus('connecting');
+    }
     
     try {
       const managementUrl = resolveManagementUrl(instance, '/api/test');
       
-      const response = await fetch(managementUrl, {
+      const response = await fetchWithScope(managementUrl, {
         method: 'GET',
         headers: {
           ...buildAuthHeaders(instance),
           'Content-Type': 'application/json'
-        },
-        signal: AbortSignal.timeout(5000) // 5 second timeout
-      });
+        }
+      }, 5000, scope);
+      if (!isCurrentAsyncScope(scope)) return;
         if (!response.ok) {
         throw new Error(`Management server responded with ${response.status}`);
       }
 
       const testData = await response.json();
+      if (!isCurrentAsyncScope(scope)) return;
       if (testData.success) {
+        markConnectionHealthy();
         setConnectionStatus('connected');
         
         // Register with the server and check app version compatibility
-        await registerWithServer();
-        await checkAppVersionCompatibility();
+        await registerWithServer(scope);
+        if (!isCurrentAsyncScope(scope)) return;
+        await checkAppVersionCompatibility(scope);
+        if (!isCurrentAsyncScope(scope)) return;
         
         // Check server status and get server info
-        await checkServerStatus();
-        await checkAuthentication();
+        await checkServerStatus(false, scope);
+        if (!isCurrentAsyncScope(scope)) return;
+        await checkAuthentication(scope);
         
       } else {
         throw new Error('Management server returned unsuccessful response');
       }
     } catch (err) {
-      setConnectionStatus('disconnected');
+      if (err?.stale || !isCurrentAsyncScope(scope)) {
+        return;
+      }
+
+      const shouldDisconnect = shouldSurfaceDisconnectedState(backgroundRetry);
+      if (shouldDisconnect) {
+        setConnectionStatus('disconnected');
+        clearAppVersions();
+      }
       setManagementServerStatus('unknown');
       setMinecraftServerStatus('unknown');
-      clearAppVersions();
     }
   }
   
   // Register with the management server
-  async function registerWithServer() {
+  async function registerWithServer(scope = getAsyncScope()) {
     try {
+      if (!isCurrentAsyncScope(scope)) return;
       await ensureSessionToken(instance, true);
     } catch (err) {
     }  }
 
   // Check app version compatibility between client and server
-  async function checkAppVersionCompatibility() {
+  async function checkAppVersionCompatibility(scope = getAsyncScope()) {
     try {
+      if (!isCurrentAsyncScope(scope)) return;
       // Get client app version
       const clientVersionResult = await window.electron.invoke('get-current-version');
+      if (!isCurrentAsyncScope(scope)) return;
       const clientVersion = clientVersionResult?.success ? clientVersionResult.version : '1.0.0';
 
       // Get server app version
       const appVersionUrl = resolveManagementUrl(instance, '/api/app/version');
-      const response = await fetch(appVersionUrl, {
+      const response = await fetchWithScope(appVersionUrl, {
         method: 'GET',
-        headers: buildAuthHeaders(instance),
-        signal: AbortSignal.timeout(5000)
-      });
+        headers: buildAuthHeaders(instance)
+      }, 5000, scope);
+      if (!isCurrentAsyncScope(scope)) return;
 
       if (response.ok) {
         const versionData = await response.json();
+        if (!isCurrentAsyncScope(scope)) return;
         if (versionData.success) {
           const serverVersion = versionData.appVersion || versionData.version;
           
@@ -391,13 +416,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         setAppVersions(clientVersion, clientVersion);
       }
     } catch (err) {
+      if (err?.stale || !isCurrentAsyncScope(scope)) return;
       clearAppVersions();
     }
   }
 
 
   // Check both management server and minecraft server status
-  async function checkServerStatus(silentRefresh = false) {
+  async function checkServerStatus(silentRefresh = false, scope = getAsyncScope()) {
+    if (!isCurrentAsyncScope(scope)) return;
     if ($clientState.connectionStatus !== 'connected') {
       setManagementServerStatus('unknown');
       setMinecraftServerStatus('unknown');
@@ -412,26 +439,38 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     try {
       // Check management server status
       const managementUrl = resolveManagementUrl(instance, '/api/test');
-      const managementResponse = await fetch(managementUrl, {
+      const managementResponse = await fetchWithScope(managementUrl, {
         method: 'GET',
-        headers: buildAuthHeaders(instance),
-        signal: AbortSignal.timeout(3000)
-      });
+        headers: buildAuthHeaders(instance)
+      }, 3000, scope);
+      if (!isCurrentAsyncScope(scope)) return;
       
       if (managementResponse.ok) {
+        markConnectionHealthy();
         setManagementServerStatus('running');
         
         // Get server info to check minecraft server status
-        await getServerInfo(silentRefresh);
+        await getServerInfo(silentRefresh, scope);
       } else {
         throw new Error('Management server not responding');
       }
       
       lastCheck = new Date();
     } catch (err) {
-      setConnectionStatus('disconnected');
+      if (err?.stale || !isCurrentAsyncScope(scope)) {
+        return;
+      }
       setManagementServerStatus('unknown');
       setMinecraftServerStatus('unknown');
+      if (shouldSurfaceDisconnectedState(silentRefresh)) {
+        setConnectionStatus('disconnected');
+      } else {
+        setTimeout(() => {
+          if (isCurrentAsyncScope(scope) && get(clientState).connectionStatus === 'connected') {
+            connectToServer({ backgroundRetry: true });
+          }
+        }, 800);
+      }
     }
     
     if (!silentRefresh) {
@@ -439,18 +478,21 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
     // Get server information including Minecraft version and required mods
-  async function getServerInfo(silentRefresh = false) {
+  async function getServerInfo(silentRefresh = false, scope = getAsyncScope()) {
     try {
+      if (!isCurrentAsyncScope(scope)) return;
       await ensureSessionToken(instance);
+      if (!isCurrentAsyncScope(scope)) return;
       const serverInfoUrl = resolveManagementUrl(instance, '/api/server/info');
-      const response = await fetch(serverInfoUrl, {
+      const response = await fetchWithScope(serverInfoUrl, {
         method: 'GET',
-        headers: buildAuthHeaders(instance),
-        signal: AbortSignal.timeout(5000)
-      });
+        headers: buildAuthHeaders(instance)
+      }, 5000, scope);
       
       if (response.ok) {        serverInfo = await response.json();
+        if (!isCurrentAsyncScope(scope)) return;
         if (serverInfo.success) {
+          markConnectionHealthy();
           setMinecraftServerStatus(serverInfo.minecraftServerStatus || 'unknown');
           requiredMods = serverInfo.requiredMods || [];
           
@@ -460,13 +502,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           // **FIX**: Also fetch complete mod list from server to get optional mods info
           try {
             const modsUrl = resolveManagementUrl(instance, '/api/mods/list');
-            const modsResponse = await fetch(modsUrl, {
+            const modsResponse = await fetchWithScope(modsUrl, {
               method: 'GET',
-              headers: buildAuthHeaders(instance),
-              signal: AbortSignal.timeout(5000)
-            });
+              headers: buildAuthHeaders(instance)
+            }, 5000, scope);
+              if (!isCurrentAsyncScope(scope)) return;
               if (modsResponse.ok) {
-              const modsData = await modsResponse.json();              if (modsData.success) {                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
+              const modsData = await modsResponse.json();              if (!isCurrentAsyncScope(scope)) return; if (modsData.success) {                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
                 // (ClientModManager sets it with required property, we don't want to overwrite that)
                 if (!serverInfo.allClientMods || serverInfo.allClientMods.length === 0 || 
                     !serverInfo.allClientMods.some(mod => mod.hasOwnProperty('required'))) {
@@ -521,13 +563,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               previousServerInfo = { minecraftVersion: serverInfo.minecraftVersion, requiredMods };
             }            // Check mod synchronization status
             await checkModSynchronization(silentRefresh);
-              // Check client synchronization status
+            // Check client synchronization status
             await checkClientSynchronization(silentRefresh);
             // Check asset synchronization status (shaders/resource packs)
             await checkAssetSynchronization();
         }
       }
     } catch (err) {
+      if (err?.stale || !isCurrentAsyncScope(scope)) {
+        return;
+      }
       setMinecraftServerStatus('unknown');
     }
   }
@@ -853,10 +898,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           }
           
           if (versions && versions.length > 0) {
+            const requiredLoader = serverInfo?.loaderType && serverInfo.loaderType !== 'vanilla'
+              ? serverInfo.loaderType
+              : null;
             // Filter versions compatible with target MC version
             const compatibleVersions = versions.filter(v => 
               v.gameVersions && v.gameVersions.includes(serverInfo.minecraftVersion) &&
-              v.loaders && v.loaders.includes('fabric')
+              (!requiredLoader || !v.loaders || v.loaders.includes(requiredLoader))
             );
               if (compatibleVersions.length > 0) {
               // Sort by date to get the latest
@@ -1273,7 +1321,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       isDownloadingMods,
       isDownloadingClient
     };
-    let fabricScanAttempted = false;
+    let loaderScanAttempted = false;
 
     if (isDownloadingMods || isDownloadingClient) {
       logger.debug('Skipped client sync check: downloads in progress', {
@@ -1314,18 +1362,19 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       
       
       if (result.success) {
-        logger.debug('Client sync fabric detection result', {
+        logger.debug('Client sync loader detection result', {
           category: 'client',
           data: {
             synchronized: result.synchronized,
             reason: result.reason,
-            fabricRequested: serverInfo?.loaderType || null,
+            loaderRequested: serverInfo?.loaderType || null,
             serverLoaderVersion: serverInfo?.loaderVersion || null,
-            resolvedFabricVersion: result.fabricVersion || null,
-            installedFabricVersion: result.installedFabricVersion || null,
-            installedFabricProfile: result.installedFabricProfile || result.fabricProfileName || null,
+            resolvedLoaderVersion: result.loaderVersion || result.fabricVersion || null,
+            installedLoaderType: result.installedLoaderType || null,
+            installedLoaderVersion: result.installedLoaderVersion || result.installedFabricVersion || null,
+            installedLoaderProfile: result.installedLoaderProfile || result.installedFabricProfile || result.fabricProfileName || null,
             targetVersion: result.targetVersion || null,
-            detectedFabricProfiles: result.detectedFabricProfiles || [],
+            detectedLoaderProfiles: result.detectedLoaderProfiles || result.detectedFabricProfiles || [],
             versionsDirPath: result.versionsDirPath || null,
             versionsDirExists: result.versionsDirExists,
             versionsDirEntries: Array.isArray(result.versionsDirEntries) ? result.versionsDirEntries.slice(0, 10) : result.versionsDirEntries
@@ -1333,27 +1382,40 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         });
 
         clientSyncInfo = result;
-        const requiresFabric = serverInfo?.loaderType === 'fabric';
+        const requiredLoaderType = serverInfo?.loaderType && serverInfo.loaderType !== 'vanilla'
+          ? serverInfo.loaderType
+          : null;
         const serverLoaderVersion = serverInfo?.loaderVersion;
-        const resolvedLoaderVersion = result.fabricVersion || null;
+        const resolvedLoaderVersion = result.loaderVersion || result.fabricVersion || null;
         const requiredLoaderVersion =
           !serverLoaderVersion || (typeof serverLoaderVersion === 'string' && serverLoaderVersion.trim().toLowerCase() === 'latest')
             ? resolvedLoaderVersion
             : serverLoaderVersion;
-        const installedLoaderVersion = result.installedFabricVersion || null;
-        fabricScanAttempted = result.fabricScanAttempted === true;
-        const loaderMismatch = fabricScanAttempted && requiresFabric && (!!requiredLoaderVersion && !!installedLoaderVersion && installedLoaderVersion !== requiredLoaderVersion);
-        const loaderMissing = fabricScanAttempted && requiresFabric && !installedLoaderVersion;
+        const installedLoaderType = result.installedLoaderType || requiredLoaderType || null;
+        const installedLoaderVersion = result.installedLoaderVersion || result.installedFabricVersion || null;
+        loaderScanAttempted = result.loaderScanAttempted === true || result.fabricScanAttempted === true;
+        const loaderMismatch =
+          loaderScanAttempted &&
+          !!requiredLoaderType &&
+          (
+            (installedLoaderType && installedLoaderType !== requiredLoaderType) ||
+            (!!requiredLoaderVersion && !!installedLoaderVersion && installedLoaderVersion !== requiredLoaderVersion)
+          );
+        const loaderMissing =
+          loaderScanAttempted &&
+          !!requiredLoaderType &&
+          (!installedLoaderType || !installedLoaderVersion);
         const versionsDirPath = result.versionsDirPath ? `versions path: ${result.versionsDirPath}` : '';
 
         if (result.synchronized && !loaderMismatch && !loaderMissing) {
           clientSyncStatus = 'ready';
         } else {
           // Override reason to surface loader gap if that's the cause
-          if (requiresFabric && fabricScanAttempted && (loaderMismatch || loaderMissing)) {
+          if (requiredLoaderType && loaderScanAttempted && (loaderMismatch || loaderMissing)) {
+            const loaderLabel = requiredLoaderType.charAt(0).toUpperCase() + requiredLoaderType.slice(1);
             const friendlyReason = loaderMissing
-              ? `Fabric loader ${requiredLoaderVersion || '(unspecified)'} required by server is not installed on this client.`
-              : `Fabric loader mismatch: client has ${installedLoaderVersion || 'unknown'}, server requires ${requiredLoaderVersion}.`;
+              ? `${loaderLabel} loader ${requiredLoaderVersion || '(unspecified)'} required by server is not installed on this client.`
+              : `${loaderLabel} loader mismatch: client has ${installedLoaderVersion || 'unknown'}, server requires ${requiredLoaderVersion}.`;
             clientSyncInfo = {
               ...clientSyncInfo,
               reason: friendlyReason
@@ -1361,15 +1423,17 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           }
           clientSyncStatus = 'needed';
 
-          if (requiresFabric && (!installedLoaderVersion || loaderMismatch)) {
-            logger.warn('Client Fabric version missing or mismatched', {
+          if (requiredLoaderType && (!installedLoaderVersion || loaderMismatch)) {
+            logger.warn('Client loader version missing or mismatched', {
               category: 'client',
               data: {
+                requiredLoaderType,
                 requiredLoaderVersion,
+                installedLoaderType,
                 installedLoaderVersion,
                 loaderMismatch,
                 loaderMissing,
-                detectedFabricProfiles: result.detectedFabricProfiles || [],
+                detectedLoaderProfiles: result.detectedLoaderProfiles || result.detectedFabricProfiles || [],
                 versionsDirPath: versionsDirPath || null,
                 reason: clientSyncInfo?.reason || result.reason || null
               }
@@ -1390,17 +1454,18 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       });
       clientSyncStatus = 'ready';
     }
-    return { skipped: false, fabricScanAttempted };
+    return { skipped: false, loaderScanAttempted };
   }  // Handle refresh button in dashboard - refresh both server status AND mod information
   async function handleRefreshFromDashboard() {
+    const scope = getAsyncScope();
     // Show checking state for user feedback
     isChecking = true;
     
     try {
   // Immediate direct status probe for accuracy
-  await fetchImmediateStatus();
+  await fetchImmediateStatus(scope);
       // Use silent refresh to prevent content flickering, but keep button feedback
-      await checkServerStatus(true);
+      await checkServerStatus(true, scope);
       
       if ($clientState.connectionStatus === 'connected' && clientModManagerComponent?.refreshFromDashboard) {
         await clientModManagerComponent.refreshFromDashboard();
@@ -1408,6 +1473,90 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     } finally {
       isChecking = false;
     }
+  }
+
+  function getAsyncScope() {
+    return asyncScopeVersion;
+  }
+
+  function isCurrentAsyncScope(scope) {
+    return scope === asyncScopeVersion;
+  }
+
+  function invalidateAsyncScope() {
+    asyncScopeVersion += 1;
+    connectionFailureCount = 0;
+    activeFetchControllers.forEach((controller) => {
+      try {
+        controller.abort();
+      } catch {
+        // Ignore abort failures during scope cleanup
+      }
+    });
+    activeFetchControllers = new Set();
+  }
+
+  async function fetchWithScope(url, options = {}, timeoutMs = 5000, scope = getAsyncScope()) {
+    if (!isCurrentAsyncScope(scope)) {
+      const staleError = new Error('Stale request scope');
+      staleError.stale = true;
+      throw staleError;
+    }
+
+    const controller = new AbortController();
+    activeFetchControllers.add(controller);
+
+    let didTimeout = false;
+    const timeoutHandle = timeoutMs > 0
+      ? setTimeout(() => {
+          didTimeout = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+
+      if (!isCurrentAsyncScope(scope)) {
+        const staleError = new Error('Stale request scope');
+        staleError.stale = true;
+        throw staleError;
+      }
+
+      return response;
+    } catch (error) {
+      if (didTimeout) {
+        const timeoutError = new Error('Request timed out');
+        timeoutError.name = 'TimeoutError';
+        throw timeoutError;
+      }
+
+      if (!isCurrentAsyncScope(scope) || error?.name === 'AbortError') {
+        const staleError = new Error('Stale request scope');
+        staleError.stale = true;
+        throw staleError;
+      }
+
+      throw error;
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      activeFetchControllers.delete(controller);
+    }
+  }
+
+  function markConnectionHealthy() {
+    connectionFailureCount = 0;
+  }
+
+  function shouldSurfaceDisconnectedState(backgroundRetry = false) {
+    connectionFailureCount += 1;
+    if (!backgroundRetry) return true;
+    return get(clientState).connectionStatus !== 'connected' || connectionFailureCount >= 2;
   }
   
   // Handle refresh request from mods manager (triggered by dashboard refresh)
@@ -1417,7 +1566,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   
   // Check authentication status
-  async function checkAuthentication() {
+  async function checkAuthentication(scope = getAsyncScope()) {
+    if (!isCurrentAsyncScope(scope)) return;
     
     if (!instance.path) {
       authStatus = 'needs-auth';
@@ -1442,6 +1592,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const result = await window.electron.invoke('minecraft-load-auth', {
         clientPath: instance.path
       });
+      if (!isCurrentAsyncScope(scope)) return;
       
       clearTimeout(authTimeout);
       
@@ -1463,6 +1614,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         }
       }
     } catch (err) {
+      if (err?.stale || !isCurrentAsyncScope(scope)) {
+        return;
+      }
       // Only set to needs-auth if we're not currently authenticating
       if (authStatus !== 'authenticating') {
         authStatus = 'needs-auth';
@@ -2436,12 +2590,31 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     try {
       if (window.electron && typeof window.electron.on === 'function') {
         window.electron.on('server-status', (rawStatus) => {
-          let status = rawStatus;
-          if (status !== 'running' && status !== 'stopped') {
-            status = (status && String(status)) || 'unknown';
+          const expectedServerInstanceId = serverInfo?.instanceId || null;
+
+          if (!rawStatus || typeof rawStatus !== 'object') {
+            return;
           }
+
+          if (!expectedServerInstanceId) {
+            return;
+          }
+
+          if (
+            rawStatus.instanceId &&
+            rawStatus.instanceId !== expectedServerInstanceId
+          ) {
+            return;
+          }
+
+          const status = typeof rawStatus.status === 'string'
+            ? rawStatus.status
+            : (typeof rawStatus.isRunning === 'boolean'
+              ? (rawStatus.isRunning ? 'running' : 'stopped')
+              : 'unknown');
+
           try { console.debug('[ClientInterface] server-status event', { raw: rawStatus, normalized: status }); } catch {}
-            setMinecraftServerStatus(status === 'running' ? 'running' : (status === 'stopped' ? 'stopped' : 'unknown'));
+          setMinecraftServerStatus(status === 'running' ? 'running' : (status === 'stopped' ? 'stopped' : 'unknown'));
           // When server transitions to running fetch fresh server info (mods/version) silently
           if (status === 'running') {
             try {
@@ -2585,7 +2758,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     // Listen for server version changes to re-check app compatibility
     window.electron.on('server-version-changed', (data) => {
-      if (data && data.port && data.port.toString() === instance.serverPort) {
+      const expectedServerInstanceId = serverInfo?.instanceId || null;
+      if (
+        data &&
+        (
+          (expectedServerInstanceId && data.instanceId === expectedServerInstanceId)
+          || (!expectedServerInstanceId && data.port && data.port.toString() === instance.serverPort)
+        )
+      ) {
         // This event is for our server, check app version compatibility
         setTimeout(() => {
           checkAppVersionCompatibility();
@@ -2681,7 +2861,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }    // Reactive statement to refresh mod sync when switching to Play tab
   // Quick reactive server status refresh when switching to Play tab or regaining visibility
   // Direct status fetch helper for immediate accuracy (bypasses slower /info propagation)
-  async function fetchImmediateStatus() {
+  async function fetchImmediateStatus(scope = getAsyncScope()) {
+    if (!isCurrentAsyncScope(scope)) return null;
     // Try regardless of connection status (could be race where we haven't marked connected yet)
     try {
   const primaryPort = instance.serverPort; // management server port (often 8080)
@@ -2693,14 +2874,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         try {
           const protocol = instance.serverProtocol === 'http' ? 'http' : 'https';
           const statusUrl = `${protocol}://${instance.serverIp}:${p}/api/server/status`;
-          const res = await fetch(statusUrl, {
+          const res = await fetchWithScope(statusUrl, {
             method: 'GET',
-            headers: buildAuthHeaders(instance),
-            signal: AbortSignal.timeout(2200)
-          });
+            headers: buildAuthHeaders(instance)
+          }, 2200, scope);
           if (res.status === 404) continue; // skip to next port
           if (res.ok) {
             const data = await res.json();
+            if (!isCurrentAsyncScope(scope)) return null;
             try { console.debug('[ClientInterface] fetchImmediateStatus response', p, data); } catch {}
             if (data && typeof data.isRunning === 'boolean') {
               sawDefinite = true;
@@ -2725,19 +2906,23 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         }
         return desired;
       }
-    } catch { /* overall silent */ }
+    } catch (error) {
+      if (!error?.stale) {
+        // overall silent
+      }
+    }
     return null;
   }
 
   let acceleratedProbeActive = false;
-  async function acceleratedStatusProbe(maxMs = 12000) {
+  async function acceleratedStatusProbe(maxMs = 12000, scope = getAsyncScope()) {
     if (acceleratedProbeActive) return;
     acceleratedProbeActive = true;
     const start = Date.now();
     const initial = get(clientState).minecraftServerStatus;
     let attempt = 0;
-    while (Date.now() - start < maxMs) {
-      const result = await fetchImmediateStatus();
+    while (Date.now() - start < maxMs && isCurrentAsyncScope(scope)) {
+      const result = await fetchImmediateStatus(scope);
       attempt++;
       if (result && result !== initial) break;
       const delay = Math.min(1500, 700 + attempt * 120); // gentle backoff
@@ -2752,9 +2937,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     if (now - lastQuickStatusCheck > 4000) {
       lastQuickStatusCheck = now;
       if ($clientState.connectionStatus === 'connected') {
+  const scope = getAsyncScope();
   // Fast probe + accelerated follow-up to catch transition within seconds
-  fetchImmediateStatus().then(() => acceleratedStatusProbe(10000));
-  getServerInfo(true); // silent; may update required mods/version
+  fetchImmediateStatus(scope).then(() => acceleratedStatusProbe(10000, scope));
+  getServerInfo(true, scope); // silent; may update required mods/version
       } else if ($clientState.connectionStatus === 'disconnected') {
         connectToServer();
       }
@@ -2762,12 +2948,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     if (!visibilityListenerAdded) {
       visibilityListenerAdded = true;
       try {
-        document.addEventListener('visibilitychange', () => {
+        visibilityChangeHandler = () => {
           if (document.visibilityState === 'visible' && get(clientState).activeTab === 'play') {
-            fetchImmediateStatus().then(() => acceleratedStatusProbe(8000));
-            getServerInfo(true);
+            const scope = getAsyncScope();
+            fetchImmediateStatus(scope).then(() => acceleratedStatusProbe(8000, scope));
+            getServerInfo(true, scope);
           }
-        });
+        };
+        document.addEventListener('visibilitychange', visibilityChangeHandler);
       } catch { /* ignore */ }
     }
   }
@@ -2796,6 +2984,12 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         serverPort: instance?.serverPort
       }
     });
+
+    invalidateAsyncScope();
+    setConnectionStatus('disconnected');
+    setManagementServerStatus('unknown');
+    setMinecraftServerStatus('unknown');
+    clearAppVersions();
     
     // Initialize client functionality
     setupLauncherEvents();
@@ -2850,6 +3044,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Return cleanup function
     return () => {
       if (cleanupChecks) cleanupChecks();
+      if (visibilityChangeHandler) {
+        try {
+          document.removeEventListener('visibilitychange', visibilityChangeHandler);
+        } catch {
+          // Ignore visibility listener cleanup issues
+        }
+        visibilityChangeHandler = null;
+      }
+      visibilityListenerAdded = false;
+      invalidateAsyncScope();
       cleanupLauncherEvents();
     };
   });
@@ -2888,6 +3092,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       inviteSecret: instance.inviteSecret,
       managementCertFingerprint: instance.managementCertFingerprint
     });
+    invalidateAsyncScope();
     setConnectionStatus('disconnected');
     connectToServer();
   }

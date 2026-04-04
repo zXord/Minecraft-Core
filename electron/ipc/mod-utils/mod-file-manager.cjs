@@ -64,8 +64,13 @@ async function readModMetadataFromJar(jarPath) {
         
         // Extract Minecraft version from dependencies - handle various formats
         let minecraftVer = null;
+        let gameVersions = [];
         if (data.depends?.minecraft) {
           if (Array.isArray(data.depends.minecraft)) {
+            gameVersions = data.depends.minecraft
+              .filter(Boolean)
+              .map((entry) => String(entry).trim())
+              .filter(Boolean);
             // Handle array format: ["1.21.2", "1.21.3"] or ["1.21.x"]
             if (data.depends.minecraft.length === 1) {
               // Single element array: ["1.21.x"] -> use as-is
@@ -81,6 +86,7 @@ async function readModMetadataFromJar(jarPath) {
           } else if (typeof data.depends.minecraft === 'string') {
             // Handle string format: "1.21.x" or ">=1.21.4-rc.3"
             minecraftVer = data.depends.minecraft;
+            gameVersions = [minecraftVer];
           }        }
         
         const result = {
@@ -90,7 +96,8 @@ async function readModMetadataFromJar(jarPath) {
           // Include Minecraft compatibility info from dependencies
           depends: data.depends,
           fabricVersion: data.depends?.fabric,
-          minecraftVersion: minecraftVer
+          minecraftVersion: minecraftVer,
+          gameVersions
         };
         
         return result;      } catch {
@@ -353,6 +360,7 @@ async function getInstalledModInfo(serverPath) {
               name: manifest.name || meta.name,
               // Always use fresh extracted Minecraft version compatibility info
               minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
+              gameVersions: meta.gameVersions || manifest.gameVersions,
               depends: meta.depends || manifest.depends,
               fabricVersion: meta.fabricVersion || manifest.fabricVersion
             };
@@ -403,6 +411,7 @@ async function getInstalledModInfo(serverPath) {
                 name: manifest.name || meta.name,
                 // Preserve extracted Minecraft version compatibility info
                 minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
+                gameVersions: meta.gameVersions || manifest.gameVersions,
                 depends: meta.depends || manifest.depends,
                 fabricVersion: meta.fabricVersion || manifest.fabricVersion              };
             }
@@ -497,6 +506,7 @@ async function getClientInstalledModInfo(clientPath) {
               versionNumber: manifest.versionNumber || meta.versionNumber,              name: manifest.name || meta.name,
               // Always use fresh extracted Minecraft version compatibility info
               minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
+              gameVersions: meta.gameVersions || manifest.gameVersions,
               depends: meta.depends || manifest.depends,
               fabricVersion: meta.fabricVersion || manifest.fabricVersion
             };
@@ -540,6 +550,7 @@ async function getClientInstalledModInfo(clientPath) {
               name: manifest.name || meta.name,
               // Preserve extracted Minecraft version compatibility info
               minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
+              gameVersions: meta.gameVersions || manifest.gameVersions,
               depends: meta.depends || manifest.depends,
               fabricVersion: meta.fabricVersion || manifest.fabricVersion
             };

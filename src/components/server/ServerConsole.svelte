@@ -1,16 +1,17 @@
 <!-- @ts-ignore -->
 <script>
   /// <reference path="../../electron.d.ts" />
-  import { onMount, afterUpdate } from 'svelte';
+  import { afterUpdate } from 'svelte';
   import { serverState, addServerLog } from '../../stores/serverState.js';
   import { LogFormatter } from '../../utils/logFormatter.js';
   import logger from '../../utils/logger.js';
   
+  export let currentInstance = null;
+
   // Local state
   let consoleEl;
   let autoScroll = true;
   let command = '';
-  
   // Access the logs from the store
   $: serverLogs = $serverState.logs;
   
@@ -215,9 +216,13 @@
     });
     
     try {
-      const ok = await window.electron.invoke('send-command', { command });
+      const result = await window.electron.invoke('send-command', {
+        command,
+        instanceId: currentInstanceId,
+        targetPath: currentInstance?.path || null
+      });
       
-      if (ok) {
+      if (result?.success) {
         logger.info('Server command sent successfully', {
           category: 'ui',
           data: {
@@ -256,128 +261,6 @@
     command = '';
   }
 
-  // Handle server log events with error recovery
-  const logHandler = (line) => {
-    try {
-      // Disabled debug logging to prevent excessive logs
-      // logger.debug('Received server log line', {
-      //   category: 'ui',
-      //   data: {
-      //     component: 'ServerConsole',
-      //     function: 'logHandler',
-      //     lineLength: line ? line.length : 0,
-      //     hasLine: !!line
-      //   }
-      // });
-      
-      // Validate the log line before adding
-      if (line === null || line === undefined) {
-        logger.warn('Received null/undefined log line, skipping', {
-          category: 'ui',
-          data: {
-            component: 'ServerConsole',
-            function: 'logHandler',
-            line
-          }
-        });
-        return;
-      }
-      
-      // Convert non-string lines to strings safely
-      let processedLine = line;
-      if (typeof line !== 'string') {
-        try {
-          processedLine = String(line);
-          logger.debug('Converted non-string log line to string', {
-            category: 'ui',
-            data: {
-              component: 'ServerConsole',
-              function: 'logHandler',
-              originalType: typeof line,
-              converted: processedLine
-            }
-          });
-        } catch (conversionError) {
-          logger.warn('Failed to convert log line to string', {
-            category: 'ui',
-            data: {
-              component: 'ServerConsole',
-              function: 'logHandler',
-              errorMessage: conversionError.message,
-              originalType: typeof line
-            }
-          });
-          processedLine = '(invalid log entry)';
-        }
-      }
-      
-      addServerLog(processedLine);
-    } catch (error) {
-      logger.error('Error in log handler', {
-        category: 'ui',
-        data: {
-          component: 'ServerConsole',
-          function: 'logHandler',
-          errorMessage: error.message,
-          lineType: typeof line
-        }
-      });
-      
-      // Try to add an error log entry
-      try {
-        addServerLog(`[LOG_ERROR] Failed to process log entry: ${error.message}`);
-      } catch (fallbackError) {
-        logger.error('Failed to add error log entry', {
-          category: 'ui',
-          data: {
-            component: 'ServerConsole',
-            function: 'logHandler.fallback',
-            errorMessage: fallbackError.message
-          }
-        });
-      }
-    }
-  };
-
-  onMount(() => {
-    logger.info('ServerConsole component mounted', {
-      category: 'ui',
-      data: {
-        component: 'ServerConsole',
-        function: 'onMount',
-        autoScroll
-      }
-    });
-    
-    // Remove any existing listeners to prevent duplicates
-    window.electron.removeAllListeners('server-log');
-
-    // Set up event listener for server logs
-    window.electron.on('server-log', logHandler);
-    
-    // Disabled debug logging to prevent excessive logs
-    // logger.debug('Server log listener registered', {
-    //   category: 'ui',
-    //   data: {
-    //     component: 'ServerConsole',
-    //     function: 'onMount',
-    //     event: 'server-log'
-    //   }
-    // });
-
-    return () => {
-      logger.debug('ServerConsole component unmounting', {
-        category: 'ui',
-        data: {
-          component: 'ServerConsole',
-          function: 'onMount.cleanup'
-        }
-      });
-      
-      // Clean up event listeners when component is unmounted
-      window.electron.removeListener('server-log', logHandler);
-    };
-  });
 </script>
 
 <!-- Fixed console view with improved styling -->

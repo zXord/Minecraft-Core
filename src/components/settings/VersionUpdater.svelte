@@ -6,7 +6,6 @@
   import { settingsStore, updateVersions } from '../../stores/settingsStore.js';
   import { safeInvoke } from '../../utils/ipcUtils.js';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
-  import { fetchAllFabricVersions } from '../../utils/versionUtils.js';
   import { modAvailabilityWatchStore } from '../../stores/modAvailabilityWatchStore.js';
 
   export let serverPath = '';
@@ -34,11 +33,19 @@
   let showWatchSettings = false;
   let modWatchPrefs = { showWindowsNotifications: false, intervalHours: 12 };
   let teardownIpcListeners = () => {};
+  let preflightBackupWarning = '';
   $: serverPathLocal = resolvedPath;
   $: if (serverPathLocal && !$modAvailabilityWatchStore.loaded) {
     modAvailabilityWatchStore.refresh(serverPathLocal);
   }
-  const selectedLoader = 'fabric';
+  let selectedLoader = 'fabric';
+
+  function formatLoaderName(loader) {
+    if (!loader) return 'Loader';
+    const normalized = String(loader).toLowerCase();
+    if (normalized === 'vanilla') return 'Vanilla';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
   function deriveWatchKey(entry) {
     if (!entry) return '';
     if (entry.key) return entry.key;
@@ -101,8 +108,8 @@
   }
 
   $: updateConfirmationMessage = [
-    selectedMC && selectedFabric
-      ? `Update server to Minecraft ${selectedMC} with Fabric ${selectedFabric}?`
+    selectedMC && (selectedLoader === 'vanilla' || selectedFabric)
+      ? `Update server to Minecraft ${selectedMC}${selectedLoader === 'vanilla' ? ' with Vanilla' : ` with ${formatLoaderName(selectedLoader)} ${selectedFabric}`}?`
       : 'Update server version?',
     targetJavaInfo?.requiredJavaVersion
       ? (targetJavaInfo.isAvailable
@@ -126,7 +133,7 @@
     if (!data || typeof data !== 'object') return;
     updateProgress = Math.round(data.percent || 0);
     updateStatus = data.speed || '';
-    currentTask = 'Installing Fabric loader...';
+    currentTask = `Installing ${selectedLoader} loader...`;
   }
 
   function handleDownloadProgress(data) {
@@ -154,12 +161,14 @@
 
     window.electron.on('minecraft-server-progress', handleMinecraftServerProgress);
     window.electron.on('fabric-install-progress', handleFabricInstallProgress);
+    window.electron.on('loader-install-progress', handleFabricInstallProgress);
     window.electron.on('download-progress', handleDownloadProgress);
     window.electron.on('server-java-download-progress', handleServerJavaDownloadProgress);
 
     return () => {
       window.electron.removeListener?.('minecraft-server-progress', handleMinecraftServerProgress);
       window.electron.removeListener?.('fabric-install-progress', handleFabricInstallProgress);
+      window.electron.removeListener?.('loader-install-progress', handleFabricInstallProgress);
       window.electron.removeListener?.('download-progress', handleDownloadProgress);
       window.electron.removeListener?.('server-java-download-progress', handleServerJavaDownloadProgress);
     };
@@ -167,6 +176,7 @@
 
   onMount(() => {
     fetchMinecraftVersions();
+    loadCurrentConfig();
     teardownIpcListeners = registerIpcListeners();
   });
 
@@ -192,9 +202,33 @@
     targetJavaInfo = null;
     if (!selectedMC) return;
     try {
-      fabricVersions = await fetchAllFabricVersions(selectedMC);
+      if (selectedLoader === 'vanilla') {
+        fabricVersions = [];
+      } else {
+        const result = await safeInvoke('get-loader-versions', {
+          loader: selectedLoader,
+          mcVersion: selectedMC
+        });
+        fabricVersions = result?.versions || [];
+      }
     } catch (err) {
     }
+  }
+
+  async function loadCurrentConfig() {
+    if (!resolvedPath) return;
+    try {
+      const config = await safeInvoke('read-config', resolvedPath);
+      selectedLoader = config?.loader || (config?.fabric ? 'fabric' : 'vanilla');
+      selectedMC = config?.version || null;
+      selectedFabric = config?.loaderVersion || config?.fabric || null;
+      if (selectedMC) {
+        await onMCChange();
+        if (selectedFabric && !fabricVersions.includes(selectedFabric)) {
+          fabricVersions = [selectedFabric, ...fabricVersions];
+        }
+      }
+    } catch {}
   }
 
   async function loadTargetJavaInfo() {
@@ -220,7 +254,7 @@
   }
 
   async function checkCompatibility() {
-    if (!selectedMC || !selectedFabric) return;
+    if (!selectedMC || (selectedLoader !== 'vanilla' && !selectedFabric)) return;
     checking = true;
     compatChecked = false;
     incompatibleMods = [];
@@ -233,6 +267,8 @@
       const results = await safeInvoke('check-mod-compatibility', {
         serverPath: resolvedPath,
         mcVersion: selectedMC,
+        loader: selectedLoader,
+        loaderVersion: selectedFabric,
         fabricVersion: selectedFabric
       });
       
@@ -275,7 +311,7 @@
               // Filter versions compatible with target MC version
               const compatibleVersions = versions.filter(v => 
                 v.gameVersions && v.gameVersions.includes(selectedMC) &&
-                v.loaders && v.loaders.includes('fabric')
+                v.loaders && v.loaders.includes(selectedLoader)
               );
               
               if (compatibleVersions.length > 0) {
@@ -319,36 +355,65 @@
     currentTask = 'Starting update...';
     
     // Capture current versions before update
-    const currentSettings = get(settingsStore);
-    const beforeUpdate = {
-      mcVersion: currentSettings.mcVersion,
-      fabricVersion: currentSettings.fabricVersion
-    };
+      const currentSettings = get(settingsStore);
+      const beforeUpdate = {
+        mcVersion: currentSettings.mcVersion,
+        loader: currentSettings.loader || (currentSettings.fabricVersion ? 'fabric' : 'vanilla'),
+        loaderVersion: currentSettings.loaderVersion || currentSettings.fabricVersion
+      };
       
     // Reset tracking arrays
     completedUpdates = [];
     updateSummary = null;
       
       // Calculate total steps for progress tracking
-    totalSteps = 4; // Minecraft server, Fabric, Java, Config
+    totalSteps = 5; // Backup, Minecraft server, loader, Java, Config
     if (modsWithUpdates.length > 0) totalSteps += modsWithUpdates.length;
     if (incompatibleMods.length > 0) totalSteps += 1;
     currentStep = 0;
     
     try {
-      // Step 1: Download Minecraft server
+      // Step 1: Create a restore-point backup before mutating the server folder
+      currentStep++;
+      currentTask = 'Creating restore point...';
+      updateProgress = Math.round((currentStep / totalSteps) * 100);
+      preflightBackupWarning = '';
+      try {
+        const backupResult = await safeInvoke('backups:safe-create', {
+          serverPath: resolvedPath,
+          type: 'full',
+          trigger: 'pre-update'
+        });
+        if (!backupResult?.success) {
+          preflightBackupWarning = backupResult?.error || 'Restore-point backup could not be created.';
+          updateStatus = `Warning: ${preflightBackupWarning}`;
+        } else {
+          updateStatus = `Restore point created: ${backupResult.name || 'backup ready'}`;
+        }
+      } catch (backupError) {
+        preflightBackupWarning = backupError.message || 'Restore-point backup could not be created.';
+        updateStatus = `Warning: ${preflightBackupWarning}`;
+      }
+
+      // Step 2: Download Minecraft server
       currentStep++;
       currentTask = 'Downloading Minecraft server...';
       updateProgress = Math.round((currentStep / totalSteps) * 100);
       await safeInvoke('download-minecraft-server', { mcVersion: selectedMC, targetPath: resolvedPath });
       
-      // Step 2: Install Fabric
+      // Step 3: Install loader
       currentStep++;
-      currentTask = 'Installing Fabric loader...';
+      currentTask = selectedLoader === 'vanilla' ? 'Preparing Vanilla server...' : `Installing ${selectedLoader} loader...`;
       updateProgress = Math.round((currentStep / totalSteps) * 100);
-      await safeInvoke('download-and-install-fabric', { path: resolvedPath, mcVersion: selectedMC, fabricVersion: selectedFabric });
+      await safeInvoke('download-and-install-loader', {
+        path: resolvedPath,
+        mcVersion: selectedMC,
+        loader: selectedLoader,
+        loaderVersion: selectedFabric,
+        fabricVersion: selectedFabric
+      });
       
-      // Step 3: Check and download Java if needed
+      // Step 4: Check and download Java if needed
       currentStep++;
       currentTask = 'Checking Java requirements...';
       updateProgress = Math.round((currentStep / totalSteps) * 100);
@@ -375,7 +440,7 @@
         currentTask = 'Java setup skipped - will download on server start';
       }
       
-      // Step 4: Update mods that have new versions
+      // Step 5: Update mods that have new versions
       if (modsWithUpdates.length > 0) {
         for (let i = 0; i < modsWithUpdates.length; i++) {
           const mod = modsWithUpdates[i];
@@ -408,13 +473,21 @@
         }
       }
       
-      // Step 5: Update server config
+      // Step 6: Update server config
       currentStep++;
       currentTask = 'Updating configuration...';
       updateProgress = Math.round((currentStep / totalSteps) * 100);
-      await safeInvoke('update-config', { serverPath: resolvedPath, updates: { version: selectedMC, fabric: selectedFabric } });
+      await safeInvoke('update-config', {
+        serverPath: resolvedPath,
+        updates: {
+          version: selectedMC,
+          loader: selectedLoader,
+          loaderVersion: selectedFabric,
+          fabric: selectedLoader === 'fabric' ? selectedFabric : null
+        }
+      });
       
-      // Step 6: Handle incompatible mods (preserve previously disabled mods)
+      // Step 7: Handle incompatible mods (preserve previously disabled mods)
       if (incompatibleMods.length > 0) {
         currentStep++;
         currentTask = 'Disabling incompatible mods...';
@@ -431,7 +504,7 @@
         
         await safeInvoke('save-disabled-mods', resolvedPath, allDisabledMods);
       }        // Step 7: Update version state
-      updateVersions(selectedMC, selectedFabric);
+      updateVersions(selectedMC, selectedFabric, selectedLoader);
       // After successful upgrade, clear any remaining mod availability watches (upgrade path complete)
       try {
         if (resolvedPath) {
@@ -447,12 +520,14 @@
             to: selectedMC,
             changed: beforeUpdate.mcVersion !== selectedMC
           },
-          fabric: {
-            from: beforeUpdate.fabricVersion,
+          loaderVersion: {
+            from: beforeUpdate.loaderVersion,
             to: selectedFabric,
-            changed: beforeUpdate.fabricVersion !== selectedFabric
+            changed: beforeUpdate.loaderVersion !== selectedFabric
           }
         },
+        loader: selectedLoader,
+        preflightBackupWarning,
         modUpdates: completedUpdates,
         disabledMods: incompatibleMods,
         totalCompatibleMods: compatibleMods.length,
@@ -490,12 +565,12 @@
       {/each}
     </select>
 
-    {#if selectedMC}      <select bind:value={selectedFabric}>
-        <option value="" disabled selected>Select Fabric Loader</option>
+    {#if selectedMC && selectedLoader !== 'vanilla'}      <select bind:value={selectedFabric}>
+        <option value="" disabled selected>Select {selectedLoader} Loader</option>
         {#each fabricVersions as f (f)}
           <option value={f}>
-            {#if $settingsStore.fabricVersion && $settingsStore.fabricVersion !== f}
-              {$settingsStore.fabricVersion} → {f}
+            {#if ($settingsStore.loaderVersion || $settingsStore.fabricVersion) && ($settingsStore.loaderVersion || $settingsStore.fabricVersion) !== f}
+              {$settingsStore.loaderVersion || $settingsStore.fabricVersion} → {f}
             {:else}
               {f}
             {/if}
@@ -505,7 +580,7 @@
     {/if}
   </div>
 
-  <button class="check-btn" on:click={checkCompatibility} disabled={!selectedFabric || checking}>
+  <button class="check-btn" on:click={checkCompatibility} disabled={(!selectedMC || (selectedLoader !== 'vanilla' && !selectedFabric)) || checking}>
     {checking ? 'Checking...' : 'Check Compatibility'}
   </button>
   
@@ -717,16 +792,23 @@
               </span>
             </div>
           {/if}
-          {#if updateSummary.versionChanges.fabric.changed}
+          {#if updateSummary.versionChanges.loaderVersion.changed}
             <div class="version-change-item fabric">
-              <span class="change-label">Fabric Loader:</span>
+              <span class="change-label">{formatLoaderName(updateSummary.loader)} Loader:</span>
               <span class="change-value">
-                {updateSummary.versionChanges.fabric.from} → {updateSummary.versionChanges.fabric.to}
+                {updateSummary.versionChanges.loaderVersion.from} → {updateSummary.versionChanges.loaderVersion.to}
               </span>
             </div>
           {/if}
         </div>
       </div>
+
+      {#if updateSummary.preflightBackupWarning}
+        <div class="summary-section warning">
+          <h4>⚠️ Restore Point Warning</h4>
+          <p class="warning-text">{updateSummary.preflightBackupWarning}</p>
+        </div>
+      {/if}
 
       <!-- Mod Updates -->
       {#if updateSummary.modUpdates.length > 0}

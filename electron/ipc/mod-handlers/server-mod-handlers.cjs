@@ -2409,6 +2409,45 @@ function createServerModHandlers(win) {
             return 0;
           }
         }
+
+        function normalizeGameVersionList(value) {
+          if (Array.isArray(value)) {
+            return value
+              .filter(Boolean)
+              .map((entry) => String(entry).trim())
+              .filter(Boolean);
+          }
+          if (typeof value === 'string' && value.trim()) {
+            return [value.trim()];
+          }
+          return [];
+        }
+
+        function extractGameVersionHintsFromVersionString(value) {
+          const raw = String(value || '').trim();
+          if (!raw) return [];
+
+          const hints = [];
+          const addMatches = (regex) => {
+            for (const match of raw.matchAll(regex)) {
+              const candidate = match?.[1] ? String(match[1]).trim() : '';
+              if (candidate && !hints.includes(candidate)) {
+                hints.push(candidate);
+              }
+            }
+          };
+
+          addMatches(/\+(\d+\.\d+(?:\.\d+)?)/g);
+          addMatches(/(?:fabric|forge|quilt|neoforge|neo)[-_](\d+\.\d+(?:\.\d+)?)/gi);
+          addMatches(/(?:minecraft|mc)[-_ ]?(\d+\.\d+(?:\.\d+)?)/gi);
+
+          return hints;
+        }
+
+        function supportsTargetMinecraft(versionList, targetVersion) {
+          return normalizeGameVersionList(versionList)
+            .some((entry) => checkMinecraftVersionCompatibility(entry, targetVersion));
+        }
         
         for (const mod of disabledModsInfo) {
           const projectId = mod.projectId;
@@ -2430,6 +2469,40 @@ function createServerModHandlers(win) {
               hasProjectId: !!projectId
             }
           });
+
+          const installedGameVersions = [
+            ...normalizeGameVersionList(mod.gameVersions),
+            ...normalizeGameVersionList(mod.minecraftVersion),
+            ...extractGameVersionHintsFromVersionString(currentVersion)
+          ].filter((entry, index, source) => source.indexOf(entry) === index);
+
+          if (
+            installedGameVersions.length > 0 &&
+            !installedGameVersions.some((entry) => checkMinecraftVersionCompatibility(entry, mcVersion))
+          ) {
+            logger.debug('Skipping disabled mod version lookup for incompatible installed build', {
+              category: 'mods',
+              data: {
+                modName: name,
+                fileName: fileName,
+                currentVersion,
+                installedGameVersions,
+                mcVersion
+              }
+            });
+
+            results.push({
+              projectId,
+              fileName,
+              name,
+              currentVersion,
+              hasUpdate: false,
+              updateAvailable: false,
+              isCompatibleUpdate: false,
+              reason: `Installed build targets ${installedGameVersions.join(', ')}, not Minecraft ${mcVersion}`
+            });
+            continue;
+          }
           
           if (!projectId) {
             // No project ID means we can't check for updates
@@ -2498,9 +2571,8 @@ function createServerModHandlers(win) {
             
             // Check if current version actually exists in available versions for target MC
             const currentVersionExists = availableVersions.some(v => 
-              v.versionNumber === currentVersion && 
-              v.gameVersions && 
-              v.gameVersions.includes(mcVersion)
+              v.versionNumber === currentVersion &&
+              supportsTargetMinecraft(v.gameVersions, mcVersion)
             );
             
             if (currentVersionExists) {

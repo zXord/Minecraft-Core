@@ -355,9 +355,14 @@
             <div class="auth-section">
               <h2>Microsoft Authentication Required</h2>
               <p>You need to authenticate with your Microsoft account to play Minecraft.</p>
-              <button class="auth-button" on:click={authenticateWithMicrosoft}>
-                🔑 Login with Microsoft
-              </button>
+              <div class="auth-actions">
+                <button class="auth-button" on:click={authenticateWithMicrosoft}>
+                  🔑 Login with Microsoft
+                </button>
+                <button class="auth-button secondary" on:click={() => $clientState.activeTab = 'settings'}>
+                  ♻️ Use Existing Login
+                </button>
+              </div>
             </div>
           {:else if authStatus === 'authenticating'}
             <div class="auth-section">
@@ -597,11 +602,14 @@
 
                     {#if actualRemovals.length > 0}
                       <div class="compact-mod-section">
-                        <h4>❌ To be Removed:</h4>
+                        <h4>❌ Recommended Remove:</h4>
                         <div class="compact-mod-list">
                           {#each actualRemovals as removal (removal.fileName)}
                             <div class="compact-mod-item removal">
-                              <span class="mod-name">{removal.fileName}</span>
+                              <div class="mod-detail-copy">
+                                <span class="mod-name">{removal.fileName}</span>
+                                <span class="mod-detail-subtext">Safe to remove from this client.</span>
+                              </div>
                               <span class="removal-badge">{removal.reason || 'no longer required'}</span>
                             </div>
                           {/each}
@@ -611,11 +619,20 @@
                     
                     {#if acknowledgments.length > 0}
                       <div class="compact-mod-section">
-                        <h4>🔗 Need Acknowledgment:</h4>
+                        <h4>🔗 Recommended Keep:</h4>
                         <div class="compact-mod-list">
                           {#each acknowledgments as ack (ack.fileName)}
                             <div class="compact-mod-item acknowledgment">
-                              <span class="mod-name">{ack.fileName}</span>
+                              <div class="mod-detail-copy">
+                                <span class="mod-name">{ack.fileName}</span>
+                                <span class="mod-detail-subtext">
+                                  {#if ack.dependentDisplayNames?.length > 0}
+                                    Needed by {ack.dependentDisplayNames.join(', ')}
+                                  {:else}
+                                    Keep this mod because another client-only mod still needs it.
+                                  {/if}
+                                </span>
+                              </div>
                               <span class="dependency-badge">{ack.reason || 'required as dependency'}</span>
                             </div>
                           {/each}
@@ -641,7 +658,7 @@
                     
                     {#if acknowledgments.length > 0}
                         <button class="mod-action-btn acknowledge" on:click={onAcknowledgeAllDependencies}>
-                          ✓ Acknowledge ({acknowledgments.length})
+                          ✓ Keep These Mods ({acknowledgments.length})
                         </button>
                     {/if}
                     </div>
@@ -996,12 +1013,15 @@
             <div class="auth-section">
               <h2>Authentication Required</h2>
               <p>Please authenticate with your Microsoft account to continue.</p>
-              <div style="display: flex; gap: 1rem; justify-content: center; margin-top: 1rem;">
+              <div class="auth-actions">
                 <button class="auth-button" on:click={checkAuthentication}>
                   🔄 Check Authentication
                 </button>
                 <button class="auth-button" on:click={authenticateWithMicrosoft}>
                   🔑 Login with Microsoft
+                </button>
+                <button class="auth-button secondary" on:click={() => $clientState.activeTab = 'settings'}>
+                  ♻️ Use Existing Login
                 </button>
               </div>
             </div>
@@ -1593,6 +1613,21 @@
     margin-right: 0.5rem;
   }
 
+  .mod-detail-copy {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin-right: 0.5rem;
+  }
+
+  .mod-detail-subtext {
+    color: #9ca3af;
+    font-size: 0.72rem;
+    line-height: 1.35;
+  }
+
   .version-badge {
     background: rgba(59, 130, 246, 0.2);
     color: #60a5fa;
@@ -1985,6 +2020,14 @@
     margin-bottom: 1rem;
   }
 
+  .auth-actions {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+  }
+
   .auth-button {
     background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
     color: white !important;
@@ -1999,6 +2042,16 @@
 
   .auth-button:hover {
     background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
+  }
+
+  .auth-button.secondary {
+    background: linear-gradient(135deg, #1f2937, #111827) !important;
+    color: #dbeafe !important;
+    border: 1px solid rgba(96, 165, 250, 0.25) !important;
+  }
+
+  .auth-button.secondary:hover {
+    background: linear-gradient(135deg, #334155, #1f2937) !important;
   }
 
   .connection-status-display {

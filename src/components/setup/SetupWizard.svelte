@@ -32,6 +32,7 @@
   let path = "";
   let mcVersions = [];
   let fabricVersions = [];
+  let selectedLoader = "fabric";
   let selectedMC = null;
   let selectedFabric = null;
   let acceptEula = false;
@@ -82,10 +83,11 @@
       }
 
       const config = await window.electron.invoke("read-config", path);
-      if (config?.version && config?.fabric) {
+      if (config?.version && (config?.loader || config?.fabric)) {
         // Existing configuration found
         selectedMC = config.version;
-        selectedFabric = config.fabric;
+        selectedLoader = config.loader || (config.fabric ? "fabric" : "vanilla");
+        selectedFabric = config.loaderVersion || config.fabric || null;
 
         logger.info("Existing configuration found, skipping to completion", {
           category: "ui",
@@ -93,7 +95,8 @@
             component: "SetupWizard",
             function: "selectFolder",
             mcVersion: selectedMC,
-            fabricVersion: selectedFabric,
+            loader: selectedLoader,
+            loaderVersion: selectedFabric,
             flow: "existing_config",
           },
         });
@@ -102,7 +105,8 @@
         dispatchSetupComplete();
       } else {
         selectedMC = config?.version || null;
-        selectedFabric = config?.fabric || null;
+        selectedLoader = config?.loader || (config?.fabric ? "fabric" : "fabric");
+        selectedFabric = config?.loaderVersion || config?.fabric || null;
 
         // Need to configure
         logger.info(
@@ -113,7 +117,8 @@
               component: "SetupWizard",
               function: "selectFolder",
               detectedVersion: selectedMC,
-              detectedFabric: selectedFabric,
+              detectedLoader: selectedLoader,
+              detectedLoaderVersion: selectedFabric,
               flow: "new_config",
             },
           },
@@ -196,13 +201,13 @@
   }
 
   async function onMCVersionChange(eventOrPreferredFabric = null) {
-    logger.info("Minecraft version changed, fetching Fabric versions", {
+    logger.info("Minecraft version changed, fetching loader versions", {
       category: "ui",
       data: {
         component: "SetupWizard",
         function: "onMCVersionChange",
         selectedMC,
-        apiUrl: `https://meta.fabricmc.net/v2/versions/loader/${selectedMC}`,
+        selectedLoader,
       },
     });
 
@@ -212,29 +217,20 @@
         : selectedFabric;
     selectedFabric = null;
     try {
-      const res = await fetch(
-        `https://meta.fabricmc.net/v2/versions/loader/${selectedMC}`,
-      );
-      if (!res.ok) {
-        const error = new Error(
-          `Failed to fetch Fabric versions: ${res.status}`,
-        );
-        logger.error("Failed to fetch Fabric versions from API", {
-          category: "ui",
-          data: {
-            component: "SetupWizard",
-            function: "onMCVersionChange",
-            selectedMC,
-            status: res.status,
-            statusText: res.statusText,
-            errorMessage: error.message,
-          },
-        });
-        throw error;
+      if (selectedLoader === "vanilla") {
+        fabricVersions = [];
+        return;
       }
 
-      const data = await res.json();
-      fabricVersions = data.map((v) => v.loader.version);
+      const result = await window.electron.invoke("get-loader-versions", {
+        loader: selectedLoader,
+        mcVersion: selectedMC,
+      });
+      if (!result?.success) {
+        throw new Error(result?.error || `Failed to fetch ${selectedLoader} versions`);
+      }
+
+      fabricVersions = result.versions || [];
       if (preservedFabric && fabricVersions.includes(preservedFabric)) {
         selectedFabric = preservedFabric;
       }
@@ -245,22 +241,28 @@
           component: "SetupWizard",
           function: "onMCVersionChange",
           selectedMC,
-          fabricVersionsCount: fabricVersions.length,
+          loaderVersionsCount: fabricVersions.length,
         },
       });
     } catch (err) {
-      logger.error("Error fetching Fabric versions", {
+      logger.error("Error fetching loader versions", {
         category: "ui",
         data: {
           component: "SetupWizard",
           function: "onMCVersionChange",
           selectedMC,
+          selectedLoader,
           errorMessage: err.message,
           fallback: "empty_array",
         },
       });
       fabricVersions = [];
     }
+  }
+
+  async function onLoaderChange() {
+    selectedFabric = null;
+    await onMCVersionChange();
   }
 
   async function saveVersionSelection() {
@@ -271,6 +273,7 @@
         function: "saveVersionSelection",
         path,
         selectedMC,
+        selectedLoader,
         selectedFabric,
         acceptEula,
       },
@@ -298,13 +301,16 @@
           step: "save_config",
           path,
           mcVersion: selectedMC,
-          fabricVersion: selectedFabric,
+          loader: selectedLoader,
+          loaderVersion: selectedFabric,
         },
       });
 
       await window.electron.invoke("save-version-selection", {
         path,
         mcVersion: selectedMC,
+        loader: selectedLoader,
+        loaderVersion: selectedFabric,
         fabricVersion: selectedFabric,
       });
 
@@ -347,23 +353,31 @@
         });
       }
 
-      // Install Fabric
-      installLogs = [...installLogs, `Installing Fabric ${selectedFabric}...`];
-      logger.debug("Starting Fabric installation", {
+      // Install selected loader
+      installLogs = [
+        ...installLogs,
+        selectedLoader === "vanilla"
+          ? "Using Vanilla server..."
+          : `Installing ${selectedLoader} ${selectedFabric}...`,
+      ];
+      logger.debug("Starting loader installation", {
         category: "ui",
         data: {
           component: "SetupWizard",
           function: "saveVersionSelection",
-          step: "install_fabric",
+          step: "install_loader",
           mcVersion: selectedMC,
-          fabricVersion: selectedFabric,
+          loader: selectedLoader,
+          loaderVersion: selectedFabric,
           path,
         },
       });
 
-      await window.electron.invoke("download-and-install-fabric", {
+      await window.electron.invoke("download-and-install-loader", {
         path,
         mcVersion: selectedMC,
+        loader: selectedLoader,
+        loaderVersion: selectedFabric,
         fabricVersion: selectedFabric,
       });
 
@@ -444,7 +458,8 @@
           result: "success",
           path,
           mcVersion: selectedMC,
-          fabricVersion: selectedFabric,
+          loader: selectedLoader,
+          loaderVersion: selectedFabric,
           eulaAccepted: acceptEula,
         },
       });
@@ -464,7 +479,8 @@
           errorMessage: err.message,
           path,
           mcVersion: selectedMC,
-          fabricVersion: selectedFabric,
+          loader: selectedLoader,
+          loaderVersion: selectedFabric,
         },
       });
     }
@@ -482,6 +498,7 @@
     // Remove any existing listeners first to prevent duplicates
     window.electron.removeAllListeners("minecraft-server-progress");
     window.electron.removeAllListeners("fabric-install-progress");
+    window.electron.removeAllListeners("loader-install-progress");
     window.electron.removeAllListeners("install-log");
     window.electron.removeAllListeners("server-java-download-progress");
 
@@ -513,6 +530,13 @@
             speed: data.speed,
           },
         });
+        installProgress = data.percent || 0;
+        installSpeed = data.speed || "0 MB/s";
+      }
+    });
+
+    window.electron.on("loader-install-progress", (data) => {
+      if (data && typeof data === "object") {
         installProgress = data.percent || 0;
         installSpeed = data.speed || "0 MB/s";
       }
@@ -564,7 +588,8 @@
         function: "dispatchSetupComplete",
         path,
         mcVersion: selectedMC,
-        fabricVersion: selectedFabric,
+        loader: selectedLoader,
+        loaderVersion: selectedFabric,
         hasPath: !!path,
       },
     });
@@ -594,7 +619,8 @@
           eventData: {
             path,
             mcVersion: selectedMC,
-            fabricVersion: selectedFabric,
+            loader: selectedLoader,
+            loaderVersion: selectedFabric,
           },
         },
       });
@@ -602,6 +628,8 @@
       dispatch("setup-complete", {
         path,
         mcVersion: selectedMC,
+        loader: selectedLoader,
+        loaderVersion: selectedFabric,
         fabricVersion: selectedFabric,
       });
     }, 0);
@@ -617,7 +645,8 @@
         newStep: step,
         path,
         mcVersion: selectedMC,
-        fabricVersion: selectedFabric,
+        loader: selectedLoader,
+        loaderVersion: selectedFabric,
       },
     });
   }
@@ -638,6 +667,7 @@
 
       window.electron.removeAllListeners("minecraft-server-progress");
       window.electron.removeAllListeners("fabric-install-progress");
+      window.electron.removeAllListeners("loader-install-progress");
       window.electron.removeAllListeners("install-log");
       window.electron.removeAllListeners("server-java-download-progress");
     };
@@ -664,10 +694,19 @@
       </select>
 
       {#if selectedMC}
-        <h2>Choose Fabric loader version</h2>
+        <h2>Choose server loader</h2>
+        <select bind:value={selectedLoader} on:change={onLoaderChange}>
+          <option value="vanilla">Vanilla</option>
+          <option value="fabric">Fabric</option>
+          <option value="forge">Forge</option>
+        </select>
+      {/if}
+
+      {#if selectedMC && selectedLoader !== "vanilla"}
+        <h2>Choose {selectedLoader} loader version</h2>
         <select bind:value={selectedFabric}>
           <option disabled selected value={null}>
-            -- Select Fabric Loader --
+            -- Select {selectedLoader} Loader --
           </option>
           {#each fabricVersions as fabricVersion (fabricVersion)}
             <option value={fabricVersion}>{fabricVersion}</option>
@@ -675,7 +714,7 @@
         </select>
       {/if}
 
-      {#if selectedFabric}
+      {#if selectedMC && (selectedLoader === "vanilla" || selectedFabric)}
         <label class="eula-label">
           <input type="checkbox" bind:checked={acceptEula} />
           <span>I accept the Minecraft EULA</span>
@@ -690,7 +729,7 @@
           disabled={!acceptEula || installing}
           on:click={saveVersionSelection}
         >
-          {installing ? "Installing..." : "Install Server"}
+          {installing ? "Installing..." : `Install ${selectedLoader === "vanilla" ? "Server" : `${selectedLoader} Server`}`}
         </button>
       {/if}
 

@@ -387,7 +387,7 @@ export function addServerLog(logLine) {
       // });
       return;
     }
-    
+
     // Format the log with timestamp when it's first added (preserves original timestamp)
     const formattedLogLine = LogFormatter.formatLogEntry(logLine);
     

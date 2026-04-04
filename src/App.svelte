@@ -3,7 +3,7 @@
   /// <reference path="./electron.d.ts" />
   import { onMount, onDestroy, setContext } from "svelte";
   import { serverState } from "./stores/serverState.js";
-  import { errorMessage } from "./stores/modStore.js";
+  import { errorMessage, resetModInstanceState } from "./stores/modStore.js";
   import { route, navigate } from "./router.js";
   import { setupIpcListeners } from "./modules/serverListeners.js";
 
@@ -53,7 +53,7 @@
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
   import { getUpdateCount } from "./stores/modStore.js";
   const updateCountStore = getUpdateCount();
-  import { checkForUpdates, loadServerConfig, loadMods, loadContent, checkDisabledModUpdates } from "./utils/mods/modAPI.js";
+  import { checkForUpdates, loadServerConfig, loadMods, loadContent, checkDisabledModUpdates, setActiveModServerPath } from "./utils/mods/modAPI.js";
   let updateIntervalId = null;
 
   // --- Flow & Tabs ---
@@ -66,8 +66,11 @@
   let isSidebarOpen = false;
   let instances = [];
   let currentInstance = null;
+  let serverStatuses = {};
   let instanceType = "server"; // 'server' or 'client'
   let showInstanceSelector = false;
+  let draggedInstanceId = null;
+  let dragIndicator = { instanceId: null, placement: "before" };
 
   // Instance renaming functionality
   let editId = null;
@@ -79,6 +82,8 @@
   // Error boundary state
   let hasError = false;
   let errorInfo = null; // Used for storing error details for potential debugging display
+  $: activeServerPath =
+    currentInstance?.type === "server" ? currentInstance.path || "" : "";
 
   // Session tracking
   const sessionId = Date.now().toString();
@@ -220,27 +225,85 @@
 
   // Save instances to persistent storage
 
-  let managementAutoStartTriggered = false;
+  let startupAutoStartTriggered = false;
 
-  async function autoStartManagementIfNeeded(instancesList) {
-    if (managementAutoStartTriggered) return;
-    if (!Array.isArray(instancesList) || instancesList.length === 0) return;
-    const serverInstance = instancesList.find((inst) => inst && inst.type === "server" && inst.path);
-    if (!serverInstance) return;
-    managementAutoStartTriggered = true;
+  function hydrateServerState(settings) {
+    if (!settings) return;
+    serverState.update((state) => ({
+      ...state,
+      port: settings.port || state.port,
+      maxRam: settings.maxRam || state.maxRam,
+    }));
+  }
+
+  async function loadServerSettingsForInstance(instance) {
+    if (!instance || instance.type !== "server" || !instance.path) return;
+    const settingsResult = await window.electron.invoke("get-settings", {
+      instanceId: instance.id,
+      serverPath: instance.path,
+    });
+    if (settingsResult?.success && settingsResult.settings) {
+      hydrateServerState(settingsResult.settings);
+    }
+  }
+
+  function activateServerModContext(serverPath = "") {
+    setActiveModServerPath(serverPath);
+    resetModInstanceState();
+  }
+
+  async function primeServerModState(serverPath) {
+    if (!serverPath) return;
+
     try {
-      const settingsResult = await window.electron.invoke("get-settings");
-      if (!settingsResult || !settingsResult.success || !settingsResult.settings) return;
-      const settings = settingsResult.settings;
-      if (!settings.autoStartManagement) return;
-      const parsedPort = Number.parseInt(String(settings.managementPort || ""), 10);
-      const portToUse = Number.isFinite(parsedPort) ? parsedPort : 8080;
-      await window.electron.invoke("start-management-server", {
-        port: portToUse,
-        serverPath: serverInstance.path,
-      });
+      await loadServerConfig(serverPath);
+      await loadMods(serverPath);
+      try { await loadContent(serverPath, "shaders"); } catch {}
+      try { await loadContent(serverPath, "resourcepacks"); } catch {}
+      await checkForUpdates(serverPath);
+      try { await checkDisabledModUpdates(serverPath); } catch {}
+
+      const scheduledPath = serverPath;
+      setTimeout(() => {
+        const currentServerPath = currentInstance?.type === "server" ? currentInstance.path : "";
+        if (currentServerPath !== scheduledPath) return;
+        try {
+          checkForUpdates(scheduledPath);
+          checkDisabledModUpdates(scheduledPath);
+        } catch {
+          /* ignore follow-up update check errors */
+        }
+      }, 2000);
+    } catch {
+      /* silent prime errors */
+    }
+  }
+
+  async function refreshServerStatuses() {
+    try {
+      const statuses = await window.electron.invoke("get-all-server-statuses");
+      if (!Array.isArray(statuses)) return;
+
+      const defaultStatuses = instances
+        .filter((instance) => instance && instance.type === "server")
+        .reduce((acc, instance) => {
+          acc[instance.id] = {
+            instanceId: instance.id,
+            isRunning: false,
+            status: "stopped",
+            targetPath: instance.path || null,
+          };
+          return acc;
+        }, {});
+
+      serverStatuses = statuses.reduce((acc, status) => {
+        if (status?.instanceId) {
+          acc[status.instanceId] = status;
+        }
+        return acc;
+      }, defaultStatuses);
     } catch (error) {
-      logger.debug("Auto-start management server failed", {
+      logger.debug("Failed to refresh server statuses", {
         category: "core",
         data: {
           component: "App",
@@ -248,6 +311,156 @@
         },
       });
     }
+  }
+
+  function getInstanceStatus(instance) {
+    if (!instance || instance.type !== "server") return null;
+    return (
+      serverStatuses[instance.id] || {
+        instanceId: instance.id,
+        isRunning: false,
+        status: "stopped",
+        targetPath: instance.path || null,
+      }
+    );
+  }
+
+  function reorderInstanceById(sourceId, targetId, placement = "before") {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+
+    const reordered = [...instances];
+    const sourceIndex = reordered.findIndex((item) => item.id === sourceId);
+    const targetIndex = reordered.findIndex((item) => item.id === targetId);
+
+    if (sourceIndex < 0 || targetIndex < 0) return;
+
+    const [moved] = reordered.splice(sourceIndex, 1);
+    const adjustedTargetIndex = reordered.findIndex((item) => item.id === targetId);
+    const insertionIndex =
+      placement === "after" ? adjustedTargetIndex + 1 : adjustedTargetIndex;
+
+    reordered.splice(insertionIndex, 0, moved);
+    instances = reordered;
+    saveInstancesIfNeeded();
+  }
+
+  function clearDragState() {
+    draggedInstanceId = null;
+    dragIndicator = { instanceId: null, placement: "before" };
+  }
+
+  function handleInstanceDragStart(instance, event) {
+    event.stopPropagation();
+    draggedInstanceId = instance.id;
+    dragIndicator = { instanceId: instance.id, placement: "before" };
+
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", instance.id);
+    }
+  }
+
+  function handleInstanceDragOver(instance, event) {
+    if (!draggedInstanceId || draggedInstanceId === instance.id) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const bounds = event.currentTarget?.getBoundingClientRect?.();
+    const placement =
+      bounds && event.clientY > bounds.top + bounds.height / 2 ? "after" : "before";
+
+    if (
+      dragIndicator.instanceId !== instance.id ||
+      dragIndicator.placement !== placement
+    ) {
+      dragIndicator = { instanceId: instance.id, placement };
+    }
+
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+  }
+
+  function handleInstanceDragLeave(instance, event) {
+    if (dragIndicator.instanceId !== instance.id) return;
+
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && event.currentTarget?.contains?.(nextTarget)) {
+      return;
+    }
+
+    dragIndicator = { instanceId: null, placement: "before" };
+  }
+
+  function handleInstanceDrop(instance, event) {
+    if (!draggedInstanceId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const bounds = event.currentTarget?.getBoundingClientRect?.();
+    const placement =
+      bounds && event.clientY > bounds.top + bounds.height / 2 ? "after" : "before";
+
+    reorderInstanceById(draggedInstanceId, instance.id, placement);
+    clearDragState();
+  }
+
+  function handleInstanceDragEnd() {
+    clearDragState();
+  }
+
+  async function autoStartInstancesIfNeeded(instancesList) {
+    if (startupAutoStartTriggered) return;
+    if (!Array.isArray(instancesList) || instancesList.length === 0) return;
+    for (const serverInstance of instancesList.filter((inst) => inst && inst.type === "server" && inst.path)) {
+      try {
+        const settingsResult = await window.electron.invoke("get-settings", {
+          instanceId: serverInstance.id,
+          serverPath: serverInstance.path,
+        });
+        if (!settingsResult?.success || !settingsResult.settings) {
+          continue;
+        }
+
+        const parsedManagementPort = Number.parseInt(String(settingsResult.settings.managementPort || ""), 10);
+        const parsedMinecraftPort = Number.parseInt(String(settingsResult.settings.port || ""), 10);
+        const parsedMaxRam = Number.parseInt(String(settingsResult.settings.maxRam || ""), 10);
+        const managementPort = Number.isFinite(parsedManagementPort) ? parsedManagementPort : 8080;
+        const minecraftPort = Number.isFinite(parsedMinecraftPort) ? parsedMinecraftPort : 25565;
+        const maxRam = Number.isFinite(parsedMaxRam) ? parsedMaxRam : 4;
+
+        if (settingsResult.settings.autoStartManagement) {
+          await window.electron.invoke("start-management-server", {
+            instanceId: serverInstance.id,
+            serverPath: serverInstance.path,
+            port: managementPort,
+          });
+        }
+
+        if (settingsResult.settings.autoStartMinecraft) {
+          await window.electron.invoke("start-server", {
+            instanceId: serverInstance.id,
+            targetPath: serverInstance.path,
+            port: minecraftPort,
+            maxRam,
+            managementPort,
+          });
+        }
+      } catch (error) {
+        logger.debug("Auto-start instance failed", {
+          category: "core",
+          data: {
+            component: "App",
+            instanceId: serverInstance.id,
+            errorMessage: error.message,
+          },
+        });
+      }
+    }
+    startupAutoStartTriggered = true;
+    await refreshServerStatuses();
   }
 
   onMount(() => {
@@ -269,6 +482,7 @@
 
     // Initialize logger instance detection
     logger.refreshInstanceDetection();
+    window.appStartupCompleted = true;
 
     // Enhanced user session logging
     logger.info("User session started", {
@@ -311,10 +525,12 @@
     // Background periodic mod/shader/resource pack update check (every 30 min)
     const runUpdateCheck = async () => {
       try {
-        if (path) {
+        const activeServerPath = currentInstance?.type === "server" ? currentInstance.path : "";
+        if (activeServerPath && activeServerPath === path) {
           // Use force refresh to bypass cache and detect new releases
           // The checkForUpdates function will queue this if another check is running
-          await checkForUpdates(path, true);
+          setActiveModServerPath(activeServerPath);
+          await checkForUpdates(activeServerPath, true);
         }
       } catch (err) {
         // Log but don't crash on update check errors
@@ -527,9 +743,8 @@
           // Valid instances found
           instances = initialInstances;
 
-          // Find the server instance to use as current (if exists)
-          currentInstance =
-            instances.find((i) => i.type === "server") || instances[0];
+          // Keep sidebar order as the source of truth for selection/startup.
+          currentInstance = instances[0] || null;
           storeCurrentInstance(currentInstance);
 
           // Set path and type based on current instance
@@ -543,64 +758,19 @@
 
             // Get settings for server instances
             if (currentInstance.type === "server") {
-              const settingsResult =
-                await window.electron.invoke("get-settings");
-              if (settingsResult && settingsResult.success) {
-                const { settings } = settingsResult;
-
-                // Update server state with settings
-                if (settings.port || settings.maxRam) {
-                  serverState.update((state) => {
-                    const newState = {
-                      ...state,
-                      port: settings.port || state.port,
-                      maxRam: settings.maxRam || state.maxRam,
-                    };
-
-                    logger.info(
-                      "Global state change: serverState updated during setup check",
-                      {
-                        category: "core",
-                        data: {
-                          component: "App",
-                          stateChange: "serverState",
-                          previousPort: state.port,
-                          newPort: newState.port,
-                          previousMaxRam: state.maxRam,
-                          newMaxRam: newState.maxRam,
-                          source: "setup-check-settings",
-                        },
-                      },
-                    );
-
-                    return newState;
-                  });
-                }
-              }
+              await loadServerSettingsForInstance(currentInstance);
             }
             // Set step to done to show the main UI
             step = "done";
             // Prime server config, then content, then run update check so counts show on launch
             if (path) {
-              (async () => {
-                try {
-                  await loadServerConfig(path); // ensure minecraftVersion populated before update check
-                  await loadMods(path); // mods first so installedModInfo populated
-                  // Load shaders then resourcepacks sequentially to avoid isLoading gate skipping one
-                  try { await loadContent(path, 'shaders'); } catch {}
-                  try { await loadContent(path, 'resourcepacks'); } catch {}
-                  await checkForUpdates(path); // first pass
-                  try { await checkDisabledModUpdates(path); } catch {}
-                  // Safety: run a second pass shortly after to catch any late-loaded manifests (resource packs etc.)
-                  setTimeout(() => { try { checkForUpdates(path); checkDisabledModUpdates(path); } catch {} }, 2000);
-                } catch {
-                  /* silent prime errors */
-                }
-              })();
+              activateServerModContext(path);
+              void primeServerModState(path);
             }
           }
           // Ensure management server auto-starts even if user lands on client first
-          autoStartManagementIfNeeded(instances);
+          autoStartInstancesIfNeeded(instances);
+          refreshServerStatuses();
         } else {
           logger.info("No valid instances found during setup check", {
             category: "core",
@@ -628,7 +798,16 @@
       }
     };
 
+    const handleServerStatusUpdate = (status) => {
+      if (!status?.instanceId) return;
+      serverStatuses = {
+        ...serverStatuses,
+        [status.instanceId]: status,
+      };
+    };
+
     checkExistingSetup();
+    window.electron.on("server-status", handleServerStatusUpdate);
 
     // Update content area width based on current window size
     updateContentAreaWidth();
@@ -651,6 +830,7 @@
       // Clean up event listeners and subscriptions
       window.removeEventListener("resize", updateContentAreaWidth);
       if (unsubscribeRoute) unsubscribeRoute();
+      window.electron.removeListener("server-status", handleServerStatusUpdate);
 
       logger.debug("Event listeners and subscriptions removed", {
         category: "ui",
@@ -723,8 +903,9 @@
   }
 
   // Handle setup completion
-  function handleSetupComplete(event) {
+  async function handleSetupComplete(event) {
     const newPath = event.detail.path;
+    let createdInstance = null;
     logger.info("Setup completed", {
       category: "core",
       data: {
@@ -750,66 +931,49 @@
       };
       instances = [inst];
       currentInstance = inst;
+      createdInstance = inst;
       storeCurrentInstance(inst);
       saveInstancesIfNeeded();
     } else if (instanceType === "server") {
-      // Check if a server instance already exists
-      const hasServer = instances.some((i) => i.type === "server");
-
-      if (hasServer) {
-        const errorMsg =
-          "You can only have one server instance. Please delete the existing server instance first.";
-
-        logger.info(
-          "Global state change: errorMessage set for duplicate server",
-          {
-            category: "core",
-            data: {
-              component: "App",
-              stateChange: "errorMessage",
-              previousValue: "",
-              newValue: errorMsg,
-              trigger: "duplicate-server-attempt",
-            },
-          },
-        );
-
-        errorMessage.set(errorMsg);
-        setTimeout(() => {
-          logger.debug(
-            "Global state change: errorMessage cleared after timeout",
-            {
-              category: "core",
-              data: {
-                component: "App",
-                stateChange: "errorMessage",
-                previousValue: errorMsg,
-                newValue: "",
-                trigger: "timeout-clear",
-              },
-            },
-          );
-          errorMessage.set("");
-        }, 5000);
-        step = "done";
-        return;
-      }
-
       // Create a new server instance
+      const nextServerCount = instances.filter((i) => i.type === "server").length + 1;
       const inst = {
         id: `server-${Date.now()}`,
-        name: "Server",
+        name: `Server ${nextServerCount}`,
         type: "server",
         path: newPath,
       };
       instances = [...instances, inst];
       currentInstance = inst;
+      createdInstance = inst;
       storeCurrentInstance(inst);
       saveInstancesIfNeeded();
     }
 
+    if (createdInstance?.type === "server" && createdInstance.path) {
+      instanceType = "server";
+      path = createdInstance.path;
+      updateServerPath();
+      try {
+        await loadServerSettingsForInstance(createdInstance);
+      } catch (error) {
+        logger.warn("Failed to hydrate new server instance settings", {
+          category: "settings",
+          data: {
+            component: "App",
+            instanceId: createdInstance.id,
+            error: error?.message || String(error),
+          },
+        });
+      }
+      activateServerModContext(createdInstance.path);
+      void primeServerModState(createdInstance.path);
+      refreshServerStatuses();
+    }
+
     // Save settings as well to ensure path is remembered
     window.electron.invoke("update-settings", {
+      instanceId: createdInstance?.id,
       serverPath: newPath,
     });
 
@@ -893,55 +1057,6 @@
       },
     });
 
-    // Check if we already have both types of instances
-    const hasServer = instances.some((i) => i.type === "server");
-    const hasClient = instances.some((i) => i.type === "client");
-
-    if (hasServer && hasClient) {
-      logger.warn("Cannot add instance - both types already exist", {
-        category: "ui",
-        data: {
-          component: "App",
-          hasServer,
-          hasClient,
-          totalInstances: instances.length,
-        },
-      });
-
-      const errorMsg =
-        "You can only have one server instance and one client instance. Please delete an existing instance first.";
-
-      logger.info("Global state change: errorMessage set for instance limit", {
-        category: "core",
-        data: {
-          component: "App",
-          stateChange: "errorMessage",
-          previousValue: "",
-          newValue: errorMsg,
-          trigger: "instance-limit-reached",
-        },
-      });
-
-      errorMessage.set(errorMsg);
-      setTimeout(() => {
-        logger.debug(
-          "Global state change: errorMessage cleared after timeout",
-          {
-            category: "core",
-            data: {
-              component: "App",
-              stateChange: "errorMessage",
-              previousValue: errorMsg,
-              newValue: "",
-              trigger: "timeout-clear",
-            },
-          },
-        );
-        errorMessage.set("");
-      }, 5000);
-      return;
-    }
-
     showInstanceSelector = true;
   }
 
@@ -956,30 +1071,6 @@
         currentInstances: instances.map((i) => i.type),
       },
     });
-
-    // Check if an instance of this type already exists
-    const hasInstanceOfType = instances.some((i) => i.type === type);
-
-    if (hasInstanceOfType) {
-      logger.warn("Cannot create instance - type already exists", {
-        category: "ui",
-        data: {
-          component: "App",
-          requestedType: type,
-          existingInstances: instances.filter((i) => i.type === type).length,
-        },
-      });
-      // Show error notification instead of alert
-      errorMessage.set(
-        `You can only have one ${type} instance. Please delete the existing ${type} instance first.`,
-      );
-      // Clear the error after 5 seconds
-      setTimeout(() => {
-        errorMessage.set("");
-      }, 5000);
-      showInstanceSelector = false;
-      return;
-    }
 
     instanceType = type;
 
@@ -1005,7 +1096,7 @@
   // Handle client setup completion
   function handleClientSetupComplete(event) {
     const {
-      path,
+      path: clientPath,
       serverIp,
       serverPort,
       serverProtocol,
@@ -1022,7 +1113,7 @@
       data: {
         component: "App",
         action: "handleClientSetupComplete",
-        hasPath: !!path,
+        hasPath: !!clientPath,
         hasServerIp: !!serverIp,
         serverPort,
         serverProtocol,
@@ -1031,14 +1122,14 @@
     });
 
     const existingInstance =
-      instances.find((instance) => instance.type === "client" && instance.path === path) || null;
+      instances.find((instance) => instance.type === "client" && instance.path === clientPath) || null;
 
     const newInstance = {
       ...(existingInstance || {}),
       id: clientId || existingInstance?.id || `client-${Date.now()}`,
       name: clientName || existingInstance?.name || "Minecraft Client",
       type: "client",
-      path,
+      path: clientPath,
       serverIp,
       serverPort,
       serverProtocol: serverProtocol || existingInstance?.serverProtocol || "https",
@@ -1052,10 +1143,14 @@
     };
 
     instances = existingInstance
-      ? instances.map((instance) => (instance.path === path ? newInstance : instance))
+      ? instances.map((instance) => (instance.path === clientPath ? newInstance : instance))
       : [...instances, newInstance];
+    instanceType = "client";
+    path = "";
     currentInstance = newInstance;
     storeCurrentInstance(newInstance);
+    activateServerModContext("");
+    refreshServerStatuses();
 
     // Save instances to persistent storage
     window.electron
@@ -1182,7 +1277,7 @@
   }
 
   // Switch between instances
-  function switchInstance(instance) {
+  async function switchInstance(instance) {
     logger.info("Switching to instance", {
       category: "ui",
       data: {
@@ -1219,11 +1314,18 @@
     storeCurrentInstance(instance);
 
     if (instance.type === "server") {
-      path = instance.path;
+      const nextServerPath = instance.path || "";
+      path = nextServerPath;
       instanceType = "server";
+      activateServerModContext(nextServerPath);
       updateServerPath();
+      await loadServerSettingsForInstance(instance);
+      refreshServerStatuses();
+      void primeServerModState(nextServerPath);
     } else {
       instanceType = "client";
+      path = "";
+      activateServerModContext("");
     }
   }
 
@@ -1320,12 +1422,38 @@
           <div
             class="instance-item"
             class:active={currentInstance && currentInstance.id === instance.id}
+            class:dragging={draggedInstanceId === instance.id}
+            class:drag-over-before={
+              dragIndicator.instanceId === instance.id &&
+              dragIndicator.placement === "before" &&
+              draggedInstanceId !== instance.id
+            }
+            class:drag-over-after={
+              dragIndicator.instanceId === instance.id &&
+              dragIndicator.placement === "after" &&
+              draggedInstanceId !== instance.id
+            }
             role="button"
             tabindex="0"
             on:click={() => switchInstance(instance)}
             on:keydown={(e) =>
               (e.key === "Enter" || e.key === " ") && switchInstance(instance)}
+            on:dragover={(e) => handleInstanceDragOver(instance, e)}
+            on:dragleave={(e) => handleInstanceDragLeave(instance, e)}
+            on:drop={(e) => handleInstanceDrop(instance, e)}
           >
+            <span
+              class="instance-drag-handle"
+              draggable={editId !== instance.id}
+              role="presentation"
+              title="Drag to reorder"
+              on:mousedown|stopPropagation
+              on:click|stopPropagation
+              on:dragstart={(e) => handleInstanceDragStart(instance, e)}
+              on:dragend={handleInstanceDragEnd}
+            >
+              ⋮⋮
+            </span>
             <span class="instance-icon"
               >{instance.type === "server" ? "🖥️" : "👤"}</span
             >
@@ -1364,14 +1492,26 @@
               </div>
             {:else}
               <!-- Display mode -->
-              <span class="instance-name">{instance.name}</span>
-              <button
-                class="edit-btn"
-                on:click={(e) => startRenaming(instance, e)}
-                title="Rename"
-              >
-                ✏️
-              </button>
+              <div class="instance-details">
+                <span class="instance-name" title={instance.name}>{instance.name}</span>
+                {#if instance.type === "server" && getInstanceStatus(instance)}
+                  <span
+                    class="instance-status-badge"
+                    class:running={getInstanceStatus(instance)?.isRunning}
+                  >
+                    {getInstanceStatus(instance)?.isRunning ? "Running" : "Stopped"}
+                  </span>
+                {/if}
+              </div>
+              <div class="instance-actions">
+                <button
+                  class="instance-action-btn"
+                  on:click={(e) => startRenaming(instance, e)}
+                  title="Rename"
+                >
+                  ✏️
+                </button>
+              </div>
             {/if}
           </div>
         {/each}
@@ -1397,63 +1537,41 @@
           <h1>Welcome to Minecraft Core</h1>
           <p>Choose an instance type to get started:</p>
           <div class="instance-type-container">
-            {#if instances.some((i) => i.type === "server")}
-              <div class="instance-type-card disabled">
-                <div class="instance-type-icon">🖥️</div>
-                <h3>Server Manager</h3>
-                <p>Create and manage Minecraft servers</p>
-                <div class="disabled-notice">
-                  You already have a server instance
-                </div>
-              </div>
-            {:else}
-              <div
-                class="instance-type-card"
-                role="button"
-                tabindex="0"
-                on:click={() => {
+            <div
+              class="instance-type-card"
+              role="button"
+              tabindex="0"
+              on:click={() => {
+                instanceType = "server";
+                showInstanceSelector = false;
+                step = "chooseFolder";
+              }}
+              on:keydown={(e) =>
+                (e.key === "Enter" || e.key === " ") &&
+                (() => {
                   instanceType = "server";
                   showInstanceSelector = false;
                   step = "chooseFolder";
-                }}
-                on:keydown={(e) =>
-                  (e.key === "Enter" || e.key === " ") &&
-                  (() => {
-                    instanceType = "server";
-                    showInstanceSelector = false;
-                    step = "chooseFolder";
-                  })()}
-              >
-                <div class="instance-type-icon">🖥️</div>
-                <h3>Server Manager</h3>
-                <p>Create and manage Minecraft servers</p>
-              </div>
-            {/if}
+                })()}
+            >
+              <div class="instance-type-icon">🖥️</div>
+              <h3>Server Manager</h3>
+              <p>Create and manage Minecraft servers</p>
+            </div>
 
-            {#if instances.some((i) => i.type === "client")}
-              <div class="instance-type-card disabled">
-                <div class="instance-type-icon">👤</div>
-                <h3>Client Interface</h3>
-                <p>Connect to Minecraft servers as a player</p>
-                <div class="disabled-notice">
-                  You already have a client instance
-                </div>
-              </div>
-            {:else}
-              <div
-                class="instance-type-card"
-                role="button"
-                tabindex="0"
-                on:click={() => selectInstanceType("client")}
-                on:keydown={(e) =>
-                  (e.key === "Enter" || e.key === " ") &&
-                  selectInstanceType("client")}
-              >
-                <div class="instance-type-icon">👤</div>
-                <h3>Client Interface</h3>
-                <p>Connect to Minecraft servers as a player</p>
-              </div>
-            {/if}
+            <div
+              class="instance-type-card"
+              role="button"
+              tabindex="0"
+              on:click={() => selectInstanceType("client")}
+              on:keydown={(e) =>
+                (e.key === "Enter" || e.key === " ") &&
+                selectInstanceType("client")}
+            >
+              <div class="instance-type-icon">👤</div>
+              <h3>Client Interface</h3>
+              <p>Connect to Minecraft servers as a player</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1559,6 +1677,7 @@
 
           <!-- Tab content container -->
           <div class="tab-content">
+            {#key `${currentInstance?.id || "server"}:${$route}`}
             {#if $route === "/dashboard"}
               <div class="content-panel">
                 {#await loadRoute('dashboard')}
@@ -1567,7 +1686,7 @@
                     <p>Loading Dashboard...</p>
                   </div>
                 {:then Component}
-                  <svelte:component this={Component} serverPath={path} />
+                  <svelte:component this={Component} serverPath={activeServerPath} {currentInstance} />
                 {:catch error}
                   <div class="route-error">
                     <p>Failed to load Dashboard. Please try again.</p>
@@ -1583,7 +1702,7 @@
               </div>
             {:else if $route === "/players"}
               <div class="content-panel">
-                <PlayerList serverPath={path} />
+                <PlayerList serverPath={activeServerPath} />
               </div>
             {:else if $route === "/mods"}
               <div class="content-panel">
@@ -1593,7 +1712,7 @@
                     <p>Loading Mods...</p>
                   </div>
                 {:then Component}
-                  <svelte:component this={Component} serverPath={path} />
+                  <svelte:component this={Component} serverPath={activeServerPath} />
                 {:catch error}
                   <div class="route-error">
                     <p>Failed to load Mods page. Please try again.</p>
@@ -1609,7 +1728,7 @@
               </div>
             {:else if $route === "/backups"}
               <div class="content-panel">
-                <Backups serverPath={path} />
+                <Backups serverPath={activeServerPath} />
               </div>
             {:else if $route === "/settings"}
               <div class="content-panel">
@@ -1620,7 +1739,7 @@
                   </div>
                 {:then Component}
                   <svelte:component this={Component}
-                    serverPath={path}
+                    serverPath={activeServerPath}
                     {currentInstance}
                     on:deleted={(e) => {
                       logger.info("Instance deleted from settings", {
@@ -1685,62 +1804,65 @@
                 {/await}
               </div>
             {/if}
+            {/key}
           </div>
         {:else if instanceType === "client"}
           {#if currentInstance && currentInstance.path && currentInstance.serverIp}
-            <ClientInterface
-              instance={currentInstance}
-              onOpenAppSettings={() => (showAppSettings = true)}
-              on:instance-updated={handleClientInstanceUpdated}
-              on:deleted={(e) => {
-                logger.info("Client instance deleted", {
-                  category: "core",
-                  data: {
-                    component: "App",
-                    deletedInstanceId: e.detail.id,
-                    remainingInstances: instances.length - 1,
-                  },
-                });
+            {#key currentInstance.id}
+              <ClientInterface
+                instance={currentInstance}
+                onOpenAppSettings={() => (showAppSettings = true)}
+                on:instance-updated={handleClientInstanceUpdated}
+                on:deleted={(e) => {
+                  logger.info("Client instance deleted", {
+                    category: "core",
+                    data: {
+                      component: "App",
+                      deletedInstanceId: e.detail.id,
+                      remainingInstances: instances.length - 1,
+                    },
+                  });
 
-                // Remove the instance from the list
-                instances = instances.filter((i) => i.id !== e.detail.id);
+                  // Remove the instance from the list
+                  instances = instances.filter((i) => i.id !== e.detail.id);
 
-                // Switch to a different instance if available, otherwise show empty state
-                if (instances.length > 0) {
-                  currentInstance = instances[0];
-                  storeCurrentInstance(instances[0]);
-                  logger.info(
-                    "Switched to remaining instance after client deletion",
-                    {
-                      category: "core",
-                      data: {
-                        component: "App",
-                        newInstanceId: currentInstance.id,
-                        newInstanceType: currentInstance.type,
+                  // Switch to a different instance if available, otherwise show empty state
+                  if (instances.length > 0) {
+                    currentInstance = instances[0];
+                    storeCurrentInstance(instances[0]);
+                    logger.info(
+                      "Switched to remaining instance after client deletion",
+                      {
+                        category: "core",
+                        data: {
+                          component: "App",
+                          newInstanceId: currentInstance.id,
+                          newInstanceType: currentInstance.type,
+                        },
                       },
-                    },
-                  );
-                  if (currentInstance.type === "server") {
-                    path = currentInstance.path;
-                    instanceType = "server";
+                    );
+                    if (currentInstance.type === "server") {
+                      path = currentInstance.path;
+                      instanceType = "server";
+                    } else {
+                      instanceType = "client";
+                    }
                   } else {
-                    instanceType = "client";
+                    logger.info(
+                      "No instances remaining after client deletion, showing empty state",
+                      {
+                        category: "core",
+                        data: { component: "App" },
+                      },
+                    );
+                    // Show empty state instead of forcing instance selector
+                    currentInstance = null;
+                    storeCurrentInstance(null);
+                    step = "done";
                   }
-                } else {
-                  logger.info(
-                    "No instances remaining after client deletion, showing empty state",
-                    {
-                      category: "core",
-                      data: { component: "App" },
-                    },
-                  );
-                  // Show empty state instead of forcing instance selector
-                  currentInstance = null;
-                  storeCurrentInstance(null);
-                  step = "done";
-                }
-              }}
-            />
+                }}
+              />
+            {/key}
           {:else}
             <!-- Client instance exists but is not configured - show setup wizard -->
             <div class="setup-container">
@@ -1792,7 +1914,7 @@
   <StatusManager />
   <ModAvailabilityNotifications />
     <UpdateNotification />
-    <Toaster richColors theme="dark" />
+    <Toaster richColors theme="dark" closeButton />
   {/if}
 </main>
 
@@ -2106,17 +2228,85 @@
     background-color: #3b82f6;
   }
 
+  .instance-item.dragging {
+    opacity: 0.55;
+  }
+
+  .instance-item.drag-over-before::before,
+  .instance-item.drag-over-after::after {
+    content: "";
+    position: absolute;
+    left: 0.6rem;
+    right: 0.6rem;
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(96, 165, 250, 0.95);
+    pointer-events: none;
+  }
+
+  .instance-item.drag-over-before::before {
+    top: -0.2rem;
+  }
+
+  .instance-item.drag-over-after::after {
+    bottom: -0.2rem;
+  }
+
+  .instance-drag-handle {
+    color: rgba(255, 255, 255, 0.45);
+    cursor: grab;
+    flex-shrink: 0;
+    font-size: 0.95rem;
+    line-height: 1;
+    margin-right: 0.45rem;
+    padding: 0.2rem 0.15rem;
+    user-select: none;
+  }
+
+  .instance-item:hover .instance-drag-handle {
+    color: rgba(255, 255, 255, 0.75);
+  }
+
   .instance-icon {
     margin-right: 0.5rem;
     font-size: 1.2rem;
     flex-shrink: 0;
   }
 
-  .instance-name {
+  .instance-details {
     flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .instance-name {
+    display: block;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
+    line-height: 1.2;
+    white-space: normal;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .instance-status-badge {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.85);
+    margin-left: 0;
+    flex-shrink: 0;
+    align-self: flex-start;
+  }
+
+  .instance-status-badge.running {
+    background: rgba(34, 197, 94, 0.18);
+    color: #86efac;
   }
 
   .rename-controls {
@@ -2124,7 +2314,7 @@
     flex: 1;
     align-items: center;
     gap: 0.5rem;
-    width: calc(100% - 2.5rem);
+    min-width: 0;
   }
 
   .rename-input {
@@ -2168,23 +2358,29 @@
     background-color: #ef4444;
   }
 
-  .edit-btn {
+  .instance-actions {
+    display: flex;
+    align-items: center;
+    margin-left: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .instance-action-btn {
     background: none;
     border: none;
     cursor: pointer;
     font-size: 0.9rem;
-    margin-left: auto;
     color: rgba(255, 255, 255, 0.6);
     opacity: 0;
     transition: opacity 0.2s;
-    flex-shrink: 0;
+    padding: 0.2rem;
   }
 
-  .instance-item:hover .edit-btn {
+  .instance-item:hover .instance-action-btn {
     opacity: 1;
   }
 
-  .edit-btn:hover {
+  .instance-action-btn:hover {
     color: white;
   }
 
@@ -2480,5 +2676,24 @@
   .route-error button:hover {
     background-color: #2563eb;
     transform: translateY(-1px);
+  }
+
+  :global([data-sonner-toast][data-styled='true']) :global([data-close-button]) {
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    color: #111827;
+    opacity: 1;
+    box-shadow: 0 6px 20px rgba(15, 23, 42, 0.22);
+  }
+
+  :global([data-sonner-toast][data-styled='true']) :global([data-close-button]:hover) {
+    background: #ffffff;
+    color: #020617;
+    border-color: rgba(96, 165, 250, 0.45);
+  }
+
+  :global([data-sonner-toast][data-styled='true']) :global([data-close-button] svg) {
+    color: inherit;
+    opacity: 1;
   }
   </style>

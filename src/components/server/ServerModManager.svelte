@@ -68,6 +68,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   // Local state
   let downloadManagerCleanup;
   let activeTab = 'installed'; // 'installed' or 'search' or 'categories'
+  let initializedServerPath = '';
   
   // Content type configuration
   const contentTypes = [
@@ -156,7 +157,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
 
   
   // Initialize filter stores on first load only
-  $: if ($loaderType && $filterModLoader === '') {
+  $: if ($loaderType && $filterModLoader !== $loaderType) {
     filterModLoader.set($loaderType);
   }
   
@@ -164,52 +165,37 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   const dispatch = createEventDispatcher();
   
   // Initialize component
-  onMount(() => {
-    const initAsync = async () => {
-      if (!serverPath) {
-        try {          const pathResult = window.serverPath ? await window.serverPath.get() : null;
-          // The result could be either { path: '...' } or just the path string
-          if (pathResult !== null && pathResult !== undefined) {
-            if (typeof pathResult === 'object' && pathResult && 'path' in pathResult) {
-              serverPath = pathResult['path'] || '';
-            } else if (typeof pathResult === 'string') {
-              serverPath = pathResult;
-            } else {
-              serverPath = '';
-            }
-          } else {
-            serverPath = '';
-          }
-        } catch (err) {
-          serverPath = '';
-        }
-      }
-      
-      // Initialize download manager and load initial data
-      downloadManagerCleanup = initDownloadManager();
-      await Promise.all([
-        loadMods(serverPath),
-        loadServerConfig(serverPath)
-      ]);
+  async function initializeServerMods(targetServerPath) {
+    const nextServerPath = typeof targetServerPath === 'string' ? targetServerPath.trim() : '';
+    if (!nextServerPath || nextServerPath === initializedServerPath) {
+      return;
+    }
 
-      // Post-load sanity: if installed mod info lacks versions initially, trigger one light refresh
-      try {
-        const info = get(installedModInfo);
-        const missingVersions = !info || info.length === 0 || info.every(i => !i?.versionNumber);
-        if (missingVersions) {
-          // Small delay to allow backend to warm up, then refresh once
-          setTimeout(() => {
-            loadMods(serverPath);
-          }, 250);
-        }
-      } catch (_) {
-        // ignore
+    initializedServerPath = nextServerPath;
+    await loadServerConfig(nextServerPath);
+    await loadMods(nextServerPath);
+
+    try {
+      const info = get(installedModInfo);
+      const missingVersions = !info || info.length === 0 || info.every(i => !i?.versionNumber);
+      if (missingVersions && initializedServerPath === nextServerPath) {
+        setTimeout(() => {
+          if (initializedServerPath === nextServerPath) {
+            loadMods(nextServerPath);
+          }
+        }, 250);
       }
-    };
-    
-    // Start initialization
-    initAsync();
-    
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  onMount(() => {
+    downloadManagerCleanup = initDownloadManager();
+    if (serverPath) {
+      void initializeServerMods(serverPath);
+    }
+
     // Return cleanup function
     return () => {
       if (downloadManagerCleanup && typeof downloadManagerCleanup === 'function') {
@@ -224,6 +210,10 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       downloadManagerCleanup();
     }
   });
+
+  $: if (serverPath) {
+    void initializeServerMods(serverPath);
+  }
   
   // Handle installing mod with dependencies
   async function handleInstallWithDependencies() {
@@ -654,6 +644,20 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     filterMinecraftVersion.set(newVersionFilter);
     filterModLoader.set(newLoaderFilter);
   }
+
+  async function getInstanceSearchOptions() {
+    const config = serverPath
+      ? await safeInvoke('read-config', serverPath)
+      : null;
+
+    return {
+      serverPath,
+      filterMinecraftVersion:
+        config?.version || get(filterMinecraftVersion) || '',
+      filterModLoader:
+        config?.loader || get(filterModLoader) || 'vanilla',
+    };
+  }
   
   // Handle search
   async function handleSearch() {
@@ -679,7 +683,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       
       
       // Perform search for the active content type
-      await searchContent(currentContentType);
+      await searchContent(currentContentType, await getInstanceSearchOptions());
       
     } catch (error) {
       errorMessage.set(`Search failed: ${error.message || 'Unknown error'}`);

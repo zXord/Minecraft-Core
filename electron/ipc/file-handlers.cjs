@@ -15,15 +15,6 @@ const { getLoggerHandlers } = require('./logger-handlers.cjs');
 const logger = getLoggerHandlers();
 
 function getPortableServerConfigDefaults(serverPath = '') {
-  const serverSettings = appStore.get('serverSettings') || {
-    port: 25565,
-    maxRam: 4,
-    managementPort: 8080,
-    autoStartMinecraft: false,
-    autoStartManagement: false
-  };
-  const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
-  const backupSettings = appStore.get('backupSettings') || {};
   const instances = appStore.get('instances') || [];
   const existingInstance = serverPath
     ? instances.find((inst) => inst && inst.type === 'server' && inst.path === serverPath)
@@ -32,29 +23,31 @@ function getPortableServerConfigDefaults(serverPath = '') {
   return {
     version: null,
     fabric: null,
-    port: serverSettings.port,
-    maxRam: serverSettings.maxRam,
-    managementPort: serverSettings.managementPort,
-    autoStartMinecraft: !!serverSettings.autoStartMinecraft,
-    autoStartManagement: !!serverSettings.autoStartManagement,
+    loader: 'vanilla',
+    loaderVersion: null,
+    port: 25565,
+    maxRam: 4,
+    managementPort: 8080,
+    autoStartMinecraft: false,
+    autoStartManagement: false,
     autoRestart: {
-      enabled: !!autoRestart.enabled,
-      delay: autoRestart.delay,
-      maxCrashes: autoRestart.maxCrashes
+      enabled: false,
+      delay: 10,
+      maxCrashes: 3
     },
     managementInviteHost: typeof existingInstance?.managementInviteHost === 'string'
       ? existingInstance.managementInviteHost
       : '',
     backupAutomation: {
-      enabled: !!backupSettings.enabled,
-      frequency: backupSettings.frequency,
-      type: backupSettings.type,
-      retentionCount: backupSettings.retentionCount,
-      runOnLaunch: backupSettings.runOnLaunch,
-      hour: backupSettings.hour,
-      minute: backupSettings.minute,
-      day: backupSettings.day,
-      lastRun: backupSettings.lastRun || null
+      enabled: false,
+      frequency: 86400000,
+      type: 'world',
+      retentionCount: 100,
+      runOnLaunch: false,
+      hour: 3,
+      minute: 0,
+      day: 0,
+      lastRun: null
     }
   };
 }
@@ -799,8 +792,15 @@ function createFileHandlers(win) {
       }
     },
     
-    'save-version-selection': (_e, { path: targetPath, mcVersion, fabricVersion }) => {
+    'save-version-selection': (_e, payload = {}) => {
       const startTime = Date.now();
+      const {
+        path: targetPath,
+        mcVersion,
+        fabricVersion,
+        loader,
+        loaderVersion
+      } = payload;
       
       logger.debug('Saving version selection', {
         category: 'settings',
@@ -809,6 +809,8 @@ function createFileHandlers(win) {
           targetPath,
           mcVersion,
           fabricVersion,
+          loader,
+          loaderVersion,
           sender: _e.sender.id
         }
       });
@@ -831,6 +833,15 @@ function createFileHandlers(win) {
         const existingConfig = readServerConfig(targetPath, getPortableServerConfigDefaults(targetPath)) || {};
         const previousVersion = existingConfig.version;
         const previousFabric = existingConfig.fabric;
+        const previousLoader = existingConfig.loader;
+        const previousLoaderVersion = existingConfig.loaderVersion;
+        const normalizedLoader = typeof loader === 'string' && loader.trim()
+          ? loader.trim().toLowerCase()
+          : (fabricVersion ? 'fabric' : (existingConfig.loader || (existingConfig.fabric ? 'fabric' : 'vanilla')));
+        const normalizedLoaderVersion = normalizedLoader === 'vanilla'
+          ? null
+          : (loaderVersion || fabricVersion || existingConfig.loaderVersion || existingConfig.fabric || null);
+        const normalizedFabricVersion = normalizedLoader === 'fabric' ? normalizedLoaderVersion : null;
         
         logger.info('Updating version configuration', {
           category: 'settings',
@@ -839,7 +850,11 @@ function createFileHandlers(win) {
             previousVersion,
             newVersion: mcVersion,
             previousFabric,
-            newFabric: fabricVersion,
+            newFabric: normalizedFabricVersion,
+            previousLoader,
+            newLoader: normalizedLoader,
+            previousLoaderVersion,
+            newLoaderVersion: normalizedLoaderVersion,
             configFile
           }
         });
@@ -847,7 +862,9 @@ function createFileHandlers(win) {
         updateServerConfig(targetPath, {
           ...existingConfig,
           version: mcVersion,
-          fabric: fabricVersion
+          loader: normalizedLoader,
+          loaderVersion: normalizedLoaderVersion,
+          fabric: normalizedFabricVersion
         }, getPortableServerConfigDefaults(targetPath));
         const duration = Date.now() - startTime;
 
@@ -859,7 +876,9 @@ function createFileHandlers(win) {
             success: true,
             configFile,
             mcVersion,
-            fabricVersion
+            fabricVersion: normalizedFabricVersion,
+            loader: normalizedLoader,
+            loaderVersion: normalizedLoaderVersion
           }
         });
 
@@ -874,7 +893,9 @@ function createFileHandlers(win) {
             duration,
             targetPath,
             mcVersion,
-            fabricVersion
+            fabricVersion,
+            loader,
+            loaderVersion
           }
         });
         throw error;

@@ -20,6 +20,13 @@ let autoRestartTimer = null;
 let serverCrashCount = 0;
 let maxCrashesBeforeDisable = storedAutoRestart.maxCrashes;
 
+function applyAutoRestartState(source = {}) {
+  const defaults = getDefaultServerConfig().autoRestart || { enabled: false, delay: 10, maxCrashes: 3 };
+  autoRestartEnabled = typeof source.enabled === 'boolean' ? source.enabled : defaults.enabled;
+  autoRestartDelay = typeof source.delay === 'number' ? source.delay : defaults.delay;
+  maxCrashesBeforeDisable = typeof source.maxCrashes === 'number' ? source.maxCrashes : defaults.maxCrashes;
+}
+
 // Set up event listeners
 eventBus.on('server-crashed', handleServerCrash);
 eventBus.on('server-normal-exit', handleNormalExit);
@@ -146,12 +153,6 @@ function resetCrashCount() {
 }
 
 function persistAutoRestartState(targetPath) {
-  appStore.set('autoRestart', {
-    enabled: autoRestartEnabled,
-    delay: autoRestartDelay,
-    maxCrashes: maxCrashesBeforeDisable
-  });
-
   if (targetPath) {
     updateServerConfig(targetPath, {
       autoRestart: {
@@ -160,7 +161,14 @@ function persistAutoRestartState(targetPath) {
         maxCrashes: maxCrashesBeforeDisable
       }
     }, getDefaultServerConfig());
+    return;
   }
+
+  appStore.set('autoRestart', {
+    enabled: autoRestartEnabled,
+    delay: autoRestartDelay,
+    maxCrashes: maxCrashesBeforeDisable
+  });
 }
 
 /**
@@ -182,7 +190,9 @@ function setAutoRestartOptions(options) {
     maxCrashesBeforeDisable = options.maxCrashes;
   }
 
-  const targetPath = options.targetPath || appStore.get('lastServerPath');
+  const targetPath = typeof options.targetPath === 'string' && options.targetPath.trim()
+    ? options.targetPath.trim()
+    : null;
   persistAutoRestartState(targetPath);
   
   // Reset crash count when enabling
@@ -190,7 +200,7 @@ function setAutoRestartOptions(options) {
     serverCrashCount = 0;
   }
   
-  const state = getAutoRestartState();
+  const state = getAutoRestartState(targetPath);
   
   // Notify the renderer of the change
   safeSend('auto-restart-status', state);
@@ -253,26 +263,13 @@ function handleServerStarted() {
  * @param {string} serverPath - Path to the server directory
  */
 function initFromServerConfig(serverPath) {
-  if (!serverPath) return;
-
-  const config = readServerConfig(serverPath, getDefaultServerConfig());
-  if (!config || !config.autoRestart) {
+  if (!serverPath) {
+    applyAutoRestartState(storedAutoRestart);
     return;
   }
 
-  if (typeof config.autoRestart.enabled === 'boolean') {
-    autoRestartEnabled = config.autoRestart.enabled;
-  }
-
-  if (typeof config.autoRestart.delay === 'number') {
-    autoRestartDelay = config.autoRestart.delay;
-  }
-
-  if (typeof config.autoRestart.maxCrashes === 'number') {
-    maxCrashesBeforeDisable = config.autoRestart.maxCrashes;
-  }
-
-  persistAutoRestartState(serverPath);
+  const config = readServerConfig(serverPath, getDefaultServerConfig());
+  applyAutoRestartState(config?.autoRestart || getDefaultServerConfig().autoRestart);
 }
 
 module.exports = {

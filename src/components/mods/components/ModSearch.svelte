@@ -1,7 +1,7 @@
 <!-- @ts-ignore -->
 <script>
   import { createEventDispatcher } from "svelte";
-  import { onMount } from "svelte";
+  import { onDestroy } from "svelte";
   import {
     searchKeyword,
     modSource,
@@ -12,10 +12,6 @@
     totalPages,
     totalResults,
     expandedModId,
-    minecraftVersion,
-    loaderType,
-    filterMinecraftVersion,
-    filterModLoader,
     installedModInfo,
     isCheckingUpdates,
     successMessage,
@@ -33,10 +29,11 @@
     fetchModVersions,
     checkForUpdates,
   } from "../../../utils/mods/modAPI.js";
+  import { safeInvoke } from "../../../utils/ipcUtils.js";
   import ModCard from "./ModCard.svelte";
   import ModFilters from "./ModFilters.svelte";
   // Props
-  export const serverPath = "";
+  export let serverPath = "";
 
   /** @type {Set<string> | undefined} */
   export let serverManagedSet = undefined;
@@ -44,6 +41,12 @@
   let versionsCache = {};
   let versionsLoading = {};
   let versionsError = {};
+  let instanceMinecraftVersion = "";
+  let instanceLoader = "vanilla";
+  let selectedMinecraftVersion = "";
+  let selectedModLoader = "vanilla";
+  let activeServerPath = "";
+  let contextRequestId = 0;
   let displayTotalPages = 1; // For UI pagination display
   let visibleMods = []; // Mods to display on current page
   let hasLoadedOnce = false;
@@ -72,26 +75,136 @@
   // Event dispatcher
   const dispatch = createEventDispatcher();
 
-  // Set the current Minecraft version as filter on component load and check for updates
-  onMount(async () => {
-    // Always default to current version on mount
-    filterMinecraftVersion.set($minecraftVersion);
-
-    // Run an initial search with current filters when component mounts
-    const initialSearchOptions = {
-      sortBy,
-      environmentType: filterType,
-      filterMinecraftVersion: $filterMinecraftVersion,
-      filterModLoader: $loaderType,
-    };
-
-    // Only automatically search when component mounts if we have content in the search field
-    if ($searchKeyword) {
-      await handleSearch(null, initialSearchOptions);
+  function normalizeConfigValue(value, fallback = "") {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed || fallback;
     }
 
-    if (!$isCheckingUpdates) {
+    return fallback;
+  }
+
+  function getSearchVersionCacheKey(modId, overrideContext = null) {
+    const normalizedContentType = $activeContentType || CONTENT_TYPES.MODS;
+    const normalizedLoader =
+      normalizedContentType === CONTENT_TYPES.MODS
+        ? normalizeConfigValue(
+            overrideContext?.loader,
+            selectedModLoader || instanceLoader || "vanilla",
+          )
+        : "noloader";
+    const normalizedVersion =
+      normalizeConfigValue(
+        overrideContext?.gameVersion,
+        selectedMinecraftVersion || instanceMinecraftVersion,
+      ) || "all";
+
+    return `${serverPath || ""}:${normalizedContentType}:${modId}:${normalizedLoader}:${normalizedVersion}`;
+  }
+
+  function buildSearchContext(filterOptions = {}) {
+    return {
+      serverPath,
+      sortBy: filterOptions?.sortBy || sortBy,
+      environmentType:
+        filterOptions?.filterType ||
+        filterOptions?.environmentType ||
+        filterType,
+      filterMinecraftVersion:
+        filterOptions?.filterMinecraftVersion !== undefined
+          ? filterOptions.filterMinecraftVersion
+          : selectedMinecraftVersion,
+      filterModLoader:
+        filterOptions?.filterModLoader !== undefined
+          ? filterOptions.filterModLoader
+          : selectedModLoader,
+    };
+  }
+
+  function buildVersionLookupContext() {
+    const effectiveVersion =
+      selectedMinecraftVersion !== undefined
+        ? selectedMinecraftVersion
+        : instanceMinecraftVersion;
+
+    return {
+      loader: selectedModLoader || instanceLoader || "vanilla",
+      minecraftVersion: instanceMinecraftVersion || "",
+      gameVersion: effectiveVersion || undefined,
+      useFilter: effectiveVersion !== "",
+    };
+  }
+
+  async function refreshInstanceContext({ resetFilters = false } = {}) {
+    const requestId = ++contextRequestId;
+    const currentServerPath = serverPath;
+
+    if (!currentServerPath) {
+      instanceMinecraftVersion = "";
+      instanceLoader = "vanilla";
+      if (resetFilters) {
+        selectedMinecraftVersion = "";
+        selectedModLoader = "vanilla";
+      }
+      return;
+    }
+
+    const config = await safeInvoke("read-config", currentServerPath);
+
+    if (requestId !== contextRequestId || currentServerPath !== serverPath) {
+      return;
+    }
+
+    instanceMinecraftVersion = normalizeConfigValue(config?.version);
+    instanceLoader = normalizeConfigValue(config?.loader, "vanilla");
+
+    if (
+      resetFilters ||
+      selectedMinecraftVersion === "" ||
+      activeServerPath !== currentServerPath
+    ) {
+      selectedMinecraftVersion = instanceMinecraftVersion;
+    }
+
+    if (resetFilters || activeServerPath !== currentServerPath) {
+      selectedModLoader = instanceLoader;
+    }
+  }
+
+  async function initializeForServerPath(resetFilters = false) {
+    versionsCache = {};
+    versionsLoading = {};
+    versionsError = {};
+    expandedModId.set(null);
+    searchResults.set([]);
+    shaderResults.set([]);
+    resourcePackResults.set([]);
+    contentTypeCache.set(new Map());
+    totalResults.set(0);
+    totalPages.set(1);
+    currentPage.set(1);
+    activeServerPath = serverPath;
+
+    await refreshInstanceContext({ resetFilters });
+
+    if ($searchKeyword) {
+      await handleSearch(null);
+    }
+
+    if (serverPath && !$isCheckingUpdates) {
       await checkForUpdates(serverPath);
+    }
+  }
+
+  onDestroy(() => {
+    contextRequestId += 1;
+    if (pageDebounceTimer) {
+      clearTimeout(pageDebounceTimer);
+      pageDebounceTimer = null;
+    }
+    if (sortMessageTimer) {
+      clearTimeout(sortMessageTimer);
+      sortMessageTimer = null;
     }
   });
 
@@ -114,8 +227,12 @@
       // For each installed mod that appears in search results, load its versions
       for (const mod of visibleMods) {
         if (installedMods.some((info) => info.projectId === mod.id)) {
+          const cacheKey = getSearchVersionCacheKey(
+            mod.id,
+            buildVersionLookupContext(),
+          );
           // Load mod versions if not already cached
-          if (!versionsCache[mod.id]) {
+          if (!versionsCache[cacheKey]) {
             await loadVersions({ detail: { modId: mod.id, loadAll: true } });
           }
         }
@@ -123,25 +240,21 @@
     } catch (error) {}
   }
 
-  // Handle content type changes
-  $: if ($activeContentType) {
-    // When switching content types, set to current version if filter is null/undefined (but not empty string)
-    if ($filterMinecraftVersion === null || $filterMinecraftVersion === undefined) {
-      filterMinecraftVersion.set($minecraftVersion);
-    }
-  }
-
   // Load mods or search results
   async function loadMods() {
-    await searchContent($activeContentType, { sortBy });
+    await searchContent($activeContentType, buildSearchContext({ sortBy }));
   }
 
   // Post-process search results to ensure they have compatible versions
-  $: if (visibleMods.length > 0 && $filterMinecraftVersion) {
+  $: if (visibleMods.length > 0 && selectedMinecraftVersion) {
     // We don't need to auto-load versions anymore
     // This will be done on-demand when a user expands a mod card
   } // Update display total pages based on API response
   $: displayTotalPages = $totalPages || 1;
+
+  $: if (serverPath !== activeServerPath) {
+    void initializeForServerPath(true);
+  }
 
   // Calculate visible mods based on active content type
   $: {
@@ -163,13 +276,7 @@
   async function handleSearch(event, filterOptions) {
     if (event) event.preventDefault();
 
-    // Get search options
-    const searchOptions = {
-      sortBy: filterOptions?.sortBy || sortBy,
-      environmentType: filterOptions?.filterType || filterType, // Include the environment filter type
-    };
-
-    await searchContent($activeContentType, searchOptions);
+    await searchContent($activeContentType, buildSearchContext(filterOptions));
   }
 
   function showSortMessage(sortOption) {
@@ -214,13 +321,16 @@
     expandedModId.set(null);
     currentPage.set(1);
 
-    // Update the filter version from the event for all content types
-    if (event && event.detail && event.detail.filterMinecraftVersion !== undefined) {
-      filterMinecraftVersion.set(event.detail.filterMinecraftVersion);
-    }
-
     // Get filter values
     if (event && event.detail) {
+      if (event.detail.filterMinecraftVersion !== undefined) {
+        selectedMinecraftVersion = event.detail.filterMinecraftVersion;
+      }
+
+      if (event.detail.filterModLoader !== undefined) {
+        selectedModLoader = event.detail.filterModLoader;
+      }
+
       // Update content-type-specific filter variables
       if ($activeContentType === CONTENT_TYPES.SHADERS) {
         shadersFilterType = event.detail.filterType;
@@ -241,6 +351,9 @@
 
       // Clear the cache to force a fresh search
       contentTypeCache.set(new Map());
+      versionsCache = {};
+      versionsLoading = {};
+      versionsError = {};
 
       // Wait for store updates to propagate
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -284,6 +397,8 @@
         await handleSearch(null, {
           sortBy,
           environmentType: filterType,
+          filterMinecraftVersion: selectedMinecraftVersion,
+          filterModLoader: selectedModLoader,
         });
         window.scrollTo(0, 0);
       } catch (error) {
@@ -313,17 +428,19 @@
   // Load versions for a mod
   async function loadVersions(event) {
     const { modId, loadLatestOnly = false, loadAll = false } = event.detail;
+    const versionLookupContext = buildVersionLookupContext();
+    const cacheKey = getSearchVersionCacheKey(modId, versionLookupContext);
 
     // If we already have versions cached and we're not forcing a reload with loadAll
-    if (versionsCache[modId] && !loadAll) {
+    if (versionsCache[cacheKey] && !loadAll) {
       // If we already have versions and not requesting a full reload, just return
-      if (versionsCache[modId].length > 0) {
+      if (versionsCache[cacheKey].length > 0) {
         return;
       }
     }
 
-    versionsLoading = { ...versionsLoading, [modId]: true };
-    versionsError = { ...versionsError, [modId]: null };
+    versionsLoading = { ...versionsLoading, [cacheKey]: true };
+    versionsError = { ...versionsError, [cacheKey]: null };
 
     try {
       const versions = await fetchModVersions(
@@ -332,15 +449,16 @@
         loadLatestOnly,
         false,
         $activeContentType,
+        versionLookupContext,
       );
-      versionsCache = { ...versionsCache, [modId]: versions };
+      versionsCache = { ...versionsCache, [cacheKey]: versions };
     } catch (error) {
       versionsError = {
         ...versionsError,
-        [modId]: error.message || "Failed to load versions",
+        [cacheKey]: error.message || "Failed to load versions",
       };
     } finally {
-      versionsLoading = { ...versionsLoading, [modId]: false };
+      versionsLoading = { ...versionsLoading, [cacheKey]: false };
     }
   }
   // Handle version selection
@@ -363,8 +481,8 @@
         const currentFilters = {
           sortBy,
           environmentType: filterType,
-          filterMinecraftVersion: $filterMinecraftVersion,
-          filterModLoader: $filterModLoader,
+          filterMinecraftVersion: selectedMinecraftVersion,
+          filterModLoader: selectedModLoader,
         };
         handleSearch(e, currentFilters);
       }}
@@ -424,8 +542,10 @@
     <ModFilters
       {sortBy}
       {filterType}
-      filterMinecraftVersion={$filterMinecraftVersion}
-      filterModLoader={$filterModLoader}
+      filterMinecraftVersion={selectedMinecraftVersion}
+      filterModLoader={selectedModLoader}
+      instanceMinecraftVersion={instanceMinecraftVersion}
+      instanceLoader={instanceLoader}
       activeContentType={$activeContentType}
       on:filterChange={handleFilterChange}
     />
@@ -553,10 +673,10 @@
           <ModCard
             {mod}
             expanded={$expandedModId === mod.id}
-            versions={versionsCache[mod.id] || []}
-            loading={versionsLoading[mod.id] || false}
-            error={versionsError[mod.id] || null}
-            filterMinecraftVersion={$filterMinecraftVersion}
+            versions={versionsCache[getSearchVersionCacheKey(mod.id, buildVersionLookupContext())] || []}
+            loading={versionsLoading[getSearchVersionCacheKey(mod.id, buildVersionLookupContext())] || false}
+            error={versionsError[getSearchVersionCacheKey(mod.id, buildVersionLookupContext())] || null}
+            filterMinecraftVersion={selectedMinecraftVersion}
             loadOnMount={true}
             installedVersionId={installedInfo?.versionId || ""}
             {serverManaged}
@@ -716,8 +836,8 @@
               : "mods"}.
         </p>
         <p>
-          {#if $filterMinecraftVersion}
-            Searching for Minecraft version {$filterMinecraftVersion}.
+          {#if selectedMinecraftVersion}
+            Searching for Minecraft version {selectedMinecraftVersion}.
           {:else}
             Searching across all Minecraft versions.
           {/if}

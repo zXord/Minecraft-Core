@@ -441,11 +441,11 @@ const modToInstall = createEnhancedModStore(null, 'modToInstall');
 // Server configuration with logging
 const serverConfig = createEnhancedModStore(null, 'serverConfig');
 const minecraftVersion = createEnhancedModStore('', 'minecraftVersion');
-const loaderType = createEnhancedModStore('fabric', 'loaderType');
+const loaderType = createEnhancedModStore('vanilla', 'loaderType');
 
 // Filter stores with logging
 const filterMinecraftVersion = createEnhancedModStore('', 'filterMinecraftVersion');
-const filterModLoader = createEnhancedModStore('fabric', 'filterModLoader');
+const filterModLoader = createEnhancedModStore('', 'filterModLoader');
 
 // Store for mod categories and requirement status with enhanced logging
 const modCategories = createEnhancedModStore(new Map(), 'modCategories'); // Map of modId -> { category: string, required: boolean }
@@ -469,6 +469,43 @@ const installedResourcePackIds = createEnhancedModStore(new SvelteSet(), 'instal
 // Installed info stores for different content types (similar to installedModInfo)
 const installedShaderInfo = createEnhancedModStore([], 'installedShaderInfo');
 const installedResourcePackInfo = createEnhancedModStore([], 'installedResourcePackInfo');
+
+function resetModInstanceState() {
+  installedMods.set([]);
+  installedModInfo.set([]);
+  installedModIds.set(new SvelteSet());
+  modVersionsCache.set({});
+  installedModVersionsCache.set({});
+  installedShaders.set([]);
+  installedShaderInfo.set([]);
+  installedShaderIds.set(new SvelteSet());
+  installedResourcePacks.set([]);
+  installedResourcePackInfo.set([]);
+  installedResourcePackIds.set(new SvelteSet());
+  searchResults.set([]);
+  shaderResults.set([]);
+  resourcePackResults.set([]);
+  modsWithUpdates.set(new Map());
+  disabledMods.set(new SvelteSet());
+  disabledModUpdates.set(new Map());
+  serverManagedFiles.set(new SvelteSet());
+  installingModIds.set(new SvelteSet());
+  currentDependencies.set([]);
+  modToInstall.set(null);
+  expandedInstalledMod.set(null);
+  expandedModId.set(null);
+  errorMessage.set('');
+  successMessage.set('');
+  searchError.set('');
+  serverConfig.set(null);
+  minecraftVersion.set('');
+  loaderType.set('vanilla');
+  filterMinecraftVersion.set('');
+  filterModLoader.set('');
+  lastUpdateCheckTime.set(0);
+  contentTypeCache.set(new Map());
+  contentTypeRetryCount.set(new Map());
+}
 
 // Content type configuration objects
 export const CONTENT_TYPES = {
@@ -1129,49 +1166,24 @@ function _extractPathCandidate(raw, seen = new Set(), depth = 0) {
 async function _getServerPath() {
   try {
     const spObj = (typeof window !== 'undefined') ? window.serverPath : null;
-    let rawVal = '';
-    if (spObj && typeof spObj.get === 'function') {
-      let val = spObj.get();
-      // Promise-like
-      // @ts-ignore
-      if (val && typeof val.then === 'function') {
-  try { val = await val; } catch { /* swallow */ }
-      }
-      rawVal = val;
-    }
-    let candidate = '';
-    if (typeof rawVal === 'string') {
-      candidate = rawVal;
-    } else if (rawVal && typeof rawVal === 'object') {
-      candidate = _extractPathCandidate(rawVal);
-      if (!candidate) {
-        try { candidate = Object.prototype.toString.call(rawVal); } catch { /* ignore */ }
-      }
-    }
-    // If candidate still looks like [object Object] or lacks separators, treat as invalid
-    if (!candidate || candidate === '[object Object]' || (!/[\\/]/.test(candidate) && !/^[a-zA-Z]:/.test(candidate))) {
-      // Try IPC fallback for last server path
-      try {
-        if (window.electron && window.electron.invoke) {
-          const last = await window.electron.invoke('get-last-server-path');
-          if (typeof last === 'string' && (/[\\/]/.test(last) || /^[a-zA-Z]:/.test(last))) {
-            return last;
-          }
-        }
-      } catch { /* ignore */ }
-      // Try localStorage cache if we ever stored it
-      try {
-        const ls = localStorage.getItem('minecraft-core:last-server-path');
-  if (ls && (/[\\/]/.test(ls) || /^[a-zA-Z]:/.test(ls))) {
-          return ls;
-        }
-      } catch { /* ignore */ }
-  // server path unresolved
+    if (!spObj || typeof spObj.get !== 'function') {
       return '';
     }
-  // resolved server path
-    // Cache for potential fallback later
-    try { localStorage.setItem('minecraft-core:last-server-path', candidate); } catch { /* ignore */ }
+
+    let rawVal = spObj.get();
+    // @ts-ignore
+    if (rawVal && typeof rawVal.then === 'function') {
+      try { rawVal = await rawVal; } catch { return ''; }
+    }
+
+    const candidate = typeof rawVal === 'string'
+      ? rawVal
+      : _extractPathCandidate(rawVal);
+
+    if (!candidate || candidate === '[object Object]' || (!/[\\/]/.test(candidate) && !/^[a-zA-Z]:/.test(candidate))) {
+      return '';
+    }
+
     return candidate;
   } catch {
     return '';
@@ -1677,6 +1689,7 @@ export {
   getHasUpdates,
   getUpdateCount,
   getCategorizedMods,
+  resetModInstanceState,
 
   // Helper functions
   compareVersions
@@ -1991,9 +2004,12 @@ export async function updateModCategory(modId, category) {
 
     let updateApplied = false;
     let oldCategory = null;
+    let previousEntry = null;
 
     modCategories.update($categories => {
-      const current = $categories.get(modId) || { required: true };
+      const existingEntry = $categories.get(modId);
+      previousEntry = existingEntry ? { ...existingEntry } : null;
+      const current = existingEntry || { required: true };
       oldCategory = current.category;
 
       if (current.category !== category) {
@@ -2045,6 +2061,16 @@ export async function updateModCategory(modId, category) {
           }
         });
       } else {
+        modCategories.update($categories => {
+          const restoredCategories = new Map($categories);
+          if (previousEntry) {
+            restoredCategories.set(modId, previousEntry);
+          } else {
+            restoredCategories.delete(modId);
+          }
+          return restoredCategories;
+        });
+
         logger.warn('Mod category updated in store but persistence failed', {
           category: 'mods',
           data: {
@@ -2113,9 +2139,12 @@ export async function updateModRequired(modId, required) {
 
     let updateApplied = false;
     let oldRequired = null;
+    let previousEntry = null;
 
     modCategories.update($categories => {
-      const current = $categories.get(modId) || { category: 'unassigned' };
+      const existingEntry = $categories.get(modId);
+      previousEntry = existingEntry ? { ...existingEntry } : null;
+      const current = existingEntry || { category: 'unassigned' };
       oldRequired = current.required;
 
       if (current.required !== required) {
@@ -2167,6 +2196,16 @@ export async function updateModRequired(modId, required) {
           }
         });
       } else {
+        modCategories.update($categories => {
+          const restoredCategories = new Map($categories);
+          if (previousEntry) {
+            restoredCategories.set(modId, previousEntry);
+          } else {
+            restoredCategories.delete(modId);
+          }
+          return restoredCategories;
+        });
+
         logger.warn('Mod required status updated in store but persistence failed', {
           category: 'mods',
           data: {

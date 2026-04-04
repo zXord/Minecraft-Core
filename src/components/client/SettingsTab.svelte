@@ -31,6 +31,12 @@
   let lastAuthDate = authData?.lastLogin || null;
   let clientFolderSize = null; // bytes
   let clientFolderSizeLoading = false;
+  let reusableAuthAccounts = [];
+  let reusableAuthLoading = false;
+  let reusableAuthError = '';
+  let selectedReusableAuthInstanceId = '';
+  let isImportingExistingAuth = false;
+  let reusableAuthLoadKey = '';
 
   function formatBytes(bytes) {
     if (bytes === 0) return '0 B';
@@ -73,11 +79,24 @@
         primaryDownloadSource = preferences.primarySource || 'modrinth';
         fallbackDownloadSource = preferences.fallbackSource || 'server';
       }
-  loadClientFolderSize();
+      loadClientFolderSize();
+      loadReusableAuthAccounts();
     } catch (error) {
       // Failed to load preferences, will use defaults
     }
   });
+
+  $: {
+    const nextLoadKey = `${instance?.id || ''}:${instance?.path || ''}`;
+    if (nextLoadKey && nextLoadKey !== reusableAuthLoadKey) {
+      reusableAuthLoadKey = nextLoadKey;
+      loadReusableAuthAccounts();
+    }
+  }
+
+  $: if (authData?.lastLogin || authData?.savedAt) {
+    lastAuthDate = authData.lastLogin || authData.savedAt;
+  }
 
   // Enhanced functions with loading states
   async function handleAuthenticate() {
@@ -96,8 +115,101 @@
       // Call authentication with force flag
       await authenticateWithMicrosoft(true);
       lastAuthDate = new Date().toISOString();
+      await loadReusableAuthAccounts();
     } finally {
       isAuthenticating = false;
+    }
+  }
+
+  function formatSavedAuthDate(value) {
+    if (!value) return 'Last updated recently';
+    try {
+      return `Saved ${new Date(value).toLocaleString()}`;
+    } catch {
+      return 'Saved recently';
+    }
+  }
+
+  async function loadReusableAuthAccounts() {
+    if (!instance?.path) {
+      reusableAuthAccounts = [];
+      selectedReusableAuthInstanceId = '';
+      reusableAuthError = '';
+      return;
+    }
+
+    reusableAuthLoading = true;
+    reusableAuthError = '';
+
+    try {
+      const result = await window.electron.invoke('minecraft-list-reusable-auth', {
+        targetClientPath: instance.path,
+        targetInstanceId: instance.id
+      });
+
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to load reusable accounts');
+      }
+
+      reusableAuthAccounts = Array.isArray(result.accounts) ? result.accounts : [];
+      if (!reusableAuthAccounts.some((account) => account.instanceId === selectedReusableAuthInstanceId)) {
+        selectedReusableAuthInstanceId = reusableAuthAccounts[0]?.instanceId || '';
+      }
+    } catch (error) {
+      reusableAuthAccounts = [];
+      selectedReusableAuthInstanceId = '';
+      reusableAuthError = error?.message || 'Failed to load reusable accounts';
+    } finally {
+      reusableAuthLoading = false;
+    }
+  }
+
+  async function handleImportExistingAuth() {
+    if (!instance?.path || !selectedReusableAuthInstanceId) return;
+
+    isImportingExistingAuth = true;
+    reusableAuthError = '';
+
+    try {
+      const importResult = await window.electron.invoke('minecraft-import-auth-from-instance', {
+        targetClientPath: instance.path,
+        sourceInstanceId: selectedReusableAuthInstanceId
+      });
+
+      if (!importResult?.success) {
+        throw new Error(importResult?.error || 'Failed to import login');
+      }
+
+      const authResult = await window.electron.invoke('minecraft-load-auth', {
+        clientPath: instance.path
+      });
+
+      if (!authResult?.success) {
+        throw new Error(authResult?.error || 'Imported login could not be loaded');
+      }
+
+      lastAuthDate = new Date().toISOString();
+      dispatch('auth-state-changed', {
+        authStatus: 'authenticated',
+        username: authResult.username,
+        authData: {
+          username: authResult.username,
+          uuid: authResult.uuid
+        }
+      });
+      dispatch('show-message', {
+        type: 'success',
+        message: `Imported ${authResult.username} from ${importResult.sourceInstanceName}`
+      });
+      await loadReusableAuthAccounts();
+    } catch (error) {
+      reusableAuthError = error?.message || 'Failed to import login';
+      dispatch('show-message', {
+        type: 'error',
+        message: reusableAuthError
+      });
+    } finally {
+      isImportingExistingAuth = false;
     }
   }
 
@@ -328,35 +440,61 @@
   }
 
   // Derive client loader info for quick display (fallback to profile name parsing)
-  function extractLoaderVersionFromProfile(profileName) {
-    if (!profileName || typeof profileName !== 'string') return null;
-    const prefix = 'fabric-loader-';
-    if (!profileName.startsWith(prefix)) return null;
-
-    const remainder = profileName.slice(prefix.length);
-    const lastDash = remainder.lastIndexOf('-');
-    if (lastDash === -1) return remainder || null;
-
-    const loaderVersion = remainder.slice(0, lastDash);
-    const suffix = remainder.slice(lastDash + 1);
-    return suffix && /^[0-9]/.test(suffix) ? (loaderVersion || null) : (remainder || null);
+  function formatLoaderName(loaderType) {
+    if (!loaderType) return 'Loader';
+    return String(loaderType).charAt(0).toUpperCase() + String(loaderType).slice(1);
   }
+
+  function extractLoaderVersionFromProfile(profileName, loaderType = null) {
+    if (!profileName || typeof profileName !== 'string') return null;
+    const normalizedProfile = String(profileName);
+    const normalizedLoader = loaderType ? String(loaderType).toLowerCase() : '';
+
+    if (normalizedLoader === 'forge' && normalizedProfile.includes('-forge-')) {
+      return normalizedProfile.split('-forge-').slice(1).join('-') || null;
+    }
+
+    if (normalizedProfile.startsWith('fabric-loader-')) {
+      const remainder = normalizedProfile.slice('fabric-loader-'.length);
+      const lastDash = remainder.lastIndexOf('-');
+      if (lastDash === -1) return remainder || null;
+      const loaderVersion = remainder.slice(0, lastDash);
+      const suffix = remainder.slice(lastDash + 1);
+      return suffix && /^[0-9]/.test(suffix) ? (loaderVersion || null) : (remainder || null);
+    }
+
+    const inlineFabricMatch = normalizedProfile.match(/-fabric([0-9][^-\s]*)/i);
+    if (inlineFabricMatch) {
+      return inlineFabricMatch[1] || null;
+    }
+
+    return null;
+  }
+  $: resolvedServerLoaderType = serverInfo?.loaderType || null;
   $: derivedProfileLoaderVersion = extractLoaderVersionFromProfile(
+    clientSyncInfo?.installedLoaderProfile ||
     clientSyncInfo?.installedFabricProfile ||
     clientSyncInfo?.fabricProfileName ||
-    clientSyncInfo?.targetVersion
+    clientSyncInfo?.targetVersion,
+    clientSyncInfo?.installedLoaderType || clientSyncInfo?.loaderType || resolvedServerLoaderType
   );
-  $: clientLoaderVersion = clientSyncInfo?.installedFabricVersion
+  $: clientLoaderType = clientSyncInfo?.installedLoaderType
+    || clientSyncInfo?.loaderType
+    || resolvedServerLoaderType
+    || null;
+  $: clientLoaderVersion = clientSyncInfo?.installedLoaderVersion
+    || clientSyncInfo?.loaderVersion
+    || clientSyncInfo?.installedFabricVersion
     || clientSyncInfo?.fabricVersion
     || derivedProfileLoaderVersion
     || null;
 
-  // Auto-trigger a silent client check to populate Fabric detection when missing
+  // Auto-trigger a silent client check to populate loader detection when missing
   let fabricAutoChecked = false;
   let fabricAutoCheckInProgress = false;
   let fabricAutoCheckCooldown = false;
 
-  // Retry the automatic Fabric detection after a short delay when a sync check is skipped
+  // Retry the automatic loader detection after a short delay when a sync check is skipped
   function scheduleFabricAutoRetry() {
     if (fabricAutoCheckCooldown) return;
     fabricAutoCheckCooldown = true;
@@ -369,7 +507,8 @@
     !fabricAutoChecked &&
     !fabricAutoCheckInProgress &&
     !fabricAutoCheckCooldown &&
-    serverInfo?.loaderType === 'fabric' &&
+    serverInfo?.loaderType &&
+    serverInfo.loaderType !== 'vanilla' &&
     !clientLoaderVersion &&
     typeof checkClientSynchronization === 'function'
   ) {
@@ -389,13 +528,26 @@
         fabricAutoCheckInProgress = false;
       });
   }
-  $: serverLoaderVersion = serverInfo?.loaderType === 'fabric' ? (serverInfo.loaderVersion || null) : null;
+  $: serverLoaderVersion =
+    serverInfo?.loaderType && serverInfo.loaderType !== 'vanilla'
+      ? (serverInfo.loaderVersion || null)
+      : null;
   $: comparableServerLoaderVersion =
     serverLoaderVersion && typeof serverLoaderVersion === 'string' && serverLoaderVersion.trim().toLowerCase() === 'latest'
-      ? (clientSyncInfo?.fabricVersion || clientLoaderVersion || null)
+      ? (clientSyncInfo?.loaderVersion || clientSyncInfo?.fabricVersion || clientLoaderVersion || null)
       : serverLoaderVersion;
-  $: loaderMismatch = comparableServerLoaderVersion && clientLoaderVersion && comparableServerLoaderVersion !== clientLoaderVersion;
-  $: loaderMissing = serverLoaderVersion && !clientLoaderVersion && clientSyncStatus !== 'ready';
+  $: loaderTypeMismatch =
+    serverInfo?.loaderType &&
+    serverInfo.loaderType !== 'vanilla' &&
+    clientLoaderType &&
+    clientLoaderType !== serverInfo.loaderType;
+  $: loaderMismatch =
+    loaderTypeMismatch ||
+    (comparableServerLoaderVersion && clientLoaderVersion && comparableServerLoaderVersion !== clientLoaderVersion);
+  $: loaderMissing =
+    serverLoaderVersion &&
+    (!clientLoaderType || !clientLoaderVersion) &&
+    clientSyncStatus !== 'ready';
 </script>
 
       <div class="settings-container">
@@ -492,15 +644,62 @@
                 </div>
             {:else}
                 <p class="auth-description">Microsoft authentication required</p>
-                <button 
-                  class="modern-btn primary sm" 
-                  on:click={handleAuthenticate} 
-                  disabled={isAuthenticating}
-                  title="Login with Microsoft"
-                >
-                  {isAuthenticating ? '⏳ Authenticating...' : '🔑 Login with Microsoft'}
-              </button>
+                <div class="auth-buttons stacked">
+                  <button 
+                    class="modern-btn primary sm" 
+                    on:click={handleAuthenticate} 
+                    disabled={isAuthenticating}
+                    title="Login with Microsoft"
+                  >
+                    {isAuthenticating ? '⏳ Authenticating...' : '🔑 Login with Microsoft'}
+                  </button>
+                </div>
             {/if}
+
+            <div class="reuse-auth-panel">
+              <div class="reuse-auth-header">
+                <h5>Use Existing Logged-In Account</h5>
+                <button class="modern-btn tertiary sm" on:click={loadReusableAuthAccounts} disabled={reusableAuthLoading}>
+                  {reusableAuthLoading ? 'Refreshing...' : 'Refresh'}
+                </button>
+              </div>
+
+              {#if reusableAuthError}
+                <p class="reuse-auth-error">{reusableAuthError}</p>
+              {/if}
+
+              {#if reusableAuthLoading && reusableAuthAccounts.length === 0}
+                <p class="reuse-auth-note">Checking other client instances for saved logins...</p>
+              {:else if reusableAuthAccounts.length > 0}
+                <p class="reuse-auth-note">Copy a saved login from another client instance into this instance.</p>
+                <div class="reuse-auth-list">
+                  {#each reusableAuthAccounts as account (account.instanceId)}
+                    <label class="reuse-auth-option">
+                      <input
+                        type="radio"
+                        name="reusable-auth-account"
+                        value={account.instanceId}
+                        bind:group={selectedReusableAuthInstanceId}
+                      />
+                      <div class="reuse-auth-copy">
+                        <strong>{account.username}</strong>
+                        <span>{account.instanceName}</span>
+                        <span>{formatSavedAuthDate(account.savedAt)}</span>
+                      </div>
+                    </label>
+                  {/each}
+                </div>
+                <button
+                  class="modern-btn secondary sm"
+                  on:click={handleImportExistingAuth}
+                  disabled={!selectedReusableAuthInstanceId || isImportingExistingAuth}
+                >
+                  {isImportingExistingAuth ? 'Importing Login...' : 'Use Selected Login'}
+                </button>
+              {:else}
+                <p class="reuse-auth-note">No reusable logins were found on other client instances yet.</p>
+              {/if}
+            </div>
             </div>
           </div>
           
@@ -513,9 +712,9 @@
               {/if}
               {#if serverLoaderVersion}
                 <div class="loader-badges">
-                  <span class="loader-pill">Server Fabric: {serverLoaderVersion}</span>
+                  <span class="loader-pill">Server {formatLoaderName(serverInfo?.loaderType)}: {serverLoaderVersion}</span>
                   <span class="loader-pill {loaderMismatch || loaderMissing ? 'warn' : 'ok'}">
-                    Client Fabric: {clientLoaderVersion || 'not detected'}
+                    Client {formatLoaderName(clientLoaderType || serverInfo?.loaderType)}: {clientLoaderVersion || 'not detected'}
                   </span>
                 </div>
               {/if}
@@ -1140,6 +1339,95 @@
     margin-top: 0.5rem;
   }
 
+  .auth-buttons.stacked {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .reuse-auth-panel {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border-radius: 6px;
+    border: 1px solid rgba(59, 130, 246, 0.18);
+    background: rgba(17, 24, 39, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .reuse-auth-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .reuse-auth-header h5 {
+    margin: 0;
+    color: #dbeafe;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+
+  .reuse-auth-note {
+    margin: 0;
+    color: #9ca3af;
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+
+  .reuse-auth-error {
+    margin: 0;
+    color: #fca5a5;
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+
+  .reuse-auth-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .reuse-auth-option {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    padding: 0.55rem 0.6rem;
+    border-radius: 5px;
+    border: 1px solid rgba(75, 85, 99, 0.35);
+    background: rgba(31, 41, 55, 0.55);
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease;
+  }
+
+  .reuse-auth-option:hover {
+    border-color: rgba(96, 165, 250, 0.4);
+    background: rgba(31, 41, 55, 0.75);
+  }
+
+  .reuse-auth-option input {
+    margin-top: 0.2rem;
+  }
+
+  .reuse-auth-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
+  .reuse-auth-copy strong {
+    color: #f3f4f6;
+    font-size: 0.76rem;
+  }
+
+  .reuse-auth-copy span {
+    color: #9ca3af;
+    font-size: 0.69rem;
+    line-height: 1.35;
+  }
+
 
 
   .no-connection {
@@ -1203,6 +1491,17 @@
   .modern-btn.secondary:hover:not(:disabled) {
     background: rgba(75, 85, 99, 0.25);
     border-color: rgba(75, 85, 99, 0.5);
+  }
+
+  .modern-btn.tertiary {
+    background: rgba(30, 41, 59, 0.7);
+    color: #bfdbfe;
+    border-color: rgba(96, 165, 250, 0.25);
+  }
+
+  .modern-btn.tertiary:hover:not(:disabled) {
+    background: rgba(30, 41, 59, 0.95);
+    border-color: rgba(96, 165, 250, 0.45);
   }
 
   .modern-btn.warning {

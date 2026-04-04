@@ -56,8 +56,8 @@
               <span class="status-text warning">🗑️ {modSyncStatus.needsRemoval} need removal</span>
             {:else if modSyncStatus.synchronized && (!modSyncStatus.needsAcknowledgment || modSyncStatus.needsAcknowledgment === 0)}
               <span class="status-text success">✅ All synchronized</span>
-            {:else if modSyncStatus.needsAcknowledgment && modSyncStatus.needsAcknowledgment > 0}
-              <span class="status-text info">🔗 {modSyncStatus.needsAcknowledgment} need acknowledgment</span>
+  {:else if modSyncStatus.needsAcknowledgment && modSyncStatus.needsAcknowledgment > 0}
+    <span class="status-text info">🔗 {modSyncStatus.needsAcknowledgment} should be kept</span>
             {:else}
               <span class="status-text warning">⚠️ {modSyncStatus.needsDownload} need download</span>
             {/if}
@@ -122,7 +122,7 @@
           <span class="status-icon">🔗</span>
           <div class="status-content">
             <h4>Dependency notifications pending</h4>
-            <p>There {modSyncStatus.needsAcknowledgment === 1 ? 'is' : 'are'} {modSyncStatus.needsAcknowledgment} mod{modSyncStatus.needsAcknowledgment > 1 ? 's' : ''} that {modSyncStatus.needsAcknowledgment === 1 ? 'is' : 'are'} being kept due to client-side dependencies. Please acknowledge {modSyncStatus.needsAcknowledgment === 1 ? 'it' : 'them'} in the mod list below.</p>
+        <p>There {modSyncStatus.needsAcknowledgment === 1 ? 'is' : 'are'} {modSyncStatus.needsAcknowledgment} mod{modSyncStatus.needsAcknowledgment > 1 ? 's' : ''} that {modSyncStatus.needsAcknowledgment === 1 ? 'is' : 'are'} still needed by client-side dependencies. Review and keep {modSyncStatus.needsAcknowledgment === 1 ? 'it' : 'them'} in the mod list below.</p>
           </div>
         </div>
       {:else if modSyncStatus.synchronized && modSyncStatus.needsOptionalDownload > 0}
@@ -153,7 +153,7 @@
               {:else if actualRemovals.length > 0}
                 <p>You need to remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''} that {actualRemovals.length > 1 ? 'are' : 'is'} no longer required by the server.</p>
               {:else if acknowledgments.length > 0}
-                <p>You need to acknowledge {acknowledgments.length} mod{acknowledgments.length > 1 ? 's' : ''} that {acknowledgments.length > 1 ? 'are' : 'is'} being kept as dependencies.</p>
+            <p>You need to keep {acknowledgments.length} mod{acknowledgments.length > 1 ? 's' : ''} that {acknowledgments.length > 1 ? 'are' : 'is'} still required as dependencies.</p>
               {/if}
             </div>
           </div>
@@ -194,7 +194,7 @@
           </button>
         {:else if acknowledgments.length > 0}
           <button class="mod-action-btn acknowledge" on:click={acknowledgeAllDependencies}>
-            ✓ Acknowledge ({acknowledgments.length})
+            ✓ Keep These Mods ({acknowledgments.length})
           </button>
         {:else}
           <button class="mod-action-btn primary" on:click={downloadRequired}>

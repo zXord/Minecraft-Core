@@ -1,5 +1,6 @@
 <script>
   export let serverPath = "";
+  export let currentInstance = null;
   import { onMount, onDestroy, afterUpdate } from "svelte";
   import ServerControls from "../components/server/ServerControls.svelte";
   import ServerMetrics from "../components/server/ServerMetrics.svelte";
@@ -246,9 +247,9 @@
       <button on:click={refreshDashboard}>Retry</button>
     </div>
   {:else}
-    <ServerControls {serverPath} />
+    <ServerControls {serverPath} {currentInstance} />
     <ServerMetrics />
-    <ServerConsole />
+    <ServerConsole {currentInstance} />
   {/if}
 </div>
 

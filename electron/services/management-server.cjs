@@ -11,19 +11,43 @@ const { wmicExecAsync } = require('../utils/wmic-utils.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { getManagementTlsConfig } = require('../utils/tls-utils.cjs');
+const { resolveServerLoader } = require('../utils/server-loader.cjs');
 const process = require('process');
 const os = require('os');
 
 // Reuse centralized in-app logger
 const logger = getLoggerHandlers();
 
+function findInstanceByPath(serverPath) {
+  if (!serverPath) return null;
+  try {
+    const appStore = require('../utils/app-store.cjs');
+    const instances = appStore.get('instances') || [];
+    return instances.find((instance) => instance && instance.type === 'server' && instance.path === serverPath) || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveManagementInstanceId(instanceId, serverPath) {
+  if (typeof instanceId === 'string' && instanceId.trim()) {
+    return instanceId.trim();
+  }
+  const instance = findInstanceByPath(serverPath);
+  if (instance && instance.id) {
+    return instance.id;
+  }
+  return typeof serverPath === 'string' && serverPath.trim() ? serverPath.trim() : 'management-default';
+}
+
 class ManagementServer {
   /** @type {ReturnType<typeof express>} */
   app;
   /** @type {import('http').Server | null} */
   server = null;
-  constructor() {
+  constructor(instanceId = null) {
     this.app = express();
+    this.instanceId = instanceId;
     this.port = 8080; // Default management port (different from Minecraft)
     this.isRunning = false;
     this.useHttps = true;
@@ -638,54 +662,20 @@ class ManagementServer {
         
         // Check Minecraft server status
         const minecraftServerStatus = await this.checkMinecraftServerStatus();
-          // Detect server loader type (Fabric/Forge/Vanilla)
-        let loaderType = 'vanilla';
-        let loaderVersion = null;
-        
-        // First priority: check .minecraft-core.json config file for loader info
-        if (fs.existsSync(minecraftCoreConfigPath)) {
-          const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
-          if (coreConfig.fabric) {
-            loaderType = 'fabric';
-            loaderVersion = coreConfig.fabric;
-          }
-        }
-        
-        // Fallback: Check for Fabric launcher jar
-        if (loaderType === 'vanilla') {
-          const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
-          if (fs.existsSync(fabricLaunchJar)) {
-            loaderType = 'fabric';
-            const configPath = path.join(this.serverPath, 'config.json');
-            if (fs.existsSync(configPath)) {
-              const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-              loaderVersion = config.fabric || config.loaderVersion;
-            }
-          }
-        }
-        
-        // Check for Forge (forge-server.jar or forge in filename)
-        if (loaderType === 'vanilla') {
-          const serverFiles = fs.readdirSync(this.serverPath);
-          for (const file of serverFiles) {
-            if (file.includes('forge') && file.endsWith('.jar') && file !== 'fabric-server-launch.jar') {
-              loaderType = 'forge';
-              const match = file.match(/forge[.-](\d+\.\d+\.\d+)/i);
-              if (match) loaderVersion = match[1];
-              break;
-            }
-          }
-        }
+        const loaderInfo = resolveServerLoader(this.serverPath);
+        const loaderType = loaderInfo.loader || 'vanilla';
+        const loaderVersion = loaderInfo.loaderVersion || null;
         
         res.json({
           success: true,
+          instanceId: this.instanceId,
           serverPath: this.serverPath,
           serverProperties: serverProps,
           minecraftPort: serverProps['server-port'] || '25565',
           minecraftServerStatus: minecraftServerStatus,
           minecraftVersion: minecraftVersion,
-          loaderType: loaderType,
-          loaderVersion: loaderVersion,
+          loaderType,
+          loaderVersion,
           requiredMods: requiredMods,
           allClientMods: allClientMods,
           appVersion: this.appVersion, // Include app version in server info
@@ -711,7 +701,10 @@ class ManagementServer {
       void _req;
       try {
         const serverManager = require('./server-manager.cjs');
-        const state = serverManager.getServerState();
+        const state = serverManager.getServerState({
+          instanceId: this.instanceId,
+          targetPath: this.serverPath
+        });
         const isRunning = !!state.isRunning && !!state.serverProcess;
         if (lastIsRunning === null) {
           lastIsRunning = isRunning;
@@ -723,7 +716,12 @@ class ManagementServer {
           try {
             // Notify desktop renderer (mirrors browser panel behavior)
             const { safeSend } = require('../utils/safe-send.cjs');
-            safeSend && safeSend('server-status', isRunning ? 'running' : 'stopped');
+            safeSend && safeSend('server-status', {
+              instanceId: this.instanceId,
+              isRunning,
+              status: isRunning ? 'running' : 'stopped',
+              targetPath: this.serverPath || state.targetPath || null
+            });
           } catch { /* ignore */ }
         }
         const info = state.serverProcess ? state.serverProcess['serverInfo'] : null;
@@ -1254,30 +1252,35 @@ class ManagementServer {
     }
   }  // Check if Minecraft server is running
   async checkMinecraftServerStatus() {
-    // Rate limiting - cache status for 30 seconds to prevent excessive checks
-    const now = Date.now();
-    if (this._lastStatusCheck && (now - this._lastStatusCheck) < 30000 && this._cachedStatus) {
-      return this._cachedStatus;
-    }
-
     try {
       // First check if we have an active server process through the server manager
       const serverManager = require('./server-manager.cjs');
-      const serverState = serverManager.getServerState();
+      const serverState = serverManager.getServerState({
+        instanceId: this.instanceId,
+        targetPath: this.serverPath
+      });
       
       if (serverState.isRunning && serverState.serverProcess) {
         try {
           // Verify the process is actually still alive
           process.kill(serverState.serverProcess.pid, 0); // Signal 0 just tests if process exists
+          const now = Date.now();
           this._cachedStatus = 'running';
           this._lastStatusCheck = now;
           return 'running';
         } catch {
           // Process doesn't exist anymore
+          const now = Date.now();
           this._cachedStatus = 'stopped';
           this._lastStatusCheck = now;
           return 'stopped';
         }
+      }
+
+      // Rate limiting - cache fallback status for 30 seconds to prevent excessive process scans
+      const now = Date.now();
+      if (this._lastStatusCheck && (now - this._lastStatusCheck) < 30000 && this._cachedStatus) {
+        return this._cachedStatus;
       }
       
       // Fallback: Check for java processes that might be Minecraft servers
@@ -1808,18 +1811,9 @@ class ManagementServer {
         }
       }
       
-      // Check for Fabric if not already detected from .minecraft-core.json
-      if (loaderType === 'vanilla') {
-        const fabricLaunchJar = path.join(this.serverPath, 'fabric-server-launch.jar');
-        if (fs.existsSync(fabricLaunchJar)) {
-          loaderType = 'fabric';
-          const configPath = path.join(this.serverPath, 'config.json');
-          if (fs.existsSync(configPath)) {
-            const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-            loaderVersion = cfg.fabric || cfg.loaderVersion || null;
-          }
-        }
-      }
+      const loaderInfo = resolveServerLoader(this.serverPath);
+      loaderType = loaderInfo.loader || loaderType;
+      loaderVersion = loaderInfo.loaderVersion || loaderVersion;
     } catch {
       return { minecraftVersion, loaderType, loaderVersion };
     }
@@ -1835,12 +1829,20 @@ class ManagementServer {
       const requiredMods = await this.getRequiredMods();
       const allClientMods = await this.getAllClientMods();
       this.versionInfo = info;
-      this.broadcastEvent('server-version-changed', { ...info, port: this.port, serverPath: this.serverPath, requiredMods, allClientMods });
+      this.broadcastEvent('server-version-changed', {
+        instanceId: this.instanceId,
+        ...info,
+        port: this.port,
+        serverPath: this.serverPath,
+        requiredMods,
+        allClientMods
+      });
     }
   }
   
   getStatus() {
     return {
+      instanceId: this.instanceId,
       isRunning: this.isRunning,
       port: this.port,
       serverPath: this.serverPath,
@@ -1857,17 +1859,135 @@ class ManagementServer {
   }
 }
 
-// Singleton instance
-let managementServerInstance = null;
+const managementServerInstances = new Map();
 
-function getManagementServer() {
-  if (!managementServerInstance) {
-    managementServerInstance = new ManagementServer();
+function getMatchingManagementServerEntries(selector = {}) {
+  const matches = [];
+  const seenKeys = new Set();
+  const requestedInstanceId = typeof selector.instanceId === 'string' && selector.instanceId.trim()
+    ? selector.instanceId.trim()
+    : '';
+  const requestedServerPath = typeof selector.serverPath === 'string' && selector.serverPath.trim()
+    ? selector.serverPath.trim()
+    : '';
+
+  for (const [key, server] of managementServerInstances.entries()) {
+    const addMatch = () => {
+      if (seenKeys.has(key)) {
+        return;
+      }
+      seenKeys.add(key);
+      matches.push([key, server]);
+    };
+
+    if (requestedInstanceId && server.instanceId === requestedInstanceId) {
+      addMatch();
+      continue;
+    }
+    if (requestedServerPath && server.serverPath === requestedServerPath) {
+      addMatch();
+      continue;
+    }
+    if (requestedInstanceId && key === requestedInstanceId) {
+      addMatch();
+      continue;
+    }
+    if (requestedServerPath && key === requestedServerPath) {
+      addMatch();
+    }
   }
-  return managementServerInstance;
+
+  return matches;
+}
+
+function getManagementServer(selector = {}) {
+  const instanceId = resolveManagementInstanceId(selector.instanceId, selector.serverPath);
+  if (!managementServerInstances.has(instanceId)) {
+    managementServerInstances.set(instanceId, new ManagementServer(instanceId));
+  }
+  const instance = managementServerInstances.get(instanceId);
+  if (selector.serverPath && !instance.serverPath) {
+    instance.serverPath = selector.serverPath;
+  }
+  return instance;
+}
+
+function getAllManagementServers() {
+  return Array.from(managementServerInstances.values());
+}
+
+function getAllManagementServerStatuses() {
+  return getAllManagementServers().map((server) => server.getStatus());
+}
+
+async function stopAndDisposeManagementServers(selector = {}) {
+  const matches = getMatchingManagementServerEntries(selector);
+  if (matches.length === 0) {
+    return {
+      success: true,
+      alreadyStopped: true,
+      instanceIds: []
+    };
+  }
+
+  const results = [];
+
+  for (const [key, server] of matches) {
+    const wasRunning = !!(server.isRunning || server.server);
+    let stopResult = { success: true, alreadyStopped: !wasRunning };
+
+    if (server.isRunning || server.server) {
+      stopResult = await server.stop();
+    } else {
+      try {
+        server.stopClientCleanup();
+        server.stopVersionWatcher();
+      } catch {
+        // Ignore cleanup errors for already-stopped servers.
+      }
+      server.isRunning = false;
+      server.server = null;
+    }
+
+    try {
+      server.updateServerPath(null);
+    } catch {
+      server.serverPath = null;
+    }
+
+    try {
+      server.sseClients = [];
+      server.clients.clear();
+      server.clientTokens.clear();
+      server.rateLimits.clear();
+      server.activeSockets.clear();
+    } catch {
+      // Ignore cleanup errors while disposing the instance registry.
+    }
+
+    managementServerInstances.delete(key);
+    results.push({
+      key,
+      instanceId: server.instanceId,
+      serverPath: server.serverPath || selector.serverPath || null,
+      success: !!(stopResult.success || stopResult.forced),
+      forced: !!stopResult.forced,
+      alreadyStopped: !wasRunning
+    });
+  }
+
+  return {
+    success: results.every((result) => result.success),
+    forced: results.some((result) => result.forced),
+    alreadyStopped: results.every((result) => result.alreadyStopped),
+    instanceIds: results.map((result) => result.instanceId),
+    results
+  };
 }
 
 module.exports = {
   ManagementServer,
-  getManagementServer
-}; 
+  getManagementServer,
+  getAllManagementServerStatuses,
+  stopAndDisposeManagementServers
+};

@@ -39,6 +39,7 @@ electron/logger-window.html
 *.flag
 *-debug.json
 termination-record.json
+Minecraft Core/
 
 # Personal planning and documentation
 personal/

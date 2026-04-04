@@ -28,6 +28,35 @@ function log(level, message, data) {
   }
 }
 
+function normalizeServerPath(serverPath) {
+  if (!serverPath || typeof serverPath !== 'string') {
+    return '';
+  }
+
+  try {
+    return path.resolve(serverPath).replace(/[\\/]+$/, '').toLowerCase();
+  } catch {
+    return serverPath.trim().replace(/[\\/]+$/, '').toLowerCase();
+  }
+}
+
+function getTrackedServerPaths() {
+  const instances = appStore.get('instances') || [];
+  return instances
+    .filter((instance) => instance && instance.type === 'server' && typeof instance.path === 'string' && instance.path.trim())
+    .map((instance) => instance.path.trim())
+    .filter((serverPath) => fs.existsSync(serverPath));
+}
+
+function pruneDetachedServerState(serverPaths) {
+  const allowedPaths = new Set(serverPaths.map((serverPath) => normalizeServerPath(serverPath)));
+  for (const trackedPath of [...serverWatchState.keys()]) {
+    if (!allowedPaths.has(normalizeServerPath(trackedPath))) {
+      serverWatchState.delete(trackedPath);
+    }
+  }
+}
+
 function getConfigDir(serverPath) {
   return path.join(serverPath, 'minecraft-core-configs');
 }
@@ -282,7 +311,7 @@ async function recordFulfilled(serverPath, watch, versionFound) {
 
 function startWatcher() {
   if (intervalHandle) return;
-  // Attempt to hydrate last server path watches (best-effort)
+  // Attempt to hydrate watch state for currently tracked server instances.
   try {
     const settings = appStore.get('appSettings') || {};
     if (settings.modWatch && (settings.modWatch.intervalHours === 24 || settings.modWatch.intervalHours === 12)) {
@@ -291,9 +320,10 @@ function startWatcher() {
   } catch {
     // ignore settings load errors
   }
-  const lastServerPath = appStore.get('lastServerPath');
-  if (lastServerPath && fs.existsSync(lastServerPath)) {
-    hydrateServerState(lastServerPath).then(() => {}).catch(() => {});
+  const trackedServerPaths = getTrackedServerPaths();
+  pruneDetachedServerState(trackedServerPaths);
+  for (const serverPath of trackedServerPaths) {
+    hydrateServerState(serverPath).then(() => {}).catch(() => {});
   }
   intervalHandle = setInterval(() => {
     performCheck();

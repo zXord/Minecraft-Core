@@ -18,6 +18,13 @@ const {
   packSecret,
   unpackSecret
 } = require('../utils/secure-store.cjs');
+const { validateServerPorts } = require('../utils/port-validator.cjs');
+const {
+  shutdownMinecraftServer
+} = require('../services/server-manager.cjs');
+const {
+  stopAndDisposeManagementServers
+} = require('../services/management-server.cjs');
 
 const logger = getLoggerHandlers();
 
@@ -30,9 +37,6 @@ const DEFAULT_SERVER_SETTINGS = {
 };
 
 function getServerConfigDefaults(serverPath = '') {
-  const serverSettings = appStore.get('serverSettings') || DEFAULT_SERVER_SETTINGS;
-  const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
-  const backupSettings = appStore.get('backupSettings') || {};
   const instances = appStore.get('instances') || [];
   const existingServer = serverPath
     ? instances.find((inst) => inst && inst.type === 'server' && inst.path === serverPath)
@@ -49,26 +53,39 @@ function getServerConfigDefaults(serverPath = '') {
   }
 
   return getDefaultServerConfig({
-    port: serverSettings.port,
-    maxRam: serverSettings.maxRam,
-    managementPort: serverSettings.managementPort,
-    autoStartMinecraft: !!serverSettings.autoStartMinecraft,
-    autoStartManagement: !!serverSettings.autoStartManagement,
-    autoRestart,
+    port: DEFAULT_SERVER_SETTINGS.port,
+    maxRam: DEFAULT_SERVER_SETTINGS.maxRam,
+    managementPort: DEFAULT_SERVER_SETTINGS.managementPort,
+    autoStartMinecraft: !!DEFAULT_SERVER_SETTINGS.autoStartMinecraft,
+    autoStartManagement: !!DEFAULT_SERVER_SETTINGS.autoStartManagement,
+    autoRestart: {
+      enabled: false,
+      delay: 10,
+      maxCrashes: 3
+    },
     managementInviteHost: typeof existingServer?.managementInviteHost === 'string'
       ? existingServer.managementInviteHost
       : '',
     managementInviteSecret: folderSecret,
     managementTls: existingServer && existingServer.managementTls ? existingServer.managementTls : null,
-    backupAutomation: backupSettings
+    backupAutomation: {
+      enabled: false,
+      frequency: 86400000,
+      type: 'world',
+      retentionCount: 100,
+      runOnLaunch: false,
+      hour: 3,
+      minute: 0,
+      day: 0,
+      lastRun: null
+    }
   });
 }
 
 function getMergedServerSettings(serverPath) {
-  const storedSettings = appStore.get('serverSettings') || DEFAULT_SERVER_SETTINGS;
   const config = serverPath ? readServerConfig(serverPath, getServerConfigDefaults(serverPath)) : null;
   return {
-    ...storedSettings,
+    ...DEFAULT_SERVER_SETTINGS,
     ...(config ? {
       port: config.port,
       maxRam: config.maxRam,
@@ -108,6 +125,132 @@ function buildPendingPinKey(host, port) {
   return `${normalizedHost}|${normalizedPort}`;
 }
 
+function isSameServerInstance(left, right) {
+  if (!left || !right || left.type !== 'server' || right.type !== 'server') {
+    return false;
+  }
+
+  if (left.id && right.id) {
+    return left.id === right.id;
+  }
+
+  return !!left.path && !!right.path && left.path === right.path;
+}
+
+function getRemovedServerInstances(currentInstances, nextInstances) {
+  const nextServers = (nextInstances || []).filter((instance) => instance && instance.type === 'server');
+  return (currentInstances || []).filter((instance) => {
+    if (!instance || instance.type !== 'server') {
+      return false;
+    }
+    return !nextServers.some((nextInstance) => isSameServerInstance(instance, nextInstance));
+  });
+}
+
+async function cleanupServerInstanceRuntime(instance, reason = 'instance_removed') {
+  if (!instance || instance.type !== 'server') {
+    return {
+      success: true,
+      skipped: true
+    };
+  }
+
+  logger.info('Stopping server runtime for removed instance', {
+    category: 'settings',
+    data: {
+      operation: 'cleanup_server_instance_runtime',
+      reason,
+      instanceId: instance.id,
+      instancePath: instance.path,
+      instanceName: instance.name
+    }
+  });
+
+  const selector = {
+    instanceId: instance.id || null,
+    targetPath: instance.path || null,
+    serverPath: instance.path || null
+  };
+
+  const managementResult = await stopAndDisposeManagementServers({
+    instanceId: selector.instanceId,
+    serverPath: selector.serverPath
+  });
+
+  const serverResult = await shutdownMinecraftServer({
+    instanceId: selector.instanceId,
+    targetPath: selector.targetPath
+  }, {
+    disposeStateAfterStop: true
+  });
+
+  const success = !!(managementResult.success && serverResult.success);
+
+  logger.info(success ? 'Removed instance runtime stopped successfully' : 'Removed instance runtime cleanup failed', {
+    category: 'settings',
+    data: {
+      operation: 'cleanup_server_instance_runtime_result',
+      reason,
+      instanceId: instance.id,
+      instancePath: instance.path,
+      success,
+      managementResult,
+      serverResult
+    }
+  });
+
+  return {
+    success,
+    managementResult,
+    serverResult
+  };
+}
+
+function findServerInstanceById(instanceId) {
+  if (!instanceId || typeof instanceId !== 'string') {
+    return null;
+  }
+
+  const instances = appStore.get('instances') || [];
+  return instances.find((instance) => instance && instance.type === 'server' && instance.id === instanceId) || null;
+}
+
+function getPreferredStoredServerPath() {
+  const instances = appStore.get('instances') || [];
+  const serverInstances = instances.filter((instance) => instance && instance.type === 'server' && typeof instance.path === 'string' && instance.path.trim());
+  if (serverInstances.length === 0) {
+    return appStore.get('lastServerPath') || '';
+  }
+
+  const lastServerPath = appStore.get('lastServerPath') || '';
+  const matchedInstance = serverInstances.find((instance) => instance.path === lastServerPath);
+  const preferredPath = matchedInstance?.path || serverInstances[0].path;
+
+  if (preferredPath && preferredPath !== lastServerPath) {
+    appStore.set('lastServerPath', preferredPath);
+  }
+
+  return preferredPath;
+}
+
+function resolveServerPathFromPayload(payload = {}) {
+  const instanceId = typeof payload.instanceId === 'string' ? payload.instanceId.trim() : '';
+  const serverPath = typeof payload.serverPath === 'string' ? payload.serverPath.trim() : '';
+
+  if (serverPath) {
+    return serverPath;
+  }
+
+  if (instanceId) {
+    const matchedInstance = findServerInstanceById(instanceId);
+    if (matchedInstance?.path) {
+      return matchedInstance.path;
+    }
+  }
+
+  return getPreferredStoredServerPath();
+}
+
 /**
  * Create settings IPC handlers
  */
@@ -118,8 +261,17 @@ function createSettingsHandlers() {
   });
 
   return {
-    'update-settings': async (_e, { port, maxRam, managementPort, serverPath, autoStartMinecraft, autoStartManagement }) => {
+    'update-settings': async (_e, payload = {}) => {
       const startTime = Date.now();
+      const {
+        port,
+        maxRam,
+        managementPort,
+        serverPath,
+        instanceId,
+        autoStartMinecraft,
+        autoStartManagement
+      } = payload;
 
       const coerceNumber = (value) => {
         if (value === null || value === undefined) return value;
@@ -147,6 +299,7 @@ function createSettingsHandlers() {
             maxRam: maxRam !== undefined,
             managementPort: managementPort !== undefined,
             serverPath: serverPath !== undefined,
+            instanceId: instanceId !== undefined,
             autoStartMinecraft: autoStartMinecraft !== undefined,
             autoStartManagement: autoStartManagement !== undefined
           }
@@ -164,7 +317,8 @@ function createSettingsHandlers() {
               port: port !== undefined,
               maxRam: maxRam !== undefined,
               managementPort: managementPort !== undefined,
-              serverPath: serverPath !== undefined
+              serverPath: serverPath !== undefined,
+              instanceId: instanceId !== undefined
             }
           }
         });
@@ -254,10 +408,12 @@ function createSettingsHandlers() {
           }
         });
 
-        const resolvedServerPath = serverPath || appStore.get('lastServerPath') || '';
+        const resolvedServerPath = resolveServerPathFromPayload({ instanceId, serverPath });
         const currentSettings = getMergedServerSettings(resolvedServerPath);
-
-        const isDefaultConfig = !appStore.get('serverSettings');
+        const configFilePath = resolvedServerPath
+          ? path.join(resolvedServerPath, '.minecraft-core.json')
+          : null;
+        const isDefaultConfig = !configFilePath || !fs.existsSync(configFilePath);
         
         if (isDefaultConfig) {
           logger.info('Default configuration applied', {
@@ -301,6 +457,23 @@ function createSettingsHandlers() {
           autoStartManagement: autoStartManagement !== undefined ? autoStartManagement : currentSettings.autoStartManagement
         };
 
+        if (resolvedServerPath && (port !== undefined || managementPort !== undefined)) {
+          const portValidation = await validateServerPorts({
+            instanceId,
+            serverPath: resolvedServerPath,
+            minecraftPort: updatedSettings.port,
+            managementPort: updatedSettings.managementPort
+          });
+
+          if (!portValidation.valid) {
+            return {
+              success: false,
+              error: portValidation.errors[0]?.message || 'Port conflict detected',
+              details: portValidation.errors
+            };
+          }
+        }
+
         // Log settings changes with before/after values
         const changes = {};
         if (port !== undefined && port !== currentSettings.port) {
@@ -338,46 +511,17 @@ function createSettingsHandlers() {
           });
         }
         
-        // Save to persistent store
-        try {
-          logger.debug('Starting settings persistence operation', {
-            category: 'settings',
-            data: {
-              handler: 'update-settings',
-              operation: 'persistence_start',
-              settingsKeys: Object.keys(updatedSettings)
-            }
-          });
-
-          appStore.set('serverSettings', updatedSettings);
-          
-          logger.info('Settings persistence completed successfully', {
-            category: 'settings',
-            data: {
-              handler: 'update-settings',
-              operation: 'persistence_success',
-              settingsKeys: Object.keys(updatedSettings),
-              duration: Date.now() - startTime
-            }
-          });
-        } catch (storeError) {
-          logger.error('Settings persistence failed', {
-            category: 'settings',
-            data: {
-              handler: 'update-settings',
-              operation: 'persistence_failure',
-              error: storeError.message,
-              errorType: storeError.constructor.name,
-              stack: storeError.stack,
-              duration: Date.now() - startTime,
-              recovery: 'throwing_error'
-            }
-          });
-          throw new Error(`Failed to save settings: ${storeError.message}`);
-        }
+        logger.debug('Skipping legacy global server settings persistence', {
+          category: 'settings',
+          data: {
+            handler: 'update-settings',
+            operation: 'persistence_skip',
+            reason: 'server_settings_are_instance_local'
+          }
+        });
         
         // If serverPath is provided, update the lastServerPath
-        if (serverPath && typeof serverPath === 'string' && serverPath.trim() !== '') {
+        if (resolvedServerPath) {
           try {
             const previousPath = appStore.get('lastServerPath');
             
@@ -387,11 +531,11 @@ function createSettingsHandlers() {
                 handler: 'update-settings',
                 operation: 'server_path_update_start',
                 previousPath,
-                newPath: serverPath
+                newPath: resolvedServerPath
               }
             });
 
-            appStore.set('lastServerPath', serverPath);
+            appStore.set('lastServerPath', resolvedServerPath);
             
             logger.info('Server path configuration updated', {
               category: 'settings',
@@ -401,10 +545,10 @@ function createSettingsHandlers() {
                 changes: {
                   lastServerPath: {
                     before: previousPath,
-                    after: serverPath
+                    after: resolvedServerPath
                   }
                 },
-                pathChanged: previousPath !== serverPath
+                pathChanged: previousPath !== resolvedServerPath
               }
             });
           } catch (pathError) {
@@ -413,7 +557,7 @@ function createSettingsHandlers() {
               data: {
                 handler: 'update-settings',
                 operation: 'server_path_update_failure',
-                serverPath,
+                serverPath: resolvedServerPath,
                 error: pathError.message,
                 errorType: pathError.constructor.name,
                 stack: pathError.stack,
@@ -479,7 +623,8 @@ function createSettingsHandlers() {
           }
         }
         
-        const hydratedInstances = validInstances.map((instance) => {
+        const storedInstances = appStore.get('instances') || [];
+        const hydratedInstances = storedInstances.map((instance) => {
           if (instance.type === 'server' && instance.path) {
             const config = readServerConfig(instance.path, getServerConfigDefaults(instance.path));
             let packedSecret = config && config.managementInviteSecret
@@ -539,7 +684,7 @@ function createSettingsHandlers() {
           return instance;
         });
 
-        if (JSON.stringify(hydratedInstances) !== JSON.stringify(validInstances)) {
+        if (JSON.stringify(hydratedInstances) !== JSON.stringify(storedInstances)) {
           appStore.set('instances', hydratedInstances);
           instanceContext.updateInstances(hydratedInstances);
         }
@@ -561,7 +706,7 @@ function createSettingsHandlers() {
           success: true, 
           settings: {
             ...updatedSettings,
-            serverPath: serverPath || appStore.get('lastServerPath')
+            serverPath: resolvedServerPath || appStore.get('lastServerPath')
           }
         };
       } catch (err) {
@@ -583,7 +728,7 @@ function createSettingsHandlers() {
       }
     },
     
-    'get-settings': async (_e) => {
+    'get-settings': async (_e, payload = {}) => {
       const startTime = Date.now();
       
       logger.debug('IPC handler invoked', {
@@ -604,10 +749,12 @@ function createSettingsHandlers() {
           }
         });
 
-        const serverPath = appStore.get('lastServerPath');
+        const serverPath = resolveServerPathFromPayload(payload);
         const settings = getMergedServerSettings(serverPath);
-        
-        const isDefaultConfig = !appStore.get('serverSettings');
+        const configFilePath = serverPath
+          ? path.join(serverPath, '.minecraft-core.json')
+          : null;
+        const isDefaultConfig = !configFilePath || !fs.existsSync(configFilePath);
         
         if (isDefaultConfig) {
           logger.debug('Default configuration applied', {
@@ -884,6 +1031,17 @@ function createSettingsHandlers() {
               instanceCount: validInstances.length
             }
           });
+
+          const removedServerInstances = getRemovedServerInstances(currentInstances, validInstances);
+          for (const removedInstance of removedServerInstances) {
+            const cleanupResult = await cleanupServerInstanceRuntime(removedInstance, 'save_instances_removed');
+            if (!cleanupResult.success) {
+              return {
+                success: false,
+                error: `Failed to stop deleted instance runtime for "${removedInstance.name || removedInstance.id}".`
+              };
+            }
+          }
 
           // Save instances to the store
           appStore.set('instances', validInstances);
@@ -1396,105 +1554,15 @@ function createSettingsHandlers() {
             deleteFiles
           }
         });
-        
-        // CRITICAL: Stop file watchers for server instances before deletion
-        if (inst.type === 'server' && inst.path) {
-          logger.debug('Stopping server processes and watchers before deletion', {
-            category: 'settings',
-            data: {
-              handler: 'delete-instance',
-              operation: 'cleanup_start',
-              instanceId: id,
-              instancePath: inst.path
-            }
-          });
 
-          try {
-            // Stop management server watchers if they're watching this path
-            const { getManagementServer } = require('../services/management-server.cjs');
-            const managementServer = getManagementServer();
-            const status = managementServer.getStatus();
-            
-            if (status.isRunning && status.serverPath === inst.path) {
-              logger.debug('Stopping management server watchers', {
-                category: 'settings',
-                data: {
-                  handler: 'delete-instance',
-                  operation: 'management_server_cleanup',
-                  instanceId: id,
-                  serverPath: inst.path
-                }
-              });
-
-              // If management server is watching this path, stop the watcher
-              managementServer.stopVersionWatcher();
-              
-              // Update server path to null to prevent further file system operations
-              managementServer.updateServerPath(null);
-
-              logger.info('Management server watchers stopped successfully', {
-                category: 'settings',
-                data: {
-                  handler: 'delete-instance',
-                  operation: 'management_server_cleanup_success',
-                  instanceId: id
-                }
-              });
-            }
-          } catch (managementError) {
-            logger.error('Failed to cleanup management server watchers', {
-              category: 'settings',
-              data: {
-                handler: 'delete-instance',
-                operation: 'management_server_cleanup_failure',
-                instanceId: id,
-                error: managementError.message,
-                errorType: managementError.constructor.name,
-                recovery: 'continuing_with_deletion'
-              }
-            });
-          }
-          
-          // Also stop any server processes that might be using this directory
-          try {
-            const { getServerProcess, killMinecraftServer } = require('../services/server-manager.cjs');
-            const serverProcess = getServerProcess();
-            if (serverProcess) {
-              logger.debug('Stopping server process before deletion', {
-                category: 'settings',
-                data: {
-                  handler: 'delete-instance',
-                  operation: 'server_process_cleanup',
-                  instanceId: id,
-                  hasServerProcess: true
-                }
-              });
-
-              killMinecraftServer();
-              // Wait a bit for process cleanup
-              await new Promise(resolve => setTimeout(resolve, 1000));
-
-              logger.info('Server process stopped successfully', {
-                category: 'settings',
-                data: {
-                  handler: 'delete-instance',
-                  operation: 'server_process_cleanup_success',
-                  instanceId: id
-                }
-              });
-            }
-          } catch (serverError) {
-            logger.error('Failed to cleanup server process', {
-              category: 'settings',
-              data: {
-                handler: 'delete-instance',
-                operation: 'server_process_cleanup_failure',
-                instanceId: id,
-                error: serverError.message,
-                errorType: serverError.constructor.name,
-                recovery: 'continuing_with_deletion'
-              }
-            });
+        if (inst.type === 'server') {
+          const cleanupResult = await cleanupServerInstanceRuntime(inst, 'delete_instance');
+          if (!cleanupResult.success) {
+            return {
+              success: false,
+              error: `Failed to stop server services for "${inst.name || inst.id}".`,
+              code: 'INSTANCE_CLEANUP_FAILED'
+            };
           }
         }
         
@@ -1511,11 +1579,13 @@ function createSettingsHandlers() {
         });
 
         appStore.set('instances', remaining);
+        instanceContext.updateInstances(remaining);
         
         // also clear lastServerPath if it was the deleted one
         const currentServerPath = appStore.get('lastServerPath');
         if (inst.path && currentServerPath === inst.path) {
-          appStore.set('lastServerPath', null);
+          const nextServerInstance = remaining.find((item) => item && item.type === 'server' && item.path);
+          appStore.set('lastServerPath', nextServerInstance?.path || null);
           
           logger.info('Server path configuration cleared', {
             category: 'settings',
@@ -1526,7 +1596,7 @@ function createSettingsHandlers() {
               changes: {
                 lastServerPath: {
                   before: currentServerPath,
-                  after: null
+                  after: nextServerInstance?.path || null
                 }
               }
             }

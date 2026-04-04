@@ -1,94 +1,301 @@
-// Server manager service
 const fs = require('fs');
-const path = require('path');
 const os = require('os');
-const { spawn } = require('child_process');
+const path = require('path');
 const process = require('process');
+const { spawn } = require('child_process');
+const pidusage = require('pidusage');
 const { safeSend } = require('../utils/safe-send.cjs');
 const eventBus = require('../utils/event-bus.cjs');
-const { resetCrashCount } = require('./auto-restart.cjs');
+const appStore = require('../utils/app-store.cjs');
 const { ServerJavaManager } = require('./server-java-manager.cjs');
+const { readServerConfig, getDefaultServerConfig, detectMinecraftVersion } = require('../utils/config-manager.cjs');
+const { resolveServerLoader } = require('../utils/server-loader.cjs');
+const { resolveLaunchPlan, syncServerPort } = require('./server-launcher.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
-const instanceContext = require('../utils/instance-context.cjs');
-const { FABRIC_LAUNCH_JAR, getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
 
-// Initialize logger
 const logger = getLoggerHandlers();
 
-// Initialize server Java manager (will be updated per server)
-let serverJavaManager = new ServerJavaManager();
+const serverStates = new Map();
+const METRICS_INTERVAL_MS = 2000;
+const LIST_COMMAND_THROTTLE = 30000;
 
-// Server process state
-let serverProcess = null;
-let serverStartMs = null;
-let serverMaxRam = 4; // Default in GB
-let playersInfo = { count: 0, names: [] };
-let listInterval = null;
-let serverLifecycleStatus = 'stopped';
-let shutdownRequest = null;
-let cloudSyncWarningSent = false;
-
-// Performance tracking
-let performanceMetrics = {
-  serverStarts: 0,
-  serverStops: 0,
-  serverKills: 0,
-  commandsSent: 0,
-  playerEvents: 0,
-  metricsUpdates: 0
-};
-
-function setServerLifecycleStatus(status, options = {}) {
-  const normalized = typeof status === 'string' ? status.toLowerCase() : 'unknown';
-  const nextStatus = ['starting', 'running', 'stopping', 'stopped', 'error', 'unknown'].includes(normalized)
-    ? normalized
-    : 'unknown';
-  const forceEmit = options.forceEmit === true;
-  const changed = serverLifecycleStatus !== nextStatus;
-  serverLifecycleStatus = nextStatus;
-
-  if (changed || forceEmit) {
-    safeSend('server-status', nextStatus);
-  }
+function createDefaultState(instanceId, targetPath = null) {
+  return {
+    instanceId,
+    targetPath,
+    process: null,
+    status: 'stopped',
+    startMs: null,
+    maxRam: 4,
+    port: 25565,
+    loader: 'vanilla',
+    playersInfo: { count: 0, names: [] },
+    stdoutBuffer: '',
+    lastLine: '',
+    lastListCommandTime: 0,
+    expectingListResponse: false,
+    responseTimeout: null,
+    listInterval: null,
+    intensivePlayerCheckMode: false,
+    intensiveCheckTimer: null,
+    intensiveCheckTimeouts: [],
+    metricsInterval: null,
+    lastMetricsUpdateAt: 0,
+    cloudSyncWarningSent: false,
+    shutdownRequest: null
+  };
 }
 
-function emitStoppedState(options = {}) {
-  const forceStatusEvent = options.forceStatusEvent === true;
-  playersInfo = { count: 0, names: [] };
-  serverStartMs = null;
-  setServerLifecycleStatus('stopped', { forceEmit: forceStatusEvent });
-  sendMetricsUpdate({
-    cpuPct: 0,
-    memUsedMB: 0,
-    maxRamMB: serverMaxRam * 1024,
-    uptime: '0h 0m 0s',
-    players: 0,
-    names: []
+function toNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function findInstanceByPath(targetPath) {
+  const instances = appStore.get('instances') || [];
+  return instances.find((instance) => instance && instance.type === 'server' && instance.path === targetPath) || null;
+}
+
+function resolveInstanceId(input = {}) {
+  if (typeof input === 'string' && input.trim()) {
+    const trimmed = input.trim();
+    if (serverStates.has(trimmed)) {
+      return trimmed;
+    }
+    const matchedByPath = Array.from(serverStates.values()).find((state) => state.targetPath === trimmed);
+    if (matchedByPath) {
+      return matchedByPath.instanceId;
+    }
+    const instance = findInstanceByPath(trimmed);
+    if (instance && instance.id) {
+      return instance.id;
+    }
+    return trimmed;
+  }
+
+  const { instanceId = null, targetPath = null } = input || {};
+  if (instanceId && typeof instanceId === 'string') {
+    return instanceId;
+  }
+
+  if (targetPath && typeof targetPath === 'string') {
+    const instance = findInstanceByPath(targetPath);
+    if (instance && instance.id) {
+      return instance.id;
+    }
+    return targetPath;
+  }
+
+  const lastServerPath = appStore.get('lastServerPath');
+  if (lastServerPath) {
+    const runningMatch = Array.from(serverStates.values()).find((state) => state.targetPath === lastServerPath);
+    if (runningMatch) {
+      return runningMatch.instanceId;
+    }
+  }
+
+  const firstRunning = Array.from(serverStates.values()).find((state) => !!state.process);
+  if (firstRunning) {
+    return firstRunning.instanceId;
+  }
+
+  const firstState = serverStates.keys().next();
+  return firstState.done ? 'server-default' : firstState.value;
+}
+
+function getOrCreateState(selector = {}) {
+  const instanceId = resolveInstanceId(selector);
+  const targetPath = selector && typeof selector === 'object' && selector.targetPath ? selector.targetPath : null;
+  if (!serverStates.has(instanceId)) {
+    serverStates.set(instanceId, createDefaultState(instanceId, targetPath));
+  }
+  const state = serverStates.get(instanceId);
+  if (targetPath && !state.targetPath) {
+    state.targetPath = targetPath;
+  }
+  return state;
+}
+
+function getState(selector = {}) {
+  const instanceId = resolveInstanceId(selector);
+  return serverStates.get(instanceId) || null;
+}
+
+function getRunningStates() {
+  return Array.from(serverStates.values()).filter((state) => !!state.process);
+}
+
+function getMatchingStates(selector = {}) {
+  const instanceId = selector && typeof selector === 'object' ? selector.instanceId : null;
+  const targetPath = selector && typeof selector === 'object' ? selector.targetPath : null;
+
+  const matches = Array.from(serverStates.values()).filter((state) => {
+    if (instanceId && state.instanceId === instanceId) {
+      return true;
+    }
+    if (targetPath && state.targetPath === targetPath) {
+      return true;
+    }
+    return false;
+  });
+
+  if (matches.length > 0) {
+    return matches;
+  }
+
+  const fallback = getState(selector);
+  return fallback ? [fallback] : [];
+}
+
+function buildStatusPayload(state) {
+  return {
+    instanceId: state.instanceId,
+    status: state.status,
+    isRunning: !!state.process,
+    targetPath: state.targetPath,
+    port: state.port,
+    maxRam: state.maxRam,
+    loader: state.loader,
+    serverStartMs: state.startMs,
+    playersInfo: {
+      count: state.playersInfo.count,
+      names: [...state.playersInfo.names]
+    }
+  };
+}
+
+function emitServerStatus(state) {
+  safeSend('server-status', buildStatusPayload(state));
+}
+
+function emitServerLog(state, line) {
+  safeSend('server-log', {
+    instanceId: state.instanceId,
+    line,
+    targetPath: state.targetPath
   });
 }
 
-function resetRuntimeIssueFlags() {
-  cloudSyncWarningSent = false;
+function formatUptime(startMs) {
+  if (!startMs) {
+    return '0h 0m 0s';
+  }
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${hours}h ${minutes}m ${seconds}s`;
 }
 
-function maybeSendCloudSyncWarning(text, serverPath) {
-  if (cloudSyncWarningSent || typeof text !== 'string' || !text.trim()) {
+function clearIntensiveChecking(state) {
+  if (state.intensiveCheckTimer) {
+    clearTimeout(state.intensiveCheckTimer);
+    state.intensiveCheckTimer = null;
+  }
+
+  if (state.intensiveCheckTimeouts.length > 0) {
+    state.intensiveCheckTimeouts.forEach(clearTimeout);
+    state.intensiveCheckTimeouts = [];
+  }
+
+  state.intensivePlayerCheckMode = false;
+}
+
+function clearMetricsInterval(state) {
+  if (state.metricsInterval) {
+    clearInterval(state.metricsInterval);
+    state.metricsInterval = null;
+  }
+}
+
+function clearListInterval(state) {
+  if (state.listInterval) {
+    clearInterval(state.listInterval);
+    state.listInterval = null;
+  }
+}
+
+function clearResponseTimeout(state) {
+  if (state.responseTimeout) {
+    clearTimeout(state.responseTimeout);
+    state.responseTimeout = null;
+  }
+}
+
+function clearStateTimers(state) {
+  clearMetricsInterval(state);
+  clearListInterval(state);
+  clearResponseTimeout(state);
+  clearIntensiveChecking(state);
+}
+
+function sendMetricsUpdate(metrics, selector = {}) {
+  const state = getState(selector) || getOrCreateState(selector);
+  state.lastMetricsUpdateAt = Date.now();
+  safeSend('metrics-update', {
+    instanceId: state.instanceId,
+    ...metrics
+  });
+}
+
+async function updateMetrics(state) {
+  const currentProcess = state.process;
+  if (!currentProcess || !currentProcess.pid) {
+    clearMetricsInterval(state);
+    return;
+  }
+
+  try {
+    const stats = await pidusage(currentProcess.pid);
+    sendMetricsUpdate({
+      cpuPct: Number(stats.cpu?.toFixed?.(1) || stats.cpu || 0),
+      memUsedMB: Number(((stats.memory || 0) / 1024 / 1024).toFixed(1)),
+      systemTotalRamMB: Number((os.totalmem() / 1024 / 1024).toFixed(1)),
+      maxRamMB: state.maxRam * 1024,
+      uptime: formatUptime(state.startMs),
+      players: state.playersInfo.count,
+      names: [...state.playersInfo.names]
+    }, { instanceId: state.instanceId });
+  } catch {
+    sendMetricsUpdate({
+      cpuPct: 0,
+      memUsedMB: 0,
+      systemTotalRamMB: Number((os.totalmem() / 1024 / 1024).toFixed(1)),
+      maxRamMB: state.maxRam * 1024,
+      uptime: formatUptime(state.startMs),
+      players: state.playersInfo.count,
+      names: [...state.playersInfo.names]
+    }, { instanceId: state.instanceId });
+  }
+}
+
+function startMetricsReporting(state) {
+  clearMetricsInterval(state);
+  state.metricsInterval = setInterval(() => {
+    updateMetrics(state).catch(() => {});
+  }, METRICS_INTERVAL_MS);
+  updateMetrics(state).catch(() => {});
+}
+
+function maybeSendCloudSyncWarning(state, text) {
+  if (state.cloudSyncWarningSent || typeof text !== 'string' || !text.trim()) {
     return;
   }
 
   const normalized = text.toLowerCase();
-  const hasHardlinkCloudError = normalized.includes('incompatible hardlinks')
-    || normalized.includes('error_cloud_files_incompatible_hardlinks');
-
-  if (!hasHardlinkCloudError) {
+  if (
+    !normalized.includes('incompatible hardlinks')
+    && !normalized.includes('error_cloud_files_incompatible_hardlinks')
+  ) {
     return;
   }
 
-  cloudSyncWarningSent = true;
+  state.cloudSyncWarningSent = true;
   safeSend('server-cloud-sync-warning', {
+    instanceId: state.instanceId,
     title: 'Cloud-synced folder blocked the world upgrade',
     summary: 'Minecraft could not finish the world upgrade because Windows blocked hardlinks inside this synced folder.',
-    serverPath,
+    serverPath: state.targetPath,
     guidance: [
       'Copy the live server to a plain local folder such as C:\\Minecraft\\Server.',
       'Start it there once so the world upgrade can finish.',
@@ -98,1620 +305,683 @@ function maybeSendCloudSyncWarning(text, serverPath) {
   });
 }
 
-// Log service initialization
-logger.info('Server manager service initialized', {
-  category: 'server',
-  data: {
-    service: 'ServerManager',
-    defaultMaxRam: serverMaxRam,
-    platform: process.platform,
-    nodeVersion: process.version
-  }
-});
-
-// Track last log line and buffer partial stdout chunks
-let lastLine = '';
-let stdoutBuffer = '';
-let lastListCommandTime = 0;
-const LIST_COMMAND_THROTTLE = 30000; // Only send list command every 30 seconds by default
-
-// Add a variable to track if we need more frequent player list checks
-let intensivePlayerCheckMode = false;
-let intensiveCheckTimer = null;
-let intensiveCheckTimeouts = [];
-let lastMetricsUpdate = 0;
-const METRICS_UPDATE_THROTTLE = 2000; // Minimum 2 seconds between updates
-
-// Function to safely send metrics updates with throttling
-function sendMetricsUpdate(metrics) {
-  const now = Date.now();
-  // Only send if it's been more than the throttle time since last update
-  if (now - lastMetricsUpdate >= METRICS_UPDATE_THROTTLE) {
-    safeSend('metrics-update', metrics);
-    lastMetricsUpdate = now;
-    performanceMetrics.metricsUpdates++;
-    
-    logger.debug('Server metrics updated', {
-      category: 'performance',
-      data: {
-        service: 'ServerManager',
-        operation: 'sendMetricsUpdate',
-        metrics: {
-          players: metrics.players,
-          uptime: metrics.uptime,
-          memUsedMB: metrics.memUsedMB,
-          cpuPct: metrics.cpuPct
-        },
-        totalUpdates: performanceMetrics.metricsUpdates,
-        throttleMs: METRICS_UPDATE_THROTTLE
-      }
-    });
-  }
-}
-
-// Function to send list command but suppress the output
-function sendListCommand() {
-  if (!serverProcess || serverProcess.killed) {
-    logger.debug('Cannot send list command - server not running', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'sendListCommand',
-        serverRunning: !!serverProcess,
-        serverKilled: serverProcess?.killed
-      }
-    });
+function sendListCommand(state) {
+  if (!state.process || state.process.killed) {
     return;
   }
-  
+
   const now = Date.now();
-  // Only send if enough time has passed since last command
-  if (now - lastListCommandTime >= LIST_COMMAND_THROTTLE || intensivePlayerCheckMode) {
-    // Set a flag to indicate we're expecting a list response
-    sendListCommand.expectingResponse = true;
-    serverProcess.stdin.write('list\n');
-    lastListCommandTime = now;
-    
-    logger.debug('List command sent to server', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'sendListCommand',
-        intensiveMode: intensivePlayerCheckMode,
-        timeSinceLastCommand: now - (lastListCommandTime - LIST_COMMAND_THROTTLE),
-        throttleMs: LIST_COMMAND_THROTTLE
-      }
-    });
-    
-    // After a timeout, assume we're no longer expecting a response
-    clearTimeout(sendListCommand.responseTimeout);
-    sendListCommand.responseTimeout = setTimeout(() => {
-      sendListCommand.expectingResponse = false;
-      logger.debug('List command response timeout', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'sendListCommand',
-          timeoutMs: 2000
-        }
-      });
-    }, 2000); // Wait 2 seconds for response
+  if (now - state.lastListCommandTime < LIST_COMMAND_THROTTLE && !state.intensivePlayerCheckMode) {
+    return;
+  }
+
+  try {
+    state.expectingListResponse = true;
+    state.process.stdin.write('list\n');
+    state.lastListCommandTime = now;
+    clearResponseTimeout(state);
+    state.responseTimeout = setTimeout(() => {
+      state.expectingListResponse = false;
+    }, 2000);
+  } catch {
+    state.expectingListResponse = false;
   }
 }
 
-// Initialize the static properties
-sendListCommand.expectingResponse = false;
-sendListCommand.responseTimeout = null;
+function enableIntensiveChecking(state) {
+  clearIntensiveChecking(state);
+  state.intensivePlayerCheckMode = true;
+  sendListCommand(state);
 
-// Function to parse player list from server response
-function parsePlayerList(text) {
-  const parseStartTime = Date.now();
-  
-  // If this is a list response, make sure we mark it as handled
-  const isListResponse = /There are \d+ of a max of \d+ players online/.test(text);
-  if (isListResponse) {
-    sendListCommand.expectingResponse = false;
-  }
-
-  // Look for patterns like "There are X of a max of Y players online: player1, player2"
-  // First pattern with player names
-  const fullPattern = /There are (\d+) of a max of \d+ players online: (.+)/;
-  const match = text.match(fullPattern);
-  
-  if (match) {
-    const count = parseInt(match[1]);
-    const names = match[2].split(', ').filter(name => name.trim());
-    const oldCount = playersInfo.count;
-    playersInfo = { count, names };
-    
-    const parseDuration = Date.now() - parseStartTime;
-    logger.debug('Player list parsed with names', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'parsePlayerList',
-        duration: parseDuration,
-        playerCount: count,
-        playerNames: names,
-        countChanged: count !== oldCount,
-        listType: 'full'
-      }
-    });
-    
-    return true;
-  }
-  
-  // Second pattern without player names (just count)
-  const countPattern = /There are (\d+) of a max of \d+ players online/;
-  const countMatch = text.match(countPattern);
-  
-  if (countMatch) {
-    const count = parseInt(countMatch[1]);
-    const oldCount = playersInfo.count;
-    
-    // Keep existing player names if count matches
-    if (count === playersInfo.names.length) {
-      playersInfo = { count, names: playersInfo.names };
-    } else {
-      // Reset names if count doesn't match
-      playersInfo = { count, names: [] };
-    }
-    
-    const parseDuration = Date.now() - parseStartTime;
-    logger.debug('Player list parsed count only', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'parsePlayerList',
-        duration: parseDuration,
-        playerCount: count,
-        countChanged: count !== oldCount,
-        namesReset: count !== playersInfo.names.length,
-        listType: 'count_only'
-      }
-    });
-    
-    return true;
-  }
-  
-  // Also look for player join/leave messages
-  const joinPattern = /(\w+) joined the game/;
-  const joinMatch = text.match(joinPattern);
-  
-  if (joinMatch) {
-    const playerName = joinMatch[1];
-    if (!playersInfo.names.includes(playerName)) {
-      // Add player to the list immediately for responsive UI
-      playersInfo.names.push(playerName);
-      playersInfo.count = playersInfo.names.length;
-      performanceMetrics.playerEvents++;
-      
-      const parseDuration = Date.now() - parseStartTime;
-      logger.info('Player joined server', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'parsePlayerList',
-          duration: parseDuration,
-          playerName,
-          totalPlayers: playersInfo.count,
-          eventType: 'join',
-          totalPlayerEvents: performanceMetrics.playerEvents
-        }
-      });
-      
-      // Update UI with the new player
-      sendMetricsUpdate({
-        cpuPct: 0.1,
-        memUsedMB: 1,
-        systemTotalRamMB: parseFloat((os.totalmem() / 1024 / 1024).toFixed(1)),
-        maxRamMB: serverMaxRam * 1024,
-        uptime: '0h 0m 0s',
-        players: playersInfo.count,
-        names: playersInfo.names
-      });
-      
-      // Send list command to get fresh player list
-      if (serverProcess && !serverProcess.killed && !intensivePlayerCheckMode) {
-        sendListCommand();
-      }
-      return true;
-    }
-  }
-  
-  const leavePattern = /(\w+) left the game/;
-  const leaveMatch = text.match(leavePattern);
-  
-  if (leaveMatch) {
-    const playerName = leaveMatch[1];
-    
-    // Remove player from the list immediately
-    playersInfo.names = playersInfo.names.filter(name => name !== playerName);
-    playersInfo.count = playersInfo.names.length;
-    performanceMetrics.playerEvents++;
-    
-    const parseDuration = Date.now() - parseStartTime;
-    logger.info('Player left server', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'parsePlayerList',
-        duration: parseDuration,
-        playerName,
-        totalPlayers: playersInfo.count,
-        eventType: 'leave',
-        totalPlayerEvents: performanceMetrics.playerEvents
-      }
-    });
-    
-    // Update UI immediately showing player has left
-    sendMetricsUpdate({
-      cpuPct: 0.1,
-      memUsedMB: 1,
-      systemTotalRamMB: parseFloat((os.totalmem() / 1024 / 1024).toFixed(1)),
-      maxRamMB: serverMaxRam * 1024,
-      uptime: '0h 0m 0s',
-      players: playersInfo.count,
-      names: playersInfo.names
-    });
-    
-    // Start moderate intensive checking if not already in that mode
-    if (!intensivePlayerCheckMode) {
-      enableIntensiveChecking();
-    }
-    
-    return true;
-  }
-  
-  return false;
-}
-
-// Helper function to enable intensive checking with cleanup
-function enableIntensiveChecking() {
-  // Always clear any existing intensive checking first to prevent accumulation
-  clearIntensiveChecking();
-  
-  // Enable intensive player list checking for a short period
-  intensivePlayerCheckMode = true;
-  
-  logger.debug('Intensive player checking enabled', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'enableIntensiveChecking',
-      duration: 6000,
-      checkIntervals: [2000, 5000]
-    }
+  [2000, 5000].forEach((delay) => {
+    const timeout = setTimeout(() => sendListCommand(state), delay);
+    state.intensiveCheckTimeouts.push(timeout);
   });
-  
-  // Send just one list command immediately
-  if (serverProcess && !serverProcess.killed) {
-    sendListCommand();
-  }
-  
-  // Set up just a few quick follow-up checks after a player event
-  const checkTimes = [2000, 5000]; // Check after 2s and 5s
 
-  checkTimes.forEach(delay => {
-    const timeout = setTimeout(() => {
-      if (serverProcess && !serverProcess.killed) {
-        sendListCommand();
-      }
-    }, delay);
-    intensiveCheckTimeouts.push(timeout);
-  });
-  
-  // Stop intensive checking after 6 seconds total
-  intensiveCheckTimer = setTimeout(() => {
-    logger.debug('Intensive player checking disabled', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'enableIntensiveChecking',
-        timeoutReached: true
-      }
-    });
-    clearIntensiveChecking();
+  state.intensiveCheckTimer = setTimeout(() => {
+    clearIntensiveChecking(state);
   }, 6000);
 }
 
-// Helper function to clear all intensive checking timers
-function clearIntensiveChecking() {
-  const wasIntensive = intensivePlayerCheckMode;
-  const timeoutsCleared = intensiveCheckTimeouts.length;
-  
-  // Clear the main intensive check timer
-  if (intensiveCheckTimer) {
-    clearTimeout(intensiveCheckTimer);
-    intensiveCheckTimer = null;
+function parsePlayerList(state, text) {
+  const fullPattern = /There are (\d+) of a max of \d+ players online: (.+)/;
+  const fullMatch = text.match(fullPattern);
+  if (fullMatch) {
+    state.expectingListResponse = false;
+    state.playersInfo = {
+      count: parseInt(fullMatch[1], 10),
+      names: fullMatch[2].split(', ').filter(Boolean)
+    };
+    return true;
   }
-  
-  // Clear all pending check timeouts
-  if (intensiveCheckTimeouts.length) {
-    intensiveCheckTimeouts.forEach(clearTimeout);
-    intensiveCheckTimeouts = [];
+
+  const countPattern = /There are (\d+) of a max of \d+ players online/;
+  const countMatch = text.match(countPattern);
+  if (countMatch) {
+    state.expectingListResponse = false;
+    const count = parseInt(countMatch[1], 10);
+    const names = state.playersInfo.names.length === count ? state.playersInfo.names : [];
+    state.playersInfo = { count, names };
+    return true;
   }
-  
-  // Disable intensive mode
-  intensivePlayerCheckMode = false;
-  
-  if (wasIntensive) {
-    logger.debug('Intensive player checking cleared', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'clearIntensiveChecking',
-        timeoutsCleared,
-        wasIntensive
-      }
-    });
+
+  const joinMatch = text.match(/(\w+) joined the game/);
+  if (joinMatch) {
+    const playerName = joinMatch[1];
+    if (!state.playersInfo.names.includes(playerName)) {
+      state.playersInfo = {
+        count: state.playersInfo.count + 1,
+        names: [...state.playersInfo.names, playerName]
+      };
+      sendListCommand(state);
+      return true;
+    }
+  }
+
+  const leaveMatch = text.match(/(\w+) left the game/);
+  if (leaveMatch) {
+    const playerName = leaveMatch[1];
+    state.playersInfo = {
+      count: Math.max(0, state.playersInfo.count - 1),
+      names: state.playersInfo.names.filter((name) => name !== playerName)
+    };
+    enableIntensiveChecking(state);
+    return true;
+  }
+
+  return false;
+}
+
+function handleLogLine(state, text) {
+  const trimmed = text.trimEnd();
+  if (!trimmed) {
+    return;
+  }
+
+  maybeSendCloudSyncWarning(state, trimmed);
+  const isListResponse = /There are \d+ of a max of \d+ players online/.test(trimmed);
+
+  if (trimmed !== state.lastLine) {
+    state.lastLine = trimmed;
+    if (!isListResponse || !state.expectingListResponse) {
+      emitServerLog(state, trimmed);
+    }
+  }
+
+  if (parsePlayerList(state, trimmed)) {
+    updateMetrics(state).catch(() => {});
   }
 }
 
-/**
- * Detect Minecraft version from server directory
- * @param {string} serverPath - Path to the server directory
- * @returns {Promise<string>} - Minecraft version or 'unknown'
- */
-async function detectMinecraftVersion(serverPath) {
-  const detectionStartTime = Date.now();
-  
-  try {
-    logger.debug('Starting Minecraft version detection', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'detectMinecraftVersion',
-        serverPath
-      }
-    });
-    
-    // First priority: check .minecraft-core.json config file
-    const minecraftCoreConfigPath = path.join(serverPath, '.minecraft-core.json');
-    if (fs.existsSync(minecraftCoreConfigPath)) {
-      const coreConfig = JSON.parse(fs.readFileSync(minecraftCoreConfigPath, 'utf8'));
-      if (coreConfig.version) {
-        const detectionDuration = Date.now() - detectionStartTime;
-        logger.info('Minecraft version detected from core config', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'detectMinecraftVersion',
-            duration: detectionDuration,
-            version: coreConfig.version,
-            source: 'minecraft-core.json',
-            serverPath
-          }
-        });
-        return coreConfig.version;
-      }
-    }
-    
-    // Second priority: try to find version from server jar files
-    const files = fs.readdirSync(serverPath);
-    const serverJars = files.filter(file =>
-      file.endsWith('.jar') && (
-        file.includes('server') ||
-        file.includes('minecraft') ||
-        file.includes('paper') || 
-        file.includes('forge') || 
-        file.includes('fabric') ||
-        file === 'fabric-server-launch.jar'
-      )
-    );
-    
-    if (serverJars.length > 0) {
-      const jarName = serverJars[0];
-      // Extract version from jar name (e.g., "minecraft_server.1.20.1.jar" or "paper-1.20.1-196.jar")
-      const versionMatch = jarName.match(/(\d+\.\d+(?:\.\d+)?)/);
-      if (versionMatch) {
-        const detectionDuration = Date.now() - detectionStartTime;
-        logger.info('Minecraft version detected from jar file', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'detectMinecraftVersion',
-            duration: detectionDuration,
-            version: versionMatch[1],
-            source: 'jar_filename',
-            jarName,
-            serverJarsFound: serverJars.length,
-            serverPath
-          }
-        });
-        return versionMatch[1];
-      }
-    }
-    
-    // Third priority: check version.json if it exists
-    const versionPath = path.join(serverPath, 'version.json');
-    if (fs.existsSync(versionPath)) {
-      const versionData = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
-      if (versionData.name || versionData.id) {
-        const version = versionData.name || versionData.id;
-        const detectionDuration = Date.now() - detectionStartTime;
-        logger.info('Minecraft version detected from version.json', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'detectMinecraftVersion',
-            duration: detectionDuration,
-            version,
-            source: 'version.json',
-            serverPath
-          }
-        });
-        return version;
-      }
-    }
-    
-    // Fourth priority: check Fabric loader version info
-    const fabricLoaderPath = path.join(serverPath, '.fabric', 'remappedJars');
-    if (fs.existsSync(fabricLoaderPath)) {
-      const fabricFiles = fs.readdirSync(fabricLoaderPath);
-      for (const file of fabricFiles) {
-        const match = file.match(/minecraft-(\d+\.\d+(?:\.\d+)?)/);
-        if (match) {
-          const detectionDuration = Date.now() - detectionStartTime;
-          logger.info('Minecraft version detected from Fabric files', {
-            category: 'server',
-            data: {
-              service: 'ServerManager',
-              operation: 'detectMinecraftVersion',
-              duration: detectionDuration,
-              version: match[1],
-              source: 'fabric_remapped',
-              fabricFile: file,
-              serverPath
-            }
-          });
-          return match[1];
-        }
-      }
-    }
-    
-    // Fifth priority: check logs directory
-    const logsPath = path.join(serverPath, 'logs');
-    if (fs.existsSync(logsPath)) {
-      const latestLog = path.join(logsPath, 'latest.log');
-      if (fs.existsSync(latestLog)) {
-        const logContent = fs.readFileSync(latestLog, 'utf8');
-        const versionMatch = logContent.match(/Starting minecraft server version (\d+\.\d+(?:\.\d+)?)|Minecraft (\d+\.\d+(?:\.\d+)?)|version (\d+\.\d+(?:\.\d+)?)/i);
-        if (versionMatch) {
-          const version = versionMatch[1] || versionMatch[2] || versionMatch[3];
-          const detectionDuration = Date.now() - detectionStartTime;
-          logger.info('Minecraft version detected from server logs', {
-            category: 'server',
-            data: {
-              service: 'ServerManager',
-              operation: 'detectMinecraftVersion',
-              duration: detectionDuration,
-              version,
-              source: 'server_logs',
-              serverPath
-            }
-          });
-          return version;
-        }
-      }
-    }
-    
-    const detectionDuration = Date.now() - detectionStartTime;
-    logger.warn('Could not detect Minecraft version', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'detectMinecraftVersion',
-        duration: detectionDuration,
-        version: 'unknown',
-        serverPath,
-        checkedSources: ['minecraft-core.json', 'jar_files', 'version.json', 'fabric_files', 'server_logs']
-      }
-    });
-    
-    return 'unknown';
-  } catch (error) {
-    const detectionDuration = Date.now() - detectionStartTime;
-    logger.error(`Minecraft version detection failed: ${error.message}`, {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'detectMinecraftVersion',
-        duration: detectionDuration,
-        errorType: error.constructor.name,
-        serverPath,
-        stack: error.stack
-      }
-    });
-    return 'unknown';
+function normalizeStartArguments(targetPathOrOptions, port, maxRam) {
+  if (targetPathOrOptions && typeof targetPathOrOptions === 'object') {
+    return {
+      instanceId: targetPathOrOptions.instanceId || null,
+      targetPath: targetPathOrOptions.targetPath,
+      port: toNumber(targetPathOrOptions.port, 25565),
+      maxRam: toNumber(targetPathOrOptions.maxRam, 4)
+    };
   }
-}
 
-// Set up event listeners
-eventBus.on('request-server-start', async ({ targetPath, port, maxRam }) => {
-  logger.info('Server start requested via event', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'request-server-start',
-      targetPath,
-      port,
-      maxRam
-    }
-  });
-  
-  const result = await startMinecraftServer(targetPath, port, maxRam);
-  
-  if (result && result.success) {
-    logger.info('Server start successful via event', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'request-server-start',
-        success: true,
-        targetPath,
-        port,
-        maxRam
-      }
-    });
-    safeSend('server-log', `[INFO] Server start successful via event`);
-  } else {
-    logger.error('Server start failed via event', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'request-server-start',
-        success: false,
-        targetPath,
-        port,
-        maxRam,
-        result
-      }
-    });
-    safeSend('server-log', `[ERROR] ${result?.message || 'Server start failed via event'}`);
-  }
-});
-
-function createStartFailure(code, message, repairable = false, extra = {}) {
   return {
-    success: false,
-    code,
-    message,
-    repairable,
-    ...extra
+    instanceId: null,
+    targetPath: targetPathOrOptions,
+    port: toNumber(port, 25565),
+    maxRam: toNumber(maxRam, 4)
   };
 }
 
-function createStartSuccess(extra = {}) {
-  return {
-    success: true,
-    code: 'SERVER_STARTED',
-    message: 'Server started successfully.',
-    repairable: false,
-    ...extra
-  };
+function buildConfigDefaultsFromStore() {
+  return getDefaultServerConfig({
+    port: 25565,
+    maxRam: 4,
+    managementPort: 8080,
+    autoStartMinecraft: false,
+    autoStartManagement: false,
+    autoRestart: {
+      enabled: false,
+      delay: 10,
+      maxCrashes: 3
+    }
+  });
 }
 
-/**
- * Start the Minecraft server
- * 
- * @param {string} targetPath - Path to the server directory
- * @param {number} port - The port number to run the server on
- * @param {number} maxRam - Maximum RAM allocation in GB
- * @returns {Promise<{success: boolean, code: string, message: string, repairable: boolean}>} Structured start result
- */
-async function startMinecraftServer(targetPath, port, maxRam) {
-  const startOperationTime = Date.now();
-  const normalizedPort = Number.isFinite(port) ? port : 25565;
-  const normalizedMaxRam = Number.isFinite(maxRam) && maxRam > 0 ? maxRam : 4;
-  const failStart = (...args) => {
-    setServerLifecycleStatus('stopped', { forceEmit: true });
-    return createStartFailure(...args);
-  };
-  
-  if (serverProcess || serverLifecycleStatus === 'starting' || serverLifecycleStatus === 'stopping') {
-    logger.warn('Server start attempted while server already running', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        serverAlreadyRunning: true,
-        existingPid: serverProcess?.pid,
-        lifecycleStatus: serverLifecycleStatus,
-        targetPath,
-        port: normalizedPort,
-        maxRam: normalizedMaxRam
-      }
-    });
-    return createStartFailure('ALREADY_RUNNING', `Server is already ${serverLifecycleStatus === 'starting' ? 'starting' : serverLifecycleStatus === 'stopping' ? 'stopping' : 'running'}.`);
-  }
-  
-  // Set instance context based on server path
-  const instanceName = instanceContext.getInstanceNameByPath(targetPath);
+async function ensureJavaReadyForServer(targetPath, minecraftVersion) {
+  const manager = new ServerJavaManager(targetPath);
+  let requirements = await manager.getJavaRequirementsForMinecraft(minecraftVersion);
 
-  try {
-  logger.info('Starting Minecraft server', {
-    instanceId: instanceName,
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'startMinecraftServer',
-      targetPath,
-      port: normalizedPort,
-      maxRam: normalizedMaxRam,
-      platform: process.platform,
-      instanceName
-    }
-  });
-  
-  performanceMetrics.serverStarts++;
-  shutdownRequest = null;
-  resetRuntimeIssueFlags();
-  setServerLifecycleStatus('starting', { forceEmit: true });
-
-  // First, detect the Minecraft version and ensure correct Java is available
-  const minecraftVersion = await detectMinecraftVersion(targetPath);
-  if (!minecraftVersion || minecraftVersion === 'unknown') {
-    const operationDuration = Date.now() - startOperationTime;
-    logger.error('Could not determine Minecraft version', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        duration: operationDuration,
-        targetPath,
+  if (requirements.needsDownload) {
+    const javaResult = await manager.ensureJavaForMinecraft(minecraftVersion, (progress) => {
+      safeSend('server-java-download-progress', {
         minecraftVersion,
-        stage: 'version_detection'
-      }
+        serverPath: targetPath,
+        ...progress
+      });
     });
-    safeSend('server-log', '[ERROR] Could not determine Minecraft version. Cannot ensure correct Java version.');
-    return failStart(
-      'VERSION_UNKNOWN',
-      'Could not determine the Minecraft version from this server folder.'
+
+    if (!javaResult.success) {
+      throw new Error(javaResult.error || 'Java installation failed');
+    }
+
+    requirements = await manager.getJavaRequirementsForMinecraft(minecraftVersion);
+  }
+
+  if (!requirements.isAvailable || !requirements.javaPath) {
+    throw new Error(
+      requirements.validationMessage
+        || `Java ${requirements.requiredJavaVersion} is not available for Minecraft ${minecraftVersion}`
     );
   }
 
-  logger.info('Minecraft version detected for server start', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'startMinecraftServer',
-      minecraftVersion,
-      targetPath,
-      stage: 'version_detection'
-    }
-  });
-  safeSend('server-log', `[INFO] Detected Minecraft version: ${minecraftVersion}`);
+  return requirements;
+}
 
-  // Set server path for Java manager and check if correct Java is available
-  serverJavaManager.setServerPath(targetPath);
-  const javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(minecraftVersion);
-  
-  logger.info('Java requirements determined', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'startMinecraftServer',
-      minecraftVersion,
-      requiredJavaVersion: javaRequirements.requiredJavaVersion,
-      javaAvailable: javaRequirements.isAvailable,
-      javaPath: javaRequirements.javaPath,
-      stage: 'java_requirements'
-    }
-  });
-  safeSend('server-log', `[INFO] Required Java version: ${javaRequirements.requiredJavaVersion}`);
+async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
+  const args = normalizeStartArguments(targetPathOrOptions, port, maxRam);
+  const { targetPath, instanceId: requestedInstanceId } = args;
 
-  let javaPath = javaRequirements.javaPath;
-
-  if (!javaRequirements.isAvailable) {
-    const javaFailureCode = javaRequirements.installationState === 'broken'
-      ? 'JAVA_BROKEN'
-      : 'JAVA_MISSING';
-    const javaFailureMessage = javaRequirements.validationMessage
-      || (javaRequirements.installationState === 'broken'
-        ? `Java ${javaRequirements.requiredJavaVersion} is installed but incomplete or broken. Repair Java from Server Maintenance before starting the server.`
-        : `Java ${javaRequirements.requiredJavaVersion} is not installed for this server. Repair Java from Server Maintenance before starting the server.`);
-
-    logger.warn('Java runtime is not ready for server start', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        requiredJavaVersion: javaRequirements.requiredJavaVersion,
-        installationState: javaRequirements.installationState,
-        validationCode: javaRequirements.validationCode,
-        validationMessage: javaRequirements.validationMessage,
-        javaPath,
-        stage: 'java_requirements'
-      }
-    });
-    safeSend('server-log', `[ERROR] ${javaFailureMessage}`);
-    return failStart(javaFailureCode, javaFailureMessage, true, {
-      requiredJavaVersion: javaRequirements.requiredJavaVersion
-    });
-  } else {
-    logger.info('Using existing Java installation', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        javaPath,
-        requiredJavaVersion: javaRequirements.requiredJavaVersion,
-        installationState: javaRequirements.installationState,
-        stage: 'java_requirements'
-      }
-    });
-    safeSend('server-log', `[INFO] Using Java at: ${javaPath}`);
+  if (!targetPath || !fs.existsSync(targetPath)) {
+    return {
+      success: false,
+      error: 'Invalid server path',
+      code: 'INVALID_SERVER_PATH'
+    };
   }
 
-  if (!javaPath) {
-    const operationDuration = Date.now() - startOperationTime;
-    logger.error('Java runtime reported available but no executable path was resolved', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        duration: operationDuration,
-        minecraftVersion,
-        requiredJavaVersion: javaRequirements.requiredJavaVersion,
-        installationState: javaRequirements.installationState,
-        stage: 'java_requirements'
-      }
-    });
-    return failStart(
-      'JAVA_BROKEN',
-      'Java runtime could not be resolved for this server. Repair Java from Server Maintenance before starting the server.',
-      true,
-      { requiredJavaVersion: javaRequirements.requiredJavaVersion }
-    );
+  const instanceId = resolveInstanceId({ instanceId: requestedInstanceId, targetPath });
+  const state = getOrCreateState({ instanceId, targetPath });
+
+  if (state.process) {
+    return {
+      success: true,
+      alreadyRunning: true,
+      instanceId: state.instanceId,
+      status: state.status,
+      pid: state.process.pid
+    };
   }
 
-  // Determine the correct server JAR to use based on configuration
-  let launchJar = null;
-  
-  // First, try to read configuration to determine server type
-  const configPath = path.join(targetPath, '.minecraft-core.json');
-  let useFabric = false;
-  
+  const defaults = buildConfigDefaultsFromStore();
+  const config = readServerConfig(targetPath, defaults) || defaults;
+  const minecraftVersion = config.version || detectMinecraftVersion(targetPath) || '1.20.1';
+  const loaderInfo = resolveServerLoader(targetPath);
+  const loader = config.loader || loaderInfo.loader || 'vanilla';
+  const loaderVersion = config.loaderVersion || config.fabric || loaderInfo.loaderVersion || null;
+
+  state.targetPath = targetPath;
+  state.port = args.port || toNumber(config.port, 25565);
+  state.maxRam = args.maxRam || toNumber(config.maxRam, 4);
+  state.loader = loader;
+  state.status = 'starting';
+  state.startMs = null;
+  state.shutdownRequest = null;
+  state.playersInfo = { count: 0, names: [] };
+  state.cloudSyncWarningSent = false;
+  state.stdoutBuffer = '';
+  state.lastLine = '';
+
+  emitServerStatus(state);
+  emitServerLog(state, `[INFO] Preparing ${loader} server startup...`);
+
   try {
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      useFabric = !!config.fabric; // Use Fabric if Fabric version is specified
-      
-      logger.debug('Server configuration loaded', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'startMinecraftServer',
-          configPath,
-          useFabric,
-          fabricVersion: config.fabric,
-          stage: 'jar_detection'
-        }
-      });
-    }
-  } catch (error) {
-    logger.debug('Could not read server configuration, using fallback detection', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        configPath,
-        errorType: error.constructor.name,
-        stage: 'jar_detection'
-      }
+    syncServerPort(targetPath, state.port);
+
+    const javaRequirements = await ensureJavaReadyForServer(targetPath, minecraftVersion);
+    const launchPlan = resolveLaunchPlan(targetPath, {
+      loader,
+      maxRam: state.maxRam,
+      minecraftVersion,
+      loaderVersion
     });
-  }
-  
-  if (useFabric) {
-    const fabricStatus = getFabricRuntimeStatus(targetPath);
 
-    if (fabricStatus.hasBlockingIssues) {
-      const operationDuration = Date.now() - startOperationTime;
-      const issueMessages = fabricStatus.blockingIssues.map(issue => issue.message);
-      const failureMessage = `${issueMessages[0]}. Repair Fabric from Server Maintenance before starting the server.`;
+    const javaPath = javaRequirements.javaPath;
+    const serverIdentifier = `minecraft-core-server-${state.instanceId}-${Date.now()}`;
+    const spawnArgs = [`-Dminecraft.core.server.id=${serverIdentifier}`, ...launchPlan.args];
 
-      logger.warn('Fabric runtime is not ready for server start', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'startMinecraftServer',
-          duration: operationDuration,
-          targetPath,
-          issues: fabricStatus.blockingIssues,
-          stage: 'jar_detection'
-        }
-      });
-
-      safeSend('server-log', `[ERROR] ${failureMessage}`);
-      return failStart('FABRIC_BROKEN', failureMessage, true, {
-        fabricIssues: issueMessages
-      });
-    }
-
-    // Try to use Fabric launcher
-    const fabricJar = path.join(targetPath, FABRIC_LAUNCH_JAR);
-    if (fs.existsSync(fabricJar)) {
-      launchJar = fabricJar;
-      logger.info('Using Fabric server launcher', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'startMinecraftServer',
-          launchJar,
-          serverType: 'fabric',
-          stage: 'jar_detection'
-        }
-      });
-    }
-  }
-  
-  // Fall back to vanilla server.jar if Fabric not available or not configured
-  if (!launchJar) {
-    const vanillaJar = path.join(targetPath, 'server.jar');
-    if (fs.existsSync(vanillaJar)) {
-      launchJar = vanillaJar;
-      logger.info('Using vanilla server jar', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'startMinecraftServer',
-          launchJar,
-          serverType: 'vanilla',
-          stage: 'jar_detection'
-        }
-      });
-    }
-  }
-  
-  // Final fallback: look for any server JAR files
-  if (!launchJar) {
-    try {
-      const files = fs.readdirSync(targetPath);
-      const serverJars = files.filter(f => 
-        f.endsWith('.jar') && 
-        (f.includes('server') || f.includes('fabric-server-launch'))
-      );
-      
-      if (serverJars.length > 0) {
-        // Prefer fabric-server-launch.jar, then server.jar, then any server JAR
-        const fabricLaunch = serverJars.find(f => f === 'fabric-server-launch.jar');
-        const serverJar = serverJars.find(f => f === 'server.jar');
-        
-        if (fabricLaunch) {
-          launchJar = path.join(targetPath, fabricLaunch);
-        } else if (serverJar) {
-          launchJar = path.join(targetPath, serverJar);
-        } else {
-          launchJar = path.join(targetPath, serverJars[0]);
-        }
-        
-        logger.info('Server jar found via fallback detection', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'startMinecraftServer',
-            launchJar,
-            serverJarsFound: serverJars,
-            selectedJar: path.basename(launchJar),
-            serverType: 'detected',
-            stage: 'jar_detection'
-          }
-        });
-      }
-    } catch (error) {
-      logger.error('Could not read server directory for jar detection', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'startMinecraftServer',
-          targetPath,
-          errorType: error.constructor.name,
-          stage: 'jar_detection'
-        }
-      });
-    }
-  }
-  
-  if (!launchJar || !fs.existsSync(launchJar)) {
-    const operationDuration = Date.now() - startOperationTime;
-    logger.error('No valid server jar found', {
+    logger.info('Spawning Minecraft server process', {
       category: 'server',
+      instanceId: state.instanceId,
       data: {
         service: 'ServerManager',
         operation: 'startMinecraftServer',
-        duration: operationDuration,
         targetPath,
-        launchJar,
-        jarExists: launchJar ? fs.existsSync(launchJar) : false,
-        stage: 'jar_detection'
-      }
-    });
-    return failStart(
-      'SERVER_JAR_MISSING',
-      'No valid server jar was found in the selected server folder.'
-    );
-  }
-
-  if (path.basename(launchJar) === FABRIC_LAUNCH_JAR) {
-    const fabricStatus = getFabricRuntimeStatus(targetPath);
-
-    if (fabricStatus.hasBlockingIssues) {
-      const operationDuration = Date.now() - startOperationTime;
-      const issueMessages = fabricStatus.blockingIssues.map(issue => issue.message);
-      const failureMessage = `${issueMessages[0]}. Repair Fabric from Server Maintenance before starting the server.`;
-
-      logger.warn('Fabric launch jar selected but runtime is incomplete', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'startMinecraftServer',
-          duration: operationDuration,
-          targetPath,
-          launchJar,
-          issues: fabricStatus.blockingIssues,
-          stage: 'jar_detection'
-        }
-      });
-
-      safeSend('server-log', `[ERROR] ${failureMessage}`);
-      return failStart('FABRIC_BROKEN', failureMessage, true, {
-        fabricIssues: issueMessages
-      });
-    }
-  }
-
-  try {
-    serverStartMs = Date.now();
-    serverMaxRam = normalizedMaxRam;
-    const serverIdentifier = `minecraft-core-server-${Date.now()}`;
-    const spawnArgs = [
-      `-Xmx${normalizedMaxRam}G`,
-      `-Dminecraft.core.server.id=${serverIdentifier}`,
-      '-jar', launchJar,
-      'nogui',
-      '--port', `${normalizedPort}`
-    ];
-    
-    logger.info('Spawning server process', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
+        loader,
+        loaderVersion,
+        minecraftVersion,
+        port: state.port,
+        maxRam: state.maxRam,
         javaPath,
-        spawnArgs,
-        serverIdentifier,
-        cwd: targetPath,
-        stage: 'process_spawn'
+        spawnArgs
       }
     });
-    safeSend('server-log', `[INFO] Starting server with Java: ${javaPath}`);
-    
-    serverProcess = spawn(javaPath, spawnArgs, {
+
+    emitServerLog(state, `[INFO] Starting server with Java: ${javaPath}`);
+
+    const child = spawn(javaPath, spawnArgs, {
       cwd: targetPath,
       detached: false,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe']
     });
-    
-    serverProcess['serverInfo'] = {
+
+    state.process = child;
+    state.startMs = Date.now();
+    child.serverInfo = {
       id: serverIdentifier,
-      jar: launchJar,
-      port: normalizedPort,
-      maxRam: normalizedMaxRam,
-      startTime: serverStartMs,
-      commandLineIdentifier: `${path.basename(launchJar)} nogui --port ${normalizedPort}`,
-      targetPath: targetPath
-    };
-    const serverInfoSnapshot = { ...serverProcess['serverInfo'] };
-    const serverPid = serverProcess.pid;
-    
-    logger.info('Server process spawned successfully', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        pid: serverProcess.pid,
-        serverInfo: serverProcess['serverInfo'],
-        stage: 'process_spawn'
-      }
-    });
-
-    // Reset log tracking for a fresh server session
-    lastLine = '';
-    stdoutBuffer = '';
-
-    const handleServerLogLine = (text) => {
-      const isListResponse = /There are \d+ of a max of \d+ players online/.test(text);
-      maybeSendCloudSyncWarning(text, targetPath);
-      
-      if (text !== lastLine) {
-        lastLine = text;
-        
-        // Only send to log if it's not a list response or we're not expecting one
-        if (!isListResponse || !sendListCommand.expectingResponse) {
-          safeSend('server-log', text);
-        }
-        
-        // If this is a list response, mark that we've received it
-        if (isListResponse) {
-          sendListCommand.expectingResponse = false;
-        }
-        
-        // Check specifically for player leave messages
-        const leaveMatch = text.match(/(\w+) left the game/);
-        if (leaveMatch) {
-          const playerName = leaveMatch[1];
-          
-          // Immediately remove the player from our tracking
-          if (playersInfo.names.includes(playerName)) {
-            playersInfo.names = playersInfo.names.filter(name => name !== playerName);
-            playersInfo.count = playersInfo.names.length;
-            
-            // Send metrics update immediately
-            sendMetricsUpdate({
-              cpuPct: 0.1,
-              memUsedMB: 1,
-              systemTotalRamMB: parseFloat((os.totalmem() / 1024 / 1024).toFixed(1)),
-              maxRamMB: serverMaxRam * 1024,
-              uptime: '0h 0m 0s',
-              players: playersInfo.count,
-              names: playersInfo.names
-            });
-            
-            // Enable moderate intensive checking if not already in that mode
-            if (!intensivePlayerCheckMode) {
-              enableIntensiveChecking();
-            }
-          }
-        }
-        // Also specifically check for player join events for special handling
-        else if (text.match(/(\w+) joined the game/)) {
-          // We'll let the parsePlayerList function handle this to avoid duplication
-        }
-        
-        // Continue with normal list parsing
-        if (parsePlayerList(text)) {
-          sendMetricsUpdate({
-            cpuPct: 0.1,
-            memUsedMB: 1,
-            systemTotalRamMB: parseFloat((os.totalmem() / 1024 / 1024).toFixed(1)),
-            maxRamMB: serverMaxRam * 1024,
-            uptime: '0h 0m 0s',
-            players: playersInfo.count,
-            names: playersInfo.names
-          });
-        }
-      }
+      instanceId: state.instanceId,
+      port: state.port,
+      maxRam: state.maxRam,
+      startTime: state.startMs,
+      targetPath,
+      loader,
+      loaderVersion,
+      minecraftVersion,
+      jar: launchPlan.jar || null,
+      launchType: launchPlan.type
     };
 
-    serverProcess.stdout.on('data', chunk => {
-      stdoutBuffer += chunk.toString();
-      const lines = stdoutBuffer.split(/\r?\n/);
-      stdoutBuffer = lines.pop();
-      
-      lines
-        .map(line => line.trimEnd())
-        .filter(line => line.length > 0)
-        .forEach(handleServerLogLine);
+    child.stdout.on('data', (chunk) => {
+      state.stdoutBuffer += chunk.toString();
+      const lines = state.stdoutBuffer.split(/\r?\n/);
+      state.stdoutBuffer = lines.pop() || '';
+      lines.forEach((line) => handleLogLine(state, line));
     });
 
-    serverProcess.stdout.on('end', () => {
-      const remaining = stdoutBuffer.trim();
-      if (remaining) {
-        handleServerLogLine(remaining);
+    child.stdout.on('end', () => {
+      if (state.stdoutBuffer.trim()) {
+        handleLogLine(state, state.stdoutBuffer);
       }
-      stdoutBuffer = '';
+      state.stdoutBuffer = '';
     });
 
-    serverProcess.stderr.on('data', chunk => {
+    child.stderr.on('data', (chunk) => {
       const text = chunk.toString();
-      maybeSendCloudSyncWarning(text, targetPath);
-      safeSend('server-log', `[STDERR] ${text}`);
+      maybeSendCloudSyncWarning(state, text);
+      emitServerLog(state, `[STDERR] ${text.trimEnd()}`);
     });
 
-    serverProcess.on('error', (err) => {
-      logger.error(`Server process error: ${err.message}`, {
+    child.on('error', (error) => {
+      logger.error(`Server process error: ${error.message}`, {
         category: 'server',
+        instanceId: state.instanceId,
         data: {
           service: 'ServerManager',
           operation: 'serverProcess.error',
-          errorType: err.constructor.name,
-          pid: serverPid,
-          serverInfo: serverInfoSnapshot,
-          stack: err.stack
+          errorType: error.constructor.name,
+          targetPath
         }
       });
-      safeSend('server-log', `Server process error: ${err.message}`);
+      emitServerLog(state, `[ERROR] Server process error: ${error.message}`);
     });
-    
-    logger.info('Server started successfully', {
-      instanceId: instanceName,
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        duration: Date.now() - startOperationTime,
-        pid: serverProcess.pid,
-        serverInfo: serverProcess['serverInfo'],
-        totalServerStarts: performanceMetrics.serverStarts,
-        instanceName
-      }
-    });
-    
-    eventBus.emit('server-started');
-    setServerLifecycleStatus('running', { forceEmit: true });
-    
-    // Start metrics reporting when server starts
-    const { startMetricsReporting } = require('./system-metrics.cjs');
-    startMetricsReporting();
-    
-    serverProcess.on('exit', (code, signal) => {
-      const exitTime = Date.now();
-      const uptime = serverStartMs ? exitTime - serverStartMs : 0;
-      const wasManualShutdown = shutdownRequest === 'stop' || shutdownRequest === 'kill';
-      const isNormalExit = code === 0 || signal === 'SIGTERM' || signal === 'SIGINT' || wasManualShutdown;
-      const exitServerInfo = serverInfoSnapshot ? { ...serverInfoSnapshot } : null;
-      
-      logger.info('Server process exited', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'serverProcess.exit',
-          exitCode: code,
-          signal,
-          isNormalExit,
-          uptime,
-          pid: serverPid,
-          serverInfo: exitServerInfo
-        }
-      });
-      
+
+    child.on('exit', (code, signal) => {
+      const wasManualShutdown = state.shutdownRequest === 'stop' || state.shutdownRequest === 'kill';
+      const isNormalExit = wasManualShutdown || code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
+
+      clearStateTimers(state);
+      state.process = null;
+      state.status = 'stopped';
+      state.startMs = null;
+      state.shutdownRequest = null;
+      state.playersInfo = { count: 0, names: [] };
+      emitServerStatus(state);
+      sendMetricsUpdate({
+        cpuPct: 0,
+        memUsedMB: 0,
+        systemTotalRamMB: Number((os.totalmem() / 1024 / 1024).toFixed(1)),
+        maxRamMB: state.maxRam * 1024,
+        uptime: '0h 0m 0s',
+        players: 0,
+        names: []
+      }, { instanceId: state.instanceId });
+
       if (!isNormalExit) {
-        const restartInfo = {
+        eventBus.emit('server-crashed', {
+          instanceId: state.instanceId,
           serverInfo: {
-            targetPath: exitServerInfo ? exitServerInfo.targetPath : null,
-            port: exitServerInfo && exitServerInfo.port ? exitServerInfo.port : 25565,
-            maxRam: exitServerInfo && exitServerInfo.maxRam ? exitServerInfo.maxRam : 4,
-            jar: exitServerInfo ? exitServerInfo.jar : null,
-            ...(exitServerInfo || {})
+            targetPath,
+            port: state.port,
+            maxRam: state.maxRam,
+            loader
           },
-          pid: serverPid,
           exitCode: code,
-          signal: signal
-        };
-        
-        logger.warn('Server crashed, emitting crash event', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'serverProcess.exit',
-            restartInfo,
-            uptime
-          }
+          signal
         });
-        
-        eventBus.emit('server-crashed', restartInfo);
       } else {
-        logger.info('Server exited normally', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'serverProcess.exit',
-            uptime,
-            exitCode: code,
-            signal
-          }
-        });
-        eventBus.emit('server-normal-exit');
+        eventBus.emit('server-normal-exit', { instanceId: state.instanceId });
       }
-      
-      if (listInterval) {
-        clearInterval(listInterval);
-        listInterval = null;
-      }
-      clearIntensiveChecking();
-      serverProcess = null;
-      shutdownRequest = null;
-      emitStoppedState({ forceStatusEvent: true });
-      setTimeout(() => {
-        safeSend('server-status', 'stopped');
-      }, 300);
     });
 
-    if (listInterval) clearInterval(listInterval);
-    // Use the player joining/leaving events as primary detection method
-    // Only check occasionally for sync purposes
-    listInterval = setInterval(() => {
-      if (serverProcess && !serverProcess.killed && !intensivePlayerCheckMode) {
-        // Only send list commands occasionally to reduce log spam
-        sendListCommand();
+    clearListInterval(state);
+    state.listInterval = setInterval(() => {
+      if (state.process && !state.process.killed && !state.intensivePlayerCheckMode) {
+        sendListCommand(state);
       }
-    }, 120000); // Check only every 2 minutes by default
+    }, 120000);
 
-    sendMetricsUpdate({
-      cpuPct: 0.1,
-      memUsedMB: 1,
-      systemTotalRamMB: parseFloat((os.totalmem() / 1024 / 1024).toFixed(1)),
-      maxRamMB: normalizedMaxRam * 1024,
-      uptime: '0h 0m 0s',
-      players: 0,
-      names: []
+    state.status = 'running';
+    emitServerStatus(state);
+    startMetricsReporting(state);
+    eventBus.emit('server-started', {
+      instanceId: state.instanceId,
+      targetPath,
+      port: state.port,
+      maxRam: state.maxRam,
+      loader
     });
-    
-    setTimeout(() => {
-      if (serverProcess) {
-        setServerLifecycleStatus('running', { forceEmit: true });
-      }
-    }, 300);
-    
-    return createStartSuccess({
-      pid: serverPid,
-      requiredJavaVersion: javaRequirements.requiredJavaVersion,
+
+    return {
+      success: true,
+      instanceId: state.instanceId,
+      pid: child.pid,
       javaPath,
-      jar: launchJar
-    });
+      jar: launchPlan.jar || null,
+      loader
+    };
   } catch (error) {
-    serverProcess = null;
-    shutdownRequest = null;
-    emitStoppedState({ forceStatusEvent: true });
-    const operationDuration = Date.now() - startOperationTime;
+    clearStateTimers(state);
+    state.process = null;
+    state.status = 'error';
+    state.startMs = null;
+    emitServerStatus(state);
+    emitServerLog(state, `[ERROR] ${error.message}`);
+
     logger.error(`Server start failed: ${error.message}`, {
       category: 'server',
+      instanceId: state.instanceId,
       data: {
         service: 'ServerManager',
         operation: 'startMinecraftServer',
-        duration: operationDuration,
-        errorType: error.constructor.name,
         targetPath,
-        port: normalizedPort,
-        maxRam: normalizedMaxRam,
-        launchJar,
-        javaPath,
-        stack: error.stack
+        errorType: error.constructor.name,
+        code: error.code || null
       }
     });
-    return createStartFailure(
-      'SERVER_START_FAILED',
-      error.message || 'Server failed to start.'
-    );
-  }
-  } catch (error) {
-    serverProcess = null;
-    shutdownRequest = null;
-    emitStoppedState({ forceStatusEvent: true });
-    const operationDuration = Date.now() - startOperationTime;
-    logger.error(`Server start failed before process launch: ${error.message}`, {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        duration: operationDuration,
-        errorType: error.constructor.name,
-        targetPath,
-        port: normalizedPort,
-        maxRam: normalizedMaxRam,
-        stack: error.stack
-      }
-    });
-    return createStartFailure(
-      'SERVER_START_FAILED',
-      error.message || 'Server failed to start.'
-    );
+
+    return {
+      success: false,
+      instanceId: state.instanceId,
+      error: error.message || 'Server failed to start.',
+      code: error.code || 'SERVER_START_FAILED',
+      details: error.details || null
+    };
   }
 }
 
-/**
- * Stop the Minecraft server gracefully
- * 
- * @returns {boolean} Success status
- */
-function stopMinecraftServer() {
-  const stopStartTime = Date.now();
-  
-  if (!serverProcess) {
-    logger.warn('Server stop attempted but no server running', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'stopMinecraftServer',
-        serverRunning: false
-      }
-    });
+function stopMinecraftServer(selector = {}) {
+  const state = getState(selector);
+  if (!state || !state.process) {
     return false;
   }
-  
-  const serverInfo = serverProcess['serverInfo'];
-  const uptime = serverStartMs ? Date.now() - serverStartMs : 0;
-  
-  logger.info('Stopping server gracefully', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'stopMinecraftServer',
-      pid: serverProcess.pid,
-      uptime,
-      serverInfo,
-      playersOnline: playersInfo.count
-    }
-  });
-  
-  shutdownRequest = 'stop';
-  setServerLifecycleStatus('stopping', { forceEmit: true });
-  serverProcess.stdin.write('stop\n');
-  performanceMetrics.serverStops++;
 
-  // Clean up all intervals and timers
-  if (listInterval) {
-    clearInterval(listInterval);
-    listInterval = null;
+  state.shutdownRequest = 'stop';
+  state.status = 'stopping';
+  emitServerStatus(state);
+
+  try {
+    state.process.stdin.write('stop\n');
+    return true;
+  } catch {
+    return false;
   }
-  clearIntensiveChecking();
-
-  const stopDuration = Date.now() - stopStartTime;
-  logger.info('Server stop command sent successfully', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'stopMinecraftServer',
-      duration: stopDuration,
-      uptime,
-      totalServerStops: performanceMetrics.serverStops,
-      stopMethod: 'graceful',
-      awaitingExit: true
-    }
-  });
-
-  return true;
 }
 
-/**
- * Force kill the Minecraft server process
- * 
- * @returns {boolean} Success status
- */
-function killMinecraftServer() {
-  const killStartTime = Date.now();
-  
-  if (!serverProcess) {
-    logger.warn('Server kill attempted but no server running', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'killMinecraftServer',
-        serverRunning: false
-      }
-    });
+function killMinecraftServer(selector = {}) {
+  const state = getState(selector);
+  if (!state || !state.process) {
     return false;
   }
-  
-  const pid = serverProcess.pid;
-  const serverInfo = serverProcess['serverInfo'];
-  const uptime = serverStartMs ? Date.now() - serverStartMs : 0;
-  
-  logger.warn('Force killing server process', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'killMinecraftServer',
-      pid,
-      uptime,
-      serverInfo,
-      playersOnline: playersInfo.count,
-      platform: process.platform
-    }
-  });
 
-  shutdownRequest = 'kill';
-  setServerLifecycleStatus('stopping', { forceEmit: true });
+  const child = state.process;
+  state.shutdownRequest = 'kill';
+  state.status = 'stopping';
+  emitServerStatus(state);
+
   try {
     if (process.platform === 'win32') {
-      spawn('taskkill', ['/PID', pid.toString(), '/F', '/T']);
-      logger.debug('Windows taskkill command executed', {
-        category: 'server',
-        data: {
-          service: 'ServerManager',
-          operation: 'killMinecraftServer',
-          pid,
-          command: 'taskkill'
-        }
-      });
+      spawn('taskkill', ['/PID', String(child.pid), '/F', '/T']);
     } else {
-      try { 
-        process.kill(-pid, 'SIGKILL');
-        logger.debug('Unix process group kill executed', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'killMinecraftServer',
-            pid,
-            signal: 'SIGKILL',
-            target: 'process_group'
-          }
-        });
-      }
-      catch { 
-        process.kill(pid, 'SIGKILL');
-        logger.debug('Unix process kill executed', {
-          category: 'server',
-          data: {
-            service: 'ServerManager',
-            operation: 'killMinecraftServer',
-            pid,
-            signal: 'SIGKILL',
-            target: 'single_process'
-          }
-        });
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        process.kill(child.pid, 'SIGKILL');
       }
     }
-  } catch (error) {
-    logger.error(`Failed to kill server process: ${error.message}`, {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'killMinecraftServer',
-        pid,
-        errorType: error.constructor.name,
-        platform: process.platform
-      }
-    });
-  }
-
-  performanceMetrics.serverKills++;
-
-  // Clean up all intervals and timers
-  if (listInterval) {
-    clearInterval(listInterval);
-    listInterval = null;
-  }
-  clearIntensiveChecking();
-
-  // Reset crash counter on manual kill
-  if (typeof resetCrashCount === 'function') {
-    resetCrashCount();
-  }
-  
-  const killDuration = Date.now() - killStartTime;
-  logger.info('Server killed successfully', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'killMinecraftServer',
-      duration: killDuration,
-      uptime,
-      totalServerKills: performanceMetrics.serverKills,
-      stopMethod: 'force_kill',
-      awaitingExit: true
-    }
-  });
-
-  return true;
-}
-
-/**
- * Send a command to the server
- * 
- * @param {string} command - The command to send
- * @returns {boolean} Success status
- */
-function sendServerCommand(command) {
-  if (!serverProcess) {
-    logger.warn('Command send attempted but no server running', {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'sendServerCommand',
-        command,
-        serverRunning: false
-      }
-    });
-    return false;
-  }
-  
-  performanceMetrics.commandsSent++;
-  
-  logger.info('Sending command to server', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'sendServerCommand',
-      command,
-      pid: serverProcess.pid,
-      totalCommandsSent: performanceMetrics.commandsSent
-    }
-  });
-  
-  try {
-    serverProcess.stdin.write(`${command}\n`);
-    safeSend('command-response', command);
     return true;
-  } catch (error) {
-    logger.error(`Failed to send command to server: ${error.message}`, {
-      category: 'server',
-      data: {
-        service: 'ServerManager',
-        operation: 'sendServerCommand',
-        command,
-        errorType: error.constructor.name,
-        pid: serverProcess?.pid
-      }
-    });
+  } catch {
     return false;
   }
 }
 
-/**
- * Get current server process info
- * 
- * @returns {object} Server state information
- */
-function getServerState() {
-  const state = {
-    isRunning: !!serverProcess,
-    serverProcess: serverProcess,
-    serverStartMs: serverStartMs,
-    serverMaxRam: serverMaxRam,
-    playersInfo: playersInfo,
-    status: serverLifecycleStatus
-  };
-  
-  logger.debug('Server state requested', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'getServerState',
-      isRunning: state.isRunning,
-      status: state.status,
-      pid: serverProcess?.pid,
-      uptime: serverStartMs ? Date.now() - serverStartMs : 0,
-      playersOnline: playersInfo.count,
-      maxRam: serverMaxRam
-    }
-  });
-  
-  return state;
-}
+function sendServerCommand(selectorOrCommand, commandMaybe) {
+  let selector = {};
+  let command = commandMaybe;
 
-/**
- * Get the server process object
- * 
- * @returns {object|null} The server process object or null
- */
-function getServerProcess() {
-  return serverProcess;
-}
-
-/**
- * Clear all intervals and timers
- */
-function clearIntervals() {
-  const hadListInterval = !!listInterval;
-  
-  if (listInterval) {
-    clearInterval(listInterval);
-    listInterval = null;
+  if (typeof selectorOrCommand === 'string' && commandMaybe === undefined) {
+    command = selectorOrCommand;
+  } else {
+    selector = selectorOrCommand || {};
   }
-  
-  // Clear intensive checking timers to prevent memory leaks
-  clearIntensiveChecking();
-  
-  logger.debug('Server intervals cleared', {
-    category: 'server',
-    data: {
-      service: 'ServerManager',
-      operation: 'clearIntervals',
-      hadListInterval,
-      intensiveCheckingCleared: true
+
+  const state = getState(selector);
+  if (!state || !state.process || !command || typeof command !== 'string') {
+    return false;
+  }
+
+  try {
+    state.process.stdin.write(`${command}\n`);
+    safeSend('command-response', {
+      instanceId: state.instanceId,
+      command
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getServerState(selector = {}) {
+  const state = getState(selector);
+  if (!state) {
+    return {
+      instanceId: resolveInstanceId(selector),
+      isRunning: false,
+      serverProcess: null,
+      serverStartMs: null,
+      serverMaxRam: 4,
+      playersInfo: { count: 0, names: [] },
+      status: 'stopped',
+      port: 25565,
+      targetPath: null,
+      loader: 'vanilla'
+    };
+  }
+
+  return {
+    instanceId: state.instanceId,
+    isRunning: !!state.process,
+    serverProcess: state.process,
+    serverStartMs: state.startMs,
+    serverMaxRam: state.maxRam,
+    playersInfo: {
+      count: state.playersInfo.count,
+      names: [...state.playersInfo.names]
+    },
+    status: state.status,
+    port: state.port,
+    targetPath: state.targetPath,
+    loader: state.loader
+  };
+}
+
+function getAllServerStates() {
+  return Array.from(serverStates.values()).map((state) => getServerState({ instanceId: state.instanceId }));
+}
+
+function getServerProcess(selector = {}) {
+  const state = getState(selector);
+  return state ? state.process : null;
+}
+
+function isInstanceRunning(selector = {}) {
+  const state = getState(selector);
+  return !!(state && state.process);
+}
+
+function getRunningServerInstanceIds() {
+  return getRunningStates().map((state) => state.instanceId);
+}
+
+function clearIntervals(selector = null) {
+  if (selector) {
+    const state = getState(selector);
+    if (state) {
+      clearStateTimers(state);
     }
+    return;
+  }
+
+  serverStates.forEach((state) => clearStateTimers(state));
+}
+
+function killAllMinecraftServers() {
+  return getRunningStates().map((state) => killMinecraftServer({ instanceId: state.instanceId }));
+}
+
+function disposeServerState(selector = {}) {
+  const matches = getMatchingStates(selector);
+  let disposedCount = 0;
+
+  matches.forEach((state) => {
+    if (state.process) {
+      return;
+    }
+    clearStateTimers(state);
+    serverStates.delete(state.instanceId);
+    disposedCount += 1;
   });
+
+  return disposedCount;
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (!child) {
+    return Promise.resolve(true);
+  }
+
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeout = null;
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      child.removeListener('exit', onExit);
+      child.removeListener('error', onError);
+      resolve(result);
+    };
+
+    const onExit = () => finish(true);
+    const onError = () => finish(true);
+
+    child.once('exit', onExit);
+    child.once('error', onError);
+
+    timeout = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function shutdownMinecraftServer(selector = {}, options = {}) {
+  const {
+    gracefulTimeoutMs = 8000,
+    killTimeoutMs = 5000,
+    forceKill = true,
+    disposeStateAfterStop = false
+  } = options;
+
+  const matches = getMatchingStates(selector);
+  if (matches.length === 0) {
+    return {
+      success: true,
+      alreadyStopped: true,
+      instanceIds: []
+    };
+  }
+
+  const results = [];
+
+  for (const state of matches) {
+    const result = {
+      instanceId: state.instanceId,
+      targetPath: state.targetPath,
+      stopped: false,
+      forced: false,
+      alreadyStopped: !state.process
+    };
+
+    if (!state.process) {
+      if (disposeStateAfterStop) {
+        disposeServerState({ instanceId: state.instanceId, targetPath: state.targetPath });
+      }
+      result.stopped = true;
+      results.push(result);
+      continue;
+    }
+
+    const child = state.process;
+    const gracefulRequested = stopMinecraftServer({ instanceId: state.instanceId });
+
+    let stopped = false;
+    if (gracefulRequested) {
+      stopped = await waitForChildExit(child, gracefulTimeoutMs);
+    }
+
+    if (!stopped && forceKill) {
+      const killRequested = killMinecraftServer({ instanceId: state.instanceId });
+      if (killRequested) {
+        result.forced = true;
+        stopped = await waitForChildExit(child, killTimeoutMs);
+      }
+    }
+
+    if (disposeStateAfterStop && !state.process) {
+      disposeServerState({ instanceId: state.instanceId, targetPath: state.targetPath });
+    }
+
+    result.stopped = stopped || !state.process;
+    results.push(result);
+  }
+
+  return {
+    success: results.every((item) => item.stopped),
+    forced: results.some((item) => item.forced),
+    alreadyStopped: results.every((item) => item.alreadyStopped),
+    instanceIds: results.map((item) => item.instanceId),
+    results
+  };
 }
 
 module.exports = {
   startMinecraftServer,
   stopMinecraftServer,
   killMinecraftServer,
+  shutdownMinecraftServer,
   sendServerCommand,
   getServerState,
+  getAllServerStates,
   getServerProcess,
+  getRunningServerInstanceIds,
+  isInstanceRunning,
+  killAllMinecraftServers,
+  disposeServerState,
   clearIntervals,
   sendMetricsUpdate
 };

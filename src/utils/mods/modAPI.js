@@ -53,7 +53,6 @@ import {
 } from '../../stores/modStore.js';
 
 // IDs to track concurrent operations
-let loadId = 0;
 let searchId = 0;
 let updateCheckId = 0;
 // Track a pending update check request if one comes in while a check is running
@@ -68,6 +67,200 @@ const MIN_SEARCH_INTERVAL = 500; // Minimum time between searches in ms
 let lastVersionFetchTime = 0;
 const MIN_VERSION_FETCH_INTERVAL = 500; // Minimum time between version fetches in ms
 const normalizePathForUpdates = (p) => (typeof p === 'string' ? p.trim().toLowerCase() : '');
+let activeContentLoads = 0;
+let activeModServerPath = '';
+let activeUpdateServerPath = '';
+const latestLoadRequestByType = new Map();
+
+function normalizeConfigValue(value) {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (value === null || value === undefined) {
+    return '';
+  }
+  return String(value).trim();
+}
+
+function buildInstalledVersionCacheKey(projectId, contentType = 'mods', updateContext = null) {
+  if (!projectId) {
+    return null;
+  }
+
+  const normalizedContentType = contentType || 'mods';
+  const normalizedLoader =
+    normalizedContentType === 'mods'
+      ? normalizeConfigValue(updateContext?.loader) || 'vanilla'
+      : 'noloader';
+  const normalizedVersion =
+    normalizeConfigValue(updateContext?.gameVersion)
+    || normalizeConfigValue(updateContext?.minecraftVersion)
+    || 'all';
+
+  return `${normalizedContentType}:${projectId}:${normalizedLoader}:${normalizedVersion}`;
+}
+
+function getInstalledVersionCacheEntry(cache, projectId, contentType = 'mods', updateContext = null) {
+  const cacheKey = buildInstalledVersionCacheKey(projectId, contentType, updateContext);
+  if (!cacheKey) {
+    return null;
+  }
+
+  return cache[cacheKey] || null;
+}
+
+function setInstalledVersionCacheEntry(projectId, versions, contentType = 'mods', updateContext = null) {
+  const cacheKey = buildInstalledVersionCacheKey(projectId, contentType, updateContext);
+  if (!cacheKey) {
+    return;
+  }
+
+  installedModVersionsCache.update(cache => ({
+    ...cache,
+    [cacheKey]: Array.isArray(versions) ? versions : []
+  }));
+}
+
+export function setActiveModServerPath(serverPath) {
+  activeModServerPath = normalizePathForUpdates(serverPath);
+}
+
+function isCurrentModServerPath(serverPath) {
+  const normalized = normalizePathForUpdates(serverPath);
+  if (!activeModServerPath) {
+    return true;
+  }
+  return normalized === activeModServerPath;
+}
+
+function beginTrackedContentLoad(contentType) {
+  const currentLoadId = (latestLoadRequestByType.get(contentType) || 0) + 1;
+  latestLoadRequestByType.set(contentType, currentLoadId);
+  activeContentLoads += 1;
+  isLoading.set(true);
+  return currentLoadId;
+}
+
+function finishTrackedContentLoad() {
+  activeContentLoads = Math.max(0, activeContentLoads - 1);
+  if (activeContentLoads === 0) {
+    isLoading.set(false);
+  }
+}
+
+function isLatestContentLoad(contentType, currentLoadId, serverPath) {
+  return latestLoadRequestByType.get(contentType) === currentLoadId && isCurrentModServerPath(serverPath);
+}
+
+function createUpdateContext(serverPath, config = null) {
+  const currentVersion = normalizeConfigValue(config?.version);
+  return {
+    serverPath,
+    loader: normalizeConfigValue(config?.loader) || 'vanilla',
+    minecraftVersion: currentVersion,
+    gameVersion: currentVersion,
+    useFilter: false
+  };
+}
+
+function normalizeGameVersionList(value) {
+  if (Array.isArray(value)) {
+    return value
+      .filter(Boolean)
+      .map((entry) => String(entry).trim())
+      .filter(Boolean);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return [value.trim()];
+  }
+  return [];
+}
+
+function extractGameVersionHintsFromVersionString(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+
+  const hints = [];
+  const addMatches = (regex) => {
+    for (const match of raw.matchAll(regex)) {
+      const candidate = match?.[1] ? String(match[1]).trim() : '';
+      if (candidate && !hints.includes(candidate)) {
+        hints.push(candidate);
+      }
+    }
+  };
+
+  // Some projects encode the MC branch after a "+" suffix, e.g. "...+1.21.11" or "...+26.1".
+  addMatches(/\+(\d+\.\d+(?:\.\d+)?)/g);
+  // Common loader-prefixed formats such as fabric-1.21.11-2.2.6 or forge-1.20.1-47.2.0.
+  addMatches(/(?:fabric|forge|quilt|neoforge|neo)[-_](\d+\.\d+(?:\.\d+)?)/gi);
+  // Explicit MC markers.
+  addMatches(/(?:minecraft|mc)[-_ ]?(\d+\.\d+(?:\.\d+)?)/gi);
+
+  return hints;
+}
+
+function getInstalledGameVersionHints(modInfo, installedEntry = null) {
+  const installedVersionRaw = modInfo?.versionNumber || modInfo?.version || '';
+  return [
+    ...normalizeGameVersionList(installedEntry?.gameVersions),
+    ...normalizeGameVersionList(modInfo?.gameVersions),
+    ...normalizeGameVersionList(modInfo?.minecraftVersion),
+    ...extractGameVersionHintsFromVersionString(installedVersionRaw)
+  ].filter((entry, index, source) => source.indexOf(entry) === index);
+}
+
+function isInstalledBuildCompatibleWithContext(modInfo, updateContext, installedEntry = null) {
+  const targetMc = normalizeConfigValue(updateContext?.minecraftVersion || updateContext?.gameVersion);
+  if (!targetMc) {
+    return true;
+  }
+
+  const installedGameVersions = getInstalledGameVersionHints(modInfo, installedEntry);
+  if (installedGameVersions.length === 0) {
+    return true;
+  }
+
+  return installedGameVersions.some((entry) => isGameVersionCompatible(targetMc, entry));
+}
+
+function normalizeInstalledInfoList(infoList, contentType, updateContext, modVersionsFromCache) {
+  return (Array.isArray(infoList) ? infoList : []).map((info) => {
+    const cleanInfo = {
+      fileName: info.fileName,
+      projectId: info.projectId || null,
+      versionId: info.versionId || null,
+      versionNumber: info.versionNumber || null,
+      name: info.name || (info.fileName ? info.fileName.replace(/\.jar$/i, '') : null),
+      source: info.source || 'modrinth',
+      minecraftVersion: info.minecraftVersion || null,
+      gameVersions: normalizeGameVersionList(info.gameVersions || info.minecraftVersion),
+      depends: info.depends || null,
+      installationDate: info.installationDate || info.installedAt || null,
+      installedAt: info.installedAt || info.installationDate || null,
+      lastUpdated: info.lastUpdated || null,
+      clientSide: info.clientSide ?? info.client_side ?? null,
+      serverSide: info.serverSide ?? info.server_side ?? null
+    };
+
+    if (cleanInfo.projectId) {
+      const versions = getInstalledVersionCacheEntry(
+        modVersionsFromCache,
+        cleanInfo.projectId,
+        contentType,
+        updateContext
+      );
+      if (versions && cleanInfo.versionNumber) {
+        const matchingVersion = versions.find(v => v.versionNumber === cleanInfo.versionNumber);
+        if (matchingVersion) {
+          cleanInfo.versionId = matchingVersion.id;
+        }
+      }
+    }
+
+    return cleanInfo;
+  });
+}
 
 // Helper to decide if a Modrinth game version entry is compatible with the current server version
 export function isGameVersionCompatible(targetVersion, candidateVersion) {
@@ -120,21 +313,11 @@ export function isGameVersionCompatible(targetVersion, candidateVersion) {
  * @returns {Promise<boolean>} - True if successful
  */
 export async function loadContent(serverPath, contentType = 'mods') {
-  // Prevent concurrent loadContent calls
-  if (get(isLoading)) {
-    return false;
-  }
-  
-  isLoading.set(true);
-  const currentLoadId = ++loadId;
+  const currentLoadId = beginTrackedContentLoad(contentType);
   
   try {
     if (!serverPath) {
-      serverPath = await safeInvoke('get-last-server-path');
-      if (!serverPath) {
-        errorMessage.set('Server path not available');
-        return false;
-      }
+      return false;
     }
     
     // Use appropriate IPC method based on content type
@@ -155,7 +338,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
     const result = await safeInvoke(ipcMethod, serverPath);
     
     // Check if this is still the latest request
-    if (currentLoadId !== loadId) {
+    if (!isLatestContentLoad(contentType, currentLoadId, serverPath)) {
       return false;
     }
     
@@ -187,6 +370,8 @@ export async function loadContent(serverPath, contentType = 'mods') {
               versionNumber: item.versionNumber || null,
               name: item.name || (item.fileName ? item.fileName.replace(/\.zip$/i, '') : null),
               source: item.source || 'modrinth',
+              minecraftVersion: item.minecraftVersion || null,
+              gameVersions: normalizeGameVersionList(item.gameVersions || item.minecraftVersion),
               installationDate: item.installationDate || item.installedAt || null,
               installedAt: item.installedAt || item.installationDate || null,
               lastUpdated: item.lastUpdated || null
@@ -224,6 +409,8 @@ export async function loadContent(serverPath, contentType = 'mods') {
               versionNumber: item.versionNumber || null,
               name: item.name || (item.fileName ? item.fileName.replace(/\.zip$/i, '') : null),
               source: item.source || 'modrinth',
+              minecraftVersion: item.minecraftVersion || null,
+              gameVersions: normalizeGameVersionList(item.gameVersions || item.minecraftVersion),
               installationDate: item.installationDate || item.installedAt || null,
               installedAt: item.installedAt || item.installationDate || null,
               lastUpdated: item.lastUpdated || null
@@ -251,6 +438,14 @@ export async function loadContent(serverPath, contentType = 'mods') {
     
     // For mods, continue with the existing category and mod info logic
     if (contentType === 'mods') {
+      const strictUpdateContext = createUpdateContext(
+        serverPath,
+        await loadServerConfig(serverPath, { syncStores: false })
+      );
+      if (!isLatestContentLoad(contentType, currentLoadId, serverPath)) {
+        return false;
+      }
+
       // Load existing saved categories first - with multiple attempts if needed
       
       // Try loading categories multiple times to ensure they're properly loaded
@@ -339,37 +534,17 @@ export async function loadContent(serverPath, contentType = 'mods') {
         }
         
         // Check again if this is still the latest request
-        if (currentLoadId !== loadId) {
+        if (!isLatestContentLoad(contentType, currentLoadId, serverPath)) {
           return false;
         }
           // Process installed mod info to ensure we have version IDs and proper data
         const modVersionsFromCache = get(installedModVersionsCache);
-        const updatedModInfo = modInfo.map((info) => {
-          // Ensure we have a clean object with all necessary properties
-          const cleanInfo = {
-            fileName: info.fileName,
-            projectId: info.projectId || null,
-            versionId: info.versionId || null,
-            versionNumber: info.versionNumber || null,
-            name: info.name || (info.fileName ? info.fileName.replace(/\.jar$/i, '') : null),
-            source: info.source || 'modrinth',
-            installationDate: info.installationDate || info.installedAt || null,
-            installedAt: info.installedAt || info.installationDate || null,
-            lastUpdated: info.lastUpdated || null
-          };
-
-          if (cleanInfo.projectId) {
-            // If we have cached version info, match version number to version ID
-            if (modVersionsFromCache[cleanInfo.projectId] && cleanInfo.versionNumber) {
-              const versions = modVersionsFromCache[cleanInfo.projectId];
-              const matchingVersion = versions.find(v => v.versionNumber === cleanInfo.versionNumber);
-              if (matchingVersion) {
-                cleanInfo.versionId = matchingVersion.id;
-              }
-            }
-          }
-          return cleanInfo;
-        });
+        let updatedModInfo = normalizeInstalledInfoList(
+          modInfo,
+          contentType,
+          strictUpdateContext,
+          modVersionsFromCache
+        );
 
         // If we got zero or mostly incomplete entries, perform one background refresh of manifests and re-read
         const needsRetry = updatedModInfo.length === 0 || updatedModInfo.every(i => !i.versionNumber && !i.versionId);
@@ -380,6 +555,12 @@ export async function loadContent(serverPath, contentType = 'mods') {
             const retryInfo = await safeInvoke('get-installed-mod-info', serverPath);
             if (Array.isArray(retryInfo)) {
               modInfo = retryInfo;
+              updatedModInfo = normalizeInstalledInfoList(
+                modInfo,
+                contentType,
+                strictUpdateContext,
+                modVersionsFromCache
+              );
             }
           } catch {
             // Ignore retry errors
@@ -391,7 +572,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
   installedModIds.set(validProjectIds);
   installedModInfo.set(updatedModInfo);
   // Prime disabled mod updates so UI can show "Enable and update" without manual check
-  try { await checkDisabledModUpdates(serverPath); } catch { /* ignore */ }
+  try { await checkDisabledModUpdates(serverPath, strictUpdateContext); } catch { /* ignore */ }
         
   // (Removed automatic post-load auto update check – now only manual button or interval triggers)
           return true;
@@ -408,7 +589,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
     errorMessage.set(`Failed to load ${contentType}: ${err.message || 'Unknown error'}`);
     return false;
   } finally {
-    isLoading.set(false);
+    finishTrackedContentLoad();
   }
 }
 
@@ -427,7 +608,8 @@ export async function loadMods(serverPath) {
  * @param {string} serverPath - Path to the server
  * @returns {Promise<Object|null>} - Server configuration or null if failed
  */
-export async function loadServerConfig(serverPath) {
+export async function loadServerConfig(serverPath, options = {}) {
+  const { syncStores = true } = options;
   try {
     if (!serverPath) {
       return null;
@@ -435,16 +617,20 @@ export async function loadServerConfig(serverPath) {
     
     const config = await safeInvoke('read-config', serverPath);
     
-    serverConfig.set(config);
+    if (syncStores && isCurrentModServerPath(serverPath)) {
+      serverConfig.set(config);
     
-    if (config) {
-      // Update Minecraft version and loader type from config
-      if (config.version) {
-        minecraftVersion.set(config.version);
-      }
-      
-      if (config.loader) {
-        loaderType.set(config.loader);
+      if (config) {
+        // Update Minecraft version and loader type from config
+        if (config.version) {
+          minecraftVersion.set(config.version);
+          filterMinecraftVersion.set(config.version);
+        }
+        
+        if (config.loader) {
+          loaderType.set(config.loader);
+          filterModLoader.set(config.loader);
+        }
       }
     }
     
@@ -470,8 +656,19 @@ export async function loadServerConfig(serverPath) {
  * @returns {string} - Cache key
  */
 function generateCacheKey(contentType, options = {}) {
-  const { searchKeyword, modSource, filterMinecraftVersion, filterModLoader, currentPage, resultsPerPage, sortBy, environmentType } = options;
-  return `${contentType}-${searchKeyword || ''}-${modSource || ''}-${filterMinecraftVersion || ''}-${filterModLoader || ''}-${currentPage || 1}-${resultsPerPage || 20}-${sortBy || 'relevance'}-${environmentType || 'all'}`;
+  const {
+    serverPath,
+    searchKeyword,
+    modSource,
+    filterMinecraftVersion,
+    filterModLoader,
+    currentPage,
+    resultsPerPage,
+    sortBy,
+    environmentType
+  } = options;
+
+  return `${normalizePathForUpdates(serverPath) || 'global'}-${contentType}-${searchKeyword || ''}-${modSource || ''}-${filterMinecraftVersion || ''}-${filterModLoader || ''}-${currentPage || 1}-${resultsPerPage || 20}-${sortBy || 'relevance'}-${environmentType || 'all'}`;
 }
 
 /**
@@ -496,13 +693,22 @@ export async function searchContent(contentType = 'mods', options = {}) {
   contentTypeSwitching.set(true);
   
   try {
+    const hasExplicitFilterMinecraftVersion = Object.prototype.hasOwnProperty.call(options, 'filterMinecraftVersion');
+    const hasExplicitFilterModLoader = Object.prototype.hasOwnProperty.call(options, 'filterModLoader');
+    const effectiveFilterMinecraftVersion = hasExplicitFilterMinecraftVersion
+      ? options.filterMinecraftVersion
+      : get(filterMinecraftVersion);
+    const effectiveFilterModLoader = hasExplicitFilterModLoader
+      ? options.filterModLoader
+      : get(filterModLoader);
+
     // Generate cache key
-    const filterVerForCache = get(filterMinecraftVersion);
     const cacheKey = generateCacheKey(contentType, {
+      serverPath: options.serverPath || activeModServerPath || activeUpdateServerPath || '',
       searchKeyword: get(searchKeyword),
       modSource: get(modSource),
-      filterMinecraftVersion: filterVerForCache,
-      filterModLoader: get(filterModLoader),
+      filterMinecraftVersion: effectiveFilterMinecraftVersion,
+      filterModLoader: effectiveFilterModLoader,
       currentPage: get(currentPage),
       resultsPerPage: get(resultsPerPage),
       ...options
@@ -553,8 +759,8 @@ export async function searchContent(contentType = 'mods', options = {}) {
     // Read filters from the centralized stores
     const query = get(searchKeyword);
     const source = get(modSource);
-    const filterVer = get(filterMinecraftVersion);
-    const loader = get(filterModLoader) || get(loaderType);
+    const filterVer = effectiveFilterMinecraftVersion;
+    const loader = effectiveFilterModLoader || get(loaderType);
     const page = get(currentPage);
     const limit = get(resultsPerPage);
     const sortBy = options.sortBy || 'relevance';
@@ -821,16 +1027,25 @@ export async function searchMods(options = {}) {
  * @param {boolean} forceRefresh - Whether to bypass cache and fetch fresh data
  * @returns {Promise<Array>} - Array of version objects
 */
-export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false, forceRefresh = false, contentType = 'mods') {
+export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnly = false, forceRefresh = false, contentType = 'mods', updateContext = null) {
   // Cache key - NOTE: forceRefresh should NOT be part of the cache key
-  const loader = get(loaderType);
-  const filterVer = get(filterMinecraftVersion);
-  const currentVersion = get(minecraftVersion);
+  const hasExplicitContext = !!updateContext;
+  const loader = hasExplicitContext
+    ? normalizeConfigValue(updateContext?.loader)
+    : get(loaderType);
+  const filterVer = hasExplicitContext || updateContext?.useFilter === false
+    ? undefined
+    : get(filterMinecraftVersion);
+  const currentVersion = hasExplicitContext
+    ? normalizeConfigValue(updateContext?.minecraftVersion)
+    : get(minecraftVersion);
   
   // Use filter version if set, otherwise use current version
   // Empty string means "All Versions" - use undefined to not filter
   let gameVersion;
-  if (filterVer === '') {
+  if (Object.prototype.hasOwnProperty.call(updateContext || {}, 'gameVersion')) {
+    gameVersion = normalizeConfigValue(updateContext?.gameVersion) || undefined;
+  } else if (filterVer === '') {
     gameVersion = undefined; // All versions
   } else if (filterVer) {
     gameVersion = filterVer; // Specific filter version
@@ -838,7 +1053,7 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
     gameVersion = currentVersion; // Current version as fallback
   }
   
-  const cacheKey = `${modId}:${loader}:${gameVersion || 'all'}:${loadLatestOnly}`;
+  const cacheKey = `${modId}:${loader || 'vanilla'}:${gameVersion || 'all'}:${loadLatestOnly}`;
 
   // Check if we already have this version information cached (unless forcing refresh)
   if (!forceRefresh) {
@@ -1226,6 +1441,8 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
  * @returns {Promise<Map<string, Object>>} - Map of mod names to update info
  */
 export async function checkForUpdates(serverPath, forceRefresh = false) {
+  const normalizedPath = normalizePathForUpdates(serverPath);
+
   // Prevent concurrent update checks
   if (get(isCheckingUpdates)) {
     // Queue a follow-up check to run right after the current one finishes
@@ -1234,6 +1451,9 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
       serverPath: serverPath || (pendingUpdateCheck?.serverPath || null),
       forceRefresh: forceRefresh || (pendingUpdateCheck?.forceRefresh || false)
     };
+    if (normalizedPath && activeUpdateServerPath && normalizedPath !== activeUpdateServerPath) {
+      updateCheckId += 1;
+    }
     return new Map();
   }
 
@@ -1246,11 +1466,11 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
       return null;
     }
   })();
-  const normalizedPath = normalizePathForUpdates(serverPath);
   const pathChanged = normalizedPath && lastUpdateCheckPath && normalizedPath !== lastUpdateCheckPath;
   let clearedUpdatesForCheck = false;
-  if (pathChanged || (previousUpdatesSnapshot && previousUpdatesSnapshot.size > 0)) {
+  if (pathChanged) {
     modsWithUpdates.set(new Map());
+    disabledModUpdates.set(new Map());
     clearedUpdatesForCheck = true;
   }
   if (normalizedPath) {
@@ -1258,16 +1478,17 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
   }
 
   isCheckingUpdates.set(true);
+  activeUpdateServerPath = normalizedPath;
   const currentCheckId = ++updateCheckId;
 
   const updatesMap = new Map();
+  const isStaleCheck = () => currentCheckId !== updateCheckId || !isCurrentModServerPath(serverPath);
 
   try {
-    if (!serverPath) {
+    if (!serverPath || !isCurrentModServerPath(serverPath)) {
       if (clearedUpdatesForCheck && previousUpdatesSnapshot && !pathChanged) {
         modsWithUpdates.set(previousUpdatesSnapshot);
       }
-      isCheckingUpdates.set(false);
       return updatesMap;
     }
 
@@ -1275,6 +1496,21 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     if (forceRefresh) {
       modVersionsCache.set({});
       installedModVersionsCache.set({});
+    }
+
+    const config = await loadServerConfig(serverPath, { syncStores: false });
+    const updateContext = createUpdateContext(serverPath, config);
+
+    if (!updateContext.minecraftVersion) {
+      if (!isStaleCheck()) {
+        modsWithUpdates.set(new Map());
+        disabledModUpdates.set(new Map());
+      }
+      return updatesMap;
+    }
+
+    if (isStaleCheck()) {
+      return updatesMap;
     }
     
     // Get all content with project IDs (mods, shaders, resource packs)
@@ -1294,29 +1530,67 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     ];
     
     if (allContentWithProjectIds.length === 0) {
-      modsWithUpdates.set(new Map());
+      if (!isStaleCheck()) {
+        modsWithUpdates.set(new Map());
+        await checkDisabledModUpdates(serverPath, updateContext);
+        try { lastUpdateCheckTime.set(Date.now()); } catch { /* ignore timestamp errors */ }
+      }
+      return updatesMap;
     }
     
-  for (const contentInfo of allContentWithProjectIds) {
+    for (const contentInfo of allContentWithProjectIds) {
       // Check if a newer update check has started
-      if (currentCheckId !== updateCheckId) {
+      if (isStaleCheck()) {
         break;
+      }
+
+      if (
+        contentInfo.contentType === 'mods' &&
+        !isInstalledBuildCompatibleWithContext(contentInfo, updateContext)
+      ) {
+        logger.info('Skipping version lookup for incompatible installed mod build', {
+          category: 'mods',
+          data: {
+            component: 'modAPI',
+            function: 'checkForUpdates',
+            modFile: contentInfo.fileName,
+            modName: contentInfo.name || null,
+            installedVersion: contentInfo.versionNumber || contentInfo.version || null,
+            minecraftVersion: updateContext.minecraftVersion || updateContext.gameVersion || null,
+            installedGameVersions: getInstalledGameVersionHints(contentInfo),
+            forceLog: true
+          }
+        });
+        continue;
       }
       
       if (contentInfo.projectId) {
         try {
           // Always fetch fresh versions to check for updates
           // This ensures we detect if a user has installed an older version
-          const versions = await fetchModVersions(contentInfo.projectId, 'modrinth', false, forceRefresh, contentInfo.contentType);
+          const versions = await fetchModVersions(
+            contentInfo.projectId,
+            'modrinth',
+            false,
+            forceRefresh,
+            contentInfo.contentType,
+            updateContext
+          );
+
+          if (isStaleCheck()) {
+            break;
+          }
           
-          // Update cache
-          installedModVersionsCache.update(cache => {
-            cache[contentInfo.projectId] = versions;
-            return cache;
-          });
+          // Update cache using the active instance/version context.
+          setInstalledVersionCacheEntry(
+            contentInfo.projectId,
+            versions,
+            contentInfo.contentType,
+            updateContext
+          );
           
           // Check if an update is available
-          const updateVersion = checkForUpdate(contentInfo, versions);
+          const updateVersion = checkForUpdate(contentInfo, versions, updateContext);
           if (updateVersion) {
             // Skip if this version is ignored for this file
             try {
@@ -1346,18 +1620,23 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
         }
       }
     }
+
+    if (isStaleCheck()) {
+      return updatesMap;
+    }
     
     // Update the store
     modsWithUpdates.set(updatesMap);
-    await checkDisabledModUpdates(serverPath);
+    await checkDisabledModUpdates(serverPath, updateContext);
     try { lastUpdateCheckTime.set(Date.now()); } catch { /* ignore timestamp errors */ }
     return updatesMap;
   } catch {
-    if (clearedUpdatesForCheck && previousUpdatesSnapshot && !pathChanged) {
+    if (!isStaleCheck() && clearedUpdatesForCheck && previousUpdatesSnapshot && !pathChanged) {
       modsWithUpdates.set(previousUpdatesSnapshot);
     }
     return updatesMap;
   } finally {
+    activeUpdateServerPath = '';
     isCheckingUpdates.set(false);
     // If a check was requested while we were busy, run it now
     if (pendingUpdateCheck) {
@@ -1376,25 +1655,22 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
  * Check for updates available for disabled mods
  * @param {string} serverPath - Server path
  */
-export async function checkDisabledModUpdates(serverPath) {
+export async function checkDisabledModUpdates(serverPath, updateContext = null) {
   try {
-    let mcVersion = get(minecraftVersion);
-    
     if (!serverPath) {
       disabledModUpdates.set(new Map());
       return;
     }
-    
-    if (!mcVersion) {
-      try {
-        const config = await loadServerConfig(serverPath);
-        if (config?.version) {
-          mcVersion = config.version;
-        }
-      } catch {
-        // ignore config load errors
-      }
+
+    if (!isCurrentModServerPath(serverPath)) {
+      return;
     }
+
+    const strictContext = updateContext || createUpdateContext(
+      serverPath,
+      await loadServerConfig(serverPath, { syncStores: false })
+    );
+    const mcVersion = normalizeConfigValue(strictContext?.minecraftVersion || strictContext?.gameVersion);
     
     if (!mcVersion) {
       disabledModUpdates.set(new Map());
@@ -1409,6 +1685,10 @@ export async function checkDisabledModUpdates(serverPath) {
     
     if (!results || !Array.isArray(results)) {
       disabledModUpdates.set(new Map());
+      return;
+    }
+
+    if (!isCurrentModServerPath(serverPath)) {
       return;
     }
     
@@ -1509,7 +1789,7 @@ export async function enableAndUpdateMod(serverPath, modFileName, projectId, tar
  * @param {Array} versions - Available versions
  * @returns {Object|null} - The update version or null
  */
-function checkForUpdate(modInfo, versions) {
+function checkForUpdate(modInfo, versions, updateContext = null) {
   const installedVersionRaw = modInfo?.versionNumber || modInfo?.version || '';
   if (!versions || versions.length === 0 || !modInfo || !installedVersionRaw) {
     return null;
@@ -1549,8 +1829,15 @@ function checkForUpdate(modInfo, versions) {
 
   // Determine Minecraft-version compatible versions
   let latestVersion = null;
+  const currentMc = updateContext?.minecraftVersion || updateContext?.gameVersion || get(minecraftVersion);
+  const installedId = modInfo.versionId;
+  const installedEntry = versions.find(v =>
+    (installedId && v.id === installedId) ||
+    v.versionNumber === installedVersionRaw ||
+    v.version_number === installedVersionRaw
+  );
+  const installedGameVersions = getInstalledGameVersionHints(modInfo, installedEntry);
   try {
-    const currentMc = get(minecraftVersion);
     if (!currentMc) {
       logger.info('Skipping update check without minecraftVersion context', {
         category: 'mods',
@@ -1565,6 +1852,27 @@ function checkForUpdate(modInfo, versions) {
       return null;
     }
     if (currentMc) {
+      if (
+        installedGameVersions.length > 0 &&
+        !installedGameVersions.some(gv => isGameVersionCompatible(currentMc, gv))
+      ) {
+        logger.info('Skipping update check for incompatible installed mod build', {
+          category: 'mods',
+          data: {
+            component: 'modAPI',
+            function: 'checkForUpdate',
+            modFile: modInfo.fileName,
+            modName: modInfo.name || null,
+            installedVersion: installedVersionRaw,
+            installedGameVersions,
+            minecraftVersion: currentMc,
+            installedId: installedId || null,
+            forceLog: true
+          }
+        });
+        return null;
+      }
+
       const compatible = sortedVersions.filter(v => {
         if (!v || !Array.isArray(v.gameVersions)) return false;
         return v.gameVersions.some(gv => isGameVersionCompatible(currentMc, gv));
@@ -1615,7 +1923,7 @@ function checkForUpdate(modInfo, versions) {
           modName: modInfo.name || null,
           installedVersion: installedVersionRaw,
           candidateVersion: latestVersion.versionNumber || latestVersion.name,
-          minecraftVersion: get(minecraftVersion),
+          minecraftVersion: currentMc,
           candidateGameVersions: latestVersion.gameVersions || [],
           candidateId: latestVersion.id || null,
           forceLog: true
@@ -1643,7 +1951,7 @@ function checkForUpdate(modInfo, versions) {
             modName: modInfo.name || null,
             installedVersion: installedVersionRaw,
             candidateVersion: latestVersion.versionNumber || latestVersion.name,
-            minecraftVersion: get(minecraftVersion),
+            minecraftVersion: currentMc,
             candidateGameVersions: latestVersion.gameVersions || [],
             candidateId: latestVersion.id || null,
             installedId: installedId || null,
@@ -1655,11 +1963,6 @@ function checkForUpdate(modInfo, versions) {
 
       if (idsDiffer) {
         // Try to locate the installed entry to compare dates
-        const installedEntry = versions.find(v =>
-          (installedId && v.id === installedId) ||
-          v.versionNumber === installedVersionRaw ||
-          v.version_number === installedVersionRaw
-        );
         const installedDate = installedEntry?.datePublished ? new Date(installedEntry.datePublished).getTime() : null;
         const latestDate = latestVersion.datePublished ? new Date(latestVersion.datePublished).getTime() : null;
 
@@ -1673,7 +1976,7 @@ function checkForUpdate(modInfo, versions) {
               modName: modInfo.name || null,
               installedVersion: installedVersionRaw,
               candidateVersion: latestVersion.versionNumber || latestVersion.name,
-              minecraftVersion: get(minecraftVersion),
+              minecraftVersion: currentMc,
               candidateGameVersions: latestVersion.gameVersions || [],
               candidateId: latestVersion.id || null,
               installedId: installedId || null,
@@ -1695,7 +1998,7 @@ function checkForUpdate(modInfo, versions) {
         modName: modInfo.name || null,
         installedVersion: installedVersionRaw,
         candidateVersion: latestVersion ? (latestVersion.versionNumber || latestVersion.name) : null,
-        minecraftVersion: get(minecraftVersion),
+        minecraftVersion: currentMc,
         candidateGameVersions: latestVersion ? (latestVersion.gameVersions || []) : [],
         installedId: modInfo.versionId || null,
         candidateId: latestVersion ? latestVersion.id || null : null,

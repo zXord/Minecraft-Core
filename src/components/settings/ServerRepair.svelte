@@ -15,6 +15,14 @@
   // Minecraft version info for repairs
   let selectedMC;
   let selectedFabric;
+  let selectedLoader = 'vanilla';
+
+  function formatLoaderName(loader) {
+    if (!loader) return 'Loader';
+    const normalized = String(loader).toLowerCase();
+    if (normalized === 'vanilla') return 'Vanilla';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
   
     async function checkHealth() {
     try {
@@ -44,9 +52,10 @@
           
           if (config && config.version) {
             selectedMC = config.version;
-            selectedFabric = config.fabric || 'latest';
+            selectedLoader = config.loader || (config.fabric ? 'fabric' : 'vanilla');
+            selectedFabric = config.loaderVersion || config.fabric || (selectedLoader === 'vanilla' ? null : 'latest');
             repairLogs = [...repairLogs, `Found Minecraft version: ${selectedMC}`];
-            repairLogs = [...repairLogs, `Found Fabric version: ${selectedFabric}`];
+            repairLogs = [...repairLogs, `Found ${formatLoaderName(selectedLoader)} version: ${selectedFabric || 'n/a'}`];
           } else {
             repairLogs = [...repairLogs, 'Error: Missing version information in server configuration.'];
             throw new Error('Missing version information. Please configure server settings first.');
@@ -58,13 +67,15 @@
       }
       
       
-      repairLogs = [...repairLogs, `Repairing server with Minecraft ${selectedMC} and Fabric ${selectedFabric}`];      // Direct call to repair-health without delay
+      repairLogs = [...repairLogs, `Repairing server with Minecraft ${selectedMC}${selectedFabric ? ` and ${formatLoaderName(selectedLoader)} ${selectedFabric}` : ''}`];
       try {
         repairLogs = [...repairLogs, 'Sending repair request to server...'];
         
         await window.electron.invoke('repair-health', {
           targetPath: serverPath,
           mcVersion: selectedMC,
+          loader: selectedLoader,
+          loaderVersion: selectedFabric,
           fabricVersion: selectedFabric
         });
         
@@ -117,7 +128,8 @@
         const config = await window.electron.invoke('read-config', serverPath);
         if (config) {
           selectedMC = config.version;
-          selectedFabric = config.fabric || 'latest';
+          selectedLoader = config.loader || (config.fabric ? 'fabric' : 'vanilla');
+          selectedFabric = config.loaderVersion || config.fabric || (selectedLoader === 'vanilla' ? null : 'latest');
         }
         
         // Initial health check
@@ -137,7 +149,7 @@
 
 <div class="server-repair-section">
   <h3>Server Core Files</h3>
-  <p class="description">This tool checks and repairs essential server files only (not world data or mods).</p>
+  <p class="description">This tool checks and repairs essential server files only, including the selected loader runtime (not world data or mods).</p>
 
   <button class="check-button" on:click={checkHealth}>
     Check Core Files

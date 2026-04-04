@@ -351,7 +351,7 @@
       filterMinecraftVersion.set(get(minecraftVersion) || '1.20.1');
     }
     if (!get(filterModLoader)) {
-      filterModLoader.set(get(loaderType) || 'fabric');
+      filterModLoader.set(get(loaderType) || 'vanilla');
     }    if (instance && instance.serverIp && instance.serverPort) {
       // On initial load, do a fresh mod synchronization check instead of just loading server info
       // This ensures we catch any mods that need removal
@@ -514,7 +514,7 @@
       };
       const modData = {
         ...modLike,
-        loader: get(loaderType) || 'fabric',
+        loader: get(loaderType) || 'vanilla',
         version: get(minecraftVersion) || '1.20.1',
         clientPath: instance?.path,
         forceReinstall: true,
@@ -650,7 +650,7 @@
         selectedVersionId: versionId,
         source: 'modrinth',
         // loader is only relevant for mods; backend ignores for shaders/resourcepacks
-        loader: get(loaderType) || 'fabric',
+        loader: get(loaderType) || 'vanilla',
         version: get(minecraftVersion) || '1.20.1',
         clientPath: pathToUse,
         forceReinstall: isUpdate,

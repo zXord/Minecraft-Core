@@ -1,5 +1,5 @@
 import { get } from 'svelte/store';
-import { serverState, updateServerStatus } from '../stores/serverState.js';
+import { addServerLog, serverState, updateServerStatus } from '../stores/serverState.js';
 import { playerState } from '../stores/playerState.js';
 import { isRestarting } from '../stores/restartState.js';
 
@@ -19,6 +19,25 @@ const METRICS_STALE_MS = 12000; // If we saw metrics recently, distrust "stopped
 let lastMetricsReceivedAt = 0;
 let pendingStatusVerification = null;
 let fallbackStatusOnFailure = null; // Use the incoming status if verification IPC fails
+
+function getCurrentServerInstanceId() {
+  try {
+    const raw = window?.localStorage?.getItem('currentInstance');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && parsed.type === 'server' ? parsed.id || null : null;
+  } catch {
+    return null;
+  }
+}
+
+function isForCurrentServer(payload) {
+  const activeInstanceId = getCurrentServerInstanceId();
+  if (!activeInstanceId) return true;
+  if (!payload || typeof payload !== 'object') return true;
+  if (!payload.instanceId) return true;
+  return payload.instanceId === activeInstanceId;
+}
 
 function normalizeStatusPayload(payload) {
   if (typeof payload === 'string') {
@@ -45,7 +64,9 @@ async function verifyServerStatus(options = {}) {
   }
   if (pendingStatusVerification) return pendingStatusVerification;
 
-  pendingStatusVerification = window.electron.invoke('get-server-status')
+  pendingStatusVerification = window.electron.invoke('get-server-status', {
+    instanceId: getCurrentServerInstanceId()
+  })
     .then(result => {
       const verifiedStatus = result?.status === 'running' ? 'Running' : 'Stopped';
       updateServerStatus(verifiedStatus);
@@ -104,10 +125,31 @@ export function setupIpcListeners() {
   let restarting = false;
   isRestarting.subscribe(v => restarting = v);
 
+  window.electron.removeAllListeners('server-log');
   window.electron.removeAllListeners('server-status');
   window.electron.removeAllListeners('metrics-update');
 
+  window.electron.on('server-log', payload => {
+    if (!isForCurrentServer(payload)) {
+      return;
+    }
+
+    const line = payload && typeof payload === 'object' && 'line' in payload
+      ? payload.line
+      : payload;
+
+    if (line === null || line === undefined) {
+      return;
+    }
+
+    addServerLog(typeof line === 'string' ? line : String(line));
+  });
+
   window.electron.on('server-status', status => {
+    if (!isForCurrentServer(status)) {
+      return;
+    }
+
     const { status: normalizedStatus, confidence } = normalizeStatusPayload(status);
 
     if (restarting) {
@@ -135,6 +177,10 @@ export function setupIpcListeners() {
   });
 
   window.electron.on('metrics-update', metrics => {
+    if (!isForCurrentServer(metrics)) {
+      return;
+    }
+
     lastMetricsReceivedAt = Date.now();
 
     serverState.update(state => ({

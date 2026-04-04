@@ -9,15 +9,32 @@ const {
   readServerConfig,
   updateServerConfig
 } = require('../utils/config-manager.cjs');
+const { validateServerPorts } = require('../utils/port-validator.cjs');
 
 function getServerInstances() {
   return appStore.get('instances') || [];
+}
+
+function findServerInstanceById(instanceId) {
+  if (!instanceId) return null;
+  const instances = getServerInstances();
+  return instances.find((inst) => inst && inst.type === 'server' && inst.id === instanceId) || null;
 }
 
 function findServerInstanceByPath(serverPath) {
   if (!serverPath) return null;
   const instances = getServerInstances();
   return instances.find((inst) => inst && inst.type === 'server' && inst.path === serverPath) || null;
+}
+
+function resolveServerInstance(payload = {}) {
+  const instanceId = typeof payload === 'object' && payload ? payload.instanceId : null;
+  const serverPath = typeof payload === 'object' && payload ? payload.serverPath : null;
+  const byId = findServerInstanceById(instanceId);
+  if (byId) {
+    return byId;
+  }
+  return findServerInstanceByPath(serverPath);
 }
 
 function updateServerInstance(serverPath, updates) {
@@ -35,9 +52,8 @@ function generateInviteSecret() {
 }
 
 function getServerConfigDefaults() {
-  const settings = appStore.get('serverSettings') || {};
   return getDefaultServerConfig({
-    managementPort: settings.managementPort || 8080
+    managementPort: 8080
   });
 }
 
@@ -68,7 +84,12 @@ function getConfiguredInviteHost(serverPath, instance = null) {
 }
 
 function getManagementPortForServer(serverPath) {
-  const status = getManagementServer().getStatus ? getManagementServer().getStatus() : null;
+  const instance = findServerInstanceByPath(serverPath);
+  const selector = {
+    instanceId: instance?.id || null,
+    serverPath
+  };
+  const status = getManagementServer(selector).getStatus ? getManagementServer(selector).getStatus() : null;
   const runningPort = status && status.port ? Number.parseInt(String(status.port), 10) : NaN;
   if (Number.isFinite(runningPort)) {
     return runningPort;
@@ -79,9 +100,7 @@ function getManagementPortForServer(serverPath) {
     return Number(config.managementPort);
   }
 
-  const settings = appStore.get('serverSettings') || {};
-  const settingsPort = settings.managementPort ? Number.parseInt(String(settings.managementPort), 10) : NaN;
-  return Number.isFinite(settingsPort) ? settingsPort : 8080;
+  return 8080;
 }
 
 function ensureInviteSecret(serverPath) {
@@ -138,27 +157,45 @@ function isPrivateIp(host) {
  * @returns {Object.<string, Function>} Object with channel names as keys and handler functions as values
  */
 function createManagementServerHandlers(win) {
-  const managementServer = getManagementServer();
-  
   return {
     // Start the management server
-    'start-management-server': async (_event, { port = 8080, serverPath }) => {
+    'start-management-server': async (_event, payload = {}) => {
       try {
-        const targetPath = serverPath || appStore.get('lastServerPath');
-        const { instance, secret } = ensureInviteSecret(targetPath);
+        const matchedInstance = resolveServerInstance(payload);
+        const targetPath = payload.serverPath || matchedInstance?.path || appStore.get('lastServerPath');
+        const instanceId = payload.instanceId || matchedInstance?.id || null;
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
+        const inviteState = ensureInviteSecret(targetPath);
+        const inviteInstance = inviteState.instance || matchedInstance || null;
+        const secret = inviteState.secret;
         if (secret) {
           managementServer.setInviteSecret(secret);
         }
-        const configuredHost = getConfiguredInviteHost(targetPath, instance);
+        const configuredHost = getConfiguredInviteHost(targetPath, inviteInstance);
         managementServer.setExternalHost(configuredHost || null);
 
-        const result = await managementServer.start(port, targetPath);
+        const requestedPort = payload.port ?? 8080;
+        const portValidation = await validateServerPorts({
+          instanceId,
+          serverPath: targetPath,
+          managementPort: requestedPort
+        });
+        if (!portValidation.valid) {
+          return {
+            success: false,
+            code: 'PORT_CONFLICT',
+            error: portValidation.errors[0].message,
+            details: portValidation.errors
+          };
+        }
+        const result = await managementServer.start(requestedPort, targetPath);
         
         if (result.success) {
           
           // Notify renderer about server status
           if (win && win.webContents) {
             win.webContents.send('management-server-status', {
+              instanceId: instanceId || inviteInstance?.id || null,
               isRunning: true,
               port: result.port,
               serverPath: targetPath
@@ -172,16 +209,21 @@ function createManagementServerHandlers(win) {
       }
     },
       // Stop the management server
-    'stop-management-server': async () => {
+    'stop-management-server': async (_event, payload = {}) => {
       try {
+        const matchedInstance = resolveServerInstance(payload);
+        const targetPath = payload.serverPath || matchedInstance?.path || appStore.get('lastServerPath');
+        const instanceId = payload.instanceId || matchedInstance?.id || null;
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
         const result = await managementServer.stop();
         
         // Notify renderer about server status when stopped, even if forced/timeout
         if (win && win.webContents && (result.success || result.forced)) {
           win.webContents.send('management-server-status', {
+            instanceId: instanceId || matchedInstance?.id || null,
             isRunning: false,
             port: null,
-            serverPath: null,
+            serverPath: targetPath,
             forced: !!result.forced,
             reason: result.reason || undefined
           });
@@ -193,8 +235,12 @@ function createManagementServerHandlers(win) {
       }
     },
       // Get management server status
-    'get-management-server-status': async () => {
+    'get-management-server-status': async (_event, payload = {}) => {
       try {
+        const matchedInstance = resolveServerInstance(payload);
+        const targetPath = payload.serverPath || matchedInstance?.path || appStore.get('lastServerPath');
+        const instanceId = payload.instanceId || matchedInstance?.id || null;
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
         const status = managementServer.getStatus();
         return { success: true, status };
       } catch (error) {
@@ -203,20 +249,28 @@ function createManagementServerHandlers(win) {
     },
     
     // Update server path
-    'update-management-server-path': async (_event, serverPath) => {
+    'update-management-server-path': async (_event, payload = {}) => {
       try {
-        const targetPath = serverPath || null;
-        const { instance, secret } = ensureInviteSecret(targetPath);
+        const matchedInstance = resolveServerInstance(payload);
+        const targetPath = typeof payload === 'string' ? payload : (payload.serverPath || matchedInstance?.path || null);
+        const instanceId = typeof payload === 'object' && payload ? (payload.instanceId || matchedInstance?.id || null) : (matchedInstance?.id || null);
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
+        const inviteState = ensureInviteSecret(targetPath);
+        const inviteInstance = inviteState.instance || matchedInstance || null;
+        const secret = inviteState.secret;
         if (secret) {
           managementServer.setInviteSecret(secret);
         }
-        const configuredHost = getConfiguredInviteHost(targetPath, instance);
+        const configuredHost = getConfiguredInviteHost(targetPath, inviteInstance);
         managementServer.setExternalHost(configuredHost || null);
         managementServer.updateServerPath(targetPath);
         
         // Notify renderer about path update
         if (win && win.webContents) {
-          win.webContents.send('management-server-path-updated', targetPath);
+          win.webContents.send('management-server-path-updated', {
+            instanceId: instanceId || inviteInstance?.id || null,
+            serverPath: targetPath
+          });
         }
         
         return { success: true, serverPath: targetPath };
@@ -228,9 +282,12 @@ function createManagementServerHandlers(win) {
     // Set external host for mod downloads
     'set-management-server-external-host': async (_event, payload = {}) => {
       try {
+        const matchedInstance = resolveServerInstance(payload);
         const hostIP = typeof payload === 'string' ? payload : payload?.hostIP;
         const serverPath = typeof payload === 'object' && payload ? payload.serverPath : undefined;
-        const targetPath = serverPath || appStore.get('lastServerPath');
+        const targetPath = serverPath || matchedInstance?.path || appStore.get('lastServerPath');
+        const instanceId = typeof payload === 'object' && payload ? (payload.instanceId || matchedInstance?.id || null) : (matchedInstance?.id || null);
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
         const host = typeof hostIP === 'string' ? hostIP.trim() : '';
         if (targetPath) {
           updateServerInstance(targetPath, { managementInviteHost: host || '' });
@@ -249,8 +306,12 @@ function createManagementServerHandlers(win) {
     },
 
     // Get current external host info
-    'get-management-server-host-info': async () => {
+    'get-management-server-host-info': async (_event, payload = {}) => {
       try {
+        const matchedInstance = resolveServerInstance(payload);
+        const targetPath = payload.serverPath || matchedInstance?.path || appStore.get('lastServerPath');
+        const instanceId = payload.instanceId || matchedInstance?.id || null;
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
         await managementServer.refreshPublicHostIfStale();
         return { 
           success: true, 
@@ -267,14 +328,20 @@ function createManagementServerHandlers(win) {
     },
 
     // Get invite link information for the current server instance
-    'get-management-invite-info': async (_event, { serverPath, port } = {}) => {
+    'get-management-invite-info': async (_event, payload = {}) => {
       try {
-        const targetPath = serverPath || appStore.get('lastServerPath');
+        const { serverPath, port } = payload;
+        const matchedInstance = resolveServerInstance(payload);
+        const targetPath = serverPath || matchedInstance?.path || appStore.get('lastServerPath');
+        const instanceId = payload.instanceId || matchedInstance?.id || null;
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
         if (!targetPath) {
           return { success: false, error: 'No server path available' };
         }
-        const { instance, secret } = ensureInviteSecret(targetPath);
-        if (!instance) {
+        const inviteState = ensureInviteSecret(targetPath);
+        const inviteInstance = inviteState.instance || matchedInstance || null;
+        const secret = inviteState.secret;
+        if (!inviteInstance) {
           return { success: false, error: 'Server instance not found' };
         }
 
@@ -286,7 +353,7 @@ function createManagementServerHandlers(win) {
         } catch {
           fingerprint = '';
         }
-        const configuredHost = getConfiguredInviteHost(targetPath, instance);
+        const configuredHost = getConfiguredInviteHost(targetPath, inviteInstance);
         const publicHost = managementServer.publicHost;
         const fallbackHost = managementServer.detectExternalIP() || 'localhost';
         const host = configuredHost || publicHost || fallbackHost;
@@ -318,9 +385,13 @@ function createManagementServerHandlers(win) {
     },
 
     // Update the configured invite host for a server instance
-    'set-management-invite-host': async (_event, { serverPath, host }) => {
+    'set-management-invite-host': async (_event, payload = {}) => {
       try {
-        const targetPath = serverPath || appStore.get('lastServerPath');
+        const { serverPath, host } = payload;
+        const matchedInstance = resolveServerInstance(payload);
+        const targetPath = serverPath || matchedInstance?.path || appStore.get('lastServerPath');
+        const instanceId = payload.instanceId || matchedInstance?.id || null;
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
         if (!targetPath) {
           return { success: false, error: 'No server path available' };
         }
@@ -335,9 +406,13 @@ function createManagementServerHandlers(win) {
     },
 
     // Regenerate the invite secret for a server instance
-    'regenerate-management-invite-secret': async (_event, { serverPath } = {}) => {
+    'regenerate-management-invite-secret': async (_event, payload = {}) => {
       try {
-        const targetPath = serverPath || appStore.get('lastServerPath');
+        const { serverPath } = payload;
+        const matchedInstance = resolveServerInstance(payload);
+        const targetPath = serverPath || matchedInstance?.path || appStore.get('lastServerPath');
+        const instanceId = payload.instanceId || matchedInstance?.id || null;
+        const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
         if (!targetPath) {
           return { success: false, error: 'No server path available' };
         }

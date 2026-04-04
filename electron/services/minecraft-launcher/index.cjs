@@ -2101,7 +2101,6 @@ Starting Minecraft with console output...
   // New method: Use proper launcher for LogUtils fix
   async launchMinecraftProper(options) {
     try {
-
       // Set authentication data
       if (this.authHandler.authData) {
         this.properLauncher.setAuthData(this.authHandler.authData);
@@ -2109,8 +2108,18 @@ Starting Minecraft with console output...
         throw new Error('No authentication data available. Please authenticate first.');
       }
 
+      const { requiredJavaVersion } = await require('./utils.cjs').resolveRequiredJavaVersion(options.minecraftVersion);
+      const javaResult = await this.javaManager.ensureJava(requiredJavaVersion);
+      if (!javaResult.success || !javaResult.javaPath) {
+        throw new Error(`Java ${requiredJavaVersion} not available: ${javaResult.error || 'Unknown error'}`);
+      }
+
       // Forward the call to the proper launcher
-      const result = await this.properLauncher.launchMinecraft(options);
+      const result = await this.properLauncher.launchMinecraft({
+        ...options,
+        javaPath: javaResult.javaPath,
+        showDebugTerminal: !!options.showDebugTerminal
+      });
 
       // Update our state to match
       if (result.success) {
@@ -2118,10 +2127,12 @@ Starting Minecraft with console output...
         this.client = this.properLauncher.client;
         this.clientPath = options.clientPath;
 
-        // Forward events
-        this.properLauncher.on('minecraft-stopped', () => {
-          this.emit('minecraft-stopped');
-        });
+        if (!this._properLauncherStopForwarder) {
+          this._properLauncherStopForwarder = () => {
+            this.emit('minecraft-stopped');
+          };
+          this.properLauncher.on('minecraft-stopped', this._properLauncherStopForwarder);
+        }
       }
 
       return result;

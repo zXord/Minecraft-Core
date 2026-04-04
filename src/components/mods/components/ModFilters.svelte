@@ -1,8 +1,6 @@
 <script>
   import { createEventDispatcher } from "svelte";
   import {
-    minecraftVersion,
-    loaderType,
     CONTENT_TYPES,
   } from "../../../stores/modStore.js";
 
@@ -12,9 +10,11 @@
   // Filter states
   export let sortBy = "relevance";
   export let filterType = "all";
-  export let filterMinecraftVersion = $minecraftVersion || "";
-  export let filterModLoader = $loaderType || "fabric";
+  export let filterMinecraftVersion = "";
+  export let filterModLoader = "vanilla";
   export let activeContentType = CONTENT_TYPES.MODS;
+  export let instanceMinecraftVersion = "";
+  export let instanceLoader = "vanilla";
 
   // Local copies for the form
   let localSortBy = sortBy;
@@ -104,9 +104,11 @@
       >
         <!-- Show "All Versions" option and current version only -->
         <option value="">All Versions</option>
-        <option value={$minecraftVersion}
-          >{$minecraftVersion} (Current)</option
-        >
+        {#if instanceMinecraftVersion}
+          <option value={instanceMinecraftVersion}
+            >{instanceMinecraftVersion} (Current)</option
+          >
+        {/if}
       </select>
     </div>
   </div>
@@ -121,7 +123,9 @@
         class="disabled-select"
         bind:value={filterModLoader}
       >
-        <option value={filterModLoader}>{filterModLoader}</option>
+        <option value={filterModLoader || instanceLoader}>
+          {filterModLoader || instanceLoader}
+        </option>
       </select>
     </div>
   {/if}

@@ -418,6 +418,78 @@ async function clearExpectedModState(clientPath) {
   }
 }
 
+function normalizeClientPath(clientPath) {
+  if (!clientPath || typeof clientPath !== 'string') return '';
+  try {
+    return path.resolve(clientPath);
+  } catch {
+    return '';
+  }
+}
+
+async function readSavedAuthSummary(clientPath) {
+  const resolvedClientPath = normalizeClientPath(clientPath);
+  if (!resolvedClientPath) return null;
+
+  const authFile = path.join(resolvedClientPath, 'xmcl-auth.json');
+  if (!fs.existsSync(authFile)) return null;
+
+  try {
+    const raw = await fsPromises.readFile(authFile, 'utf8');
+    const parsed = JSON.parse(raw);
+    const username = parsed?.name || parsed?.username || '';
+    const uuid = parsed?.uuid || '';
+
+    if (!username || !parsed?.access_token) return null;
+
+    return {
+      username,
+      uuid,
+      savedAt: parsed?.savedAt || null,
+      authFile,
+      authData: parsed
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function listReusableAuthAccounts({ targetClientPath = '', targetInstanceId = '' } = {}) {
+  const resolvedTargetPath = normalizeClientPath(targetClientPath);
+  const instances = appStore.get('instances') || [];
+  const reusableAccounts = [];
+
+  for (const instance of instances) {
+    if (!instance || instance.type !== 'client' || !instance.path) continue;
+    if (targetInstanceId && instance.id === targetInstanceId) continue;
+
+    const resolvedInstancePath = normalizeClientPath(instance.path);
+    if (!resolvedInstancePath || (resolvedTargetPath && resolvedInstancePath === resolvedTargetPath)) {
+      continue;
+    }
+
+    const authSummary = await readSavedAuthSummary(resolvedInstancePath);
+    if (!authSummary) continue;
+
+    reusableAccounts.push({
+      instanceId: instance.id,
+      instanceName: instance.name || 'Minecraft Client',
+      clientPath: resolvedInstancePath,
+      username: authSummary.username,
+      uuid: authSummary.uuid,
+      savedAt: authSummary.savedAt
+    });
+  }
+
+  reusableAccounts.sort((left, right) => {
+    const leftTime = left.savedAt ? Date.parse(left.savedAt) || 0 : 0;
+    const rightTime = right.savedAt ? Date.parse(right.savedAt) || 0 : 0;
+    return rightTime - leftTime;
+  });
+
+  return reusableAccounts;
+}
+
 function checkModCompatibility(modFileName, targetVersion) {
   const versionMatch = modFileName.match(/(\d+\.\d+(?:\.\d+)?)/);
   if (!versionMatch) return true;
@@ -844,6 +916,60 @@ function createMinecraftLauncherHandlers(win) {
       try {
         const result = await launcher.saveAuthData(clientPath);
         return result;
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+
+    'minecraft-list-reusable-auth': async (_e, { targetClientPath, targetInstanceId } = {}) => {
+      try {
+        const accounts = await listReusableAuthAccounts({ targetClientPath, targetInstanceId });
+        return { success: true, accounts };
+      } catch (error) {
+        return { success: false, error: error.message, accounts: [] };
+      }
+    },
+
+    'minecraft-import-auth-from-instance': async (_e, { targetClientPath, sourceInstanceId }) => {
+      try {
+        const resolvedTargetPath = normalizeClientPath(targetClientPath);
+        if (!resolvedTargetPath || !sourceInstanceId) {
+          return { success: false, error: 'Target client path and source instance are required' };
+        }
+
+        const instances = appStore.get('instances') || [];
+        const sourceInstance = instances.find((instance) => instance && instance.id === sourceInstanceId && instance.type === 'client');
+        if (!sourceInstance?.path) {
+          return { success: false, error: 'Source client instance not found' };
+        }
+
+        const resolvedSourcePath = normalizeClientPath(sourceInstance.path);
+        if (!resolvedSourcePath || resolvedSourcePath === resolvedTargetPath) {
+          return { success: false, error: 'Choose a different logged-in client instance' };
+        }
+
+        const authSummary = await readSavedAuthSummary(resolvedSourcePath);
+        if (!authSummary?.authData) {
+          return { success: false, error: 'Selected client instance does not have reusable login data' };
+        }
+
+        await fsPromises.mkdir(resolvedTargetPath, { recursive: true });
+        const targetAuthFile = path.join(resolvedTargetPath, 'xmcl-auth.json');
+        const importedAuthData = {
+          ...authSummary.authData,
+          importedAt: new Date().toISOString(),
+          importedFromInstanceId: sourceInstance.id
+        };
+
+        await fsPromises.writeFile(targetAuthFile, JSON.stringify(importedAuthData, null, 2), 'utf8');
+
+        return {
+          success: true,
+          username: authSummary.username,
+          uuid: authSummary.uuid,
+          sourceInstanceId: sourceInstance.id,
+          sourceInstanceName: sourceInstance.name || 'Minecraft Client'
+        };
       } catch (error) {
         return { success: false, error: error.message };
       }
@@ -2112,6 +2238,8 @@ function createMinecraftLauncherHandlers(win) {
         // If flag file exists, never touch servers.dat again - user modifications are preserved
         
         if (useProperLauncher) {
+          const loaderType = serverInfo?.loaderType || serverInfo?.loader || (serverInfo?.fabric ? 'fabric' : 'vanilla');
+          const loaderVersion = serverInfo?.loaderVersion || serverInfo?.fabric || null;
           
           const properResult = await launcher.launchMinecraftProper({
             clientPath,
@@ -2121,10 +2249,11 @@ function createMinecraftLauncherHandlers(win) {
             requiredMods,
             serverInfo,
             maxMemory,
-            needsFabric: serverInfo?.loaderType === 'fabric' || requiredMods.length > 0,
-            fabricVersion: serverInfo?.loaderVersion || 'latest'
+            loaderType,
+            loaderVersion,
+            showDebugTerminal
           });
-          if (properResult.success) {
+          if (properResult.success || loaderType === 'forge') {
             return properResult;
           }
         }
@@ -2600,6 +2729,13 @@ function createMinecraftLauncherHandlers(win) {
           if (names.length === 2) return `required as dependency by ${names[0]} and ${names[1]}`;
           return `required as dependency by ${names[0]}, ${names[1]} and ${names.length-2} other mod${names.length-2 > 1 ? 's' : ''}`;
         };
+        const normalizeDependents = (dependents) => Array.from(new Set(
+          (dependents || [])
+            .filter(Boolean)
+            .map((fileName) => fileName.toString())
+        ));
+        const formatDependentNames = (dependents) => normalizeDependents(dependents)
+          .map((fileName) => fileName.replace(/\.jar$/i, ''));
           const allCurrentMods = new Set();        if (fs.existsSync(modsDir)) {
           fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar')).forEach(f => allCurrentMods.add(f.toLowerCase()));
           fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar.disabled')).forEach(f => allCurrentMods.add(f.replace('.disabled', '').toLowerCase()));
@@ -2658,16 +2794,23 @@ function createMinecraftLauncherHandlers(win) {
             // Can be removed safely
             requiredRemovals.push({
               fileName: modFileName,
-              reason: 'no longer required by server'
+              reason: 'no longer required by server',
+              recommendedAction: 'remove',
+              dependents: [],
+              dependentDisplayNames: []
             });          } else if (isAlreadyAcknowledged) {
             // Still needed but already acknowledged - just keep it tracked, no acknowledgment needed
           } else {
             // Need acknowledgment due to client dependencies
             const dependents = await buildClientSideModsFor(modFileName);
+            const dependentDisplayNames = formatDependentNames(dependents);
             const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
             acknowledgments.push({
               fileName: modFileName,
-              reason: reason
+              reason: reason,
+              recommendedAction: 'keep',
+              dependents: normalizeDependents(dependents),
+              dependentDisplayNames
             });
           }
         }        // Process optional removals
@@ -2690,7 +2833,10 @@ function createMinecraftLauncherHandlers(win) {
             // Can be removed safely
             optionalRemovals.push({
               fileName: modFileName,
-              reason: 'no longer provided by server'
+              reason: 'no longer provided by server',
+              recommendedAction: 'remove',
+              dependents: [],
+              dependentDisplayNames: []
             });
           } else if (isAlreadyAcknowledged) {
             // Still needed but already acknowledged - just keep it tracked, no acknowledgment needed
@@ -2698,10 +2844,14 @@ function createMinecraftLauncherHandlers(win) {
           } else {
             // Need acknowledgment due to client dependencies (even for optional mods)
             const dependents = await buildClientSideModsFor(modFileName);
+            const dependentDisplayNames = formatDependentNames(dependents);
             const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
             acknowledgments.push({
               fileName: modFileName,
-              reason: reason
+              reason: reason,
+              recommendedAction: 'keep',
+              dependents: normalizeDependents(dependents),
+              dependentDisplayNames
             });
           }
         }
@@ -2733,10 +2883,14 @@ function createMinecraftLauncherHandlers(win) {
           if (isNeededByClientMod) {
             // Need acknowledgment due to client dependencies
             const dependents = await buildClientSideModsFor(modFileName);
+            const dependentDisplayNames = formatDependentNames(dependents);
             const reason = formatReason(dependents) || 'required as dependency by client downloaded mods';
             acknowledgments.push({
               fileName: modFileName,
-              reason: reason
+              reason: reason,
+              recommendedAction: 'keep',
+              dependents: normalizeDependents(dependents),
+              dependentDisplayNames
             });
           }        }
         // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====

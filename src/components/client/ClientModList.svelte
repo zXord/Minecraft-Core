@@ -310,7 +310,7 @@
               {#if needsRemoval(mod)}
                 <span class="tag warn">⚠️ Remove</span>
               {:else if needsAcknowledgment(mod)}
-                <span class="tag new">🔗 Acknowledge</span>
+                <span class="tag new">🔗 Keep</span>
               {:else if modStatus === "server mod"}
                 <span class="tag server">🔒 Server</span>
               {:else if modStatus === "installed"}
@@ -356,9 +356,9 @@
                   <button
                     class="primary sm"
                     on:click={() => handleAcknowledge(mod)}
-                    title="Acknowledge dependency"
+                    title="Keep this mod because another client-only mod depends on it"
                   >
-                    ✓ Ack
+                    ✓ Keep
                   </button>
                 {:else if needsRemoval(mod)}
                   <button
@@ -383,9 +383,9 @@
                   <button
                     class="primary sm"
                     on:click={() => handleAcknowledge(mod)}
-                    title="Acknowledge dependency"
+                    title="Keep this mod because another client-only mod depends on it"
                   >
-                    ✓ Ack
+                    ✓ Keep
                   </button>
                 {:else if needsRemoval(mod)}
                   <button
@@ -449,6 +449,11 @@
                     >🔗 {acknowledgmentInfo?.reason ||
                       "required as dependency"}</span
                   >
+                  {#if acknowledgmentInfo?.dependentDisplayNames?.length > 0}
+                    <span class="dependency-dependents">
+                      Keep because: {acknowledgmentInfo.dependentDisplayNames.join(', ')}
+                    </span>
+                  {/if}
                 </div>
               </td>
             </tr>
@@ -839,6 +844,13 @@
   .dependency-reason {
     color: #10b981;
     font-style: italic;
+  }
+
+  .dependency-dependents {
+    display: block;
+    margin-top: 0.25rem;
+    color: #cbd5e1;
+    line-height: 1.4;
   }
 
   /* Summary sections */

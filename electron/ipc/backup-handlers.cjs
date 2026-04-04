@@ -563,28 +563,89 @@ function getDefaultBackupAutomationSettings() {
   return { ...DEFAULT_BACKUP_AUTOMATION };
 }
 
-function getBackupSettings(serverPath = '') {
-  const appSettings = appStore.get('backupSettings') || getDefaultBackupAutomationSettings();
+function normalizeServerPath(serverPath) {
+  if (!serverPath || typeof serverPath !== 'string') {
+    return '';
+  }
+
+  try {
+    return path.resolve(serverPath).replace(/[\\/]+$/, '').toLowerCase();
+  } catch {
+    return serverPath.trim().replace(/[\\/]+$/, '').toLowerCase();
+  }
+}
+
+function getTrackedServerPaths() {
+  const instances = appStore.get('instances') || [];
+  return instances
+    .filter((instance) => instance && instance.type === 'server' && typeof instance.path === 'string' && instance.path.trim())
+    .map((instance) => instance.path.trim());
+}
+
+function findTrackedServerPath(candidatePath, { existingOnly = false } = {}) {
+  const normalizedCandidate = normalizeServerPath(candidatePath);
+  if (!normalizedCandidate) {
+    return '';
+  }
+
+  const match = getTrackedServerPaths().find((trackedPath) => normalizeServerPath(trackedPath) === normalizedCandidate);
+  if (!match) {
+    return '';
+  }
+
+  if (existingOnly && !fs.existsSync(match)) {
+    return '';
+  }
+
+  return match;
+}
+
+function getPreferredTrackedServerPath(preferredPath = '', { existingOnly = false } = {}) {
+  const preferredMatch = findTrackedServerPath(preferredPath, { existingOnly });
+  if (preferredMatch) {
+    return preferredMatch;
+  }
+
+  const lastServerPath = findTrackedServerPath(appStore.get('lastServerPath'), { existingOnly });
+  if (lastServerPath) {
+    return lastServerPath;
+  }
+
+  const serverSettingsPath = findTrackedServerPath((appStore.get('serverSettings') || {}).path, { existingOnly });
+  if (serverSettingsPath) {
+    return serverSettingsPath;
+  }
+
+  return getTrackedServerPaths().find((trackedPath) => !existingOnly || fs.existsSync(trackedPath)) || '';
+}
+
+function syncLastServerPath(serverPath) {
   if (!serverPath) {
+    return;
+  }
+
+  if (appStore.get('lastServerPath') !== serverPath) {
+    appStore.set('lastServerPath', serverPath);
+  }
+}
+
+function getBackupSettings(serverPath = '') {
+  if (!serverPath) {
+    const appSettings = appStore.get('backupSettings') || getDefaultBackupAutomationSettings();
     return {
       ...getDefaultBackupAutomationSettings(),
       ...appSettings
     };
   }
 
-  const config = readServerConfig(serverPath, getDefaultServerConfig({ backupAutomation: appSettings }));
+  const config = readServerConfig(serverPath, getDefaultServerConfig({
+    backupAutomation: getDefaultBackupAutomationSettings()
+  }));
   const folderSettings = config && config.backupAutomation ? config.backupAutomation : null;
-  const merged = {
+  return {
     ...getDefaultBackupAutomationSettings(),
-    ...appSettings,
     ...(folderSettings || {})
   };
-
-  if (JSON.stringify(merged) !== JSON.stringify(appSettings)) {
-    appStore.set('backupSettings', merged);
-  }
-
-  return merged;
 }
 
 function saveBackupSettings(serverPath, settings) {
@@ -592,11 +653,12 @@ function saveBackupSettings(serverPath, settings) {
     ...getDefaultBackupAutomationSettings(),
     ...(settings || {})
   };
-  appStore.set('backupSettings', merged);
   if (serverPath) {
     updateServerConfig(serverPath, {
       backupAutomation: merged
     }, getDefaultServerConfig({ backupAutomation: merged }));
+  } else {
+    appStore.set('backupSettings', merged);
   }
   return merged;
 }
@@ -674,7 +736,10 @@ function createBackupHandlers() {
           }
         });
 
-        return result;
+        return {
+          success: true,
+          ...result
+        };
       } catch (err) {
         const duration = Date.now() - startTime;
         const formattedError = formatErrorMessage(err);
@@ -692,7 +757,10 @@ function createBackupHandlers() {
           }
         });
 
-        return { error: formattedError };
+        return {
+          success: false,
+          error: formattedError
+        };
       }
     },
     'backups:list': async (_e, { serverPath }) => {
@@ -1311,7 +1379,7 @@ function createBackupHandlers() {
         }
 
         // Get previous settings
-        const targetServerPath = serverPath || appStore.get('lastServerPath') || '';
+        const targetServerPath = typeof serverPath === 'string' ? serverPath.trim() : '';
         const previousSettings = getBackupSettings(targetServerPath);
 
         logger.debug('Previous backup settings retrieved', {
@@ -1355,19 +1423,22 @@ function createBackupHandlers() {
         });
 
         saveBackupSettings(targetServerPath, backupSettings);
+        if (targetServerPath) {
+          syncLastServerPath(targetServerPath);
+        }
 
         // If enabled, start the new scheduler
-        if (enabled && frequency && serverPath) {
+        if (enabled && frequency && targetServerPath) {
           logger.info('Starting automated backup scheduler', {
             category: 'backup',
             data: {
               handler: 'backups:configure-automation',
-              serverPath,
+              serverPath: targetServerPath,
               frequency,
               type
             }
           });
-          startAutomatedBackups(backupSettings, serverPath);
+          startAutomatedBackups(backupSettings, targetServerPath);
         } else {
           logger.debug('Automated backups not started', {
             category: 'backup',
@@ -1375,7 +1446,7 @@ function createBackupHandlers() {
               handler: 'backups:configure-automation',
               enabled,
               hasFrequency: !!frequency,
-              hasServerPath: !!serverPath
+              hasServerPath: !!targetServerPath
             }
           });
         }
@@ -1388,7 +1459,7 @@ function createBackupHandlers() {
             duration,
             success: true,
             enabled,
-            schedulerStarted: enabled && frequency && serverPath
+            schedulerStarted: enabled && frequency && targetServerPath
           }
         });
 
@@ -1423,9 +1494,10 @@ function createBackupHandlers() {
       });
 
       try {
-        const serverPath = typeof payload === 'string'
+        const explicitServerPath = typeof payload === 'string'
           ? payload
-          : (payload && typeof payload.serverPath === 'string' ? payload.serverPath : (appStore.get('lastServerPath') || ''));
+          : (payload && typeof payload.serverPath === 'string' ? payload.serverPath : '');
+        const serverPath = explicitServerPath.trim();
         const settings = getBackupSettings(serverPath);
 
         logger.debug('Backup settings retrieved from store', {
@@ -3115,11 +3187,8 @@ function loadBackupManager() {
   }
   backupManagerInitialized = true;
 
-  // Load backup settings
-  // Get server path
-  const serverSettings = appStore.get('serverSettings') || {};
-  const lastServerPath = appStore.get('lastServerPath');
-  const serverPath = serverSettings.path || lastServerPath;
+  const serverPath = getPreferredTrackedServerPath('', { existingOnly: true });
+  syncLastServerPath(serverPath);
 
   const settings = getBackupSettings(serverPath || '');
 
@@ -3141,8 +3210,7 @@ function loadBackupManager() {
     data: {
       function: 'loadBackupManager',
       hasServerPath: !!serverPath,
-      hasServerSettings: !!serverSettings.path,
-      hasLastServerPath: !!lastServerPath
+      trackedServerCount: getTrackedServerPaths().length
     }
   });
 
@@ -3151,8 +3219,7 @@ function loadBackupManager() {
       category: 'backup',
       data: {
         function: 'loadBackupManager',
-        serverSettings: Object.keys(serverSettings),
-        hasLastServerPath: !!lastServerPath
+        trackedServerCount: getTrackedServerPaths().length
       }
     });
     return; // No server path available

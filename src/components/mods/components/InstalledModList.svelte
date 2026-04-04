@@ -59,9 +59,58 @@
   // Event dispatcher
   const dispatch = createEventDispatcher();
 
+  const PROJECT_INFO_CACHE_KEY = 'minecraft-core:project-environment-cache';
+
+  function readPersistedProjectInfoCache() {
+    if (typeof localStorage === 'undefined') {
+      return {};
+    }
+
+    try {
+      const rawCache = localStorage.getItem(PROJECT_INFO_CACHE_KEY);
+      if (!rawCache) {
+        return {};
+      }
+
+      const parsedCache = JSON.parse(rawCache);
+      if (!parsedCache || typeof parsedCache !== 'object' || Array.isArray(parsedCache)) {
+        return {};
+      }
+
+      const normalizedCache = {};
+      for (const [projectId, value] of Object.entries(parsedCache)) {
+        if (!projectId || !value || typeof value !== 'object' || Array.isArray(value)) {
+          continue;
+        }
+
+        normalizedCache[projectId] = {
+          projectId,
+          clientSide: value.clientSide ?? null,
+          serverSide: value.serverSide ?? null
+        };
+      }
+
+      return normalizedCache;
+    } catch {
+      return {};
+    }
+  }
+
   // Local state
   let selectedMods = new SvelteSet();
   let installedModVersionsCache = {};
+  let projectInfoCache = readPersistedProjectInfoCache();
+  let projectInfoLoading = {};
+  let projectInfoCacheSaveTimer = null;
+  let instanceVersionContext = {
+    loader: 'vanilla',
+    minecraftVersion: '',
+    gameVersion: '',
+    useFilter: false
+  };
+  let lastContextServerPath = '';
+  let contextRequestId = 0;
+  let lastProjectPrefetchSignature = '';
   let confirmDeleteVisible = false;
   let modToDelete = null;
 
@@ -142,6 +191,245 @@
       delete lastVersionsCache[key][fileName];
       scheduleSaveCache();
     }
+  }
+
+  function normalizeConfigValue(value, fallback = '') {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed || fallback;
+    }
+
+    return fallback;
+  }
+
+  function getInstalledVersionLookupKey(projectId, contentType = $activeContentType, overrideContext = null) {
+    const normalizedProjectId = projectId || 'no-project';
+    const normalizedContentType = contentType || CONTENT_TYPES.MODS;
+    const effectiveContext = overrideContext || instanceVersionContext || null;
+    const normalizedLoader =
+      normalizedContentType === CONTENT_TYPES.MODS
+        ? (effectiveContext?.loader || $loaderType || 'vanilla')
+        : 'noloader';
+    const normalizedVersion =
+      effectiveContext?.gameVersion
+      || effectiveContext?.minecraftVersion
+      || $minecraftVersion
+      || 'all';
+    return `${serverPath || ''}:${normalizedContentType}:${normalizedProjectId}:${normalizedLoader}:${normalizedVersion}`;
+  }
+
+  function isEnvironmentRequired(value) {
+    if (typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      return normalized === 'required' || normalized === 'optional' || normalized === 'supported' || normalized === 'true';
+    }
+    return false;
+  }
+
+  function getRecommendedLocation(modInfo, confirmedMatch, projectInfo = null) {
+    const metadata = confirmedMatch?.modrinthData || projectInfo || modInfo || null;
+    if (!metadata) {
+      return null;
+    }
+
+    const supportsClient = isEnvironmentRequired(metadata.clientSide ?? metadata.client_side);
+    const supportsServer = isEnvironmentRequired(metadata.serverSide ?? metadata.server_side);
+
+    if (supportsClient && supportsServer) {
+      return 'both';
+    }
+    if (supportsClient) {
+      return 'client-only';
+    }
+    if (supportsServer) {
+      return 'server-only';
+    }
+
+    return null;
+  }
+
+  function getRecommendedLocationLabel(recommendedValue) {
+    if (recommendedValue === 'server-only') {
+      return 'Server Only';
+    }
+    if (recommendedValue === 'client-only') {
+      return 'Client Only';
+    }
+    if (recommendedValue === 'both') {
+      return 'Client & Server';
+    }
+    return '';
+  }
+
+  function getLocationOptionLabel(optionValue, recommendedValue) {
+    const baseLabel = optionValue === 'server-only'
+      ? 'Server Only'
+      : optionValue === 'client-only'
+        ? 'Client Only'
+        : optionValue === 'both'
+          ? 'Client & Server'
+          : 'Select location';
+
+    if (recommendedValue && optionValue === recommendedValue) {
+      return `★ ${baseLabel}`;
+    }
+
+    return baseLabel;
+  }
+
+  function getLocationSelectTitle(recommendedValue) {
+    if (!recommendedValue) {
+      return 'Choose where this mod should be installed';
+    }
+
+    const label = recommendedValue === 'server-only'
+      ? 'Server Only'
+      : recommendedValue === 'client-only'
+        ? 'Client Only'
+        : 'Client & Server';
+
+    return `Recommended from mod metadata: ${label}`;
+  }
+
+  async function refreshInstanceVersionContext() {
+    const requestId = ++contextRequestId;
+    const currentServerPath = serverPath;
+
+    if (!currentServerPath) {
+      instanceVersionContext = {
+        loader: 'vanilla',
+        minecraftVersion: '',
+        gameVersion: '',
+        useFilter: false
+      };
+      return;
+    }
+
+    const config = await safeInvoke('read-config', currentServerPath);
+
+    if (requestId !== contextRequestId || currentServerPath !== serverPath) {
+      return;
+    }
+
+    const currentVersion = normalizeConfigValue(config?.version);
+    instanceVersionContext = {
+      loader: normalizeConfigValue(config?.loader, 'vanilla'),
+      minecraftVersion: currentVersion,
+      gameVersion: currentVersion || undefined,
+      useFilter: false
+    };
+  }
+
+  function normalizeProjectEnvironment(projectInfo) {
+    if (!projectInfo) {
+      return null;
+    }
+
+    return {
+      projectId: projectInfo.projectId || projectInfo.id || null,
+      clientSide: projectInfo.clientSide ?? projectInfo.client_side ?? null,
+      serverSide: projectInfo.serverSide ?? projectInfo.server_side ?? null,
+    };
+  }
+
+  function schedulePersistProjectInfoCache() {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+
+    if (projectInfoCacheSaveTimer) {
+      clearTimeout(projectInfoCacheSaveTimer);
+    }
+
+    projectInfoCacheSaveTimer = setTimeout(() => {
+      try {
+        localStorage.setItem(PROJECT_INFO_CACHE_KEY, JSON.stringify(projectInfoCache));
+      } catch {
+        // Ignore storage write failures and keep the in-memory cache.
+      } finally {
+        projectInfoCacheSaveTimer = null;
+      }
+    }, 100);
+  }
+
+  function storeProjectInfoInCache(projectInfo) {
+    const normalizedProjectInfo = normalizeProjectEnvironment(projectInfo);
+    if (!normalizedProjectInfo?.projectId) {
+      return;
+    }
+
+    const existingProjectInfo = projectInfoCache[normalizedProjectInfo.projectId];
+    if (
+      existingProjectInfo
+      && existingProjectInfo.clientSide === normalizedProjectInfo.clientSide
+      && existingProjectInfo.serverSide === normalizedProjectInfo.serverSide
+    ) {
+      return;
+    }
+
+    projectInfoCache = {
+      ...projectInfoCache,
+      [normalizedProjectInfo.projectId]: normalizedProjectInfo
+    };
+    schedulePersistProjectInfoCache();
+  }
+
+  async function fetchProjectInfo(projectId) {
+    if (!projectId || projectInfoCache[projectId] || projectInfoLoading[projectId]) {
+      return;
+    }
+
+    projectInfoLoading = {
+      ...projectInfoLoading,
+      [projectId]: true
+    };
+
+    try {
+      const projectInfo = await safeInvoke('get-project-info', {
+        projectId,
+        source: 'modrinth'
+      });
+
+      storeProjectInfoInCache(projectInfo);
+    } catch (_) {
+      // Ignore project metadata errors; location selector falls back gracefully.
+    } finally {
+      projectInfoLoading = {
+        ...projectInfoLoading,
+        [projectId]: false
+      };
+    }
+  }
+
+  async function prefetchInstalledProjectInfo() {
+    if (!serverPath || $activeContentType !== CONTENT_TYPES.MODS) {
+      return;
+    }
+
+    const projectIds = Array.from(
+      new Set(
+        currentInfoList
+          .map((info) => info?.projectId)
+          .filter(Boolean)
+      )
+    ).sort();
+
+    const signature = `${serverPath}:${projectIds.join('|')}`;
+    if (!projectIds.length || signature === lastProjectPrefetchSignature) {
+      return;
+    }
+
+    lastProjectPrefetchSignature = signature;
+
+    const missingProjectIds = projectIds.filter((projectId) => !projectInfoCache[projectId]);
+    if (!missingProjectIds.length) {
+      return;
+    }
+
+    await Promise.all(missingProjectIds.map((projectId) => fetchProjectInfo(projectId)));
   }
 
   // Imperative grace handler to avoid reactive loop warnings
@@ -281,6 +569,32 @@
     }
   }
 
+  $: if (serverPath !== lastContextServerPath) {
+    lastContextServerPath = serverPath;
+    installedModVersionsCache = {};
+    lastProjectPrefetchSignature = '';
+    void refreshInstanceVersionContext();
+  }
+
+  $: if (
+    serverPath
+    && $activeContentType === CONTENT_TYPES.MODS
+    && currentInfoList.length > 0
+  ) {
+    void prefetchInstalledProjectInfo();
+  }
+
+  $: if ($activeContentType === CONTENT_TYPES.MODS && $confirmedModrinthMatches.size > 0) {
+    for (const confirmedMatch of $confirmedModrinthMatches.values()) {
+      if (!confirmedMatch) continue;
+      storeProjectInfoInCache({
+        projectId: confirmedMatch.projectId || confirmedMatch.modrinthData?.projectId || confirmedMatch.modrinthData?.id,
+        clientSide: confirmedMatch.modrinthData?.clientSide ?? confirmedMatch.modrinthData?.client_side,
+        serverSide: confirmedMatch.modrinthData?.serverSide ?? confirmedMatch.modrinthData?.server_side
+      });
+    }
+  }
+
   // Briefly suppress UI only when content type actually changes
   $: if ($activeContentType !== undefined && $activeContentType !== lastActiveContentType) {
     suppressUiBriefly(250);
@@ -318,6 +632,10 @@
     if (saveCacheTimer) {
       clearTimeout(saveCacheTimer);
       saveCacheTimer = null;
+    }
+    if (projectInfoCacheSaveTimer) {
+      clearTimeout(projectInfoCacheSaveTimer);
+      projectInfoCacheSaveTimer = null;
     }
   });
 
@@ -411,6 +729,31 @@
 
   function isClientOnlyMod(modName) {
     return resolveModCategory(modName) === 'client-only';
+  }
+
+  function getInstalledModInfoEntry(modName) {
+    return (currentInfoList || []).find(info => info?.fileName === modName) || null;
+  }
+
+  function getSuggestedLocationForMod(modName) {
+    const modInfo = getInstalledModInfoEntry(modName);
+    const confirmedMatch = get(confirmedModrinthMatches).get(modName);
+    const projectInfo = projectInfoCache[confirmedMatch?.projectId || modInfo?.projectId];
+    return getRecommendedLocation(modInfo, confirmedMatch, projectInfo);
+  }
+
+  function getSuggestedLocationAssignments(modNames) {
+    if (!Array.isArray(modNames)) {
+      return [];
+    }
+
+    return modNames
+      .filter(modName => modName && resolveModCategory(modName) === UNASSIGNED_CATEGORY && !$disabledMods.has(modName))
+      .map(modName => ({
+        modName,
+        category: getSuggestedLocationForMod(modName)
+      }))
+      .filter(assignment => assignment.category && assignment.category !== UNASSIGNED_CATEGORY);
   }
 
   function selectionHasNonClientOnly(mods) {
@@ -524,6 +867,14 @@
       (modCategoryInfo?.name && modCategoryInfo.name.toLowerCase().includes(searchLower))
     );
   });
+
+  let suggestedLocationAssignments = [];
+  let applyingSuggestedLocations = false;
+
+  $: suggestedLocationAssignments =
+    $activeContentType === CONTENT_TYPES.MODS
+      ? getSuggestedLocationAssignments(filteredMods)
+      : [];
   
   function toggleDropZone() {
     dropZoneCollapsed = !dropZoneCollapsed;
@@ -1152,22 +1503,36 @@
     
     if (projectId) {
       try {
+        if (!instanceVersionContext?.minecraftVersion && serverPath) {
+          await refreshInstanceVersionContext();
+        }
+        const versionLookupContext = instanceVersionContext;
+        const versionLookupKey = getInstalledVersionLookupKey(projectId, $activeContentType, versionLookupContext);
         // Pass the correct content type for version fetching
-        const versions = await fetchModVersions(projectId, 'modrinth', false, false, $activeContentType);
+        const versions = await fetchModVersions(
+          projectId,
+          'modrinth',
+          false,
+          false,
+          $activeContentType,
+          versionLookupContext
+        );
         installedModVersionsCache = { 
           ...installedModVersionsCache, 
-          [projectId]: versions 
+          [versionLookupKey]: versions 
         };
       } catch (error) {
+        const versionLookupKey = getInstalledVersionLookupKey(projectId, $activeContentType, instanceVersionContext);
         installedModVersionsCache = { 
           ...installedModVersionsCache, 
-          [projectId]: [] 
+          [versionLookupKey]: [] 
         };
       }
     } else {
+      const versionLookupKey = getInstalledVersionLookupKey('no-project', $activeContentType, instanceVersionContext);
       installedModVersionsCache = { 
         ...installedModVersionsCache, 
-        ['no-project']: [] 
+        [versionLookupKey]: [] 
       };
     }
   }
@@ -1374,8 +1739,8 @@
     if (dependency.versionRequirement) {
         try {
           // Try to get versions and find the best match
-          const loader = get(loaderType);
-          const mcVersion = get(minecraftVersion);
+          const loader = instanceVersionContext?.loader || get(loaderType);
+          const mcVersion = instanceVersionContext?.minecraftVersion || get(minecraftVersion);
           if (!mcVersion) {
             // Log via IPC logger utility if available
             try { await safeInvoke('log-message', { level: 'warn', category: 'mods', message: 'Dependency version fetch without mcVersion', data: { projectId: dependency.projectId }}); } catch {}
@@ -1522,8 +1887,8 @@
           let versionId = null;
       if (dependency.versionRequirement) {
             try {
-              const loader = get(loaderType);
-              const mcVersion = get(minecraftVersion);
+              const loader = instanceVersionContext?.loader || get(loaderType);
+              const mcVersion = instanceVersionContext?.minecraftVersion || get(minecraftVersion);
               if (!mcVersion) {
                 try { await safeInvoke('log-message', { level: 'warn', category: 'mods', message: 'Bulk dependency version fetch without mcVersion', data: { projectId: dependency.projectId }}); } catch {}
               }
@@ -1610,25 +1975,53 @@
     }
   }
 
+  async function applyCategoryChange(modName, newCategory, { reloadAfter = true } = {}) {
+    const previousCategory = resolveModCategory(modName);
+
+    if (!modName || !newCategory || previousCategory === newCategory) {
+      return { changed: false };
+    }
+
+    const result = await safeInvoke('move-mod-file', {
+      fileName: modName,
+      newCategory,
+      serverPath
+    });
+
+    if (!result || !result.success) {
+      throw new Error(result?.error || 'Unknown error occurred');
+    }
+
+    const categorySaved = await updateModCategory(modName, newCategory);
+    if (!categorySaved) {
+      try {
+        await safeInvoke('move-mod-file', {
+          fileName: modName,
+          newCategory: previousCategory,
+          serverPath
+        });
+      } catch {
+        // Ignore rollback failures; a full reload below will surface actual disk state.
+      }
+
+      await loadModCategories();
+      await loadMods(serverPath);
+      throw new Error('Failed to save mod category');
+    }
+
+    if (reloadAfter) {
+      await loadMods(serverPath);
+    }
+
+    return { changed: true };
+  }
+
   async function handleCategoryChange(modName, event) {
     try {
       const newCategory = event.target.value;
-      await updateModCategory(modName, newCategory);
-      
-      const result = await safeInvoke('move-mod-file', {
-        fileName: modName, 
-        newCategory,
-        serverPath
-      });
-      
-      if (result && result.success) {
-        successMessage.set(`Changed ${modName} to "${newCategory}"`);
-        setTimeout(() => successMessage.set(''), 3000);
-      } else {
-        throw new Error(result?.error || 'Unknown error occurred');
-      }
-      
-      await loadMods(serverPath);
+      await applyCategoryChange(modName, newCategory);
+      successMessage.set(`Changed ${modName} to "${newCategory}"`);
+      setTimeout(() => successMessage.set(''), 3000);
     } catch (err) {
       errorMessage.set(`Failed to update mod category: ${err.message}`);
     }
@@ -1642,6 +2035,43 @@
       setTimeout(() => successMessage.set(''), 3000);
     } catch (err) {
       errorMessage.set(`Failed to update mod requirement: ${err.message}`);
+    }
+  }
+
+  async function handleApplySuggestedLocations() {
+    if (applyingSuggestedLocations || suggestedLocationAssignments.length === 0) {
+      return;
+    }
+
+    applyingSuggestedLocations = true;
+    const assignments = [...suggestedLocationAssignments];
+    const appliedMods = [];
+    const failedMods = [];
+
+    try {
+      for (const assignment of assignments) {
+        try {
+          await applyCategoryChange(assignment.modName, assignment.category, { reloadAfter: false });
+          appliedMods.push(assignment.modName);
+        } catch (error) {
+          failedMods.push(`${assignment.modName} (${error.message})`);
+        }
+      }
+
+      if (appliedMods.length > 0) {
+        await loadMods(serverPath);
+      }
+
+      if (appliedMods.length > 0) {
+        successMessage.set(`Filled ${appliedMods.length} empty location${appliedMods.length === 1 ? '' : 's'} from suggestions.`);
+        setTimeout(() => successMessage.set(''), 3000);
+      }
+
+      if (failedMods.length > 0) {
+        errorMessage.set(`Could not apply suggested locations for: ${failedMods.join(', ')}`);
+      }
+    } finally {
+      applyingSuggestedLocations = false;
     }
   }
 
@@ -2020,7 +2450,25 @@
                  style="opacity: 0; position: absolute; pointer-events: none;">
         </th>
         <th>Mod Name</th>
-        <th class="loc">Location</th>
+        <th class="loc">
+          <div class="loc-head">
+            <span>Location</span>
+            <button
+              type="button"
+              class="loc-fill-btn"
+              title={suggestedLocationAssignments.length
+                ? `Fill ${suggestedLocationAssignments.length} unassigned mod location${suggestedLocationAssignments.length === 1 ? '' : 's'} with the suggested value`
+                : 'No unassigned mods with suggestions right now'}
+              disabled={applyingSuggestedLocations || suggestedLocationAssignments.length === 0}
+              on:click={handleApplySuggestedLocations}>
+              {#if applyingSuggestedLocations}
+                Applying...
+              {:else}
+                Fill Empty{suggestedLocationAssignments.length ? ` (${suggestedLocationAssignments.length})` : ''}
+              {/if}
+            </button>
+          </div>
+        </th>
         <th class="ver">Current</th>
         <th class="alert">⚠️</th>
         <th class="status">Status</th>
@@ -2040,7 +2488,10 @@
       {#each filteredMods as mod (mod)}
       {@const modInfo = currentInfoList.find(m => m && m.fileName === mod)}
       {@const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod)}
+      {@const confirmedMatch = $confirmedModrinthMatches.get(mod)}
+      {@const projectInfo = projectInfoCache[confirmedMatch?.projectId || modInfo?.projectId]}
       {@const location = modCategoryInfo?.category || UNASSIGNED_CATEGORY}
+        {@const recommendedLocation = getRecommendedLocation(modInfo, confirmedMatch, projectInfo)}
         {@const isDisabled = $disabledMods.has(mod)}
         {@const canUpdateWhileRunning = location === 'client-only'}
         {@const updateBlockedByServer = serverRunning && !canUpdateWhileRunning}
@@ -2078,15 +2529,21 @@
         <!-- location selector -->
         <td>
           <select
-            class="loc-select"
+            class={`loc-select loc-select--${location}`}
+            title={getLocationSelectTitle(recommendedLocation)}
             disabled={locationSelectionDisabled}
             value={location}
             on:change={(e) => handleCategoryChange(mod, e)}>
-            <option value={UNASSIGNED_CATEGORY}>Select location</option>
-            <option value="server-only">Server Only</option>
-            <option value="client-only">Client Only</option>
-            <option value="both">Client & Server</option>
+            <option value={UNASSIGNED_CATEGORY}>{getLocationOptionLabel(UNASSIGNED_CATEGORY, recommendedLocation)}</option>
+            <option value="server-only">{getLocationOptionLabel('server-only', recommendedLocation)}</option>
+            <option value="client-only">{getLocationOptionLabel('client-only', recommendedLocation)}</option>
+            <option value="both">{getLocationOptionLabel('both', recommendedLocation)}</option>
           </select>
+          {#if recommendedLocation}
+            <div class="location-hint">
+              Suggested: {getRecommendedLocationLabel(recommendedLocation)}
+            </div>
+          {/if}
           {#if (location === 'client-only' || location === 'both')}
             <label class="req">
               <input type="checkbox"
@@ -2308,18 +2765,19 @@
         {#if !isDisabled && $expandedInstalledMod === mod}
           {@const confirmedMatch = $confirmedModrinthMatches.get(mod)}
           {@const projectId = confirmedMatch?.projectId || modInfo?.projectId}
+          {@const versionLookupKey = getInstalledVersionLookupKey(projectId, CONTENT_TYPES.MODS, instanceVersionContext)}
           
         <tr transition:fly="{{ x: 10, duration: 100 }}">
             <td colspan="8">
             <div class="versions">
               {#if !projectId}
                 <span class="err">No project information available</span>
-              {:else if !installedModVersionsCache[projectId]}
+              {:else if !installedModVersionsCache[versionLookupKey]}
                 <span class="loading">Loading versions...</span>
-              {:else if installedModVersionsCache[projectId]?.length === 0}
+              {:else if installedModVersionsCache[versionLookupKey]?.length === 0}
                 <span class="err">No versions available</span>
               {:else}
-                {#each installedModVersionsCache[projectId] || [] as version (version.id)}
+                {#each installedModVersionsCache[versionLookupKey] || [] as version (version.id)}
                   {@const isCurrentVersion = modInfo && modInfo.versionId === version.id}
                   <button
                     class:sel={isCurrentVersion}
@@ -2469,15 +2927,16 @@
           <!-- Version selector for shaders/resource packs -->
           {#if $expandedInstalledMod === item && info && info.projectId}
             {@const projectId = info.projectId}
+            {@const versionLookupKey = getInstalledVersionLookupKey(projectId, $activeContentType, instanceVersionContext)}
             <tr transition:fly="{{ x: 10, duration: 100 }}">
               <td colspan="6" style="padding: 0;">
                 <div class="versions">
-                {#if installedModVersionsCache[projectId] === undefined}
+                {#if installedModVersionsCache[versionLookupKey] === undefined}
                   <span class="loading">Loading versions...</span>
-                {:else if installedModVersionsCache[projectId]?.length === 0}
+                {:else if installedModVersionsCache[versionLookupKey]?.length === 0}
                   <span class="err">No versions available</span>
                 {:else}
-                  {#each installedModVersionsCache[projectId] || [] as version (version.id)}
+                  {#each installedModVersionsCache[versionLookupKey] || [] as version (version.id)}
                     {@const isCurrentVersion = info && info.versionId === version.id}
                     <button
                       class:sel={isCurrentVersion}
@@ -2824,13 +3283,43 @@
   /* Column widths - Main table - PERCENTAGE BASED */
   .mods-table th.chk, .mods-table td:nth-child(1) { width: 5%; min-width: 40px; }
   .mods-table th:nth-child(2), .mods-table td:nth-child(2) { width: 25%; min-width: 150px; } /* Mod name */
-  .mods-table th.loc, .mods-table td:nth-child(3) { width: 20%; min-width: 120px; } /* Location */
+  .mods-table th.loc, .mods-table td:nth-child(3) { width: 20%; min-width: 170px; } /* Location */
   .mods-table th.ver, .mods-table td:nth-child(4) { width: 20%; min-width: 200px; } /* Current */
   .mods-table th.alert, .mods-table td:nth-child(5) { width: 4%; min-width: 28px; } /* Alert */
   .mods-table th.status, .mods-table td:nth-child(6) { width: 10%; min-width: 70px; } /* Status */
   .mods-table th.upd, .mods-table td:nth-child(7) { width: 10%; min-width: 70px; } /* Update */
   .mods-table th.act, .mods-table td:nth-child(8) { width: 11%; min-width: 90px; } /* Actions */
   
+
+  .loc-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .loc-fill-btn {
+    font-size: 0.7rem;
+    line-height: 1.2;
+    padding: 3px 6px;
+    border-radius: 999px;
+    border: 1px solid rgba(245, 170, 40, 0.35);
+    background: rgba(245, 170, 40, 0.12);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .loc-fill-btn:hover:not(:disabled) {
+    background: rgba(245, 170, 40, 0.2);
+    border-color: rgba(245, 170, 40, 0.55);
+  }
+
+  .loc-fill-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
 
 
   /* ——————————————————— row specifics ——————————————————— */
@@ -2864,6 +3353,26 @@
     background-position: 95% 50%;
     background-size: 10px;
     padding-right: 16px;
+  }
+  .loc-select--server-only {
+    border-color: var(--col-server);
+    box-shadow: inset 0 0 0 1px rgba(44, 130, 255, 0.25);
+  }
+  .loc-select--client-only {
+    border-color: var(--col-client);
+    box-shadow: inset 0 0 0 1px rgba(52, 213, 138, 0.25);
+  }
+  .loc-select--both {
+    border-color: var(--col-both);
+    box-shadow: inset 0 0 0 1px rgba(245, 170, 40, 0.3);
+  }
+  .loc-select--unassigned {
+    border-color: var(--border-color);
+  }
+  .location-hint {
+    margin-top: 4px;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
   }
   .req { 
     font-size: 0.75rem; 

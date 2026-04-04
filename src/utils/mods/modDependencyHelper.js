@@ -71,6 +71,44 @@ function isBundledFabricModule(id) {
          (canonical.startsWith('fabric') && canonical.includes('api') && /v\d+/.test(canonical));
 }
 
+function normalizeLoaderName(loader) {
+  return typeof loader === 'string'
+    ? loader.trim().toLowerCase()
+    : '';
+}
+
+function isFabricLikeLoader(loader) {
+  const normalizedLoader = normalizeLoaderName(loader);
+  return normalizedLoader === 'fabric' || normalizedLoader === 'quilt';
+}
+
+function isFabricApiProject(id) {
+  if (!id) return false;
+  const normalizedId = String(id).trim().toLowerCase();
+  return normalizedId === 'fabric-api' || normalizedId === 'p7dkfbws';
+}
+
+export function isDependencyRelevantToActiveLoader(projectId, activeLoader) {
+  if (!projectId) {
+    return true;
+  }
+
+  const activeLoaderName = normalizeLoaderName(activeLoader);
+  if ((isFabricApiProject(projectId) || isBundledFabricModule(projectId)) && !isFabricLikeLoader(activeLoaderName)) {
+    return false;
+  }
+
+  return true;
+}
+
+export function shouldInjectFabricApiDependency(versionLoaders, activeLoader) {
+  if (!isFabricLikeLoader(activeLoader) || !Array.isArray(versionLoaders)) {
+    return false;
+  }
+
+  return versionLoaders.some(loader => isFabricLikeLoader(loader));
+}
+
 /**
  * Check for a mod's dependencies
  * @param {Object} mod - The mod object
@@ -80,6 +118,7 @@ function isBundledFabricModule(id) {
 export async function checkModDependencies(mod, visited = new Set(), options = {}, depth = 0) {
   const interactive = options.interactive === true;
   const rootInteractive = interactive && depth === 0;
+  const activeLoader = normalizeLoaderName(get(loaderType));
   if (rootInteractive) {
     logger.info('Checking mod dependencies', {
       category: 'mods',
@@ -141,7 +180,7 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
         versionInfo = await safeInvoke('get-version-info', {
           modId: mod.id,
           source: mod.source || 'modrinth',
-          loader: get(loaderType),
+          loader: activeLoader,
           gameVersion: get(minecraftVersion)
         });
       } else {
@@ -150,7 +189,7 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
           modId: mod.id,
           versionId,
           source: mod.source || 'modrinth',
-          loader: get(loaderType),
+          loader: activeLoader,
           gameVersion: get(minecraftVersion)
         });
       }
@@ -160,7 +199,7 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
         
         // Check if this is a Fabric mod
         if (versionInfo.loaders && Array.isArray(versionInfo.loaders)) {
-          isFabricMod = versionInfo.loaders.includes('fabric');
+          isFabricMod = shouldInjectFabricApiDependency(versionInfo.loaders, activeLoader);
         }
         
         // METHOD 1: Standard dependencies array
@@ -328,7 +367,7 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
           }
           
           // Check if this is a Fabric mod based on the filename
-          if (installedMod.fileName.toLowerCase().includes('fabric')) {
+          if (isFabricLikeLoader(activeLoader) && installedMod.fileName.toLowerCase().includes('fabric')) {
             isFabricMod = true;
           }
         }        // If mod isn't installed but we have a URL, ask backend to analyze it
@@ -486,6 +525,9 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
       if (depId === mod.id) {
         return false; // remove self dependencies
       }
+      if (!isDependencyRelevantToActiveLoader(depId, activeLoader)) {
+        return false;
+      }
       if (isMinecraftProjectId(depId)) {
         return false;
       }
@@ -572,6 +614,8 @@ async function filterAndResolveDependencies(dependencies, { interactive = false 
   const actualInstalledInfo = get(installedModInfo);
   
   
+  const activeLoader = normalizeLoaderName(get(loaderType));
+
   // Convert dependencies to standard format to handle different API response formats
   const normalizedDeps = dependencies
     .map(dep => ({
@@ -581,6 +625,9 @@ async function filterAndResolveDependencies(dependencies, { interactive = false 
       version_requirement: dep.version_requirement || dep.versionRequirement || null
     }))    // Skip entries that refer to Minecraft, system dependencies, or bundled Fabric modules
     .filter(dep => {
+      if (!isDependencyRelevantToActiveLoader(dep.project_id, activeLoader)) {
+        return false;
+      }
       if (isMinecraftProjectId(dep.project_id)) {
         return false;
       }
@@ -648,12 +695,11 @@ async function filterAndResolveDependencies(dependencies, { interactive = false 
       }
       
       // Get available versions for this dependency
-      const loader = get(loaderType);
       const mcVersion = get(minecraftVersion);
       const versions = await safeInvoke('get-mod-versions', {
         modId: dep.project_id,
         source: 'modrinth',
-        loader,
+        loader: activeLoader,
         mcVersion
       });
       

@@ -1,6 +1,8 @@
 <script>
   import { createEventDispatcher } from 'svelte';
+  import { get } from 'svelte/store';
   import { modrinthMatchingModals, modrinthMatchingActions } from '../../../stores/modrinthMatchingStore.js';
+  import { loaderType } from '../../../stores/modStore.js';
 
   const dispatch = createEventDispatcher();
 
@@ -30,7 +32,7 @@
 
     isSearching = true;
     try {
-      searchResults = await modrinthMatchingActions.searchModrinthManual(searchQuery.trim(), 'fabric', 20);
+      searchResults = await modrinthMatchingActions.searchModrinthManual(searchQuery.trim(), get(loaderType) || 'vanilla', 20);
     } catch (error) {
       // TODO: Add proper logging - Search error
       searchResults = [];

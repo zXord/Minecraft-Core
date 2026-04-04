@@ -55,12 +55,26 @@
     // The longer one is considered newer (e.g., 1.0.1 > 1.0)
     return partsA.length - partsB.length;
   }
+
+  function formatLoaderName(loader) {
+    if (!loader) return 'Loader';
+    const normalized = String(loader).toLowerCase();
+    if (normalized === 'vanilla') return 'Vanilla';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
   
   export let serverPath = '';
+  export let currentInstance = null;
+  let activeServerConfig = null;
+  let serverConfigRequestId = 0;
+  let lastLoadedServerPath = '';
+  let minecraftPortConflict = null;
+  let managementPortConflict = null;
   
   // Initialize local variables and store subscriptions
   let port = 25565;
   let maxRam = 4;
+  $: currentInstanceId = currentInstance?.type === 'server' ? currentInstance.id : null;
   const ACTIVE_SERVER_STATUSES = new Set(['Starting', 'Running', 'Stopping']);
   const TRANSITIONAL_SERVER_STATUSES = new Set(['Starting', 'Stopping']);
   $: status = $serverState.status;
@@ -107,21 +121,123 @@
     }
   }
 
-  // Reactive config loading when server path changes
-  $: {
-    if (serverPath) {
-      loadServerConfig(serverPath);
+  function resolveConfigLoader(config) {
+    if (config?.loader) {
+      return config.loader;
+    }
+    if (config?.fabric) {
+      return 'fabric';
+    }
+    if (config?.version) {
+      return 'vanilla';
+    }
+    return null;
+  }
+
+  function getVersionContext(config = activeServerConfig) {
+    const source = config || {};
+    const storeSnapshot = get(settingsStore);
+    return {
+      mcVersion: source.version || storeSnapshot.mcVersion || null,
+      loader: resolveConfigLoader(source)
+        || storeSnapshot.loader
+        || (storeSnapshot.fabricVersion ? 'fabric' : 'vanilla'),
+      loaderVersion: source.loaderVersion
+        || source.fabric
+        || storeSnapshot.loaderVersion
+        || storeSnapshot.fabricVersion
+        || null
+    };
+  }
+
+  function buildPortConflictState(detail) {
+    if (!detail || typeof detail !== 'object') {
+      return null;
+    }
+
+    const internalOwner = detail.conflictingInstance?.name
+      ? `Conflicting instance: ${detail.conflictingInstance.name}.`
+      : 'Conflicting instance: another server instance.';
+    const externalOwner = detail.process?.processName
+      ? `Listening process: ${detail.process.processName}${detail.process?.pid ? ` (PID ${detail.process.pid})` : ''}.`
+      : detail.process?.pid
+        ? `Listening process PID: ${detail.process.pid}.`
+        : 'Listening process: another application.';
+
+    return {
+      ...detail,
+      title: `${detail.message} ${detail.scope === 'internal' ? internalOwner : externalOwner}`.trim()
+    };
+  }
+
+  function clearPortConflict(type) {
+    if (type === 'minecraft') {
+      minecraftPortConflict = null;
+      return;
+    }
+    if (type === 'management') {
+      managementPortConflict = null;
     }
   }
+
+  function clearAllPortConflicts() {
+    minecraftPortConflict = null;
+    managementPortConflict = null;
+  }
+
+  function applyPortConflictDetails(details = []) {
+    let nextMinecraftConflict = null;
+    let nextManagementConflict = null;
+
+    for (const detail of details) {
+      if (!nextMinecraftConflict && detail?.type === 'minecraft') {
+        nextMinecraftConflict = buildPortConflictState(detail);
+      }
+      if (!nextManagementConflict && detail?.type === 'management') {
+        nextManagementConflict = buildPortConflictState(detail);
+      }
+    }
+
+    minecraftPortConflict = nextMinecraftConflict;
+    managementPortConflict = nextManagementConflict;
+  }
+
+  // Reactive config loading when server path changes
+  $: {
+    if (serverPath && serverPath !== lastLoadedServerPath) {
+      lastLoadedServerPath = serverPath;
+      updateChecked = false;
+      clearAllPortConflicts();
+      void loadServerConfig(serverPath);
+    } else if (!serverPath && lastLoadedServerPath) {
+      lastLoadedServerPath = '';
+      activeServerConfig = null;
+      updateChecked = false;
+      clearAllPortConflicts();
+    }
+  }
+
   async function loadServerConfig(path) {
+    const requestId = ++serverConfigRequestId;
     try {
       const configResult = await window.electron.invoke('read-config', path);
-      
-      if (configResult && (configResult.version || configResult.fabric)) {
-        loadSettings(configResult);
-      } else {
+
+      if (requestId !== serverConfigRequestId || path !== serverPath) {
+        return null;
       }
+
+      if (configResult && (configResult.version || configResult.loader || configResult.fabric)) {
+        activeServerConfig = configResult;
+        loadSettings(configResult);
+        return configResult;
+      }
+      activeServerConfig = null;
+      return null;
     } catch (error) {
+      if (requestId === serverConfigRequestId && path === serverPath) {
+        activeServerConfig = null;
+      }
+      return null;
     }
   }
   // Server status tracking - use reactive statements only for display, not for overriding loaded values
@@ -310,7 +426,7 @@
       }
 
       selectedMC = config.version || null;
-      selectedFabric = config.fabric || 'latest';
+      selectedFabric = config.loaderVersion || config.fabric || (config.loader === 'vanilla' ? null : 'latest');
 
       if (selectedMC) {
         const javaInfo = await window.electron.invoke('server-java-check-requirements', {
@@ -390,7 +506,7 @@
       setupRepairListeners();
       await refreshMaintenanceContext();
       
-      if (!selectedMC || !selectedFabric) {
+      if (!selectedMC) {
         repairLogs = [...repairLogs, 'Looking for server configuration...'];
         
         try {
@@ -398,9 +514,9 @@
           
           if (config && config.version) {
             selectedMC = config.version;
-            selectedFabric = config.fabric || 'latest';
+            selectedFabric = config.loaderVersion || config.fabric || (config.loader === 'vanilla' ? null : 'latest');
             repairLogs = [...repairLogs, `Found Minecraft version: ${selectedMC}`];
-            repairLogs = [...repairLogs, `Found Fabric version: ${selectedFabric}`];
+            repairLogs = [...repairLogs, `Found loader version: ${selectedFabric || 'n/a'}`];
           } else {
             repairLogs = [...repairLogs, 'Error: Missing version information in server configuration.'];
             throw new Error('Missing version information. Please configure server settings first.');
@@ -411,7 +527,7 @@
         }
       }
       
-      repairLogs = [...repairLogs, `Repairing server with Minecraft ${selectedMC} and Fabric ${selectedFabric}`];
+      repairLogs = [...repairLogs, `Repairing server with Minecraft ${selectedMC}${selectedFabric ? ` and loader ${selectedFabric}` : ''}`];
       
       try {
         repairLogs = [...repairLogs, 'Sending repair request to server...'];
@@ -419,6 +535,8 @@
         await window.electron.invoke('repair-health', {
           targetPath: serverPath,
           mcVersion: selectedMC,
+          loader: currentInstance?.loader || undefined,
+          loaderVersion: selectedFabric,
           fabricVersion: selectedFabric
         });
         
@@ -461,29 +579,48 @@
   }
   
   // Version update tracking
-  $: currentMcVersion = $settingsStore.mcVersion;
-  $: currentFabricVersion = $settingsStore.fabricVersion;
+  $: currentVersionContext = getVersionContext(activeServerConfig);
+  $: currentMcVersion = currentVersionContext.mcVersion;
+  $: currentLoaderType = currentVersionContext.loader;
+  $: currentLoaderVersion = currentVersionContext.loaderVersion;
   $: latestMcVersion = $latestVersions.mc;
-  $: latestFabricVersion = $latestVersions.fabric;
+  $: latestLoaderVersionForCurrentMc = $latestVersions.loaderVersion || $latestVersions.fabric;
+  $: latestLoaderTargetMc = $latestVersions.targetMc || latestMcVersion || currentMcVersion;
   $: mcUpdateAvailable = currentMcVersion && latestMcVersion && compareVersions(latestMcVersion, currentMcVersion) > 0;
-  $: fabricUpdateAvailable = currentFabricVersion && latestFabricVersion && compareVersions(latestFabricVersion, currentFabricVersion) > 0;
-
+  $: latestLoaderVersion = mcUpdateAvailable
+    ? ($latestVersions.targetLoaderVersion || $latestVersions.targetFabric || latestLoaderVersionForCurrentMc)
+    : latestLoaderVersionForCurrentMc;
+  $: loaderUpdateLabel = formatLoaderName(currentLoaderType);
+  $: loaderUpdateAvailable = currentLoaderType !== 'vanilla' && currentLoaderVersion && latestLoaderVersion && compareVersions(latestLoaderVersion, currentLoaderVersion) > 0;
+  $: loaderTargetsDifferentMc = currentLoaderType !== 'vanilla'
+    && !!latestLoaderTargetMc
+    && !!currentMcVersion
+    && latestLoaderTargetMc !== currentMcVersion;
 
   let updateChecked = false;
-  $: upToDate = updateChecked && !mcUpdateAvailable && !fabricUpdateAvailable && latestMcVersion && latestFabricVersion;
+  $: upToDate = updateChecked && !mcUpdateAvailable && !loaderUpdateAvailable && latestMcVersion && (currentLoaderType === 'vanilla' || latestLoaderVersion);
+
+  async function getActiveVersionContext() {
+    const config = serverPath ? await loadServerConfig(serverPath) : activeServerConfig;
+    return getVersionContext(config || activeServerConfig);
+  }
+
   async function checkVersionUpdates() {
+    const versionContext = await getActiveVersionContext();
+
     logger.info('Checking for version updates', {
       category: 'ui',
-      data: {
-        component: 'ServerControls',
-        function: 'checkVersionUpdates',
-        currentMcVersion,
-        currentFabricVersion
-      }
-    });
+        data: {
+          component: 'ServerControls',
+          function: 'checkVersionUpdates',
+          currentMcVersion: versionContext.mcVersion,
+          currentLoaderType: versionContext.loader,
+          currentLoaderVersion: versionContext.loaderVersion
+        }
+      });
     
     try {
-      await refreshLatestVersions(currentMcVersion);
+      await refreshLatestVersions(versionContext.mcVersion, versionContext.loader);
       
       logger.info('Version update check completed', {
         category: 'ui',
@@ -491,9 +628,11 @@
           component: 'ServerControls',
           function: 'checkVersionUpdates',
           mcUpdateAvailable,
-          fabricUpdateAvailable,
+          loaderUpdateAvailable,
           latestMcVersion: $latestVersions.mc,
-          latestFabricVersion: $latestVersions.fabric
+          latestLoaderVersion: $latestVersions.targetLoaderVersion || $latestVersions.targetFabric || $latestVersions.loaderVersion || $latestVersions.fabric,
+          latestLoaderTargetMc: $latestVersions.targetMc || $latestVersions.mc,
+          latestLoaderType: $latestVersions.loader
         }
       });
     } catch (error) {
@@ -560,7 +699,10 @@
   // Function to check server status
   async function checkServerStatus() {
     try {
-      const statusResult = await window.electron.invoke('get-server-status');
+      const statusResult = await window.electron.invoke('get-server-status', {
+        instanceId: currentInstanceId,
+        targetPath: serverPath
+      });
       if (statusResult) {
         const normalizedStatus = normalizeServerStatus(statusResult);
         if (normalizedStatus) {
@@ -584,7 +726,10 @@
   async function checkManagementServerStatus() {
     if (managementServerStatus === 'running') {
       try {
-        const result = await window.electron.invoke('get-management-server-status');
+        const result = await window.electron.invoke('get-management-server-status', {
+          instanceId: currentInstanceId,
+          serverPath
+        });
         if (result.success && result.status) {
           // Update client count
           connectedClients = result.status.clientCount || 0;
@@ -606,6 +751,7 @@
     inviteStatus = 'loading';
     try {
       const result = await window.electron.invoke('get-management-invite-info', {
+        instanceId: currentInstanceId,
         serverPath,
         port: coercePort(managementPort) || undefined
       });
@@ -631,6 +777,7 @@
     inviteError = '';
     try {
       const result = await window.electron.invoke('set-management-invite-host', {
+        instanceId: currentInstanceId,
         serverPath,
         host: inviteHostInput
       });
@@ -652,6 +799,7 @@
     inviteError = '';
     try {
       const result = await window.electron.invoke('regenerate-management-invite-secret', {
+        instanceId: currentInstanceId,
         serverPath
       });
       if (result && result.success) {
@@ -700,12 +848,15 @@
     try {
       applyServerStatus('Starting', { clearPlayers: false });
       const result = await window.electron.invoke('start-server', {
+        instanceId: currentInstanceId,
         targetPath: serverPath,
         port: port,
-        maxRam: maxRam
+        maxRam: maxRam,
+        managementPort: managementPort
       });
 
       if (result && result.success) {
+        clearPortConflict('minecraft');
         errorMessage.set('');
         await checkServerStatus();
         return;
@@ -718,6 +869,11 @@
       }
 
       applyServerStatus('Stopped');
+      if (Array.isArray(result?.details)) {
+        applyPortConflictDetails(result.details);
+      } else {
+        clearPortConflict('minecraft');
+      }
       const message = result?.message || result?.error || 'Failed to start server';
       errorMessage.set(message);
       setTimeout(() => errorMessage.set(''), 7000);
@@ -752,7 +908,10 @@
     
     try {
       applyServerStatus('Stopping', { clearPlayers: false });
-      await window.electron.invoke('stop-server');
+      await window.electron.invoke('stop-server', {
+        instanceId: currentInstanceId,
+        targetPath: serverPath
+      });
       await checkServerStatus();
       logger.debug('Server stop command sent successfully', {
         category: 'ui',
@@ -787,7 +946,10 @@
     
     try {
       applyServerStatus('Stopping', { clearPlayers: false });
-      await window.electron.invoke('kill-server');
+      await window.electron.invoke('kill-server', {
+        instanceId: currentInstanceId,
+        targetPath: serverPath
+      });
       await checkServerStatus();
       logger.debug('Server kill command sent successfully', {
         category: 'ui',
@@ -859,7 +1021,10 @@
     (async () => {
       try {
         // Load saved settings
-        const settingsResult = await window.electron.invoke('get-settings');
+        const settingsResult = await window.electron.invoke('get-settings', {
+          instanceId: currentInstanceId,
+          serverPath
+        });
         if (settingsResult && settingsResult.success) {
           const { settings } = settingsResult;
           // Update local variables with settings
@@ -888,12 +1053,19 @@
         await checkServerStatus();
 
         // Fetch latest version info for update notification
-        await refreshLatestVersions(get(settingsStore).mcVersion);
+        const versionContext = await getActiveVersionContext();
+        await refreshLatestVersions(
+          versionContext.mcVersion,
+          versionContext.loader
+        );
         updateChecked = true;
         
         // Load management server status on mount (but don't override saved port setting)
         try {
-          const result = await window.electron.invoke('get-management-server-status');
+          const result = await window.electron.invoke('get-management-server-status', {
+            instanceId: currentInstanceId,
+            serverPath
+          });
           if (result.success && result.status) {
             applyManagementStatus(result.status.isRunning ? 'running' : 'stopped');
             if (result.status.isRunning) {
@@ -922,11 +1094,17 @@
 
     // Set up a server status listener
     statusHandler = (status) => {
+      if (status?.instanceId && currentInstanceId && status.instanceId !== currentInstanceId) {
+        return;
+      }
       applyServerStatus(status);
     };
 
     // Listen for metrics updates
     metricsHandler = (metrics) => {
+      if (metrics?.instanceId && currentInstanceId && metrics.instanceId !== currentInstanceId) {
+        return;
+      }
       // Update the server state store
       updateServerMetrics(metrics);
       // Update player information
@@ -942,6 +1120,9 @@
 
     // Listen for management server status updates
     const handleManagementServerStatus = (data) => {
+      if (data?.instanceId && currentInstanceId && data.instanceId !== currentInstanceId) {
+        return;
+      }
       if (data.isRunning) {
         applyManagementStatus('running');
         const statusPort = coercePort(data.port);
@@ -986,7 +1167,7 @@
   });
 
   // Update server state when port or ram is changed
-  function updateSettings() {
+  async function updateSettings() {
     logger.debug('Updating server settings', {
       category: 'ui',
       data: {
@@ -1010,13 +1191,34 @@
     const normalizedMaxRam = coercePort(maxRam);
     const normalizedManagementPort = coercePort(managementPort);
     // Save settings to electron store
-    window.electron.invoke('update-settings', {
-      port: normalizedPort ?? port,
-      maxRam: normalizedMaxRam ?? maxRam,
-      managementPort: normalizedManagementPort ?? managementPort,
-      autoStartMinecraft: autoStartMinecraft,
-      autoStartManagement: autoStartManagement
-    }).catch((error) => {
+    try {
+      const result = await window.electron.invoke('update-settings', {
+        instanceId: currentInstanceId,
+        serverPath,
+        port: normalizedPort ?? port,
+        maxRam: normalizedMaxRam ?? maxRam,
+        managementPort: normalizedManagementPort ?? managementPort,
+        autoStartMinecraft: autoStartMinecraft,
+        autoStartManagement: autoStartManagement
+      });
+
+      if (result?.success) {
+        clearAllPortConflicts();
+        return result;
+      }
+
+      if (Array.isArray(result?.details)) {
+        applyPortConflictDetails(result.details);
+        return result;
+      }
+
+      clearAllPortConflicts();
+      if (result?.error) {
+        errorMessage.set(`Failed to save settings: ${result.error}`);
+        setTimeout(() => errorMessage.set(''), 5000);
+      }
+      return result;
+    } catch (error) {
       logger.error('Failed to save settings', {
         category: 'ui',
         data: {
@@ -1025,7 +1227,10 @@
           errorMessage: error.message
         }
       });
-    });
+      errorMessage.set(`Failed to save settings: ${error.message}`);
+      setTimeout(() => errorMessage.set(''), 5000);
+      return null;
+    }
   }
   
   async function runAutoStartOnce() {
@@ -1101,11 +1306,13 @@
     applyManagementStatus('starting');
     try {
       const result = await window.electron.invoke('start-management-server', {
+        instanceId: currentInstanceId,
         port: coercePort(managementPort) || managementPort,
         serverPath: serverPath
       });
       
       if (result.success) {
+        clearPortConflict('management');
         applyManagementStatus('running');
         await loadInviteInfo();
         logger.info('Management server started successfully', {
@@ -1118,6 +1325,11 @@
         });
       } else {
         applyManagementStatus('stopped');
+        if (Array.isArray(result?.details)) {
+          applyPortConflictDetails(result.details);
+        } else {
+          clearPortConflict('management');
+        }
         logger.error('Failed to start management server', {
           category: 'ui',
           data: {
@@ -1155,7 +1367,10 @@
     
     applyManagementStatus('stopping');
     try {
-      const result = await window.electron.invoke('stop-management-server');
+      const result = await window.electron.invoke('stop-management-server', {
+        instanceId: currentInstanceId,
+        serverPath
+      });
 
       if (result.success || result.forced) {
         applyManagementStatus('stopped');
@@ -1215,10 +1430,18 @@
     <h3>Minecraft Server Control Panel</h3>
     <div class="header-actions">
       <button class="check-updates-button" on:click={checkVersionUpdates}>Check Updates</button>
-      {#if mcUpdateAvailable || fabricUpdateAvailable}
+      {#if mcUpdateAvailable || loaderUpdateAvailable}
         <span class="update-notice">
-          {#if mcUpdateAvailable}MC {currentMcVersion} → {latestMcVersion}{/if}
-          {#if fabricUpdateAvailable} Fabric {currentFabricVersion} → {latestFabricVersion}{/if}
+          {#if mcUpdateAvailable}
+            MC {currentMcVersion} → {latestMcVersion}
+          {/if}
+          {#if loaderUpdateAvailable}
+            {#if mcUpdateAvailable}<span class="update-separator"> • </span>{/if}
+            {loaderUpdateLabel} {currentLoaderVersion} → {latestLoaderVersion}
+            {#if loaderTargetsDifferentMc}
+              <span class="update-context">(for MC {latestLoaderTargetMc})</span>
+            {/if}
+          {/if}
         </span>
       {:else if upToDate}
         <span class="update-notice up-to-date">All versions are up to date</span>
@@ -1250,16 +1473,30 @@
     <!-- Settings Group -->
     <div class="settings-group">
       <div class="input-group">
-        <label for="port-input">Port:</label>
+        <div class="field-label-row">
+          <label for="port-input">Port:</label>
+          {#if minecraftPortConflict}
+            <span
+              class="port-conflict-indicator"
+              class:external-port-conflict={minecraftPortConflict.scope === 'external'}
+              title={minecraftPortConflict.title}
+              aria-label={minecraftPortConflict.title}
+            >
+              ×
+            </span>
+          {/if}
+        </div>
         <input
           id="port-input"
           type="number"
           min="1025" 
           max="65535" 
           bind:value={port}
-          on:change={updateSettings}
+          on:input={() => clearPortConflict('minecraft')}
+          on:change={() => void updateSettings()}
           disabled={isServerActive}
           class:disabled-input={isServerActive}
+          class:input-has-conflict={!!minecraftPortConflict}
         />
       </div>
       
@@ -1383,16 +1620,30 @@
       <!-- Controls row -->
       <div class="management-row">
         <div class="input-group">
-          <label for="management-port-input">Port:</label>
+          <div class="field-label-row">
+            <label for="management-port-input">Port:</label>
+            {#if managementPortConflict}
+              <span
+                class="port-conflict-indicator"
+                class:external-port-conflict={managementPortConflict.scope === 'external'}
+                title={managementPortConflict.title}
+                aria-label={managementPortConflict.title}
+              >
+                ×
+              </span>
+            {/if}
+          </div>
           <input
             id="management-port-input"
             type="number"
             min="1025"
             max="65535"
             bind:value={managementPort}
-            on:change={updateSettings}
+            on:input={() => clearPortConflict('management')}
+            on:change={() => void updateSettings()}
             disabled={managementServerStatus === 'running' || managementServerStatus === 'starting'}
             class="port-input"
+            class:input-has-conflict={!!managementPortConflict}
           />
         </div>
         
@@ -1501,10 +1752,10 @@
     
     {#if maintenanceExpanded}
       <div class="maintenance-content">
-        <p class="maintenance-description">Check and repair essential server components: Java runtime, server jar, and Fabric (not world data or mods). Old local Java runtimes are cleaned up automatically.</p>
+        <p class="maintenance-description">Check and repair essential server components: Java runtime, server jar, and the selected loader runtime (not world data or mods). Old local Java runtimes are cleaned up automatically.</p>
         <div class="maintenance-meta">
           <span class="meta-pill">Minecraft: {selectedMC || 'Unknown'}</span>
-          <span class="meta-pill">Fabric: {selectedFabric || 'Unknown'}</span>
+          <span class="meta-pill">{formatLoaderName(currentInstance?.loader || currentLoaderType)}: {selectedFabric || 'Unknown'}</span>
           <span
             class="meta-pill java-pill"
             class:ready={maintenanceJavaInfo?.isAvailable}
@@ -1528,7 +1779,7 @@
           </button>
           
           {#if healthChecking}
-            <span class="status-indicator-small">Inspecting Java, server jar, and Fabric...</span>
+            <span class="status-indicator-small">Inspecting Java, server jar, and {formatLoaderName(currentInstance?.loader || currentLoaderType)}...</span>
           {:else if healthChecked && healthReport.length > 0}
             <span class="issues-found">⚠️ {healthReport.length} missing components</span>
             <button class="btn-compact repair-button" on:click={startRepair} disabled={repairing}>
@@ -1537,7 +1788,7 @@
           {:else if healthChecked && healthReport.length === 0 && selectedMC}
             <span class="all-good">✅ All components ready</span>
           {:else if selectedMC}
-            <span class="status-indicator-small">Run a check to verify Java and Fabric.</span>
+            <span class="status-indicator-small">Run a check to verify Java and {formatLoaderName(currentInstance?.loader || currentLoaderType)}.</span>
           {/if}
         </div>
         
@@ -1713,10 +1964,22 @@
   .update-notice {
     font-size: 0.75rem;
     color: #fbbf24;
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.2rem;
   }
 
   .update-notice.up-to-date {
     color: #10b981;
+  }
+
+  .update-separator {
+    color: #6b7280;
+  }
+
+  .update-context {
+    color: #cbd5e1;
   }
 
   /* Main controls - everything horizontal */
@@ -1751,6 +2014,12 @@
     font-size: 0.8rem;
   }
 
+  .field-label-row {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
   .input-group label {
     color: #ccc;
     margin: 0;
@@ -1766,6 +2035,33 @@
     width: 75px;
     text-align: center;
     font-size: 0.8rem;
+  }
+
+  .input-has-conflict {
+    border-color: #ef4444 !important;
+    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35);
+  }
+
+  .port-conflict-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1rem;
+    height: 1rem;
+    border-radius: 999px;
+    background: rgba(239, 68, 68, 0.16);
+    color: #fca5a5;
+    border: 1px solid rgba(239, 68, 68, 0.45);
+    font-size: 0.75rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: help;
+  }
+
+  .external-port-conflict {
+    background: rgba(245, 158, 11, 0.18);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.45);
   }
 
   .unit {

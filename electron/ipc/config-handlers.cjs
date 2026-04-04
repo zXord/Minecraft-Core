@@ -2,7 +2,11 @@
 const fs = require('fs');
 const path = require('path');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
-const { resolveServerLoader } = require('../utils/server-loader.cjs');
+const {
+  readServerConfig,
+  writeServerConfig,
+  updateServerConfig
+} = require('../utils/config-manager.cjs');
 
 const logger = getLoggerHandlers();
 
@@ -66,28 +70,28 @@ function createConfigHandlers() {
           }
         });
 
-        const configContent = fs.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(configContent);
-        
-        // Enrich config with detected loader information if not present
-        if (!config.loaderVersion) {
-          try {
-            const { loader, loaderVersion } = resolveServerLoader(serverPath);
-            if (loader && !config.loader) {
-              config.loader = loader;
+        let rawConfig = null;
+        try {
+          rawConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        } catch (parseError) {
+          logger.warn('Failed to parse raw config before normalization', {
+            category: 'settings',
+            data: {
+              handler: 'read-config',
+              errorType: parseError.constructor.name,
+              errorMessage: parseError.message,
+              configPath
             }
-            if (loaderVersion) {
-              config.loaderVersion = loaderVersion;
-            }
-          } catch (loaderError) {
-            logger.warn('Failed to detect loader version', {
-              category: 'settings',
-              data: {
-                handler: 'read-config',
-                errorMessage: loaderError.message
-              }
-            });
-          }
+          });
+        }
+
+        const config = readServerConfig(serverPath);
+        if (!config) {
+          return null;
+        }
+
+        if (!rawConfig || JSON.stringify(rawConfig) !== JSON.stringify(config)) {
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
         }
         
         const duration = Date.now() - startTime;
@@ -103,6 +107,7 @@ function createConfigHandlers() {
             hasPort: !!config.port,
             hasLoader: !!config.loader,
             hasLoaderVersion: !!config.loaderVersion,
+            hasJavaVersion: !!config.javaVersion,
             configKeys: Object.keys(config)
           }
         });
@@ -180,8 +185,7 @@ function createConfigHandlers() {
           }
         });
 
-        // Write the config file
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+        const normalizedConfig = writeServerConfig(serverPath, config);
         const duration = Date.now() - startTime;
 
         logger.info('Configuration file written successfully', {
@@ -191,11 +195,11 @@ function createConfigHandlers() {
             duration,
             success: true,
             configPath,
-            configSize: JSON.stringify(config).length
+            configSize: JSON.stringify(normalizedConfig).length
           }
         });
         
-        return { success: true };
+        return { success: true, config: normalizedConfig };
       } catch (err) {
         const duration = Date.now() - startTime;
         logger.error(`Failed to write config: ${err.message}`, {
@@ -252,58 +256,8 @@ function createConfigHandlers() {
         }
         
         const configPath = path.join(serverPath, '.minecraft-core.json');
-        let config = {};
-        let previousConfig = {};
-
-        // Read existing config if it exists
-        if (fs.existsSync(configPath)) {
-          logger.debug('Reading existing config for update', {
-            category: 'storage',
-            data: {
-              handler: 'update-config',
-              configPath,
-              fileExists: true
-            }
-          });
-
-          try {
-            const content = fs.readFileSync(configPath, 'utf-8');
-            config = JSON.parse(content);
-            previousConfig = { ...config }; // Store previous state for cleanup
-            
-            logger.debug('Existing config loaded for update', {
-              category: 'settings',
-              data: {
-                handler: 'update-config',
-                existingKeys: Object.keys(config),
-                previousVersion: previousConfig.version,
-                previousFabric: previousConfig.fabric
-              }
-            });
-          } catch (parseError) {
-            logger.warn('Failed to parse existing config for update, using empty config', {
-              category: 'settings',
-              data: {
-                handler: 'update-config',
-                configPath,
-                parseError: parseError.message
-              }
-            });
-            // Continue with empty config
-          }
-        } else {
-          logger.debug('No existing config file found for update', {
-            category: 'settings',
-            data: {
-              handler: 'update-config',
-              configPath,
-              fileExists: false
-            }
-          });
-        }
-
-        // Update with new values
-        const updatedConfig = { ...config, ...updates };
+        const previousConfig = readServerConfig(serverPath) || {};
+        const updatedConfig = updateServerConfig(serverPath, updates);
         
         logger.info('Applying configuration updates', {
           category: 'settings',
@@ -311,12 +265,16 @@ function createConfigHandlers() {
             handler: 'update-config',
             previousConfig: {
               version: previousConfig.version,
+              loader: previousConfig.loader || null,
+              loaderVersion: previousConfig.loaderVersion || previousConfig.fabric || null,
               fabric: previousConfig.fabric,
               port: previousConfig.port,
               maxRam: previousConfig.maxRam
             },
             updates: {
               version: updates.version,
+              loader: updates.loader || null,
+              loaderVersion: updates.loaderVersion || updates.fabric || null,
               fabric: updates.fabric,
               port: updates.port,
               maxRam: updates.maxRam
@@ -325,28 +283,33 @@ function createConfigHandlers() {
           }
         });
 
-        // Write back to file
-        fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 2));
-        
         // Perform server version cleanup if versions changed
         const versionChanged = updates.version && updates.version !== previousConfig.version;
-        const fabricChanged = updates.fabric && updates.fabric !== previousConfig.fabric;
+        const previousLoaderVersion = previousConfig.loaderVersion || previousConfig.fabric || null;
+        const nextLoaderVersion = updates.loaderVersion || updates.fabric || null;
+        const loaderChanged =
+          (updates.loader && updates.loader !== previousConfig.loader) ||
+          (nextLoaderVersion && nextLoaderVersion !== previousLoaderVersion);
         
-        if (versionChanged || fabricChanged) {
+        if (versionChanged || loaderChanged) {
           logger.info('Version changes detected, performing cleanup', {
             category: 'settings',
             data: {
               handler: 'update-config',
               versionChanged,
-              fabricChanged,
+              loaderChanged,
               oldVersion: previousConfig.version,
               newVersion: updates.version,
+              oldLoader: previousConfig.loader || null,
+              newLoader: updates.loader || null,
+              oldLoaderVersion: previousLoaderVersion,
+              newLoaderVersion: nextLoaderVersion,
               oldFabric: previousConfig.fabric,
               newFabric: updates.fabric
             }
           });
 
-          await cleanupOldServerVersions(serverPath, previousConfig);
+          await cleanupOldServerVersions(serverPath, previousConfig, updatedConfig);
         }
 
         const duration = Date.now() - startTime;
@@ -359,7 +322,7 @@ function createConfigHandlers() {
             success: true,
             configPath,
             versionChanged,
-            fabricChanged,
+            loaderChanged,
             updatedKeys: Object.keys(updates)
           }
         });
@@ -388,8 +351,43 @@ function createConfigHandlers() {
  * @param {string} serverPath - Path to the server directory
  * @param {object} oldConfig - Previous configuration for comparison
  */
-async function cleanupOldServerVersions(serverPath, oldConfig) {
+function resolveConfigLoader(config = {}) {
+  return config.loader || (config.fabric ? 'fabric' : 'vanilla');
+}
+
+function resolveConfigLoaderVersion(config = {}) {
+  return config.loaderVersion || config.fabric || null;
+}
+
+function buildVersionDirectoryCandidates(config = {}) {
+  const version = config.version || null;
+  const loader = resolveConfigLoader(config);
+  const loaderVersion = resolveConfigLoaderVersion(config);
+  const candidates = new Set();
+
+  if (!version) {
+    return candidates;
+  }
+
+  candidates.add(version);
+
+  if (loader === 'fabric' && loaderVersion) {
+    candidates.add(`fabric-loader-${loaderVersion}-${version}`);
+    candidates.add(`${version}-fabric${loaderVersion}`);
+  }
+
+  if (loader === 'forge' && loaderVersion) {
+    candidates.add(`${version}-forge-${loaderVersion}`);
+  }
+
+  return candidates;
+}
+
+async function cleanupOldServerVersions(serverPath, oldConfig, nextConfig = {}) {
   const startTime = Date.now();
+  const oldLoader = resolveConfigLoader(oldConfig);
+  const oldLoaderVersion = resolveConfigLoaderVersion(oldConfig);
+  const protectedVersionEntries = buildVersionDirectoryCandidates(nextConfig);
   
   logger.info('Starting server version cleanup', {
     category: 'storage',
@@ -397,7 +395,11 @@ async function cleanupOldServerVersions(serverPath, oldConfig) {
       function: 'cleanupOldServerVersions',
       serverPath,
       oldVersion: oldConfig.version,
-      oldFabric: oldConfig.fabric
+      oldLoader,
+      oldLoaderVersion,
+      nextVersion: nextConfig.version || null,
+      nextLoader: resolveConfigLoader(nextConfig),
+      nextLoaderVersion: resolveConfigLoaderVersion(nextConfig)
     }
   });
 
@@ -421,53 +423,23 @@ async function cleanupOldServerVersions(serverPath, oldConfig) {
       const stat = fs.lstatSync(filePath);
       
       if (stat.isFile()) {
-        // Clean up old server JARs with various naming patterns
-        if (file.endsWith('.jar')) {
-          // Patterns: minecraft_server.1.21.1.jar, server.jar (but check dates), fabric-server-*.jar, etc.
-          if (file.includes('minecraft_server') || file.includes('fabric-server') || file.includes('server-launch')) {
-            // Check if this file contains the old version or is older than expected
-            if (oldConfig.version && (file.includes(oldConfig.version) || file.includes(oldConfig.version.replace('.', '_')))) {
-              filesToCleanup.push({ file, reason: `Old Minecraft server JAR (${oldConfig.version})` });
-            }
-          }
-          
-          // Clean up old fabric installer JARs
-          if (file.includes('fabric-installer') || file.includes('fabric-loader')) {
-            if (oldConfig.fabric && (file.includes(oldConfig.fabric) || file.includes(oldConfig.fabric.replace('.', '_')))) {
-              filesToCleanup.push({ file, reason: `Old Fabric installer (${oldConfig.fabric})` });
-            }
-          }
-        }
-          // Clean up version-specific downloaded files
+        // Clean up version-specific downloaded vanilla server jars
         if (file.startsWith('minecraft_server.') && file.endsWith('.jar')) {
           const versionMatch = file.match(/minecraft_server\.(.+)\.jar/);
           if (versionMatch && oldConfig.version && versionMatch[1] === oldConfig.version) {
             filesToCleanup.push({ file, reason: `Old Minecraft server JAR (${oldConfig.version})` });
           }
         }
-        
-        // Clean up server JAR files with version in name (various patterns)
-        if (file.endsWith('.jar') && oldConfig.version) {
-          // Pattern: server-1.21.3.jar, fabric-server-mc.1.21.3-loader.0.16.9-launcher.1.0.2.jar, etc.
-          if (file.includes(oldConfig.version.replace(/\./g, '\\.')) || 
-              file.includes(oldConfig.version.replace(/\./g, '-')) ||
-              file.includes(`mc.${oldConfig.version}`) ||
-              file.includes(`mc${oldConfig.version}`)) {
-            filesToCleanup.push({ file, reason: `Old server JAR with version (${oldConfig.version})` });
-          }
-        }
-        
-        // NOTE: Do NOT clean up fabric-server-launch.jar - it's the current launcher file needed to run the server
-        // Only clean up version-specific fabric server JARs that contain old version numbers
-        if (file.includes('fabric-server') && file.endsWith('.jar') && file !== 'fabric-server-launch.jar') {
-          // Only delete fabric server JARs that contain the old MC version
-          if (oldConfig.version && (file.includes(oldConfig.version) || file.includes(`mc.${oldConfig.version}`) || file.includes(`mc${oldConfig.version}`))) {
-            filesToCleanup.push({ file, reason: `Old Fabric server JAR with version (${oldConfig.version})` });
+
+        // Clean up Fabric installer artifacts that are known to be replaceable.
+        if (oldLoader === 'fabric' && file.endsWith('.jar') && file.includes('fabric-installer')) {
+          if (oldLoaderVersion && file.includes(oldLoaderVersion) && !protectedVersionEntries.has(file.replace(/\.jar$/i, ''))) {
+            filesToCleanup.push({ file, reason: `Old Fabric installer (${oldLoaderVersion})` });
           }
         }
         
         // Clean up old server backups that might have version info
-        if (file.startsWith('server_backup_') && (file.includes(oldConfig.version) || file.includes(oldConfig.fabric))) {
+        if (file.startsWith('server_backup_') && (file.includes(oldConfig.version) || (oldLoaderVersion && file.includes(oldLoaderVersion)))) {
           filesToCleanup.push({ file, reason: `Old version backup` });
         }
         
@@ -478,22 +450,21 @@ async function cleanupOldServerVersions(serverPath, oldConfig) {
           // Old log files (older than 7 days)
           filesToCleanup.push({ file, reason: 'Old log file' });
         }      } else if (stat.isDirectory()) {
-        // Clean up libraries directory if it exists (Fabric libraries)
-        if (file === 'libraries') {
-          // Fabric creates version-specific library structures
-          // We could clean this up but it's safer to leave it for manual cleanup
-        }
-          // Clean up version-specific directories
+        // Keep libraries untouched. Loader installers manage these layouts and
+        // aggressive cleanup can break Forge/Fabric runtimes.
+
+        // Clean up exact old version directories without touching the current loader runtime.
         if (file === 'versions' && oldConfig.version) {
           const versionDir = path.join(serverPath, file);
           try {
             const versionDirContents = fs.readdirSync(versionDir);
+            const oldCandidates = buildVersionDirectoryCandidates(oldConfig);
             for (const versionFile of versionDirContents) {
-              if (versionFile === oldConfig.version || versionFile.includes(oldConfig.version)) {
+              if (oldCandidates.has(versionFile) && !protectedVersionEntries.has(versionFile)) {
                 // Mark the entire version subdirectory for deletion
                 filesToCleanup.push({ 
                   file: path.join(file, versionFile), 
-                  reason: `Old version directory (${oldConfig.version})`,
+                  reason: `Old version directory (${versionFile})`,
                   isDirectory: true
                 });
               }
@@ -581,7 +552,8 @@ async function cleanupOldServerVersions(serverPath, oldConfig) {
         duration,
         serverPath,
         oldVersion: oldConfig.version,
-        oldFabric: oldConfig.fabric
+        oldLoader,
+        oldLoaderVersion
       }
     });
     // Don't throw - cleanup is not critical for functionality

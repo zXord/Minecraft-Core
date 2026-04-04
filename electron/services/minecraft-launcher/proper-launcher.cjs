@@ -4,8 +4,305 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 
-// Import the XMCL installer package with correct function names
-const { installVersion, installAssets, installLibraries, installDependencies, installFabric } = require('@xmcl/installer');
+const { LibraryInfo, MinecraftFolder, Version } = require('@xmcl/core');
+const { installVersion, installAssets, installLibraries, installDependencies } = require('@xmcl/installer');
+const { installClientLoader, normalizeLoader, getLoaderVersions } = require('../loader-install-service.cjs');
+
+async function fetchMinecraftVersionMetadata(versionId) {
+  const response = await fetch('https://launchermeta.mojang.com/mc/game/version_manifest_v2.json');
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Minecraft version manifest: ${response.status}`);
+  }
+
+  const manifest = await response.json();
+  const versionInfo = Array.isArray(manifest?.versions)
+    ? manifest.versions.find((entry) => entry.id === versionId)
+    : null;
+
+  if (!versionInfo?.url) {
+    throw new Error(`Minecraft version metadata not found for ${versionId}`);
+  }
+
+  return versionInfo;
+}
+
+function mergeVersionArguments(parentArgs, childArgs) {
+  const merged = [];
+  const append = (value) => {
+    if (!Array.isArray(value)) return;
+    for (const entry of value) {
+      merged.push(entry);
+    }
+  };
+  append(parentArgs);
+  append(childArgs);
+  return merged;
+}
+
+function mergeVersionJson(parentJson, childJson) {
+  const parentLibraries = Array.isArray(parentJson?.libraries) ? parentJson.libraries : [];
+  const childLibraries = Array.isArray(childJson?.libraries) ? childJson.libraries : [];
+  const childLibraryNames = new Set(childLibraries.map((library) => library?.name).filter(Boolean));
+  const mergedLibraries = [
+    ...parentLibraries.filter((library) => !library?.name || !childLibraryNames.has(library.name)),
+    ...childLibraries
+  ];
+
+  return {
+    ...parentJson,
+    ...childJson,
+    arguments: {
+      jvm: mergeVersionArguments(parentJson?.arguments?.jvm, childJson?.arguments?.jvm),
+      game: mergeVersionArguments(parentJson?.arguments?.game, childJson?.arguments?.game)
+    },
+    downloads: {
+      ...(parentJson?.downloads || {}),
+      ...(childJson?.downloads || {})
+    },
+    libraries: mergedLibraries,
+    mainClass: childJson?.mainClass || parentJson?.mainClass,
+    assetIndex: childJson?.assetIndex || parentJson?.assetIndex,
+    javaVersion: childJson?.javaVersion || parentJson?.javaVersion,
+    type: childJson?.type || parentJson?.type,
+    inheritsFrom: childJson?.inheritsFrom || parentJson?.inheritsFrom,
+    jar: childJson?.jar || parentJson?.jar
+  };
+}
+
+function loadResolvedVersionJson(clientPath, versionId, visited = new Set()) {
+  if (!versionId || visited.has(versionId)) {
+    return null;
+  }
+
+  visited.add(versionId);
+  const versionJsonPath = path.join(clientPath, 'versions', versionId, `${versionId}.json`);
+  if (!fs.existsSync(versionJsonPath)) {
+    return null;
+  }
+
+  const versionJson = JSON.parse(fs.readFileSync(versionJsonPath, 'utf8'));
+  if (!versionJson?.inheritsFrom) {
+    return versionJson;
+  }
+
+  const parentJson = loadResolvedVersionJson(clientPath, versionJson.inheritsFrom, visited);
+  if (!parentJson) {
+    return versionJson;
+  }
+
+  return mergeVersionJson(parentJson, versionJson);
+}
+
+function resolveExistingLoaderProfile(clientPath, minecraftVersion, loaderType, loaderVersion) {
+  const versionsDir = path.join(clientPath, 'versions');
+  if (!fs.existsSync(versionsDir)) {
+    return null;
+  }
+
+  const versionDirs = fs.readdirSync(versionsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+
+  const normalizedLoader = normalizeLoader(loaderType);
+  if (normalizedLoader === 'vanilla') {
+    return versionDirs.includes(minecraftVersion) ? minecraftVersion : null;
+  }
+
+  if (normalizedLoader === 'forge') {
+    const exactCandidates = [
+      loaderVersion ? `${minecraftVersion}-forge-${loaderVersion}` : null,
+      loaderVersion ? `forge-${minecraftVersion}-${loaderVersion}` : null
+    ].filter(Boolean);
+    for (const candidate of exactCandidates) {
+      if (versionDirs.includes(candidate)) {
+        return candidate;
+      }
+    }
+
+    const prefix = `${minecraftVersion}-forge-`;
+    const matches = versionDirs.filter((name) => name.startsWith(prefix));
+    if (matches.length === 0) {
+      return null;
+    }
+
+    if (loaderVersion) {
+      const exactMatch = matches.find((name) => name === `${minecraftVersion}-forge-${loaderVersion}`);
+      if (exactMatch) {
+        return exactMatch;
+      }
+      const suffixMatch = matches.find((name) => name.includes(`-${loaderVersion}`));
+      if (suffixMatch) {
+        return suffixMatch;
+      }
+    }
+
+    return matches.sort().reverse()[0] || null;
+  }
+
+  if (normalizedLoader === 'fabric') {
+    const exactCandidates = [
+      loaderVersion ? `fabric-loader-${loaderVersion}-${minecraftVersion}` : null,
+      loaderVersion ? `${minecraftVersion}-fabric-${loaderVersion}` : null
+    ].filter(Boolean);
+    for (const candidate of exactCandidates) {
+      if (versionDirs.includes(candidate)) {
+        return candidate;
+      }
+    }
+
+    const matches = versionDirs.filter((name) =>
+      name.startsWith('fabric-loader-') && name.endsWith(`-${minecraftVersion}`)
+    );
+    if (matches.length === 0) {
+      return null;
+    }
+
+    if (loaderVersion) {
+      const exactMatch = matches.find((name) => name === `fabric-loader-${loaderVersion}-${minecraftVersion}`);
+      if (exactMatch) {
+        return exactMatch;
+      }
+      const middleMatch = matches.find((name) => name.includes(`-${loaderVersion}-`));
+      if (middleMatch) {
+        return middleMatch;
+      }
+    }
+
+    return matches.sort().reverse()[0] || null;
+  }
+
+  return null;
+}
+
+function resolveLibraryArtifactPath(library) {
+  if (!library || typeof library !== 'object') {
+    return null;
+  }
+
+  if (typeof library.downloads?.artifact?.path === 'string' && library.downloads.artifact.path.trim()) {
+    return library.downloads.artifact.path;
+  }
+
+  if (typeof library.name === 'string' && library.name.trim()) {
+    try {
+      return LibraryInfo.resolve(library.name).path;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function replaceLaunchPlaceholders(value, replacements) {
+  let result = value;
+  for (const [token, replacement] of Object.entries(replacements)) {
+    result = result.replace(new RegExp(`\\$\\{${token}\\}`, 'g'), () => String(replacement));
+  }
+  return result;
+}
+
+function normalizeOsName() {
+  switch (process.platform) {
+    case 'win32':
+      return 'windows';
+    case 'darwin':
+      return 'osx';
+    case 'linux':
+      return 'linux';
+    default:
+      return process.platform;
+  }
+}
+
+function isRuleMatch(rule = {}, featureState = {}) {
+  if (!rule || typeof rule !== 'object') {
+    return true;
+  }
+
+  if (rule.os && typeof rule.os === 'object') {
+    if (rule.os.name && String(rule.os.name).toLowerCase() !== normalizeOsName()) {
+      return false;
+    }
+
+    if (rule.os.arch) {
+      const expectedArch = String(rule.os.arch).toLowerCase();
+      const currentArch = process.arch === 'x64' ? 'x86_64' : process.arch.toLowerCase();
+      if (expectedArch !== currentArch && expectedArch !== process.arch.toLowerCase()) {
+        return false;
+      }
+    }
+  }
+
+  if (rule.features && typeof rule.features === 'object') {
+    for (const [featureName, expectedValue] of Object.entries(rule.features)) {
+      if (Boolean(featureState[featureName]) !== Boolean(expectedValue)) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function shouldIncludeArgument(entry, featureState = {}) {
+  if (!entry || typeof entry !== 'object' || !Array.isArray(entry.rules) || entry.rules.length === 0) {
+    return true;
+  }
+
+  let allowed = false;
+  for (const rule of entry.rules) {
+    const action = rule && typeof rule.action === 'string' ? rule.action.toLowerCase() : 'allow';
+    if (isRuleMatch(rule, featureState)) {
+      allowed = action === 'allow';
+    }
+  }
+
+  return allowed;
+}
+
+function expandVersionArguments(entries, replacements, featureState = {}) {
+  const expanded = [];
+  if (!Array.isArray(entries)) {
+    return expanded;
+  }
+
+  const appendValue = (value) => {
+    if (typeof value === 'string' && value.length > 0) {
+      expanded.push(replaceLaunchPlaceholders(value, replacements));
+    }
+  };
+
+  for (const entry of entries) {
+    if (typeof entry === 'string') {
+      appendValue(entry);
+      continue;
+    }
+
+    if (!entry || typeof entry !== 'object' || !shouldIncludeArgument(entry, featureState)) {
+      continue;
+    }
+
+    if (Array.isArray(entry.value)) {
+      for (const value of entry.value) {
+        appendValue(value);
+      }
+      continue;
+    }
+
+    appendValue(entry.value);
+  }
+
+  return expanded;
+}
+
+function appendProcessOutput(buffer, chunk, limit = 16000) {
+  const next = `${buffer}${chunk}`;
+  if (next.length <= limit) {
+    return next;
+  }
+  return next.slice(next.length - limit);
+}
 
 class ProperMinecraftLauncher extends EventEmitter {
   constructor() {
@@ -16,85 +313,46 @@ class ProperMinecraftLauncher extends EventEmitter {
     this.clientPath = null;
   }
 
-  // Set authentication data
   setAuthData(authData) {
     this.authData = authData;
   }
-  // Properly install/verify Minecraft client using XMCL packages
+
   async ensureMinecraftClient(clientPath, version) {
     this.clientPath = clientPath;
-    
-    // Ensure directories exist
+
     const versionsDir = path.join(clientPath, 'versions');
     const librariesDir = path.join(clientPath, 'libraries');
     const assetsDir = path.join(clientPath, 'assets');
-    
+
     for (const dir of [versionsDir, librariesDir, assetsDir]) {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
     }
 
-    // Step 1: Install version using the correct XMCL function (installVersion not installVersionProfile)
-    await installVersion(version, clientPath, {
+    const versionManifestEntry = await fetchMinecraftVersionMetadata(version);
+    await installVersion(versionManifestEntry, clientPath, {
       side: 'client'
     });
-    
-    
-    // Verify the version JSON exists
+
     const versionJsonPath = path.join(versionsDir, version, `${version}.json`);
     if (!fs.existsSync(versionJsonPath)) {
       throw new Error(`Version JSON not found after installation: ${versionJsonPath}`);
     }
-    
-    const versionJson = JSON.parse(fs.readFileSync(versionJsonPath, 'utf8'));
-    
-    // Step 2: Install libraries
-    await installLibraries(versionJson, clientPath);
-    
-    // Step 3: Install assets
-    await installAssets(versionJson, clientPath);
-    
-    // Step 4: Install native dependencies
-    await installDependencies(versionJson, clientPath);
-    
-      // Verify the vanilla JAR has LogUtils
-    const vanillaJar = path.join(versionsDir, version, `${version}.jar`);
-    if (fs.existsSync(vanillaJar)) {
-      const AdmZip = require('adm-zip');
-      const zip = new (/** @type {any} */ (AdmZip))(vanillaJar);
-      const entries = zip.getEntries();
-      const logUtilsEntry = entries.find(entry => entry.entryName === 'com/mojang/logging/LogUtils.class');
-      
-      if (!logUtilsEntry) {
-        // Show what logging classes are available
-        entries.filter(entry => entry.entryName.startsWith('com/mojang/logging/') && entry.entryName.endsWith('.class'));
-      }
-    }
-    
+
+    const installableVersion = await Version.parse(MinecraftFolder.from(clientPath), version);
+    installableVersion.minecraftDirectory = clientPath;
+    const installOptions = {
+      minecraftDirectory: clientPath
+    };
+
+    await installLibraries(installableVersion, installOptions);
+    await installAssets(installableVersion, installOptions);
+    await installDependencies(installableVersion, installOptions);
+
     return { success: true };
   }
-  // Install Fabric loader properly
-  async installFabric(clientPath, minecraftVersion, fabricVersion = 'latest') {
-    // Get latest Fabric version if needed
-    if (fabricVersion === 'latest') {
-      const response = await fetch('https://meta.fabricmc.net/v2/versions/loader');
-      const loaders = await response.json();
-      fabricVersion = loaders[0].version;
-    }
-    
-    // Use XMCL installer for Fabric
-    await installFabric({
-      minecraftVersion,
-      version: fabricVersion,
-      minecraft: clientPath,
-      side: 'client'
-    });
-    
-    return { success: true, version: `fabric-loader-${fabricVersion}-${minecraftVersion}` };
-  }
 
-  // Launch Minecraft manually with proper classpath 
   async launchMinecraft(options) {
     try {
       const {
@@ -103,69 +361,146 @@ class ProperMinecraftLauncher extends EventEmitter {
         serverIp,
         serverPort,
         maxMemory = 4096,
-        needsFabric = false,
-        fabricVersion = 'latest'
+        loaderType = 'vanilla',
+        loaderVersion = null,
+        javaPath = null,
+        showDebugTerminal = false
       } = options;
 
-      
       if (this.isLaunching) {
         throw new Error('Minecraft is already launching');
       }
-      
+
       if (!this.authData) {
         throw new Error('No authentication data available');
       }
-      
+
       this.isLaunching = true;
-      
-      // Ensure Minecraft is properly installed
       await this.ensureMinecraftClient(clientPath, minecraftVersion);
-      
-      // Install Fabric if needed
+
+      const normalizedLoader = normalizeLoader(loaderType);
+      let effectiveLoaderVersion = loaderVersion;
+      if (
+        normalizedLoader !== 'vanilla' &&
+        (!effectiveLoaderVersion || String(effectiveLoaderVersion).trim().toLowerCase() === 'latest')
+      ) {
+        const availableVersions = await getLoaderVersions(normalizedLoader, minecraftVersion);
+        effectiveLoaderVersion = availableVersions[0] || effectiveLoaderVersion;
+      }
+
       let launchVersion = minecraftVersion;
-      if (needsFabric) {
-        const fabricResult = await this.installFabric(clientPath, minecraftVersion, fabricVersion);
-        launchVersion = fabricResult.version;
-      }
-      
-      // Build launch arguments manually
-      const versionsDir = path.join(clientPath, 'versions');
-      const launchJsonPath = path.join(versionsDir, launchVersion, `${launchVersion}.json`);
-      
-      if (!fs.existsSync(launchJsonPath)) {
-        throw new Error(`Launch profile not found: ${launchJsonPath}`);
-      }
-      
-      const launchJson = JSON.parse(fs.readFileSync(launchJsonPath, 'utf8'));
-      
-      // Build classpath - vanilla JAR should now have LogUtils
-      const classpath = [];
-      
-      // Add vanilla JAR first (this should now have LogUtils)
-      const vanillaJar = path.join(clientPath, 'versions', minecraftVersion, `${minecraftVersion}.jar`);
-      if (fs.existsSync(vanillaJar)) {
-        classpath.push(vanillaJar);
-      } else {
-        throw new Error(`Vanilla JAR not found: ${vanillaJar}`);
-      }
-      
-      // Add all libraries from the launch profile
-      if (launchJson.libraries && Array.isArray(launchJson.libraries)) {
-          for (const lib of launchJson.libraries) {
-          if (lib.name && lib.downloads?.artifact) {
-            const libPath = path.join(clientPath, 'libraries', lib.downloads.artifact.path);
-            if (fs.existsSync(libPath)) {
-              classpath.push(libPath);
-            }
-          }
+      if (normalizedLoader !== 'vanilla') {
+        const existingProfileId = resolveExistingLoaderProfile(
+          clientPath,
+          minecraftVersion,
+          normalizedLoader,
+          effectiveLoaderVersion
+        );
+
+        if (existingProfileId) {
+          launchVersion = existingProfileId;
+        } else {
+          const loaderResult = await installClientLoader({
+            clientPath,
+            minecraftVersion,
+            loader: normalizedLoader,
+            loaderVersion: effectiveLoaderVersion,
+            javaPath
+          });
+
+          launchVersion = loaderResult.profileId ||
+            resolveExistingLoaderProfile(clientPath, minecraftVersion, normalizedLoader, effectiveLoaderVersion) ||
+            minecraftVersion;
         }
       }
-      
-      
-      // Build JVM arguments
+
+      const launchJson = loadResolvedVersionJson(clientPath, launchVersion);
+      if (!launchJson) {
+        throw new Error(`Launch profile not found: ${launchVersion}`);
+      }
+
+      const classpathEntries = [];
+      const classpathSet = new Set();
+      const addClasspathEntry = (entryPath) => {
+        if (!entryPath || !fs.existsSync(entryPath) || classpathSet.has(entryPath)) {
+          return;
+        }
+        classpathSet.add(entryPath);
+        classpathEntries.push(entryPath);
+      };
+
+      const primaryVersionId = launchJson.jar || launchJson.inheritsFrom || minecraftVersion;
+      const launchVersionJar = path.join(clientPath, 'versions', launchVersion, `${launchVersion}.jar`);
+      const primaryVersionJar = path.join(clientPath, 'versions', primaryVersionId, `${primaryVersionId}.jar`);
+      addClasspathEntry(launchVersionJar);
+      addClasspathEntry(primaryVersionJar);
+
+      const launchLibraries = Array.isArray(launchJson.libraries) ? launchJson.libraries : [];
+      for (const library of launchLibraries) {
+        const artifactPath = resolveLibraryArtifactPath(library);
+        if (!artifactPath) {
+          continue;
+        }
+        addClasspathEntry(path.join(clientPath, 'libraries', artifactPath));
+      }
+
+      if (classpathEntries.length === 0) {
+        throw new Error(`No launch classpath entries were resolved for ${launchVersion}`);
+      }
+
+      const nativesDir = path.join(clientPath, 'versions', launchVersion, 'natives');
+      if (!fs.existsSync(nativesDir)) {
+        fs.mkdirSync(nativesDir, { recursive: true });
+      }
+
+      const classpathSeparator = process.platform === 'win32' ? ';' : ':';
+      const classpathValue = classpathEntries.join(classpathSeparator);
+      const featureState = {
+        is_demo_user: false,
+        has_custom_resolution: false,
+        has_quick_plays_support: false,
+        is_quick_play_singleplayer: false,
+        is_quick_play_multiplayer: false,
+        is_quick_play_realms: false
+      };
+      const replacements = {
+        auth_playerName: this.authData.name || '',
+        auth_player_name: this.authData.name || '',
+        auth_uuid: this.authData.uuid || '',
+        auth_xuid: this.authData.xuid || '',
+        auth_accessToken: this.authData.access_token || '',
+        auth_access_token: this.authData.access_token || '',
+        auth_session: this.authData.access_token || '',
+        auth_userType: 'msa',
+        auth_user_type: 'msa',
+        clientid: this.authData.client_token || this.authData.clientToken || '',
+        user_properties: '{}',
+        version_name: launchVersion,
+        game_directory: clientPath,
+        assets_root: path.join(clientPath, 'assets'),
+        assets_index_name: launchJson.assetIndex?.id || minecraftVersion,
+        version_type: launchJson.type || 'release',
+        launcher_name: 'minecraft-core',
+        launcher_version: '1.0.0',
+        natives_directory: nativesDir,
+        classpath_separator: classpathSeparator,
+        classpath: classpathValue,
+        quickPlayPath: '',
+        quickPlaySingleplayer: '',
+        quickPlayMultiplayer: '',
+        quickPlayRealms: '',
+        resolution_width: '',
+        resolution_height: ''
+      };
+
+      const versionJvmArgs = expandVersionArguments(launchJson.arguments?.jvm, replacements, featureState);
+      const versionProvidesClasspath = versionJvmArgs.some((arg, index) =>
+        (arg === '-cp' || arg === '-classpath') && typeof versionJvmArgs[index + 1] === 'string'
+      );
+
       const jvmArgs = [
         `-Xmx${maxMemory}M`,
-        `-Xms1024M`,
+        '-Xms1024M',
         '-XX:+UseG1GC',
         '-XX:+ParallelRefProcEnabled',
         '-XX:MaxGCPauseMillis=200',
@@ -184,116 +519,184 @@ class ProperMinecraftLauncher extends EventEmitter {
         '-XX:SurvivorRatio=32',
         '-XX:+PerfDisableSharedMem',
         '-XX:MaxTenuringThreshold=1',
-        `-Djava.library.path=${path.join(clientPath, 'versions', launchVersion, 'natives')}`,
-        '-cp', classpath.join(process.platform === 'win32' ? ';' : ':')
+        `-Djava.library.path=${nativesDir}`
       ];
-      
-      // Add additional JVM args from profile
-      if (launchJson.arguments?.jvm) {
-        for (const arg of launchJson.arguments.jvm) {
-          if (typeof arg === 'string' && !jvmArgs.includes(arg)) {
-            let processedArg = arg
-              .replace(/\$\{natives_directory\}/g, path.join(clientPath, 'versions', launchVersion, 'natives'))
-              .replace(/\$\{launcher_name\}/g, 'minecraft-core')
-              .replace(/\$\{launcher_version\}/g, '1.0.0');
-            jvmArgs.push(processedArg);
-          }
+
+      if (!versionProvidesClasspath) {
+        jvmArgs.push('-cp', classpathValue);
+      }
+
+      jvmArgs.push(...versionJvmArgs);
+
+      const gameArgs = expandVersionArguments(launchJson.arguments?.game, replacements, featureState);
+
+      if (gameArgs.length === 0 && typeof launchJson.minecraftArguments === 'string') {
+        for (const arg of launchJson.minecraftArguments.split(/\s+/).filter(Boolean)) {
+          gameArgs.push(replaceLaunchPlaceholders(arg, replacements));
         }
       }
-      
-      // Build game arguments
-      const gameArgs = [];
-      
-      // Process game arguments from profile
-      if (launchJson.arguments?.game) {
-        for (const arg of launchJson.arguments.game) {
-          if (typeof arg === 'string') {
-            let processedArg = arg
-              .replace(/\$\{auth_playerName\}/g, this.authData.name)
-              .replace(/\$\{auth_player_name\}/g, this.authData.name)
-              .replace(/\$\{auth_uuid\}/g, this.authData.uuid)
-              .replace(/\$\{auth_accessToken\}/g, this.authData.access_token)
-              .replace(/\$\{auth_access_token\}/g, this.authData.access_token)
-              .replace(/\$\{auth_userType\}/g, 'msa')
-              .replace(/\$\{auth_user_type\}/g, 'msa')
-              .replace(/\$\{version_name\}/g, launchVersion)
-              .replace(/\$\{game_directory\}/g, clientPath)
-              .replace(/\$\{assets_root\}/g, path.join(clientPath, 'assets'))
-              .replace(/\$\{assets_index_name\}/g, launchJson.assetIndex?.id || minecraftVersion)
-              .replace(/\$\{version_type\}/g, 'release');
-              
-            gameArgs.push(processedArg);
-          }
-        }
+
+      if (!gameArgs.includes('--username')) {
+        gameArgs.push(
+          '--username', this.authData.name || '',
+          '--version', launchVersion,
+          '--gameDir', clientPath,
+          '--assetsDir', path.join(clientPath, 'assets'),
+          '--assetIndex', launchJson.assetIndex?.id || minecraftVersion,
+          '--uuid', this.authData.uuid || '',
+          '--accessToken', this.authData.access_token || '',
+          '--userType', 'msa',
+          '--versionType', launchJson.type || 'release',
+          '--userProperties', '{}'
+        );
       }
-      
-      // Add server connection arguments if provided
+
       if (serverIp && serverPort) {
-        gameArgs.push('--server', serverIp);
-        gameArgs.push('--port', serverPort.toString());
+        gameArgs.push('--server', serverIp, '--port', String(serverPort));
       }
-      
-      // Final arguments - use javaw.exe on Windows to avoid console
-      const javaCommand = process.platform === 'win32' ? 'javaw' : 'java';
+
+      const javaCommand = javaPath || (process.platform === 'win32' ? 'javaw' : 'java');
+      let debugJavaPath = javaCommand;
       const allArgs = [
         ...jvmArgs,
         launchJson.mainClass || 'net.minecraft.client.main.Main',
         ...gameArgs
       ];
-      
-      
-      // Launch Minecraft
-      const child = spawn(javaCommand, allArgs, {
+
+      const spawnOptions = {
         cwd: clientPath,
         stdio: ['ignore', 'pipe', 'pipe'],
-        detached: true  // Allow Minecraft to continue running after app closes
+        detached: true
+      };
+
+      let debugWindow = null;
+      if (showDebugTerminal) {
+        if (process.platform === 'win32') {
+          debugJavaPath = javaCommand.replace(/javaw\.exe$/i, 'java.exe');
+          spawnOptions.windowsHide = true;
+        }
+
+        try {
+          const { BrowserWindow } = require('electron');
+          debugWindow = new BrowserWindow({
+            width: 800,
+            height: 500,
+            title: `Minecraft Debug Console - ${launchVersion}`,
+            backgroundColor: '#1a1a1a',
+            webPreferences: {
+              nodeIntegration: false,
+              contextIsolation: true,
+              preload: path.join(__dirname, '../../preload.cjs'),
+              sandbox: true
+            },
+            icon: path.join(__dirname, '../../icon.png'),
+            show: false,
+            resizable: true,
+            minimizable: true,
+            maximizable: true
+          });
+
+          debugWindow.loadFile(path.join(__dirname, '../../debug-console.html'));
+          debugWindow.once('ready-to-show', () => {
+            debugWindow.show();
+            if (debugWindow && !debugWindow.isDestroyed()) {
+              debugWindow.webContents.send('debug-log', {
+                type: 'header',
+                message: `========================================
+MINECRAFT DEBUG CONSOLE
+========================================
+
+Java Executable: ${debugJavaPath}
+Working Directory: ${clientPath}
+Launch Version: ${launchVersion}
+
+========================================
+Starting Minecraft with console output...
+========================================
+`
+              });
+            }
+          });
+        } catch {
+          debugWindow = null;
+        }
+      }
+
+      const child = spawn(showDebugTerminal ? debugJavaPath : javaCommand, allArgs, spawnOptions);
+      this.client = { child };
+      if (!showDebugTerminal) {
+        child.unref();
+      } else if (debugWindow) {
+        this.debugWindow = debugWindow;
+        debugWindow.on('closed', () => {
+          this.debugWindow = null;
+        });
+      }
+
+      let launchStdout = '';
+      let launchStderr = '';
+      child.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        launchStdout = appendProcessOutput(launchStdout, text);
+        if (debugWindow && !debugWindow.isDestroyed()) {
+          debugWindow.webContents.send('debug-log', {
+            type: 'info',
+            message: text
+          });
+        }
       });
-      
-      // Properly detach the process so it continues running after app closes
-      child.unref();
-      
-      this.client = { child };      // Handle process output
-      child.stdout.on('data', () => {
-        // Process output logging can be added here if needed
+      child.stderr.on('data', (chunk) => {
+        const text = chunk.toString();
+        launchStderr = appendProcessOutput(launchStderr, text);
+        if (debugWindow && !debugWindow.isDestroyed()) {
+          debugWindow.webContents.send('debug-log', {
+            type: 'error',
+            message: text
+          });
+        }
       });
-      
-      child.stderr.on('data', () => {
-        // The LogUtils error should be fixed now - error handling can be added here if needed
-      });
-      
+
       child.on('close', () => {
         this.isLaunching = false;
         this.client = null;
+        if (debugWindow && !debugWindow.isDestroyed()) {
+          debugWindow.webContents.send('debug-log', {
+            type: child.exitCode === 0 ? 'success' : 'error',
+            message: `\n========================================\nMinecraft process ended with code: ${child.exitCode}\n========================================\n`
+          });
+        }
         this.emit('minecraft-stopped');
       });
-      
+
       child.on('error', () => {
         this.isLaunching = false;
         this.client = null;
         this.emit('minecraft-stopped');
       });
-      
-      // Wait to see if launch succeeds
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      
+
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
       if (child.killed || child.exitCode !== null) {
-        throw new Error(`Minecraft failed to start. Exit code: ${child.exitCode}`);
+        const combinedOutput = `${launchStdout}\n${launchStderr}`.trim();
+        const outputSuffix = combinedOutput
+          ? `\n${combinedOutput.slice(-4000)}`
+          : '';
+        throw new Error(`Minecraft failed to start. Exit code: ${child.exitCode}${outputSuffix}`);
       }
-      
-      
+
       return {
         success: true,
         message: `Minecraft ${launchVersion} launched successfully with XMCL`,
         pid: child.pid,
         version: launchVersion,
         vanillaVersion: minecraftVersion,
-        needsFabric: needsFabric
+        loaderType: normalizedLoader,
+        loaderVersion: effectiveLoaderVersion
       };
-      
     } catch (error) {
       this.isLaunching = false;
       this.client = null;
-      
+
       return {
         success: false,
         error: error.message,
@@ -302,7 +705,6 @@ class ProperMinecraftLauncher extends EventEmitter {
     }
   }
 
-  // Stop Minecraft
   async stopMinecraft() {
     if (this.client?.child) {
       this.client.child.kill('SIGTERM');
@@ -312,18 +714,17 @@ class ProperMinecraftLauncher extends EventEmitter {
         }
       }, 3000);
     }
-    
+
     this.isLaunching = false;
     this.client = null;
     this.emit('minecraft-stopped');
-    
+
     return { success: true, message: 'Minecraft stopped' };
   }
 
-  // Get launcher status
   getStatus() {
     let isRunning = false;
-      if (this.client?.child) {
+    if (this.client?.child) {
       try {
         process.kill(this.client.child.pid, 0);
         isRunning = true;
@@ -332,15 +733,15 @@ class ProperMinecraftLauncher extends EventEmitter {
         isRunning = false;
       }
     }
-    
+
     return {
       isAuthenticated: !!this.authData,
       isLaunching: this.isLaunching,
-      isRunning: isRunning,
+      isRunning,
       username: this.authData?.name || null,
       clientPath: this.clientPath
     };
   }
 }
 
-module.exports = { ProperMinecraftLauncher }; 
+module.exports = { ProperMinecraftLauncher };
