@@ -11,6 +11,7 @@ const configDir = path.join(app.getPath('userData'), 'config');
 const configFile = path.join(configDir, 'mod-categories.json');
 const UNASSIGNED_MODS_DIRNAME = 'mods_unassigned';
 const UNASSIGNED_MANIFEST_DIRNAME = 'minecraft-core-manifests-unassigned';
+const MOD_METADATA_SIGNATURE_VERSION = 1;
 
 // Create config directory if it doesn't exist
 if (!fsSync.existsSync(configDir)) {
@@ -40,13 +41,70 @@ const modCategoriesStore = {  get: () => {
 };
 
 function parseForgeToml(content) {
-  const nameMatch = content.match(/displayName\s*=\s*"([^"]+)"/);
-  const versionMatch = content.match(/version\s*=\s*"([^"]+)"/);
-  const idMatch = content.match(/modId\s*=\s*"([^"]+)"/i);
+  const lines = content.split(/\r?\n/);
+  let inFirstModBlock = false;
+  let foundFirstModBlock = false;
+  let inDescription = false;
+  const values = {};
+  const descriptionLines = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    if (line === '[[mods]]') {
+      if (foundFirstModBlock) {
+        break;
+      }
+      foundFirstModBlock = true;
+      inFirstModBlock = true;
+      continue;
+    }
+
+    if (!inFirstModBlock) {
+      continue;
+    }
+
+    if (inDescription) {
+      if (line.endsWith('"""') && line !== '"""') {
+        descriptionLines.push(line.substring(0, line.length - 3));
+        values.description = descriptionLines.join('\n');
+        inDescription = false;
+        continue;
+      }
+
+      if (line === '"""') {
+        values.description = descriptionLines.join('\n');
+        inDescription = false;
+        continue;
+      }
+
+      descriptionLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith('[')) {
+      break;
+    }
+
+    if (line.startsWith('description="""') || line === 'description="""') {
+      inDescription = true;
+      if (line.length > 15) {
+        descriptionLines.push(line.substring(15));
+      }
+      continue;
+    }
+
+    const match = line.match(/^(\w+)\s*=\s*(['"])(.*)\2$/);
+    if (match) {
+      const [, key, , value] = match;
+      values[key] = value;
+    }
+  }
+
   return {
-    name: nameMatch ? nameMatch[1] : undefined,
-    versionNumber: versionMatch ? versionMatch[1] : undefined,
-    projectId: idMatch ? idMatch[1] : undefined
+    name: values.displayName || values.modId,
+    versionNumber: values.version,
+    projectId: values.modId
   };
 }
 
@@ -129,6 +187,122 @@ async function readModMetadataFromJar(jarPath) {
     // Ignore metadata reading errors
   }
   return {};
+}
+
+function buildJarMetadataSignature(stats) {
+  return `${stats.size}:${Math.trunc(stats.mtimeMs)}`;
+}
+
+async function resolveFirstAccessiblePath(possiblePaths) {
+  for (const possiblePath of possiblePaths) {
+    try {
+      await fs.access(possiblePath);
+      return possiblePath;
+    } catch {
+      // File doesn't exist at this location, try next
+    }
+  }
+
+  return null;
+}
+
+async function resolveJarMetadataState(possiblePaths) {
+  const jarPath = await resolveFirstAccessiblePath(possiblePaths);
+  if (!jarPath) {
+    return { jarPath: null, signature: null };
+  }
+
+  try {
+    const stats = await fs.stat(jarPath);
+    return {
+      jarPath,
+      signature: buildJarMetadataSignature(stats)
+    };
+  } catch {
+    return { jarPath, signature: null };
+  }
+}
+
+function hasManifestIdentity(manifest) {
+  return Boolean(
+    manifest
+    && manifest.projectId
+    && manifest.versionNumber
+    && manifest.name
+  );
+}
+
+function shouldPreserveManifestProjectId(projectId) {
+  return Boolean(
+    projectId
+    && (projectId.length === 8 || projectId.length === 9)
+    && /^[A-Za-z0-9]{8,9}$/.test(projectId)
+  );
+}
+
+function mergeManifestWithJarMetadata(manifest, meta) {
+  const originalProjectId = manifest?.projectId;
+  const preservedProjectId = shouldPreserveManifestProjectId(originalProjectId)
+    ? originalProjectId
+    : (meta.projectId || originalProjectId);
+
+  return {
+    ...meta,
+    ...manifest,
+    projectId: preservedProjectId,
+    versionNumber: manifest?.versionNumber || meta.versionNumber,
+    name: manifest?.name || meta.name,
+    minecraftVersion: meta.minecraftVersion || manifest?.minecraftVersion,
+    gameVersions: meta.gameVersions || manifest?.gameVersions,
+    depends: meta.depends || manifest?.depends,
+    fabricVersion: meta.fabricVersion || manifest?.fabricVersion
+  };
+}
+
+async function refreshManifestMetadataIfNeeded(manifest, manifestPath, possibleJarPaths) {
+  if (!manifest) {
+    return null;
+  }
+
+  const { jarPath, signature } = await resolveJarMetadataState(possibleJarPaths);
+  let nextManifest = manifest;
+  let changed = false;
+
+  const hasStoredSignature = typeof nextManifest.fileSignature === 'string' && nextManifest.fileSignature.length > 0;
+  const signatureChanged = Boolean(signature && hasStoredSignature && nextManifest.fileSignature !== signature);
+  const missingIdentity = !hasManifestIdentity(nextManifest);
+
+  if ((missingIdentity || signatureChanged) && jarPath) {
+    try {
+      const meta = await readModMetadataFromJar(jarPath);
+      nextManifest = mergeManifestWithJarMetadata(nextManifest, meta);
+      changed = true;
+    } catch {
+      // Ignore metadata refresh errors and keep the manifest we already have
+    }
+  }
+
+  if (
+    signature
+    && (nextManifest.fileSignature !== signature || nextManifest.metadataSignatureVersion !== MOD_METADATA_SIGNATURE_VERSION)
+  ) {
+    nextManifest = {
+      ...nextManifest,
+      fileSignature: signature,
+      metadataSignatureVersion: MOD_METADATA_SIGNATURE_VERSION
+    };
+    changed = true;
+  }
+
+  if (changed) {
+    try {
+      await fs.writeFile(manifestPath, JSON.stringify(nextManifest, null, 2), 'utf8');
+    } catch {
+      // Ignore manifest persistence errors
+    }
+  }
+
+  return nextManifest;
 }
 
 async function listMods(serverPath) {
@@ -302,123 +476,37 @@ async function getInstalledModInfo(serverPath) {
       const serverManifestPath = path.join(serverManifestDir, `${modFile}.json`);
       const clientManifestPath = path.join(clientManifestDir, `${modFile}.json`);
       const unassignedManifestPath = path.join(unassignedManifestDir, `${modFile}.json`);
-      let manifest = null;      try {
+      let manifest = null;
+      let resolvedManifestPath = clientManifestPath;
+      try {
         const clientManifestContent = await fs.readFile(clientManifestPath, 'utf8');
         manifest = JSON.parse(clientManifestContent);
+        resolvedManifestPath = clientManifestPath;
       } catch {
         try {
           const serverManifestContent = await fs.readFile(serverManifestPath, 'utf8');
           manifest = JSON.parse(serverManifestContent);
+          resolvedManifestPath = serverManifestPath;
         } catch {
           try {
             const unassignedManifestContent = await fs.readFile(unassignedManifestPath, 'utf8');
             manifest = JSON.parse(unassignedManifestContent);
+            resolvedManifestPath = unassignedManifestPath;
           } catch {
             // Ignore manifest parsing errors
           }
         }
       }
-        if (manifest) {
-        // Always try to extract metadata to get fresh minecraftVersion info
-        try {
-          // Check multiple possible locations for the jar file
-          const possibleJarPaths = [
-            path.join(modsDir, modFile), // Server enabled
-            path.join(modsDir, modFile + '.disabled'), // Server disabled
-            path.join(clientModsDir, modFile), // Client enabled
-            path.join(clientModsDir, modFile + '.disabled'), // Client disabled
-            path.join(unassignedModsDir, modFile), // Unassigned
-            path.join(unassignedModsDir, modFile + '.disabled') // Unassigned disabled
-          ];
-          
-          let jarPath = null;
-          for (const possiblePath of possibleJarPaths) {
-            try {
-              await fs.access(possiblePath);
-              jarPath = possiblePath;
-              break; // Found the file, stop looking
-            } catch {
-              // File doesn't exist at this location, try next
-            }
-          }          if (jarPath) {
-            const meta = await readModMetadataFromJar(jarPath);
-            
-            // Preserve manifest projectId if it exists and looks like a Modrinth ID
-            const shouldPreserveManifestProjectId = manifest.projectId && 
-              (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
-              /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
-            
-            // Store the original manifest projectId before merging
-            const originalProjectId = manifest.projectId;
-            
-            manifest = {
-              ...meta, 
-              ...manifest, 
-              // Always preserve proper Modrinth project ID if it exists in manifest
-              projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
-              versionNumber: manifest.versionNumber || meta.versionNumber, 
-              name: manifest.name || meta.name,
-              // Always use fresh extracted Minecraft version compatibility info
-              minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
-              gameVersions: meta.gameVersions || manifest.gameVersions,
-              depends: meta.depends || manifest.depends,
-              fabricVersion: meta.fabricVersion || manifest.fabricVersion
-            };
-          }
-        } catch {
-          // Failed to extract metadata
-        }
-        
-        // Only do the old fallback extraction if manifest is still missing critical info
-        if (!manifest.projectId || !manifest.versionNumber) {
-          try {
-            // Check multiple possible locations for the jar file
-            const possibleJarPaths = [
-              path.join(modsDir, modFile), // Server enabled
-              path.join(modsDir, modFile + '.disabled'), // Server disabled
-              path.join(clientModsDir, modFile), // Client enabled
-              path.join(clientModsDir, modFile + '.disabled'), // Client disabled
-              path.join(unassignedModsDir, modFile), // Unassigned
-              path.join(unassignedModsDir, modFile + '.disabled') // Unassigned disabled
-            ];
-            
-            let jarPath = null;
-            for (const possiblePath of possibleJarPaths) {
-              try {
-                await fs.access(possiblePath);
-                jarPath = possiblePath;
-                break; // Found the file, stop looking
-              } catch {
-                // File doesn't exist at this location, try next
-              }
-            }            if (jarPath) {
-              const meta = await readModMetadataFromJar(jarPath);
-              
-              // Preserve manifest projectId if it exists and looks like a Modrinth ID
-              const shouldPreserveManifestProjectId = manifest.projectId && 
-                (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
-                /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
-              
-              // Store the original manifest projectId before merging
-              const originalProjectId = manifest.projectId;
-              
-              manifest = {
-                ...meta, 
-                ...manifest, 
-                // Always preserve proper Modrinth project ID if it exists in manifest
-                projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
-                versionNumber: manifest.versionNumber || meta.versionNumber, 
-                name: manifest.name || meta.name,
-                // Preserve extracted Minecraft version compatibility info
-                minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
-                gameVersions: meta.gameVersions || manifest.gameVersions,
-                depends: meta.depends || manifest.depends,
-                fabricVersion: meta.fabricVersion || manifest.fabricVersion              };
-            }
-          } catch {
-            // Failed to extract metadata
-          }
-        }
+      if (manifest) {
+        manifest = await refreshManifestMetadataIfNeeded(manifest, resolvedManifestPath, [
+          path.join(modsDir, modFile),
+          path.join(modsDir, modFile + '.disabled'),
+          path.join(clientModsDir, modFile),
+          path.join(clientModsDir, modFile + '.disabled'),
+          path.join(unassignedModsDir, modFile),
+          path.join(unassignedModsDir, modFile + '.disabled')
+        ]);
+
         // Ensure fileName property is always set
         manifest.fileName = modFile;
         
@@ -464,100 +552,23 @@ async function getClientInstalledModInfo(clientPath) {
     )
     .map(f => f.replace('.disabled', ''));
 
-  const uniqueModFiles = Array.from(new Set(modFiles));  const modInfo = [];
+  const uniqueModFiles = Array.from(new Set(modFiles));
+  const modInfo = [];
   for (const file of uniqueModFiles) {
     const manifestPath = path.join(manifestDir, `${file}.json`);
-    let manifest = null;    try {
+    let manifest = null;
+    try {
       const content = await fs.readFile(manifestPath, 'utf8');
       manifest = JSON.parse(content);
       
       if (manifest) {
-        // Always try to extract metadata to get fresh minecraftVersion info
-        try {
-          const jarBase = path.join(modsDir, file);
-          const jarPath = await fs
-            .access(jarBase)
-            .then(() => jarBase)
-            .catch(async () => {
-              const disabledPath = jarBase + '.disabled';
-              try {
-                await fs.access(disabledPath);
-                return disabledPath;
-              } catch {
-                return null;
-              }            });
-
-          if (jarPath) {
-            const meta = await readModMetadataFromJar(jarPath);
-            
-            // Preserve manifest projectId if it exists and looks like a Modrinth ID
-            const shouldPreserveManifestProjectId = manifest.projectId && 
-              (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
-              /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
-            
-            // Store the original manifest projectId before merging
-            const originalProjectId = manifest.projectId;
-            
-            manifest = {
-              ...meta, 
-              ...manifest, 
-              // Always preserve proper Modrinth project ID if it exists in manifest
-              projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
-              versionNumber: manifest.versionNumber || meta.versionNumber,              name: manifest.name || meta.name,
-              // Always use fresh extracted Minecraft version compatibility info
-              minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
-              gameVersions: meta.gameVersions || manifest.gameVersions,
-              depends: meta.depends || manifest.depends,
-              fabricVersion: meta.fabricVersion || manifest.fabricVersion
-            };
-          }
-        } catch {
-          // Failed to extract client metadata
-        }
+        manifest = await refreshManifestMetadataIfNeeded(manifest, manifestPath, [
+          path.join(modsDir, file),
+          path.join(modsDir, file + '.disabled')
+        ]);
       }
-      
-      // Only do the old fallback extraction if manifest is still missing critical info
-      if (!manifest.projectId || !manifest.versionNumber) {
-        try {
-          const jarBase = path.join(modsDir, file);
-          const jarPath = await fs
-            .access(jarBase)
-            .then(() => jarBase)
-            .catch(async () => {
-              const disabledPath = jarBase + '.disabled';
-              try {
-                await fs.access(disabledPath);
-                return disabledPath;
-              } catch {
-                return null;
-              }
-            });            if (jarPath) {
-            const meta = await readModMetadataFromJar(jarPath);
-            
-            // Preserve manifest projectId if it exists and looks like a Modrinth ID
-            const shouldPreserveManifestProjectId = manifest.projectId && 
-              (manifest.projectId.length === 8 || manifest.projectId.length === 9) && 
-              /^[A-Za-z0-9]{8,9}$/.test(manifest.projectId);
-              // Store the original manifest projectId before merging
-            const originalProjectId = manifest.projectId;
-            
-            manifest = { 
-              ...meta, 
-              ...manifest,
-              // Always preserve proper Modrinth project ID if it exists in manifest
-              projectId: shouldPreserveManifestProjectId ? originalProjectId : (meta.projectId || originalProjectId), 
-              versionNumber: manifest.versionNumber || meta.versionNumber, 
-              name: manifest.name || meta.name,
-              // Preserve extracted Minecraft version compatibility info
-              minecraftVersion: meta.minecraftVersion || manifest.minecraftVersion,
-              gameVersions: meta.gameVersions || manifest.gameVersions,
-              depends: meta.depends || manifest.depends,
-              fabricVersion: meta.fabricVersion || manifest.fabricVersion
-            };
-          }
-        } catch {
-          // Ignore metadata extraction errors
-        }      }      // Ensure fileName property is always set
+
+      // Ensure fileName property is always set
       if (manifest) {
         manifest.fileName = file;
         
@@ -580,30 +591,25 @@ async function getClientInstalledModInfo(clientPath) {
     }
 
     if (!manifest) {
-      const jarBase = path.join(modsDir, file);
-      const jarPath = await fs
-        .access(jarBase)
-        .then(() => {
-          return jarBase;
-        })
-        .catch(async () => {
-          const disabledPath = jarBase + '.disabled';
-          try {
-            await fs.access(disabledPath);
-            return disabledPath;
-          } catch {
-            return null;
-          }
-        });      let meta = {};
+      const { jarPath, signature } = await resolveJarMetadataState([
+        path.join(modsDir, file),
+        path.join(modsDir, file + '.disabled')
+      ]);
+      let meta = {};
       if (jarPath) {
         meta = await readModMetadataFromJar(jarPath);
-      }      const modData = { 
+      }
+      const modData = {
         fileName: file, 
         ...meta,
         // For mods without manifests, we don't know installation dates
         installedAt: null,
         lastUpdated: null
       };
+      if (signature) {
+        modData.fileSignature = signature;
+        modData.metadataSignatureVersion = MOD_METADATA_SIGNATURE_VERSION;
+      }
       modInfo.push(modData);
     }
   }

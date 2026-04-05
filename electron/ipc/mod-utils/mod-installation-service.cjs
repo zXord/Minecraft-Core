@@ -21,6 +21,23 @@ const {
   getModrinthVersions // For installClientMod
 } = require('../../services/mod-api-service.cjs'); // Adjust path as needed
 
+const GENERIC_MOD_FILENAME_BASES = new Set([
+  'minecraft',
+  'forge',
+  'neoforge',
+  'fabric',
+  'fabric-loader',
+  'fabric_loader',
+  'fabricloader',
+  'quilt',
+  'javafml',
+  'fml',
+  'mclanguage'
+]);
+
+function shouldUseMetadataFileName(cleanBase) {
+  return Boolean(cleanBase) && !GENERIC_MOD_FILENAME_BASES.has(cleanBase.toLowerCase());
+}
 
 async function installModToServer(win, serverPath, modDetails) {
   const logger = getLoggerHandlers();
@@ -597,9 +614,10 @@ async function installModToServer(win, serverPath, modDetails) {
           // Use the clean name from JAR metadata
           const cleanBase = metadata.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
           const cleanFileName = /\.jar$/i.test(cleanBase) ? cleanBase : `${cleanBase}.jar`;
+          const canUseMetadataName = shouldUseMetadataFileName(cleanBase);
 
           // Only rename if it's different and not an update (to preserve original filenames for updates)
-          if (cleanFileName !== fileName && !modDetails.forceReinstall) {
+          if (cleanFileName !== fileName && !modDetails.forceReinstall && canUseMetadataName) {
             finalFileName = cleanFileName;
             const newTargetPath = path.join(path.dirname(targetPath), finalFileName);
             await fs.rename(targetPath, newTargetPath);
@@ -621,7 +639,11 @@ async function installModToServer(win, serverPath, modDetails) {
               data: {
                 service: 'mod-installation-service',
                 fileName: fileName,
-                reason: modDetails.forceReinstall ? 'update_preserve_name' : 'same_as_clean'
+                reason: modDetails.forceReinstall
+                  ? 'update_preserve_name'
+                  : canUseMetadataName
+                    ? 'same_as_clean'
+                    : 'generic_metadata_name'
               }
             });
           }

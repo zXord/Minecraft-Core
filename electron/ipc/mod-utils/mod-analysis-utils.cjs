@@ -37,6 +37,75 @@ function invalidateMetadataCache(jarPath) {
   }
 }
 
+function parseForgeModMetadata(content) {
+  const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
+  const lines = content.split(/\r?\n/);
+  let inFirstModBlock = false;
+  let foundFirstModBlock = false;
+  let inDescription = false;
+  let currentDescription = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    if (line === '[[mods]]') {
+      if (foundFirstModBlock) {
+        break;
+      }
+      foundFirstModBlock = true;
+      inFirstModBlock = true;
+      continue;
+    }
+
+    if (!inFirstModBlock) {
+      continue;
+    }
+
+    if (inDescription) {
+      if (line.endsWith('"""') && line !== '"""') {
+        currentDescription.push(line.substring(0, line.length - 3));
+        metadata.description = currentDescription.join('\n');
+        inDescription = false;
+        continue;
+      }
+
+      if (line === '"""') {
+        metadata.description = currentDescription.join('\n');
+        inDescription = false;
+        continue;
+      }
+
+      currentDescription.push(line);
+      continue;
+    }
+
+    if (line.startsWith('[')) {
+      break;
+    }
+
+    if (line.startsWith('description="""') || line === 'description="""') {
+      inDescription = true;
+      currentDescription = [];
+      if (line.length > 15) {
+        currentDescription.push(line.substring(15));
+      }
+      continue;
+    }
+
+    const match = line.match(/^(\w+)\s*=\s*(['"])(.*)\2$/);
+    if (match) {
+      const [, key, , value] = match;
+      metadata[key] = value;
+    }
+  }
+
+  metadata.name = metadata.displayName || metadata.modId || 'Unknown';
+  metadata.version = metadata.version || 'Unknown';
+  metadata.projectId = metadata.modId || metadata.name;
+
+  return metadata;
+}
+
 function parseJarMetadataSync(jarPath) {
   let result = null;
 
@@ -73,84 +142,7 @@ function parseJarMetadataSync(jarPath) {
     if (forgeEntry) {
       const content = forgeEntry.getData().toString('utf8');
       try {
-        const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
-        const lines = content.split(/\r?\n/);
-        let currentModTable = {};
-        let inModsArray = false;
-        let inDescription = false;
-        let currentDescription = [];
-
-        lines.forEach(line => {
-          line = line.trim();
-          
-          if (line === '[[mods]]') {
-            if (Object.keys(currentModTable).length > 0) {
-              Object.assign(metadata, currentModTable);
-              currentModTable = {};
-            }
-            inModsArray = true;
-            inDescription = false;
-            return;
-          }
-          
-          if (inModsArray && line.startsWith('[') && line !== '[[mods]]') {
-            inModsArray = false;
-            return;
-          }
-          
-          if (line.startsWith('description="""') || line === 'description="""') {
-            inDescription = true;
-            currentDescription = [];
-            if (line.length > 15) {
-              currentDescription.push(line.substring(15));
-            }
-            return;
-          }
-          
-          if (inDescription) {
-            if (line.endsWith('"""') && line !== '"""') {
-              currentDescription.push(line.substring(0, line.length - 3));
-              if (inModsArray) {
-                currentModTable.description = currentDescription.join('\n');
-              } else {
-                metadata.description = currentDescription.join('\n');
-              }
-              inDescription = false;
-              return;
-            } else if (line === '"""') {
-              if (inModsArray) {
-                currentModTable.description = currentDescription.join('\n');
-              } else {
-                metadata.description = currentDescription.join('\n');
-              }
-              inDescription = false;
-              return;
-            } else {
-              currentDescription.push(line);
-              return;
-            }
-          }
-          
-          const match = line.match(/^(\w+)\s*=\s*"([^"]*)"$/);
-          if (match) {
-            const [, key, value] = match;
-            if (inModsArray) {
-              currentModTable[key] = value;
-            } else {
-              metadata[key] = value;
-            }
-          }
-        });
-        
-        if (Object.keys(currentModTable).length > 0) {
-          Object.assign(metadata, currentModTable);
-        }
-        
-        metadata.name = metadata.displayName || metadata.modId || 'Unknown';
-        metadata.version = metadata.version || 'Unknown';
-        metadata.projectId = metadata.modId || metadata.name;
-        
-        return metadata;
+        return parseForgeModMetadata(content);
       } catch {
         return null;
       }
