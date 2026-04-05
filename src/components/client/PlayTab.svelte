@@ -71,6 +71,14 @@
   $: if (typeof window !== 'undefined') {
     localStorage.setItem('minecraft-debug-terminal', showDebugTerminal.toString());
   }
+
+  $: canLaunchMinecraft =
+    clientSyncStatus === 'ready' &&
+    downloadStatus === 'ready' &&
+    $clientState.appVersionCompatible;
+
+  $: showServerOfflineNotice =
+    canLaunchMinecraft && $clientState.minecraftServerStatus !== 'running';
   
   // Memory persistence - save when maxMemory changes (but only after initial load)
   $: if (typeof window !== 'undefined' && window.localStorage && maxMemory && memoryLoaded) {
@@ -387,14 +395,11 @@
               <div class="ready-header">
                 <h2 class="status-header {
                   !$clientState.appVersionCompatible && $clientState.appVersionMismatch ? 'needs-update' :
-                  $clientState.minecraftServerStatus !== 'running' ? 'waiting' :
                   clientSyncStatus !== 'ready' ? 'needs-client' :
                   downloadStatus !== 'ready' ? 'needs-mods' : 'ready'
                 }">
                   {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
                     🔄 App Update Required
-                  {:else if $clientState.minecraftServerStatus !== 'running'}
-                    ⏸️ Waiting for Server
                   {:else if clientSyncStatus !== 'ready'}
                     📥 Client Download Required
                   {:else if downloadStatus !== 'ready'}
@@ -867,16 +872,19 @@
                 </div>
                 
                 {#if launchStatus === 'ready'}
-                  {#if $clientState.minecraftServerStatus === 'running' && clientSyncStatus === 'ready' && downloadStatus === 'ready' && $clientState.appVersionCompatible}
+                  {#if canLaunchMinecraft}
                     <button class="play-button-main" on:click={launchMinecraftWithDebug}>
                       🎮 PLAY MINECRAFT
                     </button>
+                    {#if showServerOfflineNotice}
+                      <div class="status-message">
+                        The Minecraft server is currently stopped. You can still launch the client and connect when it comes online.
+                      </div>
+                    {/if}
                   {:else}
                     <button class="play-button-main disabled" disabled>
                       {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
                         🔄 UPDATE REQUIRED
-                      {:else if $clientState.minecraftServerStatus !== 'running'}
-                        ⏸️ WAITING FOR SERVER
                       {:else if clientSyncStatus !== 'ready'}
                         📥 DOWNLOAD CLIENT FIRST
                       {:else if downloadStatus !== 'ready'}
@@ -959,10 +967,6 @@
                             {/if}
                           </div>
                         {/if}
-                      </div>
-                    {:else if $clientState.minecraftServerStatus !== 'running'}
-                      <div class="status-message">
-                        The Minecraft server is not running. Please wait for it to start.
                       </div>
                     {:else if clientSyncStatus !== 'ready'}
                       <div class="status-message">

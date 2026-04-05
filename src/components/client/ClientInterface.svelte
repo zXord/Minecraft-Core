@@ -2562,12 +2562,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       return;
     }
     
-    if ($clientState.minecraftServerStatus !== 'running') {
-      errorMessage.set('The Minecraft server is not running. Please wait for the server to start.');
-      setTimeout(() => errorMessage.set(''), 5000);
-      return;
-    }
-    
     if (clientSyncStatus === 'needed') {
       errorMessage.set('Minecraft client files need to be downloaded first');
       setTimeout(() => errorMessage.set(''), 5000);
