@@ -6,7 +6,8 @@ const modFileManager = require('../mod-utils/mod-file-manager.cjs');
 const modInstallService = require('../mod-utils/mod-installation-service.cjs');
 const { downloadWithProgress } = require('../../services/download-manager.cjs');
 const {
-  extractVersionFromFilename
+  extractVersionFromFilename,
+  checkMinecraftVersionCompatibility
 } = require('./mod-handler-utils.cjs');
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
 const { serverErrorMonitor } = require('../error-monitoring-handlers.cjs');

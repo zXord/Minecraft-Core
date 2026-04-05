@@ -392,6 +392,178 @@ function createEnhancedModStore(initialValue, storeName) {
   };
 }
 
+function normalizePersistentPreferencePath(path) {
+  if (typeof path !== 'string') {
+    return '';
+  }
+
+  const trimmedPath = path.trim();
+  return trimmedPath ? trimmedPath.replace(/\\/g, '/').toLowerCase() : '';
+}
+
+function readPersistedBooleanState(storageKey, defaultValue = true) {
+  if (typeof localStorage === 'undefined') {
+    return {
+      defaultValue: Boolean(defaultValue),
+      values: {}
+    };
+  }
+
+  try {
+    const storedValue = localStorage.getItem(storageKey);
+    if (storedValue === null) {
+      return {
+        defaultValue: Boolean(defaultValue),
+        values: {}
+      };
+    }
+
+    // Migrate the legacy single-boolean value into the scoped format.
+    if (storedValue === 'true' || storedValue === 'false') {
+      return {
+        defaultValue: storedValue === 'true',
+        values: {}
+      };
+    }
+
+    const parsedState = JSON.parse(storedValue);
+    if (!parsedState || typeof parsedState !== 'object' || Array.isArray(parsedState)) {
+      return {
+        defaultValue: Boolean(defaultValue),
+        values: {}
+      };
+    }
+
+    const normalizedValues = {};
+    const persistedValues =
+      parsedState.values && typeof parsedState.values === 'object' && !Array.isArray(parsedState.values)
+        ? parsedState.values
+        : {};
+
+    for (const [pathKey, value] of Object.entries(persistedValues)) {
+      const normalizedPathKey = normalizePersistentPreferencePath(pathKey);
+      if (!normalizedPathKey) {
+        continue;
+      }
+
+      normalizedValues[normalizedPathKey] = Boolean(value);
+    }
+
+    return {
+      defaultValue:
+        typeof parsedState.defaultValue === 'boolean'
+          ? parsedState.defaultValue
+          : Boolean(defaultValue),
+      values: normalizedValues
+    };
+  } catch {
+    return {
+      defaultValue: Boolean(defaultValue),
+      values: {}
+    };
+  }
+}
+
+function createPersistentBooleanStore(storageKey, defaultValue, storeName) {
+  let persistedState = readPersistedBooleanState(storageKey, defaultValue);
+  let activePathKey = '';
+  const baseStore = createEnhancedModStore(
+    persistedState.defaultValue,
+    storeName
+  );
+
+  const persistState = () => {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          defaultValue: persistedState.defaultValue,
+          values: persistedState.values
+        })
+      );
+    } catch {
+      // Ignore persistence failures and keep the in-memory value.
+    }
+  };
+
+  const resolveValueForPath = (pathKey) => {
+    if (!pathKey) {
+      return get(baseStore);
+    }
+
+    return Object.prototype.hasOwnProperty.call(persistedState.values, pathKey)
+      ? persistedState.values[pathKey]
+      : persistedState.defaultValue;
+  };
+
+  const setActiveValue = (value) => {
+    baseStore.set(Boolean(value));
+  };
+
+  const persistValueForPath = (pathKey, value) => {
+    if (pathKey) {
+      persistedState = {
+        ...persistedState,
+        values: {
+          ...persistedState.values,
+          [pathKey]: Boolean(value)
+        }
+      };
+    } else {
+      persistedState = {
+        ...persistedState,
+        defaultValue: Boolean(value)
+      };
+    }
+
+    persistState();
+  };
+
+  return {
+    subscribe: baseStore.subscribe,
+    set: (value) => {
+      const normalizedValue = Boolean(value);
+      persistValueForPath(activePathKey, normalizedValue);
+      setActiveValue(normalizedValue);
+    },
+    update: (updater) => {
+      const normalizedValue = Boolean(updater(get(baseStore)));
+      persistValueForPath(activePathKey, normalizedValue);
+      setActiveValue(normalizedValue);
+    },
+    loadForPath: (path) => {
+      activePathKey = normalizePersistentPreferencePath(path);
+      persistedState = readPersistedBooleanState(storageKey, persistedState.defaultValue);
+      const nextValue = resolveValueForPath(activePathKey);
+      setActiveValue(nextValue);
+      return nextValue;
+    },
+    setForPath: (path, value) => {
+      activePathKey = normalizePersistentPreferencePath(path);
+      const normalizedValue = Boolean(value);
+      persistedState = readPersistedBooleanState(storageKey, persistedState.defaultValue);
+      persistValueForPath(activePathKey, normalizedValue);
+      setActiveValue(normalizedValue);
+      return normalizedValue;
+    },
+    getForPath: (path) => {
+      const normalizedPathKey = normalizePersistentPreferencePath(path);
+      if (normalizedPathKey && normalizedPathKey === activePathKey) {
+        return get(baseStore);
+      }
+
+      persistedState = readPersistedBooleanState(storageKey, persistedState.defaultValue);
+      return normalizedPathKey
+        ? resolveValueForPath(normalizedPathKey)
+        : get(baseStore);
+    }
+  };
+}
+
 // Create the enhanced writable stores with logging and validation
 const installedMods = createEnhancedModStore([], 'installedMods');
 const installedModInfo = createEnhancedModStore([], 'installedModInfo');
@@ -415,6 +587,10 @@ const isLoading = createEnhancedModStore(false, 'isLoading');
 const isSearching = createEnhancedModStore(false, 'isSearching');
 const isCheckingUpdates = createEnhancedModStore(false, 'isCheckingUpdates');
 const lastUpdateCheckTime = createEnhancedModStore(0, 'lastUpdateCheckTime');
+const updateCheckProgress = createEnhancedModStore(
+  { active: false, current: 0, total: 0, phase: '' },
+  'updateCheckProgress'
+);
 
 // UI states with logging
 const errorMessage = createEnhancedModStore('', 'errorMessage');
@@ -446,6 +622,11 @@ const loaderType = createEnhancedModStore('vanilla', 'loaderType');
 // Filter stores with logging
 const filterMinecraftVersion = createEnhancedModStore('', 'filterMinecraftVersion');
 const filterModLoader = createEnhancedModStore('', 'filterModLoader');
+const autoUpdateChecksEnabled = createPersistentBooleanStore(
+  'minecraft-core:auto-update-checks-enabled',
+  true,
+  'autoUpdateChecksEnabled'
+);
 
 // Store for mod categories and requirement status with enhanced logging
 const modCategories = createEnhancedModStore(new Map(), 'modCategories'); // Map of modId -> { category: string, required: boolean }
@@ -469,6 +650,127 @@ const installedResourcePackIds = createEnhancedModStore(new SvelteSet(), 'instal
 // Installed info stores for different content types (similar to installedModInfo)
 const installedShaderInfo = createEnhancedModStore([], 'installedShaderInfo');
 const installedResourcePackInfo = createEnhancedModStore([], 'installedResourcePackInfo');
+
+const modInstanceStateSnapshots = new Map();
+const modInstanceSnapshotStores = [
+  ['installedMods', installedMods],
+  ['installedModInfo', installedModInfo],
+  ['installedModIds', installedModIds],
+  ['modVersionsCache', modVersionsCache],
+  ['installedModVersionsCache', installedModVersionsCache],
+  ['modsWithUpdates', modsWithUpdates],
+  ['disabledMods', disabledMods],
+  ['disabledModUpdates', disabledModUpdates],
+  ['serverManagedFiles', serverManagedFiles],
+  ['serverConfig', serverConfig],
+  ['minecraftVersion', minecraftVersion],
+  ['loaderType', loaderType],
+  ['filterMinecraftVersion', filterMinecraftVersion],
+  ['filterModLoader', filterModLoader],
+  ['activeContentType', activeContentType],
+  ['searchResults', searchResults],
+  ['shaderResults', shaderResults],
+  ['resourcePackResults', resourcePackResults],
+  ['installedShaders', installedShaders],
+  ['installedShaderInfo', installedShaderInfo],
+  ['installedShaderIds', installedShaderIds],
+  ['installedResourcePacks', installedResourcePacks],
+  ['installedResourcePackInfo', installedResourcePackInfo],
+  ['installedResourcePackIds', installedResourcePackIds],
+  ['contentTypeCache', contentTypeCache],
+  ['contentTypeRetryCount', contentTypeRetryCount],
+  ['lastUpdateCheckTime', lastUpdateCheckTime]
+];
+
+function normalizeModInstancePathKey(serverPath) {
+  return typeof serverPath === 'string' ? serverPath.trim().toLowerCase() : '';
+}
+
+function cloneModInstanceValue(value) {
+  if (value instanceof Map) {
+    return new Map(
+      Array.from(value.entries(), ([key, entryValue]) => [key, cloneModInstanceValue(entryValue)])
+    );
+  }
+
+  if (value instanceof SvelteSet || value instanceof Set) {
+    return new SvelteSet(Array.from(value, (entry) => cloneModInstanceValue(entry)));
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneModInstanceValue(entry));
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [key, cloneModInstanceValue(entryValue)])
+    );
+  }
+
+  return value;
+}
+
+function captureModInstanceStateSnapshot() {
+  return Object.fromEntries(
+    modInstanceSnapshotStores.map(([key, store]) => [key, cloneModInstanceValue(get(store))])
+  );
+}
+
+function applyModInstanceStateSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return false;
+  }
+
+  for (const [key, store] of modInstanceSnapshotStores) {
+    if (Object.prototype.hasOwnProperty.call(snapshot, key)) {
+      store.set(cloneModInstanceValue(snapshot[key]));
+    }
+  }
+
+  isLoading.set(false);
+  isSearching.set(false);
+  isCheckingUpdates.set(false);
+  updateCheckProgress.set({ active: false, current: 0, total: 0, phase: '' });
+  errorMessage.set('');
+  successMessage.set('');
+  searchError.set('');
+  downloads.set({});
+  installingModIds.set(new SvelteSet());
+  currentDependencies.set([]);
+  modToInstall.set(null);
+  expandedInstalledMod.set(null);
+  expandedModId.set(null);
+
+  return true;
+}
+
+function cacheModInstanceState(serverPath) {
+  const normalizedPath = normalizeModInstancePathKey(serverPath);
+  if (!normalizedPath) {
+    return false;
+  }
+
+  modInstanceStateSnapshots.set(normalizedPath, {
+    timestamp: Date.now(),
+    state: captureModInstanceStateSnapshot()
+  });
+
+  return true;
+}
+
+function restoreModInstanceState(serverPath) {
+  const normalizedPath = normalizeModInstancePathKey(serverPath);
+  if (!normalizedPath) {
+    return false;
+  }
+
+  const snapshotEntry = modInstanceStateSnapshots.get(normalizedPath);
+  if (!snapshotEntry?.state) {
+    return false;
+  }
+
+  return applyModInstanceStateSnapshot(snapshotEntry.state);
+}
 
 function resetModInstanceState() {
   installedMods.set([]);
@@ -503,8 +805,13 @@ function resetModInstanceState() {
   filterMinecraftVersion.set('');
   filterModLoader.set('');
   lastUpdateCheckTime.set(0);
+  updateCheckProgress.set({ active: false, current: 0, total: 0, phase: '' });
   contentTypeCache.set(new Map());
   contentTypeRetryCount.set(new Map());
+  downloads.set({});
+  isLoading.set(false);
+  isSearching.set(false);
+  isCheckingUpdates.set(false);
 }
 
 // Content type configuration objects
@@ -1648,6 +1955,7 @@ export {
   isLoading,
   isSearching,
   isCheckingUpdates,
+  updateCheckProgress,
   errorMessage,
   successMessage,
   searchError,
@@ -1670,6 +1978,7 @@ export {
   lastUpdateCheckTime,
   filterMinecraftVersion,
   filterModLoader,
+  autoUpdateChecksEnabled,
   modCategories,
   // Content type stores
   activeContentType,
@@ -1689,6 +1998,8 @@ export {
   getHasUpdates,
   getUpdateCount,
   getCategorizedMods,
+  cacheModInstanceState,
+  restoreModInstanceState,
   resetModInstanceState,
 
   // Helper functions

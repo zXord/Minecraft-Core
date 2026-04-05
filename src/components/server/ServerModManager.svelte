@@ -11,6 +11,9 @@
     searchResults,
     successMessage, 
     errorMessage,
+    installedMods,
+    installedShaders,
+    installedResourcePacks,
     installedModInfo,
     installedShaderInfo,
     installedResourcePackInfo,
@@ -49,14 +52,15 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     loadServerConfig,
     installMod,
     loadContent,
-    searchContent
+    searchContent,
+    queueInstallDownload
   } from '../../utils/mods/modAPI.js';
   import { 
     installWithDependencies,
     checkModDependencies,
     showDependencyModal
   } from '../../utils/mods/modDependencyHelper.js';
-  import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
+  import { initDownloadManager, completeDownload } from '../../utils/mods/modDownloadManager.js';
 
   
   // Import utility for checking compatibility
@@ -155,6 +159,12 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     return count;
   })();
 
+  $: installedContentCount = $activeContentType === CONTENT_TYPES.SHADERS
+    ? $installedShaders.length
+    : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS
+      ? $installedResourcePacks.length
+      : $installedMods.length;
+
   
   // Initialize filter stores on first load only
   $: if ($loaderType && $filterModLoader !== $loaderType) {
@@ -172,6 +182,20 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     }
 
     initializedServerPath = nextServerPath;
+    const alreadyHydratedForCurrentServer =
+      typeof window !== 'undefined'
+      && window.serverPath?.get?.() === nextServerPath
+      && (
+        get(isLoading)
+        || get(serverConfig) !== null
+        || get(installedMods).length > 0
+        || get(installedModInfo).length > 0
+      );
+
+    if (alreadyHydratedForCurrentServer) {
+      return;
+    }
+
     await loadServerConfig(nextServerPath);
     await loadMods(nextServerPath);
 
@@ -223,6 +247,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       if (!result) {
         // If installation failed, ensure we clean up any installing state
         const mod = get(modToInstall);
+        if (mod?.downloadId) {
+          completeDownload(mod.downloadId, true, 'Installation failed');
+        }
         if (mod && mod.id) {
           installingModIds.update(ids => {
             ids.delete(mod.id);
@@ -349,13 +376,21 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   // Handle mod installation
   async function handleInstallMod(event) {
     const { mod, versionId, isVersionChange, isDependency, onSuccess, onError, contentType } = event.detail;
+    const effectiveVersionId = versionId || mod.selectedVersionId || null;
+    const targetContentType = contentType || $activeContentType;
+    const queuedMod = {
+      ...mod,
+      ...(effectiveVersionId ? { selectedVersionId: effectiveVersionId } : {}),
+      downloadId: mod.downloadId || queueInstallDownload(mod, targetContentType)
+    };
+    const downloadId = queuedMod.downloadId;
     
 
     
     try {
       // Mark this mod as being installed to prevent duplicate installation attempts
       installingModIds.update(ids => {
-        ids.add(mod.id);
+        ids.add(queuedMod.id);
         return ids;
       });
       
@@ -363,30 +398,31 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       if (isVersionChange) {
         // Create a proper mod object for installation
         const modToUpdate = {
-          id: mod.id,
-          name: mod.name || mod.title, 
-          title: mod.name || mod.title,
-          selectedVersionId: versionId,
-          source: mod.source || 'modrinth'
+          id: queuedMod.id,
+          name: queuedMod.name || queuedMod.title, 
+          title: queuedMod.name || queuedMod.title,
+          selectedVersionId: effectiveVersionId,
+          source: queuedMod.source || 'modrinth',
+          downloadId
         };
         
         // Try to get version info for compatibility checking
         try {
-          if (versionId) {
+          if (effectiveVersionId) {
             // Get specific version info if we have a versionId
             
             try {
               const versionInfo = await safeInvoke('get-version-info', {
-                modId: mod.id,
-                versionId: versionId,
-                source: mod.source || 'modrinth',
+                modId: queuedMod.id,
+                versionId: effectiveVersionId,
+                source: queuedMod.source || 'modrinth',
                 loader: get(loaderType),
                 gameVersion: get(minecraftVersion)
               });
               
               if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
                 // Check for compatibility issues, passing the mod ID to avoid self-dependencies
-                const compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, mod.id);
+                const compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, queuedMod.id);
                 
                 // If there are compatibility issues, show them
                 if (compatibilityIssues.length > 0) {
@@ -397,7 +433,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
                   
                   // Clear installing state since we're waiting for user decision
                   installingModIds.update(ids => {
-                    ids.delete(mod.id);
+                    ids.delete(queuedMod.id);
                     return ids;
                   });
                   
@@ -414,9 +450,10 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
               
               // Clear installing state on version info error
               installingModIds.update(ids => {
-                ids.delete(mod.id);
+                ids.delete(queuedMod.id);
                 return ids;
               });
+              completeDownload(downloadId, true, versionError.message || 'Failed to check version compatibility');
               return; // Exit early since we can't proceed without proper version info
             }
           }
@@ -426,15 +463,14 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         
         // Install (will replace existing version)
         // Use contentType from event if provided (for dependencies), otherwise use active content type
-        const targetContentType = contentType || $activeContentType;
-        
-
-        
-        const installSuccess = await installMod(modToUpdate, serverPath, { contentType: targetContentType });
+        const installSuccess = await installMod(modToUpdate, serverPath, {
+          contentType: targetContentType,
+          downloadId
+        });
         
         // Clear installing state
         installingModIds.update(ids => {
-          ids.delete(mod.id);
+          ids.delete(queuedMod.id);
           return ids;
         });
         
@@ -453,17 +489,17 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       // Regular installation with dependency check
       // Always check for dependencies even for reinstalling mods
       try {
-        const dependencies = await checkModDependencies(mod, new Set(), { interactive: true });
+        const dependencies = await checkModDependencies(queuedMod, new Set(), { interactive: true });
         
         // Get the version info to also check for compatibility issues
         let compatibilityIssues = [];
         try {
-          if (versionId) {
+          if (effectiveVersionId) {
             // Get specific version info if we have a versionId
             const versionInfo = await safeInvoke('get-version-info', {
-              modId: mod.id,
-              versionId: versionId,
-              source: mod.source || 'modrinth',
+              modId: queuedMod.id,
+              versionId: effectiveVersionId,
+              source: queuedMod.source || 'modrinth',
               loader: get(loaderType),
               gameVersion: get(minecraftVersion)
             });
@@ -471,7 +507,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
             
             if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
               // Check for compatibility issues, passing the mod ID to avoid self-dependencies
-              compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, mod.id);
+              compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, queuedMod.id);
             }
           }
         } catch (compatError) {
@@ -490,35 +526,34 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
             })));
           }
           
-          showDependencyModal(mod, dependencies);
+          showDependencyModal(queuedMod, dependencies);
         } else if (compatibilityIssues.length > 0) {
           // Use existing compatibility warning handler to format and show dependency modal
           await handleCompatibilityWarning({ detail: {
             issues: compatibilityIssues,
             modToUpdate: {
-              id: mod.id,
-              name: mod.name || mod.title,
-              selectedVersionId: versionId
+              id: queuedMod.id,
+              name: queuedMod.name || queuedMod.title,
+              selectedVersionId: effectiveVersionId,
+              downloadId
             }
           }});
           // Clear installing state since we're waiting for user decision
           installingModIds.update(ids => {
-            ids.delete(mod.id);
+            ids.delete(queuedMod.id);
             return ids;
           });
           return;
         } else {
           // No dependencies or compatibility issues, install directly
-          // Use contentType from event if provided (for dependencies), otherwise use active content type
-          const targetContentType = contentType || $activeContentType;
-          
-
-          
-          const installSuccess = await installMod(mod, serverPath, { contentType: targetContentType });
+          const installSuccess = await installMod(queuedMod, serverPath, {
+            contentType: targetContentType,
+            downloadId
+          });
           
           // Clear installing state after installation
           installingModIds.update(ids => {
-            ids.delete(mod.id);
+            ids.delete(queuedMod.id);
             return ids;
           });
           
@@ -531,7 +566,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
             }
           } else if (installSuccess && isDependency) {
             // Show specific success message for dependency installations
-            successMessage.set(`Dependency "${mod.name || mod.title}" installed successfully!`);
+            successMessage.set(`Dependency "${queuedMod.name || queuedMod.title}" installed successfully!`);
             setTimeout(() => successMessage.set(''), 3000);
           }
         }
@@ -542,14 +577,12 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         errorMessage.set(`Warning: Failed to check for dependencies. This mod may not work correctly if it requires dependencies. ${depError.message || ''}`);
         
         // Ask the user if they want to continue with installation
-        if (confirm(`Warning: Failed to check if the mod "${mod.name || mod.title}" requires dependencies. Continue with installation anyway?`)) {
+        if (confirm(`Warning: Failed to check if the mod "${queuedMod.name || queuedMod.title}" requires dependencies. Continue with installation anyway?`)) {
           // If user confirms, proceed with installation
-          // Use contentType from event if provided (for dependencies), otherwise use active content type
-          const targetContentType = contentType || $activeContentType;
-          
-
-          
-          const installSuccess = await installMod(mod, serverPath, { contentType: targetContentType });
+          const installSuccess = await installMod(queuedMod, serverPath, {
+            contentType: targetContentType,
+            downloadId
+          });
           
           // Call success callback if provided and installation was successful
           if (installSuccess && onSuccess) {
@@ -560,6 +593,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
             }
           }
         } else {
+          completeDownload(downloadId, true, 'Installation cancelled');
           // User cancelled, call error callback if provided
           if (onError) {
             try {
@@ -572,16 +606,17 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         
         // Clear installing state after installation
         installingModIds.update(ids => {
-          ids.delete(mod.id);
+          ids.delete(queuedMod.id);
           return ids;
         });
       }
     } catch (error) {
+      completeDownload(downloadId, true, error.message || 'Installation failed');
       errorMessage.set(`Failed to install mod: ${error.message || 'Unknown error'}`);
       
       // Clear installing state on error
       installingModIds.update(ids => {
-        ids.delete(mod.id);
+        ids.delete(queuedMod.id);
         return ids;
       });
       
@@ -717,40 +752,6 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     
     // Clear any expanded dropdowns
     expandedInstalledMod.set(null);
-    
-    // If switching to installed tab, refresh mod list
-    if (tabName === 'installed') {
-      // Load content for the active content type without triggering update checks
-      (async () => {
-        try {
-          await loadContent(serverPath, get(activeContentType));
-        } catch (_) {}
-      })();
-    }
-    // If switching to search tab, refresh search results and check for updates
-    else if (tabName === 'search') {
-      // Ensure installed IDs/info for the current content type are loaded
-      (async () => {
-        try {
-          await loadContent(serverPath, get(activeContentType));
-        } catch (_) {
-          // ignore
-        }
-        // Do NOT auto-check updates here (manual or interval only)
-        Promise.resolve().then(() => {
-          // Only search if no results yet for the active content type
-          const currentType = get(activeContentType);
-          const hasResults = currentType === CONTENT_TYPES.SHADERS
-            ? get(shaderResults).length > 0
-            : currentType === CONTENT_TYPES.RESOURCE_PACKS
-              ? get(resourcePackResults).length > 0
-              : get(searchResults).length > 0;
-          if (!hasResults) {
-            handleSearch();
-          }
-        });
-      })();
-    }
   }
   
   // Handle content type switching with performance optimizations
@@ -901,7 +902,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       role="tab"
       tabindex={activeTab === 'installed' ? 0 : -1}
     >
-      Installed {contentTypeConfigs[$activeContentType]?.label || 'Content'}
+      Installed {contentTypeConfigs[$activeContentType]?.label || 'Content'} ({installedContentCount})
     </button>
     <button 
       type="button"

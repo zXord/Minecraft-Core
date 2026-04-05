@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, onDestroy } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import { modSyncStatus as modSyncStatusStore } from "../../stores/clientModManager.js";
 
@@ -8,6 +8,7 @@
   export let type = "required";
   export let modSyncStatus = null;
   export let serverManagedFiles = new SvelteSet();
+  export let startCollapsed = false;
 
   // Section titles and descriptions
   const sectionInfo = {
@@ -27,27 +28,151 @@
 
   // Track which mods are currently being toggled
   let togglingMods = new SvelteSet();
+  let renderedMods = [];
+  let renderLimit = 0;
+  let renderFrame = null;
+  let lastRenderedModsRef = null;
+  let lastRenderedModsLength = -1;
+  let sectionExpanded = !startCollapsed;
+  let lastAppliedStartCollapsed = startCollapsed;
+
+  const INITIAL_RENDER_COUNT = 80;
+  const RENDER_CHUNK_SIZE = 80;
+
+  function normalizeModKey(fileName = "") {
+    return String(fileName || "").toLowerCase();
+  }
+
+  function cancelScheduledRender() {
+    if (renderFrame !== null) {
+      cancelAnimationFrame(renderFrame);
+      renderFrame = null;
+    }
+  }
+
+  function scheduleProgressiveRender() {
+    if (!sectionExpanded) {
+      renderLimit = 0;
+      return;
+    }
+
+    cancelScheduledRender();
+
+    const sourceMods = Array.isArray(mods) ? mods : [];
+    const totalMods = sourceMods.length;
+    renderLimit =
+      totalMods > INITIAL_RENDER_COUNT ? INITIAL_RENDER_COUNT : totalMods;
+
+    if (renderLimit >= totalMods) {
+      return;
+    }
+
+    const pump = () => {
+      if (sourceMods !== mods) {
+        return;
+      }
+
+      renderLimit = Math.min(
+        totalMods,
+        renderLimit + RENDER_CHUNK_SIZE,
+      );
+
+      if (renderLimit < totalMods) {
+        renderFrame = requestAnimationFrame(pump);
+      } else {
+        renderFrame = null;
+      }
+    };
+
+    renderFrame = requestAnimationFrame(pump);
+  }
+
+  $: missingModKeys = new Set(
+    (
+      type === "required"
+        ? modSyncStatus?.missingMods || []
+        : modSyncStatus?.missingOptionalMods || []
+    ).map(normalizeModKey),
+  );
+
+  $: disabledModKeys = new Set(
+    (modSyncStatus?.presentDisabledMods || []).map(normalizeModKey),
+  );
+
+  $: removalByFile = new Map(
+    (
+      type === "required"
+        ? modSyncStatus?.requiredRemovals || []
+        : modSyncStatus?.optionalRemovals || []
+    )
+      .filter((removal) => removal?.fileName)
+      .map((removal) => [normalizeModKey(removal.fileName), removal]),
+  );
+
+  $: acknowledgmentByFile = new Map(
+    (modSyncStatus?.acknowledgments || [])
+      .filter((ack) => ack?.fileName)
+      .map((ack) => [normalizeModKey(ack.fileName), ack]),
+  );
+
+  $: updateByFile = new Map(
+    (
+      type === "required"
+        ? modSyncStatus?.outdatedMods || []
+        : modSyncStatus?.outdatedOptionalMods || []
+    )
+      .filter((update) => update?.fileName)
+      .map((update) => [normalizeModKey(update.fileName), update]),
+  );
+
+  $: requiredMissingSummaryCount =
+    type === "required" ? modSyncStatus?.missingMods?.length || 0 : 0;
+
+  $: requiredOutdatedSummaryCount =
+    type === "required" ? modSyncStatus?.outdatedMods?.length || 0 : 0;
+
+  $: requiredTotalDownloadSummaryCount =
+    requiredMissingSummaryCount + requiredOutdatedSummaryCount;
+
+  $: renderedMods = Array.isArray(mods) ? mods.slice(0, renderLimit) : [];
+
+  $: if (startCollapsed !== lastAppliedStartCollapsed) {
+    lastAppliedStartCollapsed = startCollapsed;
+    sectionExpanded = !startCollapsed;
+    if (!sectionExpanded) {
+      cancelScheduledRender();
+      renderLimit = 0;
+    } else {
+      scheduleProgressiveRender();
+    }
+  }
+
+  $: if (
+    mods !== lastRenderedModsRef
+    || (Array.isArray(mods) ? mods.length : 0) !== lastRenderedModsLength
+  ) {
+    lastRenderedModsRef = mods;
+    lastRenderedModsLength = Array.isArray(mods) ? mods.length : 0;
+    scheduleProgressiveRender();
+  }
+
+  onDestroy(() => {
+    cancelScheduledRender();
+  });
 
   // Get mod status from sync status
   function getModStatus(
     mod: any,
   ): "unknown" | "disabled" | "installed" | "server mod" | "missing" {
     if (!modSyncStatus) return "unknown";
+    const modKey = normalizeModKey(mod?.fileName);
 
-    // Check the appropriate missing mods list based on mod type
-    const missingList =
-      type === "required"
-        ? modSyncStatus.missingMods || []
-        : modSyncStatus.missingOptionalMods || [];
-
-    const isMissing = missingList.includes(mod.fileName);
-
-    if (isMissing) {
+    if (missingModKeys.has(modKey)) {
       return "missing";
     }
 
     // Check if this mod is server-managed (use lowercase for comparison)
-    const isServerManaged = serverManagedFiles.has(mod.fileName.toLowerCase());
+    const isServerManaged = serverManagedFiles.has(modKey);
 
     // Only show "server mod" status for required mods, not optional mods
     if (isServerManaged && type === "required") {
@@ -56,10 +181,7 @@
 
     // For optional mods, check if disabled
     if (type === "optional") {
-      if (
-        modSyncStatus.presentDisabledMods &&
-        modSyncStatus.presentDisabledMods.includes(mod.fileName)
-      ) {
+      if (disabledModKeys.has(modKey)) {
         return "disabled";
       }
     }
@@ -71,41 +193,19 @@
   function needsRemoval(mod: any) {
     // Check if the mod object itself has the needsRemoval property
     if (mod.needsRemoval) return true;
-
-    // Check in the new response structure
-    if (type === "required" && modSyncStatus?.requiredRemovals) {
-      return modSyncStatus.requiredRemovals.some(
-        (removal: any) =>
-          removal.fileName.toLowerCase() === mod.fileName.toLowerCase(),
-      );
-    }
-
-    if (type === "optional" && modSyncStatus?.optionalRemovals) {
-      return modSyncStatus.optionalRemovals.some(
-        (removal: any) =>
-          removal.fileName.toLowerCase() === mod.fileName.toLowerCase(),
-      );
-    }
-
-    return false;
+    return removalByFile.has(normalizeModKey(mod?.fileName));
   }
 
   // Check if a mod is kept due to dependency
   function needsAcknowledgment(mod: any) {
     if (!modSyncStatus?.acknowledgments) return false;
-
-    return modSyncStatus.acknowledgments.some(
-      (ack: any) => ack.fileName.toLowerCase() === mod.fileName.toLowerCase(),
-    );
+    return acknowledgmentByFile.has(normalizeModKey(mod?.fileName));
   }
 
   // Get dependency acknowledgment info for a mod
   function getAcknowledgmentInfo(mod: any) {
     if (!modSyncStatus?.acknowledgments) return null;
-
-    return modSyncStatus.acknowledgments.find(
-      (ack: any) => ack.fileName.toLowerCase() === mod.fileName.toLowerCase(),
-    );
+    return acknowledgmentByFile.get(normalizeModKey(mod?.fileName)) || null;
   }
 
   // Handle mod toggle for optional mods
@@ -130,8 +230,9 @@
 
     // Update the store to reflect the successful toggle
     if (modSyncStatus && type === "optional") {
-      const isCurrentlyDisabled =
-        modSyncStatus.presentDisabledMods?.includes(fileName);
+      const isCurrentlyDisabled = disabledModKeys.has(
+        normalizeModKey(fileName),
+      );
 
       // Update the store using the proper store update method
       modSyncStatusStore.update((currentStatus) => {
@@ -188,45 +289,13 @@
   // Check if a mod needs an update
   function needsUpdate(mod) {
     if (!modSyncStatus) return false;
-
-    // Check if this mod is in the outdated lists
-    if (type === "required" && modSyncStatus.outdatedMods) {
-      return modSyncStatus.outdatedMods.some(
-        (update) =>
-          update.fileName?.toLowerCase() === mod.fileName.toLowerCase(),
-      );
-    }
-
-    if (type === "optional" && modSyncStatus.outdatedOptionalMods) {
-      return modSyncStatus.outdatedOptionalMods.some(
-        (update) =>
-          update.fileName?.toLowerCase() === mod.fileName.toLowerCase(),
-      );
-    }
-
-    return false;
+    return updateByFile.has(normalizeModKey(mod?.fileName));
   }
 
   // Get update information for a mod
   function getUpdateInfo(mod) {
     if (!modSyncStatus) return null;
-
-    // Check if this mod is in the outdated lists
-    if (type === "required" && modSyncStatus.outdatedMods) {
-      return modSyncStatus.outdatedMods.find(
-        (update) =>
-          update.fileName?.toLowerCase() === mod.fileName.toLowerCase(),
-      );
-    }
-
-    if (type === "optional" && modSyncStatus.outdatedOptionalMods) {
-      return modSyncStatus.outdatedOptionalMods.find(
-        (update) =>
-          update.fileName?.toLowerCase() === mod.fileName.toLowerCase(),
-      );
-    }
-
-    return null;
+    return updateByFile.get(normalizeModKey(mod?.fileName)) || null;
   }
 
   // Handle individual mod update
@@ -259,6 +328,18 @@
             <div class="section-header-content">
               <h3>{sectionInfo[type].title}</h3>
               <p class="section-description">{sectionInfo[type].description}</p>
+              <div class="section-header-actions">
+                {#if mods.length > 0}
+                  <span class="section-count">{mods.length} mod{mods.length === 1 ? "" : "s"}</span>
+                {/if}
+                <button
+                  class="section-toggle-btn"
+                  on:click={() => (sectionExpanded = !sectionExpanded)}
+                  aria-expanded={sectionExpanded}
+                >
+                  {sectionExpanded ? "Hide List" : "Show List"}
+                </button>
+              </div>
 
               <!-- Optional mod download notification -->
               {#if type === "optional" && modSyncStatus && ((modSyncStatus.missingOptionalMods && modSyncStatus.missingOptionalMods.length > 0) || (modSyncStatus.outdatedOptionalMods && modSyncStatus.outdatedOptionalMods.length > 0))}
@@ -284,7 +365,7 @@
         </tr>
 
         <!-- Column headers -->
-        {#if mods.length > 0}
+        {#if mods.length > 0 && sectionExpanded}
           <tr class="column-headers">
             <th>Mod Name</th>
             <th class="status">Status</th>
@@ -294,172 +375,182 @@
           </tr>
         {/if}
       </thead>
-      <tbody>
-        {#each mods as mod (mod.fileName)}
-          {@const modStatus = getModStatus(mod)}
-          <tr class:disabled={modStatus === "disabled"}>
-            <!-- Mod Name -->
-            <td>
-              <div class="mod-name-cell">
-                <strong>{mod.name || mod.fileName}</strong>
-              </div>
-            </td>
-
-            <!-- Status -->
-            <td class="status">
-              {#if needsRemoval(mod)}
-                <span class="tag warn">⚠️ Remove</span>
-              {:else if needsAcknowledgment(mod)}
-                <span class="tag new">🔗 Keep</span>
-              {:else if modStatus === "server mod"}
-                <span class="tag server">🔒 Server</span>
-              {:else if modStatus === "installed"}
-                <span class="tag ok">Enabled</span>
-              {:else if modStatus === "disabled"}
-                <span class="tag disabled">Disabled</span>
-              {:else if modStatus === "missing"}
-                <span class="tag missing">❌ Missing</span>
-              {:else}
-                <span class="tag unknown">❓ Unknown</span>
-              {/if}
-            </td>
-
-            <!-- Version -->
-            <td class="ver">
-              {#if mod.versionNumber}
-                <code>{mod.versionNumber}</code>
-              {:else}
-                <span class="no-version">—</span>
-              {/if}
-            </td>
-
-            <!-- Update -->
-            <td class="upd">
-              {#if needsUpdate(mod)}
-                {@const updateInfo = getUpdateInfo(mod)}
-                <button
-                  class="tag new clickable"
-                  on:click={() => handleUpdate(mod)}
-                  title="Update to {updateInfo?.newVersion}"
-                >
-                  ↑ {updateInfo?.newVersion}
-                </button>
-              {:else}
-                <span class="tag ok">Up to date</span>
-              {/if}
-            </td>
-
-            <!-- Actions -->
-            <td class="act">
-              {#if type === "required"}
-                {#if needsAcknowledgment(mod)}
-                  <button
-                    class="primary sm"
-                    on:click={() => handleAcknowledge(mod)}
-                    title="Keep this mod because another client-only mod depends on it"
-                  >
-                    ✓ Keep
-                  </button>
-                {:else if needsRemoval(mod)}
-                  <button
-                    class="danger sm"
-                    on:click={() => handleRemove(mod)}
-                    title="Remove mod"
-                  >
-                    🗑️ Remove
-                  </button>
-                {:else if modStatus === "missing"}
-                  <button
-                    class="primary sm"
-                    on:click={() => handleDownloadSingle(mod)}
-                  >
-                    📥 Download
-                  </button>
-                {:else}
-                  <span class="required-tag">Required</span>
-                {/if}
-              {:else if type === "optional"}
-                {#if needsAcknowledgment(mod)}
-                  <button
-                    class="primary sm"
-                    on:click={() => handleAcknowledge(mod)}
-                    title="Keep this mod because another client-only mod depends on it"
-                  >
-                    ✓ Keep
-                  </button>
-                {:else if needsRemoval(mod)}
-                  <button
-                    class="danger sm"
-                    on:click={() => handleRemove(mod)}
-                    title="Remove mod"
-                  >
-                    🗑️ Remove
-                  </button>
-                {:else if modStatus === "missing"}
-                  <button
-                    class="primary sm"
-                    on:click={() => handleDownloadSingle(mod)}
-                  >
-                    📥 Download
-                  </button>
-                {:else}
-                  <div class="action-group">
-                    {#if togglingMods.has(mod.fileName)}
-                      <button
-                        class="toggle sm loading"
-                        disabled
-                        title="Processing..."
-                      >
-                        ⏳ Loading...
-                      </button>
-                    {:else}
-                      <button
-                        class="toggle sm"
-                        class:primary={modStatus === "disabled"}
-                        class:warn={modStatus === "installed"}
-                        on:click={() =>
-                          handleToggle(mod, modStatus !== "installed")}
-                        title={modStatus === "installed"
-                          ? "Disable mod"
-                          : "Enable mod"}
-                      >
-                        {modStatus === "installed" ? "Disable" : "Enable"}
-                      </button>
-                    {/if}
-                    <button
-                      class="danger sm"
-                      on:click={() => handleDelete(mod)}
-                      title="Remove mod"
-                    >
-                      🗑️
-                    </button>
-                  </div>
-                {/if}
-              {/if}
-            </td>
-          </tr>
-
-          <!-- Dependency notification row -->
-          {#if needsAcknowledgment(mod)}
-            {@const acknowledgmentInfo = getAcknowledgmentInfo(mod)}
-            <tr class="dependency-row">
-              <td colspan="5">
-                <div class="dependency-info">
-                  <span class="dependency-reason"
-                    >🔗 {acknowledgmentInfo?.reason ||
-                      "required as dependency"}</span
-                  >
-                  {#if acknowledgmentInfo?.dependentDisplayNames?.length > 0}
-                    <span class="dependency-dependents">
-                      Keep because: {acknowledgmentInfo.dependentDisplayNames.join(', ')}
-                    </span>
-                  {/if}
+      {#if sectionExpanded}
+        <tbody>
+          {#each renderedMods as mod (mod.fileName)}
+            {@const modStatus = getModStatus(mod)}
+            <tr class:disabled={modStatus === "disabled"}>
+              <!-- Mod Name -->
+              <td>
+                <div class="mod-name-cell">
+                  <strong>{mod.name || mod.fileName}</strong>
                 </div>
               </td>
+
+              <!-- Status -->
+              <td class="status">
+                {#if needsRemoval(mod)}
+                  <span class="tag warn">⚠️ Remove</span>
+                {:else if needsAcknowledgment(mod)}
+                  <span class="tag new">🔗 Keep</span>
+                {:else if modStatus === "server mod"}
+                  <span class="tag server">🔒 Server</span>
+                {:else if modStatus === "installed"}
+                  <span class="tag ok">Enabled</span>
+                {:else if modStatus === "disabled"}
+                  <span class="tag disabled">Disabled</span>
+                {:else if modStatus === "missing"}
+                  <span class="tag missing">❌ Missing</span>
+                {:else}
+                  <span class="tag unknown">❓ Unknown</span>
+                {/if}
+              </td>
+
+              <!-- Version -->
+              <td class="ver">
+                {#if mod.versionNumber}
+                  <code>{mod.versionNumber}</code>
+                {:else}
+                  <span class="no-version">—</span>
+                {/if}
+              </td>
+
+              <!-- Update -->
+              <td class="upd">
+                {#if needsUpdate(mod)}
+                  {@const updateInfo = getUpdateInfo(mod)}
+                  <button
+                    class="tag new clickable"
+                    on:click={() => handleUpdate(mod)}
+                    title="Update to {updateInfo?.newVersion}"
+                  >
+                    ↑ {updateInfo?.newVersion}
+                  </button>
+                {:else}
+                  <span class="tag ok">Up to date</span>
+                {/if}
+              </td>
+
+              <!-- Actions -->
+              <td class="act">
+                {#if type === "required"}
+                  {#if needsAcknowledgment(mod)}
+                    <button
+                      class="primary sm"
+                      on:click={() => handleAcknowledge(mod)}
+                      title="Keep this mod because another client-only mod depends on it"
+                    >
+                      ✓ Keep
+                    </button>
+                  {:else if needsRemoval(mod)}
+                    <button
+                      class="danger sm"
+                      on:click={() => handleRemove(mod)}
+                      title="Remove mod"
+                    >
+                      🗑️ Remove
+                    </button>
+                  {:else if modStatus === "missing"}
+                    <button
+                      class="primary sm"
+                      on:click={() => handleDownloadSingle(mod)}
+                    >
+                      📥 Download
+                    </button>
+                  {:else}
+                    <span class="required-tag">Required</span>
+                  {/if}
+                {:else if type === "optional"}
+                  {#if needsAcknowledgment(mod)}
+                    <button
+                      class="primary sm"
+                      on:click={() => handleAcknowledge(mod)}
+                      title="Keep this mod because another client-only mod depends on it"
+                    >
+                      ✓ Keep
+                    </button>
+                  {:else if needsRemoval(mod)}
+                    <button
+                      class="danger sm"
+                      on:click={() => handleRemove(mod)}
+                      title="Remove mod"
+                    >
+                      🗑️ Remove
+                    </button>
+                  {:else if modStatus === "missing"}
+                    <button
+                      class="primary sm"
+                      on:click={() => handleDownloadSingle(mod)}
+                    >
+                      📥 Download
+                    </button>
+                  {:else}
+                    <div class="action-group">
+                      {#if togglingMods.has(mod.fileName)}
+                        <button
+                          class="toggle sm loading"
+                          disabled
+                          title="Processing..."
+                        >
+                          ⏳ Loading...
+                        </button>
+                      {:else}
+                        <button
+                          class="toggle sm"
+                          class:primary={modStatus === "disabled"}
+                          class:warn={modStatus === "installed"}
+                          on:click={() =>
+                            handleToggle(mod, modStatus !== "installed")}
+                          title={modStatus === "installed"
+                            ? "Disable mod"
+                            : "Enable mod"}
+                        >
+                          {modStatus === "installed" ? "Disable" : "Enable"}
+                        </button>
+                      {/if}
+                      <button
+                        class="danger sm"
+                        on:click={() => handleDelete(mod)}
+                        title="Remove mod"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  {/if}
+                {/if}
+              </td>
             </tr>
-          {/if}
-        {/each}
-      </tbody>
+
+            <!-- Dependency notification row -->
+            {#if needsAcknowledgment(mod)}
+              {@const acknowledgmentInfo = getAcknowledgmentInfo(mod)}
+              <tr class="dependency-row">
+                <td colspan="5">
+                  <div class="dependency-info">
+                    <span class="dependency-reason"
+                      >🔗 {acknowledgmentInfo?.reason ||
+                        "required as dependency"}</span
+                    >
+                    {#if acknowledgmentInfo?.dependentDisplayNames?.length > 0}
+                      <span class="dependency-dependents">
+                        Keep because: {acknowledgmentInfo.dependentDisplayNames.join(', ')}
+                      </span>
+                    {/if}
+                  </div>
+                </td>
+              </tr>
+            {/if}
+          {/each}
+        </tbody>
+      {:else if mods.length > 0}
+        <tbody>
+          <tr class="collapsed-state">
+            <td colspan="5">
+              List hidden to keep large modpacks responsive. Use "Show List" when needed.
+            </td>
+          </tr>
+        </tbody>
+      {/if}
 
       <!-- Empty state as table row -->
       {#if mods.length === 0}
@@ -474,15 +565,20 @@
     </table>
   </div>
 
-  <!-- Summary for missing mods -->
-  {#if type === "required" && modSyncStatus && modSyncStatus.missingMods && modSyncStatus.missingMods.length > 0}
+  <!-- Summary for required downloads/updates -->
+  {#if type === "required" && modSyncStatus && ((modSyncStatus.missingMods?.length || 0) > 0 || (modSyncStatus.outdatedMods?.length || 0) > 0)}
     <div class="summary">
       <div class="missing-summary">
         <span class="summary-text">
-          {modSyncStatus.missingMods.length} mod(s) need to be downloaded
+          {requiredTotalDownloadSummaryCount} required mod(s) need download or update
         </span>
+        {#if requiredMissingSummaryCount > 0 || requiredOutdatedSummaryCount > 0}
+          <span class="summary-breakdown">
+            {requiredMissingSummaryCount} new, {requiredOutdatedSummaryCount} update{requiredOutdatedSummaryCount === 1 ? '' : 's'}
+          </span>
+        {/if}
         <button class="download-all-button" on:click={handleDownload}>
-          📥 Download All Missing
+          📥 Download/Update All Required
         </button>
       </div>
     </div>
@@ -527,6 +623,38 @@
 
   .section-header-content {
     text-align: center;
+  }
+
+  .section-header-actions {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.45rem;
+    flex-wrap: wrap;
+  }
+
+  .section-count {
+    color: #cbd5e1;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+
+  .section-toggle-btn {
+    padding: 0.3rem 0.7rem;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.45);
+    color: #e5e7eb;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+  }
+
+  .section-toggle-btn:hover {
+    background: rgba(30, 41, 59, 0.8);
+    border-color: rgba(148, 163, 184, 0.55);
   }
 
   .section-header h3 {
@@ -577,6 +705,14 @@
 
   .notification-btn:hover {
     background-color: #2563eb;
+  }
+
+  .collapsed-state td {
+    text-align: center;
+    color: #9ca3af;
+    font-size: 0.8rem;
+    padding: 0.8rem;
+    background: rgba(17, 24, 39, 0.4);
   }
 
   .empty-state {
@@ -866,6 +1002,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
   }
 
   .missing-summary.optional {
@@ -876,6 +1014,11 @@
   .summary-text {
     color: #f59e0b;
     font-weight: 500;
+  }
+
+  .summary-breakdown {
+    color: #cbd5e1;
+    font-size: 0.8rem;
   }
 
   .download-all-button {

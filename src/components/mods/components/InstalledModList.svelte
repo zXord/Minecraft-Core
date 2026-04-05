@@ -28,13 +28,15 @@
     installedResourcePackInfo,
     loaderType,
     minecraftVersion,
-    ignoreUpdate
+    ignoreUpdate,
+    autoUpdateChecksEnabled,
+    updateCheckProgress
   } from '../../../stores/modStore.js';
   import { serverState } from '../../../stores/serverState.js';
   import { formatInstallationDate, formatLastUpdated, formatTooltipDate } from '../../../utils/dateUtils.js';
   
   // Import existing API functions
-  import { loadMods, loadContent, deleteMod, deleteContent, checkForUpdates, enableAndUpdateMod, fetchModVersions, checkDisabledModUpdates, installMod } from '../../../utils/mods/modAPI.js';
+  import { loadMods, loadContent, deleteMod, deleteContent, checkForUpdates, enableAndUpdateMod, fetchModVersions, checkDisabledModUpdates, installMod, queueInstallDownload } from '../../../utils/mods/modAPI.js';
   import { safeInvoke } from '../../../utils/ipcUtils.js';
   import { checkDependencyCompatibility, checkVersionCompatibility } from '../../../utils/mods/modCompatibility.js';
   import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
@@ -86,7 +88,8 @@
         normalizedCache[projectId] = {
           projectId,
           clientSide: value.clientSide ?? null,
-          serverSide: value.serverSide ?? null
+          serverSide: value.serverSide ?? null,
+          projectType: value.projectType ?? value.project_type ?? null
         };
       }
 
@@ -117,6 +120,7 @@
   let updateAllInProgress = false;
   let checkingCompatibility = false;
   let compatibilityResults = null;
+  let compatibilityProgress = { active: false, current: 0, total: 0 };
   let bulkDownloadInProgress = false;
   let bulkDownloadProgress = 0;  
   
@@ -332,6 +336,7 @@
       projectId: projectInfo.projectId || projectInfo.id || null,
       clientSide: projectInfo.clientSide ?? projectInfo.client_side ?? null,
       serverSide: projectInfo.serverSide ?? projectInfo.server_side ?? null,
+      projectType: projectInfo.projectType ?? projectInfo.project_type ?? null
     };
   }
 
@@ -366,6 +371,7 @@
       existingProjectInfo
       && existingProjectInfo.clientSide === normalizedProjectInfo.clientSide
       && existingProjectInfo.serverSide === normalizedProjectInfo.serverSide
+      && existingProjectInfo.projectType === normalizedProjectInfo.projectType
     ) {
       return;
     }
@@ -402,6 +408,166 @@
         [projectId]: false
       };
     }
+  }
+
+  function getProjectType(projectInfo) {
+    const rawProjectType = projectInfo?.projectType ?? projectInfo?.project_type ?? '';
+    return typeof rawProjectType === 'string' ? rawProjectType.trim().toLowerCase() : '';
+  }
+
+  function mapProjectTypeToContentType(projectType) {
+    switch (projectType) {
+      case 'shader':
+      case 'shaderpack':
+        return CONTENT_TYPES.SHADERS;
+      case 'resourcepack':
+      case 'resource_pack':
+        return CONTENT_TYPES.RESOURCE_PACKS;
+      case 'mod':
+      case 'plugin':
+      case 'datapack':
+        return CONTENT_TYPES.MODS;
+      default:
+        return null;
+    }
+  }
+
+  function getDependencyFallbackContentType(dependencyName = '') {
+    const normalizedName = String(dependencyName || '').trim().toLowerCase();
+
+    if (/shader\s?pack|shaderpack|\bshaders\b/.test(normalizedName)) {
+      return CONTENT_TYPES.SHADERS;
+    }
+
+    if (/resource\s?pack|resourcepack|texture\s?pack|textures\.zip/.test(normalizedName)) {
+      return CONTENT_TYPES.RESOURCE_PACKS;
+    }
+
+    return CONTENT_TYPES.MODS;
+  }
+
+  async function resolveDependencyContentType(dependency) {
+    const projectId = dependency?.projectId;
+    if (!projectId) {
+      return getDependencyFallbackContentType(dependency?.name);
+    }
+
+    const cachedProjectInfo = projectInfoCache[projectId];
+    if (cachedProjectInfo) {
+      const cachedContentType = mapProjectTypeToContentType(getProjectType(cachedProjectInfo));
+      if (cachedContentType) {
+        return cachedContentType;
+      }
+
+      return CONTENT_TYPES.MODS;
+    }
+
+    try {
+      const projectInfo = await safeInvoke('get-project-info', {
+        projectId,
+        source: 'modrinth'
+      });
+
+      storeProjectInfoInCache(projectInfo);
+      const resolvedContentType = mapProjectTypeToContentType(getProjectType(projectInfo));
+      return resolvedContentType || CONTENT_TYPES.MODS;
+    } catch (_) {
+      return CONTENT_TYPES.MODS;
+    }
+  }
+
+  async function resolveDependencyVersionId(dependency) {
+    if (!dependency?.projectId || !dependency.versionRequirement) {
+      return null;
+    }
+
+    try {
+      const loader = instanceVersionContext?.loader || get(loaderType);
+      const mcVersion = instanceVersionContext?.minecraftVersion || get(minecraftVersion);
+      if (!mcVersion) {
+        try {
+          await safeInvoke('log-message', {
+            level: 'warn',
+            category: 'mods',
+            message: 'Dependency version fetch without mcVersion',
+            data: { projectId: dependency.projectId }
+          });
+        } catch {}
+      }
+      try { await safeInvoke('logger-allow-burst', 15000); } catch {}
+
+      const versions = await safeInvoke('get-mod-versions', {
+        modId: dependency.projectId,
+        source: 'modrinth',
+        loader,
+        mcVersion
+      });
+
+      if (!versions || versions.length === 0) {
+        return null;
+      }
+
+      const sortedVersions = [...versions].sort((a, b) => {
+        const dateA = a.datePublished ? new Date(a.datePublished).getTime() : 0;
+        const dateB = b.datePublished ? new Date(b.datePublished).getTime() : 0;
+        return dateB - dateA;
+      });
+
+      for (const version of sortedVersions) {
+        if (checkVersionCompatibility(version.versionNumber, dependency.versionRequirement)) {
+          return version.id;
+        }
+      }
+
+      return sortedVersions[0]?.id || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function buildCompatibilityResults(issues, totalChecked) {
+    const normalizedIssues = Array.isArray(issues) ? issues : [];
+    return {
+      totalChecked: totalChecked || 0,
+      totalIssues: normalizedIssues.flatMap((item) => item.issues || []).length,
+      modsWithIssues: normalizedIssues.length,
+      issues: normalizedIssues
+    };
+  }
+
+  function removeResolvedDependenciesFromCompatibilityResults(projectIds = []) {
+    if (!compatibilityResults || !Array.isArray(compatibilityResults.issues)) {
+      return;
+    }
+
+    const resolvedProjectIds = new Set((projectIds || []).filter(Boolean));
+    if (resolvedProjectIds.size === 0) {
+      return;
+    }
+
+    const remainingIssues = compatibilityResults.issues
+      .map((modIssue) => {
+        const unresolvedIssues = (modIssue.issues || []).filter((issue) => {
+          if (issue?.type !== 'missing') {
+            return true;
+          }
+
+          const dependencyProjectId = issue?.dependency?.projectId;
+          return !dependencyProjectId || !resolvedProjectIds.has(dependencyProjectId);
+        });
+
+        if (unresolvedIssues.length === 0) {
+          return null;
+        }
+
+        return {
+          ...modIssue,
+          issues: unresolvedIssues
+        };
+      })
+      .filter(Boolean);
+
+    compatibilityResults = buildCompatibilityResults(remainingIssues, compatibilityResults.totalChecked);
   }
 
   async function prefetchInstalledProjectInfo() {
@@ -573,6 +739,7 @@
     lastContextServerPath = serverPath;
     installedModVersionsCache = {};
     lastProjectPrefetchSignature = '';
+    autoUpdateChecksEnabled.loadForPath(serverPath);
     void refreshInstanceVersionContext();
   }
 
@@ -590,7 +757,8 @@
       storeProjectInfoInCache({
         projectId: confirmedMatch.projectId || confirmedMatch.modrinthData?.projectId || confirmedMatch.modrinthData?.id,
         clientSide: confirmedMatch.modrinthData?.clientSide ?? confirmedMatch.modrinthData?.client_side,
-        serverSide: confirmedMatch.modrinthData?.serverSide ?? confirmedMatch.modrinthData?.server_side
+        serverSide: confirmedMatch.modrinthData?.serverSide ?? confirmedMatch.modrinthData?.server_side,
+        projectType: confirmedMatch.modrinthData?.projectType ?? confirmedMatch.modrinthData?.project_type
       });
     }
   }
@@ -732,14 +900,11 @@
   }
 
   function getInstalledModInfoEntry(modName) {
-    return (currentInfoList || []).find(info => info?.fileName === modName) || null;
+    return infoByFile.get(modName) || null;
   }
 
   function getSuggestedLocationForMod(modName) {
-    const modInfo = getInstalledModInfoEntry(modName);
-    const confirmedMatch = get(confirmedModrinthMatches).get(modName);
-    const projectInfo = projectInfoCache[confirmedMatch?.projectId || modInfo?.projectId];
-    return getRecommendedLocation(modInfo, confirmedMatch, projectInfo);
+    return recommendedLocationByFile.get(modName) || null;
   }
 
   function getSuggestedLocationAssignments(modNames) {
@@ -778,6 +943,52 @@
   $: currentInstalledItems = $activeContentType === CONTENT_TYPES.SHADERS ? $installedShaders :
                             $activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? $installedResourcePacks :
                             $installedMods;
+
+  $: infoByFile = new Map(
+    (currentInfoList || [])
+      .filter(info => info?.fileName)
+      .map(info => [info.fileName, info])
+  );
+
+  $: categorizedModInfoByFile = new Map(
+    ($categorizedModsStore || [])
+      .filter(info => info?.fileName)
+      .map(info => [info.fileName, info])
+  );
+
+  $: recommendedLocationByFile = (() => {
+    const suggestions = new Map();
+
+    if ($activeContentType !== CONTENT_TYPES.MODS) {
+      return suggestions;
+    }
+
+    for (const modName of currentInstalledItems) {
+      if (!modName) {
+        continue;
+      }
+
+      const modInfo = infoByFile.get(modName) || null;
+      const confirmedMatch = $confirmedModrinthMatches.get(modName);
+      const projectId =
+        confirmedMatch?.projectId
+        || confirmedMatch?.modrinthData?.projectId
+        || confirmedMatch?.modrinthData?.id
+        || modInfo?.projectId
+        || null;
+
+      suggestions.set(
+        modName,
+        getRecommendedLocation(
+          modInfo,
+          confirmedMatch,
+          projectId ? projectInfoCache[projectId] : null
+        )
+      );
+    }
+
+    return suggestions;
+  })();
   
   // Content-type specific update count
   $: updateCount = (() => {
@@ -835,7 +1046,9 @@
         try {
           if ($activeContentType === CONTENT_TYPES.MODS) {
             await loadMods(serverPath);
-            try { await checkDisabledModUpdates(serverPath); } catch {}
+            if (autoUpdateChecksEnabled.getForPath(serverPath)) {
+              try { await checkDisabledModUpdates(serverPath); } catch {}
+            }
           } else {
             await loadContent(serverPath, $activeContentType);
           }
@@ -855,16 +1068,17 @@
   }
   
   // Filter items based on search term
+  $: normalizedSearchTerm = searchTerm.trim().toLowerCase();
+
   $: filteredMods = currentInstalledItems.filter(mod => {
-    if (!searchTerm) return true;
-    const modInfo = currentInfoList.find(m => m.fileName === mod);
-    const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod);
-    const searchLower = searchTerm.toLowerCase();
+    if (!normalizedSearchTerm) return true;
+    const modInfo = infoByFile.get(mod);
+    const modCategoryInfo = categorizedModInfoByFile.get(mod);
     
     return (
-      mod.toLowerCase().includes(searchLower) ||
-      (modInfo?.name && modInfo.name.toLowerCase().includes(searchLower)) ||
-      (modCategoryInfo?.name && modCategoryInfo.name.toLowerCase().includes(searchLower))
+      mod.toLowerCase().includes(normalizedSearchTerm) ||
+      (modInfo?.name && modInfo.name.toLowerCase().includes(normalizedSearchTerm)) ||
+      (modCategoryInfo?.name && modCategoryInfo.name.toLowerCase().includes(normalizedSearchTerm))
     );
   });
 
@@ -1169,16 +1383,17 @@
   // Mod management functions
   async function handleCheckUpdates() {
     try {
-      // Ensure all content types are loaded so updates cover resource packs & shaders too
-      await loadMods(serverPath); // mods first
-      await Promise.allSettled([
-        loadContent(serverPath, 'shaders'),
-        loadContent(serverPath, 'resourcepacks')
-      ]);
+      const currentContentType = $activeContentType || CONTENT_TYPES.MODS;
+      if (currentContentType === CONTENT_TYPES.MODS) {
+        await loadMods(serverPath);
+      } else {
+        await loadContent(serverPath, currentContentType);
+      }
+
       // Force fresh data when user explicitly clicks "Check for Updates"
-      await checkForUpdates(serverPath, true);
-      // Explicitly check disabled mods again to ensure they're included
-      await checkDisabledModUpdates(serverPath);
+      await checkForUpdates(serverPath, true, {
+        contentTypes: [currentContentType]
+      });
       successMessage.set('Update check completed successfully!');
       setTimeout(() => successMessage.set(''), 3000);
     } catch (error) {
@@ -1188,18 +1403,61 @@
 
   async function checkAllModsCompatibility() {
     if (checkingCompatibility) return;
-    
+
     checkingCompatibility = true;
-    compatibilityResults = null;
-    
+    compatibilityProgress = { active: false, current: 0, total: 0 };
+
     try {
-      const modsWithInfo = $installedModInfo.filter(mod => 
-        mod.projectId && 
-        mod.fileName && 
-        !$disabledMods.has(mod.fileName)
+      await Promise.allSettled([
+        loadMods(serverPath),
+        modrinthMatchingActions.loadConfirmedMatches()
+      ]);
+
+      const latestInstalledMods = get(installedMods) || [];
+      const latestInstalledInfo = get(installedModInfo) || [];
+      const latestDisabledMods = get(disabledMods) || new SvelteSet();
+      const latestConfirmedMatches = get(confirmedModrinthMatches) || new Map();
+      const installedInfoByFile = new Map(
+        latestInstalledInfo
+          .filter((mod) => mod?.fileName)
+          .map((mod) => [mod.fileName, mod])
       );
-      
+
+      const modsWithInfo = latestInstalledMods
+        .map((fileName) => {
+          if (!fileName || latestDisabledMods.has(fileName)) {
+            return null;
+          }
+
+          const modInfo = installedInfoByFile.get(fileName) || {};
+          const confirmedMatch = latestConfirmedMatches.get(fileName);
+          const projectId =
+            confirmedMatch?.projectId
+            || confirmedMatch?.modrinthData?.projectId
+            || confirmedMatch?.modrinthData?.id
+            || modInfo?.projectId
+            || null;
+
+          if (!projectId) {
+            return null;
+          }
+
+          return {
+            ...modInfo,
+            fileName,
+            projectId,
+            source: modInfo?.source || confirmedMatch?.source || 'modrinth'
+          };
+        })
+        .filter(Boolean);
+      compatibilityProgress = {
+        active: modsWithInfo.length > 0,
+        current: 0,
+        total: modsWithInfo.length
+      };
+
       if (modsWithInfo.length === 0) {
+        compatibilityResults = null;
         successMessage.set('No enabled mods with project information found');
         return;
       }
@@ -1218,7 +1476,6 @@
             selectedVersionId: mod.versionId,
             source: mod.source || 'modrinth'
           }, new Set(), { interactive: true });
-          checkedCount++;
           
           if (deps && deps.length > 0) {
             const issues = await checkDependencyCompatibility(deps, mod.projectId);
@@ -1231,16 +1488,18 @@
             }
           }
         } catch (error) {
+        } finally {
+          checkedCount++;
+          compatibilityProgress = {
+            active: true,
+            current: checkedCount,
+            total: modsWithInfo.length
+          };
         }
       }
       
       // Store results for display
-      compatibilityResults = {
-        totalChecked: checkedCount,
-        totalIssues: allIssues.flatMap(i => i.issues).length,
-        modsWithIssues: allIssues.length,
-        issues: allIssues
-      };
+      compatibilityResults = buildCompatibilityResults(allIssues, checkedCount);
       
       if (allIssues.length > 0) {
         successMessage.set(`Found ${allIssues.flatMap(i => i.issues).length} compatibility issues in ${allIssues.length} mods - see details below`);
@@ -1251,6 +1510,7 @@
       errorMessage.set(`Failed to check compatibility: ${error.message}`);
     } finally {
       checkingCompatibility = false;
+      compatibilityProgress = { active: false, current: 0, total: 0 };
     }
   }
 
@@ -1490,7 +1750,7 @@
     
     expandedInstalledMod.set(modName);
     
-    const modInfo = currentInfoList.find(m => m.fileName === modName);
+    const modInfo = infoByFile.get(modName);
     const confirmedMatch = $confirmedModrinthMatches.get(modName);
     
     // Determine which project ID to use - prefer confirmed Modrinth match
@@ -1548,7 +1808,7 @@
 
   function updateModToLatest(modName) {
     const updateInfo = $modsWithUpdates.get(modName);
-    const modInfo = currentInfoList.find(m => m.fileName === modName);
+    const modInfo = infoByFile.get(modName);
     
     if (!updateInfo || !modInfo || !modInfo.projectId) return;
     
@@ -1561,7 +1821,7 @@
 
   function updateContentToLatest(contentName) {
     const updateInfo = $modsWithUpdates.get(contentName);
-    const contentInfo = currentInfoList.find(m => m.fileName === contentName);
+    const contentInfo = infoByFile.get(contentName);
     
     if (!updateInfo || !contentInfo || !contentInfo.projectId) return;
     
@@ -1695,8 +1955,7 @@
 
     try {
       successMessage.set(`Downloading dependency: ${dependency.name}...`);
-      
-      // Create a mod object for the dependency
+      const dependencyContentType = await resolveDependencyContentType(dependency);
       const dependencyMod = {
         id: dependency.projectId,
         name: dependency.name,
@@ -1704,79 +1963,13 @@
         source: 'modrinth'
       };
 
-      // Try to determine the actual content type of the dependency
-      let dependencyContentType = $activeContentType; // Default to parent type
-      
-      // Use name-based heuristics to determine content type
-      const dependencyName = (dependency.name || '').toLowerCase();
-      
-      // Check for common shader keywords
-      if (dependencyName.includes('shader') || 
-          dependencyName.includes('iris') || 
-          dependencyName.includes('optifine') ||
-          dependencyName.includes('complementary') ||
-          dependencyName.includes('bsl') ||
-          dependencyName.includes('seus')) {
-        dependencyContentType = 'shaders';
-      }
-      // Check for common resource pack keywords
-      else if (
-        // Narrowed: require explicit resource-pack style indicators and absence of clear mod signals
-        (/resource\s?pack/.test(dependencyName) || dependencyName.endsWith('pack') || dependencyName.includes('textures.zip')) &&
-        !/fabric|forge|neoforge|quilt|api|core|library/.test(dependencyName)
-      ) {
-        dependencyContentType = 'resourcepacks';
-      }
-      // Otherwise, assume it's a mod
-      else {
-        dependencyContentType = 'mods';
-      }
-      
+      dependencyMod.downloadId = queueInstallDownload(dependencyMod, dependencyContentType, {
+        statusMessage: 'Queued from compatibility report...'
+      });
 
-
-      // Determine the best version to install based on version requirement
-      let versionId = null;
-    if (dependency.versionRequirement) {
-        try {
-          // Try to get versions and find the best match
-          const loader = instanceVersionContext?.loader || get(loaderType);
-          const mcVersion = instanceVersionContext?.minecraftVersion || get(minecraftVersion);
-          if (!mcVersion) {
-            // Log via IPC logger utility if available
-            try { await safeInvoke('log-message', { level: 'warn', category: 'mods', message: 'Dependency version fetch without mcVersion', data: { projectId: dependency.projectId }}); } catch {}
-          }
-      try { await safeInvoke('logger-allow-burst', 15000); } catch {}
-          const versions = await safeInvoke('get-mod-versions', {
-            modId: dependency.projectId,
-            source: 'modrinth',
-            loader,
-            mcVersion
-          });
-          
-          if (versions && versions.length > 0) {
-            // Sort versions by date (newest first)
-            const sortedVersions = [...versions].sort((a, b) => {
-              const dateA = a.datePublished ? new Date(a.datePublished).getTime() : 0;
-              const dateB = b.datePublished ? new Date(b.datePublished).getTime() : 0;
-              return dateB - dateA;
-            });
-            
-            // Find the best version that matches the requirement
-            for (const version of sortedVersions) {
-              if (checkVersionCompatibility(version.versionNumber, dependency.versionRequirement)) {
-                versionId = version.id;
-                break;
-              }
-            }
-            
-            // If no specific version matches, use the latest
-            if (!versionId && sortedVersions.length > 0) {
-              versionId = sortedVersions[0].id;
-            }
-          }
-        } catch (versionError) {
-          // If version resolution fails, let the system choose
-        }
+      const versionId = await resolveDependencyVersionId(dependency);
+      if (versionId) {
+        dependencyMod.selectedVersionId = versionId;
       }
 
       // Dispatch install event to parent component (ServerModManager)
@@ -1786,8 +1979,7 @@
         isDependency: true, // Flag to indicate this is a dependency installation
         contentType: dependencyContentType, // Pass the determined content type for dependencies
         onSuccess: async () => {
-          // Refresh compatibility check after successful installation
-          await refreshCompatibilityAfterInstall();
+          removeResolvedDependenciesFromCompatibilityResults([dependency.projectId]);
           successMessage.set(`Successfully installed dependency: ${dependency.name}`);
         },
         onError: (error) => {
@@ -1797,20 +1989,6 @@
 
     } catch (error) {
       errorMessage.set(`Failed to download dependency: ${error.message}`);
-    }
-  }
-
-  async function refreshCompatibilityAfterInstall() {
-    try {
-      // Reload mods to get updated installed mod info
-      await loadMods(serverPath);
-      
-      // Re-run compatibility check if results are currently displayed
-      if (compatibilityResults) {
-        await checkAllModsCompatibility();
-      }
-    } catch (error) {
-      // Failed to refresh compatibility after dependency install
     }
   }
 
@@ -1844,12 +2022,11 @@
       // Download dependencies one by one to avoid overwhelming the system
       for (let i = 0; i < uniqueDependencies.length; i++) {
         const dependency = uniqueDependencies[i];
-        bulkDownloadProgress = i;
+        bulkDownloadProgress = i + 1;
         
         try {
           successMessage.set(`Installing dependency ${i + 1}/${uniqueDependencies.length}: ${dependency.name}...`);
-          
-          // Create a mod object for the dependency
+          const dependencyContentType = await resolveDependencyContentType(dependency);
           const dependencyMod = {
             id: dependency.projectId,
             name: dependency.name,
@@ -1857,70 +2034,13 @@
             source: 'modrinth'
           };
 
-          // Try to determine the actual content type of the dependency
-          let dependencyContentType = $activeContentType; // Default to parent type
-          
-          // Use name-based heuristics to determine content type
-          const dependencyName = (dependency.name || '').toLowerCase();
-          
-          // Check for common shader keywords
-          if (dependencyName.includes('shader') || 
-              dependencyName.includes('iris') || 
-              dependencyName.includes('optifine') ||
-              dependencyName.includes('complementary') ||
-              dependencyName.includes('bsl') ||
-              dependencyName.includes('seus')) {
-            dependencyContentType = 'shaders';
-          }
-          // Check for common resource pack keywords
-          else if ((/resource\s?pack/.test(dependencyName) || dependencyName.endsWith('pack') || dependencyName.includes('textures.zip')) && !/fabric|forge|neoforge|quilt|api|core|library/.test(dependencyName)) {
-            dependencyContentType = 'resourcepacks';
-          }
-          // Otherwise, assume it's a mod
-          else {
-            dependencyContentType = 'mods';
-          }
-          
+          dependencyMod.downloadId = queueInstallDownload(dependencyMod, dependencyContentType, {
+            statusMessage: 'Queued from compatibility report...'
+          });
 
-
-          // Determine the best version to install
-          let versionId = null;
-      if (dependency.versionRequirement) {
-            try {
-              const loader = instanceVersionContext?.loader || get(loaderType);
-              const mcVersion = instanceVersionContext?.minecraftVersion || get(minecraftVersion);
-              if (!mcVersion) {
-                try { await safeInvoke('log-message', { level: 'warn', category: 'mods', message: 'Bulk dependency version fetch without mcVersion', data: { projectId: dependency.projectId }}); } catch {}
-              }
-        try { await safeInvoke('logger-allow-burst', 15000); } catch {}
-              const versions = await safeInvoke('get-mod-versions', {
-                modId: dependency.projectId,
-                source: 'modrinth',
-                loader,
-                mcVersion
-              });
-              
-              if (versions && versions.length > 0) {
-                const sortedVersions = [...versions].sort((a, b) => {
-                  const dateA = a.datePublished ? new Date(a.datePublished).getTime() : 0;
-                  const dateB = b.datePublished ? new Date(b.datePublished).getTime() : 0;
-                  return dateB - dateA;
-                });
-                
-                for (const version of sortedVersions) {
-                  if (checkVersionCompatibility(version.versionNumber, dependency.versionRequirement)) {
-                    versionId = version.id;
-                    break;
-                  }
-                }
-                
-                if (!versionId && sortedVersions.length > 0) {
-                  versionId = sortedVersions[0].id;
-                }
-              }
-            } catch (versionError) {
-              // Failed to resolve dependency version
-            }
+          const versionId = await resolveDependencyVersionId(dependency);
+          if (versionId) {
+            dependencyMod.selectedVersionId = versionId;
           }
 
           // Install the dependency using a Promise to handle the callback-based system
@@ -1932,6 +2052,7 @@
               contentType: dependencyContentType, // Pass the determined content type for dependencies
               onSuccess: async () => {
                 successfulInstalls.push(dependency.name);
+                removeResolvedDependenciesFromCompatibilityResults([dependency.projectId]);
                 resolve();
               },
               onError: (error) => {
@@ -1943,7 +2064,9 @@
           
         } catch (error) {
           // Failed to install dependency
-          failedInstalls.push({ name: dependency.name, error: error.message || error });
+          if (!failedInstalls.some((failedInstall) => failedInstall.name === dependency.name)) {
+            failedInstalls.push({ name: dependency.name, error: error.message || error });
+          }
         }
       }
       
@@ -1963,10 +2086,6 @@
           errorMessage.set(`Failed dependencies: ${failedNames}`);
         }, 3000);
       }
-      
-      // Refresh compatibility check after bulk installation
-      await refreshCompatibilityAfterInstall();
-      
     } catch (error) {
       errorMessage.set(`Bulk dependency download failed: ${error.message || error}`);
     } finally {
@@ -1975,7 +2094,7 @@
     }
   }
 
-  async function applyCategoryChange(modName, newCategory, { reloadAfter = true } = {}) {
+  async function applyCategoryChange(modName, newCategory, { reloadAfter = false } = {}) {
     const previousCategory = resolveModCategory(modName);
 
     if (!modName || !newCategory || previousCategory === newCategory) {
@@ -2097,11 +2216,14 @@
       
       // Load disabled mods from storage
       if (serverPath) {
+          autoUpdateChecksEnabled.loadForPath(serverPath);
           try {
             const disabledModsList = await safeInvoke('get-disabled-mods', serverPath);
             if (Array.isArray(disabledModsList)) {
               disabledMods.set(new SvelteSet(disabledModsList));
-              try { await checkDisabledModUpdates(serverPath); } catch {}
+              if (autoUpdateChecksEnabled.getForPath(serverPath)) {
+                try { await checkDisabledModUpdates(serverPath); } catch {}
+              }
             }
           } catch (error) {
           }
@@ -2204,13 +2326,37 @@
   <div class="left">
     <!-- Unified toolbar -->
     <div class="mods-toolbar">
-      <button class="icon-btn" on:click={handleCheckUpdates} disabled={$isCheckingUpdates} title={$isCheckingUpdates ? 'Checking...' : 'Check for Updates'}>
-        🔄
+      <button
+        class="icon-btn"
+        on:click={handleCheckUpdates}
+        disabled={$isCheckingUpdates}
+        title={$isCheckingUpdates
+          ? ($updateCheckProgress.total > 0
+            ? `Checking updates ${$updateCheckProgress.current}/${$updateCheckProgress.total}`
+            : 'Checking for updates...')
+          : 'Check for Updates'}
+      >
+        <span>🔄</span>
+        {#if $updateCheckProgress.active && $updateCheckProgress.total > 0}
+          <span class="toolbar-progress">{$updateCheckProgress.current}/{$updateCheckProgress.total}</span>
+        {/if}
       </button>
       <!-- Only show compatibility check for mods -->
       {#if $activeContentType === CONTENT_TYPES.MODS}
-        <button class="icon-btn" on:click={checkAllModsCompatibility} disabled={checkingCompatibility} title={checkingCompatibility ? 'Checking compatibility...' : 'Check Compatibility'}>
-          {#if checkingCompatibility}⏳{:else}✅{/if}
+        <button
+          class="icon-btn"
+          on:click={checkAllModsCompatibility}
+          disabled={checkingCompatibility}
+          title={checkingCompatibility
+            ? (compatibilityProgress.total > 0
+              ? `Checking compatibility ${compatibilityProgress.current}/${compatibilityProgress.total}`
+              : 'Checking compatibility...')
+            : 'Check Compatibility'}
+        >
+          <span>{#if checkingCompatibility}⏳{:else}✅{/if}</span>
+          {#if compatibilityProgress.active && compatibilityProgress.total > 0}
+            <span class="toolbar-progress">{compatibilityProgress.current}/{compatibilityProgress.total}</span>
+          {/if}
         </button>
       {/if}
       
@@ -2240,6 +2386,18 @@
       </button>
       
       <!-- Search hint -->
+      <label
+        class="toolbar-check"
+        title="Automatically check for updates in the background"
+      >
+        <input
+          type="checkbox"
+          checked={$autoUpdateChecksEnabled}
+          on:change={(event) => autoUpdateChecksEnabled.setForPath(serverPath, event.currentTarget.checked)}
+        />
+        <span>Auto-check updates</span>
+      </label>
+
       <div class="keyboard-hint" title="Use Tab to navigate between controls, / to focus search">
         ⌨️
       </div>
@@ -2295,6 +2453,11 @@
       <span class="summary-stat">
         <strong>{compatibilityResults.totalChecked}</strong> mods checked
       </span>
+      {#if checkingCompatibility && compatibilityProgress.total > 0}
+        <span class="summary-stat">
+          <strong>{compatibilityProgress.current}/{compatibilityProgress.total}</strong> checking now
+        </span>
+      {/if}
       <span class="summary-stat">
         <strong>{compatibilityResults.totalIssues}</strong> issues found
       </span>
@@ -2486,12 +2649,11 @@
       </tr>
     {:else}
       {#each filteredMods as mod (mod)}
-      {@const modInfo = currentInfoList.find(m => m && m.fileName === mod)}
-      {@const modCategoryInfo = $categorizedModsStore.find(m => m.fileName === mod)}
+      {@const modInfo = infoByFile.get(mod) || null}
+      {@const modCategoryInfo = categorizedModInfoByFile.get(mod) || null}
       {@const confirmedMatch = $confirmedModrinthMatches.get(mod)}
-      {@const projectInfo = projectInfoCache[confirmedMatch?.projectId || modInfo?.projectId]}
       {@const location = modCategoryInfo?.category || UNASSIGNED_CATEGORY}
-        {@const recommendedLocation = getRecommendedLocation(modInfo, confirmedMatch, projectInfo)}
+        {@const recommendedLocation = recommendedLocationByFile.get(mod)}
         {@const isDisabled = $disabledMods.has(mod)}
         {@const canUpdateWhileRunning = location === 'client-only'}
         {@const updateBlockedByServer = serverRunning && !canUpdateWhileRunning}
@@ -2832,7 +2994,7 @@
         </tr>
       {:else}
         {#each filteredMods as item (item)}
-          {@const info = currentInfoList.find(i => i.fileName === item)}
+          {@const info = infoByFile.get(item) || null}
           <tr class:selected={selectedMods.has(item)}>
             <!-- checkbox -->
             <td>
@@ -3676,6 +3838,9 @@
 
   /* ——————————————————— toolbar buttons ——————————————————— */
   .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     padding: 4px 8px; 
     font-size: 0.8rem; 
     background: none; 
@@ -3690,6 +3855,11 @@
     background: #2a2a2a; 
     border-radius: 4px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+
+  .toolbar-progress {
+    font-variant-numeric: tabular-nums;
+    color: #ddd;
   }
   
   .add-mods-btn-outline {
@@ -3754,6 +3924,27 @@
   .search-clear:hover {
     background: #333;
     color: #ccc;
+  }
+
+  .toolbar-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: #bbb;
+    font-size: 0.78rem;
+    user-select: none;
+  }
+
+  .toolbar-check input {
+    margin: 0;
+    accent-color: var(--col-primary);
+  }
+
+  .toolbar-check:hover {
+    background: #252525;
+    color: #ddd;
   }
   
   /* ——————————————————— keyboard hint ——————————————————— */

@@ -296,12 +296,201 @@ function expandVersionArguments(entries, replacements, featureState = {}) {
   return expanded;
 }
 
+function buildLaunchReplacements({
+  authData,
+  clientPath,
+  launchJson,
+  launchVersion,
+  minecraftVersion,
+  nativesDir,
+  classpathSeparator,
+  classpathValue
+}) {
+  return {
+    auth_playerName: authData?.name || '',
+    auth_player_name: authData?.name || '',
+    auth_uuid: authData?.uuid || '',
+    auth_xuid: authData?.xuid || '',
+    auth_accessToken: authData?.access_token || '',
+    auth_access_token: authData?.access_token || '',
+    auth_session: authData?.access_token || '',
+    auth_userType: 'msa',
+    auth_user_type: 'msa',
+    clientid: authData?.client_token || authData?.clientToken || '',
+    user_properties: '{}',
+    version_name: launchVersion,
+    game_directory: clientPath,
+    assets_root: path.join(clientPath, 'assets'),
+    assets_index_name: launchJson?.assetIndex?.id || minecraftVersion,
+    version_type: launchJson?.type || 'release',
+    launcher_name: 'minecraft-core',
+    launcher_version: '1.0.0',
+    natives_directory: nativesDir,
+    library_directory: path.join(clientPath, 'libraries'),
+    classpath_separator: classpathSeparator,
+    classpath: classpathValue,
+    quickPlayPath: '',
+    quickPlaySingleplayer: '',
+    quickPlayMultiplayer: '',
+    quickPlayRealms: '',
+    resolution_width: '',
+    resolution_height: ''
+  };
+}
+
 function appendProcessOutput(buffer, chunk, limit = 16000) {
   const next = `${buffer}${chunk}`;
   if (next.length <= limit) {
     return next;
   }
   return next.slice(next.length - limit);
+}
+
+function readTextFileIfExists(filePath) {
+  if (!filePath) {
+    return '';
+  }
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return '';
+    }
+
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function findNewestMatchingFile(directoryPath, matcher) {
+  try {
+    if (!directoryPath || !fs.existsSync(directoryPath)) {
+      return null;
+    }
+
+    const entries = fs.readdirSync(directoryPath, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && matcher(entry.name))
+      .map((entry) => {
+        const filePath = path.join(directoryPath, entry.name);
+        const stats = fs.statSync(filePath);
+        return {
+          filePath,
+          mtimeMs: stats.mtimeMs || 0
+        };
+      })
+      .sort((left, right) => right.mtimeMs - left.mtimeMs);
+
+    return entries[0]?.filePath || null;
+  } catch {
+    return null;
+  }
+}
+
+function extractTailLines(text, lineCount = 12) {
+  if (!text || typeof text !== 'string') {
+    return [];
+  }
+
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-lineCount);
+}
+
+function parseForgeDependencyDiagnostics(text) {
+  if (!text || typeof text !== 'string') {
+    return null;
+  }
+
+  const matches = Array.from(text.matchAll(
+    /Mod ID:\s*'([^']+)'.*?Requested by:\s*'([^']+)'.*?Expected range:\s*'([^']+)'.*?Actual version:\s*'([^']+)'/gsi
+  ));
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  const details = matches.map((match) => ({
+    dependencyId: match[1],
+    requestedBy: match[2],
+    expectedRange: match[3],
+    actualVersion: match[4],
+    message: `${match[2]} requires ${match[1]} ${match[3]}, found ${match[4]}`
+  }));
+
+  const first = details[0];
+  return {
+    kind: 'forge_dependency_error',
+    summary: `${first.requestedBy} requires ${first.dependencyId} ${first.expectedRange}, but ${first.actualVersion} is installed`,
+    details,
+    source: 'latest.log'
+  };
+}
+
+function parseForgeLaunchDiagnostics(sources) {
+  const orderedSources = [
+    { name: 'latest.log', text: sources.latestLog || '' },
+    { name: 'debug.log', text: sources.debugLog || '' },
+    { name: 'crash-report', text: sources.crashReport || '' },
+    { name: 'fml-report', text: sources.fmlReport || '' },
+    { name: 'hs_err', text: sources.hsErr || '' }
+  ];
+
+  for (const source of orderedSources) {
+    const dependencyDiagnostics = parseForgeDependencyDiagnostics(source.text);
+    if (dependencyDiagnostics) {
+      return {
+        ...dependencyDiagnostics,
+        source: source.name
+      };
+    }
+  }
+
+  for (const source of orderedSources) {
+    const tailLines = extractTailLines(source.text);
+    if (tailLines.length > 0) {
+      return {
+        kind: 'log_excerpt',
+        summary: tailLines[tailLines.length - 1],
+        details: tailLines.map((line) => ({ message: line })),
+        source: source.name
+      };
+    }
+  }
+
+  return null;
+}
+
+function collectLaunchDiagnostics(clientPath) {
+  const logsDir = path.join(clientPath, 'logs');
+  const crashReportsDir = path.join(clientPath, 'crash-reports');
+  const latestLogPath = path.join(logsDir, 'latest.log');
+  const debugLogPath = path.join(logsDir, 'debug.log');
+  const crashReportPath = findNewestMatchingFile(crashReportsDir, (name) => /\.txt$/i.test(name));
+  const fmlReportPath = findNewestMatchingFile(clientPath, (name) => /^fml.*\.txt$/i.test(name));
+  const hsErrPath = findNewestMatchingFile(clientPath, (name) => /^hs_err.*\.(?:log|txt)$/i.test(name));
+
+  const parsed = parseForgeLaunchDiagnostics({
+    latestLog: readTextFileIfExists(latestLogPath),
+    debugLog: readTextFileIfExists(debugLogPath),
+    crashReport: readTextFileIfExists(crashReportPath),
+    fmlReport: readTextFileIfExists(fmlReportPath),
+    hsErr: readTextFileIfExists(hsErrPath)
+  });
+
+  if (!parsed) {
+    return null;
+  }
+
+  return {
+    ...parsed,
+    latestLogPath: fs.existsSync(latestLogPath) ? latestLogPath : null,
+    debugLogPath: fs.existsSync(debugLogPath) ? debugLogPath : null,
+    crashReportPath,
+    fmlReportPath,
+    hsErrPath
+  };
 }
 
 class ProperMinecraftLauncher extends EventEmitter {
@@ -463,35 +652,16 @@ class ProperMinecraftLauncher extends EventEmitter {
         is_quick_play_multiplayer: false,
         is_quick_play_realms: false
       };
-      const replacements = {
-        auth_playerName: this.authData.name || '',
-        auth_player_name: this.authData.name || '',
-        auth_uuid: this.authData.uuid || '',
-        auth_xuid: this.authData.xuid || '',
-        auth_accessToken: this.authData.access_token || '',
-        auth_access_token: this.authData.access_token || '',
-        auth_session: this.authData.access_token || '',
-        auth_userType: 'msa',
-        auth_user_type: 'msa',
-        clientid: this.authData.client_token || this.authData.clientToken || '',
-        user_properties: '{}',
-        version_name: launchVersion,
-        game_directory: clientPath,
-        assets_root: path.join(clientPath, 'assets'),
-        assets_index_name: launchJson.assetIndex?.id || minecraftVersion,
-        version_type: launchJson.type || 'release',
-        launcher_name: 'minecraft-core',
-        launcher_version: '1.0.0',
-        natives_directory: nativesDir,
-        classpath_separator: classpathSeparator,
-        classpath: classpathValue,
-        quickPlayPath: '',
-        quickPlaySingleplayer: '',
-        quickPlayMultiplayer: '',
-        quickPlayRealms: '',
-        resolution_width: '',
-        resolution_height: ''
-      };
+      const replacements = buildLaunchReplacements({
+        authData: this.authData,
+        clientPath,
+        launchJson,
+        launchVersion,
+        minecraftVersion,
+        nativesDir,
+        classpathSeparator,
+        classpathValue
+      });
 
       const versionJvmArgs = expandVersionArguments(launchJson.arguments?.jvm, replacements, featureState);
       const versionProvidesClasspath = versionJvmArgs.some((arg, index) =>
@@ -681,7 +851,14 @@ Starting Minecraft with console output...
         const outputSuffix = combinedOutput
           ? `\n${combinedOutput.slice(-4000)}`
           : '';
-        throw new Error(`Minecraft failed to start. Exit code: ${child.exitCode}${outputSuffix}`);
+        const diagnostics = collectLaunchDiagnostics(clientPath);
+
+        return {
+          success: false,
+          error: `Minecraft failed to start. Exit code: ${child.exitCode}${outputSuffix}`,
+          message: `Failed to launch Minecraft: process exited early with code ${child.exitCode}`,
+          diagnostics
+        };
       }
 
       return {
@@ -696,11 +873,13 @@ Starting Minecraft with console output...
     } catch (error) {
       this.isLaunching = false;
       this.client = null;
+      const diagnostics = this.clientPath ? collectLaunchDiagnostics(this.clientPath) : null;
 
       return {
         success: false,
         error: error.message,
-        message: `Failed to launch Minecraft: ${error.message}`
+        message: `Failed to launch Minecraft: ${error.message}`,
+        diagnostics
       };
     }
   }
@@ -744,4 +923,11 @@ Starting Minecraft with console output...
   }
 }
 
-module.exports = { ProperMinecraftLauncher };
+module.exports = {
+  ProperMinecraftLauncher,
+  buildLaunchReplacements,
+  collectLaunchDiagnostics,
+  expandVersionArguments,
+  parseForgeLaunchDiagnostics,
+  replaceLaunchPlaceholders
+};

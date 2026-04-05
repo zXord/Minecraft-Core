@@ -2,6 +2,10 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { MicrosoftAuthenticator } = require('@xmcl/user');
+const {
+  getAuthErrorMessage,
+  shouldFallbackToEmbeddedMicrosoftAuth
+} = require('./auth-launch-utils.cjs');
 
 /**
  * Advanced authentication handler using @xmcl/user library
@@ -47,7 +51,35 @@ class XMCLAuthHandler {
       // For now, let's fall back to MSMC for the Microsoft OAuth part
       const { Auth } = require('msmc');
       const authManager = new Auth("select_account");
-      const xboxManager = await authManager.launch("electron");
+      let xboxManager;
+
+      try {
+        this._logger('debug', 'Opening Microsoft sign-in in the system browser.');
+        xboxManager = await authManager.launch("raw", {
+          width: 520,
+          height: 720
+        });
+      } catch (rawError) {
+        const rawErrorMessage = getAuthErrorMessage(rawError);
+
+        if (!shouldFallbackToEmbeddedMicrosoftAuth(rawError)) {
+          throw new Error(rawErrorMessage);
+        }
+
+        this._logger(
+          'warning',
+          `System-browser sign-in could not start (${rawErrorMessage}). Falling back to the embedded sign-in window.`
+        );
+
+        xboxManager = await authManager.launch("electron", {
+          width: 520,
+          height: 720,
+          resizable: true,
+          autoHideMenuBar: true,
+          show: true,
+          title: 'Microsoft Sign In'
+        });
+      }
       
       // Now use @xmcl/user for the Xbox/Minecraft part      // Extract the Microsoft access token from MSMC result
       if (!xboxManager.msToken) {
@@ -137,9 +169,9 @@ class XMCLAuthHandler {
       };
 
     } catch (error) {
-
-      this.emitter.emit('auth-error', error.message);
-      return { success: false, error: error.message };
+      const errorMessage = getAuthErrorMessage(error);
+      this.emitter.emit('auth-error', errorMessage);
+      return { success: false, error: errorMessage };
     } finally {
       this.isAuthenticating = false;
     }

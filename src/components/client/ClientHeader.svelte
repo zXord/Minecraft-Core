@@ -1,3 +1,4 @@
+
 <script>
   import { clientState, setActiveTab } from '../../stores/clientStore.js';
   export let tabs = ['play', 'mods', 'settings'];
@@ -23,6 +24,8 @@
     </button>
   </div>
   <div class="modern-client-tabs">
+
+
     {#each tabs as tab (tab)}
       <button class="modern-tab-button {state.activeTab === tab ? 'active' : ''}" on:click={() => selectTab(tab)}>
         {#if tab === 'play'}

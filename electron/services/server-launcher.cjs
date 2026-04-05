@@ -185,20 +185,26 @@ function findForgeLaunchAssets(serverPath, expected = {}) {
     ...files.filter((file) => path.basename(file).toLowerCase() === 'win_args.txt'),
     ...files.filter((file) => path.basename(file).toLowerCase() === 'unix_args.txt')
   ];
-  const forgeArgs = pickBestForgeAsset(forgeArgCandidates, {
-    ...expected,
-    serverPath
-  });
+  const preferredForgeArgCandidates = forgeArgCandidates.filter(
+    (file) => path.basename(file).toLowerCase() === preferredArgs
+  );
+  const resolvedForgeArgs = pickBestForgeAsset(
+    preferredForgeArgCandidates.length > 0 ? preferredForgeArgCandidates : forgeArgCandidates,
+    {
+      ...expected,
+      serverPath
+    }
+  );
 
   const runScriptCandidates = files.filter((file) => /^run\.(bat|cmd|sh)$/i.test(path.basename(file)));
   const runScript = pickBestForgeAsset(runScriptCandidates, {
     ...expected,
     serverPath
-  }, forgeArgs ? path.dirname(forgeArgs) : null);
+  }, resolvedForgeArgs ? path.dirname(resolvedForgeArgs) : null);
 
   return {
     userJvmArgs,
-    forgeArgs,
+    forgeArgs: resolvedForgeArgs,
     runScript
   };
 }

@@ -1,10 +1,22 @@
 const { safeSend } = require('../utils/safe-send.cjs');
-const { installFabric: installFabricXmcl, getLoaderArtifactListFor, installForge, getForgeVersionList, installVersion, installLibraries } = require('@xmcl/installer');
+const {
+  installFabric: installFabricXmcl,
+  getLoaderArtifactListFor,
+  installForge,
+  getForgeVersionList,
+  installVersion,
+  installLibraries,
+  walkForgeInstallerEntries,
+  unpackForgeInstaller,
+  installByProfileTask,
+  isForgeInstallerEntries
+} = require('@xmcl/installer');
 const { Version, MinecraftFolder } = require('@xmcl/core');
-const { installFabric: installFabricLegacy } = require('./download-manager.cjs');
+const { open: openZip, readEntry } = require('@xmcl/unzip');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const fetch = require('node-fetch');
 
 let logger = null;
 function getLogger() {
@@ -32,6 +44,257 @@ function normalizeLoader(loader) {
   if (normalized === 'fabric') return 'fabric';
   if (normalized === 'forge') return 'forge';
   return normalized;
+}
+
+function getForgeArtifactVersion(minecraftVersion, loaderVersion) {
+  if (!minecraftVersion || !loaderVersion) {
+    return null;
+  }
+
+  const [_, minor] = String(minecraftVersion).split('.');
+  const minorVersion = Number.parseInt(minor, 10);
+  const normalizedLoaderVersion = String(loaderVersion);
+
+  if (minorVersion >= 7 && minorVersion <= 8) {
+    return `${minecraftVersion}-${normalizedLoaderVersion}-${minecraftVersion}`;
+  }
+
+  if (normalizedLoaderVersion.startsWith(`${minecraftVersion}`)) {
+    return normalizedLoaderVersion;
+  }
+
+  return `${minecraftVersion}-${normalizedLoaderVersion}`;
+}
+
+function getForgeInstallerPath(targetPath, minecraftVersion, loaderVersion) {
+  const artifactVersion = getForgeArtifactVersion(minecraftVersion, loaderVersion);
+  if (!targetPath || !artifactVersion) {
+    return null;
+  }
+
+  return path.join(
+    targetPath,
+    'libraries',
+    'net',
+    'minecraftforge',
+    'forge',
+    artifactVersion,
+    `forge-${artifactVersion}-installer.jar`
+  );
+}
+
+async function clearStaleForgeInstaller(targetPath, minecraftVersion, loaderVersion) {
+  const installerPath = getForgeInstallerPath(targetPath, minecraftVersion, loaderVersion);
+  if (!installerPath || !fs.existsSync(installerPath)) {
+    return { installerPath, removed: false };
+  }
+
+  try {
+    try {
+      fs.chmodSync(installerPath, 0o666);
+    } catch {
+      // Best effort only. Some synced folders keep their own ACLs.
+    }
+
+    await fs.promises.rm(installerPath, {
+      force: true,
+      maxRetries: 6,
+      retryDelay: 250
+    });
+    return { installerPath, removed: true };
+  } catch (error) {
+    getLogger().warn('Failed to remove stale Forge installer artifact before retry', {
+      category: 'client',
+      data: {
+        service: 'LoaderInstallService',
+        operation: 'clearStaleForgeInstaller',
+        installerPath,
+        error: error?.message || String(error)
+      }
+    });
+    return { installerPath, removed: false, error };
+  }
+}
+
+function isForgeInstallerOpenError(error, installerPath) {
+  const message = error?.message || '';
+  if (!installerPath || !message) {
+    return false;
+  }
+
+  const normalizedInstallerPath = path.normalize(installerPath).toLowerCase();
+  const normalizedMessage = String(message).replaceAll('/', path.sep).toLowerCase();
+
+  return /eperm|ebusy|operation not permitted|resource busy/i.test(normalizedMessage)
+    && normalizedMessage.includes(normalizedInstallerPath);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function downloadFileBuffer(url) {
+  const response = await fetch(url, {
+    redirect: 'follow',
+    headers: {
+      'User-Agent': 'Minecraft-Core/LoaderInstallService'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed for ${url}: ${response.status}`);
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function getForgeInstallerDownloadUrls(minecraftVersion, loaderVersion) {
+  const artifactVersion = getForgeArtifactVersion(minecraftVersion, loaderVersion);
+  if (!artifactVersion) {
+    return [];
+  }
+
+  const relativePath = `net/minecraftforge/forge/${artifactVersion}/forge-${artifactVersion}-installer.jar`;
+
+  return [
+    `https://maven.minecraftforge.net/${relativePath}`,
+    `https://files.minecraftforge.net/maven/${relativePath}`,
+    `http://files.minecraftforge.net/maven/${relativePath}`
+  ];
+}
+
+async function canReadForgeInstallerJar(installerPath, minecraftVersion, loaderVersion) {
+  if (!installerPath || !fs.existsSync(installerPath)) {
+    return false;
+  }
+
+  const forgeArtifactVersion = getForgeArtifactVersion(minecraftVersion, loaderVersion);
+  if (!forgeArtifactVersion) {
+    return false;
+  }
+
+  let zip;
+  try {
+    zip = await openZip(installerPath, { lazyEntries: true, autoClose: false });
+    const entries = await walkForgeInstallerEntries(zip, forgeArtifactVersion);
+    return !!entries.installProfileJson && !!entries.versionJson;
+  } catch {
+    return false;
+  } finally {
+    try {
+      zip?.close();
+    } catch {
+      // Ignore zip close errors during validation.
+    }
+  }
+}
+
+async function stageForgeInstallerJar(targetPath, minecraftVersion, loaderVersion) {
+  const installerPath = getForgeInstallerPath(targetPath, minecraftVersion, loaderVersion);
+  if (!installerPath) {
+    throw new Error('Unable to resolve Forge installer path');
+  }
+
+  if (await canReadForgeInstallerJar(installerPath, minecraftVersion, loaderVersion)) {
+    return installerPath;
+  }
+
+  await fs.promises.mkdir(path.dirname(installerPath), { recursive: true });
+  await clearStaleForgeInstaller(targetPath, minecraftVersion, loaderVersion);
+
+  const stagedPath = `${installerPath}.download`;
+  await fs.promises.rm(stagedPath, {
+    force: true,
+    maxRetries: 4,
+    retryDelay: 150
+  }).catch(() => {});
+
+  let lastError = null;
+
+  for (const url of getForgeInstallerDownloadUrls(minecraftVersion, loaderVersion)) {
+    try {
+      const fileBuffer = await downloadFileBuffer(url);
+      await fs.promises.writeFile(stagedPath, fileBuffer);
+
+      const stagedReadable = await canReadForgeInstallerJar(stagedPath, minecraftVersion, loaderVersion);
+      if (!stagedReadable) {
+        throw new Error(`Downloaded Forge installer from ${url} is invalid`);
+      }
+
+      await clearStaleForgeInstaller(targetPath, minecraftVersion, loaderVersion);
+      await fs.promises.rename(stagedPath, installerPath);
+      return installerPath;
+    } catch (error) {
+      lastError = error;
+      await fs.promises.rm(stagedPath, {
+        force: true,
+        maxRetries: 2,
+        retryDelay: 100
+      }).catch(() => {});
+    }
+  }
+
+  throw lastError || new Error('Unable to stage Forge installer jar');
+}
+
+async function installForgeClientFromLocalInstaller(options = {}) {
+  const installerPath = await stageForgeInstallerJar(
+    options.clientPath,
+    options.minecraftVersion,
+    options.loaderVersion
+  );
+  const forgeArtifactVersion = getForgeArtifactVersion(
+    options.minecraftVersion,
+    options.loaderVersion
+  );
+  const minecraftFolder = MinecraftFolder.from(options.clientPath);
+
+  let zip;
+  try {
+    zip = await openZip(installerPath, { lazyEntries: true, autoClose: false });
+    const entries = await walkForgeInstallerEntries(zip, forgeArtifactVersion);
+
+    if (!entries.installProfileJson) {
+      throw new Error(`Missing install_profile.json in Forge installer ${installerPath}`);
+    }
+
+    if (!isForgeInstallerEntries(entries)) {
+      throw new Error(`Unsupported Forge installer layout in ${installerPath}`);
+    }
+
+    const profile = JSON.parse(
+      (await readEntry(zip, entries.installProfileJson)).toString()
+    );
+
+    const versionId = await unpackForgeInstaller(
+      zip,
+      entries,
+      profile,
+      minecraftFolder,
+      installerPath,
+      {
+        side: 'client',
+        java: options.javaPath
+      }
+    );
+
+    await installByProfileTask(profile, options.clientPath, {
+      side: 'client',
+      java: options.javaPath
+    }).startAndWait();
+
+    return versionId;
+  } finally {
+    try {
+      zip?.close();
+    } catch {
+      // Ignore zip close errors after install.
+    }
+  }
+}
+
+function getLegacyFabricInstaller() {
+  return require('./download-manager.cjs').installFabric;
 }
 
 function emitProgress(progressChannel, payload, loader) {
@@ -338,7 +601,7 @@ async function installFabricServer(options) {
 
   // Keep using the existing installer path for server installs because it already
   // writes the expected Fabric server launch artifacts into the target folder.
-  await installFabricLegacy(
+  await getLegacyFabricInstaller()(
     targetPath,
     minecraftVersion,
     loaderVersion,
@@ -506,17 +769,45 @@ async function installClientLoader(options = {}) {
   }
 
   if (normalizedLoader === 'forge') {
-    const versionId = await installForge(
-      {
-        version: options.loaderVersion,
-        mcversion: options.minecraftVersion
-      },
+    const installerPath = getForgeInstallerPath(
       options.clientPath,
-      {
-        side: 'client',
-        java: options.javaPath
-      }
+      options.minecraftVersion,
+      options.loaderVersion
     );
+
+    let versionId;
+    try {
+      versionId = await installForgeClientFromLocalInstaller(options);
+    } catch (error) {
+      if (
+        !isForgeInstallerOpenError(error, installerPath)
+        && !/enoent|not found|missing install_profile\.json|invalid/i.test(error?.message || '')
+      ) {
+        throw error;
+      }
+
+      getLogger().warn('Retrying Forge client install after installer artifact staging failure', {
+        category: 'client',
+        data: {
+          service: 'LoaderInstallService',
+          operation: 'installClientLoader',
+          minecraftVersion: options.minecraftVersion,
+          loaderVersion: options.loaderVersion,
+          installerPath,
+          error: error.message
+        }
+      });
+
+      await clearStaleForgeInstaller(
+        options.clientPath,
+        options.minecraftVersion,
+        options.loaderVersion
+      );
+      await delay(750);
+
+      versionId = await installForgeClientFromLocalInstaller(options);
+    }
+
     return {
       success: true,
       loader: 'forge',
@@ -533,5 +824,10 @@ module.exports = {
   getLoaderVersions,
   installServerLoader,
   installClientLoader,
-  getForgeRuntimeHealthIssues
+  getForgeRuntimeHealthIssues,
+  __testUtils: {
+    getForgeArtifactVersion,
+    getForgeInstallerPath,
+    isForgeInstallerOpenError
+  }
 };

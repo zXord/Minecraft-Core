@@ -4,6 +4,7 @@
   
   import { SvelteSet, SvelteMap } from 'svelte/reactivity';
   import { dependencyModalOpen, modToInstall, currentDependencies, installingModIds } from '../../../stores/modStore.js';
+  import { completeDownload } from '../../../utils/mods/modDownloadManager.js';
   
   // Event dispatcher
   const dispatch = createEventDispatcher();
@@ -243,6 +244,10 @@
       }
       
       // Log the cancel operation
+    }
+
+    if (mod?.downloadId) {
+      completeDownload(mod.downloadId, true, 'Installation cancelled');
     }
     
     // Clear the dependency modal state

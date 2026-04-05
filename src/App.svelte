@@ -3,7 +3,7 @@
   /// <reference path="./electron.d.ts" />
   import { onMount, onDestroy, setContext } from "svelte";
   import { serverState } from "./stores/serverState.js";
-  import { errorMessage, resetModInstanceState } from "./stores/modStore.js";
+  import { errorMessage, cacheModInstanceState, restoreModInstanceState, resetModInstanceState } from "./stores/modStore.js";
   import { route, navigate } from "./router.js";
   import { setupIpcListeners } from "./modules/serverListeners.js";
 
@@ -51,7 +51,7 @@
   import { Toaster } from "svelte-sonner";
   import { showExitConfirmation } from "./stores/exitStore.js";
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
-  import { getUpdateCount } from "./stores/modStore.js";
+  import { getUpdateCount, autoUpdateChecksEnabled } from "./stores/modStore.js";
   const updateCountStore = getUpdateCount();
   import { checkForUpdates, loadServerConfig, loadMods, loadContent, checkDisabledModUpdates, setActiveModServerPath } from "./utils/mods/modAPI.js";
   let updateIntervalId = null;
@@ -78,6 +78,7 @@
 
   // App settings modal state
   let showAppSettings = false;
+  let lastServerModContextPath = "";
 
   // Error boundary state
   let hasError = false;
@@ -248,8 +249,19 @@
   }
 
   function activateServerModContext(serverPath = "") {
+    if (lastServerModContextPath) {
+      cacheModInstanceState(lastServerModContextPath);
+    }
+
     setActiveModServerPath(serverPath);
-    resetModInstanceState();
+    const restored = serverPath ? restoreModInstanceState(serverPath) : false;
+
+    if (!restored) {
+      resetModInstanceState();
+    }
+
+    lastServerModContextPath = serverPath;
+    return restored;
   }
 
   async function primeServerModState(serverPath) {
@@ -260,11 +272,14 @@
       await loadMods(serverPath);
       try { await loadContent(serverPath, "shaders"); } catch {}
       try { await loadContent(serverPath, "resourcepacks"); } catch {}
-      await checkForUpdates(serverPath);
-      try { await checkDisabledModUpdates(serverPath); } catch {}
+      if (autoUpdateChecksEnabled.getForPath(serverPath)) {
+        await checkForUpdates(serverPath);
+        try { await checkDisabledModUpdates(serverPath); } catch {}
+      }
 
       const scheduledPath = serverPath;
       setTimeout(() => {
+        if (!autoUpdateChecksEnabled.getForPath(scheduledPath)) return;
         const currentServerPath = currentInstance?.type === "server" ? currentInstance.path : "";
         if (currentServerPath !== scheduledPath) return;
         try {
@@ -525,6 +540,9 @@
     // Background periodic mod/shader/resource pack update check (every 30 min)
     const runUpdateCheck = async () => {
       try {
+        if (!autoUpdateChecksEnabled.getForPath(path)) {
+          return;
+        }
         const activeServerPath = currentInstance?.type === "server" ? currentInstance.path : "";
         if (activeServerPath && activeServerPath === path) {
           // Use force refresh to bypass cache and detect new releases
@@ -764,8 +782,10 @@
             step = "done";
             // Prime server config, then content, then run update check so counts show on launch
             if (path) {
-              activateServerModContext(path);
-              void primeServerModState(path);
+              const restoredServerModState = activateServerModContext(path);
+              if (!restoredServerModState) {
+                void primeServerModState(path);
+              }
             }
           }
           // Ensure management server auto-starts even if user lands on client first
@@ -966,8 +986,10 @@
           },
         });
       }
-      activateServerModContext(createdInstance.path);
-      void primeServerModState(createdInstance.path);
+      const restoredServerModState = activateServerModContext(createdInstance.path);
+      if (!restoredServerModState) {
+        void primeServerModState(createdInstance.path);
+      }
       refreshServerStatuses();
     }
 
@@ -1317,11 +1339,13 @@
       const nextServerPath = instance.path || "";
       path = nextServerPath;
       instanceType = "server";
-      activateServerModContext(nextServerPath);
+      const restoredServerModState = activateServerModContext(nextServerPath);
       updateServerPath();
       await loadServerSettingsForInstance(instance);
       refreshServerStatuses();
-      void primeServerModState(nextServerPath);
+      if (!restoredServerModState) {
+        void primeServerModState(nextServerPath);
+      }
     } else {
       instanceType = "client";
       path = "";

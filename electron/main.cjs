@@ -6,6 +6,7 @@ const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
 const { setMainWindow } = require('./utils/safe-send.cjs');
 const appStore = require('./utils/app-store.cjs');
 const { ensureConfigFile } = require('./utils/config-manager.cjs');
+const { shouldAllowNavigation } = require('./utils/navigation-policy.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const { getTlsFingerprint, normalizeFingerprint } = require('./utils/tls-utils.cjs');
 const fs = require('fs');
@@ -178,21 +179,6 @@ async function openFolderDirectly(folderPath) {
       });
     }
   });
-}
-
-function isAllowedNavigation(targetUrl) {
-  if (!targetUrl || typeof targetUrl !== 'string') return false;
-  try {
-    const parsed = new URL(targetUrl);
-    if (parsed.protocol === 'file:' || parsed.protocol === 'about:') return true;
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-      const host = parsed.hostname;
-      return host === 'localhost' || host === '127.0.0.1' || host === '::1';
-    }
-  } catch {
-    return false;
-  }
-  return false;
 }
 
 function openExternalSafely(targetUrl) {
@@ -437,15 +423,21 @@ function setupCertificateVerification() {
   });
 }
 
+function isAllowedWindowNavigation(contents, targetUrl) {
+  const browserWindow = BrowserWindow.fromWebContents(contents);
+  const isMainWindow = Boolean(browserWindow && win && browserWindow.id === win.id);
+  return shouldAllowNavigation(targetUrl, { isMainWindow });
+}
+
 app.on('web-contents-created', (_event, contents) => {
   contents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedNavigation(url)) return { action: 'allow' };
+    if (isAllowedWindowNavigation(contents, url)) return { action: 'allow' };
     openExternalSafely(url);
     return { action: 'deny' };
   });
 
   contents.on('will-navigate', (event, url) => {
-    if (isAllowedNavigation(url)) return;
+    if (isAllowedWindowNavigation(contents, url)) return;
     event.preventDefault();
     openExternalSafely(url);
   });
@@ -1398,12 +1390,18 @@ app.whenReady().then(() => {
     try {
       let lastServerPath = appStore.get('lastServerPath');
       const instances = appStore.get('instances') || [];
-      const serverInstance = instances.find((inst) => inst && inst.type === 'server' && inst.path);
-      if (serverInstance && serverInstance.path && serverInstance.path !== lastServerPath) {
-        if (fs.existsSync(serverInstance.path)) {
-          appStore.set('lastServerPath', serverInstance.path);
-          lastServerPath = serverInstance.path;
-        }
+      const serverInstances = instances.filter((inst) => inst && inst.type === 'server' && inst.path);
+      const matchingServerInstance = serverInstances.find((inst) => inst.path === lastServerPath);
+      const firstExistingServerInstance = serverInstances.find((inst) => fs.existsSync(inst.path));
+
+      if (matchingServerInstance && fs.existsSync(matchingServerInstance.path)) {
+        lastServerPath = matchingServerInstance.path;
+      } else if (firstExistingServerInstance) {
+        appStore.set('lastServerPath', firstExistingServerInstance.path);
+        lastServerPath = firstExistingServerInstance.path;
+      } else if (lastServerPath) {
+        appStore.set('lastServerPath', null);
+        lastServerPath = null;
       }
       
       if (lastServerPath && win && win.webContents) {

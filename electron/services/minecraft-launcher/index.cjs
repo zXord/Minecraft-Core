@@ -967,12 +967,27 @@ class MinecraftLauncher extends EventEmitter {
 
       // Add additional JVM args from profile
       if (launchJson.arguments?.jvm) {
+        const classpathSeparator = process.platform === 'win32' ? ';' : ':';
+        const classpathValue = classpath.join(classpathSeparator);
+        const jvmReplacements = {
+          natives_directory: nativesDir,
+          launcher_name: 'minecraft-core',
+          launcher_version: '1.0.0',
+          library_directory: path.join(clientPath, 'libraries'),
+          classpath_separator: classpathSeparator,
+          classpath: classpathValue,
+          version_name: launchVersion,
+          game_directory: clientPath,
+          assets_root: path.join(clientPath, 'assets'),
+          assets_index_name: launchJson.assetIndex?.id || minecraftVersion,
+          version_type: launchJson.type || 'release'
+        };
         for (const arg of launchJson.arguments.jvm) {
           if (typeof arg === 'string' && !jvmArgs.includes(arg)) {
-            let processedArg = arg
-              .replace(/\$\{natives_directory\}/g, nativesDir)
-              .replace(/\$\{launcher_name\}/g, 'minecraft-core')
-              .replace(/\$\{launcher_version\}/g, '1.0.0');
+            let processedArg = arg;
+            for (const [token, replacement] of Object.entries(jvmReplacements)) {
+              processedArg = processedArg.replace(new RegExp(`\\$\\{${token}\\}`, 'g'), () => String(replacement));
+            }
             jvmArgs.push(processedArg);
           }
         }

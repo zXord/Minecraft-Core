@@ -118,6 +118,7 @@
         }
       });
       
+      
       if (e.detail.fullSyncResult) {
         modSyncStatus = e.detail.fullSyncResult;
       } else {

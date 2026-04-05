@@ -358,7 +358,7 @@ export function updateServerMetrics(metrics) {
 }
 
 // Performance optimization: batch log updates
-const MAX_LOGS = 200;
+const MAX_LOGS = 5000;
 let pendingLogs = [];
 let updateTimeout = null;
 let logStats = {

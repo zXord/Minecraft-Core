@@ -17,6 +17,7 @@ import {
   isLoading,
   isSearching,
   isCheckingUpdates,
+  updateCheckProgress,
   errorMessage,
   successMessage,
   searchError,
@@ -49,14 +50,18 @@ import {
   contentTypeRetryCount,
   contentTypeConfigs,
   isUpdateIgnored,
-  lastUpdateCheckTime
+  lastUpdateCheckTime,
+  autoUpdateChecksEnabled,
+  DOWNLOAD_SOURCES
 } from '../../stores/modStore.js';
+import { trackDownload, completeDownload } from './modDownloadManager.js';
 
 // IDs to track concurrent operations
 let searchId = 0;
 let updateCheckId = 0;
 // Track a pending update check request if one comes in while a check is running
 let pendingUpdateCheck = null;
+let pendingSearchRequest = null;
 let lastUpdateCheckPath = '';
 
 // Rate limiting protection
@@ -71,6 +76,189 @@ let activeContentLoads = 0;
 let activeModServerPath = '';
 let activeUpdateServerPath = '';
 const latestLoadRequestByType = new Map();
+
+function normalizeRequestedContentTypes(contentTypes) {
+  if (!Array.isArray(contentTypes) || contentTypes.length === 0) {
+    return null;
+  }
+
+  const normalizedTypes = Array.from(
+    new Set(
+      contentTypes
+        .map((contentType) => String(contentType || '').trim().toLowerCase())
+        .filter((contentType) => Object.values(contentTypeConfigs).some((config) => config.id === contentType))
+    )
+  );
+
+  return normalizedTypes.length > 0 ? normalizedTypes : null;
+}
+
+function mergeUpdateCheckOptions(currentOptions = {}, nextOptions = {}) {
+  const currentContentTypes = normalizeRequestedContentTypes(currentOptions.contentTypes);
+  const nextContentTypes = normalizeRequestedContentTypes(nextOptions.contentTypes);
+
+  if (!currentContentTypes && !nextContentTypes) {
+    return {};
+  }
+
+  if (!currentContentTypes) {
+    return {
+      contentTypes: nextContentTypes
+    };
+  }
+
+  if (!nextContentTypes) {
+    return {
+      contentTypes: currentContentTypes
+    };
+  }
+
+  return {
+    contentTypes: Array.from(new Set([...currentContentTypes, ...nextContentTypes]))
+  };
+}
+
+function normalizeContentLookupName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\.(zip|jar)$/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function namesProbablyMatch(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+
+  return left === right
+    || (left.length >= 5 && right.length >= 5 && (left.startsWith(right) || right.startsWith(left)));
+}
+
+function getLookupNamesForContent(item) {
+  const lookupNames = [
+    item?.slug,
+    item?.name,
+    item?.title,
+    item?.fileName
+  ]
+    .map(normalizeContentLookupName)
+    .filter(Boolean);
+
+  return lookupNames.filter((name, index) => lookupNames.indexOf(name) === index);
+}
+
+export function findInstalledContentEntry(item, { installedInfoList = [] } = {}) {
+  if (!item || !Array.isArray(installedInfoList) || installedInfoList.length === 0) {
+    return null;
+  }
+
+  const itemId = item.id || item.projectId || null;
+  const lookupNames = getLookupNamesForContent(item);
+
+  return installedInfoList.find((info) => {
+    if (!info) {
+      return false;
+    }
+
+    if (itemId && info.projectId === itemId) {
+      return true;
+    }
+
+    const infoLookupNames = getLookupNamesForContent(info);
+    return infoLookupNames.some((infoName) =>
+      lookupNames.some((lookupName) => namesProbablyMatch(infoName, lookupName))
+    );
+  }) || null;
+}
+
+export function matchesInstalledContent(item, {
+  installedIds = new Set(),
+  installedInfoList = [],
+  installedFilesList = []
+} = {}) {
+  if (!item) {
+    return false;
+  }
+
+  const itemId = item.id || item.projectId || null;
+  if (itemId && installedIds?.has?.(itemId)) {
+    return true;
+  }
+
+  const itemSlug = item.slug || null;
+  if (itemSlug && installedIds?.has?.(itemSlug)) {
+    return true;
+  }
+
+  if (findInstalledContentEntry(item, { installedInfoList })) {
+    return true;
+  }
+
+  const lookupNames = getLookupNamesForContent(item);
+  return (Array.isArray(installedFilesList) ? installedFilesList : []).some((fileName) => {
+    const normalizedFileName = normalizeContentLookupName(fileName);
+    return lookupNames.some((lookupName) => namesProbablyMatch(normalizedFileName, lookupName));
+  });
+}
+
+function getInstalledStateContext(contentType = 'mods') {
+  switch (contentType) {
+    case 'shaders':
+      return {
+        resultsStore: shaderResults,
+        installedIds: get(installedShaderIds),
+        installedInfoList: get(installedShaderInfo),
+        installedFilesList: get(installedShaders)
+      };
+    case 'resourcepacks':
+      return {
+        resultsStore: resourcePackResults,
+        installedIds: get(installedResourcePackIds),
+        installedInfoList: get(installedResourcePackInfo),
+        installedFilesList: get(installedResourcePacks)
+      };
+    case 'mods':
+    default:
+      return {
+        resultsStore: searchResults,
+        installedIds: get(installedModIds),
+        installedInfoList: get(installedModInfo),
+        installedFilesList: get(installedMods)
+      };
+  }
+}
+
+export function createInstallDownloadId(mod, contentType = 'mods') {
+  const baseId = normalizeContentLookupName(
+    mod?.id || mod?.projectId || mod?.slug || mod?.name || mod?.title || 'download'
+  ) || 'download';
+  return `${contentType}-${baseId}-${Date.now()}`;
+}
+
+function resolveDownloadSource(source) {
+  switch (String(source || '').toLowerCase()) {
+    case DOWNLOAD_SOURCES.MODRINTH:
+      return DOWNLOAD_SOURCES.MODRINTH;
+    case DOWNLOAD_SOURCES.CURSEFORGE:
+      return DOWNLOAD_SOURCES.CURSEFORGE;
+    default:
+      return DOWNLOAD_SOURCES.SERVER;
+  }
+}
+
+export function queueInstallDownload(mod, contentType = 'mods', options = {}) {
+  const downloadId = options.downloadId || mod?.downloadId || createInstallDownloadId(mod, contentType);
+
+  trackDownload(downloadId, mod?.title || mod?.name || 'Download', {
+    source: resolveDownloadSource(options.source || mod?.source),
+    maxAttempts: options.maxAttempts || 3,
+    state: 'queued',
+    statusMessage: options.statusMessage || 'Preparing install...'
+  });
+
+  return downloadId;
+}
 
 function normalizeConfigValue(value) {
   if (typeof value === 'string') {
@@ -525,9 +713,6 @@ export async function loadContent(serverPath, contentType = 'mods') {
 
       // Get installed mod IDs and version info
       try {
-        // Clear existing installedModInfo to ensure we get fresh data
-        installedModInfo.set([]);
-        
         let modInfo = await safeInvoke('get-installed-mod-info', serverPath);
         if (!Array.isArray(modInfo)) {
           modInfo = [];
@@ -571,8 +756,10 @@ export async function loadContent(serverPath, contentType = 'mods') {
         const validProjectIds = new SvelteSet(updatedModInfo.map(info => info.projectId).filter(Boolean));
   installedModIds.set(validProjectIds);
   installedModInfo.set(updatedModInfo);
-  // Prime disabled mod updates so UI can show "Enable and update" without manual check
-  try { await checkDisabledModUpdates(serverPath, strictUpdateContext); } catch { /* ignore */ }
+  // Prime disabled mod updates automatically only when background checks are enabled.
+  if (autoUpdateChecksEnabled.getForPath(serverPath)) {
+    try { await checkDisabledModUpdates(serverPath, strictUpdateContext); } catch { /* ignore */ }
+  }
         
   // (Removed automatic post-load auto update check – now only manual button or interval triggers)
           return true;
@@ -683,7 +870,12 @@ function isCacheValid(cacheEntry) {
 }
 
 export async function searchContent(contentType = 'mods', options = {}) {
-  if (get(isSearching)) {
+  if (get(isSearching) && !options.__retrying) {
+    pendingSearchRequest = {
+      contentType,
+      options: { ...options }
+    };
+    searchId += 1;
     return null;
   }
 
@@ -701,6 +893,8 @@ export async function searchContent(contentType = 'mods', options = {}) {
     const effectiveFilterModLoader = hasExplicitFilterModLoader
       ? options.filterModLoader
       : get(filterModLoader);
+    const { resultsStore, installedIds, installedInfoList, installedFilesList } =
+      getInstalledStateContext(contentType);
 
     // Generate cache key
     const cacheKey = generateCacheKey(contentType, {
@@ -719,21 +913,16 @@ export async function searchContent(contentType = 'mods', options = {}) {
     const cachedResult = cache.get(cacheKey);
     
     if (cachedResult && isCacheValid(cachedResult)) {
-      // Use cached results
-      switch (contentType) {
-        case 'shaders': {
-          shaderResults.set(cachedResult.data.mods || []);
-          break;
-        }
-        case 'resourcepacks': {
-          resourcePackResults.set(cachedResult.data.mods || []);
-          break;
-        }
-        case 'mods':
-        default:
-          searchResults.set(cachedResult.data.mods || []);
-          break;
-      }
+      const cachedMods = (cachedResult.data.mods || []).map((mod) => ({
+        ...mod,
+        isInstalled: matchesInstalledContent(mod, {
+          installedIds,
+          installedInfoList,
+          installedFilesList
+        })
+      }));
+
+      resultsStore.set(cachedMods);
       
       // Update pagination from cache
       if (cachedResult.data.pagination) {
@@ -743,7 +932,11 @@ export async function searchContent(contentType = 'mods', options = {}) {
       }
       
       contentTypeSwitching.set(false);
-      return cachedResult.data;
+      return {
+        ...cachedResult.data,
+        hits: cachedMods,
+        mods: cachedMods
+      };
     }
 
     // Rate limiting protection
@@ -813,88 +1006,16 @@ export async function searchContent(contentType = 'mods', options = {}) {
     }
     
     if (result && result.mods) {
-      // Get the appropriate installed IDs store based on content type
-      let installedIdsSet;
-      let installedFilesList = [];
-      let installedInfoList = [];
-      switch (contentType) {
-        case 'shaders': {
-          installedIdsSet = get(installedShaderIds);
-          installedFilesList = get(installedShaders);
-          installedInfoList = get(installedShaderInfo);
-          break;
-        }
-        case 'resourcepacks': {
-          installedIdsSet = get(installedResourcePackIds);
-          installedFilesList = get(installedResourcePacks);
-          installedInfoList = get(installedResourcePackInfo);
-          break;
-        }
-        case 'mods':
-        default:
-          installedIdsSet = get(installedModIds);
-          break;
-      }
-
-      const normalize = (str) => (str || '')
-        .toString()
-        .toLowerCase()
-        .replace(/\.(zip|jar)$/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '');
-
-      const fileBaseNames = (installedFilesList || []).map((f) => normalize(f));
-
-      const mods = result.mods.map(mod => {
-        // Primary check by IDs
-        let installed = installedIdsSet.has(mod.id) || (mod.slug && installedIdsSet.has(mod.slug));
-
-        // Fallback using installed info names and filenames (for shaders/resourcepacks)
-        if (!installed && (contentType === 'shaders' || contentType === 'resourcepacks')) {
-          const targetSlug = normalize(mod.slug || '');
-          const targetName = normalize(mod.name || mod.title || '');
-
-          if (installedInfoList && installedInfoList.length > 0) {
-            installed = installedInfoList.some(info => {
-              if (info.projectId && info.projectId === mod.id) return true;
-              const infoName = normalize(info.name || info.fileName || '');
-              return !!infoName && (
-                infoName === targetSlug || infoName === targetName ||
-                (targetSlug && (infoName.startsWith(targetSlug) || targetSlug.startsWith(infoName))) ||
-                (targetName && (infoName.startsWith(targetName) || targetName.startsWith(infoName)))
-              );
-            });
-          }
-
-          if (!installed && fileBaseNames && fileBaseNames.length > 0) {
-            installed = fileBaseNames.some(base => (
-              (targetSlug && (base === targetSlug || base.startsWith(targetSlug) || targetSlug.startsWith(base))) ||
-              (targetName && (base === targetName || base.startsWith(targetName) || targetName.startsWith(base)))
-            ));
-          }
-        }
-
-        return {
-          ...mod,
-          isInstalled: installed
-        };
-      });
+      const mods = result.mods.map((mod) => ({
+        ...mod,
+        isInstalled: matchesInstalledContent(mod, {
+          installedIds,
+          installedInfoList,
+          installedFilesList
+        })
+      }));
       
-      // Update the appropriate results store based on content type
-      switch (contentType) {
-        case 'shaders': {
-          shaderResults.set(mods);
-          break;
-        }
-        case 'resourcepacks': {
-          resourcePackResults.set(mods);
-          break;
-        }
-        case 'mods':
-        default:
-          searchResults.set(mods);
-          break;
-      }
+      resultsStore.set(mods);
       
       if (result.pagination) {
         totalResults.set(result.pagination.totalResults || mods.length);
@@ -935,21 +1056,7 @@ export async function searchContent(contentType = 'mods', options = {}) {
 
       return resultData;
     } else {
-      // Clear the appropriate results store
-      switch (contentType) {
-        case 'shaders': {
-          shaderResults.set([]);
-          break;
-        }
-        case 'resourcepacks': {
-          resourcePackResults.set([]);
-          break;
-        }
-        case 'mods':
-        default:
-          searchResults.set([]);
-          break;
-      }
+      resultsStore.set([]);
       
       totalResults.set(0);
       totalPages.set(1);
@@ -978,32 +1085,24 @@ export async function searchContent(contentType = 'mods', options = {}) {
       contentTypeSwitching.set(false);
       
       // Retry the search
-      return await searchContent(contentType, options);
+      return await searchContent(contentType, { ...options, __retrying: true });
     }
 
     // Max retries reached, handle error
     searchError.set(`Search failed after ${maxRetries} retries: ${err.message || 'Unknown error'}`);
     
-    // Clear the appropriate results store
-    switch (contentType) {
-      case 'shaders': {
-        shaderResults.set([]);
-        break;
-      }
-      case 'resourcepacks': {
-        resourcePackResults.set([]);
-        break;
-      }
-      case 'mods':
-      default:
-        searchResults.set([]);
-        break;
-    }
+    getInstalledStateContext(contentType).resultsStore.set([]);
     
     return { hits: [], totalHits: 0, totalPages: 1, error: err.message };
   } finally {
     isSearching.set(false);
     contentTypeSwitching.set(false);
+
+    if (pendingSearchRequest) {
+      const queuedSearch = pendingSearchRequest;
+      pendingSearchRequest = null;
+      void searchContent(queuedSearch.contentType, queuedSearch.options);
+    }
   }
 }
 
@@ -1119,36 +1218,22 @@ export async function fetchModVersions(modId, source = 'modrinth', loadLatestOnl
  */
 async function refreshSearchResults(contentType) {
   try {
-    // Get the appropriate stores
-    let resultsStore, installedIdsStore;
-    
-    switch (contentType) {
-      case 'shaders': {
-        resultsStore = shaderResults;
-        installedIdsStore = installedShaderIds;
-        break;
-      }
-      case 'resourcepacks': {
-        resultsStore = resourcePackResults;
-        installedIdsStore = installedResourcePackIds;
-        break;
-      }
-      case 'mods':
-      default: {
-        resultsStore = searchResults;
-        installedIdsStore = installedModIds;
-        break;
-      }
-    }
-    
-    // Get current search results and installed IDs
+    const {
+      resultsStore,
+      installedIds,
+      installedInfoList,
+      installedFilesList
+    } = getInstalledStateContext(contentType);
     const currentResults = get(resultsStore);
-    const installedIds = get(installedIdsStore);
     
     // Update the isInstalled status for all results
-    const updatedResults = currentResults.map(item => ({
+    const updatedResults = currentResults.map((item) => ({
       ...item,
-      isInstalled: installedIds.has(item.id) || (item.slug && installedIds.has(item.slug))
+      isInstalled: matchesInstalledContent(item, {
+        installedIds,
+        installedInfoList,
+        installedFilesList
+      })
     }));
     
     // Update the store with refreshed results
@@ -1159,6 +1244,7 @@ async function refreshSearchResults(contentType) {
 }
 
 export async function installMod(mod, serverPath, options = {}) {
+  let trackedDownloadId = null;
   try {
     if (!mod || !mod.id) {
       throw new Error('Invalid mod data');
@@ -1228,6 +1314,14 @@ export async function installMod(mod, serverPath, options = {}) {
       expectedChecksum: mod.checksum || null,
       checksumAlgorithm: mod.checksumAlgorithm || 'sha1'
     };
+
+    trackedDownloadId = queueInstallDownload(mod, contentType, {
+      downloadId: options.downloadId,
+      source: mod.source || contentData.originalSource,
+      maxAttempts: contentData.maxRetries,
+      statusMessage: 'Queued for download...'
+    });
+    contentData.downloadId = trackedDownloadId;
     
     // Use appropriate install method based on content type
     let ipcMethod;
@@ -1290,7 +1384,9 @@ export async function installMod(mod, serverPath, options = {}) {
     }
   } catch (err) {
     // Enhanced error logging with fallback information
-    
+    if (trackedDownloadId) {
+      completeDownload(trackedDownloadId, true, err.message || 'Installation failed');
+    }
     errorMessage.set(`Failed to install mod: ${err.message}`);
     return false;
   } finally {
@@ -1440,8 +1536,12 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
  * @param {boolean} forceRefresh - Whether to bypass cache and fetch fresh data
  * @returns {Promise<Map<string, Object>>} - Map of mod names to update info
  */
-export async function checkForUpdates(serverPath, forceRefresh = false) {
+export async function checkForUpdates(serverPath, forceRefresh = false, options = {}) {
   const normalizedPath = normalizePathForUpdates(serverPath);
+  const requestedContentTypes = normalizeRequestedContentTypes(options.contentTypes);
+  const includeMods = !requestedContentTypes || requestedContentTypes.includes('mods');
+  const includeShaders = !requestedContentTypes || requestedContentTypes.includes('shaders');
+  const includeResourcePacks = !requestedContentTypes || requestedContentTypes.includes('resourcepacks');
 
   // Prevent concurrent update checks
   if (get(isCheckingUpdates)) {
@@ -1449,7 +1549,8 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     // If multiple calls arrive, prefer the more aggressive (forceRefresh) option
     pendingUpdateCheck = {
       serverPath: serverPath || (pendingUpdateCheck?.serverPath || null),
-      forceRefresh: forceRefresh || (pendingUpdateCheck?.forceRefresh || false)
+      forceRefresh: forceRefresh || (pendingUpdateCheck?.forceRefresh || false),
+      options: mergeUpdateCheckOptions(pendingUpdateCheck?.options, options)
     };
     if (normalizedPath && activeUpdateServerPath && normalizedPath !== activeUpdateServerPath) {
       updateCheckId += 1;
@@ -1483,6 +1584,17 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
 
   const updatesMap = new Map();
   const isStaleCheck = () => currentCheckId !== updateCheckId || !isCurrentModServerPath(serverPath);
+  let processedChecks = 0;
+  let totalCheckCount = 0;
+
+  const setUpdateCheckProgress = (phase = '') => {
+    updateCheckProgress.set({
+      active: totalCheckCount > 0,
+      current: Math.min(processedChecks, totalCheckCount),
+      total: totalCheckCount,
+      phase
+    });
+  };
 
   try {
     if (!serverPath || !isCurrentModServerPath(serverPath)) {
@@ -1519,20 +1631,45 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     const resourcePacksInfo = get(installedResourcePackInfo);
     const disabledModsSet = get(disabledMods);
     
-    const modsWithProjectIds = modsInfo.filter(m => m.projectId && !disabledModsSet.has(m.fileName));
-    const shadersWithProjectIds = shadersInfo.filter(s => s.projectId);
-    const resourcePacksWithProjectIds = resourcePacksInfo.filter(r => r.projectId);
+    const modsWithProjectIds = includeMods
+      ? modsInfo.filter(m => m.projectId && !disabledModsSet.has(m.fileName))
+      : [];
+    const disabledModsWithProjectIds = includeMods
+      ? modsInfo.filter(m => m.projectId && disabledModsSet.has(m.fileName))
+      : [];
+    const shadersWithProjectIds = includeShaders
+      ? shadersInfo.filter(s => s.projectId)
+      : [];
+    const resourcePacksWithProjectIds = includeResourcePacks
+      ? resourcePacksInfo.filter(r => r.projectId)
+      : [];
     
     const allContentWithProjectIds = [
       ...modsWithProjectIds.map(m => ({ ...m, contentType: 'mods' })),
       ...shadersWithProjectIds.map(s => ({ ...s, contentType: 'shaders' })),
       ...resourcePacksWithProjectIds.map(r => ({ ...r, contentType: 'resourcepacks' }))
     ];
+
+    totalCheckCount = allContentWithProjectIds.length + disabledModsWithProjectIds.length;
+    if (totalCheckCount > 0) {
+      setUpdateCheckProgress(
+        allContentWithProjectIds.length > 0 ? 'Checking installed content' : 'Checking disabled mods'
+      );
+    }
     
     if (allContentWithProjectIds.length === 0) {
       if (!isStaleCheck()) {
         modsWithUpdates.set(new Map());
-        await checkDisabledModUpdates(serverPath, updateContext);
+        if (includeMods && disabledModsWithProjectIds.length > 0) {
+          setUpdateCheckProgress('Checking disabled mods');
+        }
+        if (includeMods) {
+          await checkDisabledModUpdates(serverPath, updateContext);
+        }
+        if (!isStaleCheck() && totalCheckCount > 0) {
+          processedChecks = totalCheckCount;
+          setUpdateCheckProgress('Completed');
+        }
         try { lastUpdateCheckTime.set(Date.now()); } catch { /* ignore timestamp errors */ }
       }
       return updatesMap;
@@ -1544,27 +1681,31 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
         break;
       }
 
-      if (
-        contentInfo.contentType === 'mods' &&
-        !isInstalledBuildCompatibleWithContext(contentInfo, updateContext)
-      ) {
-        logger.info('Skipping version lookup for incompatible installed mod build', {
-          category: 'mods',
-          data: {
-            component: 'modAPI',
-            function: 'checkForUpdates',
-            modFile: contentInfo.fileName,
-            modName: contentInfo.name || null,
-            installedVersion: contentInfo.versionNumber || contentInfo.version || null,
-            minecraftVersion: updateContext.minecraftVersion || updateContext.gameVersion || null,
-            installedGameVersions: getInstalledGameVersionHints(contentInfo),
-            forceLog: true
-          }
-        });
-        continue;
-      }
-      
-      if (contentInfo.projectId) {
+      try {
+        if (
+          contentInfo.contentType === 'mods' &&
+          !isInstalledBuildCompatibleWithContext(contentInfo, updateContext)
+        ) {
+          logger.info('Skipping version lookup for incompatible installed mod build', {
+            category: 'mods',
+            data: {
+              component: 'modAPI',
+              function: 'checkForUpdates',
+              modFile: contentInfo.fileName,
+              modName: contentInfo.name || null,
+              installedVersion: contentInfo.versionNumber || contentInfo.version || null,
+              minecraftVersion: updateContext.minecraftVersion || updateContext.gameVersion || null,
+              installedGameVersions: getInstalledGameVersionHints(contentInfo),
+              forceLog: true
+            }
+          });
+          continue;
+        }
+
+        if (!contentInfo.projectId) {
+          continue;
+        }
+
         try {
           // Always fetch fresh versions to check for updates
           // This ensures we detect if a user has installed an older version
@@ -1618,6 +1759,11 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
         } catch {
           // Silently skip this content
         }
+      } finally {
+        processedChecks += 1;
+        if (!isStaleCheck() && totalCheckCount > 0) {
+          setUpdateCheckProgress('Checking installed content');
+        }
       }
     }
 
@@ -1627,7 +1773,16 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
     
     // Update the store
     modsWithUpdates.set(updatesMap);
-    await checkDisabledModUpdates(serverPath, updateContext);
+    if (includeMods && totalCheckCount > 0) {
+      setUpdateCheckProgress('Checking disabled mods');
+    }
+    if (includeMods) {
+      await checkDisabledModUpdates(serverPath, updateContext);
+    }
+    if (!isStaleCheck() && totalCheckCount > 0) {
+      processedChecks = totalCheckCount;
+      setUpdateCheckProgress('Completed');
+    }
     try { lastUpdateCheckTime.set(Date.now()); } catch { /* ignore timestamp errors */ }
     return updatesMap;
   } catch {
@@ -1638,14 +1793,19 @@ export async function checkForUpdates(serverPath, forceRefresh = false) {
   } finally {
     activeUpdateServerPath = '';
     isCheckingUpdates.set(false);
+    updateCheckProgress.set({ active: false, current: 0, total: 0, phase: '' });
     // If a check was requested while we were busy, run it now
     if (pendingUpdateCheck) {
-      const { serverPath: pendingPath, forceRefresh: pendingForce } = pendingUpdateCheck;
+      const {
+        serverPath: pendingPath,
+        forceRefresh: pendingForce,
+        options: pendingOptions
+      } = pendingUpdateCheck;
       pendingUpdateCheck = null;
       // Fire-and-forget to avoid recursive blocking; errors are handled internally
       // Use setTimeout to yield back to the event loop
       setTimeout(() => {
-        checkForUpdates(pendingPath || serverPath, pendingForce);
+        checkForUpdates(pendingPath || serverPath, pendingForce, pendingOptions);
       }, 0);
     }
   }

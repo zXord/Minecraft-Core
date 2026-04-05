@@ -393,6 +393,79 @@ try {
   });
 }
 
+function sanitizePersistedInstanceState(store) {
+  try {
+    const instances = Array.isArray(store.get('instances')) ? store.get('instances') : [];
+    const serverInstances = instances.filter((instance) => instance && instance.type === 'server' && typeof instance.path === 'string' && instance.path.trim());
+    const validServerPaths = new Set(serverInstances.map((instance) => instance.path.trim()));
+    const validInstanceConfigKeys = new Set();
+
+    for (const instance of instances) {
+      if (!instance || typeof instance !== 'object') continue;
+      if (typeof instance.id === 'string' && instance.id.trim()) {
+        validInstanceConfigKeys.add(instance.id.trim());
+      }
+      if (typeof instance.path === 'string' && instance.path.trim()) {
+        validInstanceConfigKeys.add(instance.path.trim());
+      }
+    }
+
+    const currentLastServerPath = typeof store.get('lastServerPath') === 'string'
+      ? store.get('lastServerPath').trim()
+      : '';
+    const nextLastServerPath = validServerPaths.has(currentLastServerPath)
+      ? currentLastServerPath
+      : (serverInstances[0]?.path || null);
+
+    if ((currentLastServerPath || null) !== nextLastServerPath) {
+      store.set('lastServerPath', nextLastServerPath);
+    }
+
+    const instanceConfigs = store.get('instanceConfigs');
+    if (instanceConfigs && typeof instanceConfigs === 'object' && !Array.isArray(instanceConfigs)) {
+      const sanitizedInstanceConfigs = {};
+      let changed = false;
+
+      for (const [key, value] of Object.entries(instanceConfigs)) {
+        if (validInstanceConfigKeys.has(key)) {
+          sanitizedInstanceConfigs[key] = value;
+        } else {
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        store.set('instanceConfigs', sanitizedInstanceConfigs);
+      }
+    }
+
+    const rawStore = store.store && typeof store.store === 'object' ? store.store : {};
+    for (const key of Object.keys(rawStore)) {
+      if (!key.startsWith('retentionSettings_')) {
+        continue;
+      }
+
+      const encodedPath = key.slice('retentionSettings_'.length);
+      let decodedPath = '';
+      try {
+        decodedPath = Buffer.from(encodedPath, 'base64').toString('utf8').trim();
+      } catch {
+        decodedPath = '';
+      }
+
+      if (!decodedPath || validServerPaths.has(decodedPath)) {
+        continue;
+      }
+
+      store.delete(key);
+    }
+  } catch {
+    // Ignore startup sanitation failures and keep the store accessible.
+  }
+}
+
+sanitizePersistedInstanceState(appStore);
+
 const safeStore = {
   get: (key) => {
     logger.debug('Getting store value', {

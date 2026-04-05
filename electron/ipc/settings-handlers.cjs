@@ -147,6 +147,42 @@ function getRemovedServerInstances(currentInstances, nextInstances) {
   });
 }
 
+function cleanupDeletedInstanceStoreState(instance) {
+  if (!instance || typeof instance !== 'object') {
+    return;
+  }
+
+  const instanceConfigKeys = new Set();
+  if (typeof instance.id === 'string' && instance.id.trim()) {
+    instanceConfigKeys.add(instance.id.trim());
+  }
+  if (typeof instance.path === 'string' && instance.path.trim()) {
+    instanceConfigKeys.add(instance.path.trim());
+  }
+
+  if (instanceConfigKeys.size > 0) {
+    const instanceConfigs = appStore.get('instanceConfigs');
+    if (instanceConfigs && typeof instanceConfigs === 'object' && !Array.isArray(instanceConfigs)) {
+      let changed = false;
+      const nextInstanceConfigs = { ...instanceConfigs };
+      for (const key of instanceConfigKeys) {
+        if (Object.prototype.hasOwnProperty.call(nextInstanceConfigs, key)) {
+          delete nextInstanceConfigs[key];
+          changed = true;
+        }
+      }
+      if (changed) {
+        appStore.set('instanceConfigs', nextInstanceConfigs);
+      }
+    }
+  }
+
+  if (instance.type === 'server' && typeof instance.path === 'string' && instance.path.trim()) {
+    const retentionKey = `retentionSettings_${Buffer.from(instance.path.trim()).toString('base64')}`;
+    appStore.delete(retentionKey);
+  }
+}
+
 async function cleanupServerInstanceRuntime(instance, reason = 'instance_removed') {
   if (!instance || instance.type !== 'server') {
     return {
@@ -1580,6 +1616,7 @@ function createSettingsHandlers() {
 
         appStore.set('instances', remaining);
         instanceContext.updateInstances(remaining);
+        cleanupDeletedInstanceStoreState(inst);
         
         // also clear lastServerPath if it was the deleted one
         const currentServerPath = appStore.get('lastServerPath');

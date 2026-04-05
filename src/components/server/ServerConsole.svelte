@@ -12,13 +12,20 @@
   let consoleEl;
   let autoScroll = true;
   let command = '';
+  const DEFAULT_VISIBLE_LOGS = 400;
+  const LOG_PAGE_SIZE = 300;
+  let visibleLogCount = DEFAULT_VISIBLE_LOGS;
   // Access the logs from the store
   $: serverLogs = $serverState.logs;
+  $: hiddenLogCount = Math.max(0, (serverLogs?.length || 0) - visibleLogCount);
+  $: visibleServerLogs = Array.isArray(serverLogs)
+    ? serverLogs.slice(Math.max(0, serverLogs.length - visibleLogCount))
+    : [];
   
   // Performance optimized log formatting with caching
   $: groupedLogs = (() => {
     try {
-      return LogFormatter.groupLogsByDate(serverLogs);
+      return LogFormatter.groupLogsByDate(visibleServerLogs);
     } catch (error) {
       logger.error('Error grouping logs by date', {
         category: 'ui',
@@ -30,7 +37,7 @@
         }
       });
       // Return fallback grouping
-      return { [new Date().toDateString()]: serverLogs || [] };
+      return { [new Date().toDateString()]: visibleServerLogs || [] };
     }
   })();
   
@@ -53,13 +60,13 @@
   // Optimized log formatting using efficient batch processing
   $: formattedLogs = (() => {
     try {
-      if (!Array.isArray(serverLogs)) {
+      if (!Array.isArray(visibleServerLogs)) {
         logger.warn('Server logs is not an array, using empty array', {
           category: 'ui',
           data: {
             component: 'ServerConsole',
             function: 'formattedLogs',
-            serverLogsType: typeof serverLogs
+            serverLogsType: typeof visibleServerLogs
           }
         });
         return [];
@@ -67,7 +74,7 @@
 
       if (!showDateSeparators) {
         // Single day or no logs - use batch formatting for performance
-        return LogFormatter.batchFormatLogs(serverLogs.filter(log => log !== null && log !== undefined));
+        return LogFormatter.batchFormatLogs(visibleServerLogs.filter(log => log !== null && log !== undefined));
       }
       
       // Multiple days - use optimized separator creation
@@ -83,9 +90,40 @@
         }
       });
       // Ultimate fallback - return raw logs or empty array
-      return Array.isArray(serverLogs) ? serverLogs.filter(log => log !== null && log !== undefined) : [];
+      return Array.isArray(visibleServerLogs) ? visibleServerLogs.filter(log => log !== null && log !== undefined) : [];
     }
   })();
+
+  function loadOlderLogs() {
+    autoScroll = false;
+    const previousScrollHeight = consoleEl?.scrollHeight || 0;
+    visibleLogCount = Math.min((serverLogs?.length || 0), visibleLogCount + LOG_PAGE_SIZE);
+
+    requestAnimationFrame(() => {
+      if (!consoleEl) {
+        return;
+      }
+
+      const nextScrollHeight = consoleEl.scrollHeight || 0;
+      const scrollDelta = Math.max(0, nextScrollHeight - previousScrollHeight);
+      consoleEl.scrollTop += scrollDelta;
+    });
+  }
+
+  function jumpToLatestLogs() {
+    visibleLogCount = DEFAULT_VISIBLE_LOGS;
+    autoScroll = true;
+
+    requestAnimationFrame(() => {
+      if (consoleEl) {
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+      }
+    });
+  }
+
+  $: if (autoScroll && visibleLogCount !== DEFAULT_VISIBLE_LOGS) {
+    visibleLogCount = DEFAULT_VISIBLE_LOGS;
+  }
   
   function onConsoleScroll() {
     try {
@@ -270,6 +308,17 @@
   
   <!-- Scrollable console content -->
   <div class="scrollable-console" bind:this={consoleEl} on:scroll={onConsoleScroll}>
+    {#if hiddenLogCount > 0}
+      <div class="console-toolbar">
+        <button type="button" class="console-toolbar-button" on:click={loadOlderLogs}>
+          Load Older Logs ({hiddenLogCount})
+        </button>
+        <button type="button" class="console-toolbar-button secondary" on:click={jumpToLatestLogs}>
+          Jump To Latest
+        </button>
+      </div>
+    {/if}
+
     <!-- Visible log lines -->
     {#if !formattedLogs || formattedLogs.length === 0}
       <div class="console-line console-empty">
@@ -351,6 +400,36 @@
     /* Ensure content stays within bounds */
     overflow-x: hidden;
   }
+
+  .console-toolbar {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.95), rgba(0, 0, 0, 0.78));
+    padding-bottom: 0.5rem;
+  }
+
+  .console-toolbar-button {
+    border: 1px solid rgba(96, 165, 250, 0.35);
+    background: rgba(30, 41, 59, 0.9);
+    color: #dbeafe;
+    border-radius: 4px;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+
+  .console-toolbar-button.secondary {
+    border-color: rgba(148, 163, 184, 0.35);
+    color: #cbd5e1;
+  }
+
+  .console-toolbar-button:hover {
+    background: rgba(37, 99, 235, 0.35);
+  }
   
   /* Individual console lines */
   .console-line {
@@ -392,6 +471,10 @@
     .scrollable-console {
       font-size: 0.8rem;
       padding: 8px;
+    }
+
+    .console-toolbar {
+      flex-wrap: wrap;
     }
     
     .console-line.date-separator {

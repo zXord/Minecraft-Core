@@ -116,7 +116,12 @@
   }
 
   // Computes download state
-  $: activeDownloads = Object.values($downloads).filter((d) => isInProgress(d));
+  $: queuedDownloads = Object.values($downloads).filter(
+    (d) => d.state === DOWNLOAD_STATES.QUEUED,
+  );
+  $: activeDownloads = Object.values($downloads).filter(
+    (d) => isInProgress(d) && d.state !== DOWNLOAD_STATES.QUEUED,
+  );
   $: completedDownloads = Object.values($downloads).filter(
     (d) => d.state === DOWNLOAD_STATES.COMPLETED,
   );
@@ -418,6 +423,12 @@
           <span class="downloads-title">Downloads</span>
 
           <div class="download-counts">
+            {#if queuedDownloads.length > 0}
+              <span class="download-count queued" title="Pending downloads">
+                {queuedDownloads.length}
+              </span>
+            {/if}
+
             {#if activeDownloads.length > 0}
               <span class="download-count active" title="Active downloads">
                 {activeDownloads.length}
@@ -793,6 +804,11 @@
 
   .download-count.active {
     background-color: #2196f3;
+    color: white;
+  }
+
+  .download-count.queued {
+    background-color: #f59e0b;
     color: white;
   }
 

@@ -1,5 +1,6 @@
 // Mod API service functions
 const fetch = require('node-fetch');
+const { setMaxListeners } = require('node:events');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 
 // Initialize logger
@@ -16,6 +17,17 @@ function getVersionCacheTtlMs() {
   return VERSION_CACHE_TTL_MS;
 }
 let lastRequestTime = 0;
+
+function createAbortControllerWithTimeout(timeoutMs) {
+  const controller = new AbortController();
+  try {
+    setMaxListeners(25, controller.signal);
+  } catch {
+    // Ignore listener-limit tuning failures and keep the request flow working.
+  }
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  return { controller, timeoutId };
+}
 
 // Performance tracking
 let performanceMetrics = {
@@ -378,8 +390,7 @@ async function getModrinthPopular({ loader, version, page = 1, limit = 20, sortB
   });
   // Execute request with retry logic
   const data = await retryWithBackoff(async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 10 second timeout
+    const { controller, timeoutId } = createAbortControllerWithTimeout(20000);
     
     try {
       const response = await fetch(url.toString(), {
@@ -553,8 +564,7 @@ async function searchModrinthMods({ query, loader, version, page = 1, limit = 20
   url.searchParams.append('index', modrinthSortBy);  // For newer API versions
   // Execute request with retry logic
   const data = await retryWithBackoff(async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 10 second timeout
+    const { controller, timeoutId } = createAbortControllerWithTimeout(20000);
     
     try {
       const response = await fetch(url.toString(), {
@@ -752,8 +762,7 @@ async function getModrinthProjectInfo(projectId) {
   await rateLimit();
   
   return await retryWithBackoff(async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 10 second timeout
+    const { controller, timeoutId } = createAbortControllerWithTimeout(20000);
     
     try {
       const response = await fetch(`${MODRINTH_API}/project/${projectId}`, {
@@ -942,8 +951,7 @@ async function getModrinthVersions(projectId, loader, gameVersion, loadLatestOnl
   // Wrap the API call in retry logic
   const versions = await retryWithBackoff(async () => {
     // Add timeout to prevent hanging
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // Increased to 15 second timeout
+    const { controller, timeoutId } = createAbortControllerWithTimeout(15000);
     
     try {
       const response = await fetch(`${MODRINTH_API}/project/${projectId}/version`, {
@@ -1524,8 +1532,7 @@ async function getModrinthVersionInfo(projectId, versionId, gameVersion, loader)
   await rateLimit();
   
   return await retryWithBackoff(async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 10 second timeout
+    const { controller, timeoutId } = createAbortControllerWithTimeout(20000);
     
     try {
       const response = await fetch(`${MODRINTH_API}/version/${versionId}`, {
@@ -1626,8 +1633,7 @@ async function getModrinthVersionByFileHash(hashHex, algorithm = 'sha1') {
   if (!hashHex) return null;
   await rateLimit();
   return await retryWithBackoff(async () => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const { controller, timeoutId } = createAbortControllerWithTimeout(20000);
     try {
       const response = await fetch(`${MODRINTH_API}/version_file/${hashHex}?algorithm=${algorithm}`, {
         signal: controller.signal

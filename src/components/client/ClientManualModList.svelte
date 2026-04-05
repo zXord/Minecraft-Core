@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { get } from 'svelte/store'; // Import get
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
@@ -12,9 +12,10 @@
   export let refreshTrigger = 0; // Prop to trigger refresh when acknowledgments change  
   export let modSyncStatus = null;
   export let clientModVersionUpdates = null; // Client mod version updates from server compatibility check
+  export let startCollapsed = false;
   
   let mods = [];
-  let loading = true;
+  let loading = !startCollapsed;
   let error = '';
   let checkingUpdates = false;
   let updatingMods= new SvelteSet();
@@ -23,31 +24,142 @@
   
   // Track which mods are currently being toggled
   let togglingMods= new SvelteSet();
+  let renderedMods = [];
+  let renderLimit = 0;
+  let renderFrame = null;
+  let lastRenderedModsRef = null;
+  let lastRenderedModsLength = -1;
+  let manualModsLoadRequestId = 0;
+  let lastManualModsReloadKey = '';
+  let sectionExpanded = !startCollapsed;
+  let lastAppliedStartCollapsed = startCollapsed;
 
-  onMount(async () => {
-    await loadManualMods();
-  });  // React to clientPath changes
-  $: if (clientPath) {
-    loadManualMods();
+  const INITIAL_RENDER_COUNT = 80;
+  const RENDER_CHUNK_SIZE = 80;
+
+  function normalizeManualModKey(fileName = '') {
+    return String(fileName || '').toLowerCase();
   }
-    // React to serverManagedFiles changes - this fixes the duplicate mods issue
-  $: if ($serverManagedFiles) {
-    loadManualMods();
+
+  function buildManagedFilesSignature(managedFiles) {
+    return Array.from(managedFiles || [])
+      .map(normalizeManualModKey)
+      .sort()
+      .join('|');
   }
-  
-  // React to acknowledgment changes - this fixes the transition after acknowledgment
-  $: if (refreshTrigger > 0) {
-    loadManualMods();
+
+  function buildManualModRemovalSignature(status) {
+    return (status?.clientModChanges?.removals || [])
+      .map((removal) => [
+        removal?.action || '',
+        removal?.wasRequired ? '1' : '0',
+        normalizeManualModKey(removal?.fileName || '')
+      ].join(':'))
+      .sort()
+      .join('|');
   }
-  // React to modSyncStatus changes - catches acknowledgment state changes
-  $: if (modSyncStatus) {
-    loadManualMods();
+
+  function cancelScheduledRender() {
+    if (renderFrame !== null) {
+      cancelAnimationFrame(renderFrame);
+      renderFrame = null;
+    }
   }
+
+  function scheduleProgressiveRender() {
+    if (!sectionExpanded) {
+      renderLimit = 0;
+      return;
+    }
+
+    cancelScheduledRender();
+
+    const sourceMods = Array.isArray(mods) ? mods : [];
+    const totalMods = sourceMods.length;
+    renderLimit =
+      totalMods > INITIAL_RENDER_COUNT ? INITIAL_RENDER_COUNT : totalMods;
+
+    if (renderLimit >= totalMods) {
+      return;
+    }
+
+    const pump = () => {
+      if (sourceMods !== mods) {
+        return;
+      }
+
+      renderLimit = Math.min(
+        totalMods,
+        renderLimit + RENDER_CHUNK_SIZE
+      );
+
+      if (renderLimit < totalMods) {
+        renderFrame = requestAnimationFrame(pump);
+      } else {
+        renderFrame = null;
+      }
+    };
+
+    renderFrame = requestAnimationFrame(pump);
+  }
+
+  $: clientModVersionUpdateByFile = new Map(
+    (clientModVersionUpdates?.updates || [])
+      .filter(update => update?.fileName)
+      .map(update => [normalizeManualModKey(update.fileName), update])
+  );
+
+  $: manualModsReloadKey = clientPath
+    ? [
+        clientPath,
+        refreshTrigger,
+        buildManagedFilesSignature($serverManagedFiles),
+        buildManualModRemovalSignature(modSyncStatus)
+      ].join('::')
+    : '';
+
+  $: if (sectionExpanded && manualModsReloadKey && manualModsReloadKey !== lastManualModsReloadKey) {
+    lastManualModsReloadKey = manualModsReloadKey;
+    void loadManualMods();
+  }
+
+  $: if (
+    mods !== lastRenderedModsRef
+    || (Array.isArray(mods) ? mods.length : 0) !== lastRenderedModsLength
+  ) {
+    lastRenderedModsRef = mods;
+    lastRenderedModsLength = Array.isArray(mods) ? mods.length : 0;
+    scheduleProgressiveRender();
+  }
+
+  $: renderedMods = Array.isArray(mods) ? mods.slice(0, renderLimit) : [];
+
+  $: if (startCollapsed !== lastAppliedStartCollapsed) {
+    lastAppliedStartCollapsed = startCollapsed;
+    sectionExpanded = !startCollapsed;
+    if (!sectionExpanded) {
+      cancelScheduledRender();
+      renderLimit = 0;
+    } else {
+      scheduleProgressiveRender();
+      if (manualModsReloadKey && manualModsReloadKey !== lastManualModsReloadKey) {
+        lastManualModsReloadKey = manualModsReloadKey;
+        void loadManualMods();
+      }
+    }
+  }
+
+  onDestroy(() => {
+    cancelScheduledRender();
+  });
+
   async function loadManualMods() {
     if (!clientPath) {
       return;
     }
-      loading = true;
+
+    const requestId = ++manualModsLoadRequestId;
+    loading = true;
     error = '';
     
     try {
@@ -58,6 +170,11 @@
         clientPath,
         serverManagedFiles: Array.from(managedFilesSet) // Convert Set to Array for IPC
       });
+
+      if (requestId !== manualModsLoadRequestId) {
+        return;
+      }
+
       if (result.success) {
         // Filter out server-managed mods entirely
         // Also filter out mods that are awaiting acknowledgment (they should only appear in required mods section)
@@ -72,7 +189,9 @@
           (modSyncStatus?.clientModChanges?.removals || [])
             .filter((r: any) => r.action === 'remove_needed' && r.wasRequired === true)
             .map((r: any) => r.fileName.toLowerCase())
-        );mods = result.mods.filter(m => {
+        );
+
+        mods = result.mods.filter(m => {
           const lower = m.fileName.toLowerCase();
           const isServerManaged = managedFilesSet.has(lower);
           const needsAck = pendingAckSet.has(lower);
@@ -88,9 +207,14 @@
         error = result.error || 'Failed to load manual mods';
       }
     } catch (err) {
+      if (requestId !== manualModsLoadRequestId) {
+        return;
+      }
       error = err.message || 'Failed to load manual mods';
     } finally {
-      loading = false;
+      if (requestId === manualModsLoadRequestId) {
+        loading = false;
+      }
     }
   }
 
@@ -113,9 +237,15 @@
         serverManagedFiles: Array.from(managedFiles) // Pass the server managed files
       });
       if (result.success) {
+        const updateByFile = new Map(
+          (result.updates || [])
+            .filter((update: any) => update?.fileName)
+            .map((update: any) => [normalizeManualModKey(update.fileName), update])
+        );
+
         // Update mods with update information
         mods = mods.map((mod: any) => {
-          const updateInfo = result.updates.find((u: any) => u.fileName === mod.fileName);
+          const updateInfo = updateByFile.get(normalizeManualModKey(mod.fileName));
           if (updateInfo) {
             return {
               ...mod,
@@ -225,11 +355,7 @@
 
   // Helper function to get client mod version update info for a mod
   function getClientModVersionUpdate(mod) {
-    if (!clientModVersionUpdates?.updates) return null;
-    
-    return clientModVersionUpdates.updates.find(update => 
-      update.fileName.toLowerCase() === mod.fileName.toLowerCase()
-    );
+    return clientModVersionUpdateByFile.get(normalizeManualModKey(mod?.fileName)) || null;
   }
 
   // Function to handle toggle completion (called from parent)
@@ -271,11 +397,28 @@
                 
                 <!-- Check Updates button within header -->
                 <div class="header-actions">
+                  {#if mods.length > 0}
+                    <span class="section-count">{mods.length} mod{mods.length === 1 ? '' : 's'}</span>
+                  {/if}
+                  <button
+                    class="header-btn secondary"
+                    on:click={() => {
+                      sectionExpanded = !sectionExpanded;
+                      if (sectionExpanded && manualModsReloadKey && manualModsReloadKey !== lastManualModsReloadKey) {
+                        lastManualModsReloadKey = manualModsReloadKey;
+                        loading = true;
+                        void loadManualMods();
+                      }
+                    }}
+                    aria-expanded={sectionExpanded}
+                  >
+                    {sectionExpanded ? 'Hide List' : 'Show List'}
+                  </button>
                   <button 
                     class="header-btn" 
                     on:click={checkForUpdates}
-                    disabled={checkingUpdates}
-                    title={checkingUpdates ? 'Checking for updates...' : 'Check for Updates'}
+                    disabled={checkingUpdates || !sectionExpanded}
+                    title={!sectionExpanded ? 'Show the list before checking updates' : checkingUpdates ? 'Checking for updates...' : 'Check for Updates'}
                   >
                     {checkingUpdates ? '⏳' : '🔄'} Check Updates
                   </button>
@@ -285,7 +428,7 @@
           </tr>
           
           <!-- Column headers -->
-          {#if mods.length > 0}
+          {#if mods.length > 0 && sectionExpanded}
             <tr class="column-headers">
               <th>Mod Name</th>
               <th class="status">Status</th>
@@ -295,92 +438,102 @@
             </tr>
           {/if}
         </thead>
-        <tbody>
-          {#each mods as mod (mod.fileName)}
-            <tr class:disabled={!mod.enabled}>
-              
-              <!-- Mod Name -->
-              <td>
-                <div class="mod-name-cell">
-                  <strong>{mod.name || mod.fileName}</strong>
-                </div>
-              </td>
-
-              <!-- Status -->
-              <td class="status">
-                {#if $serverManagedFiles.has(mod.fileName.toLowerCase())}
-                  <span class="tag server">🔒 Server</span>
-                {:else}
-                  <span class="tag {mod.enabled ? 'ok' : 'disabled'}">
-                    {mod.enabled ? 'Enabled' : 'Disabled'}
-                  </span>
-                {/if}
-              </td>
-
-              <!-- Version -->
-              <td class="ver">
-                {#if getClientModVersionUpdate(mod)}
-                  {@const updateInfo = getClientModVersionUpdate(mod)}
-                  <div class="version-update">
-                    <code class="current-ver">{mod.version || 'Unknown'}</code>
-                    <span class="version-arrow">→</span>
-                    <code class="new-ver">{updateInfo.newVersion}</code>
+        {#if sectionExpanded}
+          <tbody>
+            {#each renderedMods as mod (mod.fileName)}
+              <tr class:disabled={!mod.enabled}>
+                
+                <!-- Mod Name -->
+                <td>
+                  <div class="mod-name-cell">
+                    <strong>{mod.name || mod.fileName}</strong>
                   </div>
-                {:else if mod.version}
-                  <code>{mod.version}</code>
-                {:else}
-                  <span class="no-version">—</span>
-                {/if}
-              </td>
+                </td>
 
-              <!-- Update -->
-              <td class="upd">
-                {#if getClientModVersionUpdate(mod)}
-                  <button class="tag new clickable" 
-                          on:click={() => {}}
-                          title="Update for MC {clientModVersionUpdates.minecraftVersion}">
-                    ↑ Client Update
-                  </button>
-                {:else if mod.hasUpdate}
-                  <button class="tag new clickable" 
-                          on:click={() => updateMod(mod)}
-                          disabled={updatingMods.has(mod.fileName)}
-                          title="Update to {mod.latestVersion}">
-                    {updatingMods.has(mod.fileName) ? '⏳' : '↑'} {mod.latestVersion}
-                  </button>
-                {:else}
-                  <span class="tag ok">Up to date</span>
-                {/if}
-              </td>
+                <!-- Status -->
+                <td class="status">
+                  {#if $serverManagedFiles.has(mod.fileName.toLowerCase())}
+                    <span class="tag server">🔒 Server</span>
+                  {:else}
+                    <span class="tag {mod.enabled ? 'ok' : 'disabled'}">
+                      {mod.enabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  {/if}
+                </td>
 
-              <!-- Actions -->
-              <td class="act">
-                {#if !$serverManagedFiles.has(mod.fileName.toLowerCase())}
-                  <div class="action-group">
-                    {#if togglingMods.has(mod.fileName)}
-                      <button class="toggle sm loading" disabled title="Processing...">
-                        ⏳ Loading...
+                <!-- Version -->
+                <td class="ver">
+                  {#if getClientModVersionUpdate(mod)}
+                    {@const updateInfo = getClientModVersionUpdate(mod)}
+                    <div class="version-update">
+                      <code class="current-ver">{mod.version || 'Unknown'}</code>
+                      <span class="version-arrow">→</span>
+                      <code class="new-ver">{updateInfo.newVersion}</code>
+                    </div>
+                  {:else if mod.version}
+                    <code>{mod.version}</code>
+                  {:else}
+                    <span class="no-version">—</span>
+                  {/if}
+                </td>
+
+                <!-- Update -->
+                <td class="upd">
+                  {#if getClientModVersionUpdate(mod)}
+                    <button class="tag new clickable" 
+                            on:click={() => {}}
+                            title="Update for MC {clientModVersionUpdates.minecraftVersion}">
+                      ↑ Client Update
+                    </button>
+                  {:else if mod.hasUpdate}
+                    <button class="tag new clickable" 
+                            on:click={() => updateMod(mod)}
+                            disabled={updatingMods.has(mod.fileName)}
+                            title="Update to {mod.latestVersion}">
+                      {updatingMods.has(mod.fileName) ? '⏳' : '↑'} {mod.latestVersion}
+                    </button>
+                  {:else}
+                    <span class="tag ok">Up to date</span>
+                  {/if}
+                </td>
+
+                <!-- Actions -->
+                <td class="act">
+                  {#if !$serverManagedFiles.has(mod.fileName.toLowerCase())}
+                    <div class="action-group">
+                      {#if togglingMods.has(mod.fileName)}
+                        <button class="toggle sm loading" disabled title="Processing...">
+                          ⏳ Loading...
+                        </button>
+                      {:else}
+                      <button class="toggle sm" 
+                              class:primary={!mod.enabled}
+                              class:warn={mod.enabled}
+                              on:click={() => toggleMod(mod)}
+                              title={mod.enabled ? 'Disable mod' : 'Enable mod'}>
+                        {mod.enabled ? 'Disable' : 'Enable'}
                       </button>
-                    {:else}
-                    <button class="toggle sm" 
-                            class:primary={!mod.enabled}
-                            class:warn={mod.enabled}
-                            on:click={() => toggleMod(mod)}
-                            title={mod.enabled ? 'Disable mod' : 'Enable mod'}>
-                      {mod.enabled ? 'Disable' : 'Enable'}
-                    </button>
-                    {/if}
-                    <button class="danger sm" on:click={() => promptRemove(mod)} title="Remove mod">
-                      🗑️
-                    </button>
-                  </div>
-                {:else}
-                  <span class="server-tag">Server Managed</span>
-                {/if}
+                      {/if}
+                      <button class="danger sm" on:click={() => promptRemove(mod)} title="Remove mod">
+                        🗑️
+                      </button>
+                    </div>
+                  {:else}
+                    <span class="server-tag">Server Managed</span>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        {:else if mods.length > 0}
+          <tbody>
+            <tr class="collapsed-state">
+              <td colspan="5">
+                List hidden to keep large modpacks responsive. Use "Show List" when needed.
               </td>
             </tr>
-          {/each}
-        </tbody>
+          </tbody>
+        {/if}
         
         <!-- Empty state as table row -->
         {#if mods.length === 0}
@@ -463,6 +616,17 @@
     position: absolute;
     top: 0;
     right: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .section-count {
+    color: #cbd5e1;
+    font-size: 0.78rem;
+    font-weight: 600;
   }
 
   .header-btn {
@@ -480,6 +644,23 @@
 
   .header-btn:hover:not(:disabled) {
     background-color: #4b5563;
+  }
+
+  .header-btn.secondary {
+    background-color: rgba(15, 23, 42, 0.7);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+  }
+
+  .header-btn.secondary:hover:not(:disabled) {
+    background-color: rgba(30, 41, 59, 0.85);
+  }
+
+  .collapsed-state td {
+    text-align: center;
+    color: #9ca3af;
+    font-size: 0.8rem;
+    padding: 0.8rem;
+    background: rgba(17, 24, 39, 0.4);
   }
 
   .header-btn:disabled {

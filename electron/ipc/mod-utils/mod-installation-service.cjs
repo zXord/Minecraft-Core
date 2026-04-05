@@ -519,7 +519,7 @@ async function installModToServer(win, serverPath, modDetails) {
         }
       });
 
-      const downloadId = `mod-${modDetails.id}-${Date.now()}`;
+      const downloadId = modDetails.downloadId || `mod-${modDetails.id}-${Date.now()}`;
 
       if (win && win.webContents) {
         win.webContents.send('download-progress', { id: downloadId, name: modDetails.name, progress: 0, speed: 0, completed: false, error: null });
@@ -1175,7 +1175,7 @@ async function installModToClient(win, modData) {
   const fileName = sanitizedFileName;
       targetPath = path.join(clientModsDir, fileName);
 
-      const downloadId = `client-mod-${modData.id}-${Date.now()}`;
+      const downloadId = modData.downloadId || `client-mod-${modData.id}-${Date.now()}`;
 
       logger.info('Starting client mod download', {
         category: 'network',

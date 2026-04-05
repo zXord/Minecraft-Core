@@ -16,6 +16,14 @@
     installedResourcePackInfo
   } from '../../../stores/modStore.js';
   import { onMount } from 'svelte';
+  import {
+    matchesInstalledContent,
+    findInstalledContentEntry
+  } from '../../../utils/mods/modAPI.js';
+  import {
+    buildSearchCardVersionSelectionContext,
+    resolveSearchCardVersionSelection
+  } from '../../../utils/mods/searchVersionSelection.js';
   
   // Props
   export let mod = {};
@@ -30,6 +38,7 @@
   
   // Local state
   let selectedVersionId = mod.selectedVersionId || installedVersionId;
+  let manualSelectionContextKey = '';
   let filteredVersions = [];
   let unfilteredVersions = []; // To store all versions
   let hasUpdate = false; // Add variable declaration for update status
@@ -41,17 +50,7 @@
   
   let groupedVersions = {}; // Versions grouped by Minecraft version
   let expandedMcVersions = new SvelteSet(); // Track which MC versions are expanded
-  // Helper to normalize names/ids for fuzzy matching
-  function normalizeName(str) {
-    if (!str || typeof str !== 'string') return '';
-    return str
-      .toLowerCase()
-      .replace(/\.(zip|jar)$/g, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '');
-  }
-
-  // Determine installed status based on active content type (with fallbacks for shaders/resource packs)
+  // Determine installed status based on active content type with shared matching rules.
   $: {
     let installedIds;
     let installedInfoList;
@@ -75,35 +74,13 @@
         break;
     }
 
-    // Primary: direct id/slug match in installed IDs
-    let installed = installedIds.has(mod.id) || (mod.slug && installedIds.has(mod.slug));
-
-    // Fallbacks for shaders/resource packs where IDs may be missing in installed set
-    if (!installed && installedInfoList && installedInfoList.length > 0) {
-      const targetSlug = normalizeName(mod.slug || '');
-      const targetName = normalizeName(mod.name || mod.title || '');
-      installed = installedInfoList.some((info) => {
-        const infoById = info.projectId && (info.projectId === mod.id);
-        if (infoById) return true;
-        const infoName = normalizeName(info.name || info.fileName || '');
-        return (targetSlug && infoName === targetSlug) || (targetName && infoName === targetName);
-      });
-    }
-
-    // Fallback to filename-only match when no info list (common for shaders/resourcepacks)
-    if (!installed && installedFileList && installedFileList.length > 0 && ($activeContentType !== CONTENT_TYPES.MODS)) {
-      const installedBaseNames = installedFileList.map((f) => normalizeName(f));
-      const targetSlug = normalizeName(mod.slug || '');
-      const targetName = normalizeName(mod.name || mod.title || '');
-      if (targetSlug) {
-        installed = installedBaseNames.includes(targetSlug);
-      }
-      if (!installed && targetName) {
-        installed = installedBaseNames.includes(targetName);
-      }
-    }
-
-    isInstalled = installed;
+    isInstalled = Boolean(
+      mod.isInstalled || matchesInstalledContent(mod, {
+        installedIds,
+        installedInfoList,
+        installedFilesList: installedFileList
+      })
+    );
   }
   $: isInstalling = $installingModIds.has(mod.id);
   $: isChangingVersion = isInstalled && selectedVersionId && selectedVersionId !== installedVersionId;
@@ -124,9 +101,55 @@
         installedInfoStore = $installedModInfo;
         break;
     }
-    installedModData = installedInfoStore.find(info => info.projectId === mod.id);
+    installedModData = findInstalledContentEntry(mod, {
+      installedInfoList: installedInfoStore
+    });
   }
   $: installedVersionNumber = installedModData?.versionNumber || '';
+
+  function syncSelectedVersionMetadata(versionId) {
+    selectedVersionId = versionId || '';
+    mod.selectedVersionId = selectedVersionId || undefined;
+
+    const selectedVersion = (versions || []).find((version) => version && version.id === selectedVersionId);
+    if (selectedVersion) {
+      mod.selectedVersionName = selectedVersion.name;
+      mod.selectedVersionNumber = selectedVersion.versionNumber;
+    } else {
+      delete mod.selectedVersionName;
+      delete mod.selectedVersionNumber;
+    }
+  }
+
+  $: versionSelectionContextKey = buildSearchCardVersionSelectionContext({
+    modId: mod.id,
+    activeContentType: $activeContentType,
+    filterMinecraftVersion,
+    installedVersionId,
+    versions
+  });
+
+  $: if (versions.length > 0) {
+    const resolvedSelection = resolveSearchCardVersionSelection({
+      versions,
+      filterMinecraftVersion,
+      installedVersionId,
+      isInstalled,
+      currentSelectedVersionId: selectedVersionId,
+      manualSelectionContextKey,
+      selectionContextKey: versionSelectionContextKey
+    });
+
+    if (resolvedSelection.manualSelectionContextKey !== manualSelectionContextKey) {
+      manualSelectionContextKey = resolvedSelection.manualSelectionContextKey;
+    }
+
+    if (resolvedSelection.selectedVersionId !== selectedVersionId) {
+      syncSelectedVersionMetadata(resolvedSelection.selectedVersionId);
+    } else if (selectedVersionId && mod.selectedVersionId !== selectedVersionId) {
+      syncSelectedVersionMetadata(selectedVersionId);
+    }
+  }
   
   // Get update information if available - check both ways: direct mod ID and installed mod's filename
   $: {
@@ -313,25 +336,6 @@
     return selectBestVersion(allVersions);
   }
 
-  // When versions change, try to auto-select the best version
-  $: if (versions.length > 0 && !selectedVersionId) {
-    // If we're installed, try to select the installed version first
-    if (isInstalled && installedVersionId) {
-      const installedVersion = versions.find(v => v.id === installedVersionId);
-      if (installedVersion) {
-        selectedVersionId = installedVersionId;
-      } else {
-        // Use all versions to find the best one (not filtered by MC version)
-        selectedVersionId = selectBestVersionForFilter(versions);
-      }
-    } else {
-      // Use all versions to find the best one (not filtered by MC version)
-      selectedVersionId = selectBestVersionForFilter(versions);
-    }
-    // Also update the mod object
-    mod.selectedVersionId = selectedVersionId;
-  }
-  
   /**
    * Select the best version based on MC version (highest first), then stability and release date
    * @param {Array} versions - Available versions
@@ -402,10 +406,8 @@
    * @param {Object} version - Selected version
    */
   function selectVersion(version) {
-    selectedVersionId = version.id;
-    mod.selectedVersionId = version.id;
-    mod.selectedVersionName = version.name;
-    mod.selectedVersionNumber = version.versionNumber;
+    manualSelectionContextKey = versionSelectionContextKey;
+    syncSelectedVersionMetadata(version.id);
     
     // Notify parent component
     dispatch('versionSelect', { mod, versionId: version.id });
@@ -440,8 +442,7 @@
     
     // If we have an installed version, make sure that's preselected
     if (isInstalled && installedVersionId && !selectedVersionId) {
-      selectedVersionId = installedVersionId;
-      mod.selectedVersionId = installedVersionId;
+      syncSelectedVersionMetadata(installedVersionId);
     }
     
     // If this mod is installed, check for updates

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
+const { setMaxListeners } = require('node:events');
 const { 
   installTask,
   getVersionList
@@ -35,6 +36,71 @@ const XMCL_CONFIG = {
 process.env.UNDICI_CONNECT_TIMEOUT = XMCL_CONFIG.connectionTimeout.toString();
 process.env.UNDICI_HEADERS_TIMEOUT = XMCL_CONFIG.connectionTimeout.toString();
 process.env.UNDICI_BODY_TIMEOUT = XMCL_CONFIG.connectionTimeout.toString();
+
+try {
+  setMaxListeners(XMCL_CONFIG.maxEventListeners, AbortSignal.prototype);
+} catch {
+  // Ignore listener-limit tuning failures and keep downloads working.
+}
+
+async function removePathWithRetries(targetPath, { recursive = false } = {}) {
+  if (!targetPath || !fs.existsSync(targetPath)) {
+    return false;
+  }
+
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await fs.promises.rm(targetPath, {
+        recursive,
+        force: true,
+        maxRetries: 6,
+        retryDelay: 200
+      });
+
+      if (!fs.existsSync(targetPath)) {
+        return true;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+
+  if (fs.existsSync(targetPath)) {
+    throw lastError || new Error(`Failed to remove ${targetPath}`);
+  }
+
+  return true;
+}
+
+async function clearForgeLibraryArtifacts(clientPath, minecraftVersion) {
+  const forgeRoot = path.join(clientPath, 'libraries', 'net', 'minecraftforge', 'forge');
+  if (!fs.existsSync(forgeRoot)) {
+    return [];
+  }
+
+  const clearedItems = [];
+  const entries = await fs.promises.readdir(forgeRoot, { withFileTypes: true }).catch(() => []);
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    if (!entry.name.startsWith(`${minecraftVersion}-`)) {
+      continue;
+    }
+
+    const targetPath = path.join(forgeRoot, entry.name);
+    await removePathWithRetries(targetPath, { recursive: true });
+    clearedItems.push(`Forge runtime ${entry.name}`);
+  }
+
+  return clearedItems;
+}
 
 /**
  * XMCL-based Minecraft Client Downloader
@@ -272,6 +338,51 @@ class XMCLClientDownloader {
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
   }
 
+  normalizeLoaderVersion(loaderType, loaderVersion, minecraftVersion = '') {
+    const normalizedLoader = this.normalizeLoaderType(loaderType);
+    if (loaderVersion === null || loaderVersion === undefined) {
+      return null;
+    }
+
+    const rawVersion = String(loaderVersion).trim();
+    if (!rawVersion) {
+      return null;
+    }
+
+    if (normalizedLoader !== 'forge') {
+      return rawVersion;
+    }
+
+    const normalizedMinecraftVersion = typeof minecraftVersion === 'string'
+      ? minecraftVersion.trim()
+      : '';
+
+    if (normalizedMinecraftVersion && rawVersion.startsWith(`${normalizedMinecraftVersion}-`)) {
+      return rawVersion.slice(normalizedMinecraftVersion.length + 1);
+    }
+
+    const prefixedForgeMatch = rawVersion.match(/^(\d+\.\d+(?:\.\d+)?)-(.+)$/);
+    if (prefixedForgeMatch) {
+      const [, detectedMinecraftVersion, forgeVersion] = prefixedForgeMatch;
+      if (!normalizedMinecraftVersion || detectedMinecraftVersion === normalizedMinecraftVersion) {
+        return forgeVersion;
+      }
+    }
+
+    return rawVersion;
+  }
+
+  areLoaderVersionsEquivalent(loaderType, leftVersion, rightVersion, minecraftVersion = '') {
+    const left = this.normalizeLoaderVersion(loaderType, leftVersion, minecraftVersion);
+    const right = this.normalizeLoaderVersion(loaderType, rightVersion, minecraftVersion);
+
+    if (!left || !right) {
+      return left === right;
+    }
+
+    return left === right;
+  }
+
   compareVersions(a, b) {
     const toParts = (value) => {
       const [mainRaw, preRaw] = String(value || '').split('-', 2);
@@ -329,14 +440,18 @@ class XMCLClientDownloader {
 
     const requested = requestedVersion ? String(requestedVersion).trim() : '';
     if (requested && requested.toLowerCase() !== 'latest') {
-      return requested;
+      return this.normalizeLoaderVersion(normalizedLoader, requested, minecraftVersion);
     }
 
     try {
       const versions = await getLoaderVersions(normalizedLoader, minecraftVersion);
-      return versions[0] || requested || null;
+      return this.normalizeLoaderVersion(
+        normalizedLoader,
+        versions[0] || requested || null,
+        minecraftVersion
+      );
     } catch {
-      return requested || null;
+      return this.normalizeLoaderVersion(normalizedLoader, requested || null, minecraftVersion);
     }
   }
 
@@ -354,21 +469,20 @@ class XMCLClientDownloader {
       }
 
       if (name.startsWith('net.minecraftforge:fmlloader:')) {
+        const rawVersion = name.split(':')[2] || null;
+        const baseVersion = versionJson.inheritsFrom || versionId || '';
         return {
           loaderType: 'forge',
-          loaderVersion: name.split(':')[2] || null
+          loaderVersion: this.normalizeLoaderVersion('forge', rawVersion, baseVersion)
         };
       }
 
       if (name.startsWith('net.minecraftforge:forge:')) {
         const rawVersion = name.split(':')[2] || '';
         const baseVersion = versionJson.inheritsFrom || versionId || '';
-        const normalizedVersion = baseVersion && rawVersion.startsWith(`${baseVersion}-`)
-          ? rawVersion.slice(baseVersion.length + 1)
-          : rawVersion;
         return {
           loaderType: 'forge',
-          loaderVersion: normalizedVersion || rawVersion || null
+          loaderVersion: this.normalizeLoaderVersion('forge', rawVersion, baseVersion)
         };
       }
     }
@@ -434,8 +548,18 @@ class XMCLClientDownloader {
 
       const rankedProfiles = (preferredProfiles.length > 0 ? preferredProfiles : loaderProfiles).slice().sort((a, b) => {
         if (!!requestedLoaderVersion) {
-          const aMatches = a.loaderVersion === requestedLoaderVersion ? 1 : 0;
-          const bMatches = b.loaderVersion === requestedLoaderVersion ? 1 : 0;
+          const aMatches = this.areLoaderVersionsEquivalent(
+            requestedLoader,
+            a.loaderVersion,
+            requestedLoaderVersion,
+            minecraftVersion
+          ) ? 1 : 0;
+          const bMatches = this.areLoaderVersionsEquivalent(
+            requestedLoader,
+            b.loaderVersion,
+            requestedLoaderVersion,
+            minecraftVersion
+          ) ? 1 : 0;
           if (aMatches !== bMatches) {
             return aMatches - bMatches;
           }
@@ -1020,7 +1144,7 @@ class XMCLClientDownloader {
         const loaderMismatch =
           installedLoaderVersion &&
           resolvedLoaderVersion &&
-          installedLoaderVersion !== resolvedLoaderVersion;
+          !this.areLoaderVersionsEquivalent(loaderType, installedLoaderVersion, resolvedLoaderVersion, version);
         const loaderMissing = !installedLoaderVersion || installedLoaderType !== loaderType;
         if (loaderMissing || loaderMismatch) {
           synchronized = false;
@@ -1263,7 +1387,7 @@ class XMCLClientDownloader {
       if (minecraftVersion) {
         const versionDir = path.join(versionsDir, minecraftVersion);
         if (fs.existsSync(versionDir)) {
-          fs.rmSync(versionDir, { recursive: true, force: true });
+          await removePathWithRetries(versionDir, { recursive: true });
           clearedItems.push(`${minecraftVersion} core files`);
         }
         
@@ -1278,11 +1402,16 @@ class XMCLClientDownloader {
             ) {
               const fabricDir = path.join(versionsDir, version);
               if (fs.existsSync(fabricDir)) {
-                fs.rmSync(fabricDir, { recursive: true, force: true });
+                await removePathWithRetries(fabricDir, { recursive: true });
                 clearedItems.push(`${version} loader profile`);
               }
             }
           }
+        }
+
+        const clearedForgeArtifacts = await clearForgeLibraryArtifacts(clientPath, minecraftVersion);
+        if (clearedForgeArtifacts.length > 0) {
+          clearedItems.push(...clearedForgeArtifacts);
         }
       }
       
@@ -1310,7 +1439,7 @@ class XMCLClientDownloader {
       // Clear libraries directory
       const librariesDir = path.join(clientPath, 'libraries');
       if (fs.existsSync(librariesDir)) {
-        fs.rmSync(librariesDir, { recursive: true, force: true });
+        await removePathWithRetries(librariesDir, { recursive: true });
         clearedItems.push('all libraries');
       }
       
@@ -1335,7 +1464,7 @@ class XMCLClientDownloader {
     try {
       const assetsDir = path.join(clientPath, 'assets');
       if (fs.existsSync(assetsDir)) {
-        fs.rmSync(assetsDir, { recursive: true, force: true });
+        await removePathWithRetries(assetsDir, { recursive: true });
       }
       return { success: true, message: 'Cleared assets directory' };
     } catch (error) {

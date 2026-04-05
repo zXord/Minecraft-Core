@@ -13,6 +13,8 @@
     totalResults,
     expandedModId,
     installedModInfo,
+    installedModIds,
+    installedMods,
     isCheckingUpdates,
     successMessage,
     // Content type stores
@@ -20,14 +22,21 @@
     shaderResults,
     resourcePackResults,
     CONTENT_TYPES,
+    installedShaderIds,
     installedShaderInfo,
+    installedShaders,
+    installedResourcePackIds,
     installedResourcePackInfo,
+    installedResourcePacks,
     contentTypeCache,
+    autoUpdateChecksEnabled,
   } from "../../../stores/modStore.js";
   import {
     searchContent,
     fetchModVersions,
     checkForUpdates,
+    findInstalledContentEntry,
+    matchesInstalledContent,
   } from "../../../utils/mods/modAPI.js";
   import { safeInvoke } from "../../../utils/ipcUtils.js";
   import ModCard from "./ModCard.svelte";
@@ -49,9 +58,16 @@
   let contextRequestId = 0;
   let displayTotalPages = 1; // For UI pagination display
   let visibleMods = []; // Mods to display on current page
+  let displayedMods = []; // Visible mods after client-side filters
+  let hiddenInstalledResultsCount = 0;
   let hasLoadedOnce = false;
+  let lastSearchedContentType = CONTENT_TYPES.MODS;
   let pageDebounceTimer = null;
+  let displayedUpdateCheckTimer = null;
+  let scheduledDisplayedUpdateCheckKey = "";
+  let lastDisplayedUpdateCheckKey = "";
   const PAGE_DEBOUNCE_MS = 100;
+  let hideInstalledResults = false;
   // Content-type specific filter states
   let modsSortBy = "relevance";
   let modsFilterType = "all";
@@ -175,6 +191,8 @@
     versionsCache = {};
     versionsLoading = {};
     versionsError = {};
+    scheduledDisplayedUpdateCheckKey = "";
+    lastDisplayedUpdateCheckKey = "";
     expandedModId.set(null);
     searchResults.set([]);
     shaderResults.set([]);
@@ -183,7 +201,9 @@
     totalResults.set(0);
     totalPages.set(1);
     currentPage.set(1);
+    hasLoadedOnce = false;
     activeServerPath = serverPath;
+    autoUpdateChecksEnabled.loadForPath(serverPath);
 
     await refreshInstanceContext({ resetFilters });
 
@@ -191,7 +211,7 @@
       await handleSearch(null);
     }
 
-    if (serverPath && !$isCheckingUpdates) {
+    if (serverPath && !$isCheckingUpdates && $autoUpdateChecksEnabled) {
       await checkForUpdates(serverPath);
     }
   }
@@ -202,40 +222,109 @@
       clearTimeout(pageDebounceTimer);
       pageDebounceTimer = null;
     }
+    if (displayedUpdateCheckTimer) {
+      clearTimeout(displayedUpdateCheckTimer);
+      displayedUpdateCheckTimer = null;
+    }
     if (sortMessageTimer) {
       clearTimeout(sortMessageTimer);
       sortMessageTimer = null;
     }
   });
 
-  // After each successful search, set hasLoadedOnce to true
-  $: if (visibleMods.length > 0 && !hasLoadedOnce) {
-    hasLoadedOnce = true;
+  function getDisplayedUpdateCheckKey() {
+    if (!$autoUpdateChecksEnabled || $isCheckingUpdates || displayedMods.length === 0) {
+      return "";
+    }
+
+    const installedProjectIds = new Set(
+      (currentInstalledInfoList || [])
+        .map((info) => info?.projectId)
+        .filter(Boolean),
+    );
+    const versionLookupContext = buildVersionLookupContext();
+    const uncachedInstalledIds = [];
+
+    for (const mod of displayedMods) {
+      if (!mod?.id || !installedProjectIds.has(mod.id)) {
+        continue;
+      }
+
+      const cacheKey = getSearchVersionCacheKey(mod.id, versionLookupContext);
+      if (versionsCache[cacheKey] || versionsLoading[cacheKey]) {
+        continue;
+      }
+
+      uncachedInstalledIds.push(mod.id);
+    }
+
+    if (uncachedInstalledIds.length === 0) {
+      return "";
+    }
+
+    return [
+      serverPath || "local",
+      $activeContentType,
+      versionLookupContext.loader || "noloader",
+      versionLookupContext.gameVersion || "all",
+      uncachedInstalledIds.join("|"),
+    ].join("::");
   }
 
-  // When search results change, check for updates for mods in the search results
-  $: if (visibleMods.length > 0 && !$isCheckingUpdates) {
-    checkUpdatesForDisplayedMods();
+  // When search results change, only schedule background version checks once per unique page/context.
+  $: {
+    if (displayedUpdateCheckTimer) {
+      clearTimeout(displayedUpdateCheckTimer);
+      displayedUpdateCheckTimer = null;
+    }
+
+    const nextKey = getDisplayedUpdateCheckKey();
+    if (!nextKey) {
+      scheduledDisplayedUpdateCheckKey = "";
+    } else if (
+      nextKey !== scheduledDisplayedUpdateCheckKey
+      && nextKey !== lastDisplayedUpdateCheckKey
+    ) {
+      scheduledDisplayedUpdateCheckKey = nextKey;
+      displayedUpdateCheckTimer = setTimeout(() => {
+        const runKey = scheduledDisplayedUpdateCheckKey;
+        scheduledDisplayedUpdateCheckKey = "";
+        displayedUpdateCheckTimer = null;
+        lastDisplayedUpdateCheckKey = runKey;
+        void checkUpdatesForDisplayedMods(runKey);
+      }, 150);
+    }
   }
 
   // Function to check updates for mods in the current search results
-  async function checkUpdatesForDisplayedMods() {
-    try {
-      // Get installed mod IDs
-      const installedMods = $installedModInfo.filter((info) => info.projectId);
+  async function checkUpdatesForDisplayedMods(runKey = "") {
+    if (!$autoUpdateChecksEnabled) {
+      return;
+    }
 
-      // For each installed mod that appears in search results, load its versions
-      for (const mod of visibleMods) {
-        if (installedMods.some((info) => info.projectId === mod.id)) {
-          const cacheKey = getSearchVersionCacheKey(
-            mod.id,
-            buildVersionLookupContext(),
-          );
-          // Load mod versions if not already cached
-          if (!versionsCache[cacheKey]) {
-            await loadVersions({ detail: { modId: mod.id, loadAll: true } });
-          }
+    try {
+      const installedProjectIds = new Set(
+        (currentInstalledInfoList || [])
+          .map((info) => info?.projectId)
+          .filter(Boolean),
+      );
+      const versionLookupContext = buildVersionLookupContext();
+
+      for (const mod of displayedMods) {
+        if (runKey && runKey !== lastDisplayedUpdateCheckKey) {
+          return;
         }
+
+        if (!mod?.id || !installedProjectIds.has(mod.id)) {
+          continue;
+        }
+
+        const cacheKey = getSearchVersionCacheKey(mod.id, versionLookupContext);
+        if (versionsCache[cacheKey] || versionsLoading[cacheKey]) {
+          continue;
+        }
+
+        await loadVersions({ detail: { modId: mod.id, loadAll: true } });
       }
     } catch (error) {}
   }
@@ -246,7 +335,7 @@
   }
 
   // Post-process search results to ensure they have compatible versions
-  $: if (visibleMods.length > 0 && selectedMinecraftVersion) {
+  $: if (displayedMods.length > 0 && selectedMinecraftVersion) {
     // We don't need to auto-load versions anymore
     // This will be done on-demand when a user expands a mod card
   } // Update display total pages based on API response
@@ -275,8 +364,18 @@
   // Handle search submission
   async function handleSearch(event, filterOptions) {
     if (event) event.preventDefault();
+    if (event) {
+      currentPage.set(1);
+    }
 
-    await searchContent($activeContentType, buildSearchContext(filterOptions));
+    const result = await searchContent(
+      $activeContentType,
+      buildSearchContext(filterOptions),
+    );
+    if (result !== null) {
+      hasLoadedOnce = true;
+    }
+    return result;
   }
 
   function showSortMessage(sortOption) {
@@ -354,6 +453,8 @@
       versionsCache = {};
       versionsLoading = {};
       versionsError = {};
+      scheduledDisplayedUpdateCheckKey = "";
+      lastDisplayedUpdateCheckKey = "";
 
       // Wait for store updates to propagate
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -461,6 +562,44 @@
       versionsLoading = { ...versionsLoading, [cacheKey]: false };
     }
   }
+
+  $: currentInstalledState =
+    $activeContentType === CONTENT_TYPES.SHADERS
+      ? {
+          installedIds: $installedShaderIds,
+          installedInfoList: $installedShaderInfo,
+          installedFilesList: $installedShaders,
+        }
+      : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS
+        ? {
+            installedIds: $installedResourcePackIds,
+            installedInfoList: $installedResourcePackInfo,
+            installedFilesList: $installedResourcePacks,
+          }
+        : {
+            installedIds: $installedModIds,
+            installedInfoList: $installedModInfo,
+            installedFilesList: $installedMods,
+          };
+
+  $: currentInstalledInfoList = currentInstalledState.installedInfoList;
+
+  function isInstalledResult(mod) {
+    return matchesInstalledContent(mod, currentInstalledState);
+  }
+
+  $: displayedMods = hideInstalledResults
+    ? visibleMods.filter((mod) => !isInstalledResult(mod))
+    : visibleMods;
+
+  $: hiddenInstalledResultsCount = Math.max(0, visibleMods.length - displayedMods.length);
+
+  $: if ($activeContentType !== lastSearchedContentType) {
+    lastSearchedContentType = $activeContentType;
+    hasLoadedOnce = visibleMods.length > 0;
+    scheduledDisplayedUpdateCheckKey = "";
+    lastDisplayedUpdateCheckKey = "";
+  }
   // Handle version selection
   function handleVersionSelect() {
     // Version selection handled by parent component
@@ -550,6 +689,14 @@
       on:filterChange={handleFilterChange}
     />
 
+    <label class="hide-installed-toggle">
+      <input type="checkbox" bind:checked={hideInstalledResults} />
+      <span>Hide installed</span>
+      {#if hideInstalledResults && hiddenInstalledResultsCount > 0}
+        <span class="hide-installed-count">({hiddenInstalledResultsCount} hidden on this page)</span>
+      {/if}
+    </label>
+
     <!-- Show sort applied message -->
     {#if sortAppliedMessage}
       <div class="sort-message">
@@ -558,7 +705,7 @@
     {/if}
 
     <!-- Top pagination -->
-    {#if visibleMods.length > 0}
+    {#if $totalResults > 0 && hasLoadedOnce}
       <div class="pagination top-pagination">
         <button
           class="pagination-button"
@@ -612,41 +759,12 @@
   </div>
 
   <div class="search-results">
-    {#if visibleMods.length > 0}
+    {#if displayedMods.length > 0}
       <div class="mods-grid">
-        {#each visibleMods as mod (mod.id)}
-          {@const installedInfo = (() => {
-            let infoStore;
-            switch ($activeContentType) {
-              case CONTENT_TYPES.SHADERS:
-                infoStore = $installedShaderInfo;
-                break;
-              case CONTENT_TYPES.RESOURCE_PACKS:
-                infoStore = $installedResourcePackInfo;
-                break;
-              case CONTENT_TYPES.MODS:
-              default:
-                infoStore = $installedModInfo;
-                break;
-            }
-            // Prefer projectId match; fallback to filename/name normalization for assets
-            const byId = infoStore.find((info) => info.projectId === mod.id);
-            if (byId) return byId;
-            if ($activeContentType !== CONTENT_TYPES.MODS) {
-              const normalize = (str) => (str || '')
-                .toString()
-                .toLowerCase()
-                .replace(/\.(zip|jar)$/g, '')
-                .replace(/[^a-z0-9]+/g, '-')
-                .replace(/^-+|-+$/g, '');
-              const target = normalize(mod.slug || mod.name || mod.title || '');
-              return infoStore.find((info) => {
-                const name = normalize(info.name || info.fileName || '');
-                return !!name && (name === target || name.startsWith(target) || target.startsWith(name));
-              });
-            }
-            return undefined;
-          })()}
+        {#each displayedMods as mod (mod.id)}
+          {@const installedInfo = findInstalledContentEntry(mod, {
+            installedInfoList: currentInstalledInfoList
+          })}
           {@const serverManaged = Boolean(
             serverManagedSet && installedInfo && (
               (installedInfo.fileName && serverManagedSet.has(installedInfo.fileName.toLowerCase())) ||
@@ -687,91 +805,65 @@
         {/each}
       </div>
 
-      {#if visibleMods.length === 0 && hasLoadedOnce}
-        <div class="no-results">
-          No {$activeContentType === CONTENT_TYPES.SHADERS
-            ? "shaders"
-            : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS
-              ? "resource packs"
-              : "mods"} found matching the current filters.
-          {#if $activeContentType === CONTENT_TYPES.MODS}
-            <button
-              class="switch-to-any"
-              on:click={() => {
-                if ($activeContentType === CONTENT_TYPES.SHADERS) {
-                  shadersFilterType = "all";
-                } else if ($activeContentType === CONTENT_TYPES.RESOURCE_PACKS) {
-                  resourcePacksFilterType = "all";
-                } else {
-                  modsFilterType = "all";
-                }
-                handleFilterChange();
-              }}
-            >
-              Show all mods
-            </button>
-          {/if}
+      {#if $totalResults > 0}
+        <div class="pagination">
+          <button
+            class="pagination-button"
+            on:click={() => goToPage(1)}
+            disabled={$currentPage === 1 || $isSearching}
+            title="First page"
+          >
+            «
+          </button>
+
+          <button
+            class="pagination-button"
+            on:click={() => goToPage($currentPage - 1)}
+            disabled={$currentPage === 1 || $isSearching}
+            title="Previous page"
+          >
+            ‹
+          </button>
+
+          <span class="pagination-info">
+            Page {$currentPage} of {displayTotalPages || 1}
+            {#if $totalResults > 0}
+              <span class="total-results"
+                >({$totalResults}
+                {$activeContentType === CONTENT_TYPES.SHADERS
+                  ? "shaders"
+                  : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS
+                    ? "resource packs"
+                    : "mods"}{filterType !== "all"
+                  ? " matching filter"
+                  : ""})</span
+              >
+            {/if}
+          </span>
+
+          <button
+            class="pagination-button"
+            on:click={() => goToPage($currentPage + 1)}
+            disabled={$currentPage === displayTotalPages ||
+              $isSearching ||
+              displayTotalPages <= 1}
+            title="Next page"
+          >
+            ›
+          </button>
+
+          <button
+            class="pagination-button"
+            on:click={() => goToPage(displayTotalPages)}
+            disabled={$currentPage === displayTotalPages ||
+              $isSearching ||
+              displayTotalPages <= 1}
+            title="Last page"
+          >
+            »
+          </button>
         </div>
       {/if}
-
-      <!-- Always show pagination when we have results -->
-      <div class="pagination">
-        <button
-          class="pagination-button"
-          on:click={() => goToPage(1)}
-          disabled={$currentPage === 1 || $isSearching}
-          title="First page"
-        >
-          «
-        </button>
-
-        <button
-          class="pagination-button"
-          on:click={() => goToPage($currentPage - 1)}
-          disabled={$currentPage === 1 || $isSearching}
-          title="Previous page"
-        >
-          ‹
-        </button>
-
-        <span class="pagination-info">
-          Page {$currentPage} of {displayTotalPages || 1}
-          {#if $totalResults > 0}
-            <span class="total-results"
-              >({$totalResults}
-              {$activeContentType === CONTENT_TYPES.SHADERS
-                ? "shaders"
-                : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS
-                  ? "resource packs"
-                  : "mods"}{filterType !== "all"
-                ? " matching filter"
-                : ""})</span
-            >
-          {/if}
-        </span>
-
-        <button
-          class="pagination-button"
-          on:click={() => goToPage($currentPage + 1)}
-          disabled={$currentPage === displayTotalPages ||
-            $isSearching ||
-            displayTotalPages <= 1}
-          title="Next page"
-        >
-          ›
-        </button>
-
-        <button
-          class="pagination-button"
-          on:click={() => goToPage(displayTotalPages)}
-          disabled={$currentPage === displayTotalPages ||
-            $isSearching ||
-            displayTotalPages <= 1}
-          title="Last page"
-        >
-          »
-        </button>
-      </div>
     {:else if $isSearching}
       <div class="loading-message">Searching for mods...</div>
     {:else if $searchError}
@@ -823,8 +915,54 @@
           Error: {$searchError}
         {/if}
       </div>
-    {:else if $searchKeyword}
-      <div class="no-results">No mods found matching your criteria.</div>
+    {:else if hideInstalledResults && visibleMods.length > 0}
+      <div class="no-results">
+        All results on this page are already installed.
+        <button
+          class="switch-to-any"
+          on:click={() => {
+            hideInstalledResults = false;
+          }}
+        >
+          Show installed results
+        </button>
+      </div>
+    {:else if hasLoadedOnce || $searchKeyword}
+      <div class="no-results">
+        No {$activeContentType === CONTENT_TYPES.SHADERS
+          ? "shaders"
+          : $activeContentType === CONTENT_TYPES.RESOURCE_PACKS
+            ? "resource packs"
+            : "mods"} found matching your current search and filters.
+        {#if $currentPage > 1}
+          <button class="switch-to-any" on:click={() => goToPage(1)}>
+            Go to page 1
+          </button>
+        {/if}
+        {#if filterType !== "all"}
+          <button
+            class="switch-to-any"
+            on:click={() => {
+              if ($activeContentType === CONTENT_TYPES.SHADERS) {
+                shadersFilterType = "all";
+              } else if ($activeContentType === CONTENT_TYPES.RESOURCE_PACKS) {
+                resourcePacksFilterType = "all";
+              } else {
+                modsFilterType = "all";
+              }
+              currentPage.set(1);
+              void handleSearch(null, {
+                sortBy,
+                environmentType: "all",
+                filterMinecraftVersion: selectedMinecraftVersion,
+                filterModLoader: selectedModLoader,
+              });
+            }}
+          >
+            Show all {$activeContentType === CONTENT_TYPES.MODS ? "mods" : "results"}
+          </button>
+        {/if}
+      </div>
     {:else}
       <div class="empty-state-message">
         <p>
@@ -1084,6 +1222,24 @@
     text-align: center;
     font-weight: 500;
     animation: fadeIn 0.3s ease-in;
+  }
+
+  .hide-installed-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0.6rem 0 0.25rem;
+    color: rgba(255, 255, 255, 0.82);
+    font-size: 0.92rem;
+  }
+
+  .hide-installed-toggle input {
+    margin: 0;
+  }
+
+  .hide-installed-count {
+    color: rgba(255, 255, 255, 0.58);
+    font-size: 0.85rem;
   }
 
   @keyframes fadeIn {

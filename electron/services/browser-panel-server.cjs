@@ -55,17 +55,33 @@ function getServerConfigDefaults(serverPath = '') {
   });
 }
 
+function resolveTrackedServerPath(serverPath = '') {
+  const normalizedPath = typeof serverPath === 'string' ? serverPath.trim() : '';
+  if (!normalizedPath) {
+    return '';
+  }
+
+  const instances = appStore.get('instances') || [];
+  const match = instances.find((instance) => instance && instance.type === 'server' && instance.path === normalizedPath);
+  return match?.path || '';
+}
+
 function getMergedServerSettings(serverPath = '') {
   const appSettings = {
     ...DEFAULT_SERVER_SETTINGS,
     ...(appStore.get('serverSettings') || {})
   };
 
-  if (!serverPath) {
+  const effectiveServerPath = resolveTrackedServerPath(serverPath);
+
+  if (!effectiveServerPath) {
     return appSettings;
   }
 
-  const config = readServerConfig(serverPath, getServerConfigDefaults(serverPath));
+  const config = readServerConfig(
+    effectiveServerPath,
+    getServerConfigDefaults(effectiveServerPath)
+  );
   return {
     ...appSettings,
     managementPort: config?.managementPort ?? appSettings.managementPort,
@@ -80,12 +96,14 @@ function getBackupSettings(serverPath = '') {
     ...(appStore.get('backupSettings') || {})
   };
 
-  if (!serverPath) {
+  const effectiveServerPath = resolveTrackedServerPath(serverPath);
+
+  if (!effectiveServerPath) {
     return appSettings;
   }
 
   const config = readServerConfig(
-    serverPath,
+    effectiveServerPath,
     getDefaultServerConfig({ backupAutomation: appSettings })
   );
   return {
@@ -95,6 +113,7 @@ function getBackupSettings(serverPath = '') {
 }
 
 function saveBackupSettings(serverPath, settings) {
+  const effectiveServerPath = resolveTrackedServerPath(serverPath);
   const merged = {
     ...DEFAULT_BACKUP_AUTOMATION,
     ...(appStore.get('backupSettings') || {}),
@@ -102,9 +121,9 @@ function saveBackupSettings(serverPath, settings) {
   };
 
   appStore.set('backupSettings', merged);
-  if (serverPath) {
+  if (effectiveServerPath) {
     updateServerConfig(
-      serverPath,
+      effectiveServerPath,
       { backupAutomation: merged },
       getDefaultServerConfig({ backupAutomation: merged })
     );
@@ -670,10 +689,11 @@ class BrowserPanelServer {
           ...(autoStartManagement !== undefined ? { autoStartManagement: !!autoStartManagement } : {})
         };
         appStore.set('serverSettings', updated);
+        const trackedServerPath = resolveTrackedServerPath(serverPath);
         if (serverPath !== undefined) {
-          appStore.set('lastServerPath', serverPath);
+          appStore.set('lastServerPath', trackedServerPath || null);
         }
-        const effectiveServerPath = appStore.get('lastServerPath') || '';
+        const effectiveServerPath = trackedServerPath || resolveTrackedServerPath(appStore.get('lastServerPath') || '');
         if (effectiveServerPath) {
           updateServerConfig(effectiveServerPath, {
             managementPort: updated.managementPort,

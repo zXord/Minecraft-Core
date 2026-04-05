@@ -109,6 +109,68 @@ export function shouldInjectFabricApiDependency(versionLoaders, activeLoader) {
   return versionLoaders.some(loader => isFabricLikeLoader(loader));
 }
 
+function getDependencyProjectId(dependency) {
+  return dependency?.projectId || dependency?.project_id || null;
+}
+
+export function buildDependencyResolutionState({
+  installedInfo = [],
+  disabledSet = new Set(),
+  pendingProjectIds = []
+} = {}) {
+  const installedInfoByProjectId = new Map();
+  const satisfiedProjectIds = new Set();
+
+  for (const info of installedInfo) {
+    if (!info?.projectId) {
+      continue;
+    }
+
+    if (!installedInfoByProjectId.has(info.projectId)) {
+      installedInfoByProjectId.set(info.projectId, info);
+    }
+
+    const isDisabled = Boolean(info.fileName && disabledSet?.has?.(info.fileName));
+    if (!isDisabled) {
+      satisfiedProjectIds.add(info.projectId);
+    }
+  }
+
+  for (const projectId of pendingProjectIds) {
+    if (projectId) {
+      satisfiedProjectIds.add(projectId);
+    }
+  }
+
+  return {
+    installedInfoByProjectId,
+    satisfiedProjectIds
+  };
+}
+
+export function requiresDependencyInstallation(dependency, dependencyState) {
+  const projectId = getDependencyProjectId(dependency);
+  if (!projectId) {
+    return false;
+  }
+
+  if (!dependencyState?.satisfiedProjectIds?.has(projectId)) {
+    return true;
+  }
+
+  const versionRequirement = dependency.versionRequirement || dependency.version_requirement || null;
+  if (!versionRequirement) {
+    return false;
+  }
+
+  const installedInfo = dependencyState.installedInfoByProjectId?.get(projectId);
+  if (!installedInfo?.versionNumber) {
+    return false;
+  }
+
+  return !checkVersionCompatibility(installedInfo.versionNumber, versionRequirement);
+}
+
 /**
  * Check for a mod's dependencies
  * @param {Object} mod - The mod object
@@ -612,6 +674,10 @@ async function filterAndResolveDependencies(dependencies, { interactive = false 
   
   // Get the actual installed mod info to double-check physical installation
   const actualInstalledInfo = get(installedModInfo);
+  const dependencyState = buildDependencyResolutionState({
+    installedInfo: actualInstalledInfo,
+    disabledSet: disabled
+  });
   
   
   const activeLoader = normalizeLoaderName(get(loaderType));
@@ -644,13 +710,12 @@ async function filterAndResolveDependencies(dependencies, { interactive = false 
   // Filter for required dependencies that are not already installed and enabled
   const requiredDeps = normalizedDeps.filter(dep => {
     const isRequired = dep.dependency_type === 'required';
-    const installedMod = actualInstalledInfo.find(info => info.projectId === dep.project_id);
+    const installedMod = dependencyState.installedInfoByProjectId.get(dep.project_id);
     const isPhysicallyInstalled = !!installedMod;
     const isDisabled = installedMod && disabled.has(installedMod.fileName);
-    const isInstalledAndEnabled = isPhysicallyInstalled && !isDisabled;
+    const needsInstallation = isRequired && requiresDependencyInstallation(dep, dependencyState);
     
     // Reduce log noise: only log dependencies that actually require action
-    const needsInstallation = isRequired && !isInstalledAndEnabled;
   if (needsInstallation && interactive) {
       logger.debug('Evaluating dependency requirement', {
         category: 'mods',
@@ -854,11 +919,7 @@ export async function installWithDependencies(serverPath, installFn = installMod
       dependencies.push(dep);
     }
   }
-  // Get the actual installed mod info to double-check physical installation
-  const actualInstalledInfo = get(installedModInfo);
-  const actualInstalledIds = new Set(actualInstalledInfo.map(info => info.projectId));
-  
-  
+
   if (!mod) {
     return false;
   }
@@ -891,20 +952,13 @@ export async function installWithDependencies(serverPath, installFn = installMod
       });
       
       try {
-        // Check if this dependency is actually installed (physically exists)
-        const isPhysicallyInstalled = dependency.projectId && actualInstalledIds.has(dependency.projectId);
+        const dependencyState = buildDependencyResolutionState({
+          installedInfo: get(installedModInfo),
+          disabledSet: get(disabledMods),
+          pendingProjectIds: Array.from(modsToInstall)
+        });
 
-        // Determine if installed dependency meets version requirement
-        let skipDependency = false;
-        if (dependency.projectId && isPhysicallyInstalled) {
-          // Find installed mod info to get version
-          const installedInfoEntry = actualInstalledInfo.find(info => info.projectId === dependency.projectId);
-          // Skip if no version requirement or installed version is compatible
-          if (!dependency.versionRequirement || (installedInfoEntry && checkVersionCompatibility(installedInfoEntry.versionNumber, dependency.versionRequirement))) {
-            skipDependency = true;
-          }
-        }
-        if (skipDependency) {
+        if (!requiresDependencyInstallation(dependency, dependencyState)) {
           continue;
         }
         
@@ -1061,8 +1115,10 @@ export async function installWithDependencies(serverPath, installFn = installMod
         });
         
         // Install the dependency - dependencies are always mods, regardless of main content type
-        await installFn(depMod, serverPath, { contentType: 'mods' });
-        installedCount++;
+        const dependencyInstalled = await installFn(depMod, serverPath, { contentType: 'mods' });
+        if (dependencyInstalled) {
+          installedCount++;
+        }
         } catch (error) {
           logger.debug('Failed to install dependency, continuing with others', {
             category: 'mods',

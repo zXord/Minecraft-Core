@@ -215,49 +215,33 @@ class JavaManager {
     }
 
     try {
-      const javaDirs = fs.readdirSync(this.javaBaseDir);
-      const availableVersions = javaDirs
-        .filter(dir => dir.startsWith('java-'))
-        .map(dir => parseInt(dir.replace('java-', '')))
-        .filter(version => !isNaN(version))
-        .sort((a, b) => b - a);
-
-      const compatibleVersions = availableVersions.filter(version => version >= requiredVersion);
-      const prioritizedVersions = compatibleVersions.includes(requiredVersion)
-        ? [requiredVersion, ...compatibleVersions.filter(version => version !== requiredVersion)]
-        : compatibleVersions;
-
-      let brokenValidation = null;
-
-      for (const version of prioritizedVersions) {
-        const executablePath = this.getJavaExecutablePath(version.toString());
-        if (!executablePath) {
-          continue;
-        }
-
-        const validation = this.validateJavaExecutable(executablePath);
-        if (validation.valid) {
-          return {
-            requiredJavaVersion,
-            state: 'available',
-            isInstalled: true,
-            javaPath: executablePath,
-            validation
-          };
-        }
-
-        if (!brokenValidation) {
-          brokenValidation = {
-            requiredJavaVersion,
-            state: 'broken',
-            isInstalled: false,
-            javaPath: executablePath,
-            validation
-          };
-        }
+      if (!Number.isFinite(requiredVersion) || requiredVersion <= 0) {
+        return invalidResult;
       }
 
-      return brokenValidation || invalidResult;
+      const executablePath = this.getJavaExecutablePath(requiredVersion.toString());
+      if (!executablePath) {
+        return invalidResult;
+      }
+
+      const validation = this.validateJavaExecutable(executablePath);
+      if (validation.valid) {
+        return {
+          requiredJavaVersion,
+          state: 'available',
+          isInstalled: true,
+          javaPath: executablePath,
+          validation
+        };
+      }
+
+      return {
+        requiredJavaVersion,
+        state: 'broken',
+        isInstalled: false,
+        javaPath: executablePath,
+        validation
+      };
     } catch {
       return invalidResult;
     }
