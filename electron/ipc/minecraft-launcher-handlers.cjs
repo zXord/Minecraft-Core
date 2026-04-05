@@ -3219,6 +3219,10 @@ function createMinecraftLauncherHandlers(win) {
         if (enabled) {
           if (fs.existsSync(disabledModPath)) {
             fs.renameSync(disabledModPath, modPath);
+            utils.invalidateFileChecksumCache(disabledModPath);
+            utils.invalidateFileChecksumCache(modPath);
+            modAnalysisUtils.invalidateMetadataCache(disabledModPath);
+            modAnalysisUtils.invalidateMetadataCache(modPath);
             return { success: true, action: 'enabled' };
           } else if (fs.existsSync(modPath)) {
             return { success: true, action: 'already_enabled' };
@@ -3228,6 +3232,10 @@ function createMinecraftLauncherHandlers(win) {
         } else {
           if (fs.existsSync(modPath)) {
             fs.renameSync(modPath, disabledModPath);
+            utils.invalidateFileChecksumCache(modPath);
+            utils.invalidateFileChecksumCache(disabledModPath);
+            modAnalysisUtils.invalidateMetadataCache(modPath);
+            modAnalysisUtils.invalidateMetadataCache(disabledModPath);
             return { success: true, action: 'disabled' };
           } else if (fs.existsSync(disabledModPath)) {
             return { success: true, action: 'already_disabled' };
@@ -3308,10 +3316,14 @@ function createMinecraftLauncherHandlers(win) {
         let deleted = false;
         if (fs.existsSync(modPath)) {
           fs.unlinkSync(modPath);
+          utils.invalidateFileChecksumCache(modPath);
+          modAnalysisUtils.invalidateMetadataCache(modPath);
           deleted = true;
         }
         if (fs.existsSync(disabledModPath)) {
           fs.unlinkSync(disabledModPath);
+          utils.invalidateFileChecksumCache(disabledModPath);
+          modAnalysisUtils.invalidateMetadataCache(disabledModPath);
           deleted = true;
         }
 
@@ -3350,6 +3362,8 @@ function createMinecraftLauncherHandlers(win) {
           if (!allowed.has(base)) {
             const filePath = path.join(modsDir, file);
             fs.unlinkSync(filePath);
+            utils.invalidateFileChecksumCache(filePath);
+            modAnalysisUtils.invalidateMetadataCache(filePath);
 
             const manifestPath = path.join(manifestDir, `${base}.json`);
             if (fs.existsSync(manifestPath)) fs.unlinkSync(manifestPath);

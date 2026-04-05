@@ -316,6 +316,7 @@ function buildLaunchReplacements({
     auth_session: authData?.access_token || '',
     auth_userType: 'msa',
     auth_user_type: 'msa',
+    user_type: 'msa',
     clientid: authData?.client_token || authData?.clientToken || '',
     user_properties: '{}',
     version_name: launchVersion,
@@ -336,6 +337,31 @@ function buildLaunchReplacements({
     resolution_width: '',
     resolution_height: ''
   };
+}
+
+function ensureIgnoredJarInJvmArgs(versionJvmArgs, jarPath) {
+  if (!jarPath || !fs.existsSync(jarPath)) {
+    return versionJvmArgs;
+  }
+
+  const jarName = path.basename(jarPath);
+  return versionJvmArgs.map((arg) => {
+    if (typeof arg !== 'string' || !arg.startsWith('-DignoreList=')) {
+      return arg;
+    }
+
+    const prefix = '-DignoreList=';
+    const existingEntries = arg.slice(prefix.length)
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    if (!existingEntries.includes(jarName)) {
+      existingEntries.push(jarName);
+    }
+
+    return `${prefix}${existingEntries.join(',')}`;
+  });
 }
 
 function appendProcessOutput(buffer, chunk, limit = 16000) {
@@ -663,7 +689,10 @@ class ProperMinecraftLauncher extends EventEmitter {
         classpathValue
       });
 
-      const versionJvmArgs = expandVersionArguments(launchJson.arguments?.jvm, replacements, featureState);
+      let versionJvmArgs = expandVersionArguments(launchJson.arguments?.jvm, replacements, featureState);
+      if (launchVersion !== primaryVersionId) {
+        versionJvmArgs = ensureIgnoredJarInJvmArgs(versionJvmArgs, primaryVersionJar);
+      }
       const versionProvidesClasspath = versionJvmArgs.some((arg, index) =>
         (arg === '-cp' || arg === '-classpath') && typeof versionJvmArgs[index + 1] === 'string'
       );

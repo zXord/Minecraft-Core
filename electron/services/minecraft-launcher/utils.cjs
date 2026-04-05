@@ -12,6 +12,8 @@ let versionManifestCache = {
 };
 
 const javaRequirementCache = new Map();
+const fileChecksumCache = new Map();
+const fileChecksumKeyByPath = new Map();
 
 function normalizeMinecraftVersion(minecraftVersion) {
   return typeof minecraftVersion === 'string'
@@ -80,6 +82,33 @@ function setCachedJavaRequirement(minecraftVersion, value) {
     value
   });
   return value;
+}
+
+function buildFileCacheKey(filePath, stats) {
+  return `${filePath}::${stats.size}::${Math.trunc(stats.mtimeMs)}`;
+}
+
+function updateFileChecksumKey(filePath, cacheKey) {
+  const previousKey = fileChecksumKeyByPath.get(filePath);
+  if (previousKey && previousKey !== cacheKey) {
+    fileChecksumCache.delete(previousKey);
+  }
+  fileChecksumKeyByPath.set(filePath, cacheKey);
+}
+
+function invalidateFileChecksumCache(filePath) {
+  const previousKey = fileChecksumKeyByPath.get(filePath);
+  if (previousKey) {
+    fileChecksumCache.delete(previousKey);
+    fileChecksumKeyByPath.delete(filePath);
+    return;
+  }
+
+  for (const key of Array.from(fileChecksumCache.keys())) {
+    if (key.startsWith(`${filePath}::`)) {
+      fileChecksumCache.delete(key);
+    }
+  }
 }
 
 async function fetchJson(url) {
@@ -181,39 +210,71 @@ async function resolveRequiredJavaVersion(minecraftVersion) {
 
 function calculateFileChecksum(filePath) {
   try {
+    const stats = fs.statSync(filePath);
+    const cacheKey = buildFileCacheKey(filePath, stats);
+    updateFileChecksumKey(filePath, cacheKey);
+
+    const cached = fileChecksumCache.get(cacheKey);
+    if (typeof cached !== 'undefined' && !(cached && typeof cached.then === 'function')) {
+      return cached;
+    }
+
     const fileContent = fs.readFileSync(filePath);
-    return createHash('md5').update(fileContent).digest('hex');
+    const checksum = createHash('md5').update(fileContent).digest('hex');
+    fileChecksumCache.set(cacheKey, checksum);
+    return checksum;
   } catch {
+    invalidateFileChecksumCache(filePath);
     return null;
   }
 }
 
-function calculateFileChecksumAsync(filePath) {
-  return new Promise((resolve) => {
-    try {
-      const hash = createHash('md5');
-      const stream = fs.createReadStream(filePath);
+async function calculateFileChecksumAsync(filePath) {
+  try {
+    const stats = await fs.promises.stat(filePath);
+    const cacheKey = buildFileCacheKey(filePath, stats);
+    updateFileChecksumKey(filePath, cacheKey);
 
-      stream.on('data', (chunk) => {
-        hash.update(chunk);
-      });
-
-      stream.on('end', () => {
-        resolve(hash.digest('hex'));
-      });
-
-      stream.on('error', () => {
-        resolve(null);
-      });
-    } catch {
-      resolve(null);
+    const cached = fileChecksumCache.get(cacheKey);
+    if (typeof cached !== 'undefined') {
+      return cached;
     }
-  });
+
+    const checksumPromise = new Promise((resolve) => {
+      try {
+        const hash = createHash('md5');
+        const stream = fs.createReadStream(filePath);
+
+        stream.on('data', (chunk) => {
+          hash.update(chunk);
+        });
+
+        stream.on('end', () => {
+          resolve(hash.digest('hex'));
+        });
+
+        stream.on('error', () => {
+          resolve(null);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+
+    fileChecksumCache.set(cacheKey, checksumPromise);
+    const checksum = await checksumPromise;
+    fileChecksumCache.set(cacheKey, checksum);
+    return checksum;
+  } catch {
+    invalidateFileChecksumCache(filePath);
+    return null;
+  }
 }
 
 module.exports = {
   getRequiredJavaVersion,
   resolveRequiredJavaVersion,
   calculateFileChecksum,
-  calculateFileChecksumAsync
+  calculateFileChecksumAsync,
+  invalidateFileChecksumCache
 };

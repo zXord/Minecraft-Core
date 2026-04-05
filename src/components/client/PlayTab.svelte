@@ -77,6 +77,11 @@
     downloadStatus === 'ready' &&
     $clientState.appVersionCompatible;
 
+  $: isCheckingMods =
+    downloadStatus === 'checking' || downloadStatus === 'checking-updates';
+
+  $: isDownloadingMods = downloadStatus === 'downloading';
+
   $: showServerOfflineNotice =
     canLaunchMinecraft && $clientState.minecraftServerStatus !== 'running';
   
@@ -396,12 +401,17 @@
                 <h2 class="status-header {
                   !$clientState.appVersionCompatible && $clientState.appVersionMismatch ? 'needs-update' :
                   clientSyncStatus !== 'ready' ? 'needs-client' :
+                  isCheckingMods || isDownloadingMods ? 'waiting' :
                   downloadStatus !== 'ready' ? 'needs-mods' : 'ready'
                 }">
                   {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
                     🔄 App Update Required
                   {:else if clientSyncStatus !== 'ready'}
                     📥 Client Download Required
+                  {:else if isCheckingMods}
+                    ⏳ Checking Mods...
+                  {:else if isDownloadingMods}
+                    📥 Downloading Mods...
                   {:else if downloadStatus !== 'ready'}
                     🔄 Mods Need Update
                   {:else}
@@ -465,7 +475,7 @@
                 {/if}
 
                 <!-- Mod Status -->
-                {#if downloadStatus === 'checking'}
+                {#if isCheckingMods}
                   <div class="status-indicator checking">
                     ⏳ <span>Checking Mods...</span>
                   </div>
@@ -476,10 +486,6 @@
                 {:else if downloadStatus === 'downloading'}
                   <div class="status-indicator downloading">
                     📥 <span>Downloading Mods ({downloadProgress}%)</span>
-                  </div>
-                {:else if downloadStatus === 'checking-updates'}
-                  <div class="status-indicator ready">
-                    ✅ <span>All Required Mods Ready</span>
                   </div>
                 {:else if downloadStatus === 'ready'}
                   <div class="status-indicator ready">
@@ -887,6 +893,10 @@
                         🔄 UPDATE REQUIRED
                       {:else if clientSyncStatus !== 'ready'}
                         📥 DOWNLOAD CLIENT FIRST
+                      {:else if isCheckingMods}
+                        ⏳ CHECKING MODS...
+                      {:else if isDownloadingMods}
+                        📥 DOWNLOADING MODS...
                       {:else if downloadStatus !== 'ready'}
                         📥 DOWNLOAD MODS FIRST
                       {:else}
@@ -971,6 +981,14 @@
                     {:else if clientSyncStatus !== 'ready'}
                       <div class="status-message">
                         Download the Minecraft client files before playing.
+                      </div>
+                    {:else if isCheckingMods}
+                      <div class="status-message">
+                        Checking mods and updates before launch.
+                      </div>
+                    {:else if isDownloadingMods}
+                      <div class="status-message">
+                        Downloading the required mods before launch.
                       </div>
                     {:else if downloadStatus !== 'ready'}
                       <div class="status-message">

@@ -5,14 +5,33 @@ const axios = require('axios');
 const AdmZip = require('adm-zip');
 const { Worker } = require('worker_threads');
 
-// Simple global cache to prevent infinite loops
+// Cache extracted metadata by file signature so unchanged jars do not get reparsed.
 const metadataCache = new Map();
-const cacheTimeout = 60000; // 1 minute cache
+const metadataCacheKeyByPath = new Map();
 const metadataWorkerPath = path.join(__dirname, 'mod-metadata-worker.cjs');
 
+function buildMetadataCacheKey(jarPath, stats) {
+  return `${jarPath}::${stats.size}::${Math.trunc(stats.mtimeMs)}`;
+}
+
+function updateMetadataCacheKey(jarPath, cacheKey) {
+  const previousKey = metadataCacheKeyByPath.get(jarPath);
+  if (previousKey && previousKey !== cacheKey) {
+    metadataCache.delete(previousKey);
+  }
+  metadataCacheKeyByPath.set(jarPath, cacheKey);
+}
+
 function invalidateMetadataCache(jarPath) {
+  const previousKey = metadataCacheKeyByPath.get(jarPath);
+  if (previousKey) {
+    metadataCache.delete(previousKey);
+    metadataCacheKeyByPath.delete(jarPath);
+    return;
+  }
+
   for (const key of Array.from(metadataCache.keys())) {
-    if (key.startsWith(`${jarPath}-`)) {
+    if (key.startsWith(`${jarPath}::`)) {
       metadataCache.delete(key);
     }
   }
@@ -211,37 +230,31 @@ function extractMetadataWithWorker(jarPath) {
 }
 
 async function extractDependenciesFromJar(jarPath) {
-  const cacheKey = `${jarPath}-${Date.now() - (Date.now() % cacheTimeout)}`;
-  
-  if (metadataCache.has(cacheKey)) {
-    return metadataCache.get(cacheKey);
-  }
-  
-  let result = null;
-  
   try {
-    try {
-      await fs.access(jarPath);
-    } catch {
-      result = null;
-      metadataCache.set(cacheKey, result);
-      return result;
+    const stats = await fs.stat(jarPath);
+    const cacheKey = buildMetadataCacheKey(jarPath, stats);
+    updateMetadataCacheKey(jarPath, cacheKey);
+
+    if (metadataCache.has(cacheKey)) {
+      return metadataCache.get(cacheKey);
     }
 
-    try {
-      result = await extractMetadataWithWorker(jarPath);
-      metadataCache.set(cacheKey, result);
-      return result;
-    } catch {
-      result = null;
-      metadataCache.set(cacheKey, result);
-      return result;
-    }
+    const extractionPromise = extractMetadataWithWorker(jarPath)
+      .then((metadata) => {
+        const resolvedMetadata = metadata ?? null;
+        metadataCache.set(cacheKey, resolvedMetadata);
+        return resolvedMetadata;
+      })
+      .catch(() => {
+        metadataCache.set(cacheKey, null);
+        return null;
+      });
+
+    metadataCache.set(cacheKey, extractionPromise);
+    return extractionPromise;
   } catch {
-    // TODO: Add proper logging - Failed to extract dependencies from ${jarPath}:
-    result = null;
-    metadataCache.set(cacheKey, result);
-    return result;
+    invalidateMetadataCache(jarPath);
+    return null;
   }
 }
 
