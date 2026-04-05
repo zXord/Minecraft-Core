@@ -509,7 +509,8 @@ class MinecraftLauncher extends EventEmitter {
     try {
 
       // Determine launch version and setup
-      const needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
+      const requestedLoaderType = String(serverInfo?.loaderType || '').trim().toLowerCase();
+      const needsFabric = requestedLoaderType === 'fabric';
       const fabricVersion = serverInfo?.loaderVersion || 'latest';
       let launchVersion = minecraftVersion;
 
@@ -1633,14 +1634,23 @@ Starting Minecraft with console output...
     try {
       const result = await this.clientDownloader.checkMinecraftClient(clientPath, requiredVersion, options);
 
-      const fabricSnapshot = {
-        needsFabric: options?.serverInfo?.loaderType === 'fabric' || (options?.requiredMods?.length || 0) > 0,
+      const requestedLoaderType = String(result.loaderType || options?.serverInfo?.loaderType || 'vanilla').trim().toLowerCase();
+      const loaderRequired = !!requestedLoaderType && requestedLoaderType !== 'vanilla';
+      const loaderLabel = loaderRequired
+        ? `${requestedLoaderType.charAt(0).toUpperCase()}${requestedLoaderType.slice(1)}`
+        : 'Vanilla';
+      const loaderSnapshot = {
+        requestedLoaderType,
+        loaderRequired,
         requestedLoaderVersion: options?.serverInfo?.loaderVersion || null,
-        resolvedFabricVersion: result.fabricVersion || null,
-        installedFabricVersion: result.installedFabricVersion || null,
-        installedFabricProfile: result.installedFabricProfile || result.fabricProfileName || null,
+        resolvedLoaderVersion: result.loaderVersion || result.fabricVersion || null,
+        installedLoaderType: result.installedLoaderType || null,
+        installedLoaderVersion: result.installedLoaderVersion || result.installedFabricVersion || null,
+        installedLoaderProfile: result.installedLoaderProfile || result.installedFabricProfile || result.fabricProfileName || null,
         targetVersion: result.targetVersion || null,
-        detectedFabricProfiles: Array.isArray(result.detectedFabricProfiles) ? result.detectedFabricProfiles.slice(0, 10) : result.detectedFabricProfiles,
+        detectedLoaderProfiles: Array.isArray(result.detectedLoaderProfiles)
+          ? result.detectedLoaderProfiles.slice(0, 10)
+          : (Array.isArray(result.detectedFabricProfiles) ? result.detectedFabricProfiles.slice(0, 10) : result.detectedFabricProfiles),
         versionsDirPath: result.versionsDirPath || null,
         versionsDirExists: result.versionsDirExists,
         versionsDirEntries: Array.isArray(result.versionsDirEntries) ? result.versionsDirEntries.slice(0, 10) : result.versionsDirEntries,
@@ -1648,30 +1658,30 @@ Starting Minecraft with console output...
         reason: result.reason
       };
 
-      logger.debug('Fabric detection snapshot', {
+      logger.debug('Loader detection snapshot', {
         category: 'client',
         data: {
           service: 'MinecraftLauncher',
           operation: 'checkMinecraftClient',
           clientPath: clientPath ? path.basename(clientPath) : null,
-          ...fabricSnapshot
+          ...loaderSnapshot
         }
       });
 
-      if (fabricSnapshot.needsFabric && !fabricSnapshot.installedFabricVersion) {
-        logger.warn('Fabric loader missing during client check', {
+      if (loaderSnapshot.loaderRequired && result.loaderScanAttempted && !loaderSnapshot.installedLoaderVersion && result.synchronized === false) {
+        logger.warn(`${loaderLabel} loader missing during client check`, {
           category: 'client',
           data: {
             service: 'MinecraftLauncher',
             operation: 'checkMinecraftClient',
             clientPath: clientPath ? path.basename(clientPath) : null,
-            loaderType: options?.serverInfo?.loaderType || null,
-            requestedLoaderVersion: fabricSnapshot.requestedLoaderVersion,
-            resolvedFabricVersion: fabricSnapshot.resolvedFabricVersion,
-            detectedFabricProfiles: fabricSnapshot.detectedFabricProfiles || [],
-            versionsDirPath: fabricSnapshot.versionsDirPath || null,
-            versionsDirExists: fabricSnapshot.versionsDirExists,
-            reason: fabricSnapshot.reason || null
+            loaderType: loaderSnapshot.requestedLoaderType,
+            requestedLoaderVersion: loaderSnapshot.requestedLoaderVersion,
+            resolvedLoaderVersion: loaderSnapshot.resolvedLoaderVersion,
+            detectedLoaderProfiles: loaderSnapshot.detectedLoaderProfiles || [],
+            versionsDirPath: loaderSnapshot.versionsDirPath || null,
+            versionsDirExists: loaderSnapshot.versionsDirExists,
+            reason: loaderSnapshot.reason || null
           }
         });
       }

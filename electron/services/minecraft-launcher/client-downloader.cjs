@@ -198,7 +198,7 @@ class ClientDownloader {
       serverInfo = null 
     } = options;
     
-    let needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
+    let needsFabric = String(serverInfo?.loaderType || '').trim().toLowerCase() === 'fabric';
     let requestedFabricVersion = serverInfo?.loaderVersion || 'latest';
     let resolvedFabricVersion = requestedFabricVersion;
     
@@ -1385,7 +1385,7 @@ Specification-Vendor: FabricMC
         requiredMods = [], 
         serverInfo = null 
       } = options;
-      let needsFabric = serverInfo?.loaderType === 'fabric' || requiredMods.length > 0;
+      let needsFabric = String(serverInfo?.loaderType || '').trim().toLowerCase() === 'fabric';
       let initialFabricVersion = serverInfo?.loaderVersion || 'latest'; // Keep original request for clarity if needed elsewhere
       let resolvedFabricVersion = initialFabricVersion;
       const mcVersion = String(requiredVersion || '').trim();

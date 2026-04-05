@@ -131,9 +131,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let clientModManagerComponent;
   
   // Create event dispatcher
-  const dispatch = createEventDispatcher();  // Reactive statement to check client mod compatibility when version changes
-  $: if ($clientState.versionChangeDetected && $clientState.activeTab === 'play') {
-    checkClientModVersionCompatibility(true); // Skip throttling for version changes
+  const dispatch = createEventDispatcher();
+  $: if ($clientState.versionChangeDetected && $clientState.activeTab === 'mods') {
+    scheduleAutoCompatibilityCheck(120);
     clearVersionChangeDetected();
   }
   
@@ -201,6 +201,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let connectionFailureCount = 0;
   let asyncScopeVersion = 0;
   let activeFetchControllers = new Set();
+  let playTabSyncTimer = null;
+  let playTabSyncRunning = false;
+  let playTabSyncQueued = false;
+  let pendingPlayTabSync = {
+    silentRefresh: true,
+    includeCompatibilityScan: false,
+    scope: 0
+  };
+  let autoCompatibilityTimer = null;
+  let lastAutoCompatibilityCheckKey = '';
   
   // Active tab tracking
   const tabs = ['play', 'mods', 'settings'];
@@ -561,12 +571,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
                 previousServerInfo.minecraftVersion !== serverInfo.minecraftVersion || 
                 (previousServerInfo.requiredMods?.length || 0) !== requiredMods.length) {
               previousServerInfo = { minecraftVersion: serverInfo.minecraftVersion, requiredMods };
-            }            // Check mod synchronization status
-            await checkModSynchronization(silentRefresh);
-            // Check client synchronization status
-            await checkClientSynchronization(silentRefresh);
-            // Check asset synchronization status (shaders/resource packs)
-            await checkAssetSynchronization();
+            }
+
+            schedulePlayTabSync({
+              silentRefresh,
+              delayMs: silentRefresh ? 16 : 48,
+              scope
+            });
         }
       }
     } catch (err) {
@@ -1563,6 +1574,119 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   function refreshMods() {
     // This will be handled by the ClientModManager component
     // when it receives the 'refresh-mods' event
+  }
+
+  function mergePendingPlayTabSync({
+    silentRefresh = true,
+    includeCompatibilityScan = false,
+    scope = getAsyncScope()
+  } = {}) {
+    pendingPlayTabSync = {
+      silentRefresh: pendingPlayTabSync.silentRefresh && silentRefresh,
+      includeCompatibilityScan: pendingPlayTabSync.includeCompatibilityScan || includeCompatibilityScan,
+      scope
+    };
+  }
+
+  function clearPlayTabSyncSchedule() {
+    if (playTabSyncTimer) {
+      clearTimeout(playTabSyncTimer);
+      playTabSyncTimer = null;
+    }
+    playTabSyncRunning = false;
+    playTabSyncQueued = false;
+    pendingPlayTabSync = {
+      silentRefresh: true,
+      includeCompatibilityScan: false,
+      scope: getAsyncScope()
+    };
+  }
+
+  function schedulePlayTabSync({
+    silentRefresh = true,
+    includeCompatibilityScan = false,
+    delayMs = 32,
+    scope = getAsyncScope()
+  } = {}) {
+    mergePendingPlayTabSync({ silentRefresh, includeCompatibilityScan, scope });
+
+    if (playTabSyncRunning) {
+      playTabSyncQueued = true;
+      return;
+    }
+
+    if (playTabSyncTimer) {
+      return;
+    }
+
+    playTabSyncTimer = setTimeout(async () => {
+      playTabSyncTimer = null;
+      const runOptions = pendingPlayTabSync;
+      pendingPlayTabSync = {
+        silentRefresh: true,
+        includeCompatibilityScan: false,
+        scope: runOptions.scope
+      };
+      playTabSyncRunning = true;
+
+      try {
+        await Promise.resolve();
+
+        if (!isCurrentAsyncScope(runOptions.scope)) {
+          return;
+        }
+
+        await checkModSynchronization(runOptions.silentRefresh);
+
+        if (!isCurrentAsyncScope(runOptions.scope)) {
+          return;
+        }
+
+        await checkClientSynchronization(runOptions.silentRefresh);
+
+        if (!isCurrentAsyncScope(runOptions.scope)) {
+          return;
+        }
+
+        await checkAssetSynchronization();
+
+        if (runOptions.includeCompatibilityScan && isCurrentAsyncScope(runOptions.scope)) {
+          await checkClientModVersionCompatibility(true);
+        }
+      } finally {
+        playTabSyncRunning = false;
+
+        if (playTabSyncQueued) {
+          playTabSyncQueued = false;
+          schedulePlayTabSync({
+            ...pendingPlayTabSync,
+            delayMs: 50
+          });
+        }
+      }
+    }, delayMs);
+  }
+
+  function clearAutoCompatibilitySchedule() {
+    if (autoCompatibilityTimer) {
+      clearTimeout(autoCompatibilityTimer);
+      autoCompatibilityTimer = null;
+    }
+  }
+
+  function scheduleAutoCompatibilityCheck(delayMs = 150) {
+    clearAutoCompatibilitySchedule();
+
+    autoCompatibilityTimer = setTimeout(async () => {
+      autoCompatibilityTimer = null;
+
+      if ($clientState.activeTab !== 'mods' || !instance?.path || !serverInfo?.minecraftVersion) {
+        return;
+      }
+
+      await checkClientModVersionCompatibility(true);
+      lastAutoCompatibilityCheckKey = `${instance.path}:${serverInfo.minecraftVersion}`;
+    }, delayMs);
   }
   
   // Check authentication status
@@ -2960,16 +3084,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
 
-  // Wrap existing manual refresh handler (PlayTab passes handleRefreshFromDashboard prop)
-  // so that it performs immediate status fetch before legacy check flow.
-  // (Removed reassignment wrapper; integrated immediate status in original function above.)
-  $: if ($clientState.activeTab === 'play' && $clientState.connectionStatus === 'connected' && 
-         serverInfo?.allClientMods && serverInfo.allClientMods.length > 0 &&
-         serverInfo.allClientMods.some(mod => mod.hasOwnProperty('required'))) {
-    // Small delay to allow any pending operations to complete
-    setTimeout(() => {
-      checkModSynchronization();
-    }, 100);  }
+  $: if (
+    $clientState.activeTab === 'mods' &&
+    instance?.path &&
+    serverInfo?.minecraftVersion
+  ) {
+    const autoCompatibilityKey = `${instance.path}:${serverInfo.minecraftVersion}`;
+    if (autoCompatibilityKey !== lastAutoCompatibilityCheckKey) {
+      scheduleAutoCompatibilityCheck();
+    }
+  }
   
   onMount(() => {
     logger.info('ClientInterface component mounted', {
@@ -3029,21 +3153,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         errorMessage.set(`Mod State Error: ${errorData.message}`);
         setTimeout(() => errorMessage.set(''), 8000);
       }
-    });    // Initial client mod version check (run after server state loads)
-    const checkForClientUpdates = () => {
-      if (instance?.path && serverInfo?.minecraftVersion) {        checkClientModVersionCompatibility(true); // Skip throttling for initial check
-      } else {
-        // Retry in 200ms if server info isn't ready yet
-        setTimeout(checkForClientUpdates, 200);
-      }
-    };
-    
-    // Start checking immediately
-    checkForClientUpdates();
+    });
     
     // Return cleanup function
     return () => {
       if (cleanupChecks) cleanupChecks();
+      clearPlayTabSyncSchedule();
+      clearAutoCompatibilitySchedule();
       if (visibilityChangeHandler) {
         try {
           document.removeEventListener('visibilitychange', visibilityChangeHandler);

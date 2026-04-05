@@ -548,7 +548,7 @@
                       <div class="compact-mod-section">
                         <h4>📦 Required Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each modSyncStatus.outdatedMods as update, index (update.name || update.fileName || `req-update-${index}`)}
+                          {#each modSyncStatus.outdatedMods as update, index (`req-update-${update.fileName || update.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
                               <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
@@ -562,7 +562,7 @@
                       <div class="compact-mod-section">
                         <h4>🔄 Optional Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each modSyncStatus.outdatedOptionalMods as update, index (update.name || update.fileName || `opt-update-${index}`)}
+                          {#each modSyncStatus.outdatedOptionalMods as update, index (`opt-update-${update.fileName || update.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item optional">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
                               <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
@@ -576,7 +576,7 @@
                       <div class="compact-mod-section">
                         <h4>📱 Client Mod Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each validClientUpdates as update, index (update.name || update.fileName || `client-update-${index}`)}
+                          {#each validClientUpdates as update, index (`client-update-${update.fileName || update.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item client-mod">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
                               <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
@@ -590,7 +590,7 @@
                       <div class="compact-mod-section">
                         <h4>📥 New Required:</h4>
                         <div class="compact-mod-list">
-                          {#each modSyncStatus.missingMods as modName (modName)}
+                          {#each modSyncStatus.missingMods as modName, index (`missing-mod-${modName}-${index}`)}
                             <div class="compact-mod-item new-download">
                               <span class="mod-name">{modName}</span>
                               <span class="new-badge">NEW</span>
@@ -604,7 +604,7 @@
                       <div class="compact-mod-section">
                         <h4>❌ Recommended Remove:</h4>
                         <div class="compact-mod-list">
-                          {#each actualRemovals as removal (removal.fileName)}
+                          {#each actualRemovals as removal, index (`removal-${removal.fileName || removal.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item removal">
                               <div class="mod-detail-copy">
                                 <span class="mod-name">{removal.fileName}</span>
@@ -621,7 +621,7 @@
                       <div class="compact-mod-section">
                         <h4>🔗 Recommended Keep:</h4>
                         <div class="compact-mod-list">
-                          {#each acknowledgments as ack (ack.fileName)}
+                          {#each acknowledgments as ack, index (`ack-${ack.fileName || ack.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item acknowledgment">
                               <div class="mod-detail-copy">
                                 <span class="mod-name">{ack.fileName}</span>
@@ -713,7 +713,7 @@
                       <div class="compact-mod-section">
                         <h4>✨ Missing Shaders:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.shaders.missingItems as it (it.fileName)}
+                          {#each assetsWork.shaders.missingItems as it, index (`missing-shader-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item new-download">
                               <span class="mod-name">{it.fileName}</span>
                               <span class="new-badge">NEW</span>
@@ -727,7 +727,7 @@
                       <div class="compact-mod-section">
                         <h4>🎨 Missing Resource Packs:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.resourcepacks.missingItems as it (it.fileName)}
+                          {#each assetsWork.resourcepacks.missingItems as it, index (`missing-resourcepack-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item new-download">
                               <span class="mod-name">{it.fileName}</span>
                               <span class="new-badge">NEW</span>
@@ -741,7 +741,7 @@
                       <div class="compact-mod-section">
                         <h4>✨ Shader Updates:</h4>
                         <div class="compact-mod-list">
-              {#each assetsWork.shaders.updates as it (it.fileName)}
+                          {#each assetsWork.shaders.updates as it, index (`shader-update-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item">
                               <span class="mod-name">{it.fileName}</span>
                 <span class="version-badge">{it.versionNumber ? `→ ${it.versionNumber}` : 'Update'}</span>
@@ -755,7 +755,7 @@
                       <div class="compact-mod-section">
                         <h4>🎨 Resource Pack Updates:</h4>
                         <div class="compact-mod-list">
-              {#each assetsWork.resourcepacks.updates as it (it.fileName)}
+                          {#each assetsWork.resourcepacks.updates as it, index (`resourcepack-update-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item">
                               <span class="mod-name">{it.fileName}</span>
                 <span class="version-badge">{it.versionNumber ? `→ ${it.versionNumber}` : 'Update'}</span>
@@ -769,7 +769,7 @@
                       <div class="compact-mod-section">
                         <h4>❌ Shaders To Remove:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.shaders.removable as it (it.fileName)}
+                          {#each assetsWork.shaders.removable as it, index (`shader-removal-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item removal">
                               <span class="mod-name">{it.fileName}</span>
                               <span class="removal-badge">no longer required</span>
@@ -783,7 +783,7 @@
                       <div class="compact-mod-section">
                         <h4>❌ Resource Packs To Remove:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.resourcepacks.removable as it (it.fileName)}
+                          {#each assetsWork.resourcepacks.removable as it, index (`resourcepack-removal-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item removal">
                               <span class="mod-name">{it.fileName}</span>
                               <span class="removal-badge">no longer required</span>
