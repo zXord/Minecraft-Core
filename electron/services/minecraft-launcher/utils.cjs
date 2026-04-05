@@ -188,8 +188,32 @@ function calculateFileChecksum(filePath) {
   }
 }
 
+function calculateFileChecksumAsync(filePath) {
+  return new Promise((resolve) => {
+    try {
+      const hash = createHash('md5');
+      const stream = fs.createReadStream(filePath);
+
+      stream.on('data', (chunk) => {
+        hash.update(chunk);
+      });
+
+      stream.on('end', () => {
+        resolve(hash.digest('hex'));
+      });
+
+      stream.on('error', () => {
+        resolve(null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 module.exports = {
   getRequiredJavaVersion,
   resolveRequiredJavaVersion,
-  calculateFileChecksum
+  calculateFileChecksum,
+  calculateFileChecksumAsync
 };

@@ -3,10 +3,12 @@ const path = require('path');
 const os = require('os');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
+const { Worker } = require('worker_threads');
 
 // Simple global cache to prevent infinite loops
 const metadataCache = new Map();
 const cacheTimeout = 60000; // 1 minute cache
+const metadataWorkerPath = path.join(__dirname, 'mod-metadata-worker.cjs');
 
 function invalidateMetadataCache(jarPath) {
   for (const key of Array.from(metadataCache.keys())) {
@@ -16,10 +18,201 @@ function invalidateMetadataCache(jarPath) {
   }
 }
 
+function parseJarMetadataSync(jarPath) {
+  let result = null;
+
+  try {
+    const zip = new (/** @type {any} */ (AdmZip))(jarPath);
+    const zipEntries = zip.getEntries();
+
+    // Try fabric.mod.json
+    const fabricEntry = zipEntries.find(entry =>
+      entry.entryName === 'fabric.mod.json' ||
+      entry.entryName.endsWith('/fabric.mod.json')
+    );
+
+    if (fabricEntry) {
+      const content = fabricEntry.getData().toString('utf8');
+      try {
+        const metadata = JSON.parse(content);
+        metadata.loaderType = metadata.loaderType || 'fabric';
+        metadata.projectId = metadata.projectId || metadata.id;
+        metadata.authors = metadata.authors || (metadata.author ? [metadata.author] : (metadata.contributors ? Object.keys(metadata.contributors) : []));
+        metadata.name = metadata.name || metadata.id;
+        return metadata;
+      } catch {
+        return null;
+      }
+    }
+
+    // Try META-INF/mods.toml (Forge)
+    const forgeEntry = zipEntries.find(entry =>
+      entry.entryName === 'META-INF/mods.toml' ||
+      entry.entryName.endsWith('/META-INF/mods.toml')
+    );
+
+    if (forgeEntry) {
+      const content = forgeEntry.getData().toString('utf8');
+      try {
+        const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
+        const lines = content.split(/\r?\n/);
+        let currentModTable = {};
+        let inModsArray = false;
+        let inDescription = false;
+        let currentDescription = [];
+
+        lines.forEach(line => {
+          line = line.trim();
+          
+          if (line === '[[mods]]') {
+            if (Object.keys(currentModTable).length > 0) {
+              Object.assign(metadata, currentModTable);
+              currentModTable = {};
+            }
+            inModsArray = true;
+            inDescription = false;
+            return;
+          }
+          
+          if (inModsArray && line.startsWith('[') && line !== '[[mods]]') {
+            inModsArray = false;
+            return;
+          }
+          
+          if (line.startsWith('description="""') || line === 'description="""') {
+            inDescription = true;
+            currentDescription = [];
+            if (line.length > 15) {
+              currentDescription.push(line.substring(15));
+            }
+            return;
+          }
+          
+          if (inDescription) {
+            if (line.endsWith('"""') && line !== '"""') {
+              currentDescription.push(line.substring(0, line.length - 3));
+              if (inModsArray) {
+                currentModTable.description = currentDescription.join('\n');
+              } else {
+                metadata.description = currentDescription.join('\n');
+              }
+              inDescription = false;
+              return;
+            } else if (line === '"""') {
+              if (inModsArray) {
+                currentModTable.description = currentDescription.join('\n');
+              } else {
+                metadata.description = currentDescription.join('\n');
+              }
+              inDescription = false;
+              return;
+            } else {
+              currentDescription.push(line);
+              return;
+            }
+          }
+          
+          const match = line.match(/^(\w+)\s*=\s*"([^"]*)"$/);
+          if (match) {
+            const [, key, value] = match;
+            if (inModsArray) {
+              currentModTable[key] = value;
+            } else {
+              metadata[key] = value;
+            }
+          }
+        });
+        
+        if (Object.keys(currentModTable).length > 0) {
+          Object.assign(metadata, currentModTable);
+        }
+        
+        metadata.name = metadata.displayName || metadata.modId || 'Unknown';
+        metadata.version = metadata.version || 'Unknown';
+        metadata.projectId = metadata.modId || metadata.name;
+        
+        return metadata;
+      } catch {
+        return null;
+      }
+    }
+
+    // Try quilt.mod.json
+    const quiltEntry = zipEntries.find(entry =>
+      entry.entryName === 'quilt.mod.json' ||
+      entry.entryName.endsWith('/quilt.mod.json')
+    );
+
+    if (quiltEntry) {
+      const content = quiltEntry.getData().toString('utf8');
+      try {
+        const quiltJson = JSON.parse(content);
+        const qmd = quiltJson.quilt_loader || quiltJson;
+        
+        return {
+          loaderType: 'quilt',
+          id: qmd.id,
+          version: qmd.version,
+          name: (qmd.metadata && qmd.metadata.name) || qmd.id,
+          description: (qmd.metadata && qmd.metadata.description) || '',
+          authors: qmd.metadata && qmd.metadata.contributors
+            ? Object.keys(qmd.metadata.contributors)
+            : (quiltJson.contributors ? Object.keys(quiltJson.contributors) : []),
+          projectId: qmd.id
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function extractMetadataWithWorker(jarPath) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let worker = null;
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (worker) {
+        worker.removeAllListeners();
+        worker.terminate().catch(() => {});
+      }
+      resolve(value);
+    };
+
+    try {
+      worker = new Worker(metadataWorkerPath, {
+        workerData: { jarPath }
+      });
+
+      worker.once('message', (message) => {
+        finish(message?.metadata ?? null);
+      });
+
+      worker.once('error', () => {
+        finish(parseJarMetadataSync(jarPath));
+      });
+
+      worker.once('exit', (code) => {
+        if (!settled) {
+          finish(code === 0 ? null : parseJarMetadataSync(jarPath));
+        }
+      });
+    } catch {
+      finish(parseJarMetadataSync(jarPath));
+    }
+  });
+}
+
 async function extractDependenciesFromJar(jarPath) {
   const cacheKey = `${jarPath}-${Date.now() - (Date.now() % cacheTimeout)}`;
   
-  // Return cached result if available
   if (metadataCache.has(cacheKey)) {
     return metadataCache.get(cacheKey);
   }
@@ -36,168 +229,7 @@ async function extractDependenciesFromJar(jarPath) {
     }
 
     try {
-      const zip = new (/** @type {any} */ (AdmZip))(jarPath);
-      const zipEntries = zip.getEntries();
-
-      // Try fabric.mod.json
-      const fabricEntry = zipEntries.find(entry =>
-        entry.entryName === 'fabric.mod.json' ||
-        entry.entryName.endsWith('/fabric.mod.json')
-      );
-
-      if (fabricEntry) {
-        const content = fabricEntry.getData().toString('utf8');
-        try {
-          const metadata = JSON.parse(content);
-          metadata.loaderType = metadata.loaderType || 'fabric';
-          metadata.projectId = metadata.projectId || metadata.id;
-          metadata.authors = metadata.authors || (metadata.author ? [metadata.author] : (metadata.contributors ? Object.keys(metadata.contributors) : []));
-          metadata.name = metadata.name || metadata.id;
-          result = metadata;
-          metadataCache.set(cacheKey, result);
-          return result;
-        } catch {
-          result = null;
-          metadataCache.set(cacheKey, result);
-          return result;
-        }
-      }
-
-      // Try META-INF/mods.toml (Forge)
-      const forgeEntry = zipEntries.find(entry =>
-        entry.entryName === 'META-INF/mods.toml' ||
-        entry.entryName.endsWith('/META-INF/mods.toml')
-      );
-
-      if (forgeEntry) {
-        const content = forgeEntry.getData().toString('utf8');
-        try {
-          const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
-          const lines = content.split(/\r?\n/);
-          let currentModTable = {};
-          let inModsArray = false;
-          let inDescription = false;
-          let currentDescription = [];
-
-          lines.forEach(line => {
-            line = line.trim();
-            
-            if (line === '[[mods]]') {
-              if (Object.keys(currentModTable).length > 0) {
-                Object.assign(metadata, currentModTable);
-                currentModTable = {};
-              }
-              inModsArray = true;
-              inDescription = false;
-              return;
-            }
-            
-            if (inModsArray && line.startsWith('[') && line !== '[[mods]]') {
-              inModsArray = false;
-              return;
-            }
-            
-            if (line.startsWith('description="""') || line === 'description="""') {
-              inDescription = true;
-              currentDescription = [];
-              if (line.length > 15) {
-                currentDescription.push(line.substring(15));
-              }
-              return;
-            }
-            
-            if (inDescription) {
-              if (line.endsWith('"""') && line !== '"""') {
-                currentDescription.push(line.substring(0, line.length - 3));
-                if (inModsArray) {
-                  currentModTable.description = currentDescription.join('\n');
-                } else {
-                  metadata.description = currentDescription.join('\n');
-                }
-                inDescription = false;
-                return;
-              } else if (line === '"""') {
-                if (inModsArray) {
-                  currentModTable.description = currentDescription.join('\n');
-                } else {
-                  metadata.description = currentDescription.join('\n');
-                }
-                inDescription = false;
-                return;
-              } else {
-                currentDescription.push(line);
-                return;
-              }
-            }
-            
-            const match = line.match(/^(\w+)\s*=\s*"([^"]*)"$/);
-            if (match) {
-              const [, key, value] = match;
-              if (inModsArray) {
-                currentModTable[key] = value;
-              } else {
-                metadata[key] = value;
-              }
-            }
-          });
-          
-          if (Object.keys(currentModTable).length > 0) {
-            Object.assign(metadata, currentModTable);
-          }
-          
-          metadata.name = metadata.displayName || metadata.modId || 'Unknown';
-          metadata.version = metadata.version || 'Unknown';
-          metadata.projectId = metadata.modId || metadata.name;
-          
-          result = metadata;
-          metadataCache.set(cacheKey, result);
-          return result;
-        } catch {
-          result = null;
-          metadataCache.set(cacheKey, result);
-          return result;
-        }
-      }
-
-      // Try quilt.mod.json
-      const quiltEntry = zipEntries.find(entry =>
-        entry.entryName === 'quilt.mod.json' ||
-        entry.entryName.endsWith('/quilt.mod.json')
-      );
-
-      if (quiltEntry) {
-        const content = quiltEntry.getData().toString('utf8');
-        try {
-          const quiltJson = JSON.parse(content);
-          const qmd = quiltJson.quilt_loader || quiltJson;
-          
-          const metadata = {
-            loaderType: 'quilt',
-            id: qmd.id,
-            version: qmd.version,
-            name: (qmd.metadata && qmd.metadata.name) || qmd.id,
-            description: (qmd.metadata && qmd.metadata.description) || '',
-            authors: [],
-            projectId: qmd.id
-          };
-
-          if (qmd.metadata && qmd.metadata.contributors) {
-            metadata.authors = Object.keys(qmd.metadata.contributors);
-          } else if (quiltJson.contributors) {
-             metadata.authors = Object.keys(quiltJson.contributors);
-          }
-
-          result = metadata;
-          metadataCache.set(cacheKey, result);
-          return result;
-        } catch {
-          result = null;
-          metadataCache.set(cacheKey, result);
-          return result;
-        }
-      }
-      
-      result = null;
+      result = await extractMetadataWithWorker(jarPath);
       metadataCache.set(cacheKey, result);
       return result;
     } catch {
@@ -277,5 +309,6 @@ module.exports = {
   extractDependenciesFromJar,
   fetchModInfoFromUrl,
   analyzeModFromUrl,
-  invalidateMetadataCache
+  invalidateMetadataCache,
+  parseJarMetadataSync
 };

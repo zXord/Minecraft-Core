@@ -119,6 +119,18 @@ function setRequestTimeout(request, timeoutMs, onTimeout) {
   request.on('close', clearTimer);
 }
 
+const MOD_SCAN_YIELD_INTERVAL = 20;
+
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function yieldAfterChunk(index, interval = MOD_SCAN_YIELD_INTERVAL) {
+  if (index > 0 && index % interval === 0) {
+    await yieldToEventLoop();
+  }
+}
+
 function getManagementBaseUrl(serverInfo) {
   if (!serverInfo || !serverInfo.serverIp || !serverInfo.serverPort) return '';
   const protocol = normalizeManagementProtocol(serverInfo.serverProtocol);
@@ -538,7 +550,7 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
     
     const serverManagedSet = new Set((serverManagedFiles || []).map(f => f.toLowerCase()));
     
-    const modFiles = fs.readdirSync(modsDir).filter(file => 
+    const modFiles = (await fsPromises.readdir(modsDir)).filter(file => 
       file.toLowerCase().endsWith('.jar')
     );
     
@@ -546,9 +558,14 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
     const convertedMods = new Set();
     
     if (fs.existsSync(manifestDir)) {
-      const manifests = fs.readdirSync(manifestDir).filter(f => f.endsWith('.json'));
-      for (const file of manifests) {        try {
-          const data = JSON.parse(fs.readFileSync(path.join(manifestDir, file), 'utf8'));
+      const manifests = (await fsPromises.readdir(manifestDir)).filter(f => f.endsWith('.json'));
+      for (let index = 0; index < manifests.length; index += 1) {
+        await yieldAfterChunk(index, 10);
+
+        const file = manifests[index];
+
+        try {
+          const data = JSON.parse(await fsPromises.readFile(path.join(manifestDir, file), 'utf8'));
           if (data.source === 'manual' || data.convertedFromServer) {
             convertedMods.add(data.fileName.toLowerCase());
           }
@@ -556,14 +573,19 @@ async function getClientSideDependencies(clientPath, serverManagedFiles = []) {
           // Ignore manifest parsing errors
         }
       }
-    }    // Get truly client-side mods (exclude anything currently server-managed)
+    }
+
+    // Get truly client-side mods (exclude anything currently server-managed)
     const clientSideMods = modFiles.filter(file => {
       const fileName = file.toLowerCase();
       // If it's currently server-managed, it's NOT a client-side mod
       return !serverManagedSet.has(fileName);
     });
     
-      for (const modFile of clientSideMods) {      const modPath = path.join(modsDir, modFile);
+    for (let index = 0; index < clientSideMods.length; index += 1) {
+      await yieldAfterChunk(index, 10);
+      const modFile = clientSideMods[index];
+      const modPath = path.join(modsDir, modFile);
       
       try {
         const metadata = await modAnalysisUtils.extractDependenciesFromJar(modPath);
@@ -2348,132 +2370,123 @@ function createMinecraftLauncherHandlers(win) {
           };
         }
         
-        const presentMods = fs
-          .readdirSync(modsDir)
-          .filter(file => file.toLowerCase().endsWith('.jar'));
-        const disabledMods = fs
-          .readdirSync(modsDir)
-          .filter(file => file.toLowerCase().endsWith('.jar.disabled'))
-          .map(file => file.replace('.disabled', ''));        const missingMods = [];
+        const modEntries = await fsPromises.readdir(modsDir);
+        const presentMods = [];
+        const disabledMods = [];
+        const modLookup = new Map();
+
+        const registerModRecord = (fileName, fullPath, disabled) => {
+          const lowerFileName = fileName.toLowerCase();
+          const existing = modLookup.get(lowerFileName);
+
+          if (!existing || (!disabled && existing.disabled)) {
+            modLookup.set(lowerFileName, { fileName, fullPath, disabled });
+          }
+        };
+
+        for (const entry of modEntries) {
+          const lowerEntry = entry.toLowerCase();
+
+          if (lowerEntry.endsWith('.jar.disabled')) {
+            const baseFileName = entry.slice(0, -'.disabled'.length);
+            disabledMods.push(baseFileName);
+            registerModRecord(baseFileName, path.join(modsDir, entry), true);
+            continue;
+          }
+
+          if (lowerEntry.endsWith('.jar')) {
+            presentMods.push(entry);
+            registerModRecord(entry, path.join(modsDir, entry), false);
+          }
+        }
+
+        const checksumCache = new Map();
+        const getChecksum = async (fullPath) => {
+          if (!checksumCache.has(fullPath)) {
+            checksumCache.set(fullPath, utils.calculateFileChecksumAsync(fullPath));
+          }
+
+          return checksumCache.get(fullPath);
+        };
+
+        const createOutdatedModEntry = async (serverMod, modRecord) => {
+          let modName = serverMod.fileName.replace(/\.jar$/i, '');
+          let currentVersion = 'Unknown';
+
+          try {
+            const metadata = await modAnalysisUtils.extractDependenciesFromJar(modRecord.fullPath);
+            if (metadata?.name) {
+              modName = metadata.name;
+            }
+            if (metadata?.version) {
+              currentVersion = metadata.version;
+            }
+          } catch {
+            // JAR extraction failed
+          }
+
+          if (currentVersion === 'Unknown' && modRecord?.fileName) {
+            const versionFromActual = extractVersionFromFilename(modRecord.fileName);
+            if (versionFromActual) {
+              currentVersion = versionFromActual;
+            }
+          }
+
+          return {
+            fileName: serverMod.fileName,
+            name: modName,
+            currentVersion,
+            newVersion: extractVersionFromFilename(serverMod.fileName) || serverMod.versionNumber || 'New Version'
+          };
+        };
+
+        const missingMods = [];
         const outdatedMods = [];
         const missingOptionalMods = [];
         const outdatedOptionalMods = [];
-          for (const requiredMod of requiredMods) {
-          const modPath = path.join(modsDir, requiredMod.fileName);
-          const isPresent =
-            presentMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase()) ||
-            disabledMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase());
-          
-          if (!isPresent) {
-            missingMods.push(requiredMod.fileName);          } else if (requiredMod.checksum) {
-            // Find the actual filename on disk (case-insensitive)
-            const actualFileName = presentMods.find(f => f.toLowerCase() === requiredMod.fileName.toLowerCase()) ||
-                                   disabledMods.find(f => f.toLowerCase() === requiredMod.fileName.toLowerCase());
-            
-            const actualModPath = actualFileName 
-              ? path.join(modsDir, actualFileName + (disabledMods.includes(actualFileName) ? '.disabled' : ''))
-              : (presentMods.some(f => f.toLowerCase() === requiredMod.fileName.toLowerCase())
-                ? modPath
-                : modPath + '.disabled');
-            
-            const existingChecksum = utils.calculateFileChecksum(actualModPath);
-            if (existingChecksum !== requiredMod.checksum) {
-              // Extract mod name from JAR for better display              // Extract mod name and version with fallback methods
-              let modName = requiredMod.fileName.replace(/\.jar$/i, '');
-              let currentVersion = 'Unknown';
-              
-              // Try JAR metadata extraction first
-              try {
-                if (fs.existsSync(actualModPath)) {
-                  const metadata = await modAnalysisUtils.extractDependenciesFromJar(actualModPath);
-                  if (metadata?.name) {
-                    modName = metadata.name;
-                  }
-                  if (metadata?.version) {
-                    currentVersion = metadata.version;
-                  }
-                }
-              } catch {
-                // JAR extraction failed
-              }
-              
-              // If version still unknown, try extracting from actual filename
-              if (currentVersion === 'Unknown' && actualFileName) {
-                const versionFromActual = extractVersionFromFilename(actualFileName);
-                if (versionFromActual) {
-                  currentVersion = versionFromActual;
-                }
-              }
-              
-              const newVersion = extractVersionFromFilename(requiredMod.fileName) || requiredMod.versionNumber || 'New Version';
-              
-              outdatedMods.push({
-                fileName: requiredMod.fileName,
-                name: modName,
-                currentVersion,
-                newVersion
-              });
-            }
+
+        for (let index = 0; index < requiredMods.length; index += 1) {
+          await yieldAfterChunk(index);
+
+          const requiredMod = requiredMods[index];
+          const modRecord = modLookup.get(requiredMod.fileName.toLowerCase());
+
+          if (!modRecord) {
+            missingMods.push(requiredMod.fileName);
+            continue;
+          }
+
+          if (!requiredMod.checksum) {
+            continue;
+          }
+
+          const existingChecksum = await getChecksum(modRecord.fullPath);
+          if (existingChecksum !== requiredMod.checksum) {
+            outdatedMods.push(await createOutdatedModEntry(requiredMod, modRecord));
           }
         }
-          if (Array.isArray(allClientMods) && allClientMods.length > 0) {
+
+        if (Array.isArray(allClientMods) && allClientMods.length > 0) {
           const optionalMods = allClientMods.filter(mod => !mod.required);
-          
-          for (const optionalMod of optionalMods) {
-            const modPath = path.join(modsDir, optionalMod.fileName);
-            const isPresent =
-              presentMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase()) ||
-              disabledMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase());
-            
-            if (!isPresent) {
-              missingOptionalMods.push(optionalMod.fileName);            } else if (optionalMod.checksum) {
-              // Find the actual filename on disk (case-insensitive)
-              const actualFileName = presentMods.find(f => f.toLowerCase() === optionalMod.fileName.toLowerCase()) ||
-                                     disabledMods.find(f => f.toLowerCase() === optionalMod.fileName.toLowerCase());
-              
-              const actualModPath = actualFileName 
-                ? path.join(modsDir, actualFileName + (disabledMods.includes(actualFileName) ? '.disabled' : ''))
-                : (presentMods.some(f => f.toLowerCase() === optionalMod.fileName.toLowerCase())
-                  ? modPath
-                  : modPath + '.disabled');
-              
-              const existingChecksum = utils.calculateFileChecksum(actualModPath);
-              if (existingChecksum !== optionalMod.checksum) {                // Extract mod name and version with fallback methods
-                let modName = optionalMod.fileName.replace(/\.jar$/i, '');
-                let currentVersion = 'Unknown';
-                
-                // Try JAR metadata extraction first
-                try {
-                  if (fs.existsSync(actualModPath)) {
-                    const metadata = await modAnalysisUtils.extractDependenciesFromJar(actualModPath);
-                    if (metadata?.name) {
-                      modName = metadata.name;
-                    }
-                    if (metadata?.version) {
-                      currentVersion = metadata.version;
-                    }
-                  }
-                } catch {
-                  // JAR extraction failed
-                }
-                
-                // If version still unknown, try extracting from actual filename
-                if (currentVersion === 'Unknown' && actualFileName) {
-                  const versionFromActual = extractVersionFromFilename(actualFileName);
-                  if (versionFromActual) {
-                    currentVersion = versionFromActual;
-                  }
-                }
-                
-                const newVersion = extractVersionFromFilename(optionalMod.fileName) || optionalMod.versionNumber || 'New Version';
-                
-                outdatedOptionalMods.push({
-                  fileName: optionalMod.fileName,
-                  name: modName,
-                  currentVersion,
-                  newVersion
-                });
-              }
+
+          for (let index = 0; index < optionalMods.length; index += 1) {
+            await yieldAfterChunk(index);
+
+            const optionalMod = optionalMods[index];
+            const modRecord = modLookup.get(optionalMod.fileName.toLowerCase());
+
+            if (!modRecord) {
+              missingOptionalMods.push(optionalMod.fileName);
+              continue;
+            }
+
+            if (!optionalMod.checksum) {
+              continue;
+            }
+
+            const existingChecksum = await getChecksum(modRecord.fullPath);
+            if (existingChecksum !== optionalMod.checksum) {
+              outdatedOptionalMods.push(await createOutdatedModEntry(optionalMod, modRecord));
             }
           }
         }
@@ -2481,7 +2494,8 @@ function createMinecraftLauncherHandlers(win) {
         const clientModChanges = {
           updates: [],
           removals: [],
-          newDownloads: []        };
+          newDownloads: []
+        };
         
         // Load persistent state
         const stateResult = await loadExpectedModState(clientPath, win);
@@ -2608,13 +2622,16 @@ function createMinecraftLauncherHandlers(win) {
               serverManagedFilesSetForDiff.add(lower);
             }
           }          acknowledgedDependencies = updatedAcks;
-        }const clientSideDependencies = await getClientSideDependencies(clientPath, Array.from(serverManagedFilesSetForDiff));
-          const buildClientSideModsFor = async (excludeFile) => {
+        }
+
+        const clientSideDependencies = await getClientSideDependencies(
+          clientPath,
+          Array.from(serverManagedFilesSetForDiff)
+        );
+
+        const buildClientSideModsFor = async (excludeFile) => {
           if (!fs.existsSync(modsDir)) return [];
-          
-          const modFiles = fs.readdirSync(modsDir).filter(file => 
-            file.toLowerCase().endsWith('.jar') && !file.toLowerCase().endsWith('.jar.disabled')
-          );
+          const modFiles = presentMods;
           
           const lowerExclude = excludeFile.toLowerCase();
           const dependentMods = [];
@@ -2627,7 +2644,10 @@ function createMinecraftLauncherHandlers(win) {
   
           
           // Check each client mod to see if it actually depends on the excluded file
-          for (const modFile of clientSideMods) {
+          for (let index = 0; index < clientSideMods.length; index += 1) {
+            await yieldAfterChunk(index, 10);
+
+            const modFile = clientSideMods[index];
             const modPath = path.join(modsDir, modFile);
               try {
               const metadata = await modAnalysisUtils.extractDependenciesFromJar(modPath);
@@ -2736,10 +2756,9 @@ function createMinecraftLauncherHandlers(win) {
         ));
         const formatDependentNames = (dependents) => normalizeDependents(dependents)
           .map((fileName) => fileName.replace(/\.jar$/i, ''));
-          const allCurrentMods = new Set();        if (fs.existsSync(modsDir)) {
-          fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar')).forEach(f => allCurrentMods.add(f.toLowerCase()));
-          fs.readdirSync(modsDir).filter(f => f.toLowerCase().endsWith('.jar.disabled')).forEach(f => allCurrentMods.add(f.replace('.disabled', '').toLowerCase()));
-        }
+        const allCurrentMods = new Set(
+          [...presentMods, ...disabledMods].map((fileName) => fileName.toLowerCase())
+        );
         
         // Logic for determining removals and acknowledgments
         // ===== NEW SIMPLIFIED REMOVAL DETECTION LOGIC =====
@@ -2892,92 +2911,36 @@ function createMinecraftLauncherHandlers(win) {
               dependents: normalizeDependents(dependents),
               dependentDisplayNames
             });
-          }        }
-        // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====
-          // Module analysis for updates - Track which mods need updates vs new downloads
-        // Use the already imported modAnalysisUtils from the top of the file
-        const allPresentMods = [...presentMods, ...disabledMods];
-        const allServerManagedFiles = new Set([
-            ...(serverManagedFiles || []).map(f => f.toLowerCase()),
-            ...requiredMods.map(rm => rm.fileName.toLowerCase()),
-            ...(allClientMods || []).filter(m => m.required).map(m => m.fileName.toLowerCase())
-          ]);
-        
-        // Track mods that need updates (have newer versions available)
-        const modsNeedingUpdates = new Map(); // modFileName -> { currentVersion, newVersion, serverMod }
-        
-        for (const modFileName of allPresentMods) {
-            const modFileNameLower = modFileName.toLowerCase();
-            
-            if (allServerManagedFiles.has(modFileNameLower)) {
-              continue;
-            }
-            
-            const modPath = presentMods.includes(modFileName)
-              ? path.join(modsDir, modFileName)
-              : path.join(modsDir, modFileName + '.disabled');
-              const clientModMetadata = await modAnalysisUtils.extractDependenciesFromJar(modPath);
-            if (!clientModMetadata) continue;
-            
-            const exactServerMatch = requiredMods.find(rm => 
-              rm.fileName.toLowerCase() === modFileNameLower
-            );
-            const similarServerMatch = !exactServerMatch ? requiredMods.find(rm => {
-              const serverFileName = rm.fileName.toLowerCase();
-              const clientFileName = modFileNameLower;
-              
-              const clientBase = getBaseModName(clientFileName);
-              const serverBase = getBaseModName(serverFileName);
-              if (clientBase && serverBase && clientBase === serverBase) return true;
-              if (clientModMetadata.name && serverBase === getBaseModName(clientModMetadata.name.toLowerCase().replace(/\s+/g, '_'))) return true;
-              
-              return false;
-            }) : null;
-
-            if (exactServerMatch || similarServerMatch) {
-              const matchedServerMod = exactServerMatch || similarServerMatch;
-              const serverVersion = extractVersionFromFilename(matchedServerMod.fileName) || matchedServerMod.versionNumber || 'Server Version';
-              const currentVersion = clientModMetadata.version || 'Unknown';
-              
-              // Store update info for this mod
-              modsNeedingUpdates.set(modFileName, {
-                currentVersion,
-                newVersion: serverVersion,
-                serverMod: matchedServerMod
-              });
-              
-              clientModChanges.updates.push({
-                fileName: modFileName,
-                name: clientModMetadata.name || modFileName,
-                currentVersion: currentVersion,
-                serverVersion: serverVersion,
-                action: 'update'
-              });
-            } 
-          }
-
-        const serverModsWithClientUpdates = new Set();
-        for (const update of clientModChanges.updates) {
-          const serverMod = allClientMods.find(serverMod => {
-            const serverModNameLower = serverMod.fileName.toLowerCase();
-            const clientModNameLower = update.fileName.toLowerCase();
-            
-            if (serverMod.fileName === update.fileName) return true;
-            
-            const clientBase = getBaseModName(clientModNameLower);
-            const serverBase = getBaseModName(serverModNameLower);
-            if (clientBase && serverBase && clientBase === serverBase) return true;
-            
-            return false;
-          });          if (serverMod) {
-            serverModsWithClientUpdates.add(serverMod.fileName);
           }
         }
-        
-        for (const modFileName of missingMods.concat(outdatedMods)) {
-          if (!serverModsWithClientUpdates.has(modFileName)) {
-            clientModChanges.newDownloads.push(modFileName);
-          }        }        // Track extra mods - these were handled above in the simplified removal logic
+        // ===== END SIMPLIFIED REMOVAL DETECTION LOGIC =====
+        const modsNeedingUpdates = new Map();
+
+        // Client-only update detection is handled by the dedicated compatibility scan.
+        // Skipping another deep JAR pass here keeps Play-tab mod checks responsive.
+        clientModChanges.removals = [
+          ...requiredRemovals.map((removal) => ({
+            fileName: removal.fileName,
+            action: 'remove_needed',
+            wasRequired: true,
+            reason: removal.reason
+          })),
+          ...optionalRemovals.map((removal) => ({
+            fileName: removal.fileName,
+            action: 'remove_needed',
+            wasRequired: false,
+            reason: removal.reason
+          })),
+          ...acknowledgments.map((ack) => ({
+            fileName: ack.fileName,
+            action: 'acknowledge_dependency',
+            wasRequired:
+              prevRequired.has(ack.fileName.toLowerCase()) ||
+              currRequired.has(ack.fileName.toLowerCase()),
+            reason: ack.reason
+          }))
+        ];
+
         const successfullyRemovedMods = [];
 
           // finalUpdatedServerManagedFiles should accurately reflect the current server\'s *required* mods.
