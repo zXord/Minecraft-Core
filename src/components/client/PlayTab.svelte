@@ -253,7 +253,7 @@
       const savedMaxMemory = localStorage.getItem('minecraft-client-max-memory');
       if (savedMaxMemory) {
         const parsed = parseFloat(savedMaxMemory);
-        if (!isNaN(parsed) && parsed > 0 && parsed <= 32) {
+        if (!isNaN(parsed) && parsed > 0 && parsed <= 64) {
           maxMemory = parsed;
         }
       }
@@ -392,6 +392,11 @@
                   ❌ Reset
                 </button>
               </div>
+            </div>
+          {:else if authStatus === 'checking' || authStatus === 'unknown'}
+            <div class="auth-section">
+              <h2>Checking Saved Login...</h2>
+              <p>Looking for your saved Microsoft session before we start syncing mods and client files.</p>
             </div>
           {:else if authStatus === 'authenticated' || (username && authData) || (username && username.length > 0)}
             <!-- Compact Game Information and Controls -->
@@ -848,7 +853,7 @@
                   class="memory-input"
                   bind:value={maxMemory} 
                   min="0.5" 
-                  max="16" 
+                  max="64" 
                   step="0.5"
                   disabled={isLaunching || launchStatus === 'running'}
                   title="Amount of RAM to allocate to Minecraft"

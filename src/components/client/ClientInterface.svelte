@@ -204,12 +204,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let playTabSyncTimer = null;
   let playTabSyncRunning = false;
   let playTabSyncQueued = false;
+  let playTabSyncDeferredUntilAuth = false;
   let pendingPlayTabSync = {
     silentRefresh: true,
     includeCompatibilityScan: false,
     scope: 0
   };
   let autoCompatibilityTimer = null;
+  let postDownloadVerificationTimer = null;
   let lastAutoCompatibilityCheckKey = '';
   
   // Active tab tracking
@@ -361,10 +363,12 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         await checkAppVersionCompatibility(scope);
         if (!isCurrentAsyncScope(scope)) return;
         
-        // Check server status and get server info
-        await checkServerStatus(false, scope);
-        if (!isCurrentAsyncScope(scope)) return;
         await checkAuthentication(scope);
+        if (!isCurrentAsyncScope(scope)) return;
+        
+        // Check server status and get server info after auth is known so the
+        // login UI can settle before any heavy sync work is queued.
+        await checkServerStatus(false, scope);
         
       } else {
         throw new Error('Management server returned unsuccessful response');
@@ -573,7 +577,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               previousServerInfo = { minecraftVersion: serverInfo.minecraftVersion, requiredMods };
             }
 
-            schedulePlayTabSync({
+            requestPlayTabSync({
               silentRefresh,
               delayMs: silentRefresh ? 16 : 48,
               scope
@@ -1197,6 +1201,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     if (isDownloadingMods || isDownloadingClient) {
       return;
     }
+    if (authStatus !== 'authenticated') {
+      return;
+    }
       if (!instance.path) {
       downloadStatus = 'ready';
       return;
@@ -1595,11 +1602,92 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
     playTabSyncRunning = false;
     playTabSyncQueued = false;
+    playTabSyncDeferredUntilAuth = false;
     pendingPlayTabSync = {
       silentRefresh: true,
       includeCompatibilityScan: false,
       scope: getAsyncScope()
     };
+  }
+
+  function clearPostDownloadVerificationSchedule() {
+    if (postDownloadVerificationTimer) {
+      clearTimeout(postDownloadVerificationTimer);
+      postDownloadVerificationTimer = null;
+    }
+  }
+
+  function isPlayTabSyncReady() {
+    return Boolean(instance?.path)
+      && get(clientState).connectionStatus === 'connected'
+      && authStatus === 'authenticated';
+  }
+
+  function requestPlayTabSync({
+    silentRefresh = true,
+    includeCompatibilityScan = false,
+    delayMs = 32,
+    scope = getAsyncScope()
+  } = {}) {
+    if (!isPlayTabSyncReady()) {
+      mergePendingPlayTabSync({ silentRefresh, includeCompatibilityScan, scope });
+      playTabSyncDeferredUntilAuth = true;
+      return false;
+    }
+
+    playTabSyncDeferredUntilAuth = false;
+    schedulePlayTabSync({ silentRefresh, includeCompatibilityScan, delayMs, scope });
+    return true;
+  }
+
+  function flushDeferredPlayTabSync({
+    delayMs = 320,
+    scope = getAsyncScope()
+  } = {}) {
+    if (!playTabSyncDeferredUntilAuth || !isPlayTabSyncReady()) {
+      return;
+    }
+
+    playTabSyncDeferredUntilAuth = false;
+    schedulePlayTabSync({
+      ...pendingPlayTabSync,
+      delayMs,
+      scope
+    });
+  }
+
+  function schedulePostDownloadVerification({
+    delayMs = 1800,
+    scope = getAsyncScope()
+  } = {}) {
+    clearPostDownloadVerificationSchedule();
+
+    postDownloadVerificationTimer = setTimeout(() => {
+      postDownloadVerificationTimer = null;
+      setClientModVersionUpdates(null);
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.removeItem('clientModVersionUpdates');
+      }
+
+      requestPlayTabSync({
+        silentRefresh: true,
+        includeCompatibilityScan: true,
+        delayMs: 24,
+        scope
+      });
+    }, delayMs);
+  }
+
+  async function waitForUiPaint() {
+    await new Promise((resolve) => {
+      if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(() => setTimeout(resolve, 0));
+        return;
+      }
+
+      setTimeout(resolve, 0);
+    });
   }
 
   function schedulePlayTabSync({
@@ -1630,7 +1718,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       playTabSyncRunning = true;
 
       try {
-        await Promise.resolve();
+        await waitForUiPaint();
 
         if (!isCurrentAsyncScope(runOptions.scope)) {
           return;
@@ -1727,6 +1815,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
         if (result.needsRefresh) {
           await refreshAuthToken();
+        }
+
+        if (authStatus === 'authenticated' && isCurrentAsyncScope(scope)) {
+          flushDeferredPlayTabSync({ delayMs: 320, scope });
         }
         
       } else {
@@ -2308,38 +2400,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         if (result.removedMods && result.removedMods.length > 0) {
           removeServerManagedFiles(result.removedMods);
         }
-          // Note: Individual mod download notifications are handled by DownloadProgress.svelte
+        // Note: Individual mod download notifications are handled by DownloadProgress.svelte
         // No need for a summary notification here to avoid duplicate notifications
-        setTimeout(() => successMessage.set(''), 5000);        // Re-check mod synchronization after download with a delay to allow file I/O to complete
-        // Also give time for client mod version updates to be cleared
-        setTimeout(async () => {
-          // Show checking updates status while we verify everything
-          downloadStatus = 'checking-updates';
-          
-          // Clear any cached client mod version updates to prevent stale data
-          setClientModVersionUpdates(null);
-          localStorage.removeItem('clientModVersionUpdates');
-            // Force a complete refresh of mod detection
-          await checkModSynchronization(true); // Use silent refresh to prevent status override
-
-          // Wait a bit and force refresh client mod data before compatibility check
-          setTimeout(async () => {
-            // Force fresh client mod info load before checking compatibility
-            try {
-              await window.electron.invoke('get-client-installed-mod-info', instance.path);
-            } catch (error) {
-            }
-            await checkClientModVersionCompatibility(true);
-            
-            // After all checks complete, ensure we have the correct final status
-            setTimeout(() => {
-              if (downloadStatus === 'checking-updates') {
-                // Only reset to ready if we're still in checking-updates state
-                downloadStatus = 'ready';
-              }
-            }, 500);
-          }, 1000); // Reduced delay since cache is already cleared above
-        }, 3000);
+        setTimeout(() => successMessage.set(''), 5000);
+        schedulePostDownloadVerification({
+          delayMs: 1800,
+          scope: getAsyncScope()
+        });
       } else {
         downloadStatus = 'needed';
         let failureMsg = 'Failed to download mods';
@@ -2535,13 +2602,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
     // Launch Minecraft client
   async function launchMinecraft(showDebugTerminal = false, maxMemoryGB = 2) {
+    const normalizedMaxMemoryGB = Math.min(Math.max(Number(maxMemoryGB) || 2, 0.5), 64);
+
     logger.info('Launching Minecraft client', {
       category: 'ui',
       data: {
         component: 'ClientInterface',
         function: 'launchMinecraft',
         showDebugTerminal,
-        maxMemoryGB,
+        maxMemoryGB: normalizedMaxMemoryGB,
         authStatus,
         clientSyncStatus,
         downloadStatus
@@ -2616,7 +2685,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       launchProgress = { type: 'Preparing', task: 'Initializing launcher...', total: 0 };
       
       const minecraftPort = serverInfo?.minecraftPort || '25565';
-      const memoryInMB = Math.round(maxMemoryGB * 1024);
+      const memoryInMB = Math.round(normalizedMaxMemoryGB * 1024);
       
       const result = await window.electron.invoke('minecraft-launch', {
         clientPath: instance.path,
@@ -2820,6 +2889,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         
         // Trigger a single server status refresh after authentication
         setTimeout(async () => {
+          flushDeferredPlayTabSync({ delayMs: 320 });
           await checkServerStatus();
         }, 100);
       }
@@ -2854,8 +2924,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         // This ensures the mods section updates properly
         setTimeout(async () => {
           try {
-            await checkModSynchronization();
-            await checkClientModVersionCompatibility();
+            requestPlayTabSync({
+              silentRefresh: true,
+              includeCompatibilityScan: true,
+              delayMs: 24
+            });
           } catch (e) {
             console.error('Error refreshing mod sync after client download:', e);
           }
@@ -2946,10 +3019,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Set up periodic mod synchronization check - ONLY if connected and not busy AND component is visible (reduced frequency)
     const modCheckInterval = setInterval(() => {
       if ($clientState.connectionStatus === 'connected' && 
+          authStatus === 'authenticated' &&
           !isDownloadingClient && !isDownloadingMods && !isCheckingSync &&
           $clientState.activeTab === 'play' && 
           document.visibilityState === 'visible') {
-        checkModSynchronization(true); // Silent refresh
+        requestPlayTabSync({ silentRefresh: true, delayMs: 24 });
       }
     }, 300000); // Every 5 minutes (reduced from 1 minute)
 
@@ -3154,6 +3228,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       if (cleanupChecks) cleanupChecks();
       clearPlayTabSyncSchedule();
       clearAutoCompatibilitySchedule();
+      clearPostDownloadVerificationSchedule();
       if (visibilityChangeHandler) {
         try {
           document.removeEventListener('visibilitychange', visibilityChangeHandler);
