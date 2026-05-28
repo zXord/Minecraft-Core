@@ -156,17 +156,24 @@ class ManagementServer {
     return routePath === '/health' || routePath === '/api/test' || routePath === '/api/client/register';
   }
 
+  isBulkDownloadRoute(req) {
+    const routePath = req && req.path ? req.path : '';
+    return routePath.startsWith('/api/mods/download/') || routePath.startsWith('/api/assets/download/');
+  }
+
   applyRateLimit(req, res) {
     const ip = this.getRequestIp(req);
     const windowMs = 60 * 1000;
-    const max = 120;
+    const isBulkDownload = this.isBulkDownloadRoute(req);
+    const max = isBulkDownload ? 2000 : 120;
     const now = Date.now();
-    let entry = this.rateLimits.get(ip);
+    const bucketKey = `${ip}:${isBulkDownload ? 'download' : 'api'}`;
+    let entry = this.rateLimits.get(bucketKey);
     if (!entry || now - entry.start > windowMs) {
       entry = { start: now, count: 0 };
     }
     entry.count += 1;
-    this.rateLimits.set(ip, entry);
+    this.rateLimits.set(bucketKey, entry);
     if (entry.count > max) {
       try {
         const retryAfter = Math.max(1, Math.ceil((windowMs - (now - entry.start)) / 1000));

@@ -610,6 +610,13 @@ async function getClientInstalledModInfo(clientPath) {
         modData.fileSignature = signature;
         modData.metadataSignatureVersion = MOD_METADATA_SIGNATURE_VERSION;
       }
+
+      try {
+        await fs.writeFile(manifestPath, JSON.stringify(modData, null, 2), 'utf8');
+      } catch {
+        // Ignore cache write failures; callers can still use the parsed metadata.
+      }
+
       modInfo.push(modData);
     }
   }

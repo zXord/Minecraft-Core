@@ -78,6 +78,12 @@
       if (preferences) {
         primaryDownloadSource = preferences.primarySource || 'modrinth';
         fallbackDownloadSource = preferences.fallbackSource || 'server';
+        if (
+          !['server', 'modrinth'].includes(fallbackDownloadSource) ||
+          fallbackDownloadSource === primaryDownloadSource
+        ) {
+          updateFallbackSource(primaryDownloadSource);
+        }
       }
       loadClientFolderSize();
       loadReusableAuthAccounts();
@@ -271,6 +277,7 @@
     switch (source) {
       case 'server': return 'Server';
       case 'modrinth': return 'Modrinth';
+      case 'none': return 'None';
       default: return 'Unknown';
     }
   }
@@ -808,11 +815,11 @@
         <div class="setting-info compact">
           <p class="info-text">
             {#if primaryDownloadSource === 'modrinth'}
-              Modrinth provides reliable downloads with automatic fallback to server if needed.
+              Modrinth is tried first. If it fails, the app will ask before switching to Server.
             {:else if primaryDownloadSource === 'server'}
-              Server provides direct downloads with automatic fallback to Modrinth if needed.
+              Server is tried first. If it fails, the app will ask before switching to Modrinth.
             {:else}
-              Downloads will attempt from {getFallbackSourceName(primaryDownloadSource)} first, then use {getFallbackSourceName(fallbackDownloadSource)} as fallback.
+              Downloads will attempt from {getFallbackSourceName(primaryDownloadSource)} first, then ask before using {getFallbackSourceName(fallbackDownloadSource)}.
             {/if}
           </p>
         </div>

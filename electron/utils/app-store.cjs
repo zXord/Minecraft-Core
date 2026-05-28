@@ -16,15 +16,42 @@ const Store = ElectronStore;
 
 const STORE_FILENAME = 'minecraft-core-config.json';
 const LEGACY_USER_DATA_NAMES = ['minecraft-core', 'Minecraft Core', 'Minecraft-Core'];
+const USER_DATA_OVERRIDE_ENV = 'MINECRAFT_CORE_USER_DATA_DIR';
 
 const getStorePathForUserData = (userDataDir) => path.join(userDataDir, 'config', STORE_FILENAME);
 
+const getExplicitUserDataOverride = () => {
+  const override = process.env[USER_DATA_OVERRIDE_ENV];
+  if (typeof override !== 'string' || !override.trim()) {
+    return null;
+  }
+
+  return path.resolve(override.trim());
+};
+
 const selectUserDataDir = () => {
   const fallbackUserData = path.join(os.homedir(), '.minecraft-core');
+  const explicitUserData = getExplicitUserDataOverride();
+
   if (!app || typeof app.getPath !== 'function') {
     return {
-      userData: fallbackUserData,
-      candidates: [fallbackUserData]
+      userData: explicitUserData || fallbackUserData,
+      candidates: [explicitUserData || fallbackUserData]
+    };
+  }
+
+  if (explicitUserData) {
+    try {
+      if (typeof app.setPath === 'function') {
+        app.setPath('userData', explicitUserData);
+      }
+    } catch {
+      // ignore inability to set userData path
+    }
+
+    return {
+      userData: explicitUserData,
+      candidates: [explicitUserData]
     };
   }
 

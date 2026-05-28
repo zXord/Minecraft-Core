@@ -540,6 +540,69 @@ function extractVersionFromFilename(fileName) {
   return null;
 }
 
+function buildJarFileSignature(stats) {
+  return `${stats.size}:${Math.trunc(stats.mtimeMs)}`;
+}
+
+async function readCachedManifestChecksum(clientPath, modRecord) {
+  if (!clientPath || !modRecord?.fileName || !modRecord?.fullPath) return null;
+
+  try {
+    const stats = await fsPromises.stat(modRecord.fullPath);
+    const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${modRecord.fileName}.json`);
+    const manifest = JSON.parse(await fsPromises.readFile(manifestPath, 'utf8'));
+    const cachedChecksum = typeof manifest.checksum === 'string' ? manifest.checksum.trim() : '';
+    const checksumAlgorithm = manifest.checksumAlgorithm
+      ? String(manifest.checksumAlgorithm).toLowerCase()
+      : (/^[a-f0-9]{32}$/i.test(cachedChecksum) ? 'md5' : '');
+
+    if (
+      checksumAlgorithm === 'md5' &&
+      /^[a-f0-9]{32}$/i.test(cachedChecksum) &&
+      manifest.fileSignature === buildJarFileSignature(stats)
+    ) {
+      return cachedChecksum;
+    }
+  } catch {
+    // Missing or stale manifest checksum; fall back to hashing the jar.
+  }
+
+  return null;
+}
+
+async function writeCachedManifestChecksum(clientPath, modRecord, checksum) {
+  if (!clientPath || !modRecord?.fileName || !modRecord?.fullPath || !checksum) return;
+
+  try {
+    const stats = await fsPromises.stat(modRecord.fullPath);
+    const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+    const manifestPath = path.join(manifestDir, `${modRecord.fileName}.json`);
+    await fsPromises.mkdir(manifestDir, { recursive: true });
+
+    let manifest = {};
+    try {
+      manifest = JSON.parse(await fsPromises.readFile(manifestPath, 'utf8'));
+    } catch {
+      manifest = {};
+    }
+
+    await fsPromises.writeFile(
+      manifestPath,
+      JSON.stringify({
+        ...manifest,
+        fileName: manifest.fileName || modRecord.fileName,
+        checksum,
+        checksumAlgorithm: 'md5',
+        fileSignature: buildJarFileSignature(stats),
+        metadataSignatureVersion: manifest.metadataSignatureVersion || 1
+      }, null, 2),
+      'utf8'
+    );
+  } catch {
+    // Checksum caching is an optimization; hashing already produced the authoritative value.
+  }
+}
+
 /**
  * Analyzes client-side (manual) mods to find their dependencies
  */
@@ -1031,7 +1094,7 @@ function createMinecraftLauncherHandlers(win) {
       }
     },
 
-    'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [] }) => {
+    'minecraft-download-mods': async (_e, { clientPath, requiredMods, allClientMods = [], serverInfo, optionalMods = [], downloadSourceOverride = null }) => {
       // (Download process started)
 
       try {
@@ -1067,6 +1130,24 @@ function createMinecraftLauncherHandlers(win) {
         const SERVER_HEALTH_TIMEOUT_MS = 5000;
         const SERVER_DOWNLOAD_TIMEOUT_MS = 15000;
         const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60000;
+
+        function normalizeDownloadSource(source) {
+          return source === 'server' || source === 'modrinth' ? source : null;
+        }
+
+        function getAlternateDownloadSource(source) {
+          return source === 'server' ? 'modrinth' : 'server';
+        }
+
+        function hasDownloadSource(mod, source) {
+          if (source === 'server') {
+            return !!(mod?.downloadUrl && mod.downloadUrl.includes('/api/mods/download/'));
+          }
+          if (source === 'modrinth') {
+            return !!(mod?.projectId || mod?.versionId);
+          }
+          return false;
+        }
 
         function markServerUnavailable(error) {
           serverAvailability.available = false;
@@ -1128,7 +1209,7 @@ function createMinecraftLauncherHandlers(win) {
           }
 
           if (!serverAvailability.available) {
-            logger.warn('Server download unavailable, switching to fallback sources for this session', {
+            logger.warn('Server download unavailable for this session', {
               category: 'mods',
               data: {
                 clientPath,
@@ -1194,6 +1275,9 @@ function createMinecraftLauncherHandlers(win) {
           const downloaded = [];
         const failures = [];
         const skipped = [];
+        let lastAttemptedSource = null;
+        let lastSourceSelectionMode = null;
+        let availableFallbackSource = null;
 
         if (!fs.existsSync(manifestDir)) {
           fs.mkdirSync(manifestDir, { recursive: true });
@@ -1221,9 +1305,27 @@ function createMinecraftLauncherHandlers(win) {
             // Get download preferences to determine source priority
             const configManager = require('../utils/config-manager.cjs');
             const preferences = await configManager.getInstanceConfig(clientPath, 'downloadPreferences');
-            // Default: primary = modrinth, fallback = server
-            const primarySource = preferences?.primarySource || 'modrinth';
-            const fallbackSource = preferences?.fallbackSource || 'server';
+            const primarySource = normalizeDownloadSource(preferences?.primarySource) || 'modrinth';
+            let fallbackSource = normalizeDownloadSource(preferences?.fallbackSource) || getAlternateDownloadSource(primarySource);
+            if (fallbackSource === primarySource) {
+              fallbackSource = getAlternateDownloadSource(primarySource);
+            }
+            const overrideSource = normalizeDownloadSource(downloadSourceOverride);
+            const selectedSource = overrideSource || primarySource;
+            const sourceSelectionMode = overrideSource ? 'explicit' : 'primary';
+            const manualFallbackSource = sourceSelectionMode === 'explicit'
+              ? (primarySource !== selectedSource ? primarySource : fallbackSource)
+              : fallbackSource;
+            const manualFallbackAvailable = !!(
+              manualFallbackSource &&
+              manualFallbackSource !== selectedSource &&
+              hasDownloadSource(mod, manualFallbackSource)
+            );
+            lastAttemptedSource = selectedSource;
+            lastSourceSelectionMode = sourceSelectionMode;
+            if (manualFallbackAvailable && !availableFallbackSource) {
+              availableFallbackSource = manualFallbackSource;
+            }
             
             logger.debug('Download preferences loaded', {
               category: 'mods',
@@ -1231,29 +1333,29 @@ function createMinecraftLauncherHandlers(win) {
                 clientPath,
                 primarySource,
                 fallbackSource,
+                selectedSource,
+                sourceSelectionMode,
+                manualFallbackAvailable,
                 modName: mod.name || mod.fileName,
                 hasModDownloadUrl: !!mod.downloadUrl,
                 modDownloadUrl: mod.downloadUrl
               }
             });
             
-            let sourcesToTry = [[primarySource, 'primary'], [fallbackSource, 'fallback']];
-            if (primarySource === 'server' || fallbackSource === 'server') {
+            let lastError = null;
+            let sourcesToTry = selectedSource ? [[selectedSource, sourceSelectionMode]] : [];
+            if (selectedSource === 'server') {
               const serverCanBeUsed = await ensureServerAvailable();
               if (!serverCanBeUsed) {
+                lastError = new Error(`Server download unavailable: ${serverAvailability.lastError || 'health-check-failed'}`);
                 sourcesToTry = sourcesToTry.filter(([source]) => source !== 'server');
               }
-            }
-
-            if (sourcesToTry.length === 0) {
-              sourcesToTry.push(['modrinth', 'primary']);
             }
             
             let downloadUrl = null;
             let sourceUsed = null;
             let triedPrimary = false;
             let triedFallback = false;
-            let lastError = null;
 
             // Helper to get download URL for a given source
             async function getUrlForSource(source) {
@@ -1269,7 +1371,7 @@ function createMinecraftLauncherHandlers(win) {
             const downloadId = `client-mod-${mod.projectId || mod.id || i}-${Date.now()}`;
             const modName = mod.name || mod.fileName;
 
-            // Try primary, then fallback if primary fails (network/HTTP error)
+            // Try the selected source only. Alternate sources require explicit user action.
             for (const [source, mark] of sourcesToTry) {
               if ((mark === 'primary' && triedPrimary) || (mark === 'fallback' && triedFallback)) {
                 continue;
@@ -1541,8 +1643,13 @@ function createMinecraftLauncherHandlers(win) {
               }
               failures.push({
                 fileName: mod.fileName,
-                error: lastError ? lastError.message : 'No download URL provided'
+                error: lastError ? lastError.message : 'No download URL provided',
+                attemptedSource: selectedSource,
+                fallbackAvailable: manualFallbackAvailable,
+                fallbackSource: manualFallbackSource,
+                sourceSelectionMode
               });
+              continue;
             }
             
             logger.info('Download source selected', {
@@ -1973,6 +2080,10 @@ function createMinecraftLauncherHandlers(win) {
           downloadedFiles: downloaded, // **FIX**: Include list of downloaded filenames for frontend store update
           failures: failures,
           manualModsAnalysis: manualModsAnalysis,
+          attemptedSource: lastAttemptedSource,
+          sourceSelectionMode: lastSourceSelectionMode,
+          fallbackAvailable: failures.some(failure => failure.fallbackAvailable === true),
+          fallbackSource: availableFallbackSource,
           message: failures.length === 0
             ? `Successfully processed ${totalProcessed} mods (${downloaded.length} downloaded, ${skipped.length} already present, ${removed.length} removed)`
             : `Processed ${successCount}/${totalProcessed} mods successfully, ${failures.length} failed`
@@ -2406,12 +2517,22 @@ function createMinecraftLauncherHandlers(win) {
         }
 
         const checksumCache = new Map();
-        const getChecksum = async (fullPath) => {
-          if (!checksumCache.has(fullPath)) {
-            checksumCache.set(fullPath, utils.calculateFileChecksumAsync(fullPath));
+        const getChecksum = async (modRecord) => {
+          const cacheKey = modRecord.fullPath;
+          if (!checksumCache.has(cacheKey)) {
+            checksumCache.set(cacheKey, (async () => {
+              const cachedChecksum = await readCachedManifestChecksum(clientPath, modRecord);
+              if (cachedChecksum) {
+                return cachedChecksum;
+              }
+
+              const checksum = await utils.calculateFileChecksumAsync(modRecord.fullPath);
+              await writeCachedManifestChecksum(clientPath, modRecord, checksum);
+              return checksum;
+            })());
           }
 
-          return checksumCache.get(fullPath);
+          return checksumCache.get(cacheKey);
         };
 
         const createOutdatedModEntry = async (serverMod, modRecord) => {
@@ -2465,7 +2586,7 @@ function createMinecraftLauncherHandlers(win) {
             continue;
           }
 
-          const existingChecksum = await getChecksum(modRecord.fullPath);
+          const existingChecksum = await getChecksum(modRecord);
           if (existingChecksum !== requiredMod.checksum) {
             outdatedMods.push(await createOutdatedModEntry(requiredMod, modRecord));
           }
@@ -2489,7 +2610,7 @@ function createMinecraftLauncherHandlers(win) {
               continue;
             }
 
-            const existingChecksum = await getChecksum(modRecord.fullPath);
+            const existingChecksum = await getChecksum(modRecord);
             if (existingChecksum !== optionalMod.checksum) {
               outdatedOptionalMods.push(await createOutdatedModEntry(optionalMod, modRecord));
             }

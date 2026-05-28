@@ -69,6 +69,7 @@
     handleDependencyAcknowledgment,
     updateServerMod
   } from '../../utils/clientMods.js';
+  import { createAsyncLatestQueue } from '../../utils/asyncLatestQueue.js';
 
   // Types
 
@@ -131,15 +132,74 @@
   // Component references
   let optionalModListComponent;
   let clientManualModListComponent;
+  let pendingDownloadSourceSwitch = null;
 
   let downloadManagerCleanup;
   let unsubscribeInstalledInfo;
-  let previousPath= null;
+  let previousPath = instance?.path || null;
   // Local delete confirmation state for asset deletions
   let showAssetDeleteConfirm = false;
   let pendingAssetDelete = null; // { type: 'shaderpacks'|'resourcepacks', fileName: string }
 
   let isCheckingModSync = false; // Guard to prevent reactive loops
+  let suppressInstalledInfoSync = 0;
+  let hasSeenInitialInstalledInfo = false;
+  const modSyncQueue = createAsyncLatestQueue();
+
+  function getDownloadSourceLabel(source) {
+    switch (source) {
+      case 'server': return 'Server';
+      case 'modrinth': return 'Modrinth';
+      default: return 'alternate source';
+    }
+  }
+
+  function captureDownloadSourceSwitch(result, action) {
+    if (result?.fallbackAvailable && result?.fallbackSource) {
+      pendingDownloadSourceSwitch = {
+        ...action,
+        attemptedSource: result.attemptedSource,
+        fallbackSource: result.fallbackSource
+      };
+    } else {
+      pendingDownloadSourceSwitch = null;
+    }
+  }
+
+  async function handleRequiredDownload(downloadSourceOverride = null) {
+    const result = await downloadRequiredMods(instance, { downloadSourceOverride });
+    captureDownloadSourceSwitch(result, { kind: 'required' });
+  }
+
+  async function handleOptionalDownload(downloadSourceOverride = null) {
+    const result = await downloadOptionalMods(instance, { downloadSourceOverride });
+    captureDownloadSourceSwitch(result, { kind: 'optional' });
+  }
+
+  async function handleSingleRequiredDownload(mod, downloadSourceOverride = null) {
+    const result = await downloadSingleRequiredMod(instance, mod, { downloadSourceOverride });
+    captureDownloadSourceSwitch(result, { kind: 'single-required', mod });
+  }
+
+  async function handleSingleOptionalDownload(mod, downloadSourceOverride = null) {
+    const result = await downloadSingleOptionalMod(instance, mod, { downloadSourceOverride });
+    captureDownloadSourceSwitch(result, { kind: 'single-optional', mod });
+  }
+
+  async function runPendingSourceSwitch(downloadSourceOverride = null) {
+    const pending = pendingDownloadSourceSwitch;
+    if (!pending) return;
+    pendingDownloadSourceSwitch = null;
+    if (pending.kind === 'required') {
+      await handleRequiredDownload(downloadSourceOverride);
+    } else if (pending.kind === 'optional') {
+      await handleOptionalDownload(downloadSourceOverride);
+    } else if (pending.kind === 'single-required') {
+      await handleSingleRequiredDownload(pending.mod, downloadSourceOverride);
+    } else if (pending.kind === 'single-optional') {
+      await handleSingleOptionalDownload(pending.mod, downloadSourceOverride);
+    }
+  }
   
   // keep track of which fileNames we've acknowledged is managed by store
   $: displayRequiredMods = (() => {
@@ -328,22 +388,64 @@
     }
   }
 
+  async function withInstalledInfoSyncSuppressed(task) {
+    suppressInstalledInfoSync += 1;
+    try {
+      return await task();
+    } finally {
+      suppressInstalledInfoSync = Math.max(0, suppressInstalledInfoSync - 1);
+    }
+  }
+
+  function enqueueModSync(task) {
+    return modSyncQueue.enqueue(async () => {
+      if (!instance?.path) return;
+      isCheckingModSync = true;
+      try {
+        await task();
+      } finally {
+        isCheckingModSync = false;
+      }
+    });
+  }
+
+  function syncInstalledMods() {
+    return enqueueModSync(() =>
+      withInstalledInfoSyncSuppressed(() => refreshInstalledMods(instance))
+    );
+  }
+
+  function syncServerMods() {
+    return enqueueModSync(() =>
+      withInstalledInfoSyncSuppressed(() => loadModsFromServer(instance))
+    );
+  }
+
+  function syncModStatusOnly() {
+    return enqueueModSync(() => checkModSynchronization(instance));
+  }
+
   // Connect to server and get mod information
   onMount(() => {
     downloadManagerCleanup = initDownloadManager();
     if (instance?.path) {
       // Populate local mod status even if not connected to a server
-      refreshInstalledMods(instance);
+      syncInstalledMods();
       
       // Load acknowledged dependencies from persistent storage
       loadAcknowledgedDependencies();
     }
     unsubscribeInstalledInfo = installedModInfo.subscribe(() => {
-      // Only check mod synchronization if we're not already in the middle of checking
-      // This prevents reactive loops that could cause the spam of log messages
-      if (!isCheckingModSync) {
-        checkModSynchronization(instance);
+      if (!hasSeenInitialInstalledInfo) {
+        hasSeenInitialInstalledInfo = true;
+        return;
       }
+
+      if (suppressInstalledInfoSync > 0 || isCheckingModSync) {
+        return;
+      }
+
+      syncModStatusOnly();
     });
     // Initialize filter stores for client mod search (only if null/undefined, not empty string)
     const currentFilterVer = get(filterMinecraftVersion);
@@ -356,12 +458,11 @@
       // On initial load, do a fresh mod synchronization check instead of just loading server info
       // This ensures we catch any mods that need removal
       (async () => {
-        await loadModsFromServer(instance);
-        await checkModSynchronization(instance); // This will properly detect removal needs
+        await syncServerMods();
       })();
         
       // Set up periodic mod checking - reduced frequency to prevent flashing
-      const interval = setInterval(() => loadModsFromServer(instance), 5 * 60 * 1000); // Check every 5 minutes instead of 30 seconds
+      const interval = setInterval(() => syncServerMods(), 5 * 60 * 1000); // Check every 5 minutes instead of 30 seconds
       
       return () => {
         clearInterval(interval);
@@ -371,21 +472,21 @@
   });
 
   onDestroy(() => {
+    modSyncQueue.cancel();
     if (downloadManagerCleanup) downloadManagerCleanup();
     if (unsubscribeInstalledInfo) unsubscribeInstalledInfo();
   });  // Refresh installed mods when the instance path changes
   $: if (instance?.path && instance.path !== previousPath) {
     previousPath = instance.path;
-    refreshInstalledMods(instance);
-  refreshAssets();
+    syncInstalledMods();
+    refreshAssets();
   }
 
 
 
   // Reload installed mod info and update synchronization status
   async function refreshMods() {
-    await loadModsFromServer(instance);
-    await refreshInstalledMods(instance);
+    await syncServerMods();
     await refreshAssets();
     successMessage.set('Mod list refreshed');
     setTimeout(() => successMessage.set(''), 3000);
@@ -593,7 +694,7 @@
           if (result.success) {
             successMessage.set(`Successfully added ${result.count} mods`);
 
-            await refreshInstalledMods(instance);
+            await syncInstalledMods();
         } else {
           errorMessage.set(`Failed to add mods: ${result.failed.join(', ')}`);
         }
@@ -681,7 +782,7 @@
               }
             ];
           });
-          await refreshInstalledMods(instance);
+          await syncInstalledMods();
         } else {
           // Silent refresh for shaders/resource packs so Installed shows immediately
           await refreshAssets();
@@ -713,7 +814,7 @@
     activeTab = tab;
     if (tab === 'installed') {
       if ($activeContentType === CONTENT_TYPES.MODS) {
-        refreshInstalledMods(instance);
+        syncInstalledMods();
       } else {
         // Fetch assets so returning from Find shows latest without visible spinner
         refreshAssets();
@@ -752,7 +853,7 @@
         }
       } else if (activeTab === 'installed') {
         if (contentTypeId === CONTENT_TYPES.MODS) {
-          await refreshInstalledMods(instance);
+          await syncInstalledMods();
         } else {
           await refreshAssets();
         }
@@ -927,6 +1028,25 @@
 
 <div class="client-mod-manager">
   <DownloadProgress />
+  {#if pendingDownloadSourceSwitch}
+    <div class="download-source-banner">
+      <div class="download-source-copy">
+        <strong>{getDownloadSourceLabel(pendingDownloadSourceSwitch.attemptedSource)} download failed.</strong>
+        <span>Retry in a few minutes, or switch source for this download.</span>
+      </div>
+      <div class="download-source-actions">
+        <button class="source-action" type="button" on:click={() => runPendingSourceSwitch(null)}>
+          Retry {getDownloadSourceLabel(pendingDownloadSourceSwitch.attemptedSource)}
+        </button>
+        <button class="source-action primary" type="button" on:click={() => runPendingSourceSwitch(pendingDownloadSourceSwitch.fallbackSource)}>
+          Use {getDownloadSourceLabel(pendingDownloadSourceSwitch.fallbackSource)}
+        </button>
+        <button class="source-dismiss" type="button" aria-label="Dismiss source switch" on:click={() => pendingDownloadSourceSwitch = null}>
+          x
+        </button>
+      </div>
+    </div>
+  {/if}
   <ModDependencyModal on:install={handleInstallWithDependencies} />
 
   <!-- Content Type Tabs -->
@@ -1020,7 +1140,7 @@
           
           {#if $modSyncStatus && !$modSyncStatus.synchronized}
             {#if $modSyncStatus.needsDownload > 0}
-              <button class="compact-btn primary" on:click={() => downloadRequiredMods(instance)}>
+              <button class="compact-btn primary" on:click={() => handleRequiredDownload()}>
                 📥 Download Required ({$modSyncStatus.needsDownload})
               </button>
             {:else}
@@ -1060,7 +1180,7 @@
           {/if}
         </div>
         <div class="status-actions">
-          <button class="compact-btn" on:click={() => { refreshInstalledMods(instance); refreshAssets(); }}>
+          <button class="compact-btn" on:click={() => { syncInstalledMods(); refreshAssets(); }}>
             🔄 Refresh
           </button>
           {#if $activeContentType === CONTENT_TYPES.SHADERS}
@@ -1091,7 +1211,7 @@
           <div class="connection-error">
             <h3>⚠️ Cannot Connect to Server</h3>
             <p>Make sure the management server is running and accessible.</p>
-              <button class="retry-button" on:click={() => loadModsFromServer(instance)}>
+              <button class="retry-button" on:click={() => syncServerMods()}>
                 🔄 Retry Connection
               </button>
           </div>
@@ -1110,8 +1230,8 @@
                 type="required"
                 modSyncStatus={$modSyncStatus}
                 serverManagedFiles={$serverManagedFiles}
-                on:download={() => downloadRequiredMods(instance)}
-                on:downloadSingle={(e) => downloadSingleRequiredMod(instance, e.detail.mod)}
+                on:download={() => handleRequiredDownload()}
+                on:downloadSingle={(e) => handleSingleRequiredDownload(e.detail.mod)}
                 on:remove={(e) => handleServerModRemoval(instance, e.detail.fileName)}
                 on:acknowledge={(e) => handleDependencyAcknowledgment(instance, e.detail.fileName)}
                 on:updateMod={(e) => updateServerMod(instance, e)}
@@ -1128,8 +1248,8 @@
                   modSyncStatus={$modSyncStatus}
                   serverManagedFiles={$serverManagedFiles}
                   on:toggle={(e) => handleModToggleWrapper(instance, e.detail.fileName, e.detail.enabled)}
-                  on:download={() => downloadOptionalMods(instance)}
-                  on:downloadSingle={(e) => downloadSingleOptionalMod(instance, e.detail.mod)}
+                  on:download={() => handleOptionalDownload()}
+                  on:downloadSingle={(e) => handleSingleOptionalDownload(e.detail.mod)}
                   on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
                   on:updateMod={(e) => updateServerMod(instance, e)}
                 />
@@ -1273,6 +1393,64 @@
     padding: 1rem;
     box-sizing: border-box;
     overflow-x: hidden;
+  }
+
+  .download-source-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+    padding: 0.75rem 0.875rem;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.1);
+    color: #f8fafc;
+  }
+
+  .download-source-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+    font-size: 0.875rem;
+    line-height: 1.35;
+  }
+
+  .download-source-copy span {
+    color: #cbd5e1;
+  }
+
+  .download-source-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .source-action,
+  .source-dismiss {
+    height: 2rem;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.72);
+    color: #f8fafc;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .source-action {
+    padding: 0 0.75rem;
+  }
+
+  .source-action.primary {
+    border-color: rgba(16, 185, 129, 0.5);
+    background: rgba(16, 185, 129, 0.18);
+  }
+
+  .source-dismiss {
+    width: 2rem;
+    padding: 0;
   }
 
   .content-type-tabs {
@@ -1566,6 +1744,17 @@
     .status-actions {
       justify-content: center;
       flex-wrap: wrap;
+    }
+
+    .download-source-banner,
+    .download-source-actions {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .source-action,
+    .source-dismiss {
+      width: 100%;
     }
   }
 

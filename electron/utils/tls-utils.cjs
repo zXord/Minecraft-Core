@@ -5,7 +5,7 @@ const nodeCrypto = require('crypto');
 const selfsigned = require('selfsigned');
 const { cryptoProvider } = require('@peculiar/x509');
 const appStore = require('./app-store.cjs');
-const { packSecret, unpackSecret } = require('./secure-store.cjs');
+const { packSecret, unpackSecret, ENCRYPTED_PREFIX } = require('./secure-store.cjs');
 const { readServerConfig, updateServerConfig, getDefaultServerConfig } = require('./config-manager.cjs');
 
 const TLS_STORE_KEY = 'tls';
@@ -85,8 +85,17 @@ function unpackStoredTlsKey(value) {
   try {
     return unpackSecret(value);
   } catch {
+    if (value.startsWith(ENCRYPTED_PREFIX)) {
+      return '';
+    }
     return value;
   }
+}
+
+function isPrivateKeyPem(value) {
+  return typeof value === 'string'
+    && /-----BEGIN (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----/.test(value)
+    && /-----END (?:RSA |EC |ENCRYPTED )?PRIVATE KEY-----/.test(value);
 }
 
 function getManagementTlsFromFolder(serverPath) {
@@ -201,6 +210,9 @@ async function getOrCreateTlsConfig(kind, extraHosts = [], options = {}) {
   if (existing && existing.cert && existing.key) {
     try {
       const key = unpackStoredTlsKey(existing.key);
+      if (!isPrivateKeyPem(key)) {
+        throw new Error('Stored TLS private key is not a valid PEM private key');
+      }
       const computedFingerprint = getFingerprintForCert(existing.cert);
       const fingerprint = computedFingerprint || existing.fingerprint || '';
       if (computedFingerprint) {
@@ -337,6 +349,8 @@ async function getPinnedHttpsAgent(host, port, expectedFingerprint) {
 
   const agent = new https.Agent({
     keepAlive: true,
+    rejectUnauthorized: false,
+    checkServerIdentity: () => null,
     createConnection: (options, callback) => {
       const socket = tls.connect(
         {

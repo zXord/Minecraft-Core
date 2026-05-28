@@ -189,6 +189,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let clientSyncInfo = null;
   let isChecking = false;
   let lastCheck = null;
+  let pendingDownloadSourceSwitch = null;
+
+  function getDownloadSourceLabel(source) {
+    switch (source) {
+      case 'server': return 'Server';
+      case 'modrinth': return 'Modrinth';
+      default: return 'alternate source';
+    }
+  }
 
   // Asset synchronization (shaders/resource packs)
   let isDownloadingAssets = false;
@@ -2005,13 +2014,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   // Download required mods
   async function onDownloadModsClick(options = {}) {
-    const { applyRemovals = false } = options || {};
+    const { applyRemovals = false, downloadSourceOverride = null } = options || {};
     logger.info('Starting mod download process', {
       category: 'ui',
       data: {
         component: 'ClientInterface',
         function: 'onDownloadModsClick',
         applyRemovals,
+        downloadSourceOverride,
         currentDownloadStatus: downloadStatus,
         modSyncStatus: modSyncStatus ? {
           synchronized: modSyncStatus.synchronized,
@@ -2026,7 +2036,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     downloadProgress = 0;
     
     try {
-      await downloadMods(applyRemovals);
+      pendingDownloadSourceSwitch = null;
+      await downloadMods({ applyRemovals, downloadSourceOverride });
     } catch (error) {
       logger.error('Mod download failed', {
         category: 'ui',
@@ -2041,7 +2052,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       downloadStatus = 'needed'; // Reset status on error
     }
   }  // Download required mods
-  async function downloadMods(applyRemovals = false) {
+  async function downloadMods(options = {}) {
+    const {
+      applyRemovals = false,
+      downloadSourceOverride = null
+    } = typeof options === 'object' && options !== null
+      ? options
+      : { applyRemovals: options };
+
     // Validate required parameters
     if (!instance?.path) {
       errorMessage.set('No client path configured');
@@ -2268,7 +2286,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             serverProtocol: instance.serverProtocol,
             sessionToken: instance.sessionToken,
             managementCertFingerprint: instance.managementCertFingerprint
-          }
+          },
+          downloadSourceOverride
         });
         
         if (serverResult.success) {
@@ -2289,6 +2308,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         } else {
           totalResults.success = false;
           totalResults.error = serverResult.error;
+          totalResults.failures = [
+            ...(totalResults.failures || []),
+            ...(serverResult.failures || [])
+          ];
+          totalResults.attemptedSource = serverResult.attemptedSource;
+          totalResults.sourceSelectionMode = serverResult.sourceSelectionMode;
+          totalResults.fallbackAvailable = serverResult.fallbackAvailable;
+          totalResults.fallbackSource = serverResult.fallbackSource;
         }
       }        // Handle client mod downloads (need to fetch download URLs first)
       if (clientMods.length > 0 || clientOptionalMods.length > 0) {
@@ -2427,6 +2454,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         if (result.success) {
         downloadStatus = 'ready';
         downloadProgress = 100;
+        pendingDownloadSourceSwitch = null;
 
         if (result.downloadedFiles && result.downloadedFiles.length > 0) {
           serverManagedFiles.update((current) => {
@@ -2448,6 +2476,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       } else {
         downloadStatus = 'needed';
         let failureMsg = 'Failed to download mods';
+        const canSwitchSource = result.fallbackAvailable && result.fallbackSource;
         
         if (result.failures && result.failures.length > 0) {
           failureMsg = `Failed to download ${result.failures.length} mods`;
@@ -2471,12 +2500,24 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         } else if (result.error) {
           failureMsg += `: ${result.error}`;
         }
+
+        if (canSwitchSource) {
+          pendingDownloadSourceSwitch = {
+            attemptedSource: result.attemptedSource,
+            fallbackSource: result.fallbackSource,
+            applyRemovals
+          };
+          failureMsg += `. ${getDownloadSourceLabel(result.attemptedSource)} stopped; switch to ${getDownloadSourceLabel(result.fallbackSource)} only if you want to try that source.`;
+        } else {
+          pendingDownloadSourceSwitch = null;
+        }
         
         errorMessage.set(failureMsg);
         setTimeout(() => errorMessage.set(''), 10000); // Longer timeout for detailed errors
       }
     } catch (err) {
       downloadStatus = 'needed';
+      pendingDownloadSourceSwitch = null;
       
       let errorMsg = 'Error downloading mods';
       if (err.message) {
@@ -3543,11 +3584,127 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     box-sizing: border-box !important;
     padding: 0 !important; /* Let child components handle their own padding */
   }
+
+  .download-source-banner {
+    width: var(--content-area-width);
+    max-width: 100%;
+    margin: 0 auto 0.75rem auto;
+    padding: 0.75rem 0.875rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    box-sizing: border-box;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.1);
+    color: #f8fafc;
+  }
+
+  .download-source-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+    font-size: 0.875rem;
+    line-height: 1.35;
+  }
+
+  .download-source-copy span {
+    color: #cbd5e1;
+  }
+
+  .download-source-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .source-action,
+  .source-dismiss {
+    height: 2rem;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.72);
+    color: #f8fafc;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .source-action {
+    padding: 0 0.75rem;
+  }
+
+  .source-action.primary {
+    border-color: rgba(16, 185, 129, 0.5);
+    background: rgba(16, 185, 129, 0.18);
+  }
+
+  .source-action:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .source-dismiss {
+    width: 2rem;
+    padding: 0;
+  }
+
+  @media (max-width: 760px) {
+    .download-source-banner,
+    .download-source-actions {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .source-action,
+    .source-dismiss {
+      width: 100%;
+    }
+  }
 </style>
 
 <div class="client-wrapper">
   <ClientHeader {tabs} {onOpenAppSettings} />
   <div class="client-interface">
+  {#if pendingDownloadSourceSwitch}
+    <div class="download-source-banner">
+      <div class="download-source-copy">
+        <strong>{getDownloadSourceLabel(pendingDownloadSourceSwitch.attemptedSource)} download failed.</strong>
+        <span>Retry in a few minutes, or switch source for this download.</span>
+      </div>
+      <div class="download-source-actions">
+        <button
+          type="button"
+          class="source-action"
+          disabled={isDownloadingMods || downloadStatus === 'downloading'}
+          on:click={() => onDownloadModsClick({ applyRemovals: pendingDownloadSourceSwitch.applyRemovals })}
+        >
+          Retry {getDownloadSourceLabel(pendingDownloadSourceSwitch.attemptedSource)}
+        </button>
+        <button
+          type="button"
+          class="source-action primary"
+          disabled={isDownloadingMods || downloadStatus === 'downloading'}
+          on:click={() => onDownloadModsClick({
+            applyRemovals: pendingDownloadSourceSwitch.applyRemovals,
+            downloadSourceOverride: pendingDownloadSourceSwitch.fallbackSource
+          })}
+        >
+          Use {getDownloadSourceLabel(pendingDownloadSourceSwitch.fallbackSource)}
+        </button>
+        <button
+          type="button"
+          class="source-dismiss"
+          aria-label="Dismiss source switch"
+          on:click={() => pendingDownloadSourceSwitch = null}
+        >
+          x
+        </button>
+      </div>
+    </div>
+  {/if}
   <div class="client-content">
     {#if $clientState.activeTab === 'play'}
       <PlayTab

@@ -37,6 +37,23 @@ interface Instance {
   managementCertFingerprint?: string;
 }
 
+interface DownloadOptions {
+  downloadSourceOverride?: string | null;
+}
+
+function getDownloadSourceLabel(source?: string | null) {
+  switch (source) {
+    case 'server': return 'Server';
+    case 'modrinth': return 'Modrinth';
+    default: return 'alternate source';
+  }
+}
+
+function appendManualFallbackHint(message: string, result: any) {
+  if (!result?.fallbackAvailable || !result?.fallbackSource) return message;
+  return `${message}. ${getDownloadSourceLabel(result.attemptedSource)} stopped; retry later or switch to ${getDownloadSourceLabel(result.fallbackSource)} manually.`;
+}
+
 export async function loadInstalledInfo(instance: Instance) {
   try {
     const info = await window.electron.invoke('get-client-installed-mod-info', instance.path);
@@ -219,7 +236,7 @@ export async function refreshInstalledMods(instance: Instance) {
   await checkModSynchronization(instance);
 }
 
-export async function downloadRequiredMods(instance: Instance) {
+export async function downloadRequiredMods(instance: Instance, options: DownloadOptions = {}) {
   const reqMods = get(requiredMods);
   if (!instance.path || !reqMods.length) return;
   
@@ -244,7 +261,8 @@ export async function downloadRequiredMods(instance: Instance) {
       clientPath: instance.path,
       requiredMods: modsToDownload,
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint },
+      downloadSourceOverride: options.downloadSourceOverride || null
     });
     if (result.success) {
       successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
@@ -262,12 +280,15 @@ export async function downloadRequiredMods(instance: Instance) {
         const firstFailure = result.failures[0];
         detailedError += ` | First failure: ${firstFailure.fileName} - ${firstFailure.error}`;
       }
+      detailedError = appendManualFallbackHint(detailedError, result);
       errorMessage.set(detailedError);
       setTimeout(() => errorMessage.set(''), 8000);
     }
+    return result;
   } catch (err: any) {
     errorMessage.set('Error downloading mods: ' + err.message);
     setTimeout(() => errorMessage.set(''), 5000);
+    return { success: false, error: err.message };
   }
 }
 
@@ -301,7 +322,7 @@ export async function acknowledgeAllDependencies(instance: Instance) {
   }
 }
 
-export async function downloadOptionalMods(instance: Instance) {
+export async function downloadOptionalMods(instance: Instance, options: DownloadOptions = {}) {
   const allMods = get(allClientMods);
   if (!instance.path || !allMods.length) return;
   
@@ -328,7 +349,8 @@ export async function downloadOptionalMods(instance: Instance) {
       requiredMods: [],
       optionalMods: modsToDownload,
       allClientMods: allMods,
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint },
+      downloadSourceOverride: options.downloadSourceOverride || null
     });
     if (result.success) {
       successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
@@ -339,16 +361,18 @@ export async function downloadOptionalMods(instance: Instance) {
         await refreshInstalledMods(instance);
       }, 1500);
     } else {
-      errorMessage.set(`Failed to download optional mods: ${result.error || 'Unknown error'}`);
+      errorMessage.set(appendManualFallbackHint(`Failed to download optional mods: ${result.error || 'Unknown error'}`, result));
       setTimeout(() => errorMessage.set(''), 5000);
     }
+    return result;
   } catch (err: any) {
     errorMessage.set('Error downloading optional mods: ' + err.message);
     setTimeout(() => errorMessage.set(''), 5000);
+    return { success: false, error: err.message };
   }
 }
 
-export async function downloadSingleOptionalMod(instance: Instance, mod: any) {
+export async function downloadSingleOptionalMod(instance: Instance, mod: any, options: DownloadOptions = {}) {
   if (!instance.path) return;
   try {
     const result = await window.electron.invoke('minecraft-download-mods', {
@@ -356,7 +380,8 @@ export async function downloadSingleOptionalMod(instance: Instance, mod: any) {
       requiredMods: mod.required ? [mod] : [],
       optionalMods: mod.required ? [] : [mod],
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint },
+      downloadSourceOverride: options.downloadSourceOverride || null
     });
     if (result.success) {
       // Avoid duplicate success toasts; the downloads UI already shows completion
@@ -366,16 +391,18 @@ export async function downloadSingleOptionalMod(instance: Instance, mod: any) {
         await refreshInstalledMods(instance);
       }, 1500);
     } else {
-      errorMessage.set(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`);
+      errorMessage.set(appendManualFallbackHint(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`, result));
       setTimeout(() => errorMessage.set(''), 5000);
     }
+    return result;
   } catch (err: any) {
     errorMessage.set(`Error downloading ${mod.fileName}: ${err.message}`);
     setTimeout(() => errorMessage.set(''), 5000);
+    return { success: false, error: err.message };
   }
 }
 
-export async function downloadSingleRequiredMod(instance: Instance, mod: any) {
+export async function downloadSingleRequiredMod(instance: Instance, mod: any, options: DownloadOptions = {}) {
   if (!instance.path) return;
   try {
     const result = await window.electron.invoke('minecraft-download-mods', {
@@ -383,7 +410,8 @@ export async function downloadSingleRequiredMod(instance: Instance, mod: any) {
       requiredMods: [mod],
       optionalMods: [],
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
+      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint },
+      downloadSourceOverride: options.downloadSourceOverride || null
     });
     if (result.success) {
       // Avoid duplicate success toasts; the downloads UI already shows completion
@@ -393,12 +421,14 @@ export async function downloadSingleRequiredMod(instance: Instance, mod: any) {
         await refreshInstalledMods(instance);
       }, 1500);
     } else {
-      errorMessage.set(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`);
+      errorMessage.set(appendManualFallbackHint(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`, result));
       setTimeout(() => errorMessage.set(''), 5000);
     }
+    return result;
   } catch (err: any) {
     errorMessage.set(`Error downloading ${mod.fileName}: ${err.message}`);
     setTimeout(() => errorMessage.set(''), 5000);
+    return { success: false, error: err.message };
   }
 }
 
