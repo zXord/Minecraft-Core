@@ -37,6 +37,88 @@ function invalidateMetadataCache(jarPath) {
   }
 }
 
+function isSystemDependencyId(id) {
+  if (!id) return false;
+  const canonical = String(id).toLowerCase().replace(/[^a-z]/g, '');
+  return ['minecraft', 'java', 'javafml', 'forge', 'fabricloader', 'quiltloader'].includes(canonical);
+}
+
+function normalizeMetadataDependencyId(id) {
+  if (!id) return '';
+  const normalized = String(id).trim();
+  const lower = normalized.toLowerCase();
+  if (lower === 'fabric_api' || lower === 'fabricapi') {
+    return 'fabric-api';
+  }
+  return normalized;
+}
+
+function normalizeDependencyType(type, mandatory = true) {
+  if (typeof type === 'string') {
+    const normalized = type.trim().toLowerCase();
+    if (normalized === 'required' || normalized === 'depends') return 'required';
+    if (normalized === 'optional' || normalized === 'recommends' || normalized === 'suggests') return 'optional';
+    if (normalized === 'breaks' || normalized === 'conflicts') return 'incompatible';
+  }
+
+  return mandatory === false ? 'optional' : 'required';
+}
+
+function parseTomlPrimitive(value) {
+  const trimmed = String(value || '').trim();
+  const quoted = trimmed.match(/^(['"])(.*)\1$/);
+  if (quoted) return quoted[2];
+  if (/^(true|false)$/i.test(trimmed)) return trimmed.toLowerCase() === 'true';
+  return trimmed;
+}
+
+function parseForgeDependencies(content, ownerModId) {
+  const dependencies = [];
+  const lines = content.split(/\r?\n/);
+  let current = null;
+  let currentOwner = null;
+
+  const flush = () => {
+    if (!current) return;
+    const depId = normalizeMetadataDependencyId(current.modId);
+    if (
+      depId &&
+      depId !== ownerModId &&
+      !isSystemDependencyId(depId)
+    ) {
+      dependencies.push({
+        id: depId,
+        dependency_type: normalizeDependencyType(null, current.mandatory),
+        version_requirement: typeof current.versionRange === 'string' ? current.versionRange : null,
+        source: 'META-INF/mods.toml'
+      });
+    }
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const sectionMatch = line.match(/^\[\[dependencies\.([^\]]+)\]\]$/);
+    if (sectionMatch) {
+      flush();
+      currentOwner = sectionMatch[1];
+      current = {};
+      continue;
+    }
+
+    if (!current || !currentOwner || currentOwner !== ownerModId) {
+      continue;
+    }
+
+    const match = line.match(/^(\w+)\s*=\s*(.+)$/);
+    if (match) {
+      current[match[1]] = parseTomlPrimitive(match[2]);
+    }
+  }
+
+  flush();
+  return dependencies;
+}
+
 function parseForgeModMetadata(content) {
   const metadata = { loaderType: 'forge', authors: [], dependencies: [] };
   const lines = content.split(/\r?\n/);
@@ -102,8 +184,67 @@ function parseForgeModMetadata(content) {
   metadata.name = metadata.displayName || metadata.modId || 'Unknown';
   metadata.version = metadata.version || 'Unknown';
   metadata.projectId = metadata.modId || metadata.name;
+  metadata.dependencies = parseForgeDependencies(content, metadata.modId);
 
   return metadata;
+}
+
+function normalizeMetadataDependencyList(metadata) {
+  if (!metadata || typeof metadata !== 'object') return [];
+
+  if (metadata.loaderType === 'forge') {
+    return Array.isArray(metadata.dependencies) ? metadata.dependencies : [];
+  }
+
+  const dependencies = [];
+  const addDependency = (id, type, requirement) => {
+    const normalizedId = normalizeMetadataDependencyId(id);
+    if (!normalizedId || normalizedId === metadata.id || isSystemDependencyId(normalizedId)) {
+      return;
+    }
+
+    dependencies.push({
+      id: normalizedId,
+      dependency_type: normalizeDependencyType(type),
+      version_requirement: typeof requirement === 'string' ? requirement : null,
+      source: 'fabric.mod.json'
+    });
+  };
+
+  const depends = metadata.depends || metadata.dependencies;
+  if (depends && typeof depends === 'object') {
+    if (Array.isArray(depends)) {
+      for (const dep of depends) {
+        if (typeof dep === 'string') {
+          addDependency(dep, 'required', null);
+        } else if (dep && typeof dep === 'object') {
+          addDependency(dep.id || dep.modid || dep.project_id || dep.projectId, dep.dependency_type || dep.type || 'required', dep.version_requirement || dep.versionRequirement || dep.version);
+        }
+      }
+    } else {
+      for (const [id, requirement] of Object.entries(depends)) {
+        addDependency(id, 'required', requirement);
+      }
+    }
+  }
+
+  for (const field of ['recommends', 'suggests']) {
+    const optionalDeps = metadata[field];
+    if (!optionalDeps || typeof optionalDeps !== 'object') continue;
+    for (const [id, requirement] of Object.entries(optionalDeps)) {
+      addDependency(id, 'optional', requirement);
+    }
+  }
+
+  for (const field of ['breaks', 'conflicts']) {
+    const conflictDeps = metadata[field];
+    if (!conflictDeps || typeof conflictDeps !== 'object') continue;
+    for (const [id, requirement] of Object.entries(conflictDeps)) {
+      addDependency(id, 'incompatible', requirement);
+    }
+  }
+
+  return dependencies;
 }
 
 function parseJarMetadataSync(jarPath) {
@@ -250,68 +391,42 @@ async function extractDependenciesFromJar(jarPath) {
   }
 }
 
+async function extractDependencyListFromJar(jarPath) {
+  const metadata = await extractDependenciesFromJar(jarPath);
+  return normalizeMetadataDependencyList(metadata);
+}
+
 async function fetchModInfoFromUrl(url) {
+  const tempFile = path.join(os.tmpdir(), `mod-${Date.now()}.jar`);
+
   try {
-    const tempFile = path.join(os.tmpdir(), `mod-${Date.now()}.jar`);
-    
-    try {
-      const response = await axios({
-        url: url,
-        method: 'GET',
-        responseType: 'arraybuffer'
-      });
-        
-      await fs.writeFile(tempFile, response.data);
-      
-      const dependencies = await extractDependenciesFromJar(tempFile);
-      try {
-        await fs.unlink(tempFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-      
-      return dependencies;
-    } catch (err) {
-      try {
-        await fs.unlink(tempFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-      throw err;
-    }  } catch {
+    const response = await axios({
+      url,
+      method: 'GET',
+      responseType: 'arraybuffer'
+    });
+
+    await fs.writeFile(tempFile, response.data);
+    return await extractDependencyListFromJar(tempFile);
+  } catch {
     return [];
+  } finally {
+    try {
+      await fs.unlink(tempFile);
+    } catch {
+      // Ignore cleanup errors
+    }
   }
 }
 
 async function analyzeModFromUrl(url, modId) {
-  try {
-    // Use fetchModInfoFromUrl to get the metadata
-    const metadata = await fetchModInfoFromUrl(url);
-    
-    if (!metadata) {
-      return { success: false, error: 'Could not extract metadata from mod file' };
-    }
-    
-    // Return the analysis result
-    return {
-      success: true,
-      metadata: {
-        ...metadata,
-        providedModId: modId, // Include the provided mod ID for reference
-        analysisTimestamp: Date.now()
-      }
-    };
-  } catch (error) {
-    // TODO: Add proper logging - Failed to analyze mod from URL ${url}:
-    return { 
-      success: false, 
-      error: error.message || 'Failed to analyze mod from URL' 
-    };
-  }
+  void modId;
+  return await fetchModInfoFromUrl(url);
 }
 
 module.exports = {
   extractDependenciesFromJar,
+  extractDependencyListFromJar,
   fetchModInfoFromUrl,
   analyzeModFromUrl,
   invalidateMetadataCache,

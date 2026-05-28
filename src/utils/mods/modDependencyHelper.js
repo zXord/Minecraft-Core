@@ -61,8 +61,8 @@ function isBundledFabricModule(id) {
   
   // Fabric API itself is a real mod that should be checked
   if (canonical === 'fabric-api') return false;
-  if (canonical === 'p7dkfbws') return false; // Fabric API's actual project ID
-  
+  if (canonical === 'p7dr8msh' || canonical === 'p7dkfbws') return false; // Fabric API's project ID, plus legacy typo
+
   // Individual Fabric API modules are bundled with the main Fabric API mod
   // These typically follow the pattern: fabric-[module-name]-v[version]
   return /^fabric-.*-v\d+$/.test(canonical) || 
@@ -85,7 +85,7 @@ function isFabricLikeLoader(loader) {
 function isFabricApiProject(id) {
   if (!id) return false;
   const normalizedId = String(id).trim().toLowerCase();
-  return normalizedId === 'fabric-api' || normalizedId === 'p7dkfbws';
+  return normalizedId === 'fabric-api' || normalizedId === 'p7dr8msh' || normalizedId === 'p7dkfbws';
 }
 
 export function isDependencyRelevantToActiveLoader(projectId, activeLoader) {
@@ -101,16 +101,86 @@ export function isDependencyRelevantToActiveLoader(projectId, activeLoader) {
   return true;
 }
 
-export function shouldInjectFabricApiDependency(versionLoaders, activeLoader) {
-  if (!isFabricLikeLoader(activeLoader) || !Array.isArray(versionLoaders)) {
+export function shouldInjectFabricApiDependency(dependencyIds, activeLoader) {
+  if (!isFabricLikeLoader(activeLoader) || !Array.isArray(dependencyIds)) {
     return false;
   }
 
-  return versionLoaders.some(loader => isFabricLikeLoader(loader));
+  return dependencyIds.some(id => isBundledFabricModule(id));
 }
 
 function getDependencyProjectId(dependency) {
   return dependency?.projectId || dependency?.project_id || null;
+}
+
+function isGenericDependencyName(name) {
+  if (!name) return true;
+  const normalizedName = String(name).trim();
+  return [
+    'Required Dependency',
+    'Required_Dependency',
+    'Installed Mod',
+    'Dependency',
+    'Unknown Mod',
+    'Unknown_Mod'
+  ].includes(normalizedName);
+}
+
+async function resolveDependencyInstallName(dependency) {
+  let depName = dependency.name ? dependency.name.trim() : '';
+
+  if (depName) {
+    depName = depName.split('(')[0].trim();
+
+    const phrasesToRemove = [
+      'Required dependency not installed',
+      'not installed',
+      'Required dependency',
+      'is not installed',
+      'needs to be updated',
+      'update available'
+    ];
+
+    for (const phrase of phrasesToRemove) {
+      if (depName.includes(phrase)) {
+        depName = depName.replace(phrase, '').trim();
+      }
+    }
+
+    depName = depName.replace(/[.:,;]+$/, '').trim();
+  }
+
+  if (!isGenericDependencyName(depName)) {
+    return depName;
+  }
+
+  const projectId = getDependencyProjectId(dependency);
+  if (!projectId) {
+    return '';
+  }
+
+  try {
+    const projectInfo = await safeInvoke('get-project-info', {
+      projectId,
+      source: 'modrinth'
+    });
+
+    if (projectInfo?.title) {
+      return projectInfo.title;
+    }
+  } catch (error) {
+    logger.debug('Failed to get project info for dependency, using project ID fallback', {
+      category: 'network',
+      data: {
+        function: 'installWithDependencies',
+        dependencyId: projectId,
+        errorType: error.constructor.name,
+        context: 'dependency_name_resolution'
+      }
+    });
+  }
+
+  return `mod-${projectId.substring(0, 8)}`;
 }
 
 export function buildDependencyResolutionState({
@@ -229,7 +299,8 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
     
     // Initialize an array to collect all dependencies from various sources
     const allDependencies = [];
-    let isFabricMod = false;
+    let shouldAddFabricApiDependency = false;
+    let providerMetadataAvailable = false;
     
     // FIRST ATTEMPT: Try getting dependencies from the API
     try {
@@ -258,11 +329,7 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
       
       // Check if we got valid version info
       if (versionInfo) {
-        
-        // Check if this is a Fabric mod
-        if (versionInfo.loaders && Array.isArray(versionInfo.loaders)) {
-          isFabricMod = shouldInjectFabricApiDependency(versionInfo.loaders, activeLoader);
-        }
+        providerMetadataAvailable = true;
         
         // METHOD 1: Standard dependencies array
         if (versionInfo.dependencies && Array.isArray(versionInfo.dependencies)) {
@@ -364,20 +431,21 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
         if (versionInfo.files && versionInfo.files.length > 0) {
           mod.downloadUrl = versionInfo.files[0].url;
         }
-        }    } catch (error) {
-        logger.debug('Failed to get version info from API', {
-          category: 'network',
-          data: {
-            function: 'checkModDependencies',
-            modId: mod.id,
-            errorType: error.constructor.name,
-            context: 'api_version_info'
-          }
-        });
       }
+    } catch (error) {
+      logger.debug('Failed to get version info from API', {
+        category: 'network',
+        data: {
+          function: 'checkModDependencies',
+          modId: mod.id,
+          errorType: error.constructor.name,
+          context: 'api_version_info'
+        }
+      });
+    }
     
     // SECOND ATTEMPT: If we couldn't find dependencies through API, try to analyze installed file
-    if (allDependencies.length === 0) {
+    if (!providerMetadataAvailable && allDependencies.length === 0) {
       
       try {
         // Check if this mod is already installed, and ask backend to analyze its JAR file
@@ -400,25 +468,32 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
           const jarDeps = await safeInvoke('extract-jar-dependencies', installedMod.filePath);
           
           if (jarDeps && jarDeps.length > 0) {
+            const jarDependencyIds = jarDeps
+              .map(dep => dep.id || dep.project_id || dep.projectId)
+              .filter(Boolean);
+            if (shouldInjectFabricApiDependency(jarDependencyIds, activeLoader)) {
+              shouldAddFabricApiDependency = true;
+            }
+
             // Resolve any slug-based IDs to actual project IDs and names
             for (const dep of jarDeps) {
               let pid = dep.id;
               let depName = null;
-                try {
-                  const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
-                  if (projectInfo?.id) pid = projectInfo.id;
-                  if (projectInfo?.title) depName = projectInfo.title;
-                } catch (error) {
-                  logger.debug('Failed to resolve JAR dependency project info', {
-                    category: 'network',
-                    data: {
-                      function: 'checkModDependencies',
-                      dependencyId: dep.id,
-                      errorType: error.constructor.name,
-                      context: 'installed_jar_analysis'
-                    }
-                  });
-                }
+              try {
+                const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
+                if (projectInfo?.id) pid = projectInfo.id;
+                if (projectInfo?.title) depName = projectInfo.title;
+              } catch (error) {
+                logger.debug('Failed to resolve JAR dependency project info', {
+                  category: 'network',
+                  data: {
+                    function: 'checkModDependencies',
+                    dependencyId: dep.id,
+                    errorType: error.constructor.name,
+                    context: 'installed_jar_analysis'
+                  }
+                });
+              }
               allDependencies.push({
                 project_id: pid,
                 dependency_type: dep.dependency_type,
@@ -427,13 +502,8 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
               });
             }
           }
-          
-          // Check if this is a Fabric mod based on the filename
-          if (isFabricLikeLoader(activeLoader) && installedMod.fileName.toLowerCase().includes('fabric')) {
-            isFabricMod = true;
-          }
-        }        // If mod isn't installed but we have a URL, ask backend to analyze it
-        else if (mod.downloadUrl) {
+        } else if (mod.downloadUrl) {
+          // If mod isn't installed but we have a URL, ask backend to analyze it
           
           logger.debug('Analyzing mod from URL for dependencies', {
             category: 'mods',
@@ -451,25 +521,32 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
           });
           
           if (jarDeps && jarDeps.length > 0) {
+            const jarDependencyIds = jarDeps
+              .map(dep => dep.id || dep.project_id || dep.projectId)
+              .filter(Boolean);
+            if (shouldInjectFabricApiDependency(jarDependencyIds, activeLoader)) {
+              shouldAddFabricApiDependency = true;
+            }
+
             // Resolve any slug-based IDs to actual project IDs and names
             for (const dep of jarDeps) {
               let pid = dep.id;
               let depName = null;
-                try {
-                  const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
-                  if (projectInfo?.id) pid = projectInfo.id;
-                  if (projectInfo?.title) depName = projectInfo.title;
-                } catch (error) {
-                  logger.debug('Failed to resolve URL dependency project info', {
-                    category: 'network',
-                    data: {
-                      function: 'checkModDependencies',
-                      dependencyId: dep.id,
-                      errorType: error.constructor.name,
-                      context: 'url_jar_analysis'
-                    }
-                  });
-                }
+              try {
+                const projectInfo = await safeInvoke('get-project-info', { projectId: dep.id, source: 'modrinth' });
+                if (projectInfo?.id) pid = projectInfo.id;
+                if (projectInfo?.title) depName = projectInfo.title;
+              } catch (error) {
+                logger.debug('Failed to resolve URL dependency project info', {
+                  category: 'network',
+                  data: {
+                    function: 'checkModDependencies',
+                    dependencyId: dep.id,
+                    errorType: error.constructor.name,
+                    context: 'url_jar_analysis'
+                  }
+                });
+              }
               allDependencies.push({
                 project_id: pid,
                 dependency_type: dep.dependency_type,
@@ -478,7 +555,8 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
               });
             }
           }
-          }      } catch (error) {
+        }
+      } catch (error) {
         logger.debug('Failed to analyze JAR file for dependencies', {
           category: 'mods',
           data: {
@@ -488,13 +566,14 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
             context: 'jar_analysis_fallback'
           }
         });
-        }
+      }
     }
     
     
-    // SPECIAL CASE: If this is a Fabric mod, ensure Fabric API is included (unless installing Fabric API itself)
-    if (isFabricMod) {
-  if (rootInteractive) logger.debug('Detected Fabric mod, checking for Fabric API dependency', {
+    // SPECIAL CASE: If JAR metadata lists bundled Fabric API modules,
+    // install the main Fabric API project instead of individual module IDs.
+    if (shouldAddFabricApiDependency) {
+      if (rootInteractive) logger.debug('Detected Fabric API module dependency, checking for Fabric API project', {
         category: 'mods',
         data: {
           function: 'checkModDependencies',
@@ -509,8 +588,11 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
         const fapiId = fapiInfo.id;
         const fapiName = fapiInfo.title || 'Fabric API';
         // Only inject if we're not installing Fabric API itself
-        if (mod.id !== fapiId) {
-          const hasFapi = allDependencies.some(dep => dep.project_id === fapiId);
+        if (!isFabricApiProject(mod.id) && mod.id !== fapiId) {
+          const hasFapi = allDependencies.some(dep => {
+            const depId = dep.project_id || dep.projectId || dep.id;
+            return depId === fapiId || isFabricApiProject(depId);
+          });
           if (!hasFapi) {
             if (rootInteractive) logger.debug('Adding Fabric API as required dependency', {
               category: 'mods',
@@ -530,7 +612,7 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
           }
         }
       } catch (err) {
-  if (rootInteractive) logger.warn('Failed to fetch Fabric API info for dependency injection', {
+        if (rootInteractive) logger.warn('Failed to fetch Fabric API info for dependency injection', {
           category: 'mods',
           data: {
             function: 'checkModDependencies',
@@ -971,80 +1053,9 @@ export async function installWithDependencies(serverPath, installFn = installMod
           continue;
         }
         
-        // Add this dependency to our installation tracking
-        if (dependency.projectId) {
-          modsToInstall.add(dependency.projectId);
-        }
-        
-        // Skip dependencies with generic names that might be incorrect
-        if (dependency.name === 'Required Dependency' || dependency.name === 'Required_Dependency') {
-          continue;
-        }
-        
-        // Make sure we have a proper dependency name to avoid generic filenames
-        let depName = dependency.name ? dependency.name.trim() : '';
-        
-        // Remove any parenthetical content, messages, or problematic text
-        if (depName) {
-          // Strip out any parenthetical content
-          depName = depName.split('(')[0].trim();
-          
-          // Strip out any specific problematic phrases
-          const phrasesToRemove = [
-            'Required dependency not installed',
-            'not installed',
-            'Required dependency',
-            'is not installed',
-            'needs to be updated',
-            'update available'
-          ];
-          
-          for (const phrase of phrasesToRemove) {
-            if (depName.includes(phrase)) {
-              depName = depName.replace(phrase, '').trim();
-            }
-          }
-          
-          // Clean up any leftover punctuation
-          depName = depName.replace(/[.:,;]+$/, '').trim();
-        }
-        
-        // Skip dependencies with problematic names
-        if (!depName || 
-            depName === 'Required Dependency' || 
-            depName === 'Required_Dependency' || 
-            depName === 'Installed Mod' || 
-            depName === 'Dependency' ||
-            depName === 'Unknown Mod' ||
-            depName === 'Unknown_Mod') {
-          // Try to get a better name for the dependency
-          try {
-            const projectInfo = await safeInvoke('get-project-info', {
-              projectId: dependency.projectId,
-              source: 'modrinth'
-            });
-            
-            if (projectInfo && projectInfo.title) {
-              depName = projectInfo.title;
-            } else if (dependency.projectId) {
-              // If we can't get a name, use the project ID instead of a generic name
-              depName = `mod-${dependency.projectId.substring(0, 8)}`;
-            } else {
-              // Skip dependencies without a proper name or ID
-              continue;
-            }
-            } catch (error) {
-              logger.debug('Failed to get project info for dependency, skipping', {
-                category: 'network',
-                data: {
-                  function: 'installWithDependencies',
-                  dependencyId: dependency.projectId,
-                  errorType: error.constructor.name,
-                  context: 'dependency_name_resolution'
-                }
-              });
-              continue;
-            }
+        const depName = await resolveDependencyInstallName(dependency);
+        if (!depName) {
+          throw new Error(`Required dependency ${dependency.projectId || 'unknown'} could not be resolved`);
         }
         
         const depMod = {
@@ -1081,7 +1092,11 @@ export async function installWithDependencies(serverPath, installFn = installMod
             
             // For version_mismatch issues, we may already have a specific version ID to install
             if (dependency.currentVersionId) {
-              selectedVersion = versions.find(v => v.id === dependency.currentVersionId);
+              selectedVersion = versions.find(v =>
+                v.id === dependency.currentVersionId &&
+                v.versionNumber &&
+                checkVersionCompatibility(v.versionNumber, dependency.versionRequirement)
+              );
             } 
             
             // If we don't have a specific ID or couldn't find it, try to find a compatible version
@@ -1102,10 +1117,16 @@ export async function installWithDependencies(serverPath, installFn = installMod
             if (selectedVersion) {
               depMod.selectedVersionId = selectedVersion.id;
             } else {
-              // If no compatible version found, skip this dependency
-              continue;
+              throw new Error(`No compatible version found for dependency ${depName}`);
             }
+          } else {
+            throw new Error(`No compatible versions found for dependency ${depName}`);
           }
+        }
+
+        // Add this dependency to our installation tracking only after it is resolvable.
+        if (dependency.projectId) {
+          modsToInstall.add(dependency.projectId);
         }
         
         // Mark this dependency as being installed
@@ -1118,25 +1139,30 @@ export async function installWithDependencies(serverPath, installFn = installMod
         const dependencyInstalled = await installFn(depMod, serverPath, { contentType: 'mods' });
         if (dependencyInstalled) {
           installedCount++;
+        } else {
+          throw new Error(`Failed to install dependency ${depName}`);
         }
-        } catch (error) {
-          logger.debug('Failed to install dependency, continuing with others', {
-            category: 'mods',
-            data: {
-              function: 'installWithDependencies',
-              dependencyId: dependency.projectId,
-              dependencyName: dependency.name,
-              errorType: error.constructor.name,
-              context: 'dependency_installation'
-            }
-          });
-          continue;
-        }
+      } catch (error) {
+        logger.debug('Failed to install required dependency', {
+          category: 'mods',
+          data: {
+            function: 'installWithDependencies',
+            dependencyId: dependency.projectId,
+            dependencyName: dependency.name,
+            errorType: error.constructor.name,
+            context: 'dependency_installation'
+          }
+        });
+        throw error;
+      }
     }
     
     // Now install the main content with the correct content type
     const installOptions = mainContentType ? { contentType: mainContentType } : {};
-    await installFn(mod, serverPath, installOptions);
+    const mainInstalled = await installFn(mod, serverPath, installOptions);
+    if (!mainInstalled) {
+      throw new Error(`Failed to install ${mod.name || mod.id}`);
+    }
     
     // Update success message
     successMessage.set(`Installed ${mod.name} with ${installedCount} dependencies`);

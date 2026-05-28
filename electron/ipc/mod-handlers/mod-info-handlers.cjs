@@ -47,7 +47,7 @@ function createModInfoHandlers() {
     },
 
     'extract-jar-dependencies': async (_e, modPath) => {
-      return await modAnalysisUtils.extractDependenciesFromJar(modPath);
+      return await modAnalysisUtils.extractDependencyListFromJar(modPath);
     },
 
     'analyze-mod-from-url': async (_e, { url, modId }) => {
