@@ -10,7 +10,7 @@
 module.exports = {
   // Enable/disable the development console (DevTools)
   // This controls whether DevTools opens automatically
-  enableDevConsole: true, // DISABLED FOR PRODUCTION
+  enableDevConsole: false, // DISABLED FOR PRODUCTION
 
   // Enable/disable development server auto-detection  
   // This only affects PACKAGED apps - npm run dev always works

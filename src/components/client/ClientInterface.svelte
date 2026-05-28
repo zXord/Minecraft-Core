@@ -106,7 +106,45 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
     
     return 0;
-  }  import {
+  }
+
+  function getReadableErrorMessage(error, fallback = 'Unknown error') {
+    if (typeof error === 'string') {
+      const trimmed = error.trim();
+      return trimmed || fallback;
+    }
+
+    if (error && typeof error.message === 'string') {
+      const trimmed = error.message.trim();
+      if (trimmed) return trimmed;
+    }
+
+    if (error && typeof error.error === 'string') {
+      const trimmed = error.error.trim();
+      if (trimmed) return trimmed;
+    }
+
+    if (error && typeof error.details === 'string') {
+      const trimmed = error.details.trim();
+      if (trimmed) return trimmed;
+    }
+
+    if (error && typeof error === 'object') {
+      try {
+        const serialized = JSON.stringify(error);
+        if (serialized && serialized !== '{}' && serialized !== 'null') {
+          return serialized;
+        }
+      } catch {
+        // Fall through to fallback handling
+      }
+    }
+
+    const coerced = String(error ?? '').trim();
+    return coerced && coerced !== '[object Object]' ? coerced : fallback;
+  }
+
+  import {
     clientState,
     setConnectionStatus,
     setManagementServerStatus,
@@ -1924,7 +1962,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         
       } else {
         authStatus = 'needs-auth';
-        errorMessage.set('Authentication failed: ' + result.error);
+        errorMessage.set(`Authentication failed: ${getReadableErrorMessage(result?.error)}`);
         setTimeout(() => errorMessage.set(''), 5000);
       }
   } catch (err) {      // Clear the timeout since we got an error
@@ -1938,7 +1976,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         setTimeout(() => successMessage.set(''), 3000);
       } else {
         authStatus = 'needs-auth';
-        errorMessage.set('Authentication error: ' + err.message);
+        errorMessage.set(`Authentication error: ${getReadableErrorMessage(err)}`);
         setTimeout(() => errorMessage.set(''), 5000);
       }
     }
@@ -2660,14 +2698,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         // Authentication refresh failed - require re-authentication
         isLaunching = false;
         launchStatus = 'ready';
+        const refreshErrorMessage = getReadableErrorMessage(refreshResult?.error);
         
-        if (refreshResult.requiresAuth || refreshResult.error?.includes('re-authenticate')) {
+        if (refreshResult.requiresAuth || refreshErrorMessage.includes('re-authenticate')) {
           authStatus = 'needs-auth';
           username = '';
           authData = null;
           errorMessage.set('Your Microsoft authentication has expired. Please re-authenticate in the Settings tab.');
         } else {
-          errorMessage.set(`Authentication refresh failed: ${refreshResult.error || 'Unknown error'}. Please try re-authenticating in Settings.`);
+          errorMessage.set(`Authentication refresh failed: ${refreshErrorMessage}. Please try re-authenticating in Settings.`);
         }
         setTimeout(() => errorMessage.set(''), 8000);
         return;
@@ -2870,7 +2909,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     window.electron.on('launcher-launch-error', (error) => {
       launchStatus = 'error';
       isLaunching = false;
-      errorMessage.set('Launch failed: ' + error);
+      errorMessage.set(`Launch failed: ${getReadableErrorMessage(error)}`);
       setTimeout(() => errorMessage.set(''), 5000);
     });
     
@@ -2897,7 +2936,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     window.electron.on('launcher-auth-error', (error) => {
       authStatus = 'needs-auth';
-      errorMessage.set('Authentication failed: ' + error);
+      errorMessage.set(`Authentication failed: ${getReadableErrorMessage(error)}`);
       setTimeout(() => errorMessage.set(''), 5000);
     });
     

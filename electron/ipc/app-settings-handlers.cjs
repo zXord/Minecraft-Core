@@ -3,6 +3,35 @@ const appStore = require('../utils/app-store.cjs');
 const { app, BrowserWindow } = require('electron');
 const { ensureEncryptionAvailable, packSecret, unpackSecret, ENCRYPTED_PREFIX } = require('../utils/secure-store.cjs');
 
+const STARTUP_LOGIN_ITEM_NAME = 'Minecraft Core';
+const STARTUP_MINIMIZED_ARGS = ['--start-minimized'];
+
+function buildStartupLoginItemSettings(settings) {
+  return {
+    openAtLogin: Boolean(settings.startOnStartup),
+    name: STARTUP_LOGIN_ITEM_NAME,
+    args: settings.startOnStartup && settings.startMinimized ? [...STARTUP_MINIMIZED_ARGS] : []
+  };
+}
+
+function applyStartupLoginItemSettings(settings) {
+  if (settings.startOnStartup) {
+    app.setLoginItemSettings(buildStartupLoginItemSettings(settings));
+    return;
+  }
+
+  app.setLoginItemSettings({
+    openAtLogin: false,
+    name: STARTUP_LOGIN_ITEM_NAME,
+    args: []
+  });
+  app.setLoginItemSettings({
+    openAtLogin: false,
+    name: STARTUP_LOGIN_ITEM_NAME,
+    args: [...STARTUP_MINIMIZED_ARGS]
+  });
+}
+
 /**
  * Create app settings IPC handlers
  */
@@ -83,19 +112,9 @@ function createAppSettingsHandlers() {
 
 
         // Handle startup setting
-        if (settings.startOnStartup !== undefined) {
+        if (Object.prototype.hasOwnProperty.call(settings, 'startOnStartup')) {
           try {
-            if (settings.startOnStartup) {
-              app.setLoginItemSettings({
-                openAtLogin: true,
-                name: 'Minecraft Core',
-                args: updatedSettings.startMinimized ? ['--start-minimized'] : []
-              });
-            } else {
-              app.setLoginItemSettings({
-                openAtLogin: false
-              });
-            }
+            applyStartupLoginItemSettings(updatedSettings);
           } catch {
             // TODO: Add proper logging - Failed to update startup settings
             // Don't fail the entire operation for this

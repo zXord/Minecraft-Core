@@ -14,9 +14,14 @@ const { readModMetadataFromJar } = require('./mod-utils/mod-file-manager.cjs');
 const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 const { getManagementHttpsAgent, getPinnedHttpsAgent, fetchPeerFingerprint } = require('../utils/tls-utils.cjs');
+const { getAuthErrorMessage } = require('../services/minecraft-launcher/auth-launch-utils.cjs');
 
 // In-memory lock to prevent race conditions during state operations
 let stateLockPromise = Promise.resolve();
+
+function getIpcErrorMessage(error) {
+  return getAuthErrorMessage(error);
+}
 
 function normalizeManagementProtocol(value) {
   if (typeof value !== 'string') return 'https';
@@ -799,7 +804,7 @@ function createMinecraftLauncherHandlers(win) {
   
   launcher.on('auth-error', (error) => {
     if (!win.isDestroyed()) {
-      win.webContents.send('launcher-auth-error', error);
+      win.webContents.send('launcher-auth-error', getIpcErrorMessage(error));
     }
   });
   
@@ -841,7 +846,7 @@ function createMinecraftLauncherHandlers(win) {
   
   launcher.on('launch-error', (error) => {
     if (!win.isDestroyed()) {
-      win.webContents.send('launcher-launch-error', error);
+      win.webContents.send('launcher-launch-error', getIpcErrorMessage(error));
     }
   });
   
@@ -939,7 +944,7 @@ function createMinecraftLauncherHandlers(win) {
         const result = await launcher.saveAuthData(clientPath);
         return result;
       } catch (error) {
-        return { success: false, error: error.message };
+        return { success: false, error: getIpcErrorMessage(error) };
       }
     },
 
@@ -993,7 +998,7 @@ function createMinecraftLauncherHandlers(win) {
           sourceInstanceName: sourceInstance.name || 'Minecraft Client'
         };
       } catch (error) {
-        return { success: false, error: error.message };
+        return { success: false, error: getIpcErrorMessage(error) };
       }
     },
 
@@ -1006,7 +1011,7 @@ function createMinecraftLauncherHandlers(win) {
 
         return result;
       } catch (error) {
-        return { success: false, error: error.message };
+        return { success: false, error: getIpcErrorMessage(error) };
       }
     },
 
@@ -1022,7 +1027,7 @@ function createMinecraftLauncherHandlers(win) {
         
         return { success: true };
       } catch (error) {
-        return { success: false, error: error.message };
+        return { success: false, error: getIpcErrorMessage(error) };
       }
     },
 

@@ -1,5 +1,6 @@
 <script>
   import { clientState } from '../../stores/clientStore.js';
+  import { showDownloads } from '../../stores/modStore.js';
   import { toast } from 'svelte-sonner';
   import { onMount } from 'svelte';
   import DownloadProgress from '../mods/components/DownloadProgress.svelte';
@@ -88,6 +89,16 @@
   // Memory persistence - save when maxMemory changes (but only after initial load)
   $: if (typeof window !== 'undefined' && window.localStorage && maxMemory && memoryLoaded) {
     localStorage.setItem('minecraft-client-max-memory', maxMemory.toString());
+  }
+
+  const PLAY_TAB_PREVIEW_LIMIT = 6;
+
+  function getPreviewItems(items, limit = PLAY_TAB_PREVIEW_LIMIT) {
+    return Array.isArray(items) ? items.slice(0, limit) : [];
+  }
+
+  function getHiddenItemCount(items, limit = PLAY_TAB_PREVIEW_LIMIT) {
+    return Math.max(0, (Array.isArray(items) ? items.length : 0) - limit);
   }
 
   // Format file sizes for display
@@ -556,21 +567,35 @@
                     {@const actualRemovals = [...(modSyncStatus.requiredRemovals || []), ...(modSyncStatus.optionalRemovals || [])]}
                     {@const totalChangesNeeded = downloadWork + actualRemovals.length}
                     {@const acknowledgments = filteredAcknowledgments || []}
+                    {@const requiredUpdatePreview = getPreviewItems(modSyncStatus.outdatedMods)}
+                    {@const optionalUpdatePreview = getPreviewItems(modSyncStatus.outdatedOptionalMods)}
+                    {@const clientUpdatePreview = getPreviewItems(validClientUpdates)}
+                    {@const missingModsPreview = getPreviewItems(modSyncStatus.missingMods)}
+                    {@const removalPreview = getPreviewItems(actualRemovals)}
+                    {@const acknowledgmentPreview = getPreviewItems(acknowledgments)}
                     
                     <h3>Mods Need Update ({totalChangesNeeded})</h3>
+                    <p class="play-tab-performance-note">
+                      Play shows a lightweight preview so this tab stays responsive. Open the Mods tab for the full list.
+                    </p>
                     
                     <!-- Compact mod lists -->
                     {#if modSyncStatus.outdatedMods && modSyncStatus.outdatedMods.length > 0}
                       <div class="compact-mod-section">
                         <h4>📦 Required Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each modSyncStatus.outdatedMods as update, index (`req-update-${update.fileName || update.name || 'unknown'}-${index}`)}
+                          {#each requiredUpdatePreview as update, index (`req-update-${update.fileName || update.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
                               <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(modSyncStatus.outdatedMods) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(modSyncStatus.outdatedMods)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -578,13 +603,18 @@
                       <div class="compact-mod-section">
                         <h4>🔄 Optional Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each modSyncStatus.outdatedOptionalMods as update, index (`opt-update-${update.fileName || update.name || 'unknown'}-${index}`)}
+                          {#each optionalUpdatePreview as update, index (`opt-update-${update.fileName || update.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item optional">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
                               <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(modSyncStatus.outdatedOptionalMods) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(modSyncStatus.outdatedOptionalMods)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -592,13 +622,18 @@
                       <div class="compact-mod-section">
                         <h4>📱 Client Mod Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each validClientUpdates as update, index (`client-update-${update.fileName || update.name || 'unknown'}-${index}`)}
+                          {#each clientUpdatePreview as update, index (`client-update-${update.fileName || update.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item client-mod">
                               <span class="mod-name">{update.name || update.fileName || 'Unknown Mod'}</span>
                               <span class="version-badge">{update.currentVersion} → {update.newVersion}</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(validClientUpdates) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(validClientUpdates)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -606,13 +641,18 @@
                       <div class="compact-mod-section">
                         <h4>📥 New Required:</h4>
                         <div class="compact-mod-list">
-                          {#each modSyncStatus.missingMods as modName, index (`missing-mod-${modName}-${index}`)}
+                          {#each missingModsPreview as modName, index (`missing-mod-${modName}-${index}`)}
                             <div class="compact-mod-item new-download">
                               <span class="mod-name">{modName}</span>
                               <span class="new-badge">NEW</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(modSyncStatus.missingMods) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(modSyncStatus.missingMods)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -620,7 +660,7 @@
                       <div class="compact-mod-section">
                         <h4>❌ Recommended Remove:</h4>
                         <div class="compact-mod-list">
-                          {#each actualRemovals as removal, index (`removal-${removal.fileName || removal.name || 'unknown'}-${index}`)}
+                          {#each removalPreview as removal, index (`removal-${removal.fileName || removal.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item removal">
                               <div class="mod-detail-copy">
                                 <span class="mod-name">{removal.fileName}</span>
@@ -630,6 +670,11 @@
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(actualRemovals) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(actualRemovals)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
                     
@@ -637,7 +682,7 @@
                       <div class="compact-mod-section">
                         <h4>🔗 Recommended Keep:</h4>
                         <div class="compact-mod-list">
-                          {#each acknowledgments as ack, index (`ack-${ack.fileName || ack.name || 'unknown'}-${index}`)}
+                          {#each acknowledgmentPreview as ack, index (`ack-${ack.fileName || ack.name || 'unknown'}-${index}`)}
                             <div class="compact-mod-item acknowledgment">
                               <div class="mod-detail-copy">
                                 <span class="mod-name">{ack.fileName}</span>
@@ -653,6 +698,11 @@
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(acknowledgments) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(acknowledgments)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
                     
@@ -677,6 +727,9 @@
                           ✓ Keep These Mods ({acknowledgments.length})
                         </button>
                     {/if}
+                      <button class="mod-action-btn secondary" on:click={() => $clientState.activeTab = 'mods'}>
+                        🧩 Open Mods Tab
+                      </button>
                     </div>
                   {:else}
                     <h3>Mods Need Update</h3>
@@ -721,21 +774,35 @@
                 {@const updateRps = assetsWork.resourcepacks?.updates?.length || 0}
                 {@const removableShaders = assetsWork.shaders?.removable?.length || 0}
                 {@const removableRps = assetsWork.resourcepacks?.removable?.length || 0}
+                {@const missingShaderPreview = getPreviewItems(assetsWork.shaders?.missingItems)}
+                {@const missingRpPreview = getPreviewItems(assetsWork.resourcepacks?.missingItems)}
+                {@const updateShaderPreview = getPreviewItems(assetsWork.shaders?.updates)}
+                {@const updateRpPreview = getPreviewItems(assetsWork.resourcepacks?.updates)}
+                {@const removableShaderPreview = getPreviewItems(assetsWork.shaders?.removable)}
+                {@const removableRpPreview = getPreviewItems(assetsWork.resourcepacks?.removable)}
                 {#if (missingShaders + missingRps + updateShaders + updateRps + removableShaders + removableRps) > 0}
                   <div class="detail-section">
                     <h3>Assets Need Update ({missingShaders + missingRps + updateShaders + updateRps + removableShaders + removableRps})</h3>
+                    <p class="play-tab-performance-note">
+                      Large asset lists are trimmed here too. Open the Mods tab if you need the full breakdown.
+                    </p>
 
                     {#if missingShaders > 0}
                       <div class="compact-mod-section">
                         <h4>✨ Missing Shaders:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.shaders.missingItems as it, index (`missing-shader-${it.fileName || 'unknown'}-${index}`)}
+                          {#each missingShaderPreview as it, index (`missing-shader-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item new-download">
                               <span class="mod-name">{it.fileName}</span>
                               <span class="new-badge">NEW</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(assetsWork.shaders?.missingItems) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(assetsWork.shaders?.missingItems)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -743,13 +810,18 @@
                       <div class="compact-mod-section">
                         <h4>🎨 Missing Resource Packs:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.resourcepacks.missingItems as it, index (`missing-resourcepack-${it.fileName || 'unknown'}-${index}`)}
+                          {#each missingRpPreview as it, index (`missing-resourcepack-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item new-download">
                               <span class="mod-name">{it.fileName}</span>
                               <span class="new-badge">NEW</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(assetsWork.resourcepacks?.missingItems) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(assetsWork.resourcepacks?.missingItems)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -757,13 +829,18 @@
                       <div class="compact-mod-section">
                         <h4>✨ Shader Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.shaders.updates as it, index (`shader-update-${it.fileName || 'unknown'}-${index}`)}
+                          {#each updateShaderPreview as it, index (`shader-update-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item">
                               <span class="mod-name">{it.fileName}</span>
                 <span class="version-badge">{it.versionNumber ? `→ ${it.versionNumber}` : 'Update'}</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(assetsWork.shaders?.updates) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(assetsWork.shaders?.updates)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -771,13 +848,18 @@
                       <div class="compact-mod-section">
                         <h4>🎨 Resource Pack Updates:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.resourcepacks.updates as it, index (`resourcepack-update-${it.fileName || 'unknown'}-${index}`)}
+                          {#each updateRpPreview as it, index (`resourcepack-update-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item">
                               <span class="mod-name">{it.fileName}</span>
                 <span class="version-badge">{it.versionNumber ? `→ ${it.versionNumber}` : 'Update'}</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(assetsWork.resourcepacks?.updates) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(assetsWork.resourcepacks?.updates)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -785,13 +867,18 @@
                       <div class="compact-mod-section">
                         <h4>❌ Shaders To Remove:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.shaders.removable as it, index (`shader-removal-${it.fileName || 'unknown'}-${index}`)}
+                          {#each removableShaderPreview as it, index (`shader-removal-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item removal">
                               <span class="mod-name">{it.fileName}</span>
                               <span class="removal-badge">no longer required</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(assetsWork.shaders?.removable) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(assetsWork.shaders?.removable)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -799,13 +886,18 @@
                       <div class="compact-mod-section">
                         <h4>❌ Resource Packs To Remove:</h4>
                         <div class="compact-mod-list">
-                          {#each assetsWork.resourcepacks.removable as it, index (`resourcepack-removal-${it.fileName || 'unknown'}-${index}`)}
+                          {#each removableRpPreview as it, index (`resourcepack-removal-${it.fileName || 'unknown'}-${index}`)}
                             <div class="compact-mod-item removal">
                               <span class="mod-name">{it.fileName}</span>
                               <span class="removal-badge">no longer required</span>
                             </div>
                           {/each}
                         </div>
+                        {#if getHiddenItemCount(assetsWork.resourcepacks?.removable) > 0}
+                          <button class="more-items-indicator" on:click={() => $clientState.activeTab = 'mods'}>
+                            +{getHiddenItemCount(assetsWork.resourcepacks?.removable)} more in Mods tab
+                          </button>
+                        {/if}
                       </div>
                     {/if}
 
@@ -1372,6 +1464,8 @@
     border-top: 1px solid #334155;
     width: 100%;
     box-sizing: border-box;
+    content-visibility: auto;
+    contain-intrinsic-size: 320px;
   }
 
   .detail-section h3 {
@@ -1579,6 +1673,19 @@
     color: #059669;
   }
 
+  .mod-action-btn.secondary {
+    background: rgba(148, 163, 184, 0.12);
+    color: #cbd5e1;
+    border-color: rgba(148, 163, 184, 0.25);
+  }
+
+  .mod-action-btn.secondary:hover {
+    background: rgba(148, 163, 184, 0.2);
+    border-color: rgba(148, 163, 184, 0.4);
+    transform: translateY(-1px);
+    color: #e2e8f0;
+  }
+
   /* Compact Mod Lists */
   .compact-mod-section {
     margin: 0.75rem 0;
@@ -1595,6 +1702,30 @@
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
+  }
+
+  .play-tab-performance-note {
+    margin: 0.35rem 0 0.75rem 0;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    line-height: 1.45;
+  }
+
+  .more-items-indicator {
+    margin-top: 0.4rem;
+    padding: 0.2rem 0;
+    border: none;
+    background: transparent;
+    color: #60a5fa;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 500;
+    text-align: left;
+  }
+
+  .more-items-indicator:hover {
+    color: #93c5fd;
+    text-decoration: underline;
   }
 
   .compact-mod-item {
@@ -2218,4 +2349,6 @@
 </style>
 
 <!-- add after <div class="client-main"> line -->
-<DownloadProgress />
+{#if $showDownloads}
+  <DownloadProgress />
+{/if}
