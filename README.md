@@ -1,4 +1,3 @@
-This README is written with AI assistance and I am bored to read it, so take it with a grain of salt.
 # Minecraft Core
 
 A comprehensive Minecraft Server and Client Management Application built with Electron and Svelte.
@@ -67,11 +66,13 @@ Key directories:
 
 ## 🛠️ Development Setup
 
-Want to contribute or run the project locally? Check out our [Development Setup Guide](docs/IDE_SETUP.md) for:
-- IDE configuration recommendations
-- Required extensions and tools
-- Development workflow tips
-- Build and test commands
+To run the project locally:
+
+1. Install Node.js 22.12 or newer
+2. Install dependencies with `npm install`
+3. Start the development app with `npm run dev`
+4. Run tests with `npm test`
+5. Build production assets with `npm run build`
 
 ## 🐛 Bug Reports
 

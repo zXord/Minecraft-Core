@@ -22,6 +22,7 @@ electron/logger-window.html
 
 # Editor directories and files
 .vscode/
+.vscode.example/
 .idea
 .DS_Store
 *.suo

@@ -11,7 +11,6 @@ Minecraft Core is an Electron-based application built with Svelte for the fronte
 ```
 minecraft-core/
 ├── .github/              # GitHub Actions workflows and CI/CD
-├── .kiro/                # Kiro IDE settings (gitignored)
 ├── build-resources/      # Source files for building installers
 ├── config/               # Configuration files
 ├── docs/                 # Project documentation
@@ -42,7 +41,7 @@ Configuration files for the development environment:
 - `dev-config.cjs` - Development-specific configuration used by the Electron main process
 
 ### `docs/`
-Project documentation including this file and IDE setup instructions.
+Project documentation including this file.
 
 ### `electron/`
 Electron main process code:
@@ -56,7 +55,6 @@ Electron main process code:
 ### `public/`
 Static assets that are served directly by Vite without processing:
 - `icon.png` - Application icon
-- `vite.svg` - Vite logo
 - `logger-window.html` - Standalone logger window
 
 ### `scripts/`
@@ -80,7 +78,6 @@ Frontend source code (Svelte application):
 - `routes/` - Page components for different routes
 - `stores/` - Svelte stores for state management
 - `utils/` - Frontend utility functions
-- `assets/` - Images, fonts, and other assets
 - `types/` - TypeScript type definitions
 
 ### `tests/`
@@ -101,7 +98,8 @@ Files that must remain at the project root for tooling to discover them:
 These directories contain generated files and should not be committed:
 - `dist/` - Production build output from Vite and electron-builder
 - `node_modules/` - Installed npm dependencies
-- `.vscode/` - Personal IDE settings (use `.vscode.example/` for shared configs)
+- `.vscode/` - Personal editor settings
+- `.vscode.example/` - Editor example settings, if created locally
 
 ## File Naming Conventions
 
