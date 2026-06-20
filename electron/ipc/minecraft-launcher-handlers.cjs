@@ -15,6 +15,17 @@ const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
 const { getManagementHttpsAgent, getPinnedHttpsAgent, fetchPeerFingerprint } = require('../utils/tls-utils.cjs');
 const { getAuthErrorMessage } = require('../services/minecraft-launcher/auth-launch-utils.cjs');
+const {
+  packAuthDataForDisk,
+  unpackAuthDataFromDisk
+} = require('../services/minecraft-launcher/xmcl-auth-handler.cjs');
+const {
+  assertSafeRemoteUrl,
+  isPathInside,
+  resolveSafeRedirectUrl,
+  safeBaseName,
+  safeFilePath
+} = require('../utils/security-boundaries.cjs');
 
 // In-memory lock to prevent race conditions during state operations
 let stateLockPromise = Promise.resolve();
@@ -50,6 +61,50 @@ function isManagementRequestPath(pathname) {
   if (pathname.startsWith('/api/assets/download/')) return true;
   if (pathname.startsWith('/api/client/')) return true;
   return false;
+}
+
+function getUrlPort(parsedUrl) {
+  if (parsedUrl.port) return parsedUrl.port;
+  if (parsedUrl.protocol === 'https:') return '443';
+  if (parsedUrl.protocol === 'http:') return '80';
+  return '';
+}
+
+function isSameManagementOrigin(url, serverInfo) {
+  try {
+    const base = new URL(getManagementBaseUrl(serverInfo));
+    const parsed = new URL(resolveDownloadUrl(url, serverInfo));
+    return (
+      parsed.protocol === base.protocol &&
+      normalizeHost(parsed.hostname) === normalizeHost(base.hostname) &&
+      getUrlPort(parsed) === getUrlPort(base)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeRemoteDownloadUrl(url, serverInfo) {
+  const resolvedUrl = resolveDownloadUrl(url, serverInfo);
+  if (!resolvedUrl) {
+    throw new Error('Download URL is required');
+  }
+  if (isSameManagementOrigin(resolvedUrl, serverInfo)) {
+    return resolvedUrl;
+  }
+  return assertSafeRemoteUrl(resolvedUrl, {
+    allowedProtocols: ['https:']
+  });
+}
+
+function resolveDownloadRedirectUrl(location, currentUrl, serverInfo) {
+  const nextUrl = new URL(location, currentUrl).toString();
+  if (isSameManagementOrigin(nextUrl, serverInfo)) {
+    return nextUrl;
+  }
+  return resolveSafeRedirectUrl(location, currentUrl, {
+    allowedProtocols: ['https:']
+  });
 }
 
 function shouldUseElectronNet(url, serverInfo) {
@@ -201,12 +256,12 @@ async function buildManagementRequestOptions(url, serverInfo) {
       const isHttps = resolvedUrl.protocol === 'https:';
       if (isHttps) {
         const targetHost = normalizeHost(resolvedUrl.hostname);
-        const targetPort = resolvedUrl.port || '443';
+        const targetPort = getUrlPort(resolvedUrl);
         const baseHost = normalizeHost(serverInfo?.serverIp || '');
         const basePort = serverInfo?.serverPort ? String(serverInfo.serverPort) : '';
         const isManagementTarget = baseHost && targetHost === baseHost && (!basePort || basePort === targetPort);
         const isManagementPath = isManagementRequestPath(resolvedUrl.pathname);
-        const shouldPin = isManagementTarget || isManagementPath;
+        const shouldPin = isManagementTarget && isManagementPath;
 
         if (shouldPin) {
           let fingerprint =
@@ -256,7 +311,7 @@ function getServerDownloadHeaders(url, serverInfo) {
   try {
     const parsed = new URL(resolvedUrl);
     const pathname = parsed.pathname || '';
-    if (pathname.startsWith('/api/mods/download/') || pathname.startsWith('/api/assets/download/')) {
+    if (isSameManagementOrigin(resolvedUrl, serverInfo) && (pathname.startsWith('/api/mods/download/') || pathname.startsWith('/api/assets/download/'))) {
       return { 'X-Session-Token': serverInfo.sessionToken };
     }
   } catch {
@@ -444,6 +499,51 @@ function normalizeClientPath(clientPath) {
   }
 }
 
+function assertKnownClientPath(clientPath) {
+  const resolvedPath = normalizeClientPath(clientPath);
+  if (!resolvedPath) {
+    throw new Error('Client path is required');
+  }
+  const instances = appStore.get('instances') || [];
+  const isKnown = instances.some((instance) =>
+    instance &&
+    instance.type === 'client' &&
+    typeof instance.path === 'string' &&
+    isPathInside(resolvedPath, path.resolve(instance.path)) &&
+    isPathInside(path.resolve(instance.path), resolvedPath)
+  );
+  if (!isKnown) {
+    throw new Error('Client path is not a known client instance');
+  }
+  return resolvedPath;
+}
+
+function safeJarFileName(fileName) {
+  return safeBaseName(fileName, 'mod file name', { allowedExtensions: ['.jar'] });
+}
+
+function safeZipFileName(fileName, label = 'asset file name') {
+  return safeBaseName(fileName, label, { allowedExtensions: ['.zip'] });
+}
+
+function safeMinecraftFileName(fileName, label = 'managed file name') {
+  return safeBaseName(fileName, label, { allowedExtensions: ['.jar', '.zip'] });
+}
+
+function safeManifestPath(manifestDir, fileName) {
+  const safeName = safeMinecraftFileName(fileName);
+  return safeFilePath(manifestDir, `${safeName}.json`, 'manifest file name', {
+    allowedExtensions: ['.json']
+  });
+}
+
+function normalizeAssetType(type) {
+  if (type === 'shaderpacks' || type === 'resourcepacks') {
+    return type;
+  }
+  throw new Error('Invalid asset type');
+}
+
 async function readSavedAuthSummary(clientPath) {
   const resolvedClientPath = normalizeClientPath(clientPath);
   if (!resolvedClientPath) return null;
@@ -453,7 +553,7 @@ async function readSavedAuthSummary(clientPath) {
 
   try {
     const raw = await fsPromises.readFile(authFile, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = unpackAuthDataFromDisk(JSON.parse(raw));
     const username = parsed?.name || parsed?.username || '';
     const uuid = parsed?.uuid || '';
 
@@ -820,9 +920,44 @@ function checkModDependencyByFilename(fileName, dependencies) {
 
 // Add helper function near top of handler scope
 async function getModrinthDownloadUrl(projectId, versionId, minecraftVersion, loader) {
-  const https = require('https');
-  const fetchJson = (url) => new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+  const fetchJson = (url, redirectCount = 0) => new Promise((resolve, reject) => {
+    if (redirectCount > 5) {
+      reject(new Error(`Too many redirects for ${url}`));
+      return;
+    }
+
+    let safeUrl;
+    try {
+      safeUrl = assertSafeRemoteUrl(url, {
+        allowedProtocols: ['https:'],
+        allowedHosts: ['api.modrinth.com']
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    https.get(safeUrl, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        try {
+          const redirectedUrl = resolveSafeRedirectUrl(res.headers.location, safeUrl, {
+            allowedProtocols: ['https:'],
+            allowedHosts: ['api.modrinth.com']
+          });
+          fetchJson(redirectedUrl, redirectCount + 1).then(resolve, reject);
+        } catch (error) {
+          reject(error);
+        }
+        return;
+      }
+
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode || 0}`));
+        return;
+      }
+
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
@@ -833,13 +968,13 @@ async function getModrinthDownloadUrl(projectId, versionId, minecraftVersion, lo
 
   try {
     if (versionId) {
-      const versionData = await fetchJson(`https://api.modrinth.com/v2/version/${versionId}`);
+      const versionData = await fetchJson(`https://api.modrinth.com/v2/version/${encodeURIComponent(versionId)}`);
       const primary = versionData.files?.find(f => f.primary) || versionData.files?.[0];
       return primary?.url || null;
     }
 
     if (!projectId) return null;
-    const versions = await fetchJson(`https://api.modrinth.com/v2/project/${projectId}/version`);
+    const versions = await fetchJson(`https://api.modrinth.com/v2/project/${encodeURIComponent(projectId)}/version`);
     if (!Array.isArray(versions) || versions.length === 0) return null;
 
     // Filter by MC version & loader if provided
@@ -995,7 +1130,7 @@ function createMinecraftLauncherHandlers(win) {
     
     'minecraft-load-auth': async (_e, { clientPath }) => {
       try {
-        const result = await launcher.loadAuthData(clientPath);
+        const result = await launcher.loadAuthData(assertKnownClientPath(clientPath));
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -1004,7 +1139,7 @@ function createMinecraftLauncherHandlers(win) {
     
     'minecraft-save-auth': async (_e, { clientPath }) => {
       try {
-        const result = await launcher.saveAuthData(clientPath);
+        const result = await launcher.saveAuthData(assertKnownClientPath(clientPath));
         return result;
       } catch (error) {
         return { success: false, error: getIpcErrorMessage(error) };
@@ -1022,7 +1157,7 @@ function createMinecraftLauncherHandlers(win) {
 
     'minecraft-import-auth-from-instance': async (_e, { targetClientPath, sourceInstanceId }) => {
       try {
-        const resolvedTargetPath = normalizeClientPath(targetClientPath);
+        const resolvedTargetPath = assertKnownClientPath(targetClientPath);
         if (!resolvedTargetPath || !sourceInstanceId) {
           return { success: false, error: 'Target client path and source instance are required' };
         }
@@ -1051,7 +1186,7 @@ function createMinecraftLauncherHandlers(win) {
           importedFromInstanceId: sourceInstance.id
         };
 
-        await fsPromises.writeFile(targetAuthFile, JSON.stringify(importedAuthData, null, 2), 'utf8');
+        await fsPromises.writeFile(targetAuthFile, JSON.stringify(packAuthDataForDisk(importedAuthData), null, 2), 'utf8');
 
         return {
           success: true,
@@ -1083,7 +1218,8 @@ function createMinecraftLauncherHandlers(win) {
         launcher.clearAuthData();
         
         // Also delete the saved auth file
-          const authFile = path.join(clientPath, 'xmcl-auth.json');
+          const safeClientPath = assertKnownClientPath(clientPath);
+          const authFile = path.join(safeClientPath, 'xmcl-auth.json');
           if (fs.existsSync(authFile)) {
             fs.unlinkSync(authFile);
         }
@@ -1102,6 +1238,23 @@ function createMinecraftLauncherHandlers(win) {
           // TODO: Add proper logging - Mod download failed: Invalid client path
           return { success: false, error: 'Invalid client path' };
         }
+
+        clientPath = assertKnownClientPath(clientPath);
+
+        const normalizeModRecord = (mod) => {
+          if (!mod || typeof mod !== 'object') return mod;
+          if (!mod.fileName) {
+            return mod;
+          }
+          return {
+            ...mod,
+            fileName: safeJarFileName(mod.fileName)
+          };
+        };
+
+        requiredMods = (requiredMods || []).map(normalizeModRecord);
+        optionalMods = (optionalMods || []).map(normalizeModRecord);
+        allClientMods = (allClientMods || []).map(normalizeModRecord);
 
         // Combine required and optional mods for downloading, with deduplication
         const allModsToDownload = [...(requiredMods || []), ...(optionalMods || [])];
@@ -1171,7 +1324,7 @@ function createMinecraftLauncherHandlers(win) {
           }
 
           try {
-            const candidateUrl = resolveDownloadUrl(serverUrlCandidate.downloadUrl, serverInfo);
+            const candidateUrl = normalizeRemoteDownloadUrl(serverUrlCandidate.downloadUrl, serverInfo);
             if (!candidateUrl) {
               markServerUnavailable('invalid-download-url');
               return false;
@@ -1287,7 +1440,7 @@ function createMinecraftLauncherHandlers(win) {
           const mod = allModsToDownloadFinal[i];
 
           try {
-            const modPath = path.join(clientPath, 'mods', mod.fileName);
+            const modPath = safeFilePath(modsDir, mod.fileName, 'mod file name', { allowedExtensions: ['.jar'] });
             
             if (fs.existsSync(modPath)) {
               if (mod.checksum) {
@@ -1360,7 +1513,11 @@ function createMinecraftLauncherHandlers(win) {
             // Helper to get download URL for a given source
             async function getUrlForSource(source) {
               if (source === 'server' && mod.downloadUrl && mod.downloadUrl.includes('/api/mods/download/')) {
-                return resolveDownloadUrl(mod.downloadUrl, serverInfo);
+                const serverDownloadUrl = resolveDownloadUrl(mod.downloadUrl, serverInfo);
+                if (!serverDownloadUrl || !isSameManagementOrigin(serverDownloadUrl, serverInfo)) {
+                  throw new Error('Server mod download URL is not from the configured management server');
+                }
+                return serverDownloadUrl;
               } else if (source === 'modrinth' && mod.projectId) {
                 return await getModrinthDownloadUrl(mod.projectId, mod.versionId, serverInfo?.minecraftVersion || null, serverInfo?.loaderType || null);
               }
@@ -1379,7 +1536,7 @@ function createMinecraftLauncherHandlers(win) {
               try {
                 downloadUrl = await getUrlForSource(source);
                 sourceUsed = source;
-                downloadUrl = resolveDownloadUrl(downloadUrl, serverInfo);
+                downloadUrl = normalizeRemoteDownloadUrl(downloadUrl, serverInfo);
                 if (!downloadUrl) throw new Error('No download URL for source: ' + source);
                 // Try download
                 const requestOptions = await buildManagementRequestOptions(downloadUrl, serverInfo);
@@ -1392,13 +1549,14 @@ function createMinecraftLauncherHandlers(win) {
                     if (response.statusCode === 302 || response.statusCode === 301) {
                       file.close();
                       fs.unlinkSync(modPath);
-                      const redirectUrl = response.headers.location;
-                      if (!redirectUrl) {
+                      let redirectUrl;
+                      if (!response.headers.location) {
                         reject(new Error(`Failed to download ${mod.fileName}: missing redirect location`));
                         return;
                       }
                         let redirectOptions;
                         try {
+                          redirectUrl = resolveDownloadRedirectUrl(response.headers.location, downloadUrl, serverInfo);
                           redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
                         } catch (err) {
                           reject(err);
@@ -1457,7 +1615,7 @@ function createMinecraftLauncherHandlers(win) {
                               }
                             }
                             downloaded.push(mod.fileName);
-                            const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                            const manifestPath = safeManifestPath(manifestDir, mod.fileName);
                             const installationDate = new Date().toISOString();
                             const manifestData = {
                               fileName: mod.fileName,
@@ -1551,7 +1709,7 @@ function createMinecraftLauncherHandlers(win) {
                           }
                         }
                         downloaded.push(mod.fileName);
-                        const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                        const manifestPath = safeManifestPath(manifestDir, mod.fileName);
                         const installationDate = new Date().toISOString();
                         const manifestData = {
                           fileName: mod.fileName,
@@ -1680,7 +1838,7 @@ function createMinecraftLauncherHandlers(win) {
             }
 
             if (mod.downloadUrl) {
-              const resolvedUrl = resolveDownloadUrl(mod.downloadUrl, serverInfo);
+              const resolvedUrl = normalizeRemoteDownloadUrl(mod.downloadUrl, serverInfo);
               if (resolvedUrl) {
                 mod.downloadUrl = resolvedUrl;
               }
@@ -1715,9 +1873,10 @@ function createMinecraftLauncherHandlers(win) {
                     file.close();
                     fs.unlinkSync(modPath);
                     
-                    const redirectUrl = response.headers.location;
+                    let redirectUrl;
                     let redirectOptions;
                     try {
+                      redirectUrl = resolveDownloadRedirectUrl(response.headers.location, mod.downloadUrl, serverInfo);
                       redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
                     } catch (err) {
                       reject(err);
@@ -1788,7 +1947,7 @@ function createMinecraftLauncherHandlers(win) {
                           }
                           
                           downloaded.push(mod.fileName);
-                          const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                          const manifestPath = safeManifestPath(manifestDir, mod.fileName);
                           const installationDate = new Date().toISOString();
                           const manifestData = {
                             fileName: mod.fileName,
@@ -1894,7 +2053,7 @@ function createMinecraftLauncherHandlers(win) {
                       }
                       
                       downloaded.push(mod.fileName);
-                          const manifestPath = path.join(manifestDir, `${mod.fileName}.json`);
+                          const manifestPath = safeManifestPath(manifestDir, mod.fileName);
                           const installationDate = new Date().toISOString();
                           const manifestData = {
                             fileName: mod.fileName,
@@ -2103,9 +2262,10 @@ function createMinecraftLauncherHandlers(win) {
           return { success: false, error: 'Invalid parameters' };
         }
 
-        const subdir = type === 'shaderpacks' ? 'shaderpacks' : 'resourcepacks';
-        const installDir = path.join(clientPath, subdir);
-        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const subdir = normalizeAssetType(type);
+        const installDir = path.join(safeClientPath, subdir);
+        const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
         if (!fs.existsSync(installDir)) fs.mkdirSync(installDir, { recursive: true });
         if (!fs.existsSync(manifestDir)) fs.mkdirSync(manifestDir, { recursive: true });
 
@@ -2126,7 +2286,7 @@ function createMinecraftLauncherHandlers(win) {
 
         // Internal helper to download with progress and redirect support
         async function downloadFileWithProgress(url, tmpPath, name, id) {
-          const resolvedUrl = resolveDownloadUrl(url, serverInfo) || url;
+          const resolvedUrl = normalizeRemoteDownloadUrl(url, serverInfo);
           const startTime = Date.now();
           let totalBytes = 0;
           let downloadedBytes = 0;
@@ -2137,8 +2297,8 @@ function createMinecraftLauncherHandlers(win) {
             const request = createGetRequest(resolvedUrl, requestOptions, serverInfo, async (response) => {
               // Handle redirects
               if (response.statusCode === 302 || response.statusCode === 301) {
-                const redirectUrl = response.headers.location;
-                if (!redirectUrl) {
+                let redirectUrl;
+                if (!response.headers.location) {
                   fileStream.close();
                   return reject(new Error(`HTTP ${response.statusCode} without location`));
                 }
@@ -2147,6 +2307,7 @@ function createMinecraftLauncherHandlers(win) {
                 const fileStream2 = fs.createWriteStream(tmpPath);
                 let redirectOptions;
                 try {
+                  redirectUrl = resolveDownloadRedirectUrl(response.headers.location, resolvedUrl, serverInfo);
                   redirectOptions = await buildManagementRequestOptions(redirectUrl, serverInfo);
                 } catch (err) {
                   return reject(err);
@@ -2219,8 +2380,8 @@ function createMinecraftLauncherHandlers(win) {
         }
 
         for (const item of requiredItems) {
-          const fileName = item.fileName;
-          const destPath = path.join(installDir, fileName);
+          const fileName = safeZipFileName(item.fileName);
+          const destPath = safeFilePath(installDir, fileName, 'asset file name', { allowedExtensions: ['.zip'] });
           const downloadId = `asset-${subdir}-${fileName}`;
 
           try {
@@ -2244,7 +2405,7 @@ function createMinecraftLauncherHandlers(win) {
               downloadUrl = `/api/assets/download/${subdir}/${encodeURIComponent(fileName)}`;
             }
 
-            const tmpPath = destPath + '.part';
+            const tmpPath = safeFilePath(installDir, `${fileName}.part`, 'temporary asset file name', { allowedExtensions: ['.zip.part'] });
             await downloadFileWithProgress(downloadUrl, tmpPath, fileName, downloadId);
 
             // Verify checksum if provided
@@ -2262,7 +2423,7 @@ function createMinecraftLauncherHandlers(win) {
             fs.renameSync(tmpPath, destPath);
 
             // Create manifest
-            const manifestPath = path.join(manifestDir, `${fileName}.json`);
+            const manifestPath = safeManifestPath(manifestDir, fileName);
             const now = new Date().toISOString();
             const manifestData = {
               fileName,
@@ -3298,7 +3459,7 @@ function createMinecraftLauncherHandlers(win) {
     
     'minecraft-clear-client': async (_e, { clientPath, minecraftVersion }) => {
       try {
-        const result = await launcher.clearMinecraftClient(clientPath, minecraftVersion);
+        const result = await launcher.clearMinecraftClient(assertKnownClientPath(clientPath), minecraftVersion);
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -3307,7 +3468,7 @@ function createMinecraftLauncherHandlers(win) {
 
     'minecraft-clear-client-full': async (_e, { clientPath, minecraftVersion }) => {
       try {
-        const result = await launcher.clearMinecraftClientFull(clientPath, minecraftVersion);
+        const result = await launcher.clearMinecraftClientFull(assertKnownClientPath(clientPath), minecraftVersion);
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -3316,7 +3477,7 @@ function createMinecraftLauncherHandlers(win) {
 
     'minecraft-clear-assets': async (_e, { clientPath }) => {
       try {
-        const result = await launcher.clearAssets(clientPath);
+        const result = await launcher.clearAssets(assertKnownClientPath(clientPath));
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -3338,9 +3499,11 @@ function createMinecraftLauncherHandlers(win) {
           return { success: false, error: 'Client path and mod file name are required' };
         }
         
-        const modsDir = path.join(clientPath, 'mods');
-        const modPath = path.join(modsDir, modFileName);
-        const disabledModPath = path.join(modsDir, modFileName + '.disabled');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const safeFileName = safeJarFileName(modFileName);
+        const modsDir = path.join(safeClientPath, 'mods');
+        const modPath = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
+        const disabledModPath = safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] });
         
         if (enabled) {
           if (fs.existsSync(disabledModPath)) {
@@ -3380,10 +3543,12 @@ function createMinecraftLauncherHandlers(win) {
         if (!clientPath || !type || !fileName) {
           return { success: false, error: 'Client path, type and fileName are required' };
         }
-        const subdir = type === 'shaderpacks' ? 'shaderpacks' : 'resourcepacks';
-        const dir = path.join(clientPath, subdir);
-        const filePath = path.join(dir, fileName);
-        const disabledPath = path.join(dir, fileName + '.disabled');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const subdir = normalizeAssetType(type);
+        const safeFileName = safeZipFileName(fileName);
+        const dir = path.join(safeClientPath, subdir);
+        const filePath = safeFilePath(dir, safeFileName, 'asset file name', { allowedExtensions: ['.zip'] });
+        const disabledPath = safeFilePath(dir, `${safeFileName}.disabled`, 'disabled asset file name', { allowedExtensions: ['.zip.disabled'] });
 
         if (enabled) {
           if (fs.existsSync(disabledPath)) {
@@ -3415,10 +3580,12 @@ function createMinecraftLauncherHandlers(win) {
         if (!clientPath || !type || !fileName) {
           return { success: false, error: 'Client path, type and fileName are required' };
         }
-        const subdir = type === 'shaderpacks' ? 'shaderpacks' : 'resourcepacks';
-        const dir = path.join(clientPath, subdir);
-        const filePath = path.join(dir, fileName);
-        const disabledPath = path.join(dir, fileName + '.disabled');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const subdir = normalizeAssetType(type);
+        const safeFileName = safeZipFileName(fileName);
+        const dir = path.join(safeClientPath, subdir);
+        const filePath = safeFilePath(dir, safeFileName, 'asset file name', { allowedExtensions: ['.zip'] });
+        const disabledPath = safeFilePath(dir, `${safeFileName}.disabled`, 'disabled asset file name', { allowedExtensions: ['.zip.disabled'] });
 
         let deleted = false;
         if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); deleted = true; }
@@ -3435,9 +3602,11 @@ function createMinecraftLauncherHandlers(win) {
           return { success: false, error: 'Client path and mod file name are required' };
         }
 
-        const modsDir = path.join(clientPath, 'mods');
-        const modPath = path.join(modsDir, modFileName);
-        const disabledModPath = path.join(modsDir, modFileName + '.disabled');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const safeFileName = safeJarFileName(modFileName);
+        const modsDir = path.join(safeClientPath, 'mods');
+        const modPath = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
+        const disabledModPath = safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] });
 
         let deleted = false;
         if (fs.existsSync(modPath)) {

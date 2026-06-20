@@ -831,6 +831,56 @@ function getRunningServerInstanceIds() {
   return getRunningStates().map((state) => state.instanceId);
 }
 
+async function handleServerStartRequest(payload = {}) {
+  const result = await startMinecraftServer(payload);
+  if (!result?.success) {
+    const targetPath = payload && typeof payload === 'object' ? payload.targetPath : null;
+    const instanceId = payload && typeof payload === 'object' ? payload.instanceId : null;
+    const message = result?.error || 'Unknown server start failure';
+
+    logger.error(`Auto-restart server start failed: ${message}`, {
+      category: 'server',
+      instanceId: result?.instanceId || instanceId || 'system',
+      data: {
+        service: 'ServerManager',
+        operation: 'handleServerStartRequest',
+        targetPath,
+        code: result?.code || null,
+        details: result?.details || null
+      }
+    });
+
+    safeSend('server-log', {
+      instanceId: result?.instanceId || instanceId || null,
+      targetPath,
+      line: `[ERROR] Auto-restart failed to start server: ${message}`
+    });
+  }
+
+  return result;
+}
+
+eventBus.on('request-server-start', (payload) => {
+  handleServerStartRequest(payload).catch((error) => {
+    logger.error(`Auto-restart request failed: ${error.message}`, {
+      category: 'server',
+      instanceId: payload?.instanceId || 'system',
+      data: {
+        service: 'ServerManager',
+        operation: 'request-server-start',
+        targetPath: payload?.targetPath || null,
+        errorType: error.constructor.name
+      }
+    });
+
+    safeSend('server-log', {
+      instanceId: payload?.instanceId || null,
+      targetPath: payload?.targetPath || null,
+      line: `[ERROR] Auto-restart request failed: ${error.message}`
+    });
+  });
+});
+
 function clearIntervals(selector = null) {
   if (selector) {
     const state = getState(selector);
@@ -980,6 +1030,7 @@ module.exports = {
   getServerProcess,
   getRunningServerInstanceIds,
   isInstanceRunning,
+  handleServerStartRequest,
   killAllMinecraftServers,
   disposeServerState,
   clearIntervals,

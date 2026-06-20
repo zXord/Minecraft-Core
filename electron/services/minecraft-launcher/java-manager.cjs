@@ -1,9 +1,17 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { exec, spawn, spawnSync } = require('child_process');
-const fetch = require('node-fetch');
+const { fetch } = require('../../utils/fetch.cjs');
 const { promisify } = require('util');
+const {
+  assertSafeRemoteUrl,
+  escapeWmicLikeLiteral,
+  isPathInside,
+  safeBaseName,
+  safeFilePath
+} = require('../../utils/security-boundaries.cjs');
 
 // Java Manager class to handle downloading and managing Java runtimes
 class JavaManager {
@@ -12,7 +20,7 @@ class JavaManager {
     this.architecture = this.getArchitectureString();
     this.clientPath = clientPath;
     this.isScopedJavaDir = Boolean(clientPath);
-    
+
     // Use client-specific Java directory if clientPath is provided
     if (clientPath) {
       this.javaBaseDir = path.join(clientPath, 'java');
@@ -106,6 +114,26 @@ class JavaManager {
     }
     
     return null;
+  }
+
+  calculateFileHash(filePath, algorithm = 'sha256') {
+    const hash = crypto.createHash(algorithm);
+    hash.update(fs.readFileSync(filePath));
+    return hash.digest('hex');
+  }
+
+  assertArchiveEntriesSafe(entries, extractPath) {
+    const resolvedExtractPath = path.resolve(extractPath);
+    for (const entryName of entries) {
+      const normalized = String(entryName || '').replace(/\\/g, '/');
+      if (!normalized || normalized.includes('\0') || normalized.startsWith('/') || /^[a-zA-Z]:/.test(normalized)) {
+        throw new Error(`Unsafe archive entry: ${entryName}`);
+      }
+      const resolvedEntryPath = path.resolve(resolvedExtractPath, normalized);
+      if (!isPathInside(resolvedEntryPath, resolvedExtractPath)) {
+        throw new Error(`Archive entry escapes extraction directory: ${entryName}`);
+      }
+    }
   }
 
   getJvmLibraryPath(javaExecutablePath) {
@@ -350,7 +378,6 @@ class JavaManager {
     const apiUrl = `https://api.adoptium.net/v3/assets/latest/${javaVersion}/hotspot?architecture=${this.architecture}&image_type=jre&os=${this.platform}&vendor=eclipse`;
     
     
-    // const fetch = require('node-fetch'); // Now top-level
     const response = await fetch(apiUrl);
     
     if (!response.ok) {
@@ -363,8 +390,16 @@ class JavaManager {
     }
     
     const release = releases[0];
-    const downloadUrl = release.binary.package.link;
-    const filename = release.binary.package.name;
+    const downloadUrl = assertSafeRemoteUrl(release.binary.package.link, { allowedProtocols: ['https:'] });
+    const filename = safeBaseName(release.binary.package.name, 'Java archive file name', {
+      allowedExtensions: ['.zip', '.tar.gz']
+    });
+    const expectedChecksum = typeof release.binary.package.checksum === 'string'
+      ? release.binary.package.checksum.trim().toLowerCase()
+      : '';
+    if (!expectedChecksum) {
+      throw new Error('Java runtime checksum metadata is required');
+    }
     
     
     if (progressCallback) {
@@ -385,7 +420,9 @@ class JavaManager {
       fs.mkdirSync(tempDir, { recursive: true });
     }
     
-    const tempFile = path.join(tempDir, filename);
+    const tempFile = safeFilePath(tempDir, filename, 'Java archive file name', {
+      allowedExtensions: ['.zip', '.tar.gz']
+    });
     const fileStream = fs.createWriteStream(tempFile);
     
     // Track download progress
@@ -410,12 +447,18 @@ class JavaManager {
       fileStream.on('finish', () => resolve());
       fileStream.on('error', reject);
     });
-    
-    
+
+
+    const actualChecksum = this.calculateFileHash(tempFile, 'sha256').toLowerCase();
+    if (actualChecksum !== expectedChecksum) {
+      fs.unlinkSync(tempFile);
+      throw new Error('Java runtime checksum verification failed');
+    }
+
     if (progressCallback) {
       progressCallback({ type: 'Extracting', task: 'Extracting Java runtime...', progress: 0 });
     }
-    
+
     // Extract Java archive
     await this.extractJava(tempFile, javaVersion);
     
@@ -490,6 +533,7 @@ class JavaManager {
 
     const AdmZip = require('adm-zip');
     const zip = new (/** @type {any} */ (AdmZip))(zipPath);
+    this.assertArchiveEntriesSafe(zip.getEntries().map((entry) => entry.entryName), extractPath);
     zip.extractAllTo(extractPath, true);
     await this.flattenJavaDirectory(extractPath);
   }
@@ -524,6 +568,11 @@ class JavaManager {
   
   async extractTarGz(tarPath, extractPath) {
     // const { spawn } = require('child_process'); // Now top-level
+    const listing = spawnSync('tar', ['-tzf', tarPath], { encoding: 'utf8' });
+    if (listing.status !== 0) {
+      throw new Error(`TAR listing failed: ${listing.stderr || listing.error?.message || 'unknown error'}`);
+    }
+    this.assertArchiveEntriesSafe(String(listing.stdout || '').split(/\r?\n/).filter(Boolean), extractPath);
     
     return new Promise((resolve, reject) => {
       fs.mkdirSync(extractPath, { recursive: true });
@@ -588,7 +637,7 @@ class JavaManager {
     if (process.platform === 'win32') {
       const execAsync = promisify(exec);
       if (clientPath) {
-        const clientPathEscaped = clientPath.replace(/\\/g, '\\\\');
+        const clientPathEscaped = escapeWmicLikeLiteral(clientPath);
         await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, { timeout: 5000, windowsHide: true }).catch(() => {});
         await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, { timeout: 5000, windowsHide: true }).catch(() => {});
       }

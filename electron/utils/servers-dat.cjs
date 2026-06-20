@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const fetch = require('node-fetch');
+const { fetch } = require('./fetch.cjs');
 const nbt = require('prismarine-nbt');
 const zlib = require('zlib');
 const { getManagementHttpsAgent, getPinnedHttpsAgent } = require('./tls-utils.cjs');

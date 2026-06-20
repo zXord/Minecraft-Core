@@ -362,8 +362,9 @@
 
     const host = parsed.hostname || '';
     const port = parsed.port || '8080';
-    const secret = parsed.searchParams.get('secret') || parsed.searchParams.get('s') || '';
-    const fingerprint = parsed.searchParams.get('fp') || parsed.searchParams.get('fingerprint') || '';
+    const fragmentParams = new URLSearchParams((parsed.hash || '').replace(/^#/, ''));
+    const secret = fragmentParams.get('secret') || fragmentParams.get('s') || parsed.searchParams.get('secret') || parsed.searchParams.get('s') || '';
+    const fingerprint = fragmentParams.get('fp') || fragmentParams.get('fingerprint') || parsed.searchParams.get('fp') || parsed.searchParams.get('fingerprint') || '';
 
     if (!host || !validateInviteHost(host)) {
       return { ok: false, error: 'Invite link host is invalid.' };
@@ -387,7 +388,7 @@
     if (!host || !secret) return '';
     const fpParam = fingerprint ? `&fp=${encodeURIComponent(fingerprint)}` : '';
     const formattedHost = formatInviteHost(host);
-    return `${protocol}://${formattedHost}:${port}/?secret=${encodeURIComponent(secret)}${fpParam}`;
+    return `${protocol}://${formattedHost}:${port}/#secret=${encodeURIComponent(secret)}${fpParam}`;
   }
 
   $: {
@@ -425,7 +426,7 @@
       if (!res || !res.success) {
         inviteLinkError = res?.error || 'Failed to update invite link.';
       } else {
-        const updatedLink = `${parsed.protocol}://${formatInviteHost(parsed.host)}:${parsed.port}/?secret=${encodeURIComponent(parsed.secret)}`;
+        const updatedLink = `${parsed.protocol}://${formatInviteHost(parsed.host)}:${parsed.port}/#secret=${encodeURIComponent(parsed.secret)}`;
         inviteLinkSeed = updatedLink;
         inviteLinkInput = updatedLink;
         dispatch('invite-link-updated', {
@@ -841,7 +842,7 @@
             class="modern-input"
             type="text"
             bind:value={inviteLinkInput}
-            placeholder="https://host:port/?secret=..."
+            placeholder="https://host:port/#secret=..."
           />
         </div>
         {#if inviteLinkError}

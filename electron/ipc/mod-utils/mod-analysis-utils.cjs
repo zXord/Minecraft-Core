@@ -4,6 +4,7 @@ const os = require('os');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
 const { Worker } = require('worker_threads');
+const { assertSafeRemoteUrl, safeFilePath } = require('../../utils/security-boundaries.cjs');
 
 // Cache extracted metadata by file signature so unchanged jars do not get reparsed.
 const metadataCache = new Map();
@@ -397,14 +398,27 @@ async function extractDependencyListFromJar(jarPath) {
 }
 
 async function fetchModInfoFromUrl(url) {
-  const tempFile = path.join(os.tmpdir(), `mod-${Date.now()}.jar`);
+  const safeUrl = assertSafeRemoteUrl(url, { allowedProtocols: ['https:'] });
+  const tempFile = safeFilePath(os.tmpdir(), `mod-${Date.now()}.jar`, 'temporary mod file name', {
+    allowedExtensions: ['.jar']
+  });
+  const maxJarBytes = 100 * 1024 * 1024;
 
   try {
     const response = await axios({
-      url,
+      url: safeUrl,
       method: 'GET',
-      responseType: 'arraybuffer'
+      responseType: 'arraybuffer',
+      timeout: 60000,
+      maxContentLength: maxJarBytes,
+      maxBodyLength: maxJarBytes,
+      validateStatus: (status) => status >= 200 && status < 300
     });
+
+    const contentLength = Number.parseInt(response.headers?.['content-length'] || '0', 10);
+    if (contentLength > maxJarBytes || response.data.byteLength > maxJarBytes) {
+      return [];
+    }
 
     await fs.writeFile(tempFile, response.data);
     return await extractDependencyListFromJar(tempFile);

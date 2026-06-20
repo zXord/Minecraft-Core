@@ -218,6 +218,14 @@ class LoggerService extends EventEmitter {
     }
   }
 
+  isValidFilesystemPath(filePath) {
+    return (
+      (typeof filePath === 'string' && filePath.length > 0) ||
+      Buffer.isBuffer(filePath) ||
+      filePath instanceof URL
+    );
+  }
+
   initializeStorage() {
     const storageStartTime = Date.now();
 
@@ -287,6 +295,20 @@ class LoggerService extends EventEmitter {
     const rotationStartTime = Date.now();
 
     try {
+      if (!this.isValidFilesystemPath(this.currentLogFile)) {
+        const rotationDuration = Date.now() - rotationStartTime;
+        this.logServiceEvent('Log rotation check skipped because log storage is unavailable', {
+          category: 'storage',
+          data: {
+            service: 'LoggerService',
+            operation: 'setupLogRotation',
+            duration: rotationDuration,
+            logFileAvailable: false
+          }
+        });
+        return;
+      }
+
       // Check if current log file needs rotation
       if (fs.existsSync(this.currentLogFile)) {
         const stats = fs.statSync(this.currentLogFile);
@@ -351,6 +373,10 @@ class LoggerService extends EventEmitter {
     const rotationStartTime = Date.now();
 
     try {
+      if (!this.isValidFilesystemPath(this.logsDir) || !this.isValidFilesystemPath(this.currentLogFile)) {
+        return;
+      }
+
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const rotatedFile = path.join(this.logsDir, `app-${timestamp}.log`);
 
@@ -617,6 +643,10 @@ class LoggerService extends EventEmitter {
     this.ensureConfigLoaded();
 
     try {
+      if (!this.isValidFilesystemPath(this.currentLogFile)) {
+        return;
+      }
+
       // Check if file needs rotation
       if (fs.existsSync(this.currentLogFile)) {
         const stats = fs.statSync(this.currentLogFile);

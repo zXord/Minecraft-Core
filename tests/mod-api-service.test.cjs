@@ -31,8 +31,11 @@ async function withMockedFetch(sampleVersions, fn) {
   };
 
   Module._load = function mockLoad(request, parent, isMain) {
-    if (request === 'node-fetch') {
-      return mockFetch;
+    if (typeof request === 'string' && request.endsWith('utils/fetch.cjs')) {
+      return {
+        fetch: mockFetch,
+        fetchCompat: mockFetch
+      };
     }
     if (typeof request === 'string' && request.endsWith('logger-handlers.cjs')) {
       return {

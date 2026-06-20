@@ -1,5 +1,38 @@
 const { getUpdateService } = require('../services/update-service.cjs');
 
+function getRunningServersForUpdateInstall() {
+  try {
+    const { getAllServerStates, getServerState } = require('../services/server-manager.cjs');
+    const allStates = typeof getAllServerStates === 'function' ? getAllServerStates() : [];
+    const states = Array.isArray(allStates) && allStates.length > 0
+      ? allStates
+      : [typeof getServerState === 'function' ? getServerState() : null];
+
+    return states
+      .filter((state) => state && state.isRunning)
+      .map((state) => ({
+        instanceId: state.instanceId || null,
+        targetPath: state.targetPath || null,
+        status: state.status || 'running'
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function canInstallUpdateNow() {
+  const runningServers = getRunningServersForUpdateInstall();
+  if (runningServers.length > 0) {
+    return {
+      success: false,
+      error: 'Please stop the Minecraft server before installing the update to prevent data corruption.',
+      runningServers
+    };
+  }
+
+  return { success: true };
+}
+
 function createUpdateHandlers(win) {
   const updateService = getUpdateService();
   
@@ -84,9 +117,9 @@ function createUpdateHandlers(win) {
     },
 
     // Download the available update
-    'download-update': async () => {
+    'download-update': async (_event, options = {}) => {
       try {
-        const result = await updateService.downloadUpdate();
+        const result = await updateService.downloadUpdate(options);
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -96,6 +129,11 @@ function createUpdateHandlers(win) {
     // Install the downloaded update
     'install-update': async () => {
       try {
+        const installCheck = canInstallUpdateNow();
+        if (!installCheck.success) {
+          return installCheck;
+        }
+
         updateService.quitAndInstall();
         return { success: true, message: 'Installing update...' };
       } catch (error) {
@@ -143,6 +181,14 @@ function createUpdateHandlers(win) {
       }
     },
 
+    'get-staged-specific-version-update': async () => {
+      try {
+        return await updateService.getStagedSpecificVersionInstallTest();
+      } catch (error) {
+        return { success: false, staged: false, error: error.message };
+      }
+    },
+
     // Start periodic update checks
     'start-periodic-checks': async () => {
       try {
@@ -184,9 +230,13 @@ function createUpdateHandlers(win) {
     },
 
     // Download a specific version (for server compatibility)
-    'download-specific-version': async (_event, targetVersion) => {
+    'download-specific-version': async (_event, payload) => {
       try {
-        const result = await updateService.downloadSpecificVersion(targetVersion);
+        const targetVersion = payload && typeof payload === 'object' ? payload.targetVersion : payload;
+        const options = payload && typeof payload === 'object' ? {
+          installAfterDownload: payload.installAfterDownload === true
+        } : {};
+        const result = await updateService.downloadSpecificVersion(targetVersion, options);
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -196,43 +246,18 @@ function createUpdateHandlers(win) {
     // Install a downloaded specific version
     'install-specific-version': async (_event, filePath) => {
       try {
-        const { shell } = require('electron');
-        const fs = require('fs');
-        const path = require('path');
-        
         // Wait a moment to ensure file system has synced
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Check if file exists
-        if (!fs.existsSync(filePath)) {
-          // Log additional debugging info
-          const dirPath = path.dirname(filePath);
-          
-          let dirContents = [];
-          if (fs.existsSync(dirPath)) {
-            dirContents = fs.readdirSync(dirPath);
-          }
-          
-          return { 
-            success: false, 
-            error: `Installer file not found at ${filePath}. Directory exists: ${fs.existsSync(dirPath)}${dirContents.length > 0 ? ', Files: ' + dirContents.join(', ') : ', Directory is empty'}` 
-          };
+
+        const installCheck = canInstallUpdateNow();
+        if (!installCheck.success) {
+          return installCheck;
         }
-        
-        // Check file size
-        const stats = fs.statSync(filePath);
-        
-        if (stats.size === 0) {
-          return { 
-            success: false, 
-            error: 'Installer file is empty or corrupted' 
-          };
-        }
-        
-        // Launch the installer
-        await shell.openPath(filePath);
-        
-        return { success: true, message: 'Installer launched. The app will close when installation begins.' };
+
+        return await updateService.installSpecificVersionInstaller(filePath, {
+          silent: false,
+          forceRunAfter: true
+        });
       } catch (error) {
         return { success: false, error: error.message };
       }

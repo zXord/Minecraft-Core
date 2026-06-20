@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { isGameVersionCompatible } from '../src/utils/mods/modAPI.js';
 
 /**
@@ -297,18 +298,15 @@ test('Update Check Interval - does not skip updates when interval triggers durin
   assert.ok(completedChecks >= 1, `Expected at least 1 completed check, got ${completedChecks}`);
 });
 
-test('Update Check Interval - executes delayed check after app startup', async () => {
-  let checkExecuted = false;
-  let checkForUpdatesCalls = 0;
+test('Startup update checks are not duplicated by follow-up timers or ModSearch initialization', () => {
+  const appSource = fs.readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
+  const modSearchSource = fs.readFileSync(new URL('../src/components/mods/components/ModSearch.svelte', import.meta.url), 'utf8');
 
-  // Simulate startup delay
-  setTimeout(() => {
-    checkExecuted = true;
-    checkForUpdatesCalls++;
-  }, 100);
+  const primeServerModState = appSource.match(/async function primeServerModState\(serverPath\) \{[\s\S]*?\n  \}/)?.[0] || '';
+  assert.ok(primeServerModState.includes('await checkForUpdates(serverPath)'), 'startup should keep the one primary update check');
+  assert.equal(/setTimeout\(\s*\(\)\s*=>[\s\S]*?checkForUpdates\(scheduledPath\)/.test(primeServerModState), false);
+  assert.equal(/setTimeout\(runUpdateCheck,/.test(appSource), false);
 
-  await new Promise(resolve => setTimeout(resolve, 150));
-
-  assert.equal(checkExecuted, true);
-  assert.equal(checkForUpdatesCalls, 1);
+  const initializeForServerPath = modSearchSource.match(/async function initializeForServerPath\(resetFilters = false\) \{[\s\S]*?\n  \}/)?.[0] || '';
+  assert.equal(/checkForUpdates\(/.test(initializeForServerPath), false);
 });

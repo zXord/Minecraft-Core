@@ -83,17 +83,6 @@
         needUpdate = true; reason = 'installed-unknown';
       }
     }
-    try {
-      console.debug('[ClientAssetList] required update check', {
-        fileName,
-        serverVersion,
-        installedVersion,
-        serverChecksum: serverChecksum?.slice(0,8),
-        installedChecksum: installedChecksum?.slice(0,8),
-        needUpdate,
-        reason
-      });
-    } catch {}
     return { needUpdate, serverVersion, installedVersion };
   }
 

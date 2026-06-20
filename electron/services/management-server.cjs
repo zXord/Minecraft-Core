@@ -6,8 +6,13 @@ const fs = require('fs');
 const path = require('path');
 const { createHash, randomBytes } = require('crypto');
 const https = require('https');
-const fetch = require('node-fetch');
+const { fetch } = require('../utils/fetch.cjs');
 const { wmicExecAsync } = require('../utils/wmic-utils.cjs');
+const {
+  getSocketRemoteAddress,
+  safeBaseName,
+  safeFilePath
+} = require('../utils/security-boundaries.cjs');
 const eventBus = require('../utils/event-bus.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { getManagementTlsConfig } = require('../utils/tls-utils.cjs');
@@ -123,11 +128,7 @@ class ManagementServer {
   }
 
   getRequestIp(req) {
-    const forwarded = req && req.headers && req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string' && forwarded.trim()) {
-      return forwarded.split(',')[0].trim();
-    }
-    return (req && req.ip) || (req && req.connection && req.connection.remoteAddress) || 'unknown';
+    return getSocketRemoteAddress(req);
   }
 
   getTokenFromRequest(req) {
@@ -137,9 +138,6 @@ class ManagementServer {
     const authHeader = req.get && req.get('authorization');
     if (authHeader && authHeader.startsWith('Bearer ')) {
       return authHeader.slice(7).trim();
-    }
-    if (req.query && typeof req.query.token === 'string') {
-      return req.query.token.trim();
     }
     return '';
   }
@@ -185,11 +183,11 @@ class ManagementServer {
   }
 
   sanitizeFileName(fileName) {
-    if (!fileName || typeof fileName !== 'string') return null;
-    if (fileName.includes('\0')) return null;
-    const safeName = path.basename(fileName);
-    if (safeName !== fileName) return null;
-    return safeName;
+    try {
+      return safeBaseName(fileName);
+    } catch {
+      return null;
+    }
   }
 
   // Get current app version from package.json
@@ -398,8 +396,7 @@ class ManagementServer {
         status: 'ok',
         server: 'minecraft-core-management',
         version: this.appVersion,
-        appVersion: this.appVersion, // Explicit app version field
-        serverPath: this.serverPath
+        appVersion: this.appVersion // Explicit app version field
       });
     });
 
@@ -434,14 +431,14 @@ class ManagementServer {
     this.app.post('/api/client/register', (req, res) => {
       const { clientId, name } = req.body;
       const requiredSecret = this.getInviteSecret();
-      if (requiredSecret) {
-        const providedSecret =
-          (req.body && typeof req.body.secret === 'string' ? req.body.secret : '') ||
-          (req.get && req.get('x-invite-secret')) ||
-          (req.query && typeof req.query.secret === 'string' ? req.query.secret : '');
-        if (!providedSecret || providedSecret.trim() !== requiredSecret) {
-          return res.status(401).json({ error: 'Invalid invite secret' });
-        }
+      if (!requiredSecret) {
+        return res.status(403).json({ error: 'Invite secret is not configured' });
+      }
+      const providedSecret =
+        (req.body && typeof req.body.secret === 'string' ? req.body.secret : '') ||
+        (req.get && req.get('x-invite-secret'));
+      if (!providedSecret || providedSecret.trim() !== requiredSecret) {
+        return res.status(401).json({ error: 'Invalid invite secret' });
       }
       
       if (!clientId || !name) {
@@ -475,7 +472,6 @@ class ManagementServer {
         success: true, 
         token,
         serverInfo: {
-          serverPath: this.serverPath,
           hasServer: !!this.serverPath,
           appVersion: this.appVersion // Include app version in registration response
         }
@@ -843,12 +839,7 @@ class ManagementServer {
         const baseDir = locationParam === 'client'
           ? path.join(this.serverPath, 'client', 'mods')
           : path.join(this.serverPath, 'mods');
-        const modPath = path.join(baseDir, safeFileName);
-        const resolvedBase = path.resolve(baseDir);
-        const resolvedPath = path.resolve(modPath);
-        if (!resolvedPath.startsWith(resolvedBase + path.sep)) {
-          return res.status(400).json({ error: 'Invalid file path' });
-        }
+        const modPath = safeFilePath(baseDir, safeFileName, 'file name', { allowedExtensions: ['.jar'] });
         
         if (!fs.existsSync(modPath)) {
           this.log('warn', 'Mod download requested but file not found', {
@@ -970,12 +961,7 @@ class ManagementServer {
 
       try {
         const baseDir = path.join(this.serverPath, 'client', type);
-        const assetPath = path.join(baseDir, safeFileName);
-        const resolvedBase = path.resolve(baseDir);
-        const resolvedPath = path.resolve(assetPath);
-        if (!resolvedPath.startsWith(resolvedBase + path.sep)) {
-          return res.status(400).json({ error: 'Invalid file path' });
-        }
+        const assetPath = safeFilePath(baseDir, safeFileName);
         if (!fs.existsSync(assetPath)) {
           return res.status(404).json({ error: 'Asset not found' });
         }
@@ -1045,7 +1031,7 @@ class ManagementServer {
     // Surface unexpected route errors into the in-app logger
     this.app.use((err, req, res, next) => {
       this.log('error', 'Management server request error', {
-        path: req && (req.originalUrl || req.url),
+        path: req && req.path,
         method: req && req.method,
         error: err && err.message ? err.message : 'unknown'
       });

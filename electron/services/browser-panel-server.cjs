@@ -2,12 +2,17 @@
 // Browser Panel Server - decoupled from Management Server
 const express = require('express');
 const https = require('https');
+const { randomBytes } = require('crypto');
 // No fs/path needed here currently
 const appStore = require('../utils/app-store.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
 const { getManagementServer } = require('./management-server.cjs');
 const { getBrowserPanelTlsConfig } = require('../utils/tls-utils.cjs');
 const { ensureEncryptionAvailable, packSecret, unpackSecret, ENCRYPTED_PREFIX } = require('../utils/secure-store.cjs');
+const {
+  getSocketRemoteAddress,
+  requestOriginMatchesHost
+} = require('../utils/security-boundaries.cjs');
 // Reuse existing server manager for start/stop/commands/status
 const {
   startMinecraftServer,
@@ -64,6 +69,112 @@ function resolveTrackedServerPath(serverPath = '') {
   const instances = appStore.get('instances') || [];
   const match = instances.find((instance) => instance && instance.type === 'server' && instance.path === normalizedPath);
   return match?.path || '';
+}
+
+function getBrowserPanelVisibility() {
+  const settings = appStore.get('appSettings') || {};
+  const bp = settings.browserPanel || {};
+  return bp.instanceVisibility || {};
+}
+
+function findVisibleServerInstanceByPath(serverPath = '') {
+  const normalizedPath = typeof serverPath === 'string' ? serverPath.trim() : '';
+  if (!normalizedPath) return null;
+  const instances = appStore.get('instances') || [];
+  const visibility = getBrowserPanelVisibility();
+  return instances.find((instance) => (
+    instance &&
+    instance.type === 'server' &&
+    instance.path === normalizedPath &&
+    visibility[instance.id] !== false
+  )) || null;
+}
+
+function findVisibleServerInstanceById(instanceId = '') {
+  const normalizedId = typeof instanceId === 'string' ? instanceId.trim() : '';
+  if (!normalizedId) return null;
+  const instances = appStore.get('instances') || [];
+  const visibility = getBrowserPanelVisibility();
+  return instances.find((instance) => (
+    instance &&
+    instance.type === 'server' &&
+    instance.id === normalizedId &&
+    visibility[instance.id] !== false
+  )) || null;
+}
+
+function requireVisibleServerPath(serverPath) {
+  const match = findVisibleServerInstanceByPath(serverPath);
+  if (!match) {
+    throw new Error('Instance not found or not visible');
+  }
+  return match.path;
+}
+
+function requireVisibleRunningServerPath() {
+  const state = getServerState();
+  const currentPath = state?.serverProcess?.serverInfo?.targetPath || state?.targetPath || '';
+  if (currentPath) {
+    requireVisibleServerPath(currentPath);
+  }
+  return currentPath;
+}
+
+function generateInviteSecret() {
+  return randomBytes(24).toString('base64url');
+}
+
+function ensureManagementInviteSecret(serverPath) {
+  const effectiveServerPath = requireVisibleServerPath(serverPath);
+  ensureEncryptionAvailable();
+  const instance = findVisibleServerInstanceByPath(effectiveServerPath);
+  const config = readServerConfig(effectiveServerPath, getServerConfigDefaults(effectiveServerPath));
+  let secret = typeof config?.managementInviteSecret === 'string' ? config.managementInviteSecret.trim() : '';
+
+  if (!secret && instance?.managementInviteSecret) {
+    try {
+      secret = unpackSecret(instance.managementInviteSecret);
+    } catch {
+      secret = '';
+    }
+  }
+
+  if (!secret) {
+    secret = generateInviteSecret();
+  }
+
+  updateServerConfig(effectiveServerPath, {
+    managementInviteSecret: secret,
+    managementInviteHost: typeof config?.managementInviteHost === 'string' ? config.managementInviteHost : ''
+  }, getServerConfigDefaults(effectiveServerPath));
+
+  if (instance) {
+    const instances = appStore.get('instances') || [];
+    const index = instances.findIndex((item) => item && item.id === instance.id);
+    if (index >= 0) {
+      instances[index] = {
+        ...instances[index],
+        managementInviteSecret: packSecret(secret),
+        managementInviteHost: typeof config?.managementInviteHost === 'string' ? config.managementInviteHost : ''
+      };
+      appStore.set('instances', instances);
+    }
+  }
+
+  return { serverPath: effectiveServerPath, secret, instance };
+}
+
+function sanitizeSettingsForPanel(settings) {
+  const browserPanel = settings?.browserPanel || {};
+  const hasPassword = typeof browserPanel.password === 'string' && browserPanel.password.trim().length > 0;
+  return {
+    ...settings,
+    browserPanel: {
+      ...browserPanel,
+      password: '',
+      hasPassword
+    }
+  };
 }
 
 function getMergedServerSettings(serverPath = '') {
@@ -150,11 +261,7 @@ class BrowserPanelServer {
   }
 
   getRequestIp(req) {
-    const forwarded = req && req.headers && req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string' && forwarded.trim()) {
-      return forwarded.split(',')[0].trim();
-    }
-    return (req && req.ip) || (req && req.connection && req.connection.remoteAddress) || 'unknown';
+    return getSocketRemoteAddress(req);
   }
 
   getPanelCredentials() {
@@ -259,6 +366,33 @@ class BrowserPanelServer {
         return res.status(500).send('Auth error');
       }
     });
+
+    this.app.use((req, res, next) => {
+      if (!requestOriginMatchesHost(req)) {
+        return res.status(403).json({ success: false, error: 'Cross-origin browser panel request blocked' });
+      }
+      next();
+    });
+
+    this.app.use((req, res, next) => {
+      try {
+        if (req.query && typeof req.query.serverPath === 'string') {
+          req.query.serverPath = requireVisibleServerPath(req.query.serverPath);
+        }
+        if (req.query && typeof req.query.path === 'string') {
+          req.query.path = requireVisibleServerPath(req.query.path);
+        }
+        if (req.body && typeof req.body.serverPath === 'string') {
+          req.body.serverPath = requireVisibleServerPath(req.body.serverPath);
+        }
+        if (req.body && typeof req.body.targetPath === 'string') {
+          req.body.targetPath = requireVisibleServerPath(req.body.targetPath);
+        }
+        next();
+      } catch (error) {
+        return res.status(403).json({ success: false, error: error.message });
+      }
+    });
   }
 
   setupRoutes() {
@@ -329,11 +463,15 @@ class BrowserPanelServer {
     this.app.post('/api/management/start', express.json(), async (req, res) => {
       try {
         const { port = 8080, serverPath = null } = req.body || {};
+        const inviteState = serverPath ? ensureManagementInviteSecret(serverPath) : null;
         const management = getManagementServer();
-        const result = await management.start(port, serverPath);
+        if (inviteState?.secret) {
+          management.setInviteSecret(inviteState.secret);
+        }
+        const result = await management.start(port, inviteState?.serverPath || null);
         try {
           if (result && result.success) {
-            const payload = { isRunning: true, port: result.port, serverPath };
+            const payload = { isRunning: true, port: result.port, serverPath: inviteState?.serverPath || null };
             // Notify browser UI clients immediately
             emitEvent('management-server-status', payload);
             // Notify desktop renderer too
@@ -366,13 +504,17 @@ class BrowserPanelServer {
     this.app.post('/api/management/update-path', express.json(), (req, res) => {
       try {
         const { serverPath } = req.body || {};
+        const inviteState = serverPath ? ensureManagementInviteSecret(serverPath) : null;
         const management = getManagementServer();
-        management.updateServerPath(serverPath || null);
+        if (inviteState?.secret) {
+          management.setInviteSecret(inviteState.secret);
+        }
+        management.updateServerPath(inviteState?.serverPath || null);
         try {
-          emitEvent('management-server-path-updated', serverPath || null);
-          safeSend('management-server-path-updated', serverPath || null);
+          emitEvent('management-server-path-updated', inviteState?.serverPath || null);
+          safeSend('management-server-path-updated', inviteState?.serverPath || null);
         } catch { /* ignore notify error */ }
-        res.json({ success: true, serverPath: serverPath || null });
+        res.json({ success: true, serverPath: inviteState?.serverPath || null });
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
@@ -580,10 +722,7 @@ class BrowserPanelServer {
           ...stored,
           browserPanel: { ...defaults.browserPanel, ...(stored.browserPanel || {}) }
         };
-        if (typeof settings.browserPanel.password === 'string' && settings.browserPanel.password.startsWith(ENCRYPTED_PREFIX)) {
-          settings.browserPanel.password = unpackSecret(settings.browserPanel.password);
-        }
-        res.json({ success: true, settings });
+        res.json({ success: true, settings: sanitizeSettingsForPanel(settings) });
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
@@ -632,7 +771,7 @@ class BrowserPanelServer {
           } catch { /* ignore */ }
         }
         appStore.set('appSettings', updated);
-        res.json({ success: true, settings: updated });
+        res.json({ success: true, settings: sanitizeSettingsForPanel(updated) });
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
@@ -724,7 +863,10 @@ class BrowserPanelServer {
   this.app.get('/api/server/status', (_req, res) => {
     try {
       const state = getServerState();
-      const isRunning = !!state.isRunning;
+      const info = state.serverProcess ? state.serverProcess['serverInfo'] : null;
+      const currentPath = info?.targetPath || state?.targetPath || '';
+      const visibleCurrent = !currentPath || !!findVisibleServerInstanceByPath(currentPath);
+      const isRunning = !!state.isRunning && visibleCurrent;
       if (lastIsRunning === null) {
         lastIsRunning = isRunning;
         lastTransitionTs = Date.now();
@@ -739,7 +881,6 @@ class BrowserPanelServer {
           safeSend && safeSend('server-status', isRunning ? 'running' : 'stopped');
         } catch { /* ignore SSE push error */ }
       }
-      const info = state.serverProcess ? state.serverProcess['serverInfo'] : null;
       const uptime = state.serverStartMs ? (Date.now() - state.serverStartMs) : 0;
       const players = state.playersInfo || { count: 0, names: [] };
       // Provide metrics from the system-metrics service if available
@@ -753,7 +894,7 @@ class BrowserPanelServer {
           maxRamMB = typeof last.maxRamMB === 'number' ? last.maxRamMB : maxRamMB;
         }
       } catch { /* ignore metrics retrieval error */ }
-      res.json({ success: true, isRunning, serverInfo: info, uptimeMs: uptime, players, cpuPct, memUsedMB, maxRamMB, statusVersion: statusVersionCounter, lastTransitionTs });
+      res.json({ success: true, isRunning, serverInfo: visibleCurrent ? info : null, uptimeMs: visibleCurrent ? uptime : 0, players: visibleCurrent ? players : { count: 0, names: [] }, cpuPct, memUsedMB, maxRamMB, statusVersion: statusVersionCounter, lastTransitionTs });
     } catch (e) {
       res.json({ success: false, error: e.message });
     }
@@ -781,16 +922,17 @@ class BrowserPanelServer {
     });
     this.app.post('/api/server/stop', async (_req, res) => {
       try { 
+        requireVisibleRunningServerPath();
         const ok = await stopMinecraftServer(); 
   try { safeSend('server-status', 'stopped'); } catch { /* ignore */ }
         res.json({ success: !!ok }); 
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
     this.app.post('/api/server/kill', async (_req, res) => {
-      try { const ok = await killMinecraftServer(); res.json({ success: !!ok }); } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+      try { requireVisibleRunningServerPath(); const ok = await killMinecraftServer(); res.json({ success: !!ok }); } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
     this.app.post('/api/server/command', express.json(), async (req, res) => {
-      try { const { command } = req.body || {}; const ok = await sendServerCommand(command); res.json({ success: !!ok }); } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+      try { requireVisibleRunningServerPath(); const { command } = req.body || {}; const ok = await sendServerCommand(command); res.json({ success: !!ok }); } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
     this.app.get('/api/server/logs', (req, res) => {
       try {
@@ -799,6 +941,7 @@ class BrowserPanelServer {
         const state = getServerState();
         const p = state.serverProcess?.['serverInfo']?.targetPath;
         if (!p) return res.send('');
+        requireVisibleServerPath(p);
         const tail = Math.max(1, Math.min(1000, parseInt(req.query.tail) || 200));
         const logPath = path.join(p, 'logs', 'latest.log');
         if (!fs.existsSync(logPath)) return res.send('');
@@ -883,7 +1026,14 @@ class BrowserPanelServer {
     });
 
     this.app.post('/api/instances/:id/kill', async (req, res) => {
+      const { id } = req.params;
+      const inst = findVisibleServerInstanceById(id);
+      if (!inst) return res.status(404).json({ success: false, error: 'Instance not found or not visible' });
       try {
+        const state = getServerState();
+        if (!state.isRunning) return res.json({ success: true, note: 'Already stopped' });
+        const currentPath = state.serverProcess?.['serverInfo']?.targetPath;
+        if (currentPath && currentPath !== inst.path) return res.status(409).json({ success: false, error: 'Different instance is running' });
         const ok = await killMinecraftServer();
         res.json({ success: !!ok });
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }

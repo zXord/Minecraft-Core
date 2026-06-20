@@ -2,10 +2,57 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { MicrosoftAuthenticator } = require('@xmcl/user');
+const { fetch } = require('../../utils/fetch.cjs');
 const {
   getAuthErrorMessage,
   shouldFallbackToEmbeddedMicrosoftAuth
 } = require('./auth-launch-utils.cjs');
+const {
+  ensureEncryptionAvailable,
+  packSecret,
+  unpackSecret
+} = require('../../utils/secure-store.cjs');
+
+function isSensitiveAuthKey(key) {
+  const normalized = String(key || '').toLowerCase();
+  return (
+    normalized === 'token' ||
+    normalized.endsWith('_token') ||
+    normalized.includes('access_token') ||
+    normalized.includes('refresh_token') ||
+    normalized.includes('client_token') ||
+    normalized === 'tokentype'
+  );
+}
+
+function transformSensitiveAuthValues(value, transform, key = '') {
+  if (typeof value === 'string') {
+    return isSensitiveAuthKey(key) && value ? transform(value) : value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => transformSensitiveAuthValues(entry, transform));
+  }
+
+  if (value && typeof value === 'object') {
+    const result = {};
+    for (const [entryKey, entryValue] of Object.entries(value)) {
+      result[entryKey] = transformSensitiveAuthValues(entryValue, transform, entryKey);
+    }
+    return result;
+  }
+
+  return value;
+}
+
+function packAuthDataForDisk(authData) {
+  ensureEncryptionAvailable();
+  return transformSensitiveAuthValues(authData, packSecret);
+}
+
+function unpackAuthDataFromDisk(authData) {
+  return transformSensitiveAuthValues(authData, unpackSecret);
+}
 
 /**
  * Advanced authentication handler using @xmcl/user library
@@ -15,7 +62,7 @@ class XMCLAuthHandler {
   constructor(eventEmitter) {
     this.authData = null;
     this.emitter = eventEmitter;
-    this.authenticator = new MicrosoftAuthenticator();
+    this.authenticator = new MicrosoftAuthenticator({ fetch });
     
     // Authentication state tracking
     this.isAuthenticating = false;
@@ -222,7 +269,7 @@ class XMCLAuthHandler {
       } : null
       };
 
-      fs.writeFileSync(authFile, JSON.stringify(authDataToSave, null, 2));
+      fs.writeFileSync(authFile, JSON.stringify(packAuthDataForDisk(authDataToSave), null, 2));
 
       return { success: true };
 
@@ -243,7 +290,7 @@ class XMCLAuthHandler {
       }
 
       const authDataRaw = fs.readFileSync(authFile, 'utf8');
-      const savedAuthData = JSON.parse(authDataRaw);
+      const savedAuthData = unpackAuthDataFromDisk(JSON.parse(authDataRaw));
 
       // Restore authentication data
       this.authData = {
@@ -860,7 +907,6 @@ class XMCLAuthHandler {
 
   async validateAccessToken(accessToken) {
     try {
-      const fetch = require('node-fetch');
       const res = await fetch('https://api.minecraftservices.com/minecraft/profile', {
         method: 'GET',
         headers: {
@@ -875,4 +921,8 @@ class XMCLAuthHandler {
   }
 }
 
-module.exports = { XMCLAuthHandler };
+module.exports = {
+  XMCLAuthHandler,
+  packAuthDataForDisk,
+  unpackAuthDataFromDisk
+};

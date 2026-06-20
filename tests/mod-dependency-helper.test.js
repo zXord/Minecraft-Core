@@ -444,6 +444,97 @@ test('checkModDependencies includes transitive required dependencies', async () 
   }
 });
 
+test('checkModDependencies follows pinned dependency versions for transitive checks', async () => {
+  const previousWindow = global.window;
+  global.window = {
+    electron: {
+      async invoke(channel, payload) {
+        if (channel === 'get-version-info') {
+          if (payload.modId === 'parent-mod') {
+            return {
+              id: 'parent-version',
+              loaders: ['fabric'],
+              dependencies: [
+                { project_id: 'direct-lib', version_id: 'direct-pinned-version', dependency_type: 'required' }
+              ]
+            };
+          }
+
+          if (payload.versionId === 'direct-pinned-version') {
+            return {
+              id: 'direct-pinned-version',
+              loaders: ['fabric'],
+              dependencies: []
+            };
+          }
+
+          if (payload.modId === 'direct-lib') {
+            return {
+              id: 'direct-latest-version',
+              loaders: ['fabric'],
+              dependencies: [
+                { project_id: 'latest-only-transitive-lib', dependency_type: 'required' }
+              ]
+            };
+          }
+
+          return {
+            id: `${payload.modId || payload.versionId}-version`,
+            loaders: ['fabric'],
+            dependencies: []
+          };
+        }
+
+        if (channel === 'get-project-info') {
+          const infoById = {
+            'direct-lib': { id: 'direct-lib', title: 'Direct Library' },
+            'latest-only-transitive-lib': { id: 'latest-only-transitive-lib', title: 'Latest Only Transitive Library' }
+          };
+          return infoById[payload.projectId] || null;
+        }
+
+        if (channel === 'get-mod-versions') {
+          return [
+            {
+              id: `${payload.modId}-latest`,
+              versionNumber: '1.0.0',
+              datePublished: '2024-01-01T00:00:00Z'
+            }
+          ];
+        }
+
+        return null;
+      }
+    }
+  };
+
+  try {
+    loaderType.set('fabric');
+    minecraftVersion.set('1.20.1');
+    installedModInfo.set([]);
+    disabledMods.set(new Set());
+
+    const dependencies = await checkModDependencies({
+      id: 'parent-mod',
+      name: 'Parent Mod',
+      source: 'modrinth',
+      selectedVersionId: 'parent-version'
+    });
+
+    assert.deepEqual(
+      dependencies.map(dep => ({
+        projectId: dep.projectId,
+        currentVersionId: dep.currentVersionId || null
+      })),
+      [
+        { projectId: 'direct-lib', currentVersionId: 'direct-pinned-version' }
+      ]
+    );
+  } finally {
+    global.window = previousWindow;
+  }
+});
+
 test('checkModDependencies uses Forge Modrinth version metadata without Fabric injection', async () => {
   const previousWindow = global.window;
   const calls = [];
@@ -700,4 +791,35 @@ test('installWithDependencies selects a compatible dependency version instead of
   } finally {
     global.window = previousWindow;
   }
+});
+
+test('installWithDependencies preserves pinned dependency version ids', async () => {
+  loaderType.set('fabric');
+  minecraftVersion.set('1.20.1');
+  installedModInfo.set([]);
+  disabledMods.set(new Set());
+  modToInstall.set({ id: 'parent-mod', name: 'Parent Mod', source: 'modrinth' });
+  currentDependencies.set([
+    {
+      projectId: 'direct-lib',
+      name: 'Direct Library',
+      dependencyType: 'required',
+      currentVersionId: 'direct-pinned-version'
+    }
+  ]);
+
+  const calls = [];
+  const result = await installWithDependencies('dependency-test-server-path', async (mod) => {
+    calls.push({
+      id: mod.id,
+      selectedVersionId: mod.selectedVersionId || null
+    });
+    return true;
+  });
+
+  assert.equal(result, true);
+  assert.deepEqual(calls, [
+    { id: 'direct-lib', selectedVersionId: 'direct-pinned-version' },
+    { id: 'parent-mod', selectedVersionId: null }
+  ]);
 });

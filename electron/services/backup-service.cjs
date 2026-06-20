@@ -1,14 +1,18 @@
 const fs = require('fs');
 const path = require('path');
-const { createZip, listBackups } = require('../utils/backup-util.cjs');
+const { createZip, listBackups, calculateArchiveInputSize } = require('../utils/backup-util.cjs');
 const AdmZip = require('adm-zip');
 const { sendServerCommand, getServerState } = require('./server-manager.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+const { safeSend } = require('../utils/safe-send.cjs');
 // Lazy-load retention policy when needed
 let RetentionPolicy = null;
 
 // Initialize logger
 const logger = getLoggerHandlers();
+const ALLOWED_BACKUP_TYPES = new Set(['world', 'world-delete', 'full']);
+const INCOMPLETE_BACKUP_CLEANUP_AGE_MS = 60 * 60 * 1000;
+const activeBackupPaths = new Set();
 
 // Enhanced performance tracking
 let performanceMetrics = {
@@ -58,6 +62,205 @@ function getBackupDir(serverPath) {
   return path.join(serverPath, 'backups');
 }
 
+function isPathInside(childPath, parentPath) {
+  const resolvedChild = path.resolve(childPath);
+  const resolvedParent = path.resolve(parentPath);
+  const relative = path.relative(resolvedParent, resolvedChild);
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function normalizePathForCompare(value) {
+  const resolved = path.resolve(String(value || ''));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function getSafeBackupZipPath(serverPath, name) {
+  if (!name || typeof name !== 'string' || name.includes('\0')) {
+    throw new Error('Invalid backup name');
+  }
+
+  const trimmed = name.trim();
+  if (
+    !trimmed ||
+    trimmed !== name ||
+    trimmed !== path.basename(trimmed) ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\') ||
+    trimmed === '.' ||
+    trimmed === '..' ||
+    !trimmed.toLowerCase().endsWith('.zip')
+  ) {
+    throw new Error('Invalid backup name');
+  }
+
+  const backupDir = getBackupDir(serverPath);
+  const zipPath = path.resolve(backupDir, trimmed);
+  if (!isPathInside(zipPath, backupDir)) {
+    throw new Error('Invalid backup name');
+  }
+
+  return zipPath;
+}
+
+function normalizeBackupType(type) {
+  const normalized = typeof type === 'string' ? type.trim().toLowerCase() : 'world';
+  if (!ALLOWED_BACKUP_TYPES.has(normalized)) {
+    throw new Error('Invalid backup type');
+  }
+  return normalized;
+}
+
+function isTargetServerRunning(serverPath) {
+  try {
+    const state = getServerState({ targetPath: serverPath });
+    if (!state) return false;
+    const currentPath = state.serverProcess?.serverInfo?.targetPath || state.targetPath || '';
+    return !!state.isRunning && (!currentPath || normalizePathForCompare(currentPath) === normalizePathForCompare(serverPath));
+  } catch {
+    try {
+      const state = getServerState();
+      const currentPath = state?.serverProcess?.serverInfo?.targetPath || state?.targetPath || '';
+      return !!state?.isRunning && (!currentPath || normalizePathForCompare(currentPath) === normalizePathForCompare(serverPath));
+    } catch {
+      return false;
+    }
+  }
+}
+
+function getBackupMetaPath(zipPath) {
+  return zipPath.replace(/\.zip$/i, '.json');
+}
+
+function isIncompleteBackupMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object') {
+    return false;
+  }
+
+  if (metadata.status === 'complete') {
+    return false;
+  }
+
+  return metadata.status === 'in-progress' || Number(metadata.size) === 0;
+}
+
+function getLatestBackupSidecarTime(zipPath, metaPath, metadata) {
+  const timestamps = [];
+  const metadataTime = Date.parse(metadata?.timestamp || '');
+  if (Number.isFinite(metadataTime)) {
+    timestamps.push(metadataTime);
+  }
+
+  for (const filePath of [zipPath, metaPath]) {
+    try {
+      if (fs.existsSync(filePath)) {
+        timestamps.push(fs.statSync(filePath).mtimeMs);
+      }
+    } catch {
+      // If stat fails, fall back to other timestamps.
+    }
+  }
+
+  return timestamps.length > 0 ? Math.max(...timestamps) : Date.now();
+}
+
+async function cleanupIncompleteBackups(serverPath, options = {}) {
+  const backupDir = getBackupDir(serverPath);
+  const olderThanMs = Number.isFinite(options.olderThanMs)
+    ? Math.max(0, Number(options.olderThanMs))
+    : INCOMPLETE_BACKUP_CLEANUP_AGE_MS;
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const deletedBackups = [];
+  const failedDeletions = [];
+  let skipped = 0;
+
+  if (!fs.existsSync(backupDir)) {
+    return { success: true, deleted: 0, skipped, failedDeletions, deletedBackups };
+  }
+
+  for (const metaFile of fs.readdirSync(backupDir).filter(file => file.toLowerCase().endsWith('.json'))) {
+    const metaPath = path.join(backupDir, metaFile);
+    let metadata;
+    try {
+      metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    } catch {
+      skipped++;
+      continue;
+    }
+
+    if (!isIncompleteBackupMetadata(metadata)) {
+      continue;
+    }
+
+    const zipName = metaFile.replace(/\.json$/i, '.zip');
+    const zipPath = path.join(backupDir, zipName);
+    const zipKey = normalizePathForCompare(zipPath);
+    if (activeBackupPaths.has(zipKey)) {
+      skipped++;
+      continue;
+    }
+
+    const latestWriteTime = getLatestBackupSidecarTime(zipPath, metaPath, metadata);
+    if (now - latestWriteTime < olderThanMs) {
+      skipped++;
+      continue;
+    }
+
+    try {
+      if (fs.existsSync(zipPath)) {
+        fs.unlinkSync(zipPath);
+      }
+      if (fs.existsSync(metaPath)) {
+        fs.unlinkSync(metaPath);
+      }
+      deletedBackups.push({ name: zipName, metadata });
+    } catch (error) {
+      failedDeletions.push({ name: zipName, error: error.message });
+    }
+  }
+
+  if (deletedBackups.length > 0 || failedDeletions.length > 0) {
+    logger.info('Incomplete backup cleanup completed', {
+      category: 'backup',
+      data: {
+        serverPath,
+        deleted: deletedBackups.length,
+        failed: failedDeletions.length,
+        skipped
+      }
+    });
+  }
+
+  return {
+    success: failedDeletions.length === 0,
+    deleted: deletedBackups.length,
+    skipped,
+    failedDeletions,
+    deletedBackups
+  };
+}
+
+function validateZipEntriesStayInside(zip, destinationPath) {
+  const destinationRoot = path.resolve(destinationPath);
+  for (const entry of zip.getEntries()) {
+    const entryName = entry.entryName;
+    if (
+      !entryName ||
+      typeof entryName !== 'string' ||
+      entryName.includes('\0') ||
+      path.isAbsolute(entryName) ||
+      path.win32.isAbsolute(entryName) ||
+      path.posix.isAbsolute(entryName)
+    ) {
+      throw new Error(`Unsafe backup entry: ${entryName || '(empty)'}`);
+    }
+
+    const targetPath = path.resolve(destinationRoot, entryName);
+    if (!isPathInside(targetPath, destinationRoot)) {
+      throw new Error(`Unsafe backup entry: ${entryName}`);
+    }
+  }
+}
+
 function getWorldDirs(serverPath) {
   return ['world', 'world_nether', 'world_the_end']
     .map(dir => path.join(serverPath, dir))
@@ -70,7 +273,77 @@ function getAllDirs(serverPath) {
     .map(f => path.join(serverPath, f));
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024 * 1024) {
+    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (value >= 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  return `${value} B`;
+}
+
+function isRestorePointTrigger(trigger) {
+  return trigger === 'pre-update';
+}
+
+function getBackupCompressionLevel(trigger) {
+  return isRestorePointTrigger(trigger) ? 1 : 5;
+}
+
+function emitBackupProgress({ serverPath, type, trigger, phase, percent, processedBytes, totalBytes, entriesProcessed, entriesTotal, name, size, message }) {
+  safeSend('backup-progress', {
+    serverPath,
+    type,
+    trigger,
+    phase,
+    percent: Number.isFinite(percent) ? Math.max(0, Math.min(100, Math.round(percent))) : null,
+    processedBytes: Number(processedBytes) || 0,
+    totalBytes: Number(totalBytes) || 0,
+    entriesProcessed: Number(entriesProcessed) || 0,
+    entriesTotal: Number(entriesTotal) || 0,
+    name,
+    size,
+    message
+  });
+}
+
+function createBackupProgressReporter({ serverPath, type, trigger, name }) {
+  const label = isRestorePointTrigger(trigger) ? 'restore point' : 'backup';
+
+  return (progress) => {
+    const rawPercent = Number.isFinite(progress?.percent) ? progress.percent : null;
+    const scaledPercent = rawPercent === null
+      ? null
+      : (progress.phase === 'complete' ? 96 : Math.max(3, Math.min(96, 3 + (rawPercent * 0.93))));
+    const processed = Number(progress?.processedBytes) || 0;
+    const total = Number(progress?.totalBytes) || 0;
+    const byteMessage = processed > 0
+      ? (total > 0 ? ` (${formatBytes(processed)} of ${formatBytes(total)})` : ` (${formatBytes(processed)} processed)`)
+      : '';
+
+    emitBackupProgress({
+      serverPath,
+      type,
+      trigger,
+      name,
+      phase: progress?.phase || 'zipping',
+      percent: scaledPercent,
+      processedBytes: processed,
+      totalBytes: total,
+      entriesProcessed: progress?.entriesProcessed,
+      entriesTotal: progress?.entriesTotal,
+      message: `Creating ${label}${byteMessage}...`
+    });
+  };
+}
+
 async function createBackup({ serverPath, type, trigger }) {
+  type = normalizeBackupType(type);
   const backupDir = getBackupDir(serverPath);
   if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
 
@@ -100,6 +373,7 @@ async function createBackup({ serverPath, type, trigger }) {
     timestamp: now.toISOString(), // Keep ISO format for internal use but filename uses local time
     size: stats.size,
     trigger,
+    status: 'complete',
     // Optionally add MC/Fabric version here
   };
   fs.writeFileSync(zipPath.replace('.zip', '.json'), JSON.stringify(metadata, null, 2));
@@ -107,7 +381,9 @@ async function createBackup({ serverPath, type, trigger }) {
 }
 
 async function safeCreateBackup({ serverPath, type, trigger }) {
+  type = normalizeBackupType(type);
   const backupStartTime = Date.now();
+  let activeBackupPathKey = null;
   performanceMetrics.backupsCreated++;
   
   logger.info('Starting backup creation', {
@@ -137,6 +413,8 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
       fs.mkdirSync(backupDir, { recursive: true });
     }
 
+  await cleanupIncompleteBackups(serverPath);
+
   const now = new Date();
   // Use local time for filename to match UI display
   const year = now.getFullYear();
@@ -149,6 +427,10 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   const name = `backup-${type}-${timestamp}.zip`;
   const zipPath = path.join(backupDir, name);
   const metaPath = zipPath.replace('.zip', '.json');
+  const backupProgress = createBackupProgressReporter({ serverPath, type, trigger, name });
+  const compressionLevel = getBackupCompressionLevel(trigger);
+  activeBackupPathKey = normalizePathForCompare(zipPath);
+  activeBackupPaths.add(activeBackupPathKey);
 
   let items;
   if (type === 'full') {
@@ -156,6 +438,35 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   } else {
     items = getWorldDirs(serverPath);
   }
+
+  emitBackupProgress({
+    serverPath,
+    type,
+    trigger,
+    name,
+    phase: 'preparing',
+    percent: 1,
+    entriesTotal: items.length,
+    message: isRestorePointTrigger(trigger)
+      ? `Calculating restore point size from ${items.length} server item${items.length === 1 ? '' : 's'}...`
+      : `Calculating ${type} backup size from ${items.length} item${items.length === 1 ? '' : 's'}...`
+  });
+
+  const inputSummary = calculateArchiveInputSize(items);
+
+  emitBackupProgress({
+    serverPath,
+    type,
+    trigger,
+    name,
+    phase: 'preparing',
+    percent: 1,
+    totalBytes: inputSummary.totalBytes,
+    entriesTotal: inputSummary.fileCount || items.length,
+    message: isRestorePointTrigger(trigger)
+      ? `Preparing restore point (${formatBytes(inputSummary.totalBytes)})...`
+      : `Preparing ${type} backup (${formatBytes(inputSummary.totalBytes)})...`
+  });
 
   // Check if the server is running
   const serverState = getServerState();
@@ -169,6 +480,8 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     trigger,
     automated: trigger === 'auto' || trigger === 'app-launch',
     source: trigger,
+    compressionLevel,
+    status: 'in-progress'
   };
   
   // Try to write metadata file first
@@ -224,7 +537,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
       
       while (attempts < maxAttempts) {
         try {
-          await createZip(items, zipPath);
+          await createZip(items, zipPath, { onProgress: backupProgress, inputSummary, compressionLevel });
           backupError = null;
           break; // Success, exit the loop
         } catch (err) {
@@ -268,7 +581,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     
     while (attempts < maxAttempts) {
       try {
-        await createZip(items, zipPath);
+        await createZip(items, zipPath, { onProgress: backupProgress, inputSummary, compressionLevel });
         backupError = null;
         break; // Success, exit the loop
       } catch (err) {
@@ -296,6 +609,8 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
   if (fs.existsSync(zipPath)) {
     const stats = fs.statSync(zipPath);
     metadata.size = stats.size;
+    metadata.status = 'complete';
+    metadata.completedAt = new Date().toISOString();
     performanceMetrics.totalBackupSize += stats.size;
     performanceMetrics.lastBackupSize = stats.size;
     
@@ -331,6 +646,19 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     
     // Write updated metadata with the correct size
     fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
+
+    emitBackupProgress({
+      serverPath,
+      type,
+      trigger,
+      name,
+      phase: 'complete',
+      percent: 100,
+      size: stats.size,
+      message: isRestorePointTrigger(trigger)
+        ? `Restore point created: ${name} (${formatBytes(stats.size)})`
+        : `Backup created: ${name} (${formatBytes(stats.size)})`
+    });
     
   logger.info('Backup created successfully', {
       category: 'storage',
@@ -353,6 +681,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     
   // Fire-and-forget advanced retention after successful creation
   try { applyAdvancedRetention({ serverPath, trigger }); } catch { /* ignore */ }
+  if (activeBackupPathKey) activeBackupPaths.delete(activeBackupPathKey);
   return { name, size: stats.size, metadata };
   } else {
     const backupDuration = Date.now() - backupStartTime;
@@ -371,6 +700,7 @@ async function safeCreateBackup({ serverPath, type, trigger }) {
     throw new Error('Backup file was not created correctly');
   }
   } catch (error) {
+    if (activeBackupPathKey) activeBackupPaths.delete(activeBackupPathKey);
     const backupDuration = Date.now() - backupStartTime;
   logger.error(`Backup creation failed: ${error.message}`, {
       category: 'storage',
@@ -442,7 +772,11 @@ async function applyAdvancedRetention({ serverPath, trigger }) {
   }
 }
 
-async function listBackupsWithMetadata(serverPath) {
+async function listBackupsWithMetadata(serverPath, options = {}) {
+  if (options.cleanupIncomplete !== false) {
+    await cleanupIncompleteBackups(serverPath, options.incompleteCleanup);
+  }
+
   const backups = await listBackups(serverPath);
   return backups.map(b => {
     const metaPath = b.path.replace('.zip', '.json');
@@ -459,9 +793,8 @@ async function listBackupsWithMetadata(serverPath) {
 
 async function deleteBackup({ serverPath, name }) {
   try {
-    const backupDir = getBackupDir(serverPath);
-    const zipPath = path.join(backupDir, name);
-    const metaPath = zipPath.replace('.zip', '.json');
+    const zipPath = getSafeBackupZipPath(serverPath, name);
+    const metaPath = getBackupMetaPath(zipPath);
     if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
     if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
     return { success: true };
@@ -471,12 +804,10 @@ async function deleteBackup({ serverPath, name }) {
 }
 
 async function renameBackup({ serverPath, oldName, newName }) {
-  if (!newName.endsWith('.zip')) throw new Error('Backup name must end with .zip');
-  const backupDir = getBackupDir(serverPath);
-  const oldZip = path.join(backupDir, oldName);
-  const oldMeta = oldZip.replace('.zip', '.json');
-  const newZip = path.join(backupDir, newName);
-  const newMeta = newZip.replace('.zip', '.json');
+  const oldZip = getSafeBackupZipPath(serverPath, oldName);
+  const oldMeta = getBackupMetaPath(oldZip);
+  const newZip = getSafeBackupZipPath(serverPath, newName);
+  const newMeta = getBackupMetaPath(newZip);
   if (fs.existsSync(newZip)) throw new Error('A backup with that name already exists');
   fs.renameSync(oldZip, newZip);
   if (fs.existsSync(oldMeta)) fs.renameSync(oldMeta, newMeta);
@@ -484,19 +815,20 @@ async function renameBackup({ serverPath, oldName, newName }) {
 
 async function restoreBackup({ serverPath, name, serverStatus }) {
   try {
-    if (serverStatus && serverStatus === 'Running') {
+    void serverStatus;
+    if (isTargetServerRunning(serverPath)) {
       return { success: false, error: 'Cannot restore while server is running. Please stop the server first.' };
     }
     const backupDir = getBackupDir(serverPath);
-    const zipPath = path.join(backupDir, name);
-    const metaPath = zipPath.replace('.zip', '.json');
+    const zipPath = getSafeBackupZipPath(serverPath, name);
+    const metaPath = getBackupMetaPath(zipPath);
     if (!fs.existsSync(zipPath)) {
       return { success: false, error: 'Backup file not found.' };
     }
     let type = 'full';
     if (fs.existsSync(metaPath)) {      try {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        if (meta.type) type = meta.type;
+        if (meta.type) type = normalizeBackupType(meta.type);
       } catch {
         type = 'full';
       }
@@ -513,8 +845,8 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
     const minute = now.getMinutes().toString().padStart(2, '0');
     const second = now.getSeconds().toString().padStart(2, '0');
     const timestamp = `${year}-${month}-${day}_${hour}-${minute}-${second}`;
-    let preRestoreBackupName = `pre-restore-${type}-${timestamp}.zip`;
-    let preRestoreBackupPath = path.join(backupDir, preRestoreBackupName);
+    const preRestoreBackupName = `pre-restore-${type}-${timestamp}.zip`;
+    const preRestoreBackupPath = getSafeBackupZipPath(serverPath, preRestoreBackupName);
     // Choose folders to backup before restore
     const itemsToBackup = isWorldType
       ? getWorldDirs(serverPath)
@@ -528,7 +860,8 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
           type,
           timestamp: now.toISOString(),
           size: stats.size,
-          trigger: 'pre-restore'
+          trigger: 'pre-restore',
+          status: 'complete'
         };
         fs.writeFileSync(preRestoreBackupPath.replace('.zip', '.json'), JSON.stringify(preMeta, null, 2));
       } catch (err) {
@@ -546,6 +879,7 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
     }
     // For full backups, just extract and overwrite everything
     const zip = new (/** @type {any} */ (AdmZip))(zipPath);
+    validateZipEntriesStayInside(zip, serverPath);
     zip.extractAllTo(serverPath, true);
     return { success: true, message: 'Backup restored successfully.', preRestoreBackup: preRestoreBackupName };
   } catch (err) {
@@ -622,6 +956,7 @@ module.exports = {
   renameBackup,
   restoreBackup,
   cleanupAutomaticBackups,
+  cleanupIncompleteBackups,
   getWorldDirs,
   getBackupDir,
   getPerformanceMetrics

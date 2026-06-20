@@ -497,7 +497,8 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
               allDependencies.push({
                 project_id: pid,
                 dependency_type: dep.dependency_type,
-                version_requirement: dep.version_requirement,
+      version_requirement: dep.version_requirement,
+      version_id: dep.version_id || dep.versionId || dep.currentVersionId,
                 name: depName
               });
             }
@@ -551,6 +552,7 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
                 project_id: pid,
                 dependency_type: dep.dependency_type,
                 version_requirement: dep.version_requirement,
+                version_id: dep.version_id || dep.versionId || dep.currentVersionId,
                 name: depName
               });
             }
@@ -694,7 +696,12 @@ export async function checkModDependencies(mod, visited = new Set(), options = {
     // Recursively check dependencies of each dependency
     const allDeps = [...directDeps];
     for (const dep of directDeps) {
-      const nestedDeps = await checkModDependencies({ id: dep.projectId, selectedVersionId: null, source: mod.source || 'modrinth' }, visited, options, depth + 1);
+      const nestedDeps = await checkModDependencies({
+        id: dep.projectId,
+        name: dep.name,
+        selectedVersionId: dep.currentVersionId || null,
+        source: mod.source || 'modrinth'
+      }, visited, options, depth + 1);
       for (const nested of nestedDeps) {
         if (!allDeps.find(d => d.projectId === nested.projectId)) {
           allDeps.push(nested);
@@ -770,7 +777,8 @@ async function filterAndResolveDependencies(dependencies, { interactive = false 
       project_id: dep.project_id || dep.projectId,
       dependency_type: dep.dependency_type || dep.dependencyType || 'required',
       name: dep.name || null,
-      version_requirement: dep.version_requirement || dep.versionRequirement || null
+      version_requirement: dep.version_requirement || dep.versionRequirement || null,
+      version_id: dep.version_id || dep.versionId || dep.currentVersionId || null
     }))    // Skip entries that refer to Minecraft, system dependencies, or bundled Fabric modules
     .filter(dep => {
       if (!isDependencyRelevantToActiveLoader(dep.project_id, activeLoader)) {
@@ -918,6 +926,7 @@ async function filterAndResolveDependencies(dependencies, { interactive = false 
       name: name,
       dependencyType: dep.dependency_type,
       versionRequirement: dep.version_requirement,
+      currentVersionId: dep.version_id,
       versionInfo: versionInfo
     };
   }));
@@ -1064,6 +1073,10 @@ export async function installWithDependencies(serverPath, installFn = installMod
           source: 'modrinth',
           title: depName
         };
+
+        if (dependency.currentVersionId) {
+          depMod.selectedVersionId = dependency.currentVersionId;
+        }
         
         // If there's a specific version requirement, handle it
         if (dependency.versionRequirement) {

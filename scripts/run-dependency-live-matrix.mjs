@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 
 import {
   checkModDependencies,
-  installWithDependencies
+  installWithDependencies,
+  isDependencyRelevantToActiveLoader
 } from '../src/utils/mods/modDependencyHelper.js';
 import {
   currentDependencies,
@@ -16,8 +17,13 @@ import {
 const API = 'https://api.modrinth.com/v2';
 const MC_VERSION = '1.20.1';
 const USER_AGENT = 'minecraft-core-dependency-matrix/1.0';
+const TARGET_PER_LOADER = Number.parseInt(process.env.DEPENDENCY_MATRIX_CASES || '50', 10);
+const EXTRA_EXCLUDED_SLUGS = (process.env.DEPENDENCY_MATRIX_EXCLUDE_SLUGS || '')
+  .split(',')
+  .map(slug => slug.trim().toLowerCase())
+  .filter(Boolean);
 
-const MATRIX = {
+const BASELINE_MATRIX = {
   fabric: [
     { slug: 'iris', title: 'Iris Shaders', versionId: 's5eFLITc', versionNumber: '1.7.6+1.20.1' },
     { slug: 'entityculling', title: 'Entity Culling', versionId: 'rpOQImBG', versionNumber: '1.10.2' },
@@ -124,6 +130,24 @@ async function getVersions(projectIdOrSlug, loader) {
   })).sort((a, b) => new Date(b.datePublished).getTime() - new Date(a.datePublished).getTime());
 }
 
+async function searchProjects(loader, offset) {
+  const facets = encodeURIComponent(JSON.stringify([
+    ['project_type:mod'],
+    [`versions:${MC_VERSION}`],
+    [`categories:${loader}`]
+  ]));
+  return await getJson(`${API}/search?facets=${facets}&index=downloads&limit=100&offset=${offset}`);
+}
+
+function hasRequiredProjectDependency(version) {
+  return (version.dependencies || []).some(dep => dep.dependency_type === 'required' && dep.project_id);
+}
+
+async function selectVersionWithRequiredDependency(projectIdOrSlug, loader) {
+  const versions = await getVersions(projectIdOrSlug, loader);
+  return versions.find(hasRequiredProjectDependency) || null;
+}
+
 function sortedUnique(values) {
   return Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b));
 }
@@ -152,6 +176,10 @@ async function collectExpectedDependencies(root, loader, visited = new Set()) {
     }
 
     for (const dep of version.dependencies || []) {
+      if (!isDependencyRelevantToActiveLoader(dep.project_id, loader)) {
+        continue;
+      }
+
       if (dep.dependency_type === 'optional' && dep.project_id) {
         optional.add(dep.project_id);
       }
@@ -178,6 +206,68 @@ async function collectExpectedDependencies(root, loader, visited = new Set()) {
     expected: Array.from(expected.values()).sort((a, b) => a.projectId.localeCompare(b.projectId)),
     optional: sortedUnique(Array.from(optional))
   };
+}
+
+async function discoverMatrix(loader, count, excludedSlugs) {
+  const selected = [];
+  const seen = new Set(excludedSlugs);
+  let offset = 0;
+
+  while (selected.length < count && offset < 1000) {
+    const search = await searchProjects(loader, offset);
+    const hits = search.hits || [];
+
+    if (hits.length === 0) {
+      break;
+    }
+
+    for (const hit of hits) {
+      const slug = hit.slug || hit.project_id;
+      const normalizedSlug = slug.toLowerCase();
+
+      if (seen.has(normalizedSlug)) {
+        continue;
+      }
+
+      seen.add(normalizedSlug);
+
+      try {
+        const version = await selectVersionWithRequiredDependency(slug, loader);
+        if (!version) {
+          continue;
+        }
+
+        const root = {
+          slug,
+          title: hit.title || slug,
+          versionId: version.id,
+          versionNumber: version.versionNumber
+        };
+        const { expected } = await collectExpectedDependencies(root, loader, new Set());
+
+        if (expected.length === 0) {
+          continue;
+        }
+
+        selected.push(root);
+        console.log(`SELECT\t${loader}\t${slug}\t${version.versionNumber}`);
+
+        if (selected.length >= count) {
+          break;
+        }
+      } catch (error) {
+        console.warn(`SKIP\t${loader}\t${slug}\t${error.message}`);
+      }
+    }
+
+    offset += hits.length;
+  }
+
+  if (selected.length < count) {
+    throw new Error(`Only found ${selected.length}/${count} ${loader} projects with required dependencies outside the baseline matrix`);
+  }
+
+  return selected;
 }
 
 globalThis.window = {
@@ -229,7 +319,9 @@ async function runCase(root, loader) {
 
   const detectedIds = sortedUnique(detected.map(dep => dep.projectId));
   const expectedIds = sortedUnique(expected.map(dep => dep.projectId));
-  const forcedOptionalIds = optional.filter(projectId => detectedIds.includes(projectId));
+  const forcedOptionalIds = optional.filter(projectId =>
+    detectedIds.includes(projectId) && !expectedIds.includes(projectId)
+  );
 
   modToInstall.set({
     id: root.slug,
@@ -276,8 +368,21 @@ async function runCase(root, loader) {
 }
 
 const results = [];
+const baselineSlugs = new Set(
+  Object.values(BASELINE_MATRIX)
+    .flat()
+    .map(root => root.slug.toLowerCase())
+);
+for (const slug of EXTRA_EXCLUDED_SLUGS) {
+  baselineSlugs.add(slug);
+}
+const matrix = {
+  fabric: await discoverMatrix('fabric', TARGET_PER_LOADER, baselineSlugs),
+  forge: await discoverMatrix('forge', TARGET_PER_LOADER, baselineSlugs)
+};
+
 for (const loader of ['fabric', 'forge']) {
-  for (const root of MATRIX[loader]) {
+  for (const root of matrix[loader]) {
     const result = await runCase(root, loader);
     results.push(result);
     const status = result.pass ? 'PASS' : 'FAIL';
@@ -288,6 +393,9 @@ for (const loader of ['fabric', 'forge']) {
 const failures = results.filter(result => !result.pass);
 const summary = {
   minecraftVersion: MC_VERSION,
+  targetPerLoader: TARGET_PER_LOADER,
+  excludedBaselineCount: baselineSlugs.size,
+  extraExcludedCount: EXTRA_EXCLUDED_SLUGS.length,
   fabricCount: results.filter(result => result.loader === 'fabric').length,
   forgeCount: results.filter(result => result.loader === 'forge').length,
   passCount: results.filter(result => result.pass).length,

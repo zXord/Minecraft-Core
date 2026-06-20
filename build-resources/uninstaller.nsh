@@ -10,6 +10,53 @@ Var /GLOBAL Label_3
 Var /GLOBAL CheckBox_1
 Var /GLOBAL Checkbox_State
 
+# During an app update, show only the native install progress page.
+# Fresh installs still use the normal assisted installer pages.
+!macro customInstallMode
+    ${if} ${isUpdated}
+        ${if} $installMode == "all"
+            StrCpy $isForceMachineInstall "1"
+        ${else}
+            StrCpy $isForceCurrentInstall "1"
+        ${endif}
+    ${endif}
+!macroend
+
+!macro customFinishPage
+    Function MinecraftCoreSkipFinishPageForUpdate
+        ${if} ${isUpdated}
+            Abort
+        ${endif}
+    FunctionEnd
+
+    Function MinecraftCoreFinishStartApp
+        ${if} ${isUpdated}
+            StrCpy $1 "--updated"
+        ${else}
+            StrCpy $1 ""
+        ${endif}
+        ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"
+    FunctionEnd
+
+    !define MUI_PAGE_CUSTOMFUNCTION_PRE MinecraftCoreSkipFinishPageForUpdate
+    !ifndef HIDE_RUN_AFTER_FINISH
+        !define MUI_FINISHPAGE_RUN
+        !define MUI_FINISHPAGE_RUN_FUNCTION "MinecraftCoreFinishStartApp"
+    !endif
+    !insertmacro MUI_PAGE_FINISH
+!macroend
+
+!macro customInstall
+    ${if} ${isUpdated}
+    ${andIf} ${isForceRun}
+    ${andIfNot} ${Silent}
+        HideWindow
+        StrCpy $1 "--updated"
+        ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"
+        !insertmacro quitSuccess
+    ${endif}
+!macroend
+
 # Create a custom uninstall page
 UninstPage custom un.nsDialogsPage un.nsDialogsPageLeave
 
@@ -72,4 +119,4 @@ FunctionEnd
             MessageBox MB_OK "Your Minecraft Core data has been preserved and will be available if you reinstall."
         ${EndIf}
     ${endIf}
-!macroend 
+!macroend

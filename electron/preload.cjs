@@ -204,6 +204,7 @@ contextBridge.exposeInMainWorld('electron', {
       'remind-later',
       'set-auto-install',
       'get-update-status',
+      'get-staged-specific-version-update',
       'start-periodic-checks',
       'stop-periodic-checks',
       'check-for-specific-version',
@@ -308,8 +309,10 @@ contextBridge.exposeInMainWorld('electron', {
       'server-cloud-sync-warning',
       'auto-restart-status',
       'mod-install-progress',
+      'mod-compatibility-progress',
       'setup-progress',
       'backup-notification',
+      'backup-progress',
       'backup-size-changed',
   // Mod availability watcher events
   'mod-availability-notification',
@@ -384,8 +387,10 @@ contextBridge.exposeInMainWorld('electron', {
       'server-cloud-sync-warning',
       'auto-restart-status',
       'mod-install-progress',
+      'mod-compatibility-progress',
       'setup-progress',
       'backup-notification',
+      'backup-progress',
       'backup-size-changed',
   'mod-availability-notification',
       // Management server events
@@ -461,6 +466,7 @@ contextBridge.exposeInMainWorld('electron', {
       'mod-install-progress',
       'setup-progress',
       'backup-notification',
+      'backup-progress',
       'backup-size-changed',
   'mod-availability-notification',
       // Management server events

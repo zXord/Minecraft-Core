@@ -80,6 +80,7 @@
   >    <div
       class="modal-content"
       role="document"
+      on:click|stopPropagation
     >
       <div class="modal-header">
         <h3 id="dialog-title">{title}</h3>

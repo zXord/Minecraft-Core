@@ -5,6 +5,7 @@ const { getModrinthDownloadUrl, getCurseForgeDownloadUrl } = require('../../serv
 const modFileManager = require('../mod-utils/mod-file-manager.cjs');
 const modInstallService = require('../mod-utils/mod-installation-service.cjs');
 const { downloadWithProgress } = require('../../services/download-manager.cjs');
+const appStore = require('../../utils/app-store.cjs');
 const {
   extractVersionFromFilename,
   checkMinecraftVersionCompatibility
@@ -12,9 +13,100 @@ const {
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
 const { serverErrorMonitor } = require('../error-monitoring-handlers.cjs');
 const { resolveServerLoader } = require('../../utils/server-loader.cjs');
+const {
+  assertSafeRemoteUrl,
+  isPathInside,
+  safeBaseName,
+  safeFilePath
+} = require('../../utils/security-boundaries.cjs');
+
+const ALLOWED_CHECKSUM_ALGORITHMS = new Set(['sha1', 'sha256', 'sha512', 'md5']);
+const ALLOWED_MOD_FILE_SUFFIXES = ['.jar', '.jar.disabled', '.zip', '.json'];
+
+function normalizeChecksumAlgorithm(algorithm) {
+  const normalized = String(algorithm || 'sha1').trim().toLowerCase();
+  if (!ALLOWED_CHECKSUM_ALGORITHMS.has(normalized)) {
+    throw new Error(`Unsupported algorithm: ${algorithm}`);
+  }
+  return normalized;
+}
+
+function getKnownInstanceRoots() {
+  const roots = new Set();
+  const instances = Array.isArray(appStore.get('instances')) ? appStore.get('instances') : [];
+  for (const instance of instances) {
+    if (instance && typeof instance.path === 'string' && instance.path.trim()) {
+      roots.add(path.resolve(instance.path));
+    }
+  }
+  const lastServerPath = appStore.get('lastServerPath');
+  if (typeof lastServerPath === 'string' && lastServerPath.trim()) {
+    roots.add(path.resolve(lastServerPath));
+  }
+  return Array.from(roots);
+}
+
+function assertKnownInstanceFilePath(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    throw new Error('File path is required');
+  }
+  const resolvedPath = path.resolve(filePath);
+  const lowerPath = resolvedPath.toLowerCase();
+  if (!ALLOWED_MOD_FILE_SUFFIXES.some((suffix) => lowerPath.endsWith(suffix))) {
+    throw new Error('File type is not allowed');
+  }
+  const roots = getKnownInstanceRoots();
+  if (!roots.some((root) => isPathInside(resolvedPath, root)) && !isPathInside(resolvedPath, require('os').tmpdir())) {
+    throw new Error('File path is outside known instance folders');
+  }
+  return resolvedPath;
+}
+
+function safeTempJarPath(mod, suffix = '') {
+  const rawStem = String(mod?.name || mod?.id || 'mod')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'mod';
+  const fileName = safeBaseName(`${rawStem}${suffix}-${Date.now()}.jar`, 'temporary mod file name', {
+    allowedExtensions: ['.jar']
+  });
+  return safeFilePath(require('os').tmpdir(), fileName, 'temporary mod file name', {
+    allowedExtensions: ['.jar']
+  });
+}
+
+function normalizeModDownloadUrl(downloadUrl, options = {}) {
+  const safeUrl = assertSafeRemoteUrl(downloadUrl, { allowedProtocols: ['https:'] });
+  if (options.requireChecksum && !options.expectedChecksum) {
+    throw new Error('A checksum is required for caller-provided mod download URLs');
+  }
+  return safeUrl;
+}
 
 function createServerModHandlers(win) {
   const logger = getLoggerHandlers();
+
+  function emitModCompatibilityProgress(progress) {
+    if (!win || (typeof win.isDestroyed === 'function' && win.isDestroyed()) || !win.webContents) {
+      return;
+    }
+
+    const total = Math.max(0, Number(progress?.total) || 0);
+    const current = Math.max(0, Math.min(total || Number(progress?.current) || 0, Number(progress?.current) || 0));
+    const percent = total > 0
+      ? Math.max(0, Math.min(100, Math.round((current / total) * 100)))
+      : Math.max(0, Math.min(100, Number(progress?.percent) || 0));
+
+    win.webContents.send('mod-compatibility-progress', {
+      phase: progress?.phase || 'checking',
+      current,
+      total,
+      percent,
+      modName: progress?.modName || null,
+      fileName: progress?.fileName || null,
+      message: progress?.message || ''
+    });
+  }
   
   logger.info('Server mod handlers initialized', {
     category: 'mods',
@@ -322,6 +414,14 @@ function createServerModHandlers(win) {
         
         return 0;
       }      try {
+        emitModCompatibilityProgress({
+          phase: 'loading',
+          current: 0,
+          total: 0,
+          percent: 0,
+          message: 'Loading installed mods...'
+        });
+
         modApiService.clearVersionCache();
         const installed = await modFileManager.getInstalledModInfo(serverPath);
         const disabledMods = await modFileManager.getDisabledMods(serverPath);
@@ -341,8 +441,18 @@ function createServerModHandlers(win) {
             mcVersion: mcVersion
           }
         });
+
+        emitModCompatibilityProgress({
+          phase: 'ready',
+          current: 0,
+          total: enabledMods.length,
+          message: enabledMods.length > 0
+            ? `Checking ${enabledMods.length} enabled mod${enabledMods.length === 1 ? '' : 's'}...`
+            : 'No enabled mods to check.'
+        });
       
-      for (const mod of enabledMods) {
+      for (let modIndex = 0; modIndex < enabledMods.length; modIndex += 1) {
+        const mod = enabledMods[modIndex];
         const projectId = mod.projectId;
         const fileName = mod.fileName;
         const name = mod.name || mod.title || fileName;
@@ -351,6 +461,13 @@ function createServerModHandlers(win) {
         if (!currentVersion || currentVersion === 'Unknown') {
           currentVersion = extractVersionFromFilename(fileName) || 'Unknown';
         }
+        const providerFields = {
+          source: mod.source || null,
+          modrinthId: mod.modrinthId || null,
+          curseforgeId: mod.curseforgeId || mod.curseForgeId || null,
+          projectUrl: mod.projectUrl || mod.pageUrl || mod.websiteUrl || mod.url || null,
+          slug: mod.slug || null
+        };
         
         logger.debug('Processing individual mod compatibility', {
           category: 'mods',
@@ -362,172 +479,186 @@ function createServerModHandlers(win) {
             hasProjectId: !!projectId
           }
         });
-        
-        if (!projectId) {
-          logger.debug('Mod has no project ID, marking as compatible', {
-            category: 'mods',
-            data: {
-              modName: name,
-              fileName: fileName
-            }
-          });
-          
-          results.push({
-            projectId: null,
-            fileName,
-            name,
-            currentVersion,
-            compatible: true,
-            dependencies: []
-          });
-          continue;
-        }
+
+        emitModCompatibilityProgress({
+          phase: 'checking',
+          current: modIndex,
+          total: enabledMods.length,
+          modName: name,
+          fileName,
+          message: `Checking ${name}...`
+        });
         
         try {
-          // FIXED: Check if ANY versions exist for target MC version FIRST (most important)
-          const availableVersions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, false);
-          
-          logger.debug('Retrieved available versions for mod', {
-            category: 'network',
-            data: {
-              modName: name,
-              projectId: projectId,
-              mcVersion: mcVersion,
-              availableVersionCount: availableVersions?.length || 0
-            }
-          });
-          
-          // If NO versions are available for the target MC version, mark as incompatible immediately
-          if (!availableVersions || availableVersions.length === 0) {
-            logger.debug('No versions available for target MC version', {
+          if (!projectId) {
+            logger.debug('Mod has no project ID, marking as compatible', {
               category: 'mods',
               data: {
                 modName: name,
-                projectId: projectId,
-                mcVersion: mcVersion,
-                compatibilityStatus: 'incompatible'
+                fileName: fileName
               }
             });
             
             results.push({
-              projectId,
+              projectId: null,
               fileName,
               name,
               currentVersion,
-              latestVersion: currentVersion,
-              compatible: false,
-              reason: `No versions available for Minecraft ${mcVersion}`,
+              ...providerFields,
+              compatible: true,
               dependencies: []
             });
             continue;
           }
           
-          // Get the latest available version for the target MC version
-          const latestVersions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, true);
-          const latest = latestVersions && latestVersions[0];
-          
-          // Check if current version is among the available versions for target MC
-          let currentVersionCompatible = false;
-          
-          if (mod.minecraftVersion) {
-            // Use backend-extracted metadata if available
-            currentVersionCompatible = checkMinecraftVersionCompatibility(mod.minecraftVersion, mcVersion);
-            // BUT also verify the version actually exists in the available versions list
-            if (currentVersionCompatible) {
-              const currentVersionExists = availableVersions.some(v => 
-                v.versionNumber === currentVersion && 
-                v.gameVersions && 
-                v.gameVersions.includes(mcVersion)
-              );
-              currentVersionCompatible = currentVersionExists;
-            }
-          } else {
-            // Check if current version exists in the available versions for target MC
-            currentVersionCompatible = availableVersions.some(v => {
-              const versionMatches = v.versionNumber === currentVersion;
-              const supportsTargetMC = v.gameVersions && v.gameVersions.includes(mcVersion);
-              return versionMatches && supportsTargetMC;
-            });
-          }
-          
-          if (currentVersionCompatible) {
-            // Current version is compatible AND actually available for target MC
-            logger.debug('Current mod version is compatible', {
-              category: 'mods',
-              data: {
-                modName: name,
-                currentVersion: currentVersion,
-                latestVersion: latest?.versionNumber,
-                hasUpdate: latest && latest.versionNumber !== currentVersion
-              }
-            });
-            
-            results.push({
-              projectId,
-              fileName,
-              name,
-              currentVersion,
-              latestVersion: latest ? latest.versionNumber : currentVersion,
-              compatible: true,
-              hasUpdate: latest && latest.versionNumber !== currentVersion,
-              dependencies: latest ? (latest.dependencies || []) : []
-            });
-          } else if (latest) {
-            // Current version is not compatible, but there IS a latest version available
-            logger.debug('Current mod version incompatible, but update available', {
-              category: 'mods',
-              data: {
-                modName: name,
-                currentVersion: currentVersion,
-                latestVersion: latest.versionNumber,
-                compatibilityStatus: 'update_available'
-              }
-            });
-            
-            results.push({
-              projectId,
-              fileName,
-              name,
-              currentVersion,
-              latestVersion: latest.versionNumber,
-              compatible: true, // Mark as compatible since there's an update available
-              hasUpdate: true,
-              reason: `Current version incompatible, update available: ${currentVersion} → ${latest.versionNumber}`,
-              dependencies: latest.dependencies || []
-            });
-          } else {
-            // This shouldn't happen since we checked availableVersions.length > 0 above
-            logger.warn('No compatible versions found despite available versions existing', {
-              category: 'mods',
+            // FIXED: Check if ANY versions exist for target MC version FIRST (most important)
+            const availableVersions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, false);
+
+            logger.debug('Retrieved available versions for mod', {
+              category: 'network',
               data: {
                 modName: name,
                 projectId: projectId,
-                currentVersion: currentVersion,
-                mcVersion: mcVersion
+                mcVersion: mcVersion,
+                availableVersionCount: availableVersions?.length || 0
               }
             });
 
-            logger.debug('Diagnostic snapshot for incompatibility', {
-              category: 'mods',
-              data: {
-                modName: name,
-                availableSample: availableVersions.slice(0,5).map(v => ({ num: v.versionNumber, gv: v.gameVersions })),
-                latestSample: latestVersions ? latestVersions.slice(0,3).map(v => v.versionNumber) : [],
-                reason: 'No version entry matched both versionNumber and mcVersion'
+            // If NO versions are available for the target MC version, mark as incompatible immediately
+            if (!availableVersions || availableVersions.length === 0) {
+              logger.debug('No versions available for target MC version', {
+                category: 'mods',
+                data: {
+                  modName: name,
+                  projectId: projectId,
+                  mcVersion: mcVersion,
+                  compatibilityStatus: 'incompatible'
+                }
+              });
+
+              results.push({
+                projectId,
+                fileName,
+                name,
+                currentVersion,
+                latestVersion: currentVersion,
+                ...providerFields,
+                compatible: false,
+                reason: `No versions available for Minecraft ${mcVersion}`,
+                dependencies: []
+              });
+              continue;
+            }
+
+            // Get the latest available version for the target MC version
+            const latestVersions = await modApiService.getModrinthVersions(projectId, loaderForApi, mcVersion, true);
+            const latest = latestVersions && latestVersions[0];
+
+            // Check if current version is among the available versions for target MC
+            let currentVersionCompatible = false;
+
+            if (mod.minecraftVersion) {
+              // Use backend-extracted metadata if available
+              currentVersionCompatible = checkMinecraftVersionCompatibility(mod.minecraftVersion, mcVersion);
+              // BUT also verify the version actually exists in the available versions list
+              if (currentVersionCompatible) {
+                const currentVersionExists = availableVersions.some(v =>
+                  v.versionNumber === currentVersion &&
+                  v.gameVersions &&
+                  v.gameVersions.includes(mcVersion)
+                );
+                currentVersionCompatible = currentVersionExists;
               }
-            });
-            
-            results.push({
-              projectId,
-              fileName,
-              name,
-              currentVersion,
-              latestVersion: currentVersion,
-              compatible: false,
-              reason: `No compatible versions found for Minecraft ${mcVersion}`,
-              dependencies: []
-            });
-          }
+            } else {
+              // Check if current version exists in the available versions for target MC
+              currentVersionCompatible = availableVersions.some(v => {
+                const versionMatches = v.versionNumber === currentVersion;
+                const supportsTargetMC = v.gameVersions && v.gameVersions.includes(mcVersion);
+                return versionMatches && supportsTargetMC;
+              });
+            }
+
+            if (currentVersionCompatible) {
+              // Current version is compatible AND actually available for target MC
+              logger.debug('Current mod version is compatible', {
+                category: 'mods',
+                data: {
+                  modName: name,
+                  currentVersion: currentVersion,
+                  latestVersion: latest?.versionNumber,
+                  hasUpdate: latest && latest.versionNumber !== currentVersion
+                }
+              });
+
+              results.push({
+                projectId,
+                fileName,
+                name,
+                currentVersion,
+                latestVersion: latest ? latest.versionNumber : currentVersion,
+                ...providerFields,
+                compatible: true,
+                hasUpdate: latest && latest.versionNumber !== currentVersion,
+                dependencies: latest ? (latest.dependencies || []) : []
+              });
+            } else if (latest) {
+              // Current version is not compatible, but there IS a latest version available
+              logger.debug('Current mod version incompatible, but update available', {
+                category: 'mods',
+                data: {
+                  modName: name,
+                  currentVersion: currentVersion,
+                  latestVersion: latest.versionNumber,
+                  compatibilityStatus: 'update_available'
+                }
+              });
+
+              results.push({
+                projectId,
+                fileName,
+                name,
+                currentVersion,
+                latestVersion: latest.versionNumber,
+                ...providerFields,
+                compatible: true, // Mark as compatible since there's an update available
+                hasUpdate: true,
+                reason: `Current version incompatible, update available: ${currentVersion} → ${latest.versionNumber}`,
+                dependencies: latest.dependencies || []
+              });
+            } else {
+              // This shouldn't happen since we checked availableVersions.length > 0 above
+              logger.warn('No compatible versions found despite available versions existing', {
+                category: 'mods',
+                data: {
+                  modName: name,
+                  projectId: projectId,
+                  currentVersion: currentVersion,
+                  mcVersion: mcVersion
+                }
+              });
+
+              logger.debug('Diagnostic snapshot for incompatibility', {
+                category: 'mods',
+                data: {
+                  modName: name,
+                  availableSample: availableVersions.slice(0,5).map(v => ({ num: v.versionNumber, gv: v.gameVersions })),
+                  latestSample: latestVersions ? latestVersions.slice(0,3).map(v => v.versionNumber) : [],
+                  reason: 'No version entry matched both versionNumber and mcVersion'
+                }
+              });
+
+              results.push({
+                projectId,
+                fileName,
+                name,
+                currentVersion,
+                latestVersion: currentVersion,
+                ...providerFields,
+                compatible: false,
+                reason: `No compatible versions found for Minecraft ${mcVersion}`,
+                dependencies: []
+              });
+            }
         } catch (err) {
           logger.error(`Error checking mod compatibility: ${err.message}`, {
             category: 'mods',
@@ -544,11 +675,28 @@ function createServerModHandlers(win) {
             fileName,
             name,
             currentVersion,
+            ...providerFields,
             compatible: false,
             error: err.message
           });
+        } finally {
+          emitModCompatibilityProgress({
+            phase: 'checked',
+            current: modIndex + 1,
+            total: enabledMods.length,
+            modName: name,
+            fileName,
+            message: `Checked ${name} (${modIndex + 1}/${enabledMods.length})`
+          });
         }
       }
+
+      emitModCompatibilityProgress({
+        phase: 'complete',
+        current: enabledMods.length,
+        total: enabledMods.length,
+        message: `Checked ${enabledMods.length} enabled mod${enabledMods.length === 1 ? '' : 's'}`
+      });
       
       logger.info('Server mod compatibility check completed', {
         category: 'mods',
@@ -728,7 +876,11 @@ function createServerModHandlers(win) {
 
       try {
         // Use the existing mod API service to download from server
-        const downloadUrl = mod.downloadUrl || await getModrinthDownloadUrl(
+        const callerProvidedDownloadUrl = typeof mod?.downloadUrl === 'string' && mod.downloadUrl.trim();
+        const downloadUrl = callerProvidedDownloadUrl ? normalizeModDownloadUrl(mod.downloadUrl, {
+          requireChecksum: true,
+          expectedChecksum: mod.expectedChecksum
+        }) : await getModrinthDownloadUrl(
           mod.projectId || mod.id,
           mod.version,
           mod.loader
@@ -738,13 +890,13 @@ function createServerModHandlers(win) {
           throw new Error('No download URL available for server download');
         }
 
+        const safeDownloadUrl = normalizeModDownloadUrl(downloadUrl);
+
         // Create a temporary file path for download
-        const tempDir = require('os').tmpdir();
-        const tempFileName = `${mod.name || mod.id}_${Date.now()}.jar`;
-        const tempFilePath = require('path').join(tempDir, tempFileName);
+        const tempFilePath = safeTempJarPath(mod);
 
         // Download the file with progress reporting
-        await downloadWithProgress(downloadUrl, tempFilePath, `download-progress-${mod.id || mod.name}`);
+        await downloadWithProgress(safeDownloadUrl, tempFilePath, `download-progress-${mod.id || mod.name}`);
         
         // Get file size after download
         const stats = fs.statSync(tempFilePath);
@@ -797,7 +949,7 @@ function createServerModHandlers(win) {
                   modId: mod.id,
                   modName: mod.name,
                   source: 'server',
-                  downloadUrl,
+                  downloadUrl: safeDownloadUrl,
                   downloadTime: Date.now()
                 }
               });
@@ -828,7 +980,7 @@ function createServerModHandlers(win) {
         return {
           success: true,
           filePath: tempFilePath,
-          downloadUrl,
+          downloadUrl: safeDownloadUrl,
           size: fileSize,
           checksumValidation
         };
@@ -917,13 +1069,13 @@ function createServerModHandlers(win) {
           throw new Error(`No download URL available for ${source} fallback`);
         }
 
+        const safeDownloadUrl = normalizeModDownloadUrl(downloadUrl);
+
         // Create a temporary file path for download
-        const tempDir = require('os').tmpdir();
-        const tempFileName = `${mod.name || mod.id}_${source}_${Date.now()}.jar`;
-        const tempFilePath = require('path').join(tempDir, tempFileName);
+        const tempFilePath = safeTempJarPath(mod, `-${source}`);
 
         // Download the file with progress reporting
-        await downloadWithProgress(downloadUrl, tempFilePath, `download-progress-${mod.id || mod.name}-${source}`);
+        await downloadWithProgress(safeDownloadUrl, tempFilePath, `download-progress-${mod.id || mod.name}-${source}`);
         
         // Get file size after download
         const fallbackStats = fs.statSync(tempFilePath);
@@ -977,7 +1129,7 @@ function createServerModHandlers(win) {
                   modId: mod.id,
                   modName: mod.name,
                   source,
-                  downloadUrl,
+                  downloadUrl: safeDownloadUrl,
                   downloadTime: Date.now()
                 }
               });
@@ -1009,7 +1161,7 @@ function createServerModHandlers(win) {
         return {
           success: true,
           filePath: tempFilePath,
-          downloadUrl,
+          downloadUrl: safeDownloadUrl,
           source,
           size: fallbackFileSize,
           checksumValidation
@@ -1057,12 +1209,15 @@ function createServerModHandlers(win) {
     },
 
     'calculate-file-checksum': async (_e, { filePath, algorithm = 'sha1' }) => {
+      const safeFilePathForChecksum = assertKnownInstanceFilePath(filePath);
+      const safeAlgorithm = normalizeChecksumAlgorithm(algorithm);
+
       logger.debug('Calculating file checksum', {
         category: 'mods',
         data: {
           handler: 'calculate-file-checksum',
-          filePath,
-          algorithm
+          filePath: safeFilePathForChecksum,
+          algorithm: safeAlgorithm
         }
       });
 
@@ -1071,8 +1226,8 @@ function createServerModHandlers(win) {
         // fs is already declared at the top of the file
         
         return new Promise((resolve, reject) => {
-          const hash = crypto.createHash(algorithm);
-          const stream = fs.createReadStream(filePath);
+          const hash = crypto.createHash(safeAlgorithm);
+          const stream = fs.createReadStream(safeFilePathForChecksum);
           
           stream.on('data', (data) => {
             hash.update(data);
@@ -1084,8 +1239,8 @@ function createServerModHandlers(win) {
               category: 'mods',
               data: {
                 handler: 'calculate-file-checksum',
-                filePath,
-                algorithm,
+                filePath: safeFilePathForChecksum,
+                algorithm: safeAlgorithm,
                 checksum
               }
             });
@@ -1097,8 +1252,8 @@ function createServerModHandlers(win) {
               category: 'mods',
               data: {
                 handler: 'calculate-file-checksum',
-                filePath,
-                algorithm,
+                filePath: safeFilePathForChecksum,
+                algorithm: safeAlgorithm,
                 errorType: error.constructor.name
               }
             });
@@ -1110,8 +1265,8 @@ function createServerModHandlers(win) {
           category: 'mods',
           data: {
             handler: 'calculate-file-checksum',
-            filePath,
-            algorithm,
+            filePath: safeFilePathForChecksum,
+            algorithm: safeAlgorithm,
             errorType: error.constructor.name
           }
         });
@@ -1323,25 +1478,27 @@ function createServerModHandlers(win) {
 
     'verify-file-integrity': async (_e, { filePath, expectedChecksum, algorithm = 'sha1' }) => {
       const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      const safeFilePathForIntegrity = assertKnownInstanceFilePath(filePath);
+      const safeAlgorithm = normalizeChecksumAlgorithm(algorithm);
       
       logger.debug('Verifying file integrity', {
         category: 'mods',
         data: {
           handler: 'verify-file-integrity',
-          filePath,
+          filePath: safeFilePathForIntegrity,
           hasExpectedChecksum: !!expectedChecksum,
-          algorithm
+          algorithm: safeAlgorithm
         }
       });
 
       try {
-        const result = await fileIntegrityService.verifyFileIntegrity(filePath, expectedChecksum, algorithm);
+        const result = await fileIntegrityService.verifyFileIntegrity(safeFilePathForIntegrity, expectedChecksum, safeAlgorithm);
         
         logger.debug('File integrity verification completed', {
           category: 'mods',
           data: {
             handler: 'verify-file-integrity',
-            filePath,
+            filePath: safeFilePathForIntegrity,
             isValid: result.isValid,
             algorithm: result.algorithm
           }
@@ -1353,7 +1510,7 @@ function createServerModHandlers(win) {
           category: 'mods',
           data: {
             handler: 'verify-file-integrity',
-            filePath,
+            filePath: safeFilePathForIntegrity,
             errorType: error.constructor.name
           }
         });
@@ -1363,27 +1520,29 @@ function createServerModHandlers(win) {
 
     'store-file-checksum': async (_e, { filePath, checksum, algorithm = 'sha1', metadata = {} }) => {
       const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      const safeFilePathForIntegrity = assertKnownInstanceFilePath(filePath);
+      const safeAlgorithm = normalizeChecksumAlgorithm(algorithm);
       
       logger.debug('Storing file checksum', {
         category: 'mods',
         data: {
           handler: 'store-file-checksum',
-          filePath,
+          filePath: safeFilePathForIntegrity,
           checksum,
-          algorithm,
+          algorithm: safeAlgorithm,
           hasMetadata: Object.keys(metadata).length > 0
         }
       });
 
       try {
-        await fileIntegrityService.storeFileChecksum(filePath, checksum, algorithm, metadata);
+        await fileIntegrityService.storeFileChecksum(safeFilePathForIntegrity, checksum, safeAlgorithm, metadata);
         
         logger.debug('File checksum stored successfully', {
           category: 'mods',
           data: {
             handler: 'store-file-checksum',
-            filePath,
-            algorithm
+            filePath: safeFilePathForIntegrity,
+            algorithm: safeAlgorithm
           }
         });
         
@@ -1393,7 +1552,7 @@ function createServerModHandlers(win) {
           category: 'mods',
           data: {
             handler: 'store-file-checksum',
-            filePath,
+            filePath: safeFilePathForIntegrity,
             errorType: error.constructor.name
           }
         });
@@ -1403,23 +1562,24 @@ function createServerModHandlers(win) {
 
     'get-stored-checksum': async (_e, { filePath }) => {
       const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      const safeFilePathForIntegrity = assertKnownInstanceFilePath(filePath);
       
       logger.debug('Getting stored checksum', {
         category: 'mods',
         data: {
           handler: 'get-stored-checksum',
-          filePath
+          filePath: safeFilePathForIntegrity
         }
       });
 
       try {
-        const result = await fileIntegrityService.getStoredChecksum(filePath);
+        const result = await fileIntegrityService.getStoredChecksum(safeFilePathForIntegrity);
         
         logger.debug('Stored checksum retrieved', {
           category: 'mods',
           data: {
             handler: 'get-stored-checksum',
-            filePath,
+            filePath: safeFilePathForIntegrity,
             found: !!result,
             algorithm: result?.algorithm
           }
@@ -1431,7 +1591,7 @@ function createServerModHandlers(win) {
           category: 'mods',
           data: {
             handler: 'get-stored-checksum',
-            filePath,
+            filePath: safeFilePathForIntegrity,
             errorType: error.constructor.name
           }
         });
@@ -1441,17 +1601,20 @@ function createServerModHandlers(win) {
 
     'batch-verify-integrity': async (_e, { filePaths }) => {
       const { fileIntegrityService } = require('../mod-utils/file-integrity-service.cjs');
+      const safeFilePaths = Array.isArray(filePaths)
+        ? filePaths.map((filePath) => assertKnownInstanceFilePath(filePath))
+        : [];
       
       logger.info('Starting batch integrity verification', {
         category: 'mods',
         data: {
           handler: 'batch-verify-integrity',
-          fileCount: filePaths?.length || 0
+          fileCount: safeFilePaths.length
         }
       });
 
       try {
-        const result = await fileIntegrityService.batchVerifyIntegrity(filePaths, (progress) => {
+        const result = await fileIntegrityService.batchVerifyIntegrity(safeFilePaths, (progress) => {
           // Send progress updates to the renderer
           if (win && win.webContents) {
             win.webContents.send('batch-integrity-progress', progress);
@@ -3078,7 +3241,9 @@ function createServerModHandlers(win) {
 
       try {
         const shadersPath = path.join(serverPath, 'client', 'shaderpacks');
-        const shaderPath = path.join(shadersPath, shaderName);
+        const shaderPath = safeFilePath(shadersPath, shaderName, 'shader file name', {
+          allowedExtensions: ['.zip']
+        });
         
         if (fs.existsSync(shaderPath)) {
           fs.unlinkSync(shaderPath);
@@ -3132,7 +3297,9 @@ function createServerModHandlers(win) {
 
       try {
         const resourcePacksPath = path.join(serverPath, 'client', 'resourcepacks');
-        const resourcePackPath = path.join(resourcePacksPath, resourcePackName);
+        const resourcePackPath = safeFilePath(resourcePacksPath, resourcePackName, 'resource pack file name', {
+          allowedExtensions: ['.zip']
+        });
         
         if (fs.existsSync(resourcePackPath)) {
           fs.unlinkSync(resourcePackPath);

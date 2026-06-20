@@ -14,6 +14,7 @@
   });
   
   onDestroy(() => {
+    removeUpdateListeners();
     logger.debug('UpdateChecker component destroyed', {
       category: 'ui',
       data: {
@@ -461,7 +462,7 @@
         });
         
         toast.info('Installing Update', {
-          description: 'The app will restart to complete the installation',
+          description: 'The installer will show progress and reopen the app when it finishes.',
           duration: 5000
         });
       } else {
@@ -492,135 +493,151 @@
     }
   }
 
-  onMount(() => {
-    loadInitialData();
-    
-    // Listen for update status changes
-    window.electron.on('update-checking-for-update', () => {
-      logger.debug('Update checking event received', {
-        category: 'ui',
-        data: {
-          component: 'UpdateChecker',
-          event: 'update-checking-for-update'
-        }
-      });
-      
-      updateStatus.isCheckingForUpdates = true;
-      updateStatus = { ...updateStatus };
+  function handleUpdateCheckingForUpdate() {
+    logger.debug('Update checking event received', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        event: 'update-checking-for-update'
+      }
     });
     
-    window.electron.on('update-available', (info) => {
-      logger.info('Update available event received', {
-        category: 'ui',
-        data: {
-          component: 'UpdateChecker',
-          event: 'update-available',
-          version: info.version
-        }
-      });
-      
-      updateStatus.updateAvailable = true;
-      updateStatus.latestVersion = info.version;
-      updateStatus.isCheckingForUpdates = false;
-      updateStatus = { ...updateStatus };
-      isDownloaded = false; // Reset download state for new update
+    updateStatus.isCheckingForUpdates = true;
+    updateStatus = { ...updateStatus };
+  }
+
+  function handleUpdateAvailable(info) {
+    logger.info('Update available event received', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        event: 'update-available',
+        version: info.version
+      }
     });
     
-    window.electron.on('update-not-available', () => {
-      logger.debug('Update not available event received', {
-        category: 'ui',
-        data: {
-          component: 'UpdateChecker',
-          event: 'update-not-available'
-        }
-      });
-      
-      updateStatus.updateAvailable = false;
-      updateStatus.isCheckingForUpdates = false;
-      updateStatus = { ...updateStatus };
+    updateStatus.updateAvailable = true;
+    updateStatus.latestVersion = info.version;
+    updateStatus.isCheckingForUpdates = false;
+    updateStatus = { ...updateStatus };
+    isDownloaded = false; // Reset download state for new update
+  }
+
+  function handleUpdateNotAvailable() {
+    logger.debug('Update not available event received', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        event: 'update-not-available'
+      }
     });
     
-    // Listen for download progress
-    window.electron.on('update-download-progress', (progress) => {
-      logger.debug('Update download progress received', {
-        category: 'ui',
-        data: {
-          component: 'UpdateChecker',
-          event: 'update-download-progress',
-          percent: progress.percent,
-          bytesPerSecond: progress.bytesPerSecond,
-          total: progress.total,
-          transferred: progress.transferred
-        }
-      });
-      
-      downloadProgress = progress;
-      isDownloading = true;
+    updateStatus.updateAvailable = false;
+    updateStatus.isCheckingForUpdates = false;
+    updateStatus = { ...updateStatus };
+  }
+
+  function handleUpdateDownloadProgress(progress) {
+    logger.debug('Update download progress received', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        event: 'update-download-progress',
+        percent: progress.percent,
+        bytesPerSecond: progress.bytesPerSecond,
+        total: progress.total,
+        transferred: progress.transferred
+      }
     });
     
-    // Listen for download completion
-    window.electron.on('update-downloaded', () => {
-      logger.info('Update download completed', {
-        category: 'ui',
-        data: {
-          component: 'UpdateChecker',
-          event: 'update-downloaded'
-        }
-      });
-      
-      isDownloading = false;
-      isDownloaded = true;
-      
-      // Don't show notification here since UpdateNotification component handles it
-    });
-    
-    // Handle update errors with friendly messages
-    window.electron.on('update-error', (errorData) => {
-      logger.error('Update error event received', {
-        category: 'ui',
-        data: {
-          component: 'UpdateChecker',
-          event: 'update-error',
-          errorData
-        }
-      });
-      
-      updateStatus.isCheckingForUpdates = false;
-      updateStatus = { ...updateStatus };
-      
-      // Show friendly error message
-      if (errorData && errorData.title) {
-        let description = errorData.message;
-        if (errorData.details) {
-          description += ` ${errorData.details}`;
-        }
-        
-        toast.error(errorData.title, {
-          description: description,
-          duration: 8000
-        });
-      } else {
-        // Fallback for old-style errors
-        toast.error('Update Check Failed', {
-          description: 'An unexpected error occurred while checking for updates',
-          duration: 8000
-        });
+    downloadProgress = progress;
+    isDownloading = true;
+  }
+
+  function handleUpdateDownloaded() {
+    logger.info('Update download completed', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        event: 'update-downloaded'
       }
     });
 
-    // Pipe main-process update logs into the in-app logger for visibility
-    window.electron.on('update-log', (entry) => {
-      const level = (entry?.level || 'info').toLowerCase();
-      const logFn = logger[level] || logger.info;
-      logFn(`Updater: ${entry?.message || 'event'}`, {
-        category: 'update',
-        data: {
-          entry,
-          source: 'main-update-service',
-          logFile: entry?.logFile
-        }
-      });
+    isDownloading = false;
+    isDownloaded = true;
+
+    // Don't show notification here since UpdateNotification component handles it
+  }
+
+  function handleUpdateError(errorData) {
+    logger.error('Update error event received', {
+      category: 'ui',
+      data: {
+        component: 'UpdateChecker',
+        event: 'update-error',
+        errorData
+      }
     });
+
+    updateStatus.isCheckingForUpdates = false;
+    updateStatus = { ...updateStatus };
+
+    // Show friendly error message
+    if (errorData && errorData.title) {
+      let description = errorData.message;
+      if (errorData.details) {
+        description += ` ${errorData.details}`;
+      }
+
+      toast.error(errorData.title, {
+        description: description,
+        duration: 8000
+      });
+    } else {
+      // Fallback for old-style errors
+      toast.error('Update Check Failed', {
+        description: 'An unexpected error occurred while checking for updates',
+        duration: 8000
+      });
+    }
+  }
+
+  function handleUpdateLog(entry) {
+    const level = (entry?.level || 'info').toLowerCase();
+    const logFn = logger[level] || logger.info;
+    logFn(`Updater: ${entry?.message || 'event'}`, {
+      category: 'update',
+      data: {
+        entry,
+        source: 'main-update-service',
+        logFile: entry?.logFile
+      }
+    });
+  }
+
+  function removeUpdateListeners() {
+    if (!window?.electron?.removeListener) return;
+
+    window.electron.removeListener('update-checking-for-update', handleUpdateCheckingForUpdate);
+    window.electron.removeListener('update-available', handleUpdateAvailable);
+    window.electron.removeListener('update-not-available', handleUpdateNotAvailable);
+    window.electron.removeListener('update-download-progress', handleUpdateDownloadProgress);
+    window.electron.removeListener('update-downloaded', handleUpdateDownloaded);
+    window.electron.removeListener('update-error', handleUpdateError);
+    window.electron.removeListener('update-log', handleUpdateLog);
+  }
+
+  onMount(() => {
+    loadInitialData();
+
+    // Listen for update status changes
+    window.electron.on('update-checking-for-update', handleUpdateCheckingForUpdate);
+    window.electron.on('update-available', handleUpdateAvailable);
+    window.electron.on('update-not-available', handleUpdateNotAvailable);
+    window.electron.on('update-download-progress', handleUpdateDownloadProgress);
+    window.electron.on('update-downloaded', handleUpdateDownloaded);
+    window.electron.on('update-error', handleUpdateError);
+    window.electron.on('update-log', handleUpdateLog);
   });
 </script>
 

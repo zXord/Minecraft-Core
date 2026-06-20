@@ -16,7 +16,12 @@ const { open: openZip, readEntry } = require('@xmcl/unzip');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const fetch = require('node-fetch');
+const crypto = require('crypto');
+const { fetch } = require('../utils/fetch.cjs');
+const {
+  assertSafeRemoteUrl,
+  resolveSafeRedirectUrl
+} = require('../utils/security-boundaries.cjs');
 
 let logger = null;
 function getLogger() {
@@ -133,19 +138,45 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function downloadFileBuffer(url) {
-  const response = await fetch(url, {
-    redirect: 'follow',
+async function downloadFileBuffer(url, redirectCount = 0) {
+  if (redirectCount > 5) {
+    throw new Error(`Too many redirects for ${url}`);
+  }
+
+  const safeUrl = assertSafeRemoteUrl(url, { allowedProtocols: ['https:'] });
+  const response = await fetch(safeUrl, {
+    redirect: 'manual',
     headers: {
       'User-Agent': 'Minecraft-Core/LoaderInstallService'
     }
   });
 
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get('location');
+    const redirectedUrl = resolveSafeRedirectUrl(location, safeUrl, {
+      allowedProtocols: ['https:']
+    });
+    return downloadFileBuffer(redirectedUrl, redirectCount + 1);
+  }
+
   if (!response.ok) {
-    throw new Error(`Request failed for ${url}: ${response.status}`);
+    throw new Error(`Request failed for ${safeUrl}: ${response.status}`);
   }
 
   return Buffer.from(await response.arrayBuffer());
+}
+
+async function downloadExpectedSha1(url) {
+  const text = await fetchText(`${url}.sha1`);
+  const match = String(text || '').match(/[a-fA-F0-9]{40}/);
+  if (!match) {
+    throw new Error(`Missing SHA-1 checksum for ${url}`);
+  }
+  return match[0].toLowerCase();
+}
+
+function calculateBufferSha1(buffer) {
+  return crypto.createHash('sha1').update(buffer).digest('hex').toLowerCase();
 }
 
 function getForgeInstallerDownloadUrls(minecraftVersion, loaderVersion) {
@@ -158,8 +189,7 @@ function getForgeInstallerDownloadUrls(minecraftVersion, loaderVersion) {
 
   return [
     `https://maven.minecraftforge.net/${relativePath}`,
-    `https://files.minecraftforge.net/maven/${relativePath}`,
-    `http://files.minecraftforge.net/maven/${relativePath}`
+    `https://files.minecraftforge.net/maven/${relativePath}`
   ];
 }
 
@@ -213,7 +243,12 @@ async function stageForgeInstallerJar(targetPath, minecraftVersion, loaderVersio
 
   for (const url of getForgeInstallerDownloadUrls(minecraftVersion, loaderVersion)) {
     try {
+      const expectedSha1 = await downloadExpectedSha1(url);
       const fileBuffer = await downloadFileBuffer(url);
+      const actualSha1 = calculateBufferSha1(fileBuffer);
+      if (actualSha1 !== expectedSha1) {
+        throw new Error(`Downloaded Forge installer checksum mismatch for ${url}`);
+      }
       await fs.promises.writeFile(stagedPath, fileBuffer);
 
       const stagedReadable = await canReadForgeInstallerJar(stagedPath, minecraftVersion, loaderVersion);
@@ -310,19 +345,34 @@ function emitLog(logChannel, message) {
 
 function fetchText(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, (response) => {
+    let safeUrl;
+    try {
+      safeUrl = assertSafeRemoteUrl(url, { allowedProtocols: ['https:'] });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    https.get(safeUrl, (response) => {
       const statusCode = response.statusCode || 0;
 
       if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
         response.resume();
-        const redirectedUrl = new URL(response.headers.location, url).toString();
+        let redirectedUrl;
+        try {
+          redirectedUrl = resolveSafeRedirectUrl(response.headers.location, safeUrl, {
+            allowedProtocols: ['https:']
+          });
+        } catch (error) {
+          reject(error);
+          return;
+        }
         fetchText(redirectedUrl).then(resolve).catch(reject);
         return;
       }
 
       if (statusCode < 200 || statusCode >= 300) {
         response.resume();
-        reject(new Error(`Request failed for ${url}: ${statusCode}`));
+        reject(new Error(`Request failed for ${safeUrl}: ${statusCode}`));
         return;
       }
 

@@ -1,6 +1,6 @@
 const fs = require('fs');
 const { createHash } = require('crypto');
-const fetch = require('node-fetch');
+const { fetch } = require('../../utils/fetch.cjs');
 
 const VERSION_MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
 const VERSION_CACHE_TTL_MS = 1000 * 60 * 60 * 6;

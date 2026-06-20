@@ -9,6 +9,83 @@ const { checkModCompatibilityFromFilename } = require('./mod-handler-utils.cjs')
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
 const modApiService = require('../../services/mod-api-service.cjs');
 const crypto = require('crypto');
+const appStore = require('../../utils/app-store.cjs');
+const {
+  assertSafeRemoteUrl,
+  isPathInside,
+  safeBaseName,
+  safeFilePath
+} = require('../../utils/security-boundaries.cjs');
+
+function safeJarFileName(value, label = 'mod file name') {
+  return safeBaseName(value, label, { allowedExtensions: ['.jar'] });
+}
+
+function safeJarOrDisabledFileName(value, label = 'mod file name') {
+  return safeBaseName(value, label, { allowedExtensions: ['.jar', '.jar.disabled'] });
+}
+
+function safeManifestFilePath(manifestDir, jarFileName) {
+  const safeName = safeJarFileName(jarFileName);
+  return safeClientManifestPath(manifestDir, safeName);
+}
+
+function safeClientManifestPath(manifestDir, fileName) {
+  const safeName = safeBaseName(fileName, 'manifest owner name');
+  return safeFilePath(manifestDir, `${safeName}.json`, 'manifest file name', {
+    allowedExtensions: ['.json']
+  });
+}
+
+function safeClientModsPath(clientPath, fileName) {
+  const safeName = safeJarFileName(fileName);
+  return safeFilePath(path.join(clientPath, 'mods'), safeName, 'mod file name', {
+    allowedExtensions: ['.jar']
+  });
+}
+
+function getKnownClientModRoots() {
+  const instances = Array.isArray(appStore.get('instances')) ? appStore.get('instances') : [];
+  return instances
+    .filter((instance) => instance && instance.type === 'client' && typeof instance.path === 'string' && instance.path.trim())
+    .map((instance) => path.resolve(instance.path, 'mods'));
+}
+
+function assertKnownClientPath(clientPath) {
+  if (typeof clientPath !== 'string' || !clientPath.trim()) {
+    throw new Error('Client path is required');
+  }
+  const resolvedPath = path.resolve(clientPath);
+  const instances = Array.isArray(appStore.get('instances')) ? appStore.get('instances') : [];
+  const isKnown = instances.some((instance) =>
+    instance
+    && instance.type === 'client'
+    && typeof instance.path === 'string'
+    && isPathInside(resolvedPath, path.resolve(instance.path))
+    && isPathInside(path.resolve(instance.path), resolvedPath)
+  );
+  if (!isKnown) {
+    throw new Error('Client path is not a known client instance');
+  }
+  return resolvedPath;
+}
+
+function assertKnownClientModPath(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    throw new Error('Mod path is required');
+  }
+  const resolvedPath = path.resolve(filePath);
+  safeJarOrDisabledFileName(path.basename(resolvedPath));
+  const roots = getKnownClientModRoots();
+  if (!roots.some((root) => isPathInside(resolvedPath, root))) {
+    throw new Error('Mod path is outside known client mod folders');
+  }
+  return resolvedPath;
+}
+
+function safeModDownloadUrl(value) {
+  return assertSafeRemoteUrl(value, { allowedProtocols: ['https:'] });
+}
 
 function createClientModHandlers(win) {
   const logger = getLoggerHandlers();
@@ -34,7 +111,11 @@ function createClientModHandlers(win) {
       });
 
       try {
-        const result = await modInstallService.installModToClient(win, modData);
+        const safeModData = {
+          ...modData,
+          clientPath: assertKnownClientPath(modData?.clientPath)
+        };
+        const result = await modInstallService.installModToClient(win, safeModData);
         
         logger.info('Client mod installation completed', {
           category: 'mods',
@@ -68,10 +149,11 @@ function createClientModHandlers(win) {
         data: { handler: 'list-client-assets', clientPath, type }
       });
       try {
-        if (!clientPath || !type) throw new Error('Invalid parameters');
-        const subdir = type === 'shaderpacks' ? 'shaderpacks' : 'resourcepacks';
-        const dir = path.join(clientPath, subdir);
-        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        if (!type || !['shaderpacks', 'resourcepacks'].includes(type)) throw new Error('Invalid parameters');
+        const subdir = type;
+        const dir = path.join(safeClientPath, subdir);
+        const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
         if (!fs.existsSync(dir)) {
           return { success: true, type: subdir, items: [] };
         }
@@ -87,15 +169,16 @@ function createClientModHandlers(win) {
         // Consider .zip, .zip.disabled; also allow directories for resourcepacks
         const items = [];
         for (const name of all) {
+          const safeEntryName = safeBaseName(name, 'asset entry name');
           const lower = name.toLowerCase();
-          const full = path.join(dir, name);
+          const full = safeFilePath(dir, safeEntryName, 'asset entry name');
           const isZip = lower.endsWith('.zip') || lower.endsWith('.zip.disabled');
           const isDir = !isZip && fs.existsSync(full) && fs.statSync(full).isDirectory();
           if (!isZip && !isDir) continue;
 
-          const fileName = name.replace(/\.disabled$/i, '');
+          const fileName = safeBaseName(safeEntryName.replace(/\.disabled$/i, ''), 'asset file name');
           const enabled = !lower.endsWith('.disabled');
-          const statPath = enabled ? full : full.replace(/\.disabled$/i, '');
+          const statPath = enabled ? full : safeFilePath(dir, fileName, 'asset file name');
           let size = 0; let lastModified = null;
           try {
             const st = fs.statSync(statPath);
@@ -113,7 +196,7 @@ function createClientModHandlers(win) {
           let versionId = null;
           let versionNumber = null;
           let manifestName = null;
-          const manifestPath = path.join(manifestDir, `${fileName}.json`);
+          const manifestPath = safeClientManifestPath(manifestDir, fileName);
           if (fs.existsSync(manifestPath)) {
             try {
               const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -309,18 +392,19 @@ function createClientModHandlers(win) {
         data: {
           handler: 'get-client-installed-mod-info',
           clientPath: clientPath,
-          pathExists: fs.existsSync(clientPath)
+          pathExists: typeof clientPath === 'string' && fs.existsSync(clientPath)
         }
       });
 
       try {
-        const modInfo = await modFileManager.getClientInstalledModInfo(clientPath);
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const modInfo = await modFileManager.getClientInstalledModInfo(safeClientPath);
         
         logger.info('Retrieved client mod info', {
           category: 'mods',
           data: {
             handler: 'get-client-installed-mod-info',
-            clientPath: clientPath,
+            clientPath: safeClientPath,
             modCount: modInfo?.length || 0
           }
         });
@@ -348,23 +432,29 @@ function createClientModHandlers(win) {
           handler: 'check-client-mod-compatibility',
           minecraftVersion: newMinecraftVersion,
           clientPath: clientPath,
-          pathExists: fs.existsSync(clientPath)
+          pathExists: typeof clientPath === 'string' && fs.existsSync(clientPath)
         }
       });
 
-      if (!clientPath || !fs.existsSync(clientPath)) {
+      let safeClientPath;
+      try {
+        safeClientPath = assertKnownClientPath(clientPath);
+      } catch (error) {
         logger.error('Invalid client path provided for compatibility check', {
           category: 'mods',
           data: {
             handler: 'check-client-mod-compatibility',
             clientPath: clientPath,
-            pathExists: fs.existsSync(clientPath)
+            pathExists: typeof clientPath === 'string' && fs.existsSync(clientPath)
           }
         });
+        throw error;
+      }
+      if (!fs.existsSync(safeClientPath)) {
         throw new Error('Invalid client path provided');
       }
       try {
-        const clientModInfo = await modFileManager.getClientInstalledModInfo(clientPath);
+        const clientModInfo = await modFileManager.getClientInstalledModInfo(safeClientPath);
         const compatibilityResults = [];
         
         logger.debug('Processing mod compatibility checks', {
@@ -509,17 +599,20 @@ function createClientModHandlers(win) {
         throw new Error('No download URL available for mod update');
       }
       try {
-        const modsDir = path.join(clientPath, 'mods');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const safeDownloadUrl = safeModDownloadUrl(modInfo.downloadUrl);
+        const modsDir = path.join(safeClientPath, 'mods');
         await fs.promises.mkdir(modsDir, { recursive: true });
-        const sanitizedName = modInfo.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-        const fileName = sanitizedName.endsWith('.jar') ? sanitizedName : `${sanitizedName}.jar`;
-        const targetPath = path.join(modsDir, fileName);
+        const sourceName = String(modInfo.fileName || modInfo.name || modInfo.projectId || 'mod')
+          .replace(/[^a-zA-Z0-9_.-]/g, '_');
+        const fileName = safeJarFileName(sourceName.toLowerCase().endsWith('.jar') ? sourceName : `${sourceName}.jar`);
+        const targetPath = safeFilePath(modsDir, fileName, 'mod file name', { allowedExtensions: ['.jar'] });
 
         logger.debug('Downloading mod update', {
           category: 'network',
           data: {
             modName: modInfo.name,
-            downloadUrl: modInfo.downloadUrl,
+            downloadUrl: safeDownloadUrl,
             targetPath: targetPath,
             fileName: fileName
           }
@@ -530,7 +623,7 @@ function createClientModHandlers(win) {
       const { promisify } = require('util');
       const pipelineAsync = promisify(pipeline);
       const response = await axios({
-        url: modInfo.downloadUrl,
+        url: safeDownloadUrl,
         method: 'GET',
         responseType: 'stream',
         timeout: 60000
@@ -547,20 +640,24 @@ function createClientModHandlers(win) {
       });
 
       const oldFileName = modInfo.currentFilePath
-        ? path.basename(modInfo.currentFilePath)
+        ? safeJarFileName(path.basename(assertKnownClientModPath(modInfo.currentFilePath)))
         : fileName;
       const newFileName = path.basename(targetPath);
 
-      if (modInfo.currentFilePath && fs.existsSync(modInfo.currentFilePath)) {
+      const currentModPath = modInfo.currentFilePath
+        ? assertKnownClientModPath(modInfo.currentFilePath)
+        : safeFilePath(modsDir, oldFileName, 'mod file name', { allowedExtensions: ['.jar'] });
+
+      if (modInfo.currentFilePath && fs.existsSync(currentModPath)) {
         if (oldFileName !== newFileName) {
-          await fs.promises.unlink(modInfo.currentFilePath);
+          await fs.promises.unlink(currentModPath);
         }
       }
 
-      const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+      const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
       await fs.promises.mkdir(manifestDir, { recursive: true });
-      const oldManifestPath = path.join(manifestDir, `${oldFileName}.json`);
-      const newManifestPath = path.join(manifestDir, `${newFileName}.json`);
+      const oldManifestPath = safeManifestFilePath(manifestDir, oldFileName);
+      const newManifestPath = safeManifestFilePath(manifestDir, newFileName);
       let manifest = {};
       try {
         const content = await fs.promises.readFile(oldManifestPath, 'utf8');
@@ -615,34 +712,60 @@ function createClientModHandlers(win) {
       }
     },
 
-    'disable-client-mod': async (_e, { modFilePath }) => {
+    'disable-client-mod': async (_e, { modFilePath, clientPath, fileName }) => {
+      let safeModPath = '';
+      let disabledPath = '';
       logger.info('Disabling client mod', {
         category: 'mods',
         data: {
           handler: 'disable-client-mod',
-          modFilePath: modFilePath,
-          fileExists: fs.existsSync(modFilePath)
+          hasModFilePath: !!modFilePath,
+          hasClientPath: !!clientPath,
+          hasFileName: !!fileName
         }
       });
 
-      if (!fs.existsSync(modFilePath)) {
+      try {
+        if (clientPath && fileName) {
+          const safeClientPath = assertKnownClientPath(clientPath);
+          const safeFileName = safeJarFileName(fileName);
+          safeModPath = safeFilePath(path.join(safeClientPath, 'mods'), safeFileName, 'mod file name', {
+            allowedExtensions: ['.jar']
+          });
+        } else {
+          safeModPath = assertKnownClientModPath(modFilePath);
+        }
+        disabledPath = safeFilePath(path.dirname(safeModPath), `${path.basename(safeModPath)}.disabled`, 'disabled mod file name', {
+          allowedExtensions: ['.jar.disabled']
+        });
+      } catch (error) {
+        logger.error(`Invalid mod path for disabling: ${error.message}`, {
+          category: 'mods',
+          data: {
+            handler: 'disable-client-mod',
+            errorType: error.constructor.name
+          }
+        });
+        throw error;
+      }
+
+      if (!fs.existsSync(safeModPath)) {
         logger.error('Mod file not found for disabling', {
           category: 'mods',
           data: {
             handler: 'disable-client-mod',
-            modFilePath: modFilePath
+            modFilePath: safeModPath
           }
         });
         throw new Error('Mod file not found');
       }
       
-      const disabledPath = modFilePath + '.disabled';
       if (fs.existsSync(disabledPath)) {
         logger.warn('Mod is already disabled', {
           category: 'mods',
           data: {
             handler: 'disable-client-mod',
-            modFilePath: modFilePath,
+            modFilePath: safeModPath,
             disabledPath: disabledPath
           }
         });
@@ -650,13 +773,13 @@ function createClientModHandlers(win) {
       }
 
       try {
-        fs.renameSync(modFilePath, disabledPath);
+        fs.renameSync(safeModPath, disabledPath);
         
         logger.info('Client mod disabled successfully', {
           category: 'mods',
           data: {
             handler: 'disable-client-mod',
-            originalPath: modFilePath,
+            originalPath: safeModPath,
             disabledPath: disabledPath
           }
         });
@@ -667,7 +790,7 @@ function createClientModHandlers(win) {
           category: 'mods',
           data: {
             handler: 'disable-client-mod',
-            modFilePath: modFilePath,
+            modFilePath: safeModPath,
             errorType: error.constructor.name
           }
         });
@@ -713,7 +836,8 @@ function createClientModHandlers(win) {
         return { success: false, error: 'Minecraft version not provided.', updatedCount: 0 };
       }
       try {
-        const modsDir = path.join(clientPath, 'mods');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const modsDir = path.join(safeClientPath, 'mods');
         if (!fs.existsSync(modsDir)) {
           fs.mkdirSync(modsDir, { recursive: true });
         }
@@ -743,24 +867,26 @@ function createClientModHandlers(win) {
             throw new Error(`No suitable file found for ${modToUpdate.name || modToUpdate.fileName} for MC ${minecraftVersion}`);
           }
           const primaryFile = modToUpdate.newVersionDetails.files.find(f => f.primary && f.url);
-          const fileToDownload = primaryFile || modToUpdate.newVersionDetails.files.find(f => f.url && f.filename.endsWith('.jar')) || modToUpdate.newVersionDetails.files[0];
+          const fileToDownload = primaryFile || modToUpdate.newVersionDetails.files.find(f => f.url && typeof f.filename === 'string' && f.filename.endsWith('.jar')) || modToUpdate.newVersionDetails.files[0];
           if (!fileToDownload || !fileToDownload.url) {
             throw new Error(`Could not determine download URL for ${modToUpdate.name || modToUpdate.fileName}`);
           }
-          const oldFileName = modToUpdate.fileName;
-          const newFileName = fileToDownload.filename;
-          if (oldFileName && fs.existsSync(path.join(modsDir, oldFileName))) {
+          const oldFileName = modToUpdate.fileName ? safeJarFileName(modToUpdate.fileName) : null;
+          const newFileName = safeJarFileName(fileToDownload.filename);
+          const safeDownloadUrl = safeModDownloadUrl(fileToDownload.url);
+          const newModPath = safeFilePath(modsDir, newFileName, 'mod file name', { allowedExtensions: ['.jar'] });
+          if (oldFileName && fs.existsSync(safeFilePath(modsDir, oldFileName, 'mod file name', { allowedExtensions: ['.jar'] }))) {
             await disableMod(modsDir, oldFileName);
           }
-          await downloadWithProgress(fileToDownload.url, modsDir, newFileName);
+          await downloadWithProgress(safeDownloadUrl, newModPath, `client-mod-update-${modToUpdate.projectId || newFileName}`);
 
-          const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+          const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
           await fs.promises.mkdir(manifestDir, { recursive: true });
-          const oldManifestPath = path.join(manifestDir, `${oldFileName}.json`);
-          const newManifestPath = path.join(manifestDir, `${newFileName}.json`);
+          const oldManifestPath = oldFileName ? safeManifestFilePath(manifestDir, oldFileName) : null;
+          const newManifestPath = safeManifestFilePath(manifestDir, newFileName);
           let manifest = {};
           try {
-            const content = await fs.promises.readFile(oldManifestPath, 'utf8');
+            const content = oldManifestPath ? await fs.promises.readFile(oldManifestPath, 'utf8') : '';
             manifest = JSON.parse(content);
           } catch {
             manifest = {
@@ -777,11 +903,11 @@ function createClientModHandlers(win) {
           }
           manifest.lastUpdated = new Date().toISOString();
           await fs.promises.writeFile(newManifestPath, JSON.stringify(manifest, null, 2));
-          if (oldManifestPath !== newManifestPath) {
+          if (oldManifestPath && oldManifestPath !== newManifestPath) {
             await fs.promises.unlink(oldManifestPath).catch(() => {});
           }
 
-          modAnalysisUtils.invalidateMetadataCache(path.join(modsDir, newFileName));
+          modAnalysisUtils.invalidateMetadataCache(newModPath);
 
           logger.debug('Individual mod update completed', {
             category: 'mods',
@@ -863,7 +989,8 @@ function createClientModHandlers(win) {
         return { success: false, error: 'Client path not provided.', disabledCount: 0 };
       }
       
-      const modsDir = path.join(clientPath, 'mods');
+      const safeClientPath = assertKnownClientPath(clientPath);
+      const modsDir = path.join(safeClientPath, 'mods');
       if (!fs.existsSync(modsDir)) {
         logger.warn('Mods directory does not exist for bulk disable', {
           category: 'mods',
@@ -891,15 +1018,16 @@ function createClientModHandlers(win) {
           if (!modToDisable.fileName) {
             throw new Error('Mod filename not provided for disabling.');
           }
-          const modPath = path.join(modsDir, modToDisable.fileName);
+          const safeFileName = safeJarFileName(modToDisable.fileName);
+          const modPath = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
           if (fs.existsSync(modPath)) {
-            await disableMod(modsDir, modToDisable.fileName);
+            await disableMod(modsDir, safeFileName);
             disabledCount++;
             
             logger.debug('Individual mod disabled', {
               category: 'mods',
               data: {
-                fileName: modToDisable.fileName,
+                fileName: safeFileName,
                 modPath: modPath
               }
             });
@@ -907,7 +1035,7 @@ function createClientModHandlers(win) {
             logger.debug('Mod file not found for disabling', {
               category: 'mods',
               data: {
-                fileName: modToDisable.fileName,
+                fileName: safeFileName,
                 modPath: modPath
               }
             });
@@ -962,7 +1090,8 @@ function createClientModHandlers(win) {
         return { success: false, error: 'Invalid mods data' };
       }
       
-      const modsDir = path.join(clientPath, 'mods');
+      const safeClientPath = assertKnownClientPath(clientPath);
+      const modsDir = path.join(safeClientPath, 'mods');
       if (!fs.existsSync(modsDir)) {
         logger.error('Mods directory not found for name enhancement', {
           category: 'mods',
@@ -980,9 +1109,10 @@ function createClientModHandlers(win) {
         for (const mod of mods) {
           const enhancedMod = { ...mod };
           try {
+            const safeFileName = safeJarFileName(mod.fileName);
             const possiblePaths = [
-              path.join(modsDir, mod.fileName),
-              path.join(modsDir, mod.fileName + '.disabled')
+              safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] }),
+              safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] })
             ];
             let actualPath = null;
             for (const possiblePath of possiblePaths) {
@@ -1070,18 +1200,20 @@ function createClientModHandlers(win) {
           throw new Error('Invalid parameters provided');
         }
 
-        if (!fs.existsSync(clientPath)) {
+        const safeClientPath = assertKnownClientPath(clientPath);
+
+        if (!fs.existsSync(safeClientPath)) {
           logger.error('Client path does not exist for mod updates', {
             category: 'mods',
             data: {
               handler: 'download-client-mod-version-updates',
-              clientPath: clientPath
+              clientPath: safeClientPath
             }
           });
           throw new Error('Client path does not exist');
         }
 
-        const modsDir = path.join(clientPath, 'mods');
+        const modsDir = path.join(safeClientPath, 'mods');
         await fs.promises.mkdir(modsDir, { recursive: true });
 
         let updatedCount = 0;
@@ -1120,12 +1252,13 @@ function createClientModHandlers(win) {
               errors.push(error);
               continue;
             }            // Find current mod file (old filename) and use original filename pattern
-            const oldFileName = update.oldFileName || update.fileName; // Fallback for compatibility
+            const oldFileName = safeJarFileName(update.oldFileName || update.fileName); // Fallback for compatibility
             // Use the original mod filename instead of the Modrinth API filename to maintain consistency
             const newFileName = oldFileName; // Keep the original filename pattern instead of using API filename
+            const safeDownloadUrl = safeModDownloadUrl(update.downloadUrl);
             
-            const currentModPath = path.join(modsDir, oldFileName);
-            const newModPath = path.join(modsDir, newFileName);
+            const currentModPath = safeFilePath(modsDir, oldFileName, 'mod file name', { allowedExtensions: ['.jar'] });
+            const newModPath = safeFilePath(modsDir, newFileName, 'mod file name', { allowedExtensions: ['.jar'] });
             // Download new version with progress tracking
             const downloadId = `client-update-${update.projectId || update.name}-${Date.now()}`;
             const modName = update.name || oldFileName;
@@ -1134,7 +1267,7 @@ function createClientModHandlers(win) {
               category: 'network',
               data: {
                 modName: modName,
-                downloadUrl: update.downloadUrl,
+                downloadUrl: safeDownloadUrl,
                 downloadId: downloadId,
                 oldFileName: oldFileName,
                 newFileName: newFileName
@@ -1154,7 +1287,7 @@ function createClientModHandlers(win) {
             }
             
             const response = await require('axios')({
-              url: update.downloadUrl,
+              url: safeDownloadUrl,
               method: 'GET',
               responseType: 'stream',
               timeout: 60000,
@@ -1176,7 +1309,7 @@ function createClientModHandlers(win) {
                 }
               }
             });            // Create temporary file for download (use new filename)
-            const tempPath = newModPath + '.tmp';
+            const tempPath = safeFilePath(modsDir, `${newFileName}.tmp`, 'temporary mod file name', { allowedExtensions: ['.jar.tmp'] });
             const writer = fs.createWriteStream(tempPath);
               await new Promise((resolve, reject) => {
               response.data.pipe(writer);
@@ -1217,9 +1350,9 @@ function createClientModHandlers(win) {
             
             // Move new file to final location
             await fs.promises.rename(tempPath, newModPath);            // Update manifest for the same filename
-            const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+            const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
             await fs.promises.mkdir(manifestDir, { recursive: true });
-            const manifestPath = path.join(manifestDir, `${newFileName}.json`);
+            const manifestPath = safeManifestFilePath(manifestDir, newFileName);
             
             let manifest = {};
             try {
@@ -1363,8 +1496,10 @@ function createClientModHandlers(win) {
           throw new Error('Client path and file name are required');
         }
 
-        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
-        const manifestPath = path.join(manifestDir, `${fileName}.json`);
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const safeFileName = safeJarFileName(fileName);
+        const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
+        const manifestPath = safeManifestFilePath(manifestDir, safeFileName);
         
         // Delete the manifest file to force re-reading from jar
         if (fs.existsSync(manifestPath)) {
@@ -1373,20 +1508,22 @@ function createClientModHandlers(win) {
             category: 'storage',
             data: {
               manifestPath: manifestPath,
-              fileName: fileName
+              fileName: safeFileName
             }
           });
         }
 
         // Also invalidate any other caches
-        const modPath = path.join(clientPath, 'mods', fileName);
+        const modPath = safeFilePath(path.join(safeClientPath, 'mods'), safeFileName, 'mod file name', {
+          allowedExtensions: ['.jar']
+        });
         if (modAnalysisUtils && modAnalysisUtils.invalidateMetadataCache) {
           modAnalysisUtils.invalidateMetadataCache(modPath);
           logger.debug('Invalidated metadata cache', {
             category: 'mods',
             data: {
               modPath: modPath,
-              fileName: fileName
+              fileName: safeFileName
             }
           });
         }
@@ -1395,8 +1532,8 @@ function createClientModHandlers(win) {
           category: 'mods',
           data: {
             handler: 'clear-client-mod-cache',
-            fileName: fileName,
-            clientPath: clientPath
+            fileName: safeFileName,
+            clientPath: safeClientPath
           }
         });
 

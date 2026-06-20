@@ -2880,7 +2880,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               ? (rawStatus.isRunning ? 'running' : 'stopped')
               : 'unknown');
 
-          try { console.debug('[ClientInterface] server-status event', { raw: rawStatus, normalized: status }); } catch {}
           setMinecraftServerStatus(status === 'running' ? 'running' : (status === 'stopped' ? 'stopped' : 'unknown'));
           // When server transitions to running fetch fresh server info (mods/version) silently
           if (status === 'running') {
@@ -3154,7 +3153,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           if (res.ok) {
             const data = await res.json();
             if (!isCurrentAsyncScope(scope)) return null;
-            try { console.debug('[ClientInterface] fetchImmediateStatus response', p, data); } catch {}
             if (data && typeof data.isRunning === 'boolean') {
               sawDefinite = true;
               if (data.isRunning) anyRunning = true;

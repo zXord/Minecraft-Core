@@ -1,14 +1,30 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
-const fetch = require('node-fetch');
+const { fetch } = require('../../utils/fetch.cjs');
 const utils = require('./utils.cjs');
+const {
+  assertSafeRemoteUrl,
+  resolveSafeRedirectUrl
+} = require('../../utils/security-boundaries.cjs');
 
 class ClientDownloader {
   constructor(javaManager, eventEmitter) {
     this.javaManager = javaManager;
     this.emitter = eventEmitter;
+  }
+
+  calculateFileHash(filePath, algorithm = 'sha1') {
+    const hash = crypto.createHash(algorithm);
+    hash.update(fs.readFileSync(filePath));
+    return hash.digest('hex');
+  }
+
+  fileMatchesHash(filePath, expectedHash, algorithm = 'sha1') {
+    if (!expectedHash || !fs.existsSync(filePath)) return false;
+    return this.calculateFileHash(filePath, algorithm).toLowerCase() === String(expectedHash).toLowerCase();
   }
 
   /**
@@ -527,6 +543,7 @@ class ClientDownloader {
 
       const clientJarPath = path.join(versionDir, `${minecraftVersion}.jar`);
       const expectedJarSize = versionDetails.downloads.client.size;
+      const expectedJarHash = versionDetails.downloads.client.sha1;
       
       if (fs.existsSync(clientJarPath)) {
         fs.unlinkSync(clientJarPath);
@@ -542,7 +559,8 @@ class ClientDownloader {
             total: Math.round(expectedJarSize / (1024 * 1024)), // MB
             current: Math.round((progress / 100) * expectedJarSize / (1024 * 1024)) // MB
           });
-        }
+        },
+        { expectedHash: expectedJarHash, algorithm: 'sha1' }
       );
       
       if (!jarDownloadSuccess) {
@@ -600,7 +618,10 @@ class ClientDownloader {
                 fs.mkdirSync(libDir, { recursive: true });
               }
 
-          await this._downloadFileSingle(artifact.url, libPath);
+          await this._downloadFileSingle(artifact.url, libPath, null, {
+            expectedHash: artifact.sha1,
+            algorithm: 'sha1'
+          });
         }
       }
 
@@ -620,7 +641,10 @@ class ClientDownloader {
         const assetIndexUrl = versionDetails.assetIndex.url;
         const assetIndexPath = path.join(assetsIndexesDir, `${versionDetails.assetIndex.id}.json`);
         
-        await this._downloadFileSingle(assetIndexUrl, assetIndexPath);
+        await this._downloadFileSingle(assetIndexUrl, assetIndexPath, null, {
+          expectedHash: versionDetails.assetIndex.sha1,
+          algorithm: 'sha1'
+        });
 
         const assetIndexData = JSON.parse(fs.readFileSync(assetIndexPath, 'utf8'));
         
@@ -664,11 +688,30 @@ class ClientDownloader {
   async _downloadJsonSingle(url) {
     return new Promise((resolve, reject) => {
       const timeout = 30000; // Increased timeout
-      const request = https.get(url, { timeout }, (response) => {
+      let safeUrl;
+      try {
+        safeUrl = assertSafeRemoteUrl(url, { allowedProtocols: ['https:'] });
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      const request = https.get(safeUrl, { timeout }, (response) => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-          return this._downloadJsonSingle(response.headers.location).then(resolve, reject);
+          let redirectedUrl;
+          try {
+            redirectedUrl = resolveSafeRedirectUrl(response.headers.location, safeUrl, {
+              allowedProtocols: ['https:']
+            });
+          } catch (error) {
+            response.resume();
+            reject(error);
+            return;
+          }
+          response.resume();
+          return this._downloadJsonSingle(redirectedUrl).then(resolve, reject);
         }
         if (response.statusCode !== 200) {
+          response.resume();
           return reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
         }
         let data = '';
@@ -690,10 +733,10 @@ class ClientDownloader {
     });
   }
 
-  async downloadFile(url, filePath, maxRetries = 3, progressCallback = null) {
+  async downloadFile(url, filePath, maxRetries = 3, progressCallback = null, integrity = {}) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        await this._downloadFileSingle(url, filePath, progressCallback);
+        await this._downloadFileSingle(url, filePath, progressCallback, integrity);
         return;
       } catch (error) {
         if (attempt === maxRetries) {
@@ -704,21 +747,45 @@ class ClientDownloader {
     }
   }
 
-  async _downloadFileSingle(url, filePath, progressCallback = null) {
+  async _downloadFileSingle(url, filePath, progressCallback = null, integrity = {}) {
     return new Promise((resolve, reject) => {
       const file = fs.createWriteStream(filePath);
       const timeout = 120000; // Increased to 2 minutes for large files
       let downloadedBytes = 0;
       let totalBytes = 0;
       let lastProgressUpdate = 0;
+      let safeUrl;
+
+      try {
+        safeUrl = assertSafeRemoteUrl(url, { allowedProtocols: ['https:'] });
+      } catch (error) {
+        file.close();
+        fs.unlink(filePath, () => {});
+        reject(error);
+        return;
+      }
       
-      const request = https.get(url, { timeout }, (response) => {
+      const request = https.get(safeUrl, { timeout }, (response) => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          let redirectedUrl;
+          try {
+            redirectedUrl = resolveSafeRedirectUrl(response.headers.location, safeUrl, {
+              allowedProtocols: ['https:']
+            });
+          } catch (error) {
+            response.resume();
+            file.close();
+            fs.unlink(filePath, () => {});
+            reject(error);
+            return;
+          }
+          response.resume();
           file.close();
           fs.unlink(filePath, () => {});
-          return this._downloadFileSingle(response.headers.location, filePath, progressCallback).then(resolve, reject);
+          return this._downloadFileSingle(redirectedUrl, filePath, progressCallback, integrity).then(resolve, reject);
         }
         if (response.statusCode !== 200) {
+          response.resume();
           file.close();
           fs.unlink(filePath, () => {});
           return reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
@@ -759,6 +826,11 @@ class ClientDownloader {
         if (totalBytes > 0 && finalSize !== totalBytes) {
         fs.unlink(filePath, () => {});
           return reject(new Error(`Download incomplete: ${finalSize}/${totalBytes} bytes`));
+        }
+
+        if (integrity.expectedHash && !this.fileMatchesHash(filePath, integrity.expectedHash, integrity.algorithm || 'sha1')) {
+          fs.unlink(filePath, () => {});
+          return reject(new Error(`Download checksum mismatch for ${path.basename(filePath)}`));
         }
         
         resolve(true);
@@ -1809,7 +1881,7 @@ Specification-Vendor: FabricMC
         // Skip if file already exists and has correct size
         if (fs.existsSync(destFile)) {
           const stats = fs.statSync(destFile);
-          if (stats.size === size) {
+          if (stats.size === size && this.fileMatchesHash(destFile, hash, 'sha1')) {
             skipped++;
             processed++;
             if (processed % 50 === 0 || processed === totalAssets) {
@@ -1826,7 +1898,10 @@ Specification-Vendor: FabricMC
         const downloadUrl = `https://resources.download.minecraft.net/${twoChar}/${hash}`;
 
         // Create download promise
-        const downloadPromise = this.downloadFile(downloadUrl, destFile)
+        const downloadPromise = this.downloadFile(downloadUrl, destFile, 3, null, {
+          expectedHash: hash,
+          algorithm: 'sha1'
+        })
           .then(() => {
             downloaded++;
             processed++;

@@ -1,5 +1,5 @@
 // Mod API service functions
-const fetch = require('node-fetch');
+const { fetch } = require('../utils/fetch.cjs');
 const { setMaxListeners } = require('node:events');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 

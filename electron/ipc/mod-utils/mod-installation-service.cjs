@@ -10,6 +10,11 @@ const pipelineAsync = promisify(pipeline);
 const { extractDependenciesFromJar } = require('./mod-analysis-utils.cjs');
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
 const { UNASSIGNED_MODS_DIRNAME, UNASSIGNED_MANIFEST_DIRNAME } = require('./mod-file-manager.cjs');
+const {
+  assertSafeRemoteUrl,
+  safeBaseName,
+  safeFilePath
+} = require('../../utils/security-boundaries.cjs');
 
 // Placeholder for API service functions - these will be imported later
 // For now, we might have to define minimal stubs or expect them to be passed if complex
@@ -37,6 +42,35 @@ const GENERIC_MOD_FILENAME_BASES = new Set([
 
 function shouldUseMetadataFileName(cleanBase) {
   return Boolean(cleanBase) && !GENERIC_MOD_FILENAME_BASES.has(cleanBase.toLowerCase());
+}
+
+function allowedContentExtensions(contentType) {
+  return contentType === 'shaders' || contentType === 'resourcepacks'
+    ? ['.zip', '.jar']
+    : ['.jar'];
+}
+
+function safeContentFileName(fileName, contentType, label = 'content file name') {
+  return safeBaseName(fileName, label, {
+    allowedExtensions: allowedContentExtensions(contentType)
+  });
+}
+
+function safeContentFilePath(baseDir, fileName, contentType, label = 'content file name') {
+  return safeFilePath(baseDir, safeContentFileName(fileName, contentType, label), label, {
+    allowedExtensions: allowedContentExtensions(contentType)
+  });
+}
+
+function safeManifestPath(manifestDir, fileName, contentType) {
+  const safeName = safeContentFileName(fileName, contentType);
+  return safeFilePath(manifestDir, `${safeName}.json`, 'manifest file name', {
+    allowedExtensions: ['.json']
+  });
+}
+
+function safeModDownloadUrl(downloadUrl) {
+  return assertSafeRemoteUrl(downloadUrl, { allowedProtocols: ['https:'] });
 }
 
 async function installModToServer(win, serverPath, modDetails) {
@@ -197,6 +231,7 @@ async function installModToServer(win, serverPath, modDetails) {
         }
       });
     }
+    fileName = safeContentFileName(fileName, modDetails.contentType);
 
     logger.debug('Determined mod filename', {
       category: 'mods',
@@ -209,11 +244,11 @@ async function installModToServer(win, serverPath, modDetails) {
     });
 
     let currentModLocation = null;
-    let destinationPath = path.join(modsDir, fileName); // Default to server
+    let destinationPath = safeContentFilePath(modsDir, fileName, modDetails.contentType); // Default to server
 
     if (unassignedModsDir) {
       currentModLocation = 'unassigned';
-      destinationPath = path.join(unassignedModsDir, fileName);
+      destinationPath = safeContentFilePath(unassignedModsDir, fileName, modDetails.contentType);
     }
 
     if (modDetails.forceReinstall) {
@@ -227,10 +262,10 @@ async function installModToServer(win, serverPath, modDetails) {
       });
 
       // Use old filename for location detection if provided (for updates)
-      const checkFileName = modDetails.oldFileName || fileName;
-      const serverModPath = path.join(modsDir, checkFileName);
-      const clientModPath = path.join(clientModsDir, checkFileName);
-      const unassignedModPath = unassignedModsDir ? path.join(unassignedModsDir, checkFileName) : null;
+      const checkFileName = safeContentFileName(modDetails.oldFileName || fileName, modDetails.contentType);
+      const serverModPath = safeContentFilePath(modsDir, checkFileName, modDetails.contentType);
+      const clientModPath = safeContentFilePath(clientModsDir, checkFileName, modDetails.contentType);
+      const unassignedModPath = unassignedModsDir ? safeContentFilePath(unassignedModsDir, checkFileName, modDetails.contentType) : null;
       const serverExists = await fs.access(serverModPath).then(() => true).catch(() => false);
       const clientExists = await fs.access(clientModPath).then(() => true).catch(() => false);
       const unassignedExists = unassignedModPath
@@ -250,7 +285,7 @@ async function installModToServer(win, serverPath, modDetails) {
 
       if (clientExists && serverExists) {
         currentModLocation = 'both';
-        destinationPath = path.join(modsDir, fileName); // Install new version to server
+        destinationPath = safeContentFilePath(modsDir, fileName, modDetails.contentType); // Install new version to server
 
         logger.debug('Mod exists in both locations, cleaning up old files', {
           category: 'storage',
@@ -270,9 +305,8 @@ async function installModToServer(win, serverPath, modDetails) {
           // Also clean up manifests if they exist
           const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
           const clientManifestDir = path.join(serverPath, 'client', 'minecraft-core-manifests');
-          const oldManifestPath = `${checkFileName}.json`;
-          await fs.unlink(path.join(serverManifestDir, oldManifestPath)).catch(() => { });
-          await fs.unlink(path.join(clientManifestDir, oldManifestPath)).catch(() => { });
+          await fs.unlink(safeManifestPath(serverManifestDir, checkFileName, modDetails.contentType)).catch(() => { });
+          await fs.unlink(safeManifestPath(clientManifestDir, checkFileName, modDetails.contentType)).catch(() => { });
 
           logger.debug('Cleaned up old mod files and manifests', {
             category: 'storage',
@@ -294,7 +328,7 @@ async function installModToServer(win, serverPath, modDetails) {
         }
       } else if (clientExists && !serverExists) {
         currentModLocation = 'client-only';
-        destinationPath = path.join(clientModsDir, fileName); // Install new version to client
+        destinationPath = safeContentFilePath(clientModsDir, fileName, modDetails.contentType); // Install new version to client
 
         logger.debug('Mod exists in client only, cleaning up old file', {
           category: 'storage',
@@ -311,8 +345,7 @@ async function installModToServer(win, serverPath, modDetails) {
 
           // Also clean up client manifest if it exists
           const clientManifestDir = path.join(serverPath, 'client', 'minecraft-core-manifests');
-          const oldManifestPath = `${checkFileName}.json`;
-          await fs.unlink(path.join(clientManifestDir, oldManifestPath)).catch(() => { });
+          await fs.unlink(safeManifestPath(clientManifestDir, checkFileName, modDetails.contentType)).catch(() => { });
 
           logger.debug('Cleaned up old client mod file', {
             category: 'storage',
@@ -334,7 +367,7 @@ async function installModToServer(win, serverPath, modDetails) {
         }
       } else if (serverExists && !clientExists) {
         currentModLocation = 'server-only';
-        destinationPath = path.join(modsDir, fileName); // Install new version to server
+        destinationPath = safeContentFilePath(modsDir, fileName, modDetails.contentType); // Install new version to server
 
         logger.debug('Mod exists in server only, cleaning up old file', {
           category: 'storage',
@@ -351,8 +384,7 @@ async function installModToServer(win, serverPath, modDetails) {
 
           // Also clean up server manifest if it exists
           const serverManifestDir = path.join(serverPath, 'minecraft-core-manifests');
-          const oldManifestPath = `${checkFileName}.json`;
-          await fs.unlink(path.join(serverManifestDir, oldManifestPath)).catch(() => { });
+          await fs.unlink(safeManifestPath(serverManifestDir, checkFileName, modDetails.contentType)).catch(() => { });
 
           logger.debug('Cleaned up old server mod file', {
             category: 'storage',
@@ -375,7 +407,7 @@ async function installModToServer(win, serverPath, modDetails) {
       }
       else if (unassignedExists && !serverExists && !clientExists) {
         currentModLocation = 'unassigned';
-        destinationPath = path.join(unassignedModsDir, fileName);
+        destinationPath = safeContentFilePath(unassignedModsDir, fileName, modDetails.contentType);
 
         logger.debug('Mod exists in unassigned location, cleaning up old file', {
           category: 'storage',
@@ -390,8 +422,7 @@ async function installModToServer(win, serverPath, modDetails) {
           await fs.unlink(unassignedModPath);
 
           if (unassignedManifestDir) {
-            const oldManifestPath = `${checkFileName}.json`;
-            await fs.unlink(path.join(unassignedManifestDir, oldManifestPath)).catch(() => { });
+            await fs.unlink(safeManifestPath(unassignedManifestDir, checkFileName, modDetails.contentType)).catch(() => { });
           }
 
           logger.debug('Cleaned up old unassigned mod file', {
@@ -525,6 +556,7 @@ async function installModToServer(win, serverPath, modDetails) {
         });
         throw new Error('Failed to get download URL for mod');
       }
+      downloadUrl = safeModDownloadUrl(downloadUrl);
 
       logger.info('Starting mod download', {
         category: 'network',
@@ -613,13 +645,16 @@ async function installModToServer(win, serverPath, modDetails) {
         if (metadata && metadata.name) {
           // Use the clean name from JAR metadata
           const cleanBase = metadata.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-          const cleanFileName = /\.jar$/i.test(cleanBase) ? cleanBase : `${cleanBase}.jar`;
+          const cleanFileName = safeContentFileName(
+            /\.jar$/i.test(cleanBase) ? cleanBase : `${cleanBase}.jar`,
+            modDetails.contentType
+          );
           const canUseMetadataName = shouldUseMetadataFileName(cleanBase);
 
           // Only rename if it's different and not an update (to preserve original filenames for updates)
           if (cleanFileName !== fileName && !modDetails.forceReinstall && canUseMetadataName) {
             finalFileName = cleanFileName;
-            const newTargetPath = path.join(path.dirname(targetPath), finalFileName);
+            const newTargetPath = safeContentFilePath(path.dirname(targetPath), finalFileName, modDetails.contentType);
             await fs.rename(targetPath, newTargetPath);
             finalTargetPath = newTargetPath;
             destinationPath = newTargetPath;
@@ -661,7 +696,9 @@ async function installModToServer(win, serverPath, modDetails) {
       }
 
       if (currentModLocation === 'both') {
-        const otherTargetPath = (destinationPath === path.join(modsDir, finalFileName)) ? path.join(clientModsDir, finalFileName) : path.join(modsDir, finalFileName);
+        const serverFinalPath = safeContentFilePath(modsDir, finalFileName, modDetails.contentType);
+        const clientFinalPath = safeContentFilePath(clientModsDir, finalFileName, modDetails.contentType);
+        const otherTargetPath = (destinationPath === serverFinalPath) ? clientFinalPath : serverFinalPath;
 
         logger.debug('Copying mod to both locations', {
           category: 'storage',
@@ -750,7 +787,7 @@ async function installModToServer(win, serverPath, modDetails) {
 
           if (currentModLocation === 'client-only') {
             await fs.mkdir(clientManifestDir, { recursive: true });
-            const clientManifestPath = path.join(clientManifestDir, `${finalFileName}.json`);
+            const clientManifestPath = safeManifestPath(clientManifestDir, finalFileName, modDetails.contentType);
             await fs.writeFile(clientManifestPath, JSON.stringify(manifest, null, 2));
 
             logger.debug('Saved client-only manifest', {
@@ -763,8 +800,8 @@ async function installModToServer(win, serverPath, modDetails) {
           } else if (currentModLocation === 'both') {
             await fs.mkdir(serverManifestDir, { recursive: true });
             await fs.mkdir(clientManifestDir, { recursive: true });
-            const serverManifestPath = path.join(serverManifestDir, `${finalFileName}.json`);
-            const clientManifestPath = path.join(clientManifestDir, `${finalFileName}.json`);
+            const serverManifestPath = safeManifestPath(serverManifestDir, finalFileName, modDetails.contentType);
+            const clientManifestPath = safeManifestPath(clientManifestDir, finalFileName, modDetails.contentType);
             await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));
             await fs.writeFile(clientManifestPath, JSON.stringify(manifest, null, 2));
 
@@ -778,7 +815,7 @@ async function installModToServer(win, serverPath, modDetails) {
             });
           } else if (currentModLocation === 'unassigned' && unassignedManifestDir) {
             await fs.mkdir(unassignedManifestDir, { recursive: true });
-            const unassignedManifestPath = path.join(unassignedManifestDir, `${finalFileName}.json`);
+            const unassignedManifestPath = safeManifestPath(unassignedManifestDir, finalFileName, modDetails.contentType);
             await fs.writeFile(unassignedManifestPath, JSON.stringify(manifest, null, 2));
 
             logger.debug('Saved unassigned manifest', {
@@ -790,7 +827,7 @@ async function installModToServer(win, serverPath, modDetails) {
             });
           } else { // server-only fallback
             await fs.mkdir(serverManifestDir, { recursive: true });
-            const serverManifestPath = path.join(serverManifestDir, `${finalFileName}.json`);
+            const serverManifestPath = safeManifestPath(serverManifestDir, finalFileName, modDetails.contentType);
             await fs.writeFile(serverManifestPath, JSON.stringify(manifest, null, 2));
 
             logger.debug('Saved server-only manifest', {
@@ -956,7 +993,8 @@ async function installModToClient(win, modData) {
         sanitizedFileName = `${sanitizedBase}${defaultExtension}`;
       }
     }
-    let targetPath = path.join(clientModsDir, sanitizedFileName); // Initial target path
+    sanitizedFileName = safeContentFileName(sanitizedFileName, contentType);
+    let targetPath = safeContentFilePath(clientModsDir, sanitizedFileName, contentType); // Initial target path
 
     logger.debug('Determined client mod filename', {
       category: 'mods',
@@ -997,12 +1035,14 @@ async function installModToClient(win, modData) {
         const manifestFiles = await fs.readdir(clientManifestDir).catch(() => []);
         for (const manifestFile of manifestFiles) {
           if (!manifestFile.endsWith('.json')) continue;
-          const manifestPath = path.join(clientManifestDir, manifestFile);
+          const manifestPath = safeFilePath(clientManifestDir, manifestFile, 'manifest file name', {
+            allowedExtensions: ['.json']
+          });
           try {
             const manifestContent = await fs.readFile(manifestPath, 'utf8');
             const manifest = JSON.parse(manifestContent);
             if (manifest.projectId === modData.id) {
-              const oldFilePath = path.join(clientModsDir, manifest.fileName);
+              const oldFilePath = safeContentFilePath(clientModsDir, manifest.fileName, manifest.contentType || contentType);
               await fs.unlink(oldFilePath).catch(() => { });
               await fs.unlink(manifestPath).catch(() => { });
 
@@ -1044,7 +1084,7 @@ async function installModToClient(win, modData) {
           });
 
           for (const match of possibleMatches) {
-            await fs.unlink(path.join(clientModsDir, match)).catch(() => { });
+            await fs.unlink(safeContentFilePath(clientModsDir, match, contentType)).catch(() => { });
           }
         }
       } catch (error) {
@@ -1181,7 +1221,7 @@ async function installModToClient(win, modData) {
       }
 
       const primaryFile = versionInfo.files.find(file => file.primary) || versionInfo.files[0];
-      const downloadUrl = primaryFile.url;
+      const downloadUrl = safeModDownloadUrl(primaryFile.url);
 
       logger.debug('Determined client mod download details', {
         category: 'network',
@@ -1194,8 +1234,8 @@ async function installModToClient(win, modData) {
       });
 
       // Use sanitized file name for storage to match server behaviour
-  const fileName = sanitizedFileName;
-      targetPath = path.join(clientModsDir, fileName);
+      const fileName = safeContentFileName(sanitizedFileName, contentType);
+      targetPath = safeContentFilePath(clientModsDir, fileName, contentType);
 
       const downloadId = modData.downloadId || `client-mod-${modData.id}-${Date.now()}`;
 
@@ -1273,7 +1313,7 @@ async function installModToClient(win, modData) {
         fileSize: primaryFile.size,
         contentType
       };
-      const manifestPath = path.join(clientManifestDir, `${fileName}.json`);
+      const manifestPath = safeManifestPath(clientManifestDir, fileName, contentType);
       await fs.writeFile(manifestPath, JSON.stringify(manifestData, null, 2), 'utf8');
 
       logger.info('Client mod installation completed successfully', {

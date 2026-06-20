@@ -5,6 +5,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { app } = require('electron'); // Required for app.getPath('userData')
 const AdmZip = require('adm-zip');
+const { safeBaseName, safeFilePath } = require('../../utils/security-boundaries.cjs');
 
 // Simple store implementation to persist mod categories
 const configDir = path.join(app.getPath('userData'), 'config');
@@ -809,8 +810,8 @@ async function addMod(serverPath, modPath) {
   }
   
   const modsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
-  const fileName = path.basename(modPath);
-  const targetPath = path.join(modsDir, fileName);
+  const fileName = safeBaseName(path.basename(modPath), 'mod file name', { allowedExtensions: ['.jar'] });
+  const targetPath = safeFilePath(modsDir, fileName, 'mod file name', { allowedExtensions: ['.jar'] });
   
   await fs.mkdir(modsDir, { recursive: true });
   
@@ -843,7 +844,8 @@ async function deleteMod(serverPath, modName) {
   if (!modName) {
     throw new Error('Mod name is required');
   }
-    const fileName = modName.endsWith('.jar') ? modName : `${modName}.jar`;
+    const requestedName = safeBaseName(modName, 'mod name');
+    const fileName = requestedName.endsWith('.jar') ? requestedName : `${requestedName}.jar`;
     // Check multiple possible locations for the mod file
   const possiblePaths = [
     path.join(serverPath, 'mods', fileName),
@@ -920,11 +922,12 @@ async function saveTemporaryFile({ name, buffer }) {
     throw new Error('Invalid or empty buffer received');
   }
   
+  const safeName = safeBaseName(name, 'file name', { allowedExtensions: ['.jar'] });
   const tempDir = path.join(os.tmpdir(), 'minecraft-core-mods');
   await fs.mkdir(tempDir, { recursive: true });
   
-  const hash = crypto.createHash('md5').update(`${name}-${Date.now()}`).digest('hex').slice(0, 8);
-  const tempFilePath = path.join(tempDir, `${hash}-${name}`);
+  const hash = crypto.createHash('md5').update(`${safeName}-${Date.now()}`).digest('hex').slice(0, 8);
+  const tempFilePath = safeFilePath(tempDir, `${hash}-${safeName}`, 'file name', { allowedExtensions: ['.jar'] });
     const uint8Array = new Uint8Array(buffer);
   await fs.writeFile(tempFilePath, uint8Array);
   
@@ -945,8 +948,9 @@ async function directAddMod({ serverPath, fileName, buffer }) {
     throw new Error('Valid file buffer is required');
   }
   
+  fileName = safeBaseName(fileName, 'file name', { allowedExtensions: ['.jar'] });
   const modsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
-  const targetPath = path.join(modsDir, fileName);
+  const targetPath = safeFilePath(modsDir, fileName, 'file name', { allowedExtensions: ['.jar'] });
     await fs.mkdir(modsDir, { recursive: true });
   await fs.writeFile(targetPath, new Uint8Array(buffer));
   
@@ -960,6 +964,10 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   if (!fileName) throw new Error('Filename is required');
   if (!newCategory) throw new Error('New category is required');
   if (!serverPath) throw new Error('Server path is required');
+  fileName = safeBaseName(fileName, 'file name', { allowedExtensions: ['.jar'] });
+  if (!['server-only', 'client-only', 'both', 'unassigned', 'disabled'].includes(newCategory)) {
+    throw new Error('Invalid mod category');
+  }
 
   const clientPath = path.join(serverPath, 'client');
   const serverModsDir = path.join(serverPath, 'mods');

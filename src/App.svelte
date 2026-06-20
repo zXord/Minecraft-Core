@@ -53,7 +53,7 @@
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
   import { getUpdateCount, autoUpdateChecksEnabled } from "./stores/modStore.js";
   const updateCountStore = getUpdateCount();
-  import { checkForUpdates, loadServerConfig, loadMods, loadContent, checkDisabledModUpdates, setActiveModServerPath } from "./utils/mods/modAPI.js";
+  import { checkForUpdates, loadServerConfig, loadMods, loadContent, setActiveModServerPath } from "./utils/mods/modAPI.js";
   let updateIntervalId = null;
 
   // --- Flow & Tabs ---
@@ -274,21 +274,7 @@
       try { await loadContent(serverPath, "resourcepacks"); } catch {}
       if (autoUpdateChecksEnabled.getForPath(serverPath)) {
         await checkForUpdates(serverPath);
-        try { await checkDisabledModUpdates(serverPath); } catch {}
       }
-
-      const scheduledPath = serverPath;
-      setTimeout(() => {
-        if (!autoUpdateChecksEnabled.getForPath(scheduledPath)) return;
-        const currentServerPath = currentInstance?.type === "server" ? currentInstance.path : "";
-        if (currentServerPath !== scheduledPath) return;
-        try {
-          checkForUpdates(scheduledPath);
-          checkDisabledModUpdates(scheduledPath);
-        } catch {
-          /* ignore follow-up update check errors */
-        }
-      }, 2000);
     } catch {
       /* silent prime errors */
     }
@@ -563,8 +549,6 @@
       }
     };
     updateIntervalId = setInterval(runUpdateCheck, 30 * 60 * 1000);
-    // Initial delayed check (wait a bit for initial loads)
-    setTimeout(runUpdateCheck, 15 * 1000);
 
     // Set up navigation tracking
     const unsubscribeRoute = route.subscribe((currentRoute) => {

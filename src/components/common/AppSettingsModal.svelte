@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher } from 'svelte';
   import UpdateChecker from './UpdateChecker.svelte';
+  import logger from '../../utils/logger.js';
   
   // Props
   export let visible = false;
@@ -320,8 +321,6 @@
 
   async function openLogger() {
     try {
-      // Import logger dynamically to avoid circular dependencies
-      const { default: logger } = await import('../../utils/logger.js');
       const result = await logger.openWindow();
       
       if (!result.success) {

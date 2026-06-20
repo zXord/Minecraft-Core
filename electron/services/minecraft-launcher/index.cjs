@@ -10,6 +10,8 @@ const { ClientDownloader } = require('./client-downloader.cjs');
 const XMCLClientDownloader = require('./xmcl-client-downloader.cjs');
 const { ProperMinecraftLauncher } = require('./proper-launcher.cjs');
 const { getLoggerHandlers } = require('../../ipc/logger-handlers.cjs');
+const { escapeWmicLikeLiteral } = require('../../utils/security-boundaries.cjs');
+const { fetch } = require('../../utils/fetch.cjs');
 
 // Initialize logger
 const logger = getLoggerHandlers();
@@ -1406,7 +1408,7 @@ Starting Minecraft with console output...
 
           // Try to kill only processes running from our client directory
           if (this.clientPath) {
-            const clientPathEscaped = this.clientPath.replace(/\\/g, '\\\\');
+            const clientPathEscaped = escapeWmicLikeLiteral(this.clientPath);
 
             try {
               logger.debug('Terminating Java processes by client path', {
@@ -1928,8 +1930,6 @@ Starting Minecraft with console output...
   // Validate session token against Mojang's servers (from debugging guide)
   async validateSessionToken(accessToken, uuid) {
     try {
-      const fetch = require('node-fetch');
-
       const payload = {
         accessToken: accessToken,
         selectedProfile: uuid,

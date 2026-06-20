@@ -10,6 +10,47 @@ const {
   checkModCompatibilityFromFilename,
   compareVersions
 } = require('./mod-handler-utils.cjs');
+const appStore = require('../../utils/app-store.cjs');
+const {
+  assertSafeRemoteUrl,
+  isPathInside,
+  safeBaseName,
+  safeFilePath
+} = require('../../utils/security-boundaries.cjs');
+
+function assertKnownClientPath(clientPath) {
+  if (typeof clientPath !== 'string' || !clientPath.trim()) {
+    throw new Error('Client path is required');
+  }
+  const resolvedPath = path.resolve(clientPath);
+  const instances = Array.isArray(appStore.get('instances')) ? appStore.get('instances') : [];
+  const isKnown = instances.some((instance) =>
+    instance
+    && instance.type === 'client'
+    && typeof instance.path === 'string'
+    && isPathInside(resolvedPath, path.resolve(instance.path))
+    && isPathInside(path.resolve(instance.path), resolvedPath)
+  );
+  if (!isKnown) {
+    throw new Error('Client path is not a known client instance');
+  }
+  return resolvedPath;
+}
+
+function safeJarFileName(value) {
+  return safeBaseName(value, 'mod file name', { allowedExtensions: ['.jar'] });
+}
+
+function safeManifestFilePath(manifestDir, fileName) {
+  const safeName = safeJarFileName(fileName);
+  return safeFilePath(manifestDir, `${safeName}.json`, 'manifest file name', {
+    allowedExtensions: ['.json']
+  });
+}
+
+function safeModDownloadUrl(value) {
+  return assertSafeRemoteUrl(value, { allowedProtocols: ['https:'] });
+}
 
 function createManualModHandlers() {
   return {
@@ -18,11 +59,11 @@ function createManualModHandlers() {
     'get-manual-mods-detailed': async (_event, { clientPath, serverManagedFiles }) => {
       try {
         
-        if (!clientPath || !fs.existsSync(clientPath)) {
+        const safeClientPath = assertKnownClientPath(clientPath);
+        if (!fs.existsSync(safeClientPath)) {
           throw new Error('Invalid client path provided');
         }
-        
-        const modsDir = path.join(clientPath, 'mods');
+        const modsDir = path.join(safeClientPath, 'mods');
 
         if (!fs.existsSync(modsDir)) {
           return { success: true, mods: [] };
@@ -33,7 +74,7 @@ function createManualModHandlers() {
         let acknowledgedDependencies = new Set();
         try {
           const { loadExpectedModState } = require('../minecraft-launcher-handlers.cjs');
-          const stateResult = await loadExpectedModState(clientPath);
+          const stateResult = await loadExpectedModState(safeClientPath);
           if (stateResult.success && stateResult.acknowledgedDeps) {
             acknowledgedDependencies = stateResult.acknowledgedDeps;
           }
@@ -151,12 +192,13 @@ function createManualModHandlers() {
     // Check manual mods for basic compatibility
     'check-manual-mods': async (_event, { clientPath, minecraftVersion }) => {
       try {
-          if (!clientPath || !fs.existsSync(clientPath)) {
+        const safeClientPath = assertKnownClientPath(clientPath);
+        if (!fs.existsSync(safeClientPath)) {
           throw new Error('Invalid client path provided');
         }
         
         // Get detailed mods directly using the same logic
-        const modsDir = path.join(clientPath, 'mods');
+        const modsDir = path.join(safeClientPath, 'mods');
         
         if (!fs.existsSync(modsDir)) {
           return { success: true, results: [] };
@@ -263,39 +305,41 @@ function createManualModHandlers() {
     'remove-manual-mods': async (_event, { clientPath, fileNames }) => {
       try {
         
-        if (!clientPath || !fs.existsSync(clientPath)) {
+        const safeClientPath = assertKnownClientPath(clientPath);
+        if (!fs.existsSync(safeClientPath)) {
           throw new Error('Invalid client path provided');
         }
         
         if (!Array.isArray(fileNames) || fileNames.length === 0) {
           throw new Error('No file names provided');
         }
-          const modsDir = path.join(clientPath, 'mods');
+        const modsDir = path.join(safeClientPath, 'mods');
         const removedFiles = [];
         const errors = [];
         
         for (const fileName of fileNames) {
           try {
-            let filePath = path.join(modsDir, fileName);
+            const safeFileName = safeJarFileName(fileName);
+            let filePath = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
             let found = false;
             
             // Check in enabled mods directory
             if (fs.existsSync(filePath)) {
               fs.unlinkSync(filePath);
-              removedFiles.push({ fileName, location: 'enabled' });
+              removedFiles.push({ fileName: safeFileName, location: 'enabled' });
               found = true;
             } else {
               // Check for disabled mod with .disabled extension
-              filePath = path.join(modsDir, fileName + '.disabled');
+              filePath = safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] });
               if (fs.existsSync(filePath)) {
                 fs.unlinkSync(filePath);
-                removedFiles.push({ fileName, location: 'disabled' });
+                removedFiles.push({ fileName: safeFileName, location: 'disabled' });
                 found = true;
               }
             }
             
             if (!found) {
-              errors.push({ fileName, error: 'File not found' });
+              errors.push({ fileName: safeFileName, error: 'File not found' });
             }
           } catch (fileError) {
             errors.push({ fileName, error: fileError.message });
@@ -318,28 +362,30 @@ function createManualModHandlers() {
     'toggle-manual-mod': async (_event, { clientPath, fileName, enable }) => {
       try {
         
-        if (!clientPath || !fs.existsSync(clientPath)) {
+        const safeClientPath = assertKnownClientPath(clientPath);
+        if (!fs.existsSync(safeClientPath)) {
           throw new Error('Invalid client path provided');
         }
-          const modsDir = path.join(clientPath, 'mods');
+        const safeFileName = safeJarFileName(fileName);
+        const modsDir = path.join(safeClientPath, 'mods');
         
         let sourceFile, targetFile;
         
         if (enable) {
           // Enabling: removing .disabled extension
-          sourceFile = path.join(modsDir, fileName + '.disabled');
-          targetFile = path.join(modsDir, fileName);
+          sourceFile = safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] });
+          targetFile = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
           
           if (!fs.existsSync(sourceFile)) {
-            throw new Error(`Disabled mod file not found: ${fileName}.disabled`);
+            throw new Error(`Disabled mod file not found: ${safeFileName}.disabled`);
           }
         } else {
           // Disabling: adding .disabled extension
-          sourceFile = path.join(modsDir, fileName);
-          targetFile = path.join(modsDir, fileName + '.disabled');
+          sourceFile = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
+          targetFile = safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] });
           
           if (!fs.existsSync(sourceFile)) {
-            throw new Error(`Enabled mod file not found: ${fileName}`);
+            throw new Error(`Enabled mod file not found: ${safeFileName}`);
           }
         }
         
@@ -366,7 +412,8 @@ function createManualModHandlers() {
     'update-manual-mod': async (_event, { clientPath, fileName, newVersion, downloadUrl }) => {
       try {
         
-        if (!clientPath || !fs.existsSync(clientPath)) {
+        const safeClientPath = assertKnownClientPath(clientPath);
+        if (!fs.existsSync(safeClientPath)) {
           throw new Error('Invalid client path provided');
         }
         
@@ -379,29 +426,33 @@ function createManualModHandlers() {
         const { pipeline } = require('stream');
         const { promisify } = require('util');
         const pipelineAsync = promisify(pipeline);
-          const modsDir = path.join(clientPath, 'mods');
+        const safeFileName = safeJarFileName(fileName);
+        const safeDownloadUrl = safeModDownloadUrl(downloadUrl);
+        const modsDir = path.join(safeClientPath, 'mods');
         
         // Find the current mod file
-        let currentFilePath = path.join(modsDir, fileName);
+        let currentFilePath = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
         let isDisabled = false;
         
         if (!fs.existsSync(currentFilePath)) {
-          currentFilePath = path.join(modsDir, fileName + '.disabled');
+          currentFilePath = safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] });
           isDisabled = true;
           
           if (!fs.existsSync(currentFilePath)) {
-            throw new Error(`Mod file not found: ${fileName}`);
+            throw new Error(`Mod file not found: ${safeFileName}`);
           }
         }
           // **FIX**: Keep the original filename instead of appending version
         // This maintains consistency with the original installation naming
-        const newFileName = fileName; // Keep the same filename
-        const targetPath = path.join(modsDir, newFileName + (isDisabled ? '.disabled' : ''));
+        const newFileName = safeFileName; // Keep the same filename
+        const targetPath = isDisabled
+          ? safeFilePath(modsDir, `${newFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] })
+          : safeFilePath(modsDir, newFileName, 'mod file name', { allowedExtensions: ['.jar'] });
         
         // Download the new version
         const writer = createWriteStream(targetPath);
         const response = await axios({
-          url: downloadUrl,
+          url: safeDownloadUrl,
           method: 'GET',
           responseType: 'stream',
           timeout: 60000,
@@ -412,7 +463,7 @@ function createManualModHandlers() {
       await pipelineAsync(response.data, writer);
           // **FIX**: Update the manifest file with new version information
         try {
-          const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
+          const manifestPath = safeManifestFilePath(path.join(safeClientPath, 'minecraft-core-manifests'), safeFileName);
           if (fs.existsSync(manifestPath)) {
             const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
             const manifest = JSON.parse(manifestContent);
@@ -446,11 +497,12 @@ function createManualModHandlers() {
     // Check for updates for manual mods
     'check-manual-mod-updates': async (_event, { clientPath, minecraftVersion, serverManagedFiles }) => {
       try {
-        if (!clientPath || !fs.existsSync(clientPath)) {
+        const safeClientPath = assertKnownClientPath(clientPath);
+        if (!fs.existsSync(safeClientPath)) {
           throw new Error('Invalid client path provided');
         }
         
-        const modsDir = path.join(clientPath, 'mods');
+        const modsDir = path.join(safeClientPath, 'mods');
         
         if (!fs.existsSync(modsDir)) {
           return { success: true, updates: [], summary: { total: 0, updatesAvailable: 0 } };
@@ -474,7 +526,7 @@ function createManualModHandlers() {
             metadata = await readModMetadata(filePath);
             currentVersion = metadata?.version || 'Unknown';            // **FIX**: Try to get version from manifest file if available for better accuracy
             if (metadata && metadata.projectId) {
-              const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
+              const manifestPath = safeManifestFilePath(path.join(safeClientPath, 'minecraft-core-manifests'), fileName);
               try {
                 const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
                 const manifest = JSON.parse(manifestContent);
@@ -558,7 +610,7 @@ function createManualModHandlers() {
             metadata = await readModMetadata(filePath);
             currentVersion = metadata?.version || 'Unknown';            // **FIX**: Try to get version from manifest file if available for better accuracy
             if (metadata && metadata.projectId) {
-              const manifestPath = path.join(clientPath, 'minecraft-core-manifests', `${fileName}.json`);
+              const manifestPath = safeManifestFilePath(path.join(safeClientPath, 'minecraft-core-manifests'), fileName);
               try {
                 const manifestContent = await fsPromises.readFile(manifestPath, 'utf8');
                 const manifest = JSON.parse(manifestContent);
@@ -685,7 +737,8 @@ function createManualModHandlers() {
           return { success: false, error: 'Minecraft version not provided.', updatedCount: 0 };
         }
 
-        const modsDir = path.join(clientPath, 'mods');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const modsDir = path.join(safeClientPath, 'mods');
         if (!fs.existsSync(modsDir)) {
           fs.mkdirSync(modsDir, { recursive: true });
         }
@@ -701,28 +754,30 @@ function createManualModHandlers() {
 
             // Find the primary file (usually a .jar)
             const primaryFile = modToUpdate.newVersionDetails.files.find(f => f.primary && f.url);
-            const fileToDownload = primaryFile || modToUpdate.newVersionDetails.files.find(f => f.url && f.filename.endsWith('.jar')) || modToUpdate.newVersionDetails.files[0];
+            const fileToDownload = primaryFile || modToUpdate.newVersionDetails.files.find(f => f.url && typeof f.filename === 'string' && f.filename.endsWith('.jar')) || modToUpdate.newVersionDetails.files[0];
 
             if (!fileToDownload || !fileToDownload.url) {
               throw new Error(`Could not determine download URL for ${modToUpdate.name || modToUpdate.fileName}`);
             }
 
-            const oldFileName = modToUpdate.fileName;
-            const newFileName = fileToDownload.filename;
+            const oldFileName = modToUpdate.fileName ? safeJarFileName(modToUpdate.fileName) : null;
+            const newFileName = safeJarFileName(fileToDownload.filename);
+            const safeDownloadUrl = safeModDownloadUrl(fileToDownload.url);
+            const newModPath = safeFilePath(modsDir, newFileName, 'mod file name', { allowedExtensions: ['.jar'] });
 
-            if (oldFileName && fs.existsSync(path.join(modsDir, oldFileName))) {
+            if (oldFileName && fs.existsSync(safeFilePath(modsDir, oldFileName, 'mod file name', { allowedExtensions: ['.jar'] }))) {
               await disableMod(modsDir, oldFileName);
             }
 
-            await downloadWithProgress(fileToDownload.url, modsDir, newFileName);
+            await downloadWithProgress(safeDownloadUrl, newModPath, `manual-client-mod-update-${modToUpdate.projectId || newFileName}`);
 
-            const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+            const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
             await fsPromises.mkdir(manifestDir, { recursive: true });
-            const oldManifestPath = path.join(manifestDir, `${oldFileName}.json`);
-            const newManifestPath = path.join(manifestDir, `${newFileName}.json`);
+            const oldManifestPath = oldFileName ? safeManifestFilePath(manifestDir, oldFileName) : null;
+            const newManifestPath = safeManifestFilePath(manifestDir, newFileName);
             let manifest = {};
             try {
-              const content = await fsPromises.readFile(oldManifestPath, 'utf8');
+              const content = oldManifestPath ? await fsPromises.readFile(oldManifestPath, 'utf8') : '';
               manifest = JSON.parse(content);
             } catch {
               manifest = {
@@ -739,11 +794,11 @@ function createManualModHandlers() {
             }
             manifest.lastUpdated = new Date().toISOString();
             await fsPromises.writeFile(newManifestPath, JSON.stringify(manifest, null, 2));
-            if (oldManifestPath !== newManifestPath) {
+            if (oldManifestPath && oldManifestPath !== newManifestPath) {
               await fsPromises.unlink(oldManifestPath).catch(() => {});
             }
 
-            modAnalysisUtils.invalidateMetadataCache(path.join(modsDir, newFileName));
+            modAnalysisUtils.invalidateMetadataCache(newModPath);
 
             updatedCount++;
 
@@ -768,11 +823,14 @@ function createManualModHandlers() {
         if (!mods || !Array.isArray(mods) || mods.length === 0) {
           return { success: false, error: 'No mods specified for disabling.', disabledCount: 0 };
         }
-        if (!clientPath) {
-          return { success: false, error: 'Client path not provided.', disabledCount: 0 };
+        let safeClientPath;
+        try {
+          safeClientPath = assertKnownClientPath(clientPath);
+        } catch (error) {
+          return { success: false, error: error.message || 'Client path not provided.', disabledCount: 0 };
         }
 
-        const modsDir = path.join(clientPath, 'mods');
+        const modsDir = path.join(safeClientPath, 'mods');
         if (!fs.existsSync(modsDir)) {
           // If mods directory doesn't exist, there's nothing to disable.
           return { success: true, disabledCount: 0, message: 'Mods directory does not exist.' };
@@ -786,9 +844,10 @@ function createManualModHandlers() {
             if (!modToDisable.fileName) {
               throw new Error('Mod filename not provided for disabling.');
             }
-            const modPath = path.join(modsDir, modToDisable.fileName);
+            const safeFileName = safeJarFileName(modToDisable.fileName);
+            const modPath = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
             if (fs.existsSync(modPath)) {
-              await disableMod(modsDir, modToDisable.fileName);
+              await disableMod(modsDir, safeFileName);
               disabledCount++;
             } else {
               // Optionally, count this as a non-error if the goal is to ensure it's disabled
@@ -811,7 +870,8 @@ function createManualModHandlers() {
           return { success: false, error: 'Invalid mods data' };
         }
 
-        const modsDir = path.join(clientPath, 'mods');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const modsDir = path.join(safeClientPath, 'mods');
         if (!fs.existsSync(modsDir)) {
           return { success: false, error: 'Mods directory not found' };
         }
@@ -822,10 +882,11 @@ function createManualModHandlers() {
           const enhancedMod = { ...mod };
           
           try {
+            const safeFileName = safeJarFileName(mod.fileName);
             // Try to find the actual JAR file on disk
             const possiblePaths = [
-              path.join(modsDir, mod.fileName),
-              path.join(modsDir, mod.fileName + '.disabled')
+              safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] }),
+              safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] })
             ];
             
             let actualPath = null;

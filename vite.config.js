@@ -19,41 +19,51 @@ export default defineConfig({
       },
       output: {
         format: 'es',
-        // Manual chunk configuration for code splitting optimization
-        // Strategy: Separate large dependencies, stores, and utilities into logical chunks
-        // This reduces initial bundle size and improves caching
+        // Manual chunk configuration for code splitting optimization.
+        // Keep shared state/helpers together because stores and utils reference each other.
         manualChunks: (id) => {
-          // Vendor chunk: Extract large third-party dependencies
-          // These rarely change, so they benefit from long-term caching
-          if (id.includes('node_modules')) {
-            // Group heavy packages that are used across multiple routes
-            if (id.includes('minecraft-data') || 
-                id.includes('@xmcl') || 
-                id.includes('axios') ||
-                id.includes('lucide-svelte')) {
-              return 'vendor';
-            }
+          const normalizedId = id.replace(/\\/g, '/');
+
+          if (normalizedId.includes('node_modules')) {
+            return 'vendor';
           }
-          
-          // Store modules: Separate Svelte stores for better caching
-          // Stores are shared across routes but change independently
-          if (id.includes('/stores/')) {
-            return 'stores';
+
+          if (normalizedId.includes('/src/logger.js') || normalizedId.includes('/src/components/logger/')) {
+            return 'logger-window';
           }
-          
-          // Utility modules: Group by functional category
-          // This allows route-specific utilities to load with their routes
-          if (id.includes('/utils/mods/')) {
-            return 'utils-mods';
+
+          if (normalizedId.includes('/src/components/client/')) {
+            return 'feature-client';
           }
-          if (id.includes('/utils/backup/')) {
-            return 'utils-backup';
+          if (normalizedId.includes('/src/components/backup/') || normalizedId.endsWith('/src/components/Backups.svelte') || normalizedId.includes('/src/utils/backup/')) {
+            return 'feature-backups';
           }
-          if (id.includes('/utils/metrics/')) {
-            return 'utils-metrics';
+          if (normalizedId.includes('/src/components/mods/') || normalizedId.endsWith('/src/components/server/ServerModManager.svelte') || normalizedId.includes('/src/utils/mods/')) {
+            return 'feature-mods';
           }
-          if (id.includes('/utils/')) {
-            return 'utils';
+          if (normalizedId.includes('/src/components/settings/')) {
+            return 'feature-settings';
+          }
+          if (normalizedId.includes('/src/components/server/')) {
+            return 'feature-server';
+          }
+          if (normalizedId.includes('/src/components/setup/')) {
+            return 'feature-setup';
+          }
+          if (normalizedId.includes('/src/components/players/')) {
+            return 'feature-players';
+          }
+          if (normalizedId.includes('/src/components/common/')) {
+            return 'app-common';
+          }
+
+          if (
+            normalizedId.includes('/src/stores/') ||
+            normalizedId.includes('/src/utils/') ||
+            normalizedId.includes('/src/modules/') ||
+            normalizedId.endsWith('/src/router.js')
+          ) {
+            return 'app-core';
           }
         }
       }

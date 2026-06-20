@@ -5,11 +5,10 @@ const progress = require('progress-stream');
 const { safeSend } = require('../utils/safe-send.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
+const { fetch } = require('../utils/fetch.cjs');
 
 // Initialize logger
 const logger = getLoggerHandlers();
-
-const fetch = (...args) => import('node-fetch').then(({ default: fn }) => fn.apply(null, args));
 
 // Performance tracking
 let performanceMetrics = {

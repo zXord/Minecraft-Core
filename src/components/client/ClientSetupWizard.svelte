@@ -136,8 +136,9 @@
 
     const host = parsed.hostname || '';
     const port = parsed.port || '8080';
-    const secret = parsed.searchParams.get('secret') || parsed.searchParams.get('s') || '';
-    const fingerprint = parsed.searchParams.get('fp') || parsed.searchParams.get('fingerprint') || '';
+    const fragmentParams = new URLSearchParams((parsed.hash || '').replace(/^#/, ''));
+    const secret = fragmentParams.get('secret') || fragmentParams.get('s') || parsed.searchParams.get('secret') || parsed.searchParams.get('s') || '';
+    const fingerprint = fragmentParams.get('fp') || fragmentParams.get('fingerprint') || parsed.searchParams.get('fp') || parsed.searchParams.get('fingerprint') || '';
 
     if (!host || !validateIp(host)) {
       return { ok: false, error: 'Invite link host is invalid.' };
@@ -411,7 +412,7 @@
           id="invite-link" 
           bind:value={inviteLink} 
           on:input={onInviteLinkChange}
-          placeholder="https://host:port/?secret=..."
+          placeholder="https://host:port/#secret=..."
         />
         {#if inviteError}
           <small class="input-error">{inviteError}</small>

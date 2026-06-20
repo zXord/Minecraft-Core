@@ -72,7 +72,6 @@
       const config = await window.electron.invoke('read-config', serverPath);
       if (config) {
         serverConfig = config;
-        console.log('Loaded server config:', config);
         
         // Get Java version info
         if (config.version) {

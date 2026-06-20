@@ -1,6 +1,27 @@
 // Server Properties IPC handlers
 const path = require('path');
 const fs = require('fs');
+const appStore = require('../utils/app-store.cjs');
+const { isPathInside } = require('../utils/security-boundaries.cjs');
+
+function assertKnownServerPath(serverPath) {
+  if (typeof serverPath !== 'string' || !serverPath.trim()) {
+    throw new Error('Server path is required');
+  }
+  const resolvedPath = path.resolve(serverPath);
+  const instances = Array.isArray(appStore.get('instances')) ? appStore.get('instances') : [];
+  const isKnown = instances.some((instance) =>
+    instance
+    && instance.type === 'server'
+    && typeof instance.path === 'string'
+    && isPathInside(resolvedPath, path.resolve(instance.path))
+    && isPathInside(path.resolve(instance.path), resolvedPath)
+  );
+  if (!isKnown) {
+    throw new Error('Server path is not a known server instance');
+  }
+  return resolvedPath;
+}
 
 /**
  * Create server properties IPC handlers
@@ -9,9 +30,7 @@ function createServerPropertiesHandlers() {
   return {
     'read-server-properties': async (_e, serverPath) => {
       try {
-        if (!serverPath) {
-          return { success: false, error: 'Server path is required' };
-        }
+        serverPath = assertKnownServerPath(serverPath);
         
         const propertiesFilePath = path.join(serverPath, 'server.properties');
         const backupFilePath = path.join(serverPath, 'server.properties.default');
@@ -42,9 +61,7 @@ function createServerPropertiesHandlers() {
     
     'write-server-properties': async (_e, { serverPath, properties }) => {
       try {
-        if (!serverPath) {
-          return { success: false, error: 'Server path is required' };
-        }
+        serverPath = assertKnownServerPath(serverPath);
         
         if (!properties || typeof properties !== 'object') {
           return { success: false, error: 'Invalid properties object' };
@@ -72,9 +89,7 @@ function createServerPropertiesHandlers() {
     
     'generate-server-properties': async (_e, serverPath) => {
       try {
-        if (!serverPath) {
-          return { success: false, error: 'Server path is required' };
-        }
+        serverPath = assertKnownServerPath(serverPath);
         
         const propertiesFilePath = path.join(serverPath, 'server.properties');
         
@@ -99,9 +114,7 @@ function createServerPropertiesHandlers() {
 
     'restore-backup-properties': async (_e, serverPath) => {
       try {
-        if (!serverPath) {
-          return { success: false, error: 'Server path is required' };
-        }
+        serverPath = assertKnownServerPath(serverPath);
         const propertiesFilePath = path.join(serverPath, 'server.properties');
         const backupFilePath = path.join(serverPath, 'server.properties.default');
         // Check if backup exists

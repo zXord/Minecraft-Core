@@ -24,6 +24,7 @@ import {
 import { minecraftVersion } from '../stores/modStore.js';
 import { safeInvoke } from './ipcUtils.js';
 import { buildAuthHeaders, ensureSessionToken, getManagementBaseUrl, resolveManagementUrl } from './managementAuth.js';
+import logger from './logger.js';
 
 interface Instance {
   serverIp?: string;
@@ -75,8 +76,7 @@ export async function loadInstalledInfo(instance: Instance) {
     }
   } catch (err: any) {
     // Log error but continue - mod enrichment is not critical
-    const logger = await import('./logger.js');
-    logger.default.error('Failed to enrich installed mod information', {
+    logger.error('Failed to enrich installed mod information', {
       category: 'mods',
       data: {
         error: err.message,
@@ -208,8 +208,7 @@ export async function checkModSynchronization(instance: Instance) {
         }
       } catch (error: any) {
         // Log error but continue - mod synchronization update is not critical
-        const logger = await import('./logger.js');
-        logger.default.debug('Failed to update mod synchronization state', {
+        logger.debug('Failed to update mod synchronization state', {
           category: 'mods',
           data: {
             error: error.message,

@@ -1,5 +1,5 @@
 <script>
-  import { clientState } from '../../stores/clientStore.js';
+  import { clientState, setAppVersions } from '../../stores/clientStore.js';
   import { showDownloads } from '../../stores/modStore.js';
   import { toast } from 'svelte-sonner';
   import { onMount } from 'svelte';
@@ -48,6 +48,7 @@
   // State for specific version downloads
   let specificVersionDownload = {
     isDownloading: false,
+    isInstalling: false,
     isComplete: false,
     progress: 0,
     downloadedBytes: 0,
@@ -58,6 +59,8 @@
     filePath: null,
     error: null
   };
+  let stagedVersionHydrationPending =
+    typeof window !== 'undefined' && !!window.electron?.invoke;
   
   // Debug terminal toggle setting
   let showDebugTerminal = false;
@@ -76,6 +79,7 @@
   $: canLaunchMinecraft =
     clientSyncStatus === 'ready' &&
     downloadStatus === 'ready' &&
+    !stagedVersionHydrationPending &&
     $clientState.appVersionCompatible;
 
   $: isCheckingMods =
@@ -124,6 +128,7 @@
       // Reset download state
       specificVersionDownload = {
         isDownloading: false,
+        isInstalling: false,
         isComplete: false,
         progress: 0,
         downloadedBytes: 0,
@@ -163,7 +168,7 @@
           });
         }
         
-        // Trigger download of specific version
+        // Trigger download; installation only starts after the user confirms it.
         const downloadResult = await window.electron.invoke('download-specific-version', serverVersion);
         
         if (!downloadResult.success) {
@@ -171,6 +176,20 @@
           specificVersionDownload.error = downloadResult.error || 'Download failed';
           specificVersionDownload = { ...specificVersionDownload };
           throw new Error(downloadResult.error || 'Download failed');
+        } else if (downloadResult.installStarted) {
+          specificVersionDownload.isDownloading = false;
+          specificVersionDownload.isInstalling = true;
+          specificVersionDownload.isComplete = false;
+          specificVersionDownload.filePath = downloadResult.filePath;
+          specificVersionDownload.progress = 100;
+          specificVersionDownload = { ...specificVersionDownload };
+
+          if (typeof window !== 'undefined' && typeof toast !== 'undefined') {
+            toast.info('Installing Update', {
+              description: 'The installer will show progress and reopen the app when it finishes.',
+              duration: 8000
+            });
+          }
         } else if (downloadResult.needsManualInstall) {
           // Show success message for manual download
           specificVersionDownload.isDownloading = false;
@@ -242,8 +261,8 @@
       const result = await window.electron.invoke('install-specific-version', specificVersionDownload.filePath);
       
       if (result.success) {
-        toast.success('Installation Started', {
-          description: 'The installer will open shortly. Please follow the installation instructions.',
+        toast.info('Installing Update', {
+          description: 'The installer will show progress and reopen the app when it finishes.',
           duration: 10000
         });
       } else {
@@ -254,6 +273,49 @@
         description: error.message,
         duration: 8000
       });
+    }
+  }
+
+  async function hydrateStagedSpecificVersionDownload() {
+    try {
+      if (typeof window === 'undefined' || !window.electron?.invoke) {
+        return;
+      }
+
+      const staged = await window.electron.invoke('get-staged-specific-version-update');
+      if (!staged?.success || !staged.staged || !staged.filePath) {
+        return;
+      }
+
+      const size = staged.size || 0;
+      specificVersionDownload = {
+        isDownloading: false,
+        isInstalling: false,
+        isComplete: true,
+        progress: 100,
+        downloadedBytes: size,
+        totalBytes: size,
+        downloadedMB: size ? size / 1024 / 1024 : 0,
+        totalMB: size ? size / 1024 / 1024 : 0,
+        version: staged.serverVersion || staged.version,
+        filePath: staged.filePath,
+        error: null
+      };
+
+      if (staged.clientVersion && staged.serverVersion) {
+        setAppVersions(staged.clientVersion, staged.serverVersion);
+      }
+
+      if (typeof toast !== 'undefined') {
+        toast.success('Update Ready to Install', {
+          description: `Version ${staged.serverVersion || staged.version} is staged for install testing.`,
+          duration: 8000
+        });
+      }
+    } catch {
+      // Staging is only a development test helper. Ignore missing channels in normal app usage.
+    } finally {
+      stagedVersionHydrationPending = false;
     }
   }
 
@@ -277,6 +339,8 @@
     let completeHandler;
     let errorHandler;
     if (typeof window !== 'undefined' && window.electron) {
+      hydrateStagedSpecificVersionDownload();
+
       progressHandler = (progress) => {
         specificVersionDownload.progress = progress.progress || 0;
         specificVersionDownload.downloadedBytes = progress.downloadedSize || specificVersionDownload.downloadedBytes || 0;
@@ -296,17 +360,25 @@
       
       completeHandler = (info) => {
         specificVersionDownload.isDownloading = false;
-        specificVersionDownload.isComplete = true;
+        specificVersionDownload.isInstalling = info.installStarted === true;
+        specificVersionDownload.isComplete = info.installStarted !== true;
         specificVersionDownload.filePath = info.filePath;
         specificVersionDownload.downloadedBytes = specificVersionDownload.totalBytes || specificVersionDownload.downloadedBytes;
         specificVersionDownload.downloadedMB = specificVersionDownload.totalMB || specificVersionDownload.downloadedMB;
         specificVersionDownload.progress = 100;
         specificVersionDownload = { ...specificVersionDownload };
         
-        toast.success('Download Complete!', {
-          description: `Version ${info.version} is ready to install. Install button should appear now.`,
-          duration: 10000
-        });
+        if (info.installStarted) {
+          toast.info('Installing Update', {
+            description: 'The installer will show progress and reopen the app when it finishes.',
+            duration: 8000
+          });
+        } else {
+          toast.success('Download Complete!', {
+            description: `Version ${info.version} is ready to install.`,
+            duration: 10000
+          });
+        }
       };
       window.electron.on('specific-version-download-complete', completeHandler);
       
@@ -416,12 +488,15 @@
               <div class="ready-header">
                 <h2 class="status-header {
                   !$clientState.appVersionCompatible && $clientState.appVersionMismatch ? 'needs-update' :
+                  stagedVersionHydrationPending ? 'waiting' :
                   clientSyncStatus !== 'ready' ? 'needs-client' :
                   isCheckingMods || isDownloadingMods ? 'waiting' :
                   downloadStatus !== 'ready' ? 'needs-mods' : 'ready'
                 }">
                   {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
                     🔄 App Update Required
+                  {:else if stagedVersionHydrationPending}
+                    ⏳ Checking App Update...
                   {:else if clientSyncStatus !== 'ready'}
                     📥 Client Download Required
                   {:else if isCheckingMods}
@@ -988,6 +1063,8 @@
                     <button class="play-button-main disabled" disabled>
                       {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
                         🔄 UPDATE REQUIRED
+                      {:else if stagedVersionHydrationPending}
+                        ⏳ CHECKING APP UPDATE...
                       {:else if clientSyncStatus !== 'ready'}
                         📥 DOWNLOAD CLIENT FIRST
                       {:else if isCheckingMods}
@@ -1000,7 +1077,11 @@
                         🎮 PLAY MINECRAFT
                       {/if}
                     </button>
-                    {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
+                    {#if stagedVersionHydrationPending}
+                      <div class="status-message">
+                        Checking app update state before launch.
+                      </div>
+                    {:else if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
                       <div class="status-message version-mismatch">
                         <div class="version-warning">
                           ⚠️ <strong>App Version Mismatch</strong>
@@ -1030,6 +1111,15 @@
                                   {/if}
                                 </span>
                               </div>
+                            </div>
+                          </div>
+                        {:else if specificVersionDownload.isInstalling}
+                          <div class="version-download-complete">
+                            <div class="completion-message">
+                              🔄 <strong>Installing Update</strong>
+                            </div>
+                            <div class="completion-details">
+                              The installer will show progress and reopen the app when version {specificVersionDownload.version} finishes installing.
                             </div>
                           </div>
                         {:else if specificVersionDownload.isComplete}

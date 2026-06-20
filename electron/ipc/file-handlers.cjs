@@ -11,8 +11,57 @@ const {
 } = require('../utils/config-manager.cjs');
 const { createZip } = require('../utils/backup-util.cjs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
+const { isPathInside } = require('../utils/security-boundaries.cjs');
 
 const logger = getLoggerHandlers();
+const ALLOWED_CHECKSUM_ALGORITHMS = new Set(['sha1', 'sha256', 'sha512', 'md5']);
+const ALLOWED_CHECKSUM_FILE_SUFFIXES = ['.jar', '.jar.disabled', '.zip', '.json'];
+
+function normalizeChecksumAlgorithm(algorithm) {
+  const normalized = String(algorithm || 'sha1').trim().toLowerCase();
+  if (!ALLOWED_CHECKSUM_ALGORITHMS.has(normalized)) {
+    throw new Error(`Unsupported algorithm: ${algorithm}. Supported: ${Array.from(ALLOWED_CHECKSUM_ALGORITHMS).join(', ')}`);
+  }
+  return normalized;
+}
+
+function getKnownInstanceRoots() {
+  const roots = new Set();
+  const instances = Array.isArray(appStore.get('instances')) ? appStore.get('instances') : [];
+  for (const instance of instances) {
+    if (instance && typeof instance.path === 'string' && instance.path.trim()) {
+      roots.add(path.resolve(instance.path));
+    }
+  }
+
+  for (const key of ['lastServerPath', 'lastClientPath']) {
+    const value = appStore.get(key);
+    if (typeof value === 'string' && value.trim()) {
+      roots.add(path.resolve(value));
+    }
+  }
+
+  return Array.from(roots);
+}
+
+function assertAllowedChecksumPath(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    throw new Error('File path is required');
+  }
+
+  const resolvedPath = path.resolve(filePath);
+  const lowerPath = resolvedPath.toLowerCase();
+  if (!ALLOWED_CHECKSUM_FILE_SUFFIXES.some((suffix) => lowerPath.endsWith(suffix))) {
+    throw new Error('Checksum file type is not allowed');
+  }
+
+  const roots = getKnownInstanceRoots();
+  if (!roots.some((root) => isPathInside(resolvedPath, root))) {
+    throw new Error('Checksum file path is outside known instance folders');
+  }
+
+  return resolvedPath;
+}
 
 function getPortableServerConfigDefaults(serverPath = '') {
   const instances = appStore.get('instances') || [];
@@ -68,33 +117,25 @@ function getPortableServerConfigDefaults(serverPath = '') {
 async function calculateFileChecksum(filePath, algorithm = 'sha1') {
   const crypto = require('crypto');
   const startTime = Date.now();
+  const safeFilePath = assertAllowedChecksumPath(filePath);
+  const safeAlgorithm = normalizeChecksumAlgorithm(algorithm);
   
   logger.debug('Starting file checksum calculation', {
     category: 'storage',
     data: {
       function: 'calculateFileChecksum',
-      filePath,
-      algorithm
+      filePath: safeFilePath,
+      algorithm: safeAlgorithm
     }
   });
 
   try {
-    if (!filePath) {
-      throw new Error('File path is required');
+    if (!fs.existsSync(safeFilePath)) {
+      throw new Error(`File does not exist: ${safeFilePath}`);
     }
 
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`File does not exist: ${filePath}`);
-    }
-
-    // Validate algorithm
-    const supportedAlgorithms = ['sha1', 'sha256', 'md5'];
-    if (!supportedAlgorithms.includes(algorithm.toLowerCase())) {
-      throw new Error(`Unsupported algorithm: ${algorithm}. Supported: ${supportedAlgorithms.join(', ')}`);
-    }
-
-    const hash = crypto.createHash(algorithm);
-    const stream = fs.createReadStream(filePath);
+    const hash = crypto.createHash(safeAlgorithm);
+    const stream = fs.createReadStream(safeFilePath);
 
     return new Promise((resolve, reject) => {
       stream.on('error', (error) => {
@@ -103,8 +144,8 @@ async function calculateFileChecksum(filePath, algorithm = 'sha1') {
           category: 'storage',
           data: {
             function: 'calculateFileChecksum',
-            filePath,
-            algorithm,
+            filePath: safeFilePath,
+            algorithm: safeAlgorithm,
             duration,
             errorType: error.constructor.name
           }
@@ -124,8 +165,8 @@ async function calculateFileChecksum(filePath, algorithm = 'sha1') {
           category: 'performance',
           data: {
             function: 'calculateFileChecksum',
-            filePath,
-            algorithm,
+            filePath: safeFilePath,
+            algorithm: safeAlgorithm,
             checksumLength: checksum.length,
             duration,
             success: true
@@ -141,8 +182,8 @@ async function calculateFileChecksum(filePath, algorithm = 'sha1') {
       category: 'storage',
       data: {
         function: 'calculateFileChecksum',
-        filePath,
-        algorithm,
+        filePath: safeFilePath,
+        algorithm: safeAlgorithm,
         duration,
         errorType: error.constructor.name
       }

@@ -118,12 +118,16 @@ function scheduleAutoRestart(restartInfo) {
         safeSend('server-log', `[INFO] Auto-restarting server at ${targetPathToRestart} with port ${portToRestart} and RAM ${maxRamToRestart}GB`);
         
         setTimeout(() => {
-          eventBus.emit('request-server-start', {
+          const requestAccepted = eventBus.emit('request-server-start', {
             targetPath: targetPathToRestart,
             port: portToRestart,
             maxRam: maxRamToRestart
           });
-          safeSend('server-log', `[INFO] Auto-restart request sent`);
+          if (requestAccepted) {
+            safeSend('server-log', `[INFO] Auto-restart request sent`);
+          } else {
+            safeSend('server-log', `[ERROR] Auto-restart failed: no server start handler is registered`);
+          }
         }, 2000);
       } else {
         safeSend('server-log', `[ERROR] Cannot auto-restart: invalid server path ${targetPathToRestart}`);

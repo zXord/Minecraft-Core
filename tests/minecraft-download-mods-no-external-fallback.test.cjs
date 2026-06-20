@@ -136,6 +136,7 @@ test('server download mode does not fall back to Modrinth when server downloads 
     await withMinecraftHandlers({ appStoreData, utils }, async (handlers, root) => {
       const clientPath = path.join(root, 'client');
       await fsp.mkdir(path.join(clientPath, 'mods'), { recursive: true });
+      appStoreData.instances = [{ id: 'client-test', type: 'client', path: clientPath }];
       appStoreData.instanceConfigs[clientPath] = {
         downloadPreferences: {
           primarySource: 'server',
@@ -201,6 +202,7 @@ test('explicit Modrinth retry is the only path that contacts Modrinth after serv
     await withMinecraftHandlers({ appStoreData, utils }, async (handlers, root) => {
       const clientPath = path.join(root, 'client');
       await fsp.mkdir(path.join(clientPath, 'mods'), { recursive: true });
+      appStoreData.instances = [{ id: 'client-test', type: 'client', path: clientPath }];
       appStoreData.instanceConfigs[clientPath] = {
         downloadPreferences: {
           primarySource: 'server',
@@ -268,6 +270,7 @@ test('Modrinth download mode does not fall back to server when Modrinth fails', 
     await withMinecraftHandlers({ appStoreData, utils }, async (handlers, root) => {
       const clientPath = path.join(root, 'client');
       await fsp.mkdir(path.join(clientPath, 'mods'), { recursive: true });
+      appStoreData.instances = [{ id: 'client-test', type: 'client', path: clientPath }];
       appStoreData.instanceConfigs[clientPath] = {
         downloadPreferences: {
           primarySource: 'modrinth',

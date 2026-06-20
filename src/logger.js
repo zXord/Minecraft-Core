@@ -2,15 +2,18 @@ import { mount } from 'svelte';
 import LoggerWindow from './components/logger/LoggerWindow.svelte';
 import './app.css';
 
-// Mount the Logger Window component
-const app = mount(LoggerWindow, {
-  target: document.getElementById('logger-root')
-});
+const loggerRoot = document.getElementById('logger-root');
+let app = null;
 
-// Store reference for potential cleanup
-if (typeof window !== 'undefined') {
+if (loggerRoot) {
+  app = mount(LoggerWindow, {
+    target: loggerRoot
+  });
+}
+
+if (typeof window !== 'undefined' && app) {
   // @ts-ignore
   window.loggerApp = app;
 }
 
-export default app; 
+export default app;

@@ -1867,11 +1867,7 @@ function createSettingsHandlers() {
         const configFile = path.join(clientPath, 'client-config.json');
         let existingConfig = {};
         if (fs.existsSync(configFile)) {
-          try {
-            existingConfig = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-          } catch {
-            existingConfig = {};
-          }
+          existingConfig = readClientConfig(clientPath) || {};
         }
         const resolvedPort = serverPort || '8080';
         const storedToken = typeof sessionToken === 'string' && sessionToken.trim()
@@ -1931,7 +1927,13 @@ function createSettingsHandlers() {
           }
         });
         
-        await fsPromises.writeFile(configFile, JSON.stringify(config, null, 2));
+        ensureEncryptionAvailable();
+        const configForDisk = {
+          ...config,
+          ...(config.sessionToken ? { sessionToken: packSecret(config.sessionToken) } : {}),
+          ...(config.inviteSecret ? { inviteSecret: packSecret(config.inviteSecret) } : {})
+        };
+        await fsPromises.writeFile(configFile, JSON.stringify(configForDisk, null, 2));
 
         logger.info('Client configuration file saved successfully', {
           category: 'settings',

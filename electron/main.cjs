@@ -9,6 +9,7 @@ const { ensureConfigFile } = require('./utils/config-manager.cjs');
 const { shouldAllowNavigation } = require('./utils/navigation-policy.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const { getTlsFingerprint, normalizeFingerprint } = require('./utils/tls-utils.cjs');
+const { shouldUseDevServer } = require('./utils/runtime-mode.cjs');
 const fs = require('fs');
 const { getUpdateService } = require('./services/update-service.cjs');
 const devConfig = require('../config/dev-config.cjs');
@@ -36,6 +37,55 @@ try {
   });
 } catch {
   // Failed to initialize logger service
+}
+
+function describeStartupError(error) {
+  if (!error) {
+    return {
+      errorType: 'Unknown',
+      errorMessage: 'Unknown startup error',
+      stack: ''
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      errorType: error.constructor?.name || 'Error',
+      errorMessage: error.message || 'Unknown startup error',
+      stack: error.stack || ''
+    };
+  }
+
+  return {
+    errorType: typeof error,
+    errorMessage: String(error),
+    stack: ''
+  };
+}
+
+function logStartupError(message, error) {
+  const details = describeStartupError(error);
+  try {
+    console.error(`[Minecraft Core] ${message}: ${details.errorMessage}`, details.stack || details);
+  } catch {
+    // ignore console logging failures
+  }
+
+  try {
+    if (logger) {
+      logger.fatal(message, {
+        category: 'core',
+        data: {
+          errorType: details.errorType,
+          errorMessage: details.errorMessage,
+          forceLog: true
+        },
+        stack: details.stack
+      });
+    }
+  } catch {
+    // ignore logger failures while reporting startup failures
+  }
 }
 
 // Utility function to open folders directly using child_process
@@ -184,6 +234,10 @@ async function openFolderDirectly(folderPath) {
 function openExternalSafely(targetUrl) {
   try {
     if (targetUrl) {
+      const parsed = new URL(targetUrl);
+      if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
+        return;
+      }
       shell.openExternal(targetUrl);
     }
   } catch {
@@ -426,7 +480,10 @@ function setupCertificateVerification() {
 function isAllowedWindowNavigation(contents, targetUrl) {
   const browserWindow = BrowserWindow.fromWebContents(contents);
   const isMainWindow = Boolean(browserWindow && win && browserWindow.id === win.id);
-  return shouldAllowNavigation(targetUrl, { isMainWindow });
+  const allowedFilePaths = isMainWindow
+    ? [path.join(__dirname, '..', 'dist', 'index.html')]
+    : [];
+  return shouldAllowNavigation(targetUrl, { isMainWindow, allowedFilePaths });
 }
 
 app.on('web-contents-created', (_event, contents) => {
@@ -1108,10 +1165,12 @@ function createWindow() {
     }
   }
   
-  // Load the app - check if in development mode
-  // If running from source (npm run dev), always try dev server first
-  // If running from built app, only use dev server if enabled in config
-  const isDev = !app.isPackaged || devConfig.enableDevServer;
+  const isDev = shouldUseDevServer({
+    isPackaged: app.isPackaged,
+    enableDevServer: devConfig.enableDevServer,
+    lifecycleEvent: process.env.npm_lifecycle_event || '',
+    forceDevServer: process.env.MINECRAFT_CORE_USE_DEV_SERVER === '1'
+  });
   
   if (logger) {
     logger.info('Loading application content', {
@@ -1119,7 +1178,8 @@ function createWindow() {
       data: {
         isDev,
         isPackaged: app.isPackaged,
-        enableDevServer: devConfig.enableDevServer
+        enableDevServer: devConfig.enableDevServer,
+        lifecycleEvent: process.env.npm_lifecycle_event || ''
       }
     });
   }
@@ -1447,6 +1507,8 @@ app.whenReady().then(() => {
   
   // Setup cleanup handlers
   setupAppCleanup(app, win);
+}).catch((error) => {
+  logStartupError('Application startup failed before main window could load', error);
 });
 
 // Quit when all windows are closed (except on macOS)

@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
 const { resolveServerLoader } = require('./server-loader.cjs');
+const { unpackSecret } = require('./secure-store.cjs');
 
 const SERVER_CONFIG_FILENAME = '.minecraft-core.json';
 const CLIENT_CONFIG_FILENAME = 'client-config.json';
@@ -526,11 +527,33 @@ function normalizeClientConfig(config = {}) {
     lastConnected: typeof config.lastConnected === 'string' ? config.lastConnected : ''
   };
 
-  if (typeof config.sessionToken === 'string' && config.sessionToken.trim()) {
-    normalized.sessionToken = config.sessionToken.trim();
+  const unpackClientSecret = (value, fieldName) => {
+    if (typeof value !== 'string' || !value.trim()) {
+      return '';
+    }
+    try {
+      return unpackSecret(value).trim();
+    } catch (error) {
+      getLogger().warn('Failed to decrypt client config secret', {
+        category: 'settings',
+        data: {
+          function: 'normalizeClientConfig',
+          fieldName,
+          errorType: error.constructor.name,
+          errorMessage: error.message
+        }
+      });
+      return '';
+    }
+  };
+
+  const sessionToken = unpackClientSecret(config.sessionToken, 'sessionToken');
+  const inviteSecret = unpackClientSecret(config.inviteSecret, 'inviteSecret');
+  if (sessionToken) {
+    normalized.sessionToken = sessionToken;
   }
-  if (typeof config.inviteSecret === 'string' && config.inviteSecret.trim()) {
-    normalized.inviteSecret = config.inviteSecret.trim();
+  if (inviteSecret) {
+    normalized.inviteSecret = inviteSecret;
   }
   if (typeof config.managementCertFingerprint === 'string' && config.managementCertFingerprint.trim()) {
     normalized.managementCertFingerprint = config.managementCertFingerprint.trim();

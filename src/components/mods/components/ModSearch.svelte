@@ -34,7 +34,6 @@
   import {
     searchContent,
     fetchModVersions,
-    checkForUpdates,
     findInstalledContentEntry,
     matchesInstalledContent,
   } from "../../../utils/mods/modAPI.js";
@@ -209,10 +208,6 @@
 
     if ($searchKeyword) {
       await handleSearch(null);
-    }
-
-    if (serverPath && !$isCheckingUpdates && $autoUpdateChecksEnabled) {
-      await checkForUpdates(serverPath);
     }
   }
 

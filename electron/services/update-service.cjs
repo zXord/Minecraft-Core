@@ -2,9 +2,17 @@ const { autoUpdater } = require('electron-updater');
 const { EventEmitter } = require('events');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const { spawn } = require('child_process');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { app } = require('electron');
 const { getAppCacheDir } = require('electron-updater/out/AppAdapter');
+const {
+  assertSafeRemoteUrl,
+  resolveSafeRedirectUrl,
+  safeBaseName,
+  safeFilePath
+} = require('../utils/security-boundaries.cjs');
 let devConfig = {};
 try {
   // Optional dev overrides for update behavior
@@ -65,6 +73,9 @@ class UpdateService extends EventEmitter {
     this.lastProgressTotal = null;
     this.lastProgressTransferred = null;
     this.lastProgressPercent = null;
+    this.specificVersionDownloads = new Map();
+    this.installAfterCurrentDownload = false;
+    this.stagedSpecificVersionInstallTest = null;
 
     this.setupLogger();
     this.setupAutoUpdater();
@@ -581,8 +592,23 @@ class UpdateService extends EventEmitter {
       this.activeDownloadAttemptId = null;
       this.emit('update-downloaded', info);
       
-      // Auto-install if enabled
-      if (this.autoInstallEnabled) {
+      // Auto-install user-started downloads with visible installer progress, unless a server is running.
+      if (this.autoInstallEnabled || this.installAfterCurrentDownload) {
+        const installCheck = this.canInstallUpdatesNow();
+        if (!installCheck.success) {
+          this.installAfterCurrentDownload = false;
+          this.logUpdate('warn', 'Auto-install skipped because a Minecraft server is running', {
+            version: info.version,
+            runningServers: installCheck.runningServers || []
+          });
+          this.emit('update-error', {
+            title: 'Cannot Install Update',
+            message: installCheck.error,
+            details: 'Stop the server and install the downloaded update again.'
+          });
+          return;
+        }
+
         this.quitAndInstall();
       }
     });
@@ -695,7 +721,8 @@ class UpdateService extends EventEmitter {
   }
 
   // Start downloading the update
-  async downloadUpdate() {
+  async downloadUpdate(options = {}) {
+    const installAfterDownload = options?.installAfterDownload === true;
     const previousDisableDifferential = autoUpdater.disableDifferentialDownload;
     let appliedDifferentialOverride = false;
     try {
@@ -715,6 +742,7 @@ class UpdateService extends EventEmitter {
         this.lastProgressPercent = null;
         this.lastProgressTransferred = null;
       }
+      this.installAfterCurrentDownload = installAfterDownload;
       if (!autoUpdater.disableDifferentialDownload) {
         const shouldDisable = await this.shouldDisableDifferentialDownload();
         if (shouldDisable) {
@@ -730,7 +758,8 @@ class UpdateService extends EventEmitter {
         files: this.summarizeUpdateFiles(this.lastUpdateInfo?.files),
         alreadyDownloading,
         differentialDisabled: autoUpdater.disableDifferentialDownload,
-        differentialOverride: appliedDifferentialOverride
+        differentialOverride: appliedDifferentialOverride,
+        installAfterDownload
       });
       await autoUpdater.downloadUpdate();
       return { success: true, message: 'Download started' };
@@ -738,6 +767,7 @@ class UpdateService extends EventEmitter {
       const attemptId = this.activeDownloadAttemptId;
       this.isDownloadingUpdate = false;
       this.activeDownloadAttemptId = null;
+      this.installAfterCurrentDownload = false;
       this.logUpdate('error', 'Download failed', {
         message: error.message,
         downloadAttemptId: attemptId
@@ -752,6 +782,7 @@ class UpdateService extends EventEmitter {
 
   // Install the downloaded update
   quitAndInstall() {
+    this.installAfterCurrentDownload = false;
     autoUpdater.quitAndInstall(false, true);
   }
 
@@ -845,6 +876,609 @@ class UpdateService extends EventEmitter {
     }
   }
 
+  getSpecificVersionDownloadDir() {
+    return path.join(app.getPath('temp'), 'minecraft-core-updates');
+  }
+
+  getUpdateInstallTestEnvConfig() {
+    const sourceInstallerPath = process.env.MC_CORE_STAGE_UPDATE_INSTALLER || '';
+    if (!sourceInstallerPath) return null;
+
+    return {
+      sourceInstallerPath,
+      targetVersion: process.env.MC_CORE_STAGE_UPDATE_VERSION || null,
+      clientVersion: process.env.MC_CORE_STAGE_UPDATE_CLIENT_VERSION || null
+    };
+  }
+
+  parseVersionFromInstallerName(fileName) {
+    const name = path.basename(String(fileName || ''));
+    const match = name.match(/Minecraft-Core-Setup-(.+)\.exe$/i);
+    return match ? match[1] : null;
+  }
+
+  getStagedSpecificVersionInstallTestResult(record) {
+    if (!record) {
+      return { success: true, staged: false };
+    }
+
+    return {
+      success: true,
+      staged: true,
+      testMode: true,
+      version: record.version,
+      serverVersion: record.serverVersion || record.version,
+      clientVersion: record.clientVersion || null,
+      filePath: record.filePath,
+      fileName: record.fileName,
+      size: record.size,
+      checksumVerified: record.checksumVerified === true,
+      checksumAlgorithm: record.checksumAlgorithm || null,
+      checksumSource: record.checksumSource || null
+    };
+  }
+
+  async getStagedSpecificVersionInstallTest() {
+    if (
+      this.stagedSpecificVersionInstallTest?.filePath &&
+      fs.existsSync(this.stagedSpecificVersionInstallTest.filePath)
+    ) {
+      return this.getStagedSpecificVersionInstallTestResult(this.stagedSpecificVersionInstallTest);
+    }
+
+    const envConfig = this.getUpdateInstallTestEnvConfig();
+    if (!envConfig) {
+      return { success: true, staged: false };
+    }
+
+    return this.stageSpecificVersionInstallTest(envConfig);
+  }
+
+  async stageSpecificVersionInstallTest(options = {}) {
+    if (app.isPackaged) {
+      return {
+        success: false,
+        staged: false,
+        error: 'Update install test staging is only available while running from source.'
+      };
+    }
+
+    const sourceInstallerPath = typeof options.sourceInstallerPath === 'string'
+      ? options.sourceInstallerPath.trim()
+      : '';
+    if (!sourceInstallerPath) {
+      return { success: false, staged: false, error: 'Installer path is required' };
+    }
+
+    if (!fs.existsSync(sourceInstallerPath)) {
+      return {
+        success: false,
+        staged: false,
+        error: `Installer file not found at ${sourceInstallerPath}`
+      };
+    }
+
+    const realSourcePath = fs.realpathSync(sourceInstallerPath);
+    if (!this.isWindowsInstallerName(realSourcePath)) {
+      return {
+        success: false,
+        staged: false,
+        error: 'Installer file name is not a recognized Windows installer'
+      };
+    }
+
+    const sourceStats = fs.statSync(realSourcePath);
+    if (!sourceStats.isFile() || sourceStats.size <= 0) {
+      return { success: false, staged: false, error: 'Installer file is empty or corrupted' };
+    }
+
+    const fileName = safeBaseName(path.basename(realSourcePath), 'installer file name', {
+      allowedExtensions: ['.exe']
+    });
+    const tempDir = this.getSpecificVersionDownloadDir();
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+
+    const stagedFilePath = safeFilePath(tempDir, fileName, 'installer file name', {
+      allowedExtensions: ['.exe']
+    });
+    const realTargetPath = fs.existsSync(stagedFilePath)
+      ? fs.realpathSync(stagedFilePath)
+      : path.resolve(stagedFilePath);
+
+    if (realSourcePath !== realTargetPath) {
+      fs.copyFileSync(realSourcePath, stagedFilePath);
+    }
+
+    const targetVersion = options.targetVersion
+      || this.parseVersionFromInstallerName(fileName)
+      || this.getCurrentVersion();
+    const hash = await this.calculateFileHash(stagedFilePath, 'sha256', 'hex');
+    const verification = {
+      checksumVerified: true,
+      checksumAlgorithm: 'sha256',
+      checksumSource: 'local-dev-update-install-test',
+      checksumEncoding: 'hex',
+      expectedHash: hash,
+      actualHash: hash
+    };
+
+    const record = this.rememberSpecificVersionDownload(
+      stagedFilePath,
+      targetVersion,
+      verification
+    );
+    record.testMode = true;
+    record.serverVersion = targetVersion;
+    record.clientVersion = options.clientVersion || null;
+    this.stagedSpecificVersionInstallTest = record;
+
+    this.emit('specific-version-download-complete', {
+      version: targetVersion,
+      filePath: stagedFilePath,
+      success: true,
+      installStarted: false,
+      checksumVerified: true,
+      checksumAlgorithm: 'sha256',
+      checksumSource: 'local-dev-update-install-test',
+      testMode: true
+    });
+
+    this.logUpdate('info', 'Specific version install test staged', {
+      version: targetVersion,
+      fileName,
+      sourceInstallerPath: realSourcePath,
+      stagedFilePath
+    });
+
+    return this.getStagedSpecificVersionInstallTestResult(record);
+  }
+
+  getDownloadRecordKey(filePath) {
+    const resolvedPath = path.resolve(filePath);
+    return process.platform === 'win32' ? resolvedPath.toLowerCase() : resolvedPath;
+  }
+
+  isWindowsInstallerName(fileName) {
+    const name = path.basename(String(fileName || ''));
+    return /\.exe$/i.test(name) && /(setup|installer)/i.test(name);
+  }
+
+  findWindowsInstallerAsset(assets) {
+    if (!Array.isArray(assets)) return null;
+    return assets.find((asset) => this.isWindowsInstallerName(asset?.name)) || null;
+  }
+
+  async calculateFileHash(filePath, algorithm, encoding = 'hex') {
+    return new Promise((resolve, reject) => {
+      const hash = crypto.createHash(algorithm);
+      const stream = fs.createReadStream(filePath);
+
+      stream.on('error', reject);
+      stream.on('data', (chunk) => hash.update(chunk));
+      stream.on('end', () => {
+        try {
+          resolve(hash.digest(encoding));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  }
+
+  normalizeChecksumValue(value, encoding) {
+    const normalized = String(value || '').trim().replace(/^['"]|['"]$/g, '');
+    return encoding === 'hex' ? normalized.toLowerCase() : normalized;
+  }
+
+  parseAssetDigestChecksum(digest) {
+    if (typeof digest !== 'string') return null;
+
+    const match = digest.trim().match(/^(sha256|sha512):([a-fA-F0-9]+)$/i);
+    if (!match) return null;
+
+    const algorithm = match[1].toLowerCase();
+    const expectedLength = algorithm === 'sha256' ? 64 : 128;
+    const expectedHash = match[2].toLowerCase();
+    if (expectedHash.length !== expectedLength) return null;
+
+    return {
+      algorithm,
+      expectedHash,
+      encoding: 'hex',
+      source: 'github-asset-digest'
+    };
+  }
+
+  parseYamlScalar(value) {
+    let scalar = String(value || '').trim();
+    if ((scalar.startsWith('"') && scalar.endsWith('"')) || (scalar.startsWith("'") && scalar.endsWith("'"))) {
+      scalar = scalar.slice(1, -1);
+    }
+    return scalar;
+  }
+
+  getAssetFileName(value) {
+    const text = String(value || '').replace(/\\/g, '/');
+    try {
+      return path.basename(new URL(text).pathname);
+    } catch {
+      return path.basename(text);
+    }
+  }
+
+  parseLatestYmlSha512(ymlText, installerFileName) {
+    const targetFileName = path.basename(installerFileName).toLowerCase();
+    const lines = String(ymlText || '').split(/\r?\n/);
+    let topLevelPath = null;
+    let topLevelSha512 = null;
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+
+      const topPathMatch = line.match(/^path:\s*(.+)$/);
+      if (topPathMatch) {
+        topLevelPath = this.parseYamlScalar(topPathMatch[1]);
+      }
+
+      const topShaMatch = line.match(/^sha512:\s*(.+)$/);
+      if (topShaMatch) {
+        topLevelSha512 = this.parseYamlScalar(topShaMatch[1]);
+      }
+
+      const urlMatch = line.match(/^\s*(?:-\s*)?url:\s*(.+)$/);
+      if (!urlMatch) continue;
+
+      const urlValue = this.parseYamlScalar(urlMatch[1]);
+      if (this.getAssetFileName(urlValue).toLowerCase() !== targetFileName) continue;
+
+      for (let blockIndex = index + 1; blockIndex < lines.length; blockIndex += 1) {
+        if (/^\s*-\s*url:\s*/.test(lines[blockIndex])) break;
+
+        const shaMatch = lines[blockIndex].match(/^\s*sha512:\s*(.+)$/);
+        if (shaMatch) {
+          return {
+            algorithm: 'sha512',
+            expectedHash: this.parseYamlScalar(shaMatch[1]),
+            encoding: 'base64',
+            source: 'latest.yml'
+          };
+        }
+      }
+    }
+
+    if (
+      topLevelPath &&
+      topLevelSha512 &&
+      this.getAssetFileName(topLevelPath).toLowerCase() === targetFileName
+    ) {
+      return {
+        algorithm: 'sha512',
+        expectedHash: topLevelSha512,
+        encoding: 'base64',
+        source: 'latest.yml'
+      };
+    }
+
+    return null;
+  }
+
+  findSpecificVersionMetadataAsset(assets) {
+    if (!Array.isArray(assets)) return null;
+
+    const ymlAssets = assets.filter((asset) => /\.ya?ml$/i.test(asset?.name || ''));
+    return ymlAssets.find((asset) => /^latest\.ya?ml$/i.test(asset.name || '')) ||
+      ymlAssets.find((asset) => /latest/i.test(asset.name || '') && !/(mac|linux)/i.test(asset.name || '')) ||
+      null;
+  }
+
+  async fetchText(url) {
+    if (typeof fetch !== 'function') {
+      throw new Error('Fetch API is not available');
+    }
+
+    const safeUrl = assertSafeRemoteUrl(url, { allowedProtocols: ['https:'] });
+    const response = await fetch(safeUrl);
+    if (!response.ok) {
+      throw new Error(`Metadata download failed: ${response.status} ${response.statusText}`);
+    }
+    return response.text();
+  }
+
+  async resolveSpecificVersionChecksum(releaseInfo, windowsAsset) {
+    const digestChecksum = this.parseAssetDigestChecksum(windowsAsset?.digest);
+    if (digestChecksum) {
+      return { checksum: digestChecksum, warning: null };
+    }
+
+    const metadataAsset = this.findSpecificVersionMetadataAsset(releaseInfo?.assets);
+    if (!metadataAsset?.browser_download_url) {
+      return {
+        checksum: null,
+        warning: 'No checksum metadata was published for this installer'
+      };
+    }
+
+    try {
+      const latestYml = await this.fetchText(metadataAsset.browser_download_url);
+      const ymlChecksum = this.parseLatestYmlSha512(latestYml, windowsAsset.name);
+      if (ymlChecksum) {
+        return {
+          checksum: {
+            ...ymlChecksum,
+            source: metadataAsset.name || ymlChecksum.source
+          },
+          warning: null
+        };
+      }
+
+      return {
+        checksum: null,
+        warning: `Checksum metadata did not include ${windowsAsset.name}`
+      };
+    } catch (error) {
+      return {
+        checksum: null,
+        warning: `Unable to read checksum metadata: ${error.message}`
+      };
+    }
+  }
+
+  async verifySpecificVersionInstallerChecksum(filePath, checksumInfo) {
+    if (!checksumInfo) {
+      return {
+        success: false,
+        checksumVerified: false,
+        error: 'Installer checksum metadata is required before installing this version'
+      };
+    }
+
+    const encoding = checksumInfo.encoding || 'hex';
+    const actualHash = await this.calculateFileHash(filePath, checksumInfo.algorithm, encoding);
+    const actual = this.normalizeChecksumValue(actualHash, encoding);
+    const expected = this.normalizeChecksumValue(checksumInfo.expectedHash, encoding);
+
+    if (!expected || actual !== expected) {
+      return {
+        success: false,
+        checksumVerified: false,
+        checksumAlgorithm: checksumInfo.algorithm,
+        checksumSource: checksumInfo.source,
+        expectedHash: expected,
+        actualHash: actual,
+        error: 'Downloaded installer checksum did not match the published checksum'
+      };
+    }
+
+    return {
+      success: true,
+      checksumVerified: true,
+      checksumAlgorithm: checksumInfo.algorithm,
+      checksumSource: checksumInfo.source,
+      expectedHash: expected,
+      actualHash: actual,
+      checksumEncoding: encoding
+    };
+  }
+
+  rememberSpecificVersionDownload(filePath, targetVersion, verification, checksumWarning = null) {
+    const stats = fs.statSync(filePath);
+    const record = {
+      filePath: path.resolve(filePath),
+      fileName: path.basename(filePath),
+      version: targetVersion,
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+      downloadedAt: Date.now(),
+      checksumVerified: verification.checksumVerified === true,
+      checksumAlgorithm: verification.checksumAlgorithm || null,
+      checksumSource: verification.checksumSource || null,
+      checksumEncoding: verification.checksumEncoding || 'hex',
+      expectedHash: verification.expectedHash || null,
+      actualHash: verification.actualHash || null,
+      checksumWarning
+    };
+
+    this.specificVersionDownloads.set(this.getDownloadRecordKey(filePath), record);
+    return record;
+  }
+
+  removeFileIfExists(filePath) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch {
+      // Non-fatal cleanup best effort.
+    }
+  }
+
+  isPathInsideDirectory(childPath, parentDir) {
+    const relativePath = path.relative(parentDir, childPath);
+    return Boolean(relativePath) && !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
+  }
+
+  getRunningMinecraftServersForUpdateInstall() {
+    try {
+      const { getAllServerStates, getServerState } = require('./server-manager.cjs');
+      const allStates = typeof getAllServerStates === 'function' ? getAllServerStates() : [];
+      const states = Array.isArray(allStates) && allStates.length > 0
+        ? allStates
+        : [typeof getServerState === 'function' ? getServerState() : null];
+
+      return states
+        .filter((state) => state && state.isRunning)
+        .map((state) => ({
+          instanceId: state.instanceId || null,
+          targetPath: state.targetPath || null,
+          status: state.status || 'running'
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  canInstallUpdatesNow() {
+    const runningServers = this.getRunningMinecraftServersForUpdateInstall();
+    if (runningServers.length > 0) {
+      return {
+        success: false,
+        error: 'Please stop the Minecraft server before installing the update to prevent data corruption.',
+        runningServers
+      };
+    }
+
+    return { success: true };
+  }
+
+  async validateSpecificVersionInstaller(filePath) {
+    try {
+      if (typeof filePath !== 'string' || filePath.trim() === '') {
+        return { success: false, error: 'Installer file path is required' };
+      }
+
+      const downloadDir = this.getSpecificVersionDownloadDir();
+      if (!fs.existsSync(downloadDir)) {
+        return { success: false, error: 'Installer download folder does not exist' };
+      }
+
+      if (!fs.existsSync(filePath)) {
+        return { success: false, error: `Installer file not found at ${filePath}` };
+      }
+
+      const realDownloadDir = fs.realpathSync(downloadDir);
+      const realFilePath = fs.realpathSync(filePath);
+      if (!this.isPathInsideDirectory(realFilePath, realDownloadDir)) {
+        return { success: false, error: 'Installer file is outside the updater download folder' };
+      }
+
+      if (!this.isWindowsInstallerName(realFilePath)) {
+        return { success: false, error: 'Installer file name is not a recognized Windows installer' };
+      }
+
+      const stats = fs.statSync(realFilePath);
+      if (!stats.isFile() || stats.size <= 0) {
+        return { success: false, error: 'Installer file is empty or corrupted' };
+      }
+
+      const record = this.specificVersionDownloads.get(this.getDownloadRecordKey(filePath));
+      if (!record) {
+        return { success: false, error: 'Installer was not downloaded by the updater in this app session' };
+      }
+
+      if (stats.size !== record.size) {
+        return { success: false, error: 'Installer file size changed after download' };
+      }
+
+      if (record.checksumVerified && record.expectedHash) {
+        const verification = await this.verifySpecificVersionInstallerChecksum(realFilePath, {
+          algorithm: record.checksumAlgorithm,
+          expectedHash: record.expectedHash,
+          encoding: record.checksumEncoding,
+          source: record.checksumSource
+        });
+
+        if (!verification.success) {
+          return {
+            success: false,
+            error: 'Installer checksum changed after download'
+          };
+        }
+      } else if (stats.mtimeMs !== record.mtimeMs) {
+        return { success: false, error: 'Installer file changed after download' };
+      }
+
+      return {
+        success: true,
+        filePath: realFilePath,
+        version: record.version,
+        checksumVerified: record.checksumVerified,
+        checksumAlgorithm: record.checksumAlgorithm,
+        checksumSource: record.checksumSource,
+        checksumWarning: record.checksumWarning
+      };
+    } catch (error) {
+      return { success: false, error: `Failed to validate installer: ${error.message}` };
+    }
+  }
+
+  buildSpecificVersionInstallerArgs(options = {}) {
+    const silent = options.silent === true;
+    const forceRunAfter = options.forceRunAfter !== false;
+    const args = ['--updated'];
+
+    if (silent) {
+      args.push('/S');
+    }
+
+    if (forceRunAfter) {
+      args.push('--force-run');
+    }
+
+    return { args, silent, forceRunAfter };
+  }
+
+  spawnSpecificVersionInstaller(installerPath, args) {
+    const child = spawn(installerPath, args, {
+      detached: true,
+      stdio: 'ignore'
+    });
+    child.unref();
+    return child;
+  }
+
+  requestAppQuitForSpecificVersionInstall() {
+    setImmediate(() => {
+      app.quit();
+    });
+  }
+
+  async installSpecificVersionInstaller(filePath, options = {}) {
+    const installCheck = this.canInstallUpdatesNow();
+    if (!installCheck.success) {
+      return installCheck;
+    }
+
+    const validation = await this.validateSpecificVersionInstaller(filePath);
+    if (!validation.success) {
+      return validation;
+    }
+
+    const { args, silent, forceRunAfter } = this.buildSpecificVersionInstallerArgs(options);
+
+    try {
+      this.spawnSpecificVersionInstaller(validation.filePath, args);
+      this.logUpdate('info', 'Specific version installer launched', {
+        version: validation.version,
+        fileName: path.basename(validation.filePath),
+        silent,
+        forceRunAfter,
+        checksumVerified: validation.checksumVerified
+      });
+      this.requestAppQuitForSpecificVersionInstall();
+
+      return {
+        success: true,
+        message: silent
+          ? 'Installing update silently. The app will close and reopen when the update finishes.'
+          : 'Installing update. The installer will show progress and reopen the app when it finishes.',
+        silent,
+        forceRunAfter,
+        version: validation.version
+      };
+    } catch (error) {
+      this.logUpdate('error', 'Failed to launch specific version installer', {
+        version: validation.version,
+        error: error.message
+      });
+      return {
+        success: false,
+        error: `Failed to launch installer: ${error.message}`
+      };
+    }
+  }
+
   // Check for a specific version (for server compatibility)
   async checkForSpecificVersion(targetVersion) {
     try {
@@ -932,8 +1566,10 @@ class UpdateService extends EventEmitter {
   }
 
   // Download a specific version from GitHub releases
-  async downloadSpecificVersion(targetVersion) {
+  async downloadSpecificVersion(targetVersion, options = {}) {
     try {
+      const installAfterDownload = options?.installAfterDownload === true;
+
       // Handle development mode
       if (this.isDevelopmentMode()) {
         return { 
@@ -984,10 +1620,7 @@ class UpdateService extends EventEmitter {
       }
 
       // Find the appropriate installer for Windows
-      const windowsAsset = releaseInfo.assets.find(asset => 
-        asset.name.includes('.exe') && 
-        (asset.name.includes('Setup') || asset.name.includes('setup') || asset.name.includes('installer'))
-      );
+      const windowsAsset = this.findWindowsInstallerAsset(releaseInfo.assets);
 
       if (!windowsAsset) {
         this.isDownloadingSpecificVersion = false; // Clear flag before returning
@@ -997,20 +1630,22 @@ class UpdateService extends EventEmitter {
         };
       }
 
-      // Download the file locally with progress tracking
-      const path = require('path');
-      const fs = require('fs');
-      const { app } = require('electron');
-      
       // Create temp directory for downloads
-      const tempDir = path.join(app.getPath('temp'), 'minecraft-core-updates');
+      const tempDir = this.getSpecificVersionDownloadDir();
       
       if (!fs.existsSync(tempDir)) {
         fs.mkdirSync(tempDir, { recursive: true });
       }
       
-      const fileName = windowsAsset.name;
-      let filePath = path.join(tempDir, fileName);
+      const fileName = safeBaseName(windowsAsset.name, 'installer asset name', {
+        allowedExtensions: ['.exe']
+      });
+      const filePath = safeFilePath(tempDir, fileName, 'installer asset name', {
+        allowedExtensions: ['.exe']
+      });
+      const safeDownloadUrl = assertSafeRemoteUrl(windowsAsset.browser_download_url, {
+        allowedProtocols: ['https:']
+      });
       
       // Check if file already exists and remove it to force fresh download
       if (fs.existsSync(filePath)) {
@@ -1021,6 +1656,8 @@ class UpdateService extends EventEmitter {
           // Non-fatal, as we'll overwrite it anyway.
         }
       }
+
+      const checksumResolution = await this.resolveSpecificVersionChecksum(releaseInfo, windowsAsset);
       
       // Emit initial progress to show download started
       this.emit('specific-version-download-progress', {
@@ -1033,22 +1670,93 @@ class UpdateService extends EventEmitter {
       });
       
       const downloadResult = await this.downloadFileWithProgress(
-        windowsAsset.browser_download_url, 
+        safeDownloadUrl,
         filePath, 
         targetVersion
       );
       
       if (downloadResult.success) {
-        // Note: completion event is already emitted by downloadFileWithProgress
+        const verification = await this.verifySpecificVersionInstallerChecksum(filePath, checksumResolution.checksum);
+        if (!verification.success) {
+          this.removeFileIfExists(filePath);
+          this.emit('specific-version-download-error', {
+            version: targetVersion,
+            error: verification.error || 'Installer checksum verification failed'
+          });
+
+          return {
+            success: false,
+            error: verification.error || 'Installer checksum verification failed',
+            checksumVerified: false,
+            checksumAlgorithm: verification.checksumAlgorithm || checksumResolution.checksum?.algorithm || null,
+            checksumSource: verification.checksumSource || checksumResolution.checksum?.source || null
+          };
+        }
+
+        this.rememberSpecificVersionDownload(
+          filePath,
+          targetVersion,
+          verification,
+          checksumResolution.warning
+        );
+
+        const completionInfo = {
+          version: targetVersion,
+          filePath: filePath,
+          success: true,
+          installStarted: installAfterDownload,
+          checksumVerified: verification.checksumVerified === true,
+          checksumAlgorithm: verification.checksumAlgorithm || null,
+          checksumSource: verification.checksumSource || null,
+          checksumWarning: checksumResolution.warning || null
+        };
+
+        this.emit('specific-version-download-complete', completionInfo);
+
+        let installResult = null;
+        if (installAfterDownload) {
+          installResult = await this.installSpecificVersionInstaller(filePath, {
+            silent: false,
+            forceRunAfter: true
+          });
+
+          if (!installResult.success) {
+            this.emit('specific-version-download-error', {
+              version: targetVersion,
+              error: installResult.error || 'Installer launch failed'
+            });
+
+            return {
+              success: false,
+              error: installResult.error || 'Installer launch failed',
+              filePath: filePath,
+              fileName: path.basename(filePath),
+              version: targetVersion,
+              downloadComplete: true,
+              installStarted: false,
+              checksumVerified: verification.checksumVerified === true,
+              checksumAlgorithm: verification.checksumAlgorithm || null,
+              checksumSource: verification.checksumSource || null,
+              checksumWarning: checksumResolution.warning || null
+            };
+          }
+        }
+
         return {
           success: true,
-          message: `Version ${targetVersion} downloaded successfully`,
+          message: installResult?.message || `Version ${targetVersion} downloaded successfully`,
           filePath: filePath,
           fileName: path.basename(filePath),
           version: targetVersion,
-          downloadComplete: true
+          downloadComplete: true,
+          installStarted: installResult?.success === true,
+          checksumVerified: verification.checksumVerified === true,
+          checksumAlgorithm: verification.checksumAlgorithm || null,
+          checksumSource: verification.checksumSource || null,
+          checksumWarning: checksumResolution.warning || null
         };
-              } else {
+
+      } else {
         this.emit('specific-version-download-error', {
           version: targetVersion,
           error: downloadResult.error || 'Download failed'
@@ -1076,12 +1784,21 @@ class UpdateService extends EventEmitter {
     try {
       const https = require('https');
       const fs = require('fs');
+      const safeUrl = assertSafeRemoteUrl(url, { allowedProtocols: ['https:'] });
 
       return new Promise((resolve, reject) => {
-        const request = https.get(url, (response) => {
+        const request = https.get(safeUrl, (response) => {
           // Handle redirects
           if (response.statusCode === 302 || response.statusCode === 301) {
-            const redirectUrl = response.headers.location;
+            let redirectUrl;
+            try {
+              redirectUrl = resolveSafeRedirectUrl(response.headers.location, safeUrl, {
+                allowedProtocols: ['https:']
+              });
+            } catch (error) {
+              reject(error);
+              return;
+            }
             return this.downloadFileWithProgress(redirectUrl, filePath, version)
               .then(resolve)
               .catch(reject);
@@ -1144,13 +1861,6 @@ class UpdateService extends EventEmitter {
               if (fs.existsSync(filePath)) {
                 const stats = fs.statSync(filePath);
                 if (stats.size > 0) {
-                  // Emit completion event
-                  this.emit('specific-version-download-complete', {
-                    version: version,
-                    filePath: filePath,
-                    success: true
-                  });
-                  
                   resolve({ success: true, filePath: filePath });
                 } else {
                   // File exists but is empty

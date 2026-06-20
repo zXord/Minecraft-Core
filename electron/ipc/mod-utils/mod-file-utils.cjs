@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { safeBaseName, safeFilePath } = require('../../utils/security-boundaries.cjs');
 
 /**
  * Disable a mod by renaming it with .disabled extension
@@ -9,12 +10,13 @@ const path = require('path');
  */
 async function disableMod(modsDir, fileName) {
   try {
-    const sourcePath = path.join(modsDir, fileName);
+    fileName = safeBaseName(fileName, 'file name', { allowedExtensions: ['.jar'] });
+    const sourcePath = safeFilePath(modsDir, fileName, 'file name', { allowedExtensions: ['.jar'] });
     
     if (!fs.existsSync(sourcePath)) {
       return false;
     }    // Rename the file with .disabled extension
-    const targetPath = path.join(modsDir, fileName + '.disabled');
+    const targetPath = safeFilePath(modsDir, `${fileName}.disabled`, 'file name', { allowedExtensions: ['.jar.disabled'] });
     
     // Check if target already exists
     if (fs.existsSync(targetPath)) {
@@ -37,13 +39,14 @@ async function disableMod(modsDir, fileName) {
  */
 async function enableMod(modsDir, fileName) {
   try {
-    const sourcePath = path.join(modsDir, fileName + '.disabled');
+    fileName = safeBaseName(fileName, 'file name', { allowedExtensions: ['.jar'] });
+    const sourcePath = safeFilePath(modsDir, `${fileName}.disabled`, 'file name', { allowedExtensions: ['.jar.disabled'] });
     
     if (!fs.existsSync(sourcePath)) {
       return false;
     }
 
-    const targetPath = path.join(modsDir, fileName);
+    const targetPath = safeFilePath(modsDir, fileName, 'file name', { allowedExtensions: ['.jar'] });
     
     // Check if target already exists
     if (fs.existsSync(targetPath)) {

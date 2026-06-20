@@ -2,12 +2,33 @@
 const path = require('path');
 const fs = require('fs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
+const appStore = require('../utils/app-store.cjs');
+const { isPathInside } = require('../utils/security-boundaries.cjs');
 
 // Keep track of player names associated with IPs
 const playerIpMap = new Map();
 
 // Initialize logger
 const logger = getLoggerHandlers();
+
+function assertKnownServerPath(serverPath) {
+  if (typeof serverPath !== 'string' || !serverPath.trim()) {
+    throw new Error('Invalid server path');
+  }
+  const resolvedPath = path.resolve(serverPath);
+  const instances = Array.isArray(appStore.get('instances')) ? appStore.get('instances') : [];
+  const isKnown = instances.some((instance) =>
+    instance
+    && instance.type === 'server'
+    && typeof instance.path === 'string'
+    && isPathInside(resolvedPath, path.resolve(instance.path))
+    && isPathInside(path.resolve(instance.path), resolvedPath)
+  );
+  if (!isKnown) {
+    throw new Error('Server path is not a known server instance');
+  }
+  return resolvedPath;
+}
 
 /**
  * Initialize the player-IP map from the persistent file
@@ -98,7 +119,8 @@ function createPlayerHandlers() {
           }
         });
 
-        if (!serverPath || !fs.existsSync(serverPath)) {
+        serverPath = assertKnownServerPath(serverPath);
+        if (!fs.existsSync(serverPath)) {
           logger.error('Failed to read players: invalid server path', {
             category: 'core',
             data: {
@@ -322,7 +344,8 @@ function createPlayerHandlers() {
     },
     
     'add-player': (_e, listName, serverPath, entry) => {
-        if (!serverPath || !fs.existsSync(serverPath)) {
+        serverPath = assertKnownServerPath(serverPath);
+        if (!fs.existsSync(serverPath)) {
           throw new Error('Invalid server path');
         }
         
@@ -428,7 +451,8 @@ function createPlayerHandlers() {
     },
     
     'add-player-with-details': (_e, listName, serverPath, detailsObj) => {
-        if (!serverPath || !fs.existsSync(serverPath)) {
+        serverPath = assertKnownServerPath(serverPath);
+        if (!fs.existsSync(serverPath)) {
           throw new Error('Invalid server path');
         }
         
@@ -495,7 +519,8 @@ function createPlayerHandlers() {
     
     'get-last-banned-player': (_e, serverPath) => {
       try {
-        if (!serverPath || !fs.existsSync(serverPath)) {
+        serverPath = assertKnownServerPath(serverPath);
+        if (!fs.existsSync(serverPath)) {
           return { lastBannedPlayer: null };
         }
         
@@ -579,7 +604,8 @@ function createPlayerHandlers() {
     },
     
     'remove-player': (_e, listName, serverPath, entry) => {
-        if (!serverPath || !fs.existsSync(serverPath)) {
+        serverPath = assertKnownServerPath(serverPath);
+        if (!fs.existsSync(serverPath)) {
           throw new Error('Invalid server path');
         }
         

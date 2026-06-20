@@ -48,6 +48,8 @@
 
   // Handle update available
   function handleUpdateAvailable(info) {
+    downloadNotificationShown = false;
+
     // Don't show popup notifications for client instances
     // Client version compatibility is handled in the Play tab
     if (isClientInstance()) {
@@ -109,6 +111,16 @@
     });
   }
 
+  function handleUpdateNotAvailable() {
+    updateStatus.isCheckingForUpdates = false;
+    updateStatus = { ...updateStatus };
+  }
+
+  function handleUpdateCheckingForUpdate() {
+    updateStatus.isCheckingForUpdates = true;
+    updateStatus = { ...updateStatus };
+  }
+
   // Download update
   async function downloadUpdate() {
     // Prevent multiple simultaneous downloads
@@ -161,7 +173,7 @@
       
       if (result.success) {
         toast.info('Installing Update', {
-          description: 'The app will restart to complete the installation',
+          description: 'The installer will show progress and reopen the app when it finishes.',
           duration: 5000
         });
       } else {
@@ -254,19 +266,8 @@
     window.electron.on('update-download-progress', handleDownloadProgress);
     window.electron.on('update-downloaded', handleUpdateDownloaded);
     window.electron.on('update-error', handleUpdateError);
-    window.electron.on('update-not-available', () => {
-      updateStatus.isCheckingForUpdates = false;
-      updateStatus = { ...updateStatus };
-    });
-    window.electron.on('update-checking-for-update', () => {
-      updateStatus.isCheckingForUpdates = true;
-      updateStatus = { ...updateStatus };
-    });
-    
-    // Reset notification flag when new update is available
-    window.electron.on('update-available', () => {
-      downloadNotificationShown = false;
-    });
+    window.electron.on('update-not-available', handleUpdateNotAvailable);
+    window.electron.on('update-checking-for-update', handleUpdateCheckingForUpdate);
   });
 
   onDestroy(() => {
@@ -275,8 +276,8 @@
     window.electron.removeListener('update-download-progress', handleDownloadProgress);
     window.electron.removeListener('update-downloaded', handleUpdateDownloaded);
     window.electron.removeListener('update-error', handleUpdateError);
-    window.electron.removeListener('update-not-available', () => {});
-    window.electron.removeListener('update-checking-for-update', () => {});
+    window.electron.removeListener('update-not-available', handleUpdateNotAvailable);
+    window.electron.removeListener('update-checking-for-update', handleUpdateCheckingForUpdate);
   });
 </script>
 
@@ -704,4 +705,4 @@
       </div>
     </div>
   </div>
-{/if} 
+{/if}

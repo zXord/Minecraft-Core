@@ -1,10 +1,14 @@
-<script>  import { onMount, onDestroy } from 'svelte';
+<script>
+  import { onMount, onDestroy } from 'svelte';
   
   import { SvelteSet } from 'svelte/reactivity';
   import { get } from 'svelte/store';
+  import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-svelte';
   import { serverState } from '../../stores/serverState.js';
   import { settingsStore, updateVersions } from '../../stores/settingsStore.js';
   import { safeInvoke } from '../../utils/ipcUtils.js';
+  import { clearModUpdateIndicators } from '../../utils/mods/modAPI.js';
+  import { getProjectPageAction, getProjectSource, getProjectSourceLabel, normalizeModrinthProjectDetails } from '../../utils/mods/modrinthProjectLinks.js';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { modAvailabilityWatchStore } from '../../stores/modAvailabilityWatchStore.js';
 
@@ -13,7 +17,16 @@
   let mcVersions = [];
   let fabricVersions = [];
   let selectedMC = null;
-  let selectedFabric = null;  let checking = false;
+  let selectedFabric = null;
+  let checking = false;
+  let compatibilityCheckProgress = {
+    active: false,
+    phase: 'idle',
+    current: 0,
+    total: 0,
+    percent: 0,
+    message: ''
+  };
   let targetJavaInfo = null;
   let targetJavaInfoLoading = false;
   let javaInfoRequestId = 0;
@@ -22,9 +35,12 @@
   let incompatibleMods = [];
   let compatibleMods = [];
   let modsWithUpdates = [];
-  let showUpdateConfirmation = false;  let updateProgress = 0;
+  let showUpdateConfirmation = false;
+  let createRestorePointBeforeUpdate = true;
+  let updateProgress = 0;
   let updateStatus = '';
-  let currentTask = '';  let totalSteps = 0;
+  let currentTask = '';
+  let totalSteps = 0;
   let currentStep = 0;
   let completedUpdates = []; // Track successful mod updates
   let updateSummary = null; // Complete summary of all changes
@@ -34,6 +50,10 @@
   let modWatchPrefs = { showWindowsNotifications: false, intervalHours: 12 };
   let teardownIpcListeners = () => {};
   let preflightBackupWarning = '';
+  let expandedModDetails = {};
+  let modDetailsLoading = {};
+  let modProjectDetails = {};
+  let modProjectDetailErrors = {};
   $: serverPathLocal = resolvedPath;
   $: if (serverPathLocal && !$modAvailabilityWatchStore.loaded) {
     modAvailabilityWatchStore.refresh(serverPathLocal);
@@ -74,6 +94,122 @@
     }
   }
   function formatDate(ts) { if (!ts) return '-'; try { return new Date(ts).toLocaleString(); } catch { return ts; } }
+
+  function modDetailKey(mod) {
+    return mod?.projectId || mod?.fileName || mod?.name || '';
+  }
+
+  function getModProjectIdentifier(mod) {
+    return mod?.projectId || mod?.modrinthId || mod?.curseforgeId || mod?.id || '';
+  }
+
+  function isModDetailsExpanded(mod, expandedState = expandedModDetails) {
+    const key = modDetailKey(mod);
+    return !!(key && expandedState[key]);
+  }
+
+  function isModDetailsLoading(mod, loadingState = modDetailsLoading) {
+    const key = modDetailKey(mod);
+    return !!(key && loadingState[key]);
+  }
+
+  function formatCompactNumber(value) {
+    const number = Number(value) || 0;
+    return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(number);
+  }
+
+  function formatSideSupport(value) {
+    if (!value) return 'unknown';
+    return String(value).replace(/_/g, ' ');
+  }
+
+  function canLoadProviderDetails(mod) {
+    return getProjectSource(mod) === 'modrinth' && !!(mod?.projectId || mod?.modrinthId);
+  }
+
+  function getModPageAction(mod, projectDetailsByKey = modProjectDetails) {
+    const key = modDetailKey(mod);
+    return getProjectPageAction(mod, projectDetailsByKey[key] || {});
+  }
+
+  function getModPageLabel(mod, projectDetailsByKey = modProjectDetails) {
+    return getModPageAction(mod, projectDetailsByKey)?.label || 'project page';
+  }
+
+  function hasModPageAction(mod, projectDetailsByKey = modProjectDetails) {
+    return !!getModPageAction(mod, projectDetailsByKey);
+  }
+
+  function getModProjectDetails(mod, projectDetailsByKey = modProjectDetails) {
+    return projectDetailsByKey[modDetailKey(mod)] || {};
+  }
+
+  function getModDetailError(mod, detailErrorsByKey = modProjectDetailErrors) {
+    return detailErrorsByKey[modDetailKey(mod)] || '';
+  }
+
+  function getModDetailsText(mod, details = {}) {
+    if (details.description) {
+      return details.description;
+    }
+
+    const sourceLabel = getProjectSourceLabel(mod, details);
+    if (canLoadProviderDetails(mod)) {
+      return `No ${sourceLabel} description is available for this project.`;
+    }
+
+    return `Installed from ${sourceLabel}. No provider description is available for this item, so only local file and version details are shown.`;
+  }
+
+  async function loadModDetails(mod) {
+    const key = modDetailKey(mod);
+    const projectId = mod?.projectId || mod?.modrinthId;
+    if (!key || !canLoadProviderDetails(mod) || modProjectDetails[key] || modDetailsLoading[key]) {
+      return;
+    }
+
+    modDetailsLoading = { ...modDetailsLoading, [key]: true };
+    modProjectDetailErrors = { ...modProjectDetailErrors, [key]: '' };
+
+    try {
+      const projectInfo = await safeInvoke('get-project-info', {
+        projectId,
+        source: 'modrinth'
+      });
+      modProjectDetails = {
+        ...modProjectDetails,
+        [key]: normalizeModrinthProjectDetails(projectInfo)
+      };
+    } catch (error) {
+      modProjectDetailErrors = {
+        ...modProjectDetailErrors,
+        [key]: error?.message || 'Could not load Modrinth details.'
+      };
+    } finally {
+      modDetailsLoading = { ...modDetailsLoading, [key]: false };
+    }
+  }
+
+  function toggleModDetails(mod) {
+    const key = modDetailKey(mod);
+    if (!key) return;
+
+    if (expandedModDetails[key]) {
+      const { [key]: _removed, ...remaining } = expandedModDetails;
+      expandedModDetails = remaining;
+      return;
+    }
+
+    expandedModDetails = { ...expandedModDetails, [key]: true };
+    void loadModDetails(mod);
+  }
+
+  async function openModPage(mod) {
+    const action = getModPageAction(mod);
+    if (!action?.url) return;
+
+    await safeInvoke('open-external-url', action.url);
+  }
 
   async function loadModWatchPrefs() {
     try {
@@ -145,6 +281,79 @@
     }
   }
 
+  function formatProgressBytes(bytes) {
+    const value = Number(bytes) || 0;
+    if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+    if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${value} B`;
+  }
+
+  function handleBackupProgress(data) {
+    if (!data || typeof data !== 'object' || data.trigger !== 'pre-update') return;
+    const percent = Number(data.percent);
+    if (Number.isFinite(percent)) {
+      updateProgress = Math.max(1, Math.min(100, Math.round(percent)));
+    }
+    currentTask = data.message || 'Creating restore point...';
+    if (data.processedBytes || data.totalBytes) {
+      updateStatus = data.totalBytes
+        ? `${formatProgressBytes(data.processedBytes)} of ${formatProgressBytes(data.totalBytes)}`
+        : `${formatProgressBytes(data.processedBytes)} processed`;
+    } else if (data.entriesProcessed || data.entriesTotal) {
+      updateStatus = `${data.entriesProcessed || 0}/${data.entriesTotal || 0} files`;
+    } else {
+      updateStatus = '';
+    }
+  }
+
+  function resetCompatibilityCheckProgress(message = '') {
+    compatibilityCheckProgress = {
+      active: !!message,
+      phase: message ? 'loading' : 'idle',
+      current: 0,
+      total: 0,
+      percent: 0,
+      message
+    };
+  }
+
+  function handleModCompatibilityProgress(data) {
+    if (!data || typeof data !== 'object') return;
+    const total = Math.max(0, Number(data.total) || 0);
+    const current = Math.max(0, Math.min(total || Number(data.current) || 0, Number(data.current) || 0));
+    const percent = total > 0
+      ? Math.max(0, Math.min(100, Math.round((current / total) * 100)))
+      : Math.max(0, Math.min(100, Number(data.percent) || 0));
+
+    compatibilityCheckProgress = {
+      active: checking || data.phase !== 'complete',
+      phase: data.phase || 'checking',
+      current,
+      total,
+      percent,
+      message: data.message || (total > 0 ? `Checking mods ${current}/${total}...` : 'Checking mods...')
+    };
+  }
+
+  function getCompatibilityButtonLabel() {
+    if (!checking) return 'Check Compatibility';
+    if (compatibilityCheckProgress.total > 0) {
+      return `Checking ${compatibilityCheckProgress.current}/${compatibilityCheckProgress.total}`;
+    }
+    return 'Checking...';
+  }
+
+  function getCompatibilityProgressLabel() {
+    if (compatibilityCheckProgress.total > 0) {
+      return `${compatibilityCheckProgress.current}/${compatibilityCheckProgress.total}`;
+    }
+    if (compatibilityCheckProgress.percent > 0) {
+      return `${compatibilityCheckProgress.percent}%`;
+    }
+    return '';
+  }
+
   function handleServerJavaDownloadProgress(data) {
     if (!data || typeof data !== 'object') return;
     updateProgress = data.progress || 0;
@@ -163,6 +372,8 @@
     window.electron.on('fabric-install-progress', handleFabricInstallProgress);
     window.electron.on('loader-install-progress', handleFabricInstallProgress);
     window.electron.on('download-progress', handleDownloadProgress);
+    window.electron.on('backup-progress', handleBackupProgress);
+    window.electron.on('mod-compatibility-progress', handleModCompatibilityProgress);
     window.electron.on('server-java-download-progress', handleServerJavaDownloadProgress);
 
     return () => {
@@ -170,6 +381,8 @@
       window.electron.removeListener?.('fabric-install-progress', handleFabricInstallProgress);
       window.electron.removeListener?.('loader-install-progress', handleFabricInstallProgress);
       window.electron.removeListener?.('download-progress', handleDownloadProgress);
+      window.electron.removeListener?.('backup-progress', handleBackupProgress);
+      window.electron.removeListener?.('mod-compatibility-progress', handleModCompatibilityProgress);
       window.electron.removeListener?.('server-java-download-progress', handleServerJavaDownloadProgress);
     };
   }
@@ -262,6 +475,11 @@
     modsWithUpdates = [];
     completedUpdates = []; // Clear previous completed updates
     updateSummary = null; // Clear previous update summary
+    expandedModDetails = {};
+    modDetailsLoading = {};
+    modProjectDetails = {};
+    modProjectDetailErrors = {};
+    resetCompatibilityCheckProgress('Loading installed mods...');
     
     try {
       const results = await safeInvoke('check-mod-compatibility', {
@@ -271,6 +489,13 @@
         loaderVersion: selectedFabric,
         fabricVersion: selectedFabric
       });
+      compatibilityCheckProgress = {
+        ...compatibilityCheckProgress,
+        active: true,
+        phase: 'finalizing',
+        percent: 100,
+        message: 'Finalizing compatibility results...'
+      };
       
       // Get disabled mods to filter them out from frontend processing as well
       const disabledModsList = await safeInvoke('get-disabled-mods', resolvedPath);
@@ -288,6 +513,11 @@
           fileName: mod.fileName,
           currentVersion: mod.currentVersion,
           projectId: mod.projectId,
+          modrinthId: mod.modrinthId,
+          curseforgeId: mod.curseforgeId,
+          source: mod.source,
+          projectUrl: mod.projectUrl || mod.pageUrl || mod.websiteUrl || mod.url,
+          slug: mod.slug,
           compatible: mod.compatible
         };
         
@@ -343,13 +573,20 @@
       
       compatChecked = true;
     } catch (err) {
+    } finally {
+      checking = false;
+      compatibilityCheckProgress = {
+        ...compatibilityCheckProgress,
+        active: false
+      };
     }
-    checking = false;
   }
   async function updateServerVersion() {
+    createRestorePointBeforeUpdate = true;
     showUpdateConfirmation = true;
   }  async function confirmUpdate() {
     showUpdateConfirmation = false;
+    const shouldCreateRestorePoint = createRestorePointBeforeUpdate;
     updating = true;
     updateProgress = 0;
     currentTask = 'Starting update...';
@@ -367,32 +604,36 @@
     updateSummary = null;
       
       // Calculate total steps for progress tracking
-    totalSteps = 5; // Backup, Minecraft server, loader, Java, Config
+    totalSteps = shouldCreateRestorePoint ? 5 : 4; // Optional backup, Minecraft server, loader, Java, Config
     if (modsWithUpdates.length > 0) totalSteps += modsWithUpdates.length;
     if (incompatibleMods.length > 0) totalSteps += 1;
     currentStep = 0;
     
     try {
-      // Step 1: Create a restore-point backup before mutating the server folder
-      currentStep++;
-      currentTask = 'Creating restore point...';
-      updateProgress = Math.round((currentStep / totalSteps) * 100);
+      // Step 1: Optionally create a restore-point backup before mutating the server folder
       preflightBackupWarning = '';
-      try {
-        const backupResult = await safeInvoke('backups:safe-create', {
-          serverPath: resolvedPath,
-          type: 'full',
-          trigger: 'pre-update'
-        });
-        if (!backupResult?.success) {
-          preflightBackupWarning = backupResult?.error || 'Restore-point backup could not be created.';
+      if (shouldCreateRestorePoint) {
+        currentStep++;
+        currentTask = 'Creating restore point...';
+        updateProgress = 1;
+        try {
+          const backupResult = await safeInvoke('backups:safe-create', {
+            serverPath: resolvedPath,
+            type: 'full',
+            trigger: 'pre-update'
+          });
+          if (!backupResult?.success) {
+            preflightBackupWarning = backupResult?.error || 'Restore-point backup could not be created.';
+            updateStatus = `Warning: ${preflightBackupWarning}`;
+          } else {
+            updateStatus = `Restore point created: ${backupResult.name || 'backup ready'}`;
+          }
+        } catch (backupError) {
+          preflightBackupWarning = backupError.message || 'Restore-point backup could not be created.';
           updateStatus = `Warning: ${preflightBackupWarning}`;
-        } else {
-          updateStatus = `Restore point created: ${backupResult.name || 'backup ready'}`;
         }
-      } catch (backupError) {
-        preflightBackupWarning = backupError.message || 'Restore-point backup could not be created.';
-        updateStatus = `Warning: ${preflightBackupWarning}`;
+      } else {
+        updateStatus = 'Restore point skipped by user choice.';
       }
 
       // Step 2: Download Minecraft server
@@ -505,6 +746,7 @@
         await safeInvoke('save-disabled-mods', resolvedPath, allDisabledMods);
       }        // Step 7: Update version state
       updateVersions(selectedMC, selectedFabric, selectedLoader);
+      clearModUpdateIndicators();
       // After successful upgrade, clear any remaining mod availability watches (upgrade path complete)
       try {
         if (resolvedPath) {
@@ -527,6 +769,8 @@
           }
         },
         loader: selectedLoader,
+        restorePointCreated: shouldCreateRestorePoint && !preflightBackupWarning,
+        restorePointSkipped: !shouldCreateRestorePoint,
         preflightBackupWarning,
         modUpdates: completedUpdates,
         disabledMods: incompatibleMods,
@@ -581,7 +825,7 @@
   </div>
 
   <button class="check-btn" on:click={checkCompatibility} disabled={(!selectedMC || (selectedLoader !== 'vanilla' && !selectedFabric)) || checking}>
-    {checking ? 'Checking...' : 'Check Compatibility'}
+    {getCompatibilityButtonLabel()}
   </button>
   
   <div class="check-info">
@@ -598,6 +842,22 @@
       </p>
     {/if}
   </div>
+  {#if checking}
+    <div class="compatibility-check-progress">
+      <div class="compatibility-progress-header">
+        <span>{compatibilityCheckProgress.message || 'Checking compatibility...'}</span>
+        {#if getCompatibilityProgressLabel()}
+          <strong>{getCompatibilityProgressLabel()}</strong>
+        {/if}
+      </div>
+      <div class="progress-bar" class:indeterminate={compatibilityCheckProgress.total === 0}>
+        <div
+          class="progress-fill"
+          style="width: {compatibilityCheckProgress.total > 0 ? compatibilityCheckProgress.percent : 35}%"
+        ></div>
+      </div>
+    </div>
+  {/if}
   {#if compatChecked}
     <div class="compat-results-container">
       <!-- Mod Updates Available -->
@@ -605,9 +865,49 @@
         <div class="compat-results info">          <h4>🔄 Mod Updates Available ({modsWithUpdates.length})</h4>
           <ul class="mod-updates-list">
             {#each modsWithUpdates as mod (mod.name)}
-              <li class="mod-update-item">
-                <span class="mod-name">{mod.name}</span>
-                <span class="version-change">{mod.currentVersion} → {mod.newVersion}</span>
+              <li
+                class="mod-update-item mod-detail-row"
+                class:expanded={isModDetailsExpanded(mod, expandedModDetails)}
+              >
+                <div class="mod-row-main">
+                  <span class="mod-name">{mod.name}</span>
+                  <span class="version-change">{mod.currentVersion} → {mod.newVersion}</span>
+                  <div class="mod-row-actions">
+                    <button class="mod-row-icon-button" on:click|stopPropagation={() => toggleModDetails(mod)} title={isModDetailsExpanded(mod, expandedModDetails) ? 'Hide mod details' : 'Show mod details'} aria-label={isModDetailsExpanded(mod, expandedModDetails) ? 'Hide mod details' : 'Show mod details'}>
+                      {#if isModDetailsExpanded(mod, expandedModDetails)}
+                        <ChevronDown size={14} />
+                      {:else}
+                        <ChevronRight size={14} />
+                      {/if}
+                    </button>
+                    {#if hasModPageAction(mod, modProjectDetails)}
+                      <button class="mod-row-icon-button" on:click|stopPropagation={() => openModPage(mod)} title="Open {getModPageLabel(mod, modProjectDetails)}" aria-label="Open {getModPageLabel(mod, modProjectDetails)}">
+                        <ExternalLink size={14} />
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+                {#if isModDetailsExpanded(mod, expandedModDetails)}
+                  <div class="mod-details-panel">
+                    {#if isModDetailsLoading(mod, modDetailsLoading)}
+                      <p class="mod-details-text">Loading Modrinth details...</p>
+                    {:else if getModDetailError(mod, modProjectDetailErrors)}
+                      <p class="mod-details-error">{getModDetailError(mod, modProjectDetailErrors)}</p>
+                    {:else}
+                      <p class="mod-details-text">{getModDetailsText(mod, getModProjectDetails(mod, modProjectDetails))}</p>
+                      <div class="mod-details-meta">
+                        {#if getModProjectDetails(mod, modProjectDetails).title && getModProjectDetails(mod, modProjectDetails).title !== mod.name}<span>{getModProjectDetails(mod, modProjectDetails).title}</span>{/if}
+                        <span>Source: {getProjectSourceLabel(mod, getModProjectDetails(mod, modProjectDetails))}</span>
+                        {#if mod.fileName}<span>{mod.fileName}</span>{/if}
+                        {#if getModProjectIdentifier(mod)}<span>Project: {getModProjectIdentifier(mod)}</span>{/if}
+                        {#if getModProjectDetails(mod, modProjectDetails).downloads}<span>{formatCompactNumber(getModProjectDetails(mod, modProjectDetails).downloads)} downloads</span>{/if}
+                        {#if getModProjectDetails(mod, modProjectDetails).followers}<span>{formatCompactNumber(getModProjectDetails(mod, modProjectDetails).followers)} followers</span>{/if}
+                        {#if getModProjectDetails(mod, modProjectDetails).clientSide}<span>Client: {formatSideSupport(getModProjectDetails(mod, modProjectDetails).clientSide)}</span>{/if}
+                        {#if getModProjectDetails(mod, modProjectDetails).serverSide}<span>Server: {formatSideSupport(getModProjectDetails(mod, modProjectDetails).serverSide)}</span>{/if}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -622,12 +922,52 @@
           <ul class="compatible-mods-list">
             {#each compatibleMods as mod (mod.name)}
               {#if !mod.updateAvailable}
-                <li class="compatible-mod-item">
-                  <span class="mod-name">{mod.name}</span>
-                  {#if mod.currentVersion}
-                    <span class="mod-version">{mod.currentVersion}</span>
+                <li
+                  class="compatible-mod-item mod-detail-row"
+                  class:expanded={isModDetailsExpanded(mod, expandedModDetails)}
+                >
+                  <div class="mod-row-main">
+                    <span class="mod-name">{mod.name}</span>
+                    {#if mod.currentVersion}
+                      <span class="mod-version">{mod.currentVersion}</span>
+                    {/if}
+                    <span class="compatible-status">✅ Compatible</span>
+                    <div class="mod-row-actions">
+                      <button class="mod-row-icon-button" on:click|stopPropagation={() => toggleModDetails(mod)} title={isModDetailsExpanded(mod, expandedModDetails) ? 'Hide mod details' : 'Show mod details'} aria-label={isModDetailsExpanded(mod, expandedModDetails) ? 'Hide mod details' : 'Show mod details'}>
+                        {#if isModDetailsExpanded(mod, expandedModDetails)}
+                          <ChevronDown size={14} />
+                        {:else}
+                          <ChevronRight size={14} />
+                        {/if}
+                      </button>
+                      {#if hasModPageAction(mod, modProjectDetails)}
+                        <button class="mod-row-icon-button" on:click|stopPropagation={() => openModPage(mod)} title="Open {getModPageLabel(mod, modProjectDetails)}" aria-label="Open {getModPageLabel(mod, modProjectDetails)}">
+                          <ExternalLink size={14} />
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                  {#if isModDetailsExpanded(mod, expandedModDetails)}
+                    <div class="mod-details-panel">
+                      {#if isModDetailsLoading(mod, modDetailsLoading)}
+                        <p class="mod-details-text">Loading Modrinth details...</p>
+                      {:else if getModDetailError(mod, modProjectDetailErrors)}
+                        <p class="mod-details-error">{getModDetailError(mod, modProjectDetailErrors)}</p>
+                      {:else}
+                        <p class="mod-details-text">{getModDetailsText(mod, getModProjectDetails(mod, modProjectDetails))}</p>
+                        <div class="mod-details-meta">
+                          {#if getModProjectDetails(mod, modProjectDetails).title && getModProjectDetails(mod, modProjectDetails).title !== mod.name}<span>{getModProjectDetails(mod, modProjectDetails).title}</span>{/if}
+                          <span>Source: {getProjectSourceLabel(mod, getModProjectDetails(mod, modProjectDetails))}</span>
+                          {#if mod.fileName}<span>{mod.fileName}</span>{/if}
+                          {#if getModProjectIdentifier(mod)}<span>Project: {getModProjectIdentifier(mod)}</span>{/if}
+                          {#if getModProjectDetails(mod, modProjectDetails).downloads}<span>{formatCompactNumber(getModProjectDetails(mod, modProjectDetails).downloads)} downloads</span>{/if}
+                          {#if getModProjectDetails(mod, modProjectDetails).followers}<span>{formatCompactNumber(getModProjectDetails(mod, modProjectDetails).followers)} followers</span>{/if}
+                          {#if getModProjectDetails(mod, modProjectDetails).clientSide}<span>Client: {formatSideSupport(getModProjectDetails(mod, modProjectDetails).clientSide)}</span>{/if}
+                          {#if getModProjectDetails(mod, modProjectDetails).serverSide}<span>Server: {formatSideSupport(getModProjectDetails(mod, modProjectDetails).serverSide)}</span>{/if}
+                        </div>
+                      {/if}
+                    </div>
                   {/if}
-                  <span class="compatible-status">✅ Compatible</span>
                 </li>
               {/if}
             {/each}
@@ -641,16 +981,56 @@
           <h4>⚠️ Incompatible Mods ({incompatibleMods.length})</h4>          <p class="warning-text">These mods will be disabled during the update:</p>
           <ul class="incompatible-mods-list">
             {#each incompatibleMods as mod (mod.name)}
-              <li class="incompatible-mod-item">
-                <span class="mod-name">{mod.name}</span>
-                {#if mod.currentVersion}
-                  <span class="mod-version">{mod.currentVersion}</span>
-                {/if}
-                <span class="incompatible-reason">No compatible version found</span>
-                {#if mod.projectId}
-                  <button class="watch-btn" on:click={() => toggleWatch(mod)} title={activeWatches.has(watchKey(mod)) ? 'Remove watch' : 'Watch for availability'}>
-                    {#if activeWatches.has(watchKey(mod))}🔔{:else}🔕{/if}
-                  </button>
+              <li
+                class="incompatible-mod-item mod-detail-row"
+                class:expanded={isModDetailsExpanded(mod, expandedModDetails)}
+              >
+                <div class="mod-row-main">
+                  <span class="mod-name">{mod.name}</span>
+                  {#if mod.currentVersion}
+                    <span class="mod-version">{mod.currentVersion}</span>
+                  {/if}
+                  <span class="incompatible-reason">No compatible version found</span>
+                  <div class="mod-row-actions">
+                    <button class="mod-row-icon-button" on:click|stopPropagation={() => toggleModDetails(mod)} title={isModDetailsExpanded(mod, expandedModDetails) ? 'Hide mod details' : 'Show mod details'} aria-label={isModDetailsExpanded(mod, expandedModDetails) ? 'Hide mod details' : 'Show mod details'}>
+                      {#if isModDetailsExpanded(mod, expandedModDetails)}
+                        <ChevronDown size={14} />
+                      {:else}
+                        <ChevronRight size={14} />
+                      {/if}
+                    </button>
+                    {#if hasModPageAction(mod, modProjectDetails)}
+                      <button class="mod-row-icon-button" on:click|stopPropagation={() => openModPage(mod)} title="Open {getModPageLabel(mod, modProjectDetails)}" aria-label="Open {getModPageLabel(mod, modProjectDetails)}">
+                        <ExternalLink size={14} />
+                      </button>
+                    {/if}
+                    {#if mod.projectId}
+                      <button class="watch-btn" on:click|stopPropagation={() => toggleWatch(mod)} title={activeWatches.has(watchKey(mod)) ? 'Remove watch' : 'Watch for availability'}>
+                        {#if activeWatches.has(watchKey(mod))}🔔{:else}🔕{/if}
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+                {#if isModDetailsExpanded(mod, expandedModDetails)}
+                  <div class="mod-details-panel">
+                    {#if isModDetailsLoading(mod, modDetailsLoading)}
+                      <p class="mod-details-text">Loading Modrinth details...</p>
+                    {:else if getModDetailError(mod, modProjectDetailErrors)}
+                      <p class="mod-details-error">{getModDetailError(mod, modProjectDetailErrors)}</p>
+                    {:else}
+                      <p class="mod-details-text">{getModDetailsText(mod, getModProjectDetails(mod, modProjectDetails))}</p>
+                      <div class="mod-details-meta">
+                        {#if getModProjectDetails(mod, modProjectDetails).title && getModProjectDetails(mod, modProjectDetails).title !== mod.name}<span>{getModProjectDetails(mod, modProjectDetails).title}</span>{/if}
+                        <span>Source: {getProjectSourceLabel(mod, getModProjectDetails(mod, modProjectDetails))}</span>
+                        {#if mod.fileName}<span>{mod.fileName}</span>{/if}
+                        {#if getModProjectIdentifier(mod)}<span>Project: {getModProjectIdentifier(mod)}</span>{/if}
+                        {#if getModProjectDetails(mod, modProjectDetails).downloads}<span>{formatCompactNumber(getModProjectDetails(mod, modProjectDetails).downloads)} downloads</span>{/if}
+                        {#if getModProjectDetails(mod, modProjectDetails).followers}<span>{formatCompactNumber(getModProjectDetails(mod, modProjectDetails).followers)} followers</span>{/if}
+                        {#if getModProjectDetails(mod, modProjectDetails).clientSide}<span>Client: {formatSideSupport(getModProjectDetails(mod, modProjectDetails).clientSide)}</span>{/if}
+                        {#if getModProjectDetails(mod, modProjectDetails).serverSide}<span>Server: {formatSideSupport(getModProjectDetails(mod, modProjectDetails).serverSide)}</span>{/if}
+                      </div>
+                    {/if}
+                  </div>
                 {/if}
               </li>
             {/each}
@@ -914,7 +1294,12 @@
   backdropClosable={true}
   on:confirm={confirmUpdate}
   on:cancel={() => showUpdateConfirmation = false}
-/>
+>
+  <label class="restore-point-option">
+    <input type="checkbox" bind:checked={createRestorePointBeforeUpdate} />
+    <span>Create restore point before updating</span>
+  </label>
+</ConfirmationDialog>
 
 <style>
   /* Remove ALL old container styling - this component is now wrapped in cards */
@@ -1075,13 +1460,103 @@
     border-radius: 4px;
     margin: 0;
   }
+  .mod-detail-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.45rem;
+  }
+  .mod-detail-row.expanded {
+    background-color: rgba(255, 255, 255, 0.07);
+  }
+  .mod-row-main {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-height: 28px;
+  }
+  .mod-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: auto;
+    flex: 0 0 auto;
+  }
+  .mod-row-icon-button {
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: #cbd5e0;
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 0;
+  }
+  .mod-row-icon-button:hover {
+    background: rgba(79, 195, 247, 0.16);
+    border-color: rgba(79, 195, 247, 0.4);
+    color: #e2f6ff;
+  }
+  .mod-details-panel {
+    padding: 0.6rem 0.7rem;
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+  }
+  .mod-details-text,
+  .mod-details-error {
+    margin: 0;
+    color: #cbd5e0;
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+  .mod-details-error {
+    color: #fc8181;
+  }
+  .mod-details-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.45rem;
+  }
+  .mod-details-meta span {
+    color: #9fb7d0;
+    background: rgba(79, 195, 247, 0.08);
+    border: 1px solid rgba(79, 195, 247, 0.14);
+    border-radius: 4px;
+    padding: 0.15rem 0.35rem;
+    font-size: 0.68rem;
+  }
   .watch-btn { margin-left:0.5rem; background:transparent; border:1px solid rgba(255,255,255,0.2); color:#ffb347; cursor:pointer; border-radius:4px; padding:2px 6px; font-size:0.85rem; }
   .watch-btn:hover { background: rgba(255,255,255,0.1); }
+  .mod-row-actions .watch-btn {
+    height: 26px;
+    margin-left: 0;
+    padding: 0 0.35rem;
+  }
   .watch-panel-toggle { margin-top:0.75rem; }
   .watch-panel-toggle.global { text-align:left; margin-top:1rem; }
   .watch-buttons { display:flex; gap:4px; }
   .watch-panel-toggle button { background:#2d3748; color:#fff; border:1px solid #4b5563; padding:0.3rem 0.6rem; border-radius:4px; cursor:pointer; font-size:0.75rem; }
   .watch-panel { margin-top:0.75rem; padding:0.6rem; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); border-radius:6px; font-size:0.75rem; }
+  .restore-point-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    color: #dbeafe;
+    font-size: 0.9rem;
+    line-height: 1.3;
+  }
+  .restore-point-option input {
+    width: 16px;
+    height: 16px;
+    accent-color: #3b82f6;
+    flex: 0 0 auto;
+  }
   .watch-header-row { display:flex; justify-content:space-between; align-items:center; }
   .watch-settings-btn { background:transparent; border:1px solid rgba(255,255,255,0.2); color:#a0aec0; cursor:pointer; border-radius:4px; padding:2px 6px; font-size:0.7rem; }
   .watch-settings-btn:hover { background:rgba(255,255,255,0.1); }
@@ -1112,6 +1587,8 @@
   .mod-name {
     font-weight: 500;
     flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .version-change {
     font-family: 'Courier New', monospace;
@@ -1577,5 +2054,50 @@
 
   .java-requirement.missing-java {
     color: #f59e0b !important;
+  }
+
+  .compatibility-check-progress {
+    margin: 0.5rem 0;
+    padding: 0.75rem;
+    background: rgba(59, 130, 246, 0.08);
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    border-radius: 4px;
+    text-align: left;
+  }
+
+  .compatibility-progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.45rem;
+    color: #bfdbfe;
+    font-size: 0.82rem;
+  }
+
+  .compatibility-progress-header span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .compatibility-progress-header strong {
+    color: #60a5fa;
+    font-size: 0.78rem;
+    flex: 0 0 auto;
+  }
+
+  .progress-bar.indeterminate .progress-fill {
+    animation: compatibility-progress-pulse 1.2s ease-in-out infinite alternate;
+  }
+
+  @keyframes compatibility-progress-pulse {
+    from {
+      transform: translateX(-40%);
+    }
+
+    to {
+      transform: translateX(190%);
+    }
   }
 </style>

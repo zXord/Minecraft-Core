@@ -313,6 +313,12 @@ export function setActiveModServerPath(serverPath) {
   activeModServerPath = normalizePathForUpdates(serverPath);
 }
 
+export function clearModUpdateIndicators() {
+  modsWithUpdates.set(new Map());
+  disabledModUpdates.set(new Map());
+  updateCheckProgress.set({ active: false, current: 0, total: 0, phase: '' });
+}
+
 function isCurrentModServerPath(serverPath) {
   const normalized = normalizePathForUpdates(serverPath);
   if (!activeModServerPath) {

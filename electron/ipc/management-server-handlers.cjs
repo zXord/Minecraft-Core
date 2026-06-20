@@ -363,7 +363,7 @@ function createManagementServerHandlers(win) {
         const configuredPort = getManagementPortForServer(targetPath);
         const portValue = Number.isFinite(requestedPort) ? Number(requestedPort) : configuredPort;
         const fpParam = fingerprint ? `&fp=${encodeURIComponent(fingerprint)}` : '';
-        const inviteLink = `${protocol}://${host}:${portValue}/?secret=${encodeURIComponent(secret)}${fpParam}`;
+        const inviteLink = `${protocol}://${host}:${portValue}/#secret=${encodeURIComponent(secret)}${fpParam}`;
         const usesPublicHost = hostSource === 'public' && !isPrivateIp(host);
 
         return {
