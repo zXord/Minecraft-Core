@@ -1,0 +1,131 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const {
+  assertArtifactSetUnchanged,
+  computeArtifactSetDigest,
+  createArtifactSetPlan,
+  finalizeVerifiedArtifactSet,
+  normalizeRuntimeTuple
+} = require('../../electron/services/modpacks/contracts.cjs');
+const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
+const { ARCHIVE_LIMITS, computePreflightReserve } = require('../../electron/services/modpacks/limits.cjs');
+const { createModpackPaths } = require('../../electron/services/modpacks/paths.cjs');
+
+const artifactInput = Object.freeze({
+  provider: 'github',
+  project: { id: '101', slug: 'example-pack', title: 'Example Pack' },
+  release: { id: '202', version: '1.2.3', channel: 'release', publishedAt: '2026-08-01T00:00:00.000Z' },
+  artifactSet: {
+    kind: 'single',
+    primaryPartId: 'asset-303',
+    groupingScheme: 'single',
+    parts: [{
+      partId: 'asset-303',
+      providerAssetId: '303',
+      fileName: 'example-server.zip',
+      size: '9007199254740992',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+      providerDigest: { algorithm: 'sha256', value: 'a'.repeat(64) }
+    }],
+    providerImmutable: false,
+    attestationStatus: 'unavailable'
+  }
+});
+
+test('artifact plans preserve reviewed identity with immutable decimal byte fields', () => {
+  const plan = createArtifactSetPlan(artifactInput);
+
+  assert.equal(plan.type, 'artifact-set-plan');
+  assert.equal(plan.artifactSet.parts[0].size, '9007199254740992');
+  assert.equal(plan.artifactSet.setDigest, '5aee0c3fd428e878d884f5d1e0ab1331338cb6b45c1acfb4eafe5e52cec39d73');
+  assert.equal(Object.isFrozen(plan), true);
+  assert.equal(Object.isFrozen(plan.artifactSet.parts[0]), true);
+  assert.throws(() => createArtifactSetPlan({ ...artifactInput, unexpected: true }), error => error.code === 'INVALID_REQUEST');
+});
+
+test('artifact digest hashes canonical ordered part identities instead of object insertion order', () => {
+  const digest = computeArtifactSetDigest([{
+    updatedAt: '2026-08-01T00:00:00.000Z',
+    fileName: 'example-server.zip',
+    size: '9007199254740992',
+    providerDigest: { value: 'a'.repeat(64), algorithm: 'sha256' },
+    providerAssetId: '303',
+    partId: 'asset-303'
+  }]);
+
+  assert.equal(digest, '5aee0c3fd428e878d884f5d1e0ab1331338cb6b45c1acfb4eafe5e52cec39d73');
+});
+
+test('verified artifact sets require measured SHA-256 and SHA-512 results', () => {
+  const plan = createArtifactSetPlan(artifactInput);
+  const verified = finalizeVerifiedArtifactSet(plan, [{
+    partId: 'asset-303',
+    measuredSize: '9007199254740992',
+    sha256: 'b'.repeat(64),
+    sha512: 'c'.repeat(128)
+  }]);
+
+  assert.equal(verified.type, 'verified-artifact-set');
+  assert.deepEqual(verified.artifactSet.parts[0].calculatedDigests, {
+    sha256: 'b'.repeat(64),
+    sha512: 'c'.repeat(128)
+  });
+  assert.equal(verified.artifactSet.parts[0].measuredSize, '9007199254740992');
+  assert.equal(Object.isFrozen(verified), true);
+  assert.throws(
+    () => finalizeVerifiedArtifactSet(plan, [{ partId: 'asset-303', measuredSize: '1', sha256: 'b'.repeat(64) }]),
+    error => error.code === 'INVALID_REQUEST'
+  );
+});
+
+test('artifact plans reject a reviewed-set mutation with PLAN_STALE', () => {
+  const expected = createArtifactSetPlan(artifactInput);
+  const actual = createArtifactSetPlan({
+    ...artifactInput,
+    artifactSet: { ...artifactInput.artifactSet, parts: [{ ...artifactInput.artifactSet.parts[0], size: '2' }] }
+  });
+
+  assert.throws(() => assertArtifactSetUnchanged(expected, actual), error => error instanceof ModpackError && error.code === 'PLAN_STALE');
+  assert.equal(assertArtifactSetUnchanged(expected, expected), expected);
+});
+
+test('runtime tuples accept only exact supported loader identity', () => {
+  const runtime = normalizeRuntimeTuple({
+    minecraftVersion: '1.21.1', loaderFamily: 'neoforge', loaderVersion: '21.1.99', javaMajor: 21, os: 'win32', architecture: 'x64'
+  });
+
+  assert.deepEqual(runtime, {
+    minecraftVersion: '1.21.1', loaderFamily: 'neoforge', loaderVersion: '21.1.99', javaMajor: 21, os: 'win32', architecture: 'x64'
+  });
+  assert.equal(Object.isFrozen(runtime), true);
+  assert.throws(
+    () => normalizeRuntimeTuple({ ...runtime, loaderFamily: 'latest' }),
+    error => error.code === 'INVALID_REQUEST'
+  );
+});
+
+test('central archive limits use decimal public bytes and bigint-safe reserve arithmetic', () => {
+  assert.equal(ARCHIVE_LIMITS.version, 1);
+  assert.equal(ARCHIVE_LIMITS.maxArtifactSetBytes, '17179869184');
+  assert.equal(ARCHIVE_LIMITS.maxExpandedBytes, '68719476736');
+  assert.equal(computePreflightReserve('90071992547409920'), '9007199254740992');
+  assert.equal(computePreflightReserve('1'), '2147483648');
+});
+
+test('modpack path roots stay below the application userData lifecycle root', () => {
+  const roots = createModpackPaths('C:\\app-data');
+
+  assert.deepEqual(roots, {
+    root: 'C:\\app-data\\modpack-lifecycle',
+    cache: 'C:\\app-data\\modpack-lifecycle\\cache',
+    selections: 'C:\\app-data\\modpack-lifecycle\\selections',
+    notifications: 'C:\\app-data\\modpack-lifecycle\\notifications',
+    recoveryActive: 'C:\\app-data\\modpack-lifecycle\\active',
+    recoveryHistory: 'C:\\app-data\\modpack-lifecycle\\history',
+    operations: 'C:\\app-data\\modpack-lifecycle\\operations',
+    plans: 'C:\\app-data\\modpack-lifecycle\\plans',
+    workspaces: 'C:\\app-data\\modpack-lifecycle\\workspaces'
+  });
+  assert.equal(Object.isFrozen(roots), true);
+});
