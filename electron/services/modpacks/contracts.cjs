@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const { ModpackError, deepFreeze } = require('./errors.cjs');
 const { parseNonNegativeBytes } = require('./limits.cjs');
+const { isSafeWindowsBasename } = require('./windows-basename.cjs');
 
 const PROVIDERS = new Set(['modrinth', 'github', 'local']);
 const CHANNELS = new Set(['release', 'beta', 'alpha', 'prerelease']);
@@ -27,7 +28,8 @@ function assertKnownKeys(value, keys, field) {
 }
 
 function assertNonEmptyString(value, field, { maxLength = 256, pattern } = {}) {
-  if (typeof value !== 'string' || !value || value.length > maxLength || /[\u0000-\u001f]/.test(value) || (pattern && !pattern.test(value))) {
+  if (typeof value !== 'string' || !value || value.length > maxLength ||
+    [...value].some(character => character.charCodeAt(0) <= 0x1f) || (pattern && !pattern.test(value))) {
     invalidRequest('Request string is invalid', field);
   }
   return value;
@@ -75,14 +77,7 @@ function normalizeCalculatedDigests(value, field) {
 
 function normalizeFileName(value, field) {
   assertNonEmptyString(value, field, { maxLength: 255 });
-  const windowsStem = value.split('.', 1)[0].replace(/[ .]+$/g, '').toUpperCase();
-  const windowsDeviceNames = new Set(['CON', 'PRN', 'AUX', 'NUL', 'CLOCK$', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9']);
-  if (
-    value !== value.trim() || value === '.' || value === '..' || /[<>:"/\\|?*]/.test(value) || /[. ]$/.test(value) ||
-    windowsDeviceNames.has(windowsStem)
-  ) {
-    invalidRequest('Request file name is invalid', field);
-  }
+  if (!isSafeWindowsBasename(value)) invalidRequest('Request file name is invalid', field);
   return value;
 }
 

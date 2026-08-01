@@ -4,15 +4,11 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { ModpackError } = require('../errors.cjs');
 const { computeArtifactSetDigest } = require('../contracts.cjs');
+const { isSafeWindowsBasename, windowsBasenameCollisionKey } = require('../windows-basename.cjs');
 
 const SHA256 = /^[a-f0-9]{64}$/; const SHA512 = /^[a-f0-9]{128}$/; const PART_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const DEVICES = new Set(['CON', 'PRN', 'AUX', 'NUL', 'CLOCK$', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9']);
 function invalid(field) { throw new ModpackError('INVALID_REQUEST', 'Artifact cache request is invalid', { details: { field } }); }
 function validSize(size) { return typeof size === 'string' && /^(0|[1-9][0-9]*)$/.test(size); }
-function safeBasename(name) {
-  if (typeof name !== 'string' || name !== path.basename(name) || name === '.' || name === '..' || name !== name.trim() || /[<>:"/\\|?*\u0000-\u001f]/.test(name) || /[. ]$/.test(name)) return false;
-  return !DEVICES.has(name.split('.', 1)[0].replace(/[ .]+$/g, '').toUpperCase());
-}
 function inside(parent, child) { const relative = path.relative(parent, child); return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative); }
 
 class ArtifactCache {
@@ -112,13 +108,13 @@ class ArtifactCache {
     const set = verifiedSet.artifactSet;
     if (!Array.isArray(set.parts) || !set.parts.length || typeof set.primaryPartId !== 'string' || !SHA256.test(set.setDigest || '') || !['single', 'multipart'].includes(set.kind) || !['single', 'part-number', 'rar-rxx', 'numbered-volume'].includes(set.groupingScheme) || typeof set.providerImmutable !== 'boolean' || !['unavailable', 'unverified', 'verified'].includes(set.attestationStatus) || (set.kind === 'single' && (set.parts.length !== 1 || set.groupingScheme !== 'single')) || (set.kind === 'multipart' && (set.parts.length < 2 || set.groupingScheme === 'single'))) invalid('verifiedSet');
     const ids = new Set(); const aliases = new Set(); const parts = set.parts.map((part) => {
-      if (!part || typeof part !== 'object' || !PART_ID.test(part.partId || '') || !safeBasename(part.fileName) || !validSize(part.size) || part.size !== part.measuredSize || !validSize(part.measuredSize) || !part.calculatedDigests || !SHA256.test(part.calculatedDigests.sha256 || '') || !SHA512.test(part.calculatedDigests.sha512 || '')) invalid('verifiedSet');
-      if (ids.has(part.partId)) invalid('verifiedSet'); ids.add(part.partId); const alias = part.fileName.normalize('NFC').toLocaleLowerCase('en-US'); if (aliases.has(alias)) invalid('verifiedSet'); aliases.add(alias); return part;
+      if (!part || typeof part !== 'object' || !PART_ID.test(part.partId || '') || !isSafeWindowsBasename(part.fileName) || !validSize(part.size) || part.size !== part.measuredSize || !validSize(part.measuredSize) || !part.calculatedDigests || !SHA256.test(part.calculatedDigests.sha256 || '') || !SHA512.test(part.calculatedDigests.sha512 || '')) invalid('verifiedSet');
+      if (ids.has(part.partId)) invalid('verifiedSet'); ids.add(part.partId); const alias = windowsBasenameCollisionKey(part.fileName); if (aliases.has(alias)) invalid('verifiedSet'); aliases.add(alias); return part;
     });
     if (!ids.has(set.primaryPartId) || computeArtifactSetDigest(parts) !== set.setDigest) invalid('verifiedSet'); return { parts, primary: parts.find((part) => part.partId === set.primaryPartId) };
   }
   async assertFreshDirectDestination(destination) {
-    if (typeof destination !== 'string' || !destination) invalid('destination'); const resolved = path.resolve(destination); if (!inside(this.workspaceRoot, resolved) || path.dirname(resolved) !== this.workspaceRoot || !safeBasename(path.basename(resolved))) invalid('destination');
+    if (typeof destination !== 'string' || !destination) invalid('destination'); const resolved = path.resolve(destination); if (!inside(this.workspaceRoot, resolved) || path.dirname(resolved) !== this.workspaceRoot || !isSafeWindowsBasename(path.basename(resolved))) invalid('destination');
     await this.controlledRoot(this.workspaceRoot, 'destination');
     for (const candidate of [resolved]) { try { await this.fs.lstat(candidate); invalid('destination'); } catch (error) { if (error?.code !== 'ENOENT') throw error; } }
     return resolved;

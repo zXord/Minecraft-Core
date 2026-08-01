@@ -6,16 +6,14 @@ const { groupMultipartCandidates: defaultGrouping } = require('../artifacts/mult
 const { createArtifactSetPlan, finalizeVerifiedArtifactSet } = require('../contracts.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const { ARCHIVE_LIMITS } = require('../limits.cjs');
+const { isSafeWindowsBasename, windowsBasenameCollisionKey } = require('../windows-basename.cjs');
+const { WindowsReparseInspector } = require('./windows-reparse-inspector.cjs');
 
 const SELECTION_TTL_MS = 30 * 60 * 1000;
 const PARTIAL_ATTEMPTS = 16;
 const COPY_CHUNK_BYTES = 64 * 1024;
 const SAFE_PARTIAL_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const WINDOWS_DEVICES = new Set([
-  'CON', 'PRN', 'AUX', 'NUL', 'CLOCK$',
-  'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
-  'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
-]);
+const MAX_ARTIFACT_SET_BYTES = BigInt(ARCHIVE_LIMITS.maxArtifactSetBytes);
 
 function invalidRequest(field = 'request') {
   return new ModpackError('INVALID_REQUEST', 'Local archive request is invalid', { details: { field } });
@@ -39,6 +37,10 @@ function hashMismatch() {
 
 function cancelled() {
   return new ModpackError('CANCELLED', 'Local archive ingestion was cancelled');
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw cancelled();
 }
 
 function limitExceeded(actual) {
@@ -65,19 +67,12 @@ function decimalBytes(value) {
   return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value);
 }
 
-function safeBasename(value) {
-  if (typeof value !== 'string' || !value || value !== path.basename(value) || value !== value.trim() || value === '.' || value === '..' ||
-    value.length > 255 || /[<>:"/\\|?*]/.test(value) || [...value].some(character => character.charCodeAt(0) <= 0x1f) || /[. ]$/.test(value)) return false;
-  const stem = value.split('.', 1)[0].replace(/[ .]+$/g, '').toUpperCase();
-  return !WINDOWS_DEVICES.has(stem);
-}
-
 function supportedName(value) {
   return /\.(?:mrpack|zip|rar|r\d{2}|\d{3,})$/i.test(value);
 }
 
 function canonicalName(value) {
-  return value.normalize('NFC').toLocaleLowerCase('en-US');
+  return windowsBasenameCollisionKey(value);
 }
 
 function canonicalPath(value) {
@@ -97,7 +92,7 @@ function statValue(stat, key) {
 }
 
 function isReparseLike(stat) {
-  return Boolean(stat?.isSymbolicLink?.() || stat?.isReparsePoint?.() || stat?.reparsePoint === true);
+  return Boolean(stat?.isSymbolicLink?.());
 }
 
 function captureIdentity(stat) {
@@ -168,14 +163,16 @@ class LocalArtifactSource {
     partialRoot,
     groupMultipartCandidates = defaultGrouping,
     partialIdSource = randomUUID,
-    maxSetBytes = BigInt(ARCHIVE_LIMITS.maxArtifactSetBytes)
+    maxSetBytes = MAX_ARTIFACT_SET_BYTES,
+    reparseInspector = new WindowsReparseInspector()
   } = {}) {
     if (!dialog || typeof dialog.showOpenDialog !== 'function' || !registry || typeof registry.create !== 'function' || typeof registry.claim !== 'function' ||
       typeof registry.invalidate !== 'function' || typeof clock !== 'function' || !fsApi || typeof fsApi.lstat !== 'function' || typeof fsApi.open !== 'function' ||
       !cache || typeof cache.commitPart !== 'function' || typeof cache.root !== 'string' || typeof partialRoot !== 'string' || !partialRoot ||
-      typeof groupMultipartCandidates !== 'function' || typeof partialIdSource !== 'function') throw new TypeError('Local artifact source dependencies are invalid');
+      typeof groupMultipartCandidates !== 'function' || typeof partialIdSource !== 'function' || !reparseInspector ||
+      typeof reparseInspector.isReparsePoint !== 'function') throw new TypeError('Local artifact source dependencies are invalid');
     const parsedLimit = typeof maxSetBytes === 'bigint' ? maxSetBytes : decimalBytes(maxSetBytes) ? BigInt(maxSetBytes) : -1n;
-    if (parsedLimit < 0n) throw new TypeError('Local artifact byte limit is invalid');
+    if (parsedLimit < 0n || parsedLimit > MAX_ARTIFACT_SET_BYTES) throw new TypeError('Local artifact byte limit is invalid');
     this.dialog = dialog;
     this.registry = registry;
     this.clock = clock;
@@ -185,6 +182,7 @@ class LocalArtifactSource {
     this.groupMultipartCandidates = groupMultipartCandidates;
     this.partialIdSource = partialIdSource;
     this.maxSetBytes = parsedLimit;
+    this.reparseInspector = reparseInspector;
     if (!isInside(path.resolve(cache.root), this.partialRoot)) throw new TypeError('Local artifact partial root must be inside the cache root');
   }
 
@@ -216,12 +214,27 @@ class LocalArtifactSource {
     return group;
   }
 
-  async statSelectedFile(selectedPath) {
+  async assertPathIsNotReparse(selectedPath, { signal, selection = false } = {}) {
+    let reparse;
     try {
-      return await this.fs.lstat(selectedPath, { bigint: true });
+      reparse = await this.reparseInspector.isReparsePoint(selectedPath, signal ? { signal } : undefined);
+    } catch (error) {
+      if (error?.code === 'ABORT_ERR') throw error;
+      throw selection ? invalidSelection() : staleSelection();
+    }
+    throwIfCancelled(signal);
+    if (typeof reparse !== 'boolean' || reparse) throw selection ? invalidSelection() : staleSelection();
+  }
+
+  async statSelectedFile(selectedPath) {
+    let stat;
+    try {
+      stat = await this.fs.lstat(selectedPath, { bigint: true });
     } catch {
       throw invalidSelection();
     }
+    await this.assertPathIsNotReparse(selectedPath, { selection: true });
+    return stat;
   }
 
   async selectWithNativeDialog(request) {
@@ -242,7 +255,9 @@ class LocalArtifactSource {
     }
     if (!result || typeof result !== 'object' || typeof result.canceled !== 'boolean' || !Array.isArray(result.filePaths)) throw invalidSelection();
     if (result.canceled) return deepFreeze({ cancelled: true });
-    if (result.filePaths.length === 0 || (!allowMultipart && result.filePaths.length !== 1) ||
+    const selectedCount = result.filePaths.length;
+    if (selectedCount > ARCHIVE_LIMITS.maxArchiveEntries) throw invalidSelection();
+    if (selectedCount === 0 || (!allowMultipart && selectedCount !== 1) ||
       result.filePaths.some(value => typeof value !== 'string' || !path.isAbsolute(value))) throw invalidSelection();
 
     const logicalPaths = new Set();
@@ -250,15 +265,15 @@ class LocalArtifactSource {
     const identities = new Set();
     const records = [];
     let total = 0n;
-    for (let index = 0; index < result.filePaths.length; index += 1) {
+    for (let index = 0; index < selectedCount; index += 1) {
       const selectedPath = result.filePaths[index];
       const pathKey = canonicalPath(selectedPath);
       if (logicalPaths.has(pathKey)) throw invalidSelection();
       logicalPaths.add(pathKey);
       const displayName = path.basename(selectedPath);
-      if (!safeBasename(displayName)) throw invalidSelection();
+      if (!isSafeWindowsBasename(displayName)) throw invalidSelection();
       if (!supportedName(displayName)) {
-        if (result.filePaths.length > 1) throw invalidSelection();
+        if (selectedCount > 1) throw invalidSelection();
         throw unsupportedArchive();
       }
       const nameKey = canonicalName(displayName);
@@ -302,7 +317,7 @@ class LocalArtifactSource {
   validatePrivateRecords(value) {
     if (!Array.isArray(value) || value.length === 0) throw staleSelection();
     return value.map(record => {
-      if (!isPlainObject(record) || typeof record.path !== 'string' || !path.isAbsolute(record.path) || !safeBasename(record.displayName) ||
+      if (!isPlainObject(record) || typeof record.path !== 'string' || !path.isAbsolute(record.path) || !isSafeWindowsBasename(record.displayName) ||
         !supportedName(record.displayName) || !decimalBytes(record.size) || typeof record.updatedAt !== 'string' ||
         typeof record.partId !== 'string' || !/^local-[0-9]{4,}$/.test(record.partId) || !isPlainObject(record.identity) || record.identity.size !== record.size) throw staleSelection();
       return record;
@@ -329,13 +344,17 @@ class LocalArtifactSource {
     throw new ModpackError('OPERATION_IN_PROGRESS', 'Local archive staging is busy');
   }
 
-  async currentIdentity(selectedPath) {
+  async currentIdentity(selectedPath, signal) {
+    let identity;
     try {
-      return captureIdentity(await this.fs.lstat(selectedPath, { bigint: true }));
+      identity = captureIdentity(await this.fs.lstat(selectedPath, { bigint: true }));
     } catch (error) {
       if (error instanceof ModpackError && error.code === 'INVALID_REQUEST') throw staleSelection();
       throw staleSelection();
     }
+    throwIfCancelled(signal);
+    await this.assertPathIsNotReparse(selectedPath, { signal });
+    return identity;
   }
 
   async handleIdentity(handle) {
@@ -359,14 +378,21 @@ class LocalArtifactSource {
     let partMeasured = 0n;
     const hashes = { sha256: crypto.createHash('sha256'), sha512: crypto.createHash('sha512') };
     try {
-      this.assertIdentity(record.identity, await this.currentIdentity(record.path));
+      const initialPathIdentity = await this.currentIdentity(record.path, signal);
+      throwIfCancelled(signal);
+      this.assertIdentity(record.identity, initialPathIdentity);
       try {
         sourceHandle = await this.fs.open(record.path, 'r');
       } catch {
         throw staleSelection();
       }
-      this.assertIdentity(record.identity, await this.handleIdentity(sourceHandle));
+      throwIfCancelled(signal);
+      const initialHandleIdentity = await this.handleIdentity(sourceHandle);
+      throwIfCancelled(signal);
+      this.assertIdentity(record.identity, initialHandleIdentity);
+      await this.assertPathIsNotReparse(record.path, { signal });
       ({ partialPath, handle: targetHandle } = await this.openUniquePartial());
+      throwIfCancelled(signal);
       abortListener = () => {};
       signal?.addEventListener('abort', abortListener, { once: true });
       const chunk = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
@@ -403,17 +429,32 @@ class LocalArtifactSource {
       }
       if (partMeasured !== expectedSize) throw hashMismatch();
       await targetHandle.sync();
+      throwIfCancelled(signal);
       const targetStat = await targetHandle.stat({ bigint: true });
+      throwIfCancelled(signal);
       if (!targetStat.isFile() || isReparseLike(targetStat) || BigInt(targetStat.size) !== partMeasured) throw hashMismatch();
-      this.assertIdentity(record.identity, await this.handleIdentity(sourceHandle));
-      this.assertIdentity(record.identity, await this.currentIdentity(record.path));
+      const precommitHandleIdentity = await this.handleIdentity(sourceHandle);
+      throwIfCancelled(signal);
+      this.assertIdentity(record.identity, precommitHandleIdentity);
+      await this.assertPathIsNotReparse(record.path, { signal });
+      const precommitPathIdentity = await this.currentIdentity(record.path, signal);
+      throwIfCancelled(signal);
+      this.assertIdentity(record.identity, precommitPathIdentity);
       const calculated = { sha256: hashes.sha256.digest('hex'), sha512: hashes.sha512.digest('hex') };
       await targetHandle.close();
       targetHandle = null;
+      throwIfCancelled(signal);
       await this.cache.commitPart({ partialPath, sha256: calculated.sha256, measuredSize: partMeasured.toString() });
       partialPath = null;
-      this.assertIdentity(record.identity, await this.handleIdentity(sourceHandle));
-      this.assertIdentity(record.identity, await this.currentIdentity(record.path));
+      throwIfCancelled(signal);
+      const finalHandleIdentity = await this.handleIdentity(sourceHandle);
+      throwIfCancelled(signal);
+      this.assertIdentity(record.identity, finalHandleIdentity);
+      await this.assertPathIsNotReparse(record.path, { signal });
+      const finalPathIdentity = await this.currentIdentity(record.path, signal);
+      throwIfCancelled(signal);
+      this.assertIdentity(record.identity, finalPathIdentity);
+      throwIfCancelled(signal);
       return deepFreeze({ partId: record.partId, measuredSize: partMeasured.toString(), ...calculated });
     } finally {
       if (abortListener) {
@@ -453,7 +494,12 @@ class LocalArtifactSource {
       if (total > this.maxSetBytes) throw limitExceeded(total);
       const budget = { used: 0n, total, max: this.maxSetBytes };
       const verified = [];
-      for (const part of plan.artifactSet.parts) verified.push(await this.streamPart(byId.get(part.partId), { signal, onProgress, budget }));
+      for (const part of plan.artifactSet.parts) {
+        const verifiedPart = await this.streamPart(byId.get(part.partId), { signal, onProgress, budget });
+        throwIfCancelled(signal);
+        verified.push(verifiedPart);
+      }
+      throwIfCancelled(signal);
       return finalizeVerifiedArtifactSet(plan, verified);
     } catch (error) {
       if (error instanceof ModpackError) throw error;

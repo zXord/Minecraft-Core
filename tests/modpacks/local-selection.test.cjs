@@ -6,6 +6,8 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { ArtifactCache } = require('../../electron/services/modpacks/artifacts/artifact-cache.cjs');
+const { createArtifactSetPlan } = require('../../electron/services/modpacks/contracts.cjs');
+const { ARCHIVE_LIMITS } = require('../../electron/services/modpacks/limits.cjs');
 const { SelectionRegistry } = require('../../electron/services/modpacks/local/selection-registry.cjs');
 const { LocalArtifactSource } = require('../../electron/services/modpacks/local/local-artifact-source.cjs');
 
@@ -33,7 +35,8 @@ async function fixture({
   ids = [ID_A, ID_B],
   now = Date.UTC(2026, 7, 2, 0, 0, 0),
   cacheDecorator,
-  groupMultipartCandidates
+  groupMultipartCandidates,
+  reparseInspector = { isReparsePoint: async () => false }
 } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-local-selection-'));
   const sourceRoot = path.join(root, 'selected', 'private-parent');
@@ -69,6 +72,7 @@ async function fixture({
     cache,
     partialRoot: path.join(cache.root, 'local-partials'),
     partialIdSource: idSequence(['partial-one', 'partial-two', 'partial-three']),
+    reparseInspector,
     ...(maxSetBytes === undefined ? {} : { maxSetBytes }),
     ...(groupMultipartCandidates ? { groupMultipartCandidates } : {})
   });
@@ -292,7 +296,90 @@ test('empty, duplicate, missing, non-file, unsafe-name, unsupported, and excessi
   await assert.rejects(f.source.selectWithNativeDialog({ allowMultipart: false }), error => error.code === 'INVALID_REQUEST');
 });
 
-test('symlinks and reparse-like selected entries are rejected before registration', async (t) => {
+test('picker entry count is rejected before inspecting or allocating from any selected path', async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  const filePaths = new Proxy([], {
+    get(target, property) {
+      if (property === 'length') return ARCHIVE_LIMITS.maxArchiveEntries + 1;
+      throw new Error(`picker entries were inspected through ${String(property)}`);
+    }
+  });
+  f.dialog.showOpenDialog = async () => ({ canceled: false, filePaths });
+  await assert.rejects(
+    f.source.selectWithNativeDialog({ allowMultipart: true }),
+    error => error.code === 'INVALID_REQUEST'
+  );
+  assert.equal(f.randomId.calls, 0);
+});
+
+test('Win32 reserved basenames and DEL are rejected before native selection registration', async (t) => {
+  let backingPath;
+  const aliasFs = {
+    ...fs,
+    lstat: async (target, options) => fs.lstat(backingPath && target !== backingPath ? backingPath : target, options)
+  };
+  const f = await fixture({ fsApi: aliasFs });
+  t.after(f.cleanup);
+  backingPath = f.paths.get('server.zip');
+  for (const name of ['COM¹.zip', 'lpt².rar', `archive${String.fromCharCode(0x7f)}.zip`]) {
+    f.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.join(f.sourceRoot, name)] });
+    await assert.rejects(
+      f.source.selectWithNativeDialog({ allowMultipart: false }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
+  assert.equal(f.randomId.calls, 0);
+});
+
+test('Win32 reserved basenames and DEL cannot be re-admitted by contracts or cache validation', async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  const sha256 = 'a'.repeat(64);
+  const sha512 = 'b'.repeat(128);
+  for (const fileName of ['COM³.zip', 'LPT¹.rar', `archive${String.fromCharCode(0x7f)}.zip`]) {
+    const artifactSet = {
+      kind: 'single',
+      primaryPartId: 'part-1',
+      groupingScheme: 'single',
+      parts: [{ partId: 'part-1', fileName, size: '1' }],
+      providerImmutable: false,
+      attestationStatus: 'unavailable'
+    };
+    assert.throws(
+      () => createArtifactSetPlan({ provider: 'local', artifactSet }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+
+    const canonicalParts = [{
+      partId: 'part-1',
+      providerAssetId: null,
+      fileName,
+      size: '1',
+      updatedAt: null,
+      providerDigest: null,
+      calculatedDigests: { sha256, sha512 }
+    }];
+    const setDigest = digest(Buffer.from(JSON.stringify(canonicalParts), 'utf8'), 'sha256');
+    assert.throws(
+      () => f.cache.validateVerifiedSet({
+        type: 'verified-artifact-set',
+        artifactSet: {
+          ...artifactSet,
+          setDigest,
+          parts: [{
+            ...artifactSet.parts[0],
+            measuredSize: '1',
+            calculatedDigests: { sha256, sha512 }
+          }]
+        }
+      }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
+});
+
+test('symlinks and Windows-inspected reparse entries are rejected across every identity phase', async (t) => {
   await t.test('file symlink', async (t) => {
     const f = await fixture({ files: { 'real.zip': Buffer.from('real') } });
     t.after(f.cleanup);
@@ -310,28 +397,43 @@ test('symlinks and reparse-like selected entries are rejected before registratio
     await assert.rejects(f.source.selectWithNativeDialog({ allowMultipart: false }), error => error.code === 'INVALID_REQUEST');
   });
 
-  await t.test('reported reparse point', async (t) => {
-    const f = await fixture({ files: { 'real.zip': Buffer.from('real') } });
-    t.after(f.cleanup);
-    const realFs = fs;
-    const reparseFs = {
-      ...realFs,
-      lstat: async (target, options) => {
-        const stat = await realFs.lstat(target, options);
-        return target === f.paths.get('real.zip') ? proxyStat(stat, { isReparsePoint: () => true }) : stat;
+  for (const [phase, reparseCall] of [
+    ['selection', 1],
+    ['before-open path identity', 2],
+    ['after-open handle identity', 3],
+    ['post-copy handle identity', 4],
+    ['precommit path identity', 5],
+    ['postcommit handle identity', 6],
+    ['final path identity', 7]
+  ]) {
+    await t.test(phase, async (t) => {
+      let calls = 0;
+      const f = await fixture({
+        files: { 'real.zip': Buffer.alloc(100_000, 0x31) },
+        reparseInspector: {
+          async isReparsePoint() {
+            calls += 1;
+            return calls === reparseCall;
+          }
+        }
+      });
+      t.after(f.cleanup);
+      if (phase === 'selection') {
+        await assert.rejects(
+          f.source.selectWithNativeDialog({ allowMultipart: false }),
+          error => error.code === 'INVALID_REQUEST'
+        );
+        assert.equal(f.randomId.calls, 0);
+        return;
       }
-    };
-    const reparseSource = new LocalArtifactSource({
-      dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: [f.paths.get('real.zip')] }) },
-      registry: new SelectionRegistry({ clock: () => f.clockState.now, randomId: idSequence([ID_B]) }),
-      clock: () => f.clockState.now,
-      fsApi: reparseFs,
-      cache: f.cache,
-      partialRoot: path.join(f.cache.root, 'reparse-partials'),
-      partialIdSource: idSequence(['reparse-partial'])
+      const selected = await f.source.selectWithNativeDialog({ allowMultipart: false });
+      await assert.rejects(
+        f.source.ingestSelection(selected.selectionId, {}),
+        error => error.code === 'PLAN_STALE'
+      );
+      assert.deepEqual(await partialFiles(f.cache.root), []);
     });
-    await assert.rejects(reparseSource.selectWithNativeDialog({ allowMultipart: false }), error => error.code === 'INVALID_REQUEST');
-  });
+  }
 });
 
 test('multipart gaps, duplicate volumes, secondary-only families, and unrelated extras cannot be registered', async (t) => {
@@ -365,6 +467,30 @@ test('hard-link aliases are duplicate source identities and cannot form a select
   await fs.link(f.paths.get('server.part1.rar'), alias);
   f.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [f.paths.get('server.part1.rar'), alias] });
   await assert.rejects(f.source.selectWithNativeDialog({ allowMultipart: true }), error => error.code === 'INVALID_REQUEST');
+});
+
+test('the injected byte ceiling may lower but never expand the central 16 GiB limit', () => {
+  const cacheRoot = path.resolve(os.tmpdir(), 'mc-local-limit-cache');
+  const dependencies = {
+    dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+    registry: { create() {}, claim() {}, invalidate() {} },
+    fsApi: fs,
+    cache: {
+      root: cacheRoot,
+      commitPart: async () => {},
+      controlledRoot: async () => {},
+      ensureControlledDirectory: async () => {}
+    },
+    partialRoot: path.join(cacheRoot, 'partials')
+  };
+  assert.doesNotThrow(() => new LocalArtifactSource({ ...dependencies, maxSetBytes: 1n }));
+  assert.throws(
+    () => new LocalArtifactSource({
+      ...dependencies,
+      maxSetBytes: BigInt(ARCHIVE_LIMITS.maxArtifactSetBytes) + 1n
+    }),
+    TypeError
+  );
 });
 
 test('declared aggregate bytes are bounded before registration and streamed bytes are bounded while copying', async (t) => {
@@ -579,6 +705,93 @@ test('cancellation aborts promptly, removes listeners and partials, consumes the
   assert.deepEqual(await partialFiles(f.cache.root), []);
   assert.deepEqual(await fs.readFile(f.paths.get('server.zip')), content);
   await assert.rejects(f.source.ingestSelection(selected.selectionId, {}), error => error.code === 'PLAN_STALE');
+});
+
+test('cancellation after source open or any post-copy await can never resolve a verified set', async (t) => {
+  for (const stage of [
+    'source-open',
+    'target-sync',
+    'target-stat',
+    'precommit-handle-identity',
+    'precommit-path-identity',
+    'target-close',
+    'cache-commit',
+    'final-handle-identity',
+    'final-path-identity'
+  ]) {
+    await t.test(stage, async (t) => {
+      const signal = new TrackingSignal();
+      let selectedPath;
+      let sourceStats = 0;
+      let selectedLstats = 0;
+      const stagedFs = {
+        ...fs,
+        lstat: async (target, options) => {
+          const result = await fs.lstat(target, options);
+          if (target === selectedPath) {
+            selectedLstats += 1;
+            if ((stage === 'precommit-path-identity' && selectedLstats === 3) ||
+              (stage === 'final-path-identity' && selectedLstats === 4)) signal.abort();
+          }
+          return result;
+        },
+        open: async (target, flags, ...rest) => {
+          const handle = await fs.open(target, flags, ...rest);
+          if (target === selectedPath && flags === 'r') {
+            if (stage === 'source-open') signal.abort();
+            return proxyHandle(handle, {
+              stat: async options => {
+                const result = await handle.stat(options);
+                sourceStats += 1;
+                if ((stage === 'precommit-handle-identity' && sourceStats === 2) ||
+                  (stage === 'final-handle-identity' && sourceStats === 3)) signal.abort();
+                return result;
+              }
+            });
+          }
+          if (flags === 'wx') {
+            return proxyHandle(handle, {
+              sync: async () => {
+                await handle.sync();
+                if (stage === 'target-sync') signal.abort();
+              },
+              stat: async options => {
+                const result = await handle.stat(options);
+                if (stage === 'target-stat') signal.abort();
+                return result;
+              },
+              close: async () => {
+                await handle.close();
+                if (stage === 'target-close') signal.abort();
+              }
+            });
+          }
+          return handle;
+        }
+      };
+      const f = await fixture({
+        files: { 'server.zip': Buffer.alloc(100_000, 0x63) },
+        fsApi: stagedFs,
+        cacheDecorator(cache) {
+          const commit = cache.commitPart.bind(cache);
+          cache.commitPart = async request => {
+            const result = await commit(request);
+            if (stage === 'cache-commit') signal.abort();
+            return result;
+          };
+        }
+      });
+      t.after(f.cleanup);
+      selectedPath = f.paths.get('server.zip');
+      const selected = await f.source.selectWithNativeDialog({ allowMultipart: false });
+      await assert.rejects(
+        f.source.ingestSelection(selected.selectionId, { signal }),
+        error => error.code === 'CANCELLED'
+      );
+      assert.equal(signal.listeners.size, 0);
+      assert.deepEqual(await partialFiles(f.cache.root), []);
+    });
+  }
 });
 
 test('a failing signal listener cleanup cannot strand source handles or controlled partials', async (t) => {
