@@ -39,6 +39,28 @@ test('groups .rar and .r00 volumes with the rar file as primary', () => {
   assert.deepEqual(choice.parts.map((part) => part.fileName), ['server.rar', 'server.r00', 'server.r01']);
 });
 
+test('keeps a lone bare RAR as a single choice but disables secondary-only RAR families', () => {
+  const [single] = groupMultipartCandidates([remote('a1', 'server.rar')]);
+  assert.equal(single.kind, 'single');
+  assert.equal(single.groupingScheme, 'single');
+  const [secondaryOnly] = groupMultipartCandidates([remote('a1', 'server.r00'), remote('a2', 'server.r01')]);
+  assert.equal(secondaryOnly.disabled, true);
+  assert.deepEqual(secondaryOnly.missingVolumes, [0]);
+});
+
+test('rejects unsafe multipart indices and bounds known tail enumeration', () => {
+  for (const fileName of ['server.part0.rar', 'server.part999999999999999999999999999.rar', 'server.250001']) {
+    assert.throws(() => groupMultipartCandidates([remote('a1', fileName)]), error => error.code === 'INVALID_REQUEST');
+  }
+  const [knownTail] = groupMultipartCandidates([
+    { ...remote('a1', 'server.part1.rar'), expectedPartCount: 3 },
+    { ...remote('a2', 'server.part2.rar'), expectedPartCount: 3 }
+  ]);
+  assert.equal(knownTail.disabled, true);
+  assert.deepEqual(knownTail.missingVolumes, [3]);
+  assert.equal(knownTail.tailCompleteness, 'known-missing');
+});
+
 test('groups numeric volumes and disables known missing middle and tail gaps', () => {
   const [middle] = groupMultipartCandidates([remote('a1', 'server.001'), remote('a3', 'server.003')]);
   assert.equal(middle.disabled, true);

@@ -71,6 +71,24 @@ test('records reject renderer-supplied path fields and resolve only opaque inter
   assert.equal(f.registry.resolveOwnedId({ ownerId: 'plan-a', id: inspectionId, kind: 'inspection' }).result.archiveFamily, 'zip');
 });
 
+test('resolution returns a frozen path-free snapshot that cannot mutate registry authorization', (t) => {
+  const f = registryFixture(); t.after(f.cleanup);
+  const id = f.registry.createStagingOutput({ ownerId: 'plan-a' });
+  const resolved = f.registry.resolveOwnedId({ ownerId: 'plan-a', id, kind: 'output' });
+  assert.equal(Object.hasOwn(resolved, 'path'), false);
+  assert.equal(Object.isFrozen(resolved), true);
+  resolved.ownerId = 'plan-b';
+  resolved.kind = 'inspection';
+  resolved.lastUsedAt = 999999;
+  resolved.path = 'C:\\secret';
+  resolved.value.extra = 'forged';
+  assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'plan-b', id, kind: 'output' }), error => error.code === 'PLAN_STALE');
+  const fresh = f.registry.resolveOwnedId({ ownerId: 'plan-a', id, kind: 'output' });
+  assert.equal(fresh.kind, 'output');
+  assert.equal(Object.hasOwn(fresh, 'lastUsedAt'), false);
+  assert.equal(Object.hasOwn(fresh.value, 'extra'), false);
+});
+
 test('transfers every owner record atomically so old IDs cannot be replayed', (t) => {
   const f = registryFixture(); t.after(f.cleanup);
   const artifactSetId = f.registry.registerVerifiedSet({ ownerId: 'planning-1', verifiedSet });
@@ -81,6 +99,19 @@ test('transfers every owner record atomically so old IDs cannot be replayed', (t
     assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'planning-1', id, kind }), error => error.code === 'PLAN_STALE');
     assert.equal(f.registry.resolveOwnedId({ ownerId: 'plan-1', id, kind }).id, id);
   }
+});
+
+test('claimed transfers survive expiry, allow plan-to-job handoff once, and reject replay transfers', (t) => {
+  const f = registryFixture(); t.after(f.cleanup);
+  const id = f.registry.createStagingOutput({ ownerId: 'planning-1' });
+  assert.equal(f.registry.transferOwnership({ fromOwnerId: 'planning-1', toOwnerId: 'plan-1' }), 1);
+  f.advance(31 * 60 * 1000);
+  assert.equal(f.registry.sweepExpired(), 0);
+  assert.equal(f.registry.resolveOwnedId({ ownerId: 'plan-1', id, kind: 'output' }).id, id);
+  assert.equal(f.registry.transferOwnership({ fromOwnerId: 'plan-1', toOwnerId: 'job-1' }), 1);
+  assert.throws(() => f.registry.transferOwnership({ fromOwnerId: 'plan-1', toOwnerId: 'job-1' }), error => error.code === 'PLAN_STALE');
+  assert.throws(() => f.registry.transferOwnership({ fromOwnerId: 'job-1', toOwnerId: 'job-1' }), error => error.code === 'PLAN_STALE');
+  assert.throws(() => f.registry.transferOwnership({ fromOwnerId: 'empty-owner', toOwnerId: 'job-2' }), error => error.code === 'PLAN_STALE');
 });
 
 test('materializes a registered set into an owner-bound input ID without returning a renderer path', async (t) => {
@@ -94,7 +125,28 @@ test('materializes a registered set into an owner-bound input ID without returni
   const artifactSetId = f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet });
   const inputDirectoryId = await f.registry.materializeInput({ ownerId: 'plan-a', artifactSetId });
   assert.match(inputDirectoryId, /^input-/);
-  assert.equal(fs.existsSync(f.registry.resolveOwnedId({ ownerId: 'plan-a', id: inputDirectoryId, kind: 'input' }).value.primaryPath), true);
+  const snapshot = f.registry.resolveOwnedId({ ownerId: 'plan-a', id: inputDirectoryId, kind: 'input' });
+  assert.equal(Object.hasOwn(snapshot.value, 'primaryPath'), false);
+  assert.equal(fs.existsSync(path.join(f.root, inputDirectoryId, 'server.zip')), true);
+});
+
+test('materialization reserves owner state so transfer, release, and expiry cannot orphan it', async (t) => {
+  const f = registryFixture(); t.after(f.cleanup);
+  let finish;
+  f.registry.artifactCache = { materializeSet: async (_set, destination) => {
+    await new Promise((resolve) => { finish = () => { fs.mkdirSync(destination, { recursive: true }); fs.writeFileSync(path.join(destination, 'server.zip'), 'archive'); resolve(); }; });
+    return path.join(destination, 'server.zip');
+  } };
+  const artifactSetId = f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet });
+  const pending = f.registry.materializeInput({ ownerId: 'plan-a', artifactSetId });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(() => f.registry.transferOwnership({ fromOwnerId: 'plan-a', toOwnerId: 'job-a' }), error => error.code === 'PLAN_STALE');
+  assert.throws(() => f.registry.releaseOwner('plan-a'), error => error.code === 'PLAN_STALE');
+  f.advance(31 * 60 * 1000);
+  assert.equal(f.registry.sweepExpired(), 0);
+  finish();
+  const inputId = await pending;
+  assert.equal(f.registry.resolveOwnedId({ ownerId: 'plan-a', id: inputId, kind: 'input' }).id, inputId);
 });
 
 test('failed ownership transfer leaves every record with its original owner', (t) => {
@@ -109,4 +161,39 @@ test('failed ownership transfer leaves every record with its original owner', (t
   assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'plan-1', id: freshId, kind: 'output' }), error => error.code === 'PLAN_STALE');
   assert.equal(f.registry.sweepExpired(30 * 60 * 1000), 1);
   assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'planning-1', id: staleId, kind: 'output' }), error => error.code === 'PLAN_STALE');
+});
+
+test('registry reference ownership keeps shared cached digests until the final owner releases', (t) => {
+  const f = registryFixture(); t.after(f.cleanup);
+  const calls = [];
+  f.registry.artifactCache = { retain: (digest) => calls.push(`+${digest}`), release: (digest) => calls.push(`-${digest}`) };
+  const digest = 'a'.repeat(64);
+  const shared = { type: 'verified-artifact-set', artifactSet: { primaryPartId: 'p', parts: [{ partId: 'p', fileName: 'server.zip', measuredSize: '1', calculatedDigests: { sha256: digest, sha512: 'b'.repeat(128) } }] } };
+  f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet: shared });
+  f.registry.registerVerifiedSet({ ownerId: 'plan-b', verifiedSet: shared });
+  f.registry.releaseOwner('plan-a');
+  f.registry.releaseOwner('plan-b');
+  assert.deepEqual(calls, [`+${digest}`, `+${digest}`, `-${digest}`, `-${digest}`]);
+});
+
+test('failed verified-set registration rolls back only references it acquired', (t) => {
+  const f = registryFixture(); t.after(f.cleanup);
+  const first = 'a'.repeat(64); const second = 'c'.repeat(64); const calls = [];
+  f.registry.artifactCache = { retain: (digest) => { calls.push(`+${digest}`); if (digest === second) throw new Error('retain failed'); }, release: (digest) => calls.push(`-${digest}`) };
+  const failing = { type: 'verified-artifact-set', artifactSet: { primaryPartId: 'a', parts: [
+    { partId: 'a', fileName: 'one.zip', measuredSize: '1', calculatedDigests: { sha256: first, sha512: 'b'.repeat(128) } },
+    { partId: 'b', fileName: 'two.zip', measuredSize: '1', calculatedDigests: { sha256: second, sha512: 'd'.repeat(128) } }
+  ] } };
+  assert.throws(() => f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet: failing }), /retain failed/);
+  assert.deepEqual(calls, [`+${first}`, `+${second}`, `-${first}`]);
+});
+
+test('expiry releases verified-set cache references', (t) => {
+  const f = registryFixture(); t.after(f.cleanup);
+  const digest = 'a'.repeat(64); const calls = [];
+  f.registry.artifactCache = { retain: (value) => calls.push(`+${value}`), release: (value) => calls.push(`-${value}`) };
+  f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet: { type: 'verified-artifact-set', artifactSet: { primaryPartId: 'p', parts: [{ partId: 'p', fileName: 'server.zip', measuredSize: '1', calculatedDigests: { sha256: digest, sha512: 'b'.repeat(128) } }] } } });
+  f.advance(30 * 60 * 1000);
+  assert.equal(f.registry.sweepExpired(), 1);
+  assert.deepEqual(calls, [`+${digest}`, `-${digest}`]);
 });

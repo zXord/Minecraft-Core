@@ -4,6 +4,7 @@ const test = require('node:test');
 const { createArtifactSetPlan } = require('../../electron/services/modpacks/contracts.cjs');
 const { validateCompleteArtifactSet } = require('../../electron/services/modpacks/artifacts/artifact-set.cjs');
 const { canonicalPartIdentity, computePlanFingerprint } = require('../../electron/services/modpacks/artifacts/artifact-fingerprint.cjs');
+const { finalizeVerifiedArtifactSet } = require('../../electron/services/modpacks/contracts.cjs');
 
 function plan(parts = [{ partId: 'asset-1', providerAssetId: '1', fileName: 'server.zip', size: '10' }]) {
   return createArtifactSetPlan({
@@ -43,4 +44,11 @@ test('fingerprints canonical reviewed identity and changes when the plan changes
   assert.deepEqual(canonicalPartIdentity(first.artifactSet.parts[0]), {
     partId: 'asset-1', providerAssetId: '1', fileName: 'server.zip', size: '10', updatedAt: null, providerDigest: null
   });
+});
+
+test('fingerprints verified byte identity even when provider metadata is unchanged', () => {
+  const reviewed = plan();
+  const first = finalizeVerifiedArtifactSet(reviewed, [{ partId: 'asset-1', measuredSize: '10', sha256: 'a'.repeat(64), sha512: 'b'.repeat(128) }]);
+  const changedBytes = finalizeVerifiedArtifactSet(reviewed, [{ partId: 'asset-1', measuredSize: '10', sha256: 'c'.repeat(64), sha512: 'd'.repeat(128) }]);
+  assert.notEqual(computePlanFingerprint(first), computePlanFingerprint(changedBytes));
 });
