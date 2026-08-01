@@ -13,11 +13,12 @@
     "test": "node --test",
     "build": "vite build && node scripts/post-build.mjs",
     "build:icons": "node scripts/generate-icon.cjs",
+    "verify:archive-runtime": "node scripts/verify-archive-runtime.cjs",
     "start": "electron .",
     "prod": "npm run build && npm run start",
-    "pack": "npm run build && npm run build:icons && electron-builder --dir",
-    "dist": "npm run build && npm run build:icons && electron-builder",
-    "release": "npm run build && npm run build:icons && electron-builder --publish=always"
+    "pack": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder --dir",
+    "dist": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder",
+    "release": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder --publish=always"
   },
   "devDependencies": {
     "@eslint/js": "^9.28.0",
