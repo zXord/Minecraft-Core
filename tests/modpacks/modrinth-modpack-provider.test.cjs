@@ -66,7 +66,6 @@ test('search serializes Modrinth modpack facets, paging, compatibility, and supp
     categories: ['technology', 'adventure'],
     gameVersion: '1.21.1',
     loader: 'fabric',
-    channel: 'release',
     serverCompatibility: 'compatible',
     sort: 'downloads',
     offset: 20,
@@ -93,7 +92,7 @@ test('search preserves exact project IDs and derives server-side compatibility w
   const http = makeHttp({
     '/search': jsonResponse({
       hits: [{
-        project_id: 'project-7', slug: 'factory-pack', title: 'Factory Pack', description: 'Build things',
+        project_id: 'project-7', project_type: 'modpack', slug: 'factory-pack', title: 'Factory Pack', description: 'Build things',
         categories: ['fabric', 'technology'], display_categories: ['technology'], versions: ['1.21.1'],
         client_side: 'required', server_side: 'optional', downloads: 9001,
         icon_url: 'https://images.example/icon.png', gallery: ['https://images.example/gallery.png'],
@@ -240,4 +239,92 @@ test('provider validates request identifiers filters and paging before transport
   await assert.rejects(provider.searchProjects({ sort: 'relevance', offset: -1, limit: 101 }), error => error.code === 'INVALID_REQUEST');
   await assert.rejects(provider.listVersions({ projectId: 'ok', channels: ['prerelease'] }), error => error.code === 'INVALID_REQUEST');
   assert.deepEqual(http.calls, []);
+});
+
+test('search rejects project-search channels because the official endpoint has no channel facet', async () => {
+  const http = makeHttp({});
+  const provider = new ModrinthModpackProvider({ http });
+  await assert.rejects(provider.searchProjects({ channel: 'release', offset: 0, limit: 10 }), error => error.code === 'INVALID_REQUEST');
+  assert.deepEqual(http.calls, []);
+});
+
+test('search requires modpack result types and unique exact project IDs', async () => {
+  const base = {
+    project_id: 'same-project', project_type: 'modpack', slug: 'same', title: 'Same', description: '',
+    categories: ['fabric'], display_categories: ['fabric'], versions: ['1.21.1'], client_side: 'required',
+    server_side: 'required', downloads: 1, icon_url: null, gallery: [], date_modified: '2026-01-01T00:00:00.000Z'
+  };
+  for (const hits of [[{ ...base, project_type: 'mod' }], [base, { ...base, slug: 'duplicate' }]]) {
+    const provider = new ModrinthModpackProvider({ http: makeHttp({ '/search': jsonResponse({ hits, offset: 0, limit: 10, total_hits: hits.length }) }) });
+    await assert.rejects(provider.searchProjects({ offset: 0, limit: 10 }), error => error.code === 'INVALID_REQUEST');
+  }
+});
+
+test('exact project and version endpoints reject mismatched response identities without fallback', async () => {
+  const projectBody = {
+    id: 'different-project', slug: 'different', project_type: 'modpack', title: 'Different', description: '', body: '', icon_url: null,
+    gallery: [], game_versions: ['1.21.1'], loaders: ['fabric'], client_side: 'required', server_side: 'required',
+    updated: '2026-01-01T00:00:00.000Z', downloads: 1, donation_urls: []
+  };
+  const projectHttp = makeHttp({ '/project/project-exact': jsonResponse(projectBody) });
+  await assert.rejects(new ModrinthModpackProvider({ http: projectHttp }).getProject('project-exact'), error => error.code === 'INVALID_REQUEST');
+  assert.deepEqual(projectHttp.requestedPaths, ['/project/project-exact']);
+
+  const versionHttp = makeHttp({ '/version/version-exact': jsonResponse(version({ id: 'different-version' })) });
+  await assert.rejects(new ModrinthModpackProvider({ http: versionHttp }).resolveArtifactSetPlan('version-exact'), error => error.code === 'INVALID_REQUEST');
+  assert.deepEqual(versionHttp.requestedPaths, ['/version/version-exact']);
+});
+
+test('version history requires the requested project ID and unique exact version IDs', async () => {
+  for (const values of [
+    [version({ id: 'v1', project_id: 'other-project' })],
+    [version({ id: 'v1' }), version({ id: 'v1', version_number: 'duplicate' })]
+  ]) {
+    const http = makeHttp({ '/project/project-exact/version': jsonResponse(values) });
+    const provider = new ModrinthModpackProvider({ http });
+    await assert.rejects(provider.listVersions({ projectId: 'project-exact' }), error => error.code === 'INVALID_REQUEST');
+    assert.deepEqual(http.requestedPaths, ['/project/project-exact/version']);
+  }
+});
+
+test('provider accepts only bounded Buffer bodies with fatal UTF-8', async () => {
+  const stringBody = new ModrinthModpackProvider({ http: makeHttp({ '/search': { statusCode: 200, body: '{"hits":[],"offset":0,"limit":10,"total_hits":0}' } }) });
+  await assert.rejects(stringBody.searchProjects({ offset: 0, limit: 10 }), error => error.code === 'INVALID_REQUEST');
+  const invalidUtf8 = new ModrinthModpackProvider({ http: makeHttp({ '/search': { statusCode: 200, body: Buffer.from([0xc3, 0x28]) } }) });
+  await assert.rejects(invalidUtf8.searchProjects({ offset: 0, limit: 10 }), error => error.code === 'INVALID_REQUEST');
+  assert.throws(() => new ModrinthModpackProvider({ http: makeHttp({}), maxResponseBytes: 2 * 1024 * 1024 + 1 }), TypeError);
+});
+
+test('loader normalization is closed deduplicated and list queries serialize exact upstream names', async () => {
+  const project = {
+    id: 'project-exact', slug: 'exact', project_type: 'modpack', title: 'Exact', description: '', body: '', icon_url: null,
+    gallery: [], game_versions: ['1.21.1'], loaders: ['minecraft', 'vanilla', 'fabric', 'fabric-loader', 'forge', 'neoforge', 'quilt-loader'],
+    client_side: 'required', server_side: 'required', updated: '2026-01-01T00:00:00.000Z', downloads: 1, donation_urls: []
+  };
+  const http = makeHttp({
+    '/project/project-exact': jsonResponse(project),
+    '/search': ({ query }) => {
+      assert.deepEqual(JSON.parse(query.facets), [['project_type:modpack'], ['categories:vanilla']]);
+      return jsonResponse({ hits: [], offset: 0, limit: 10, total_hits: 0 });
+    },
+    '/project/project-exact/version': ({ query }) => {
+      assert.deepEqual(query, { loaders: '["minecraft","fabric","forge","neoforge","quilt"]' });
+      return jsonResponse([version({ loaders: ['minecraft', 'vanilla', 'fabric', 'fabric-loader', 'forge', 'neoforge', 'quilt-loader'] })]);
+    }
+  });
+  const provider = new ModrinthModpackProvider({ http });
+  assert.deepEqual((await provider.getProject('project-exact')).runtimes.loaders, ['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+  await provider.searchProjects({ loader: 'vanilla', offset: 0, limit: 10 });
+  const listed = await provider.listVersions({ projectId: 'project-exact', loaders: ['vanilla', 'fabric', 'forge', 'neoforge', 'quilt'] });
+  assert.deepEqual(listed[0].loaders, ['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+
+  const invalidRequestHttp = makeHttp({});
+  await assert.rejects(new ModrinthModpackProvider({ http: invalidRequestHttp }).listVersions({ projectId: 'project-exact', loaders: ['bukkit'] }), error => error.code === 'INVALID_REQUEST');
+  assert.deepEqual(invalidRequestHttp.calls, []);
+
+  for (const route of ['/project/project-exact', '/version/version-exact']) {
+    const body = route.startsWith('/project/') ? { ...project, loaders: ['bukkit'] } : version({ loaders: ['bukkit'] });
+    const invalid = new ModrinthModpackProvider({ http: makeHttp({ [route]: jsonResponse(body) }) });
+    await assert.rejects(route.startsWith('/project/') ? invalid.getProject('project-exact') : invalid.getVersion('version-exact'), error => error.code === 'INVALID_REQUEST');
+  }
 });

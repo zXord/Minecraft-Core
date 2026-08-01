@@ -6,6 +6,7 @@ const {
   parseMrpackManifest,
   validateMrpackManifest
 } = require('../../electron/services/modpacks/mrpack/mrpack-parser.cjs');
+const { ARCHIVE_LIMITS } = require('../../electron/services/modpacks/limits.cjs');
 
 function manifest(overrides = {}) {
   return {
@@ -42,12 +43,18 @@ test('requires format version one minecraft metadata and exact supported depende
   for (const bad of [
     manifest({ formatVersion: 2 }), manifest({ formatVersion: '1' }), manifest({ game: 'other' }),
     manifest({ versionId: '' }), manifest({ name: '' }), manifest({ dependencies: {} }),
-    manifest({ dependencies: { minecraft: '1.21.1', unknown: '1' } }),
-    manifest({ dependencies: { minecraft: '1.21.1', forge: '1', neoforge: '2' } })
+    manifest({ dependencies: { minecraft: '1.21.1', unknown: '1' } })
   ]) {
     assert.throws(() => validateMrpackManifest(bad), error => error.code === 'MANIFEST_INVALID');
   }
   assert.deepEqual(validateMrpackManifest(manifest({ dependencies: { minecraft: '1.21.1' } })).dependencies, { minecraft: '1.21.1' });
+});
+
+test('multiple MRPACK loader dependencies fail with LOADER_CONFLICT', () => {
+  assert.throws(
+    () => validateMrpackManifest(manifest({ dependencies: { minecraft: '1.21.1', forge: '1', neoforge: '2' } })),
+    error => error.code === 'LOADER_CONFLICT'
+  );
 });
 
 test('requires lower-case SHA-1 and SHA-512 with exact lengths and safe integer sizes', () => {
@@ -104,4 +111,13 @@ test('normalizes absent environment as required and validates explicit server st
   }
   assert.throws(() => validateMrpackManifest(manifest({ files: [{ ...source, env: { client: 'required' } }] })), error => error.code === 'MANIFEST_INVALID');
   assert.throws(() => validateMrpackManifest(manifest({ files: [{ ...source, env: { client: 'required', server: 'maybe' } }] })), error => error.code === 'MANIFEST_INVALID');
+});
+
+test('enforces the central per-file expanded-byte limit at its exact boundary', () => {
+  const maximum = Number(BigInt(ARCHIVE_LIMITS.maxFileExpandedBytes));
+  assert.equal(validateMrpackManifest(manifest({ files: [{ ...manifest().files[0], fileSize: maximum }] })).files[0].fileSize, String(maximum));
+  assert.throws(
+    () => validateMrpackManifest(manifest({ files: [{ ...manifest().files[0], fileSize: maximum + 1 }] })),
+    error => error.code === 'ARCHIVE_LIMIT_EXCEEDED' && error.details?.limit === 'maxFileExpandedBytes' && error.details?.actual === String(maximum + 1)
+  );
 });

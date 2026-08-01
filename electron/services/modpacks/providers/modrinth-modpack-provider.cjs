@@ -8,6 +8,18 @@ const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CHANNELS = new Set(['release', 'beta', 'alpha']);
 const LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+const UPSTREAM_LOADER_TO_APP = new Map([
+  ['minecraft', 'vanilla'], ['vanilla', 'vanilla'],
+  ['fabric', 'fabric'], ['fabric-loader', 'fabric'],
+  ['forge', 'forge'], ['neoforge', 'neoforge'],
+  ['quilt', 'quilt'], ['quilt-loader', 'quilt']
+]);
+const APP_LOADER_TO_VERSION_API = new Map([
+  ['vanilla', 'minecraft'], ['fabric', 'fabric'], ['forge', 'forge'], ['neoforge', 'neoforge'], ['quilt', 'quilt']
+]);
+const APP_LOADER_TO_SEARCH_CATEGORY = new Map([
+  ['vanilla', 'vanilla'], ['fabric', 'fabric'], ['forge', 'forge'], ['neoforge', 'neoforge'], ['quilt', 'quilt']
+]);
 const SERVER_COMPATIBILITY = new Set(['required', 'optional', 'unsupported', 'unknown']);
 
 function invalidResponse() {
@@ -70,6 +82,21 @@ function strings(value, { maxItems = 256, maxLength = 128 } = {}) {
   return value.map(item => text(item, maxLength));
 }
 
+function normalizedLoaders(value) {
+  const source = strings(value, { maxItems: 64 });
+  const result = [];
+  const seen = new Set();
+  for (const upstream of source) {
+    const family = UPSTREAM_LOADER_TO_APP.get(upstream);
+    if (!family) throw invalidResponse();
+    if (!seen.has(family)) {
+      seen.add(family);
+      result.push(family);
+    }
+  }
+  return result;
+}
+
 function optionalString(value, max = 1024, options) {
   return value === null || value === undefined ? null : text(value, max, options);
 }
@@ -79,7 +106,7 @@ function normalizeCompatibility(value) {
 }
 
 function normalizeSearchHit(hit) {
-  if (!plain(hit)) throw invalidResponse();
+  if (!plain(hit) || hit.project_type !== 'modpack') throw invalidResponse();
   const categories = strings(hit.categories, { maxItems: 128 });
   const gallery = hit.gallery === undefined ? [] : strings(hit.gallery, { maxItems: 32, maxLength: 4096 }).map(candidateUrl);
   return {
@@ -91,7 +118,7 @@ function normalizeSearchHit(hit) {
     galleryUrlCandidates: gallery,
     categories,
     minecraftVersions: strings(hit.versions, { maxItems: 256, maxLength: 64 }),
-    loaders: categories.filter(category => LOADERS.has(category)),
+    loaders: [...new Set(categories.map(category => UPSTREAM_LOADER_TO_APP.get(category)).filter(Boolean))],
     serverCompatibility: normalizeCompatibility(hit.server_side),
     updatedAt: timestamp(hit.date_modified),
     downloads: count(hit.downloads)
@@ -134,7 +161,7 @@ function normalizeProject(project) {
     galleryCandidates: normalizeGallery(project.gallery ?? []),
     runtimes: {
       minecraftVersions: strings(project.game_versions, { maxItems: 256, maxLength: 64 }),
-      loaders: strings(project.loaders, { maxItems: 64 }).map(loader => loader === 'fabric-loader' ? 'fabric' : loader === 'quilt-loader' ? 'quilt' : loader)
+      loaders: normalizedLoaders(project.loaders)
     },
     serverCompatibility: normalizeCompatibility(project.server_side),
     updatedAt: timestamp(project.updated),
@@ -166,7 +193,7 @@ function normalizeVersion(value) {
     changelog: optionalString(value.changelog, 1024 * 1024, { multiline: true, empty: true }),
     channel: value.version_type,
     minecraftVersions: strings(value.game_versions, { maxItems: 256, maxLength: 64 }),
-    loaders: strings(value.loaders, { maxItems: 64 }).map(loader => loader === 'fabric-loader' ? 'fabric' : loader === 'quilt-loader' ? 'quilt' : loader),
+    loaders: normalizedLoaders(value.loaders),
     publishedAt: timestamp(value.date_published),
     downloads: count(value.downloads),
     files: value.files.map(normalizeFile)
@@ -186,7 +213,7 @@ function requestFilterStrings(value, field, { maxItems = 32, pattern = /^[A-Za-z
 
 class ModrinthModpackProvider {
   constructor({ http, maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES } = {}) {
-    if (!http || typeof http.request !== 'function' || !Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) throw new TypeError('Modrinth provider dependencies are invalid');
+    if (!http || typeof http.request !== 'function' || !Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0 || maxResponseBytes > DEFAULT_MAX_RESPONSE_BYTES) throw new TypeError('Modrinth provider dependencies are invalid');
     this.http = http;
     this.maxResponseBytes = maxResponseBytes;
   }
@@ -195,7 +222,7 @@ class ModrinthModpackProvider {
     let response;
     try { response = await this.http.request(path, options); }
     catch (error) { if (error instanceof ModpackError) throw error; throw unavailable(); }
-    if (!response || !Number.isSafeInteger(response.statusCode) || (!Buffer.isBuffer(response.body) && typeof response.body !== 'string')) throw invalidResponse();
+    if (!response || !Number.isSafeInteger(response.statusCode) || !Buffer.isBuffer(response.body)) throw invalidResponse();
     if (response.statusCode === 404 && missingCode) {
       const details = missingCode === 'REPOSITORY_NOT_FOUND'
         ? { provider: 'modrinth', repositoryId: missingId }
@@ -203,7 +230,7 @@ class ModrinthModpackProvider {
       throw new ModpackError(missingCode, missingCode === 'REPOSITORY_NOT_FOUND' ? 'Modrinth project was not found' : 'Modrinth version was not found', { details });
     }
     if (response.statusCode < 200 || response.statusCode >= 300) throw unavailable();
-    const bytes = Buffer.isBuffer(response.body) ? response.body : Buffer.from(response.body, 'utf8');
+    const bytes = response.body;
     if (bytes.length > this.maxResponseBytes) {
       throw new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Modrinth response exceeded the configured byte limit', {
         details: { limit: 'maxTechnicalStdoutBytes', actual: String(bytes.length) }
@@ -220,7 +247,7 @@ class ModrinthModpackProvider {
     categories = requestFilterStrings(categories, 'categories');
     if (gameVersion !== undefined && (typeof gameVersion !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(gameVersion))) throw invalidRequest('gameVersion');
     if (loader !== undefined && !LOADERS.has(loader)) throw invalidRequest('loader');
-    if (channel !== undefined && !CHANNELS.has(channel)) throw invalidRequest('channel');
+    if (channel !== undefined) throw invalidRequest('channel');
     if (serverCompatibility !== undefined && serverCompatibility !== 'compatible' && !SERVER_COMPATIBILITY.has(serverCompatibility)) throw invalidRequest('serverCompatibility');
     if (sort !== 'updated' && sort !== 'downloads') throw invalidRequest('sort');
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw invalidRequest('offset');
@@ -228,7 +255,7 @@ class ModrinthModpackProvider {
     const facets = [['project_type:modpack']];
     if (categories.length) facets.push(categories.map(category => `categories:${category}`));
     if (gameVersion) facets.push([`versions:${gameVersion}`]);
-    if (loader) facets.push([`categories:${loader}`]);
+    if (loader) facets.push([`categories:${APP_LOADER_TO_SEARCH_CATEGORY.get(loader)}`]);
     if (serverCompatibility === 'compatible') facets.push(['server_side:required', 'server_side:optional']);
     else if (serverCompatibility) facets.push([`server_side:${serverCompatibility}`]);
     const value = await this.requestJson('/search', { query: {
@@ -239,34 +266,41 @@ class ModrinthModpackProvider {
       limit: String(limit)
     } });
     if (!plain(value) || !Array.isArray(value.hits) || value.hits.length > 100) throw invalidResponse();
+    const items = value.hits.map(normalizeSearchHit);
+    if (new Set(items.map(item => item.projectId)).size !== items.length) throw invalidResponse();
     return deepFreeze({
-      items: value.hits.map(normalizeSearchHit),
+      items,
       pagination: { offset: count(value.offset), limit: count(value.limit), total: count(value.total_hits) }
     });
   }
 
   async getProject(projectId) {
     projectId = requestIdentifier(projectId, 'projectId');
-    return normalizeProject(await this.requestJson(`/project/${projectId}`, undefined, { missingCode: 'REPOSITORY_NOT_FOUND', missingId: projectId }));
+    const project = normalizeProject(await this.requestJson(`/project/${projectId}`, undefined, { missingCode: 'REPOSITORY_NOT_FOUND', missingId: projectId }));
+    if (project.projectId !== projectId) throw invalidResponse();
+    return project;
   }
 
   async listVersions({ projectId, gameVersions, loaders, channels } = {}) {
     projectId = requestIdentifier(projectId, 'projectId');
     gameVersions = requestFilterStrings(gameVersions, 'gameVersions');
-    loaders = requestFilterStrings(loaders, 'loaders');
+    loaders = requestFilterStrings(loaders, 'loaders', { pattern: /^(?:vanilla|fabric|forge|neoforge|quilt)$/ });
     channels = requestFilterStrings(channels, 'channels', { pattern: /^(?:release|beta|alpha)$/ });
     const query = {};
     if (gameVersions.length) query.game_versions = JSON.stringify(gameVersions);
-    if (loaders.length) query.loaders = JSON.stringify(loaders);
+    if (loaders.length) query.loaders = JSON.stringify(loaders.map(loader => APP_LOADER_TO_VERSION_API.get(loader)));
     const value = await this.requestJson(`/project/${projectId}/version`, { query }, { missingCode: 'REPOSITORY_NOT_FOUND', missingId: projectId });
     if (!Array.isArray(value) || value.length > 1000) throw invalidResponse();
     const versions = value.map(normalizeVersion);
+    if (versions.some(version => version.projectId !== projectId) || new Set(versions.map(version => version.versionId)).size !== versions.length) throw invalidResponse();
     return deepFreeze(channels.length ? versions.filter(item => channels.includes(item.channel)) : versions);
   }
 
   async getVersion(versionId) {
     versionId = requestIdentifier(versionId, 'versionId');
-    return normalizeVersion(await this.requestJson(`/version/${versionId}`, undefined, { missingCode: 'RELEASE_NOT_FOUND', missingId: versionId }));
+    const version = normalizeVersion(await this.requestJson(`/version/${versionId}`, undefined, { missingCode: 'RELEASE_NOT_FOUND', missingId: versionId }));
+    if (version.versionId !== versionId) throw invalidResponse();
+    return version;
   }
 
   async resolveArtifactSetPlan(versionId) {

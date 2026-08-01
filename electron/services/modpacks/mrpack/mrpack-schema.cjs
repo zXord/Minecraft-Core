@@ -28,6 +28,12 @@ function collision() {
   });
 }
 
+function limitExceeded(limit, actual) {
+  return new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Pack content exceeded the configured byte limit', {
+    details: { limit, actual: String(actual) }
+  });
+}
+
 function plainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
@@ -100,6 +106,7 @@ function normalizeFile(value, index) {
   if (Object.keys(value).some(key => !allowed.has(key))) throw manifestInvalid('unsupported-format');
   if (!Array.isArray(value.downloads) || value.downloads.length === 0 || value.downloads.length > 16) throw manifestInvalid();
   if (!Number.isSafeInteger(value.fileSize) || value.fileSize < 0) throw manifestInvalid();
+  if (BigInt(value.fileSize) > BigInt(ARCHIVE_LIMITS.maxFileExpandedBytes)) throw limitExceeded('maxFileExpandedBytes', value.fileSize);
   return {
     path: normalizeMrpackPath(value.path),
     hashes: normalizeHashes(value.hashes),
@@ -116,7 +123,7 @@ function normalizeDependencies(value) {
   if (keys.some(key => !DEPENDENCY_KEYS.has(key))) throw manifestInvalid('unsupported-format');
   for (const key of keys) if (!boundedString(value[key], { max: 128 })) throw manifestInvalid();
   const loaders = keys.filter(key => key !== 'minecraft');
-  if (loaders.length > 1) throw manifestInvalid('unsupported-format');
+  if (loaders.length > 1) throw new ModpackError('LOADER_CONFLICT', 'Modrinth pack declares conflicting loaders');
   return Object.fromEntries(keys.map(key => [key, value[key]]));
 }
 

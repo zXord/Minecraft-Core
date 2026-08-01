@@ -29,8 +29,8 @@ function normalizeArchiveEntries(entries) {
   if (!Array.isArray(entries) || entries.length > ARCHIVE_LIMITS.maxArchiveEntries) invalidRequest('archiveEntries');
   const normalized = [];
   for (const source of entries) {
-    const record = typeof source === 'string' ? { path: source, type: 'file' } : source;
-    if (!record || typeof record !== 'object' || Array.isArray(record)) unsafeEntry('non-regular-entry');
+    const record = source;
+    if (!record || typeof record !== 'object' || Array.isArray(record) || Object.getPrototypeOf(record) !== Object.prototype) unsafeEntry('non-regular-entry');
     if (record.type !== 'file' && record.type !== 'directory') unsafeEntry('non-regular-entry');
     if (Object.keys(record).some(key => !['path', 'type', 'size'].includes(key))) unsafeEntry('non-regular-entry');
     if (record.size !== undefined && (!Number.isSafeInteger(record.size) || record.size < 0)) unsafeEntry('non-regular-entry');
@@ -83,11 +83,11 @@ function selectedOptionAliases(manifest, selection) {
   return result;
 }
 
-function overrideOperations(entries) {
-  const operations = [];
+function projectedArchiveOperations(entries) {
+  const files = [];
+  const directories = [];
   const aliasesByLayer = new Map([['overrides', new Set()], ['server-overrides', new Set()]]);
   for (const entry of entries) {
-    if (entry.type !== 'file') continue;
     const slash = entry.path.indexOf('/');
     if (slash < 0) continue;
     const prefix = entry.path.slice(0, slash).toLocaleLowerCase('en-US');
@@ -100,16 +100,50 @@ function overrideOperations(entries) {
     const aliases = aliasesByLayer.get(prefix);
     if (aliases.has(alias)) entryCollision();
     aliases.add(alias);
-    operations.push({
+    const operation = {
       layer: prefix,
       order: prefix === 'overrides' ? 1 : 2,
       archivePath: entry.path,
       targetPath,
       ...(entry.size === undefined ? {} : { size: entry.size })
-    });
+    };
+    if (entry.type === 'file') files.push(operation);
+    else directories.push(operation);
   }
-  operations.sort((left, right) => left.order - right.order || canonicalWindowsPath(left.archivePath).localeCompare(canonicalWindowsPath(right.archivePath), 'en-US'));
-  return operations;
+  const sorter = (left, right) => left.order - right.order || canonicalWindowsPath(left.archivePath).localeCompare(canonicalWindowsPath(right.archivePath), 'en-US');
+  files.sort(sorter);
+  directories.sort(sorter);
+  return { files, directories };
+}
+
+function validateProjectedTargets(downloads, files, directories) {
+  const nodes = new Map();
+  const projected = [
+    ...downloads.filter(download => download.selected).map(download => ({ type: 'file', order: 0, targetPath: download.targetPath })),
+    ...files.map(file => ({ type: 'file', order: file.order, targetPath: file.targetPath })),
+    ...directories.map(directory => ({ type: 'directory', order: directory.order, targetPath: directory.targetPath }))
+  ].sort((left, right) => left.order - right.order || canonicalWindowsPath(left.targetPath).localeCompare(canonicalWindowsPath(right.targetPath), 'en-US') || left.type.localeCompare(right.type));
+
+  for (const item of projected) {
+    const alias = canonicalWindowsPath(item.targetPath);
+    const current = nodes.get(alias);
+    if (current) {
+      if (current.type !== item.type) entryCollision('file-directory-collision');
+      if (item.type === 'file') {
+        if (item.order <= current.order) entryCollision();
+        nodes.set(alias, item);
+      }
+      continue;
+    }
+    const segments = alias.split('/');
+    for (let length = 1; length < segments.length; length += 1) {
+      if (nodes.get(segments.slice(0, length).join('/'))?.type === 'file') entryCollision('file-directory-collision');
+    }
+    if (item.type === 'file') {
+      for (const [existingAlias] of nodes) if (existingAlias.startsWith(`${alias}/`)) entryCollision('file-directory-collision');
+    }
+    nodes.set(alias, item);
+  }
 }
 
 function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles, archiveEntries = [] } = {}) {
@@ -126,6 +160,7 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
       optional,
       selected: isSelected,
       downloadUrl: file.downloads[0],
+      downloadUrlCandidates: [...file.downloads],
       allowedHosts: [...MRPACK_DOWNLOAD_HOSTS],
       allowSubdomains: false,
       size: file.fileSize,
@@ -135,8 +170,16 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
     });
   }
 
+  const selectedBytes = downloads.reduce((total, download) => total + (download.selected ? BigInt(download.size) : 0n), 0n);
+  if (selectedBytes > BigInt(ARCHIVE_LIMITS.maxArtifactSetBytes)) {
+    throw new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Pack downloads exceeded the configured byte limit', {
+      details: { limit: 'maxArtifactSetBytes', actual: selectedBytes.toString() }
+    });
+  }
+
   const entries = normalizeArchiveEntries(archiveEntries);
-  const operations = overrideOperations(entries);
+  const { files: operations, directories } = projectedArchiveOperations(entries);
+  validateProjectedTargets(downloads, operations, directories);
   if (!downloads.some(download => download.selected) && operations.length === 0) {
     throw new ModpackError('CLIENT_ONLY_PACK', 'Modrinth pack has no supported server content');
   }
@@ -150,6 +193,9 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
       targetPath: operation.targetPath,
       ...(operation.size === undefined ? {} : { size: operation.size })
     }));
+  const finalDirectories = [...new Set(directories.map(directory => canonicalWindowsPath(directory.targetPath)))]
+    .sort((left, right) => left.localeCompare(right, 'en-US'))
+    .map(targetPath => ({ targetPath }));
 
   return deepFreeze({
     type: 'mrpack-server-plan',
@@ -162,7 +208,8 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
       { name: 'server-overrides', order: 2 }
     ],
     overrideOperations: operations,
-    finalOverrides
+    finalOverrides,
+    finalDirectories
   });
 }
 
