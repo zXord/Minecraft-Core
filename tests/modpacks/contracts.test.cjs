@@ -134,6 +134,21 @@ test('artifact plans reject primary-part and grouping metadata mutations with PL
   assert.throws(() => assertArtifactSetUnchanged(expected, groupingChanged), error => error.code === 'PLAN_STALE');
 });
 
+test('artifact comparisons recompute digests and include provider trust metadata', () => {
+  const expected = createArtifactSetPlan(artifactInput);
+  const staleSerialized = JSON.parse(JSON.stringify(expected));
+  staleSerialized.artifactSet.parts[0].size = '1';
+  const providerImmutableChanged = JSON.parse(JSON.stringify(expected));
+  providerImmutableChanged.artifactSet.providerImmutable = true;
+  const attestationChanged = JSON.parse(JSON.stringify(expected));
+  attestationChanged.artifactSet.attestationStatus = 'verified';
+
+  assert.throws(() => assertArtifactSetUnchanged(expected, staleSerialized), error => error.code === 'PLAN_STALE');
+  assert.throws(() => assertArtifactSetUnchanged(expected, providerImmutableChanged), error => error.code === 'PLAN_STALE');
+  assert.throws(() => assertArtifactSetUnchanged(expected, attestationChanged), error => error.code === 'PLAN_STALE');
+  assert.equal(assertArtifactSetUnchanged(expected, expected), expected);
+});
+
 test('artifact plans enforce inverse single and multipart grouping invariants', () => {
   assert.throws(
     () => createArtifactSetPlan({ ...artifactInput, artifactSet: { ...artifactInput.artifactSet, kind: 'multipart', groupingScheme: 'single' } }),

@@ -224,19 +224,25 @@ function finalizeVerifiedArtifactSet(plan, verifiedParts) {
 }
 
 function assertArtifactSetUnchanged(expected, actual) {
-  const expectedIdentity = expected && expected.artifactSet && {
-    kind: expected.artifactSet.kind,
-    primaryPartId: expected.artifactSet.primaryPartId,
-    groupingScheme: expected.artifactSet.groupingScheme,
-    setDigest: expected.artifactSet.setDigest
+  const normalizedExpected = revalidateArtifactSetPlan(expected);
+  const normalizedActual = revalidateArtifactSetPlan(actual);
+  const expectedIdentity = {
+    kind: normalizedExpected.artifactSet.kind,
+    primaryPartId: normalizedExpected.artifactSet.primaryPartId,
+    groupingScheme: normalizedExpected.artifactSet.groupingScheme,
+    setDigest: normalizedExpected.artifactSet.setDigest,
+    providerImmutable: normalizedExpected.artifactSet.providerImmutable,
+    attestationStatus: normalizedExpected.artifactSet.attestationStatus
   };
-  const actualIdentity = actual && actual.artifactSet && {
-    kind: actual.artifactSet.kind,
-    primaryPartId: actual.artifactSet.primaryPartId,
-    groupingScheme: actual.artifactSet.groupingScheme,
-    setDigest: actual.artifactSet.setDigest
+  const actualIdentity = {
+    kind: normalizedActual.artifactSet.kind,
+    primaryPartId: normalizedActual.artifactSet.primaryPartId,
+    groupingScheme: normalizedActual.artifactSet.groupingScheme,
+    setDigest: normalizedActual.artifactSet.setDigest,
+    providerImmutable: normalizedActual.artifactSet.providerImmutable,
+    attestationStatus: normalizedActual.artifactSet.attestationStatus
   };
-  if (!expectedIdentity || !actualIdentity || JSON.stringify(expectedIdentity) !== JSON.stringify(actualIdentity)) {
+  if (JSON.stringify(expectedIdentity) !== JSON.stringify(actualIdentity)) {
     throw new ModpackError('PLAN_STALE', 'The reviewed artifact set has changed');
   }
   return actual;
