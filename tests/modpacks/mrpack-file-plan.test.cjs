@@ -35,7 +35,7 @@ test('builds deterministic required downloads with both hashes and exact runtime
   const plan = buildMrpackServerPlan({ manifest: manifest(), selectedOptionalFiles: [], archiveEntries: [] });
   assert.deepEqual(plan.runtime, { minecraftVersion: '1.21.1', loaderFamily: 'fabric', loaderVersion: '0.16.9' });
   assert.deepEqual(plan.downloads, [{
-    partId: `file-${'a'.repeat(40)}`,
+    partId: 'file-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-140e8bce9451a32f82f9944c94c163bf94ac1a892553546f927208754ee178dc',
     targetPath: 'mods/required.jar', optional: false, selected: true,
     downloadUrl: 'https://cdn.modrinth.com/data/a/versions/b/required.jar',
     downloadUrlCandidates: ['https://cdn.modrinth.com/data/a/versions/b/required.jar'],
@@ -128,6 +128,15 @@ test('archive entry metadata must be explicit plain and closed', () => {
   ]) assert.throws(() => buildMrpackServerPlan({ manifest: manifest(), archiveEntries: [entry] }), error => error.code === 'UNSAFE_ARCHIVE_ENTRY');
 });
 
+test('projected overrides reject Win32 superscript COM and LPT device aliases', () => {
+  for (const device of ['COM¹', 'COM²', 'COM³', 'LPT¹', 'LPT²', 'LPT³']) {
+    assert.throws(
+      () => buildMrpackServerPlan({ manifest: manifest(), archiveEntries: [archiveFile(`overrides/config/${device}.toml`)] }),
+      error => error.code === 'UNSAFE_ARCHIVE_ENTRY'
+    );
+  }
+});
+
 test('rejects archive aliases and file-directory conflicts even outside applied override trees', () => {
   assert.throws(() => buildMrpackServerPlan({
     manifest: manifest(), archiveEntries: [
@@ -204,4 +213,18 @@ test('MRPACK mirror candidates preserve validated provider order and are frozen'
     formatVersion: 1, game: 'minecraft', versionId: 'v1', name: 'Pack', dependencies: { minecraft: '1.21.1' },
     files: [file('mods/example.jar', 'required', { downloads: [...mirrors, 'https://evil.example/example.jar'] })]
   }), error => error.code === 'INVALID_RELEASE_URL');
+});
+
+test('duplicate bytes at distinct targets receive deterministic unique safe part IDs', () => {
+  const pack = manifest([file('mods/one.jar'), file('mods/two.jar')]);
+  const first = buildMrpackServerPlan({ manifest: pack, archiveEntries: [] });
+  const second = buildMrpackServerPlan({ manifest: pack, archiveEntries: [] });
+  assert.equal(first.downloads.length, 2);
+  assert.notEqual(first.downloads[0].partId, first.downloads[1].partId);
+  assert.deepEqual(first.downloads.map(download => download.partId), second.downloads.map(download => download.partId));
+  for (const download of first.downloads) {
+    assert.match(download.partId, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+    assert.deepEqual(download.requiredProviderDigests, { sha1: 'a'.repeat(40), sha512: 'b'.repeat(128) });
+    assert.deepEqual(download.providerDigest, { algorithm: 'sha512', value: 'b'.repeat(128) });
+  }
 });

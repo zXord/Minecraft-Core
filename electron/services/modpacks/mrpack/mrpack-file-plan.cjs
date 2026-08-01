@@ -1,3 +1,4 @@
+const crypto = require('node:crypto');
 const { ARCHIVE_LIMITS } = require('../limits.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const {
@@ -63,6 +64,15 @@ function runtimeFromDependencies(dependencies) {
   if (!loader) return { minecraftVersion: dependencies.minecraft, loaderFamily: 'vanilla', loaderVersion: dependencies.minecraft };
   const loaderFamily = loader === 'fabric-loader' ? 'fabric' : loader === 'quilt-loader' ? 'quilt' : loader;
   return { minecraftVersion: dependencies.minecraft, loaderFamily, loaderVersion: dependencies[loader] };
+}
+
+function downloadPartId(file) {
+  const targetIdentity = crypto.createHash('sha256')
+    .update(file.hashes.sha1, 'utf8')
+    .update('\0', 'utf8')
+    .update(canonicalWindowsPath(file.path), 'utf8')
+    .digest('hex');
+  return `file-${file.hashes.sha1}-${targetIdentity}`;
 }
 
 function selectedOptionAliases(manifest, selection) {
@@ -155,7 +165,7 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
     const optional = file.env.server === 'optional';
     const isSelected = !optional || selected === null || selected.has(canonicalWindowsPath(file.path));
     downloads.push({
-      partId: `file-${file.hashes.sha1}`,
+      partId: downloadPartId(file),
       targetPath: file.path,
       optional,
       selected: isSelected,

@@ -223,6 +223,12 @@ class ModrinthModpackProvider {
     try { response = await this.http.request(path, options); }
     catch (error) { if (error instanceof ModpackError) throw error; throw unavailable(); }
     if (!response || !Number.isSafeInteger(response.statusCode) || !Buffer.isBuffer(response.body)) throw invalidResponse();
+    const bytes = response.body;
+    if (bytes.length > this.maxResponseBytes) {
+      throw new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Modrinth response exceeded the configured byte limit', {
+        details: { limit: 'maxTechnicalStdoutBytes', actual: String(bytes.length) }
+      });
+    }
     if (response.statusCode === 404 && missingCode) {
       const details = missingCode === 'REPOSITORY_NOT_FOUND'
         ? { provider: 'modrinth', repositoryId: missingId }
@@ -230,12 +236,6 @@ class ModrinthModpackProvider {
       throw new ModpackError(missingCode, missingCode === 'REPOSITORY_NOT_FOUND' ? 'Modrinth project was not found' : 'Modrinth version was not found', { details });
     }
     if (response.statusCode < 200 || response.statusCode >= 300) throw unavailable();
-    const bytes = response.body;
-    if (bytes.length > this.maxResponseBytes) {
-      throw new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Modrinth response exceeded the configured byte limit', {
-        details: { limit: 'maxTechnicalStdoutBytes', actual: String(bytes.length) }
-      });
-    }
     let value;
     try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
     catch { throw invalidResponse(); }

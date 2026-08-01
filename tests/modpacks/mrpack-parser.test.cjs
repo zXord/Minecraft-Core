@@ -83,6 +83,15 @@ test('normalizes target separators and rejects traversal Windows aliases devices
   }
 });
 
+test('rejects Win32 superscript COM and LPT device aliases in manifest targets', () => {
+  for (const device of ['COM¹', 'COM²', 'COM³', 'LPT¹', 'LPT²', 'LPT³']) {
+    assert.throws(
+      () => validateMrpackManifest(manifest({ files: [{ ...manifest().files[0], path: `mods/${device}.jar` }] })),
+      error => error.code === 'MANIFEST_INVALID'
+    );
+  }
+});
+
 test('rejects duplicate file targets using Windows case and Unicode aliases', () => {
   const first = manifest().files[0];
   for (const alias of ['MODS/EXAMPLE.JAR', 'mods/e\u0301.jar']) {

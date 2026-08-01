@@ -59,7 +59,8 @@ function normalizeMrpackPath(value, { rejectState = true } = {}) {
     const normalized = segment.normalize('NFC');
     if (!normalized || normalized.length > 255 || /[. ]$/.test(normalized) || /[<>"|?*]/.test(normalized)) throw manifestInvalid();
     const stem = normalized.split('.', 1)[0].toUpperCase();
-    if (DEVICE_NAMES.has(stem)) throw manifestInvalid();
+    const win32DeviceStem = stem.replaceAll('¹', '1').replaceAll('²', '2').replaceAll('³', '3');
+    if (DEVICE_NAMES.has(win32DeviceStem)) throw manifestInvalid();
     if (rejectState && normalized.toLocaleLowerCase('en-US').startsWith('.minecraft-core')) throw manifestInvalid();
     return normalized;
   });

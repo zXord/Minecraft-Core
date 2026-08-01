@@ -295,6 +295,26 @@ test('provider accepts only bounded Buffer bodies with fatal UTF-8', async () =>
   assert.throws(() => new ModrinthModpackProvider({ http: makeHttp({}), maxResponseBytes: 2 * 1024 * 1024 + 1 }), TypeError);
 });
 
+test('provider enforces the response byte ceiling before 404 and 429 status dispatch', async () => {
+  const oversized404 = new ModrinthModpackProvider({
+    http: makeHttp({ '/project/missing': { statusCode: 404, body: Buffer.alloc(33, 0x78) } }),
+    maxResponseBytes: 32
+  });
+  await assert.rejects(
+    oversized404.getProject('missing'),
+    error => error.code === 'ARCHIVE_LIMIT_EXCEEDED' && error.details?.actual === '33'
+  );
+
+  const oversized429 = new ModrinthModpackProvider({
+    http: makeHttp({ '/search': { statusCode: 429, body: Buffer.alloc(33, 0x78) } }),
+    maxResponseBytes: 32
+  });
+  await assert.rejects(
+    oversized429.searchProjects({ offset: 0, limit: 10 }),
+    error => error.code === 'ARCHIVE_LIMIT_EXCEEDED' && error.details?.actual === '33'
+  );
+});
+
 test('loader normalization is closed deduplicated and list queries serialize exact upstream names', async () => {
   const project = {
     id: 'project-exact', slug: 'exact', project_type: 'modpack', title: 'Exact', description: '', body: '', icon_url: null,
