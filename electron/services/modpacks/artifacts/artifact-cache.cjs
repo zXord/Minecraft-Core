@@ -133,6 +133,14 @@ class ArtifactCache {
     } catch (error) { await this.fs.rm(staging, { recursive: true, force: true }).catch(() => {}); throw error; }
     return path.join(published, primary.fileName);
   }
-  async removeIfUnreferenced(sha256) { const entry = this.pathForSha256(sha256); if ((this.references.get(sha256) || 0) > 0) return false; await this.assertSafePath(entry, this.root, 'cache', { requireFile: true }); try { await this.fs.unlink(entry); return true; } catch (error) { if (error?.code === 'ENOENT') return false; throw error; } }
+  async removeIfUnreferenced(sha256) {
+    const entry = this.pathForSha256(sha256); if ((this.references.get(sha256) || 0) > 0) return false;
+    await this.assertSafePath(entry, this.root, 'cache');
+    try {
+      const info = await this.fs.lstat(entry);
+      if (!info.isFile() || info.isSymbolicLink()) invalid('cache');
+      await this.fs.unlink(entry); return true;
+    } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+  }
 }
 module.exports = { ArtifactCache };

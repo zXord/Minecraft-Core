@@ -133,4 +133,10 @@ test('removes an unreferenced cache entry only after every reference is released
   assert.equal(await f.cache.removeIfUnreferenced(sha256), false);
   f.cache.release(sha256);
   assert.equal(await f.cache.removeIfUnreferenced(sha256), true);
+  assert.equal(await f.cache.removeIfUnreferenced(sha256), false);
+});
+
+test('returns false when an unreferenced cache entry was never created', async (t) => {
+  const f = await fixture(); t.after(f.cleanup);
+  assert.equal(await f.cache.removeIfUnreferenced('a'.repeat(64)), false);
 });
