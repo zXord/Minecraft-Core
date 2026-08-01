@@ -23,6 +23,7 @@ function cancelled() { return new ModpackError('CANCELLED', 'Artifact download w
 function safeDownloadFailure() { return new ModpackError('INVALID_RELEASE_URL', 'Artifact download failed', { details: { reasonCode: 'host-not-allowed' } }); }
 function decimalBytes(value) { return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value); }
 function isInside(parent, child) { const relative = path.relative(parent, child); return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative)); }
+function validDigest(value, algorithm) { return typeof value === 'string' && new RegExp(`^[a-f0-9]{${DIGEST_LENGTHS[algorithm]}}$`).test(value); }
 
 function strippedPlan(plan) {
   if (!plan || typeof plan !== 'object' || !plan.artifactSet || !Array.isArray(plan.artifactSet.parts)) return plan;
@@ -81,19 +82,33 @@ class ArtifactDownloader {
     }
     if (signal?.aborted) throw cancelled();
     const provider = partPlan.provider;
-    if (provider === 'modrinth' && !partPlan.providerDigest) {
-      throw new ModpackError('MISSING_PROVIDER_DIGEST', 'Provider digest is required for this artifact', { details: { partId: partPlan.partId } });
-    }
     const providerDigest = partPlan.providerDigest;
     if (providerDigest) {
-      if (!Object.hasOwn(DIGEST_LENGTHS, providerDigest.algorithm) || typeof providerDigest.value !== 'string' || !new RegExp(`^[a-f0-9]{${DIGEST_LENGTHS[providerDigest.algorithm]}}$`).test(providerDigest.value)) {
+      if (!Object.hasOwn(DIGEST_LENGTHS, providerDigest.algorithm) || !validDigest(providerDigest.value, providerDigest.algorithm)) {
         throw new ModpackError('INVALID_REQUEST', 'Artifact provider digest is invalid', { details: { field: 'plan' } });
       }
     }
+    if (provider === 'github' && providerDigest && providerDigest.algorithm !== 'sha256') {
+      throw new ModpackError('INVALID_REQUEST', 'Artifact provider digest is invalid', { details: { field: 'plan' } });
+    }
+    let requiredProviderDigests;
+    if (provider === 'modrinth') {
+      requiredProviderDigests = partPlan.requiredProviderDigests;
+      if (!requiredProviderDigests || typeof requiredProviderDigests !== 'object' || Array.isArray(requiredProviderDigests) ||
+        !validDigest(requiredProviderDigests.sha1, 'sha1') || !validDigest(requiredProviderDigests.sha512, 'sha512')) {
+        throw new ModpackError('MISSING_PROVIDER_DIGEST', 'Provider digest is required for this artifact', { details: { partId: partPlan.partId } });
+      }
+      if (Object.keys(requiredProviderDigests).length !== 2 || providerDigest?.algorithm !== 'sha512' || providerDigest.value !== requiredProviderDigests.sha512) {
+        throw new ModpackError('INVALID_REQUEST', 'Artifact provider digest is invalid', { details: { field: 'plan' } });
+      }
+    } else if (partPlan.requiredProviderDigests !== undefined) {
+      throw new ModpackError('INVALID_REQUEST', 'Artifact provider digest is invalid', { details: { field: 'plan' } });
+    }
     let response; let partialPath; let handle;
     const expectedSize = BigInt(partPlan.size);
+    if (budget.used + expectedSize > budget.max) throw limitExceeded(budget.used + expectedSize);
     const hashes = { sha256: crypto.createHash('sha256'), sha512: crypto.createHash('sha512') };
-    if (providerDigest?.algorithm === 'sha1') hashes.sha1 = crypto.createHash('sha1');
+    if (providerDigest?.algorithm === 'sha1' || provider === 'modrinth') hashes.sha1 = crypto.createHash('sha1');
     let measured = 0n;
     try {
       response = await this.client.request(partPlan.downloadUrl, {
@@ -118,6 +133,7 @@ class ArtifactDownloader {
           const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
           const nextMeasured = measured + BigInt(chunk.length); const nextSet = budget.used + BigInt(chunk.length);
           if (nextSet > budget.max) { response.destroy(); throw limitExceeded(nextSet); }
+          if (nextMeasured > expectedSize) { response.destroy(); throw hashMismatch(); }
           for (const hash of Object.values(hashes)) hash.update(chunk);
           let written = 0;
           while (written < chunk.length) {
@@ -132,14 +148,18 @@ class ArtifactDownloader {
       if (signal?.aborted) throw cancelled();
       if (measured !== expectedSize) throw hashMismatch();
       const calculated = { sha256: hashes.sha256.digest('hex'), sha512: hashes.sha512.digest('hex') };
-      if (providerDigest) {
+      if (provider === 'modrinth') {
+        const actualSha1 = hashes.sha1.digest('hex');
+        if (actualSha1 !== requiredProviderDigests.sha1) throw hashMismatch('sha1', requiredProviderDigests.sha1, actualSha1);
+        if (calculated.sha512 !== requiredProviderDigests.sha512) throw hashMismatch('sha512', requiredProviderDigests.sha512, calculated.sha512);
+      } else if (providerDigest) {
         const actual = providerDigest.algorithm === 'sha1' ? hashes.sha1.digest('hex') : calculated[providerDigest.algorithm];
         if (actual !== providerDigest.value) throw hashMismatch(providerDigest.algorithm, providerDigest.value, actual);
       }
       await handle.sync(); await handle.close(); handle = null;
-      const cachePath = await this.cache.commitPart({ partialPath, sha256: calculated.sha256, measuredSize: measured.toString() });
+      await this.cache.commitPart({ partialPath, sha256: calculated.sha256, measuredSize: measured.toString() });
       partialPath = null;
-      return deepFreeze({ partId: partPlan.partId, measuredSize: measured.toString(), sha256: calculated.sha256, sha512: calculated.sha512, cachePath });
+      return deepFreeze({ partId: partPlan.partId, measuredSize: measured.toString(), sha256: calculated.sha256, sha512: calculated.sha512 });
     } catch (error) {
       response?.destroy?.();
       if (handle) await handle.close().catch(() => {});
@@ -166,7 +186,7 @@ class ArtifactDownloader {
     for (const part of reviewed.artifactSet.parts) {
       const source = sourceById.get(part.partId);
       if (!source || typeof source.downloadUrl !== 'string') throw new ModpackError('INVALID_REQUEST', 'Artifact download plan is invalid', { details: { field: 'plan' } });
-      verifiedParts.push(await this.downloadPartWithBudget({ ...part, provider: reviewed.provider, downloadUrl: source.downloadUrl, allowedHosts: source.allowedHosts, allowSubdomains: source.allowSubdomains, headers: source.headers }, { signal, onProgress, budget }));
+      verifiedParts.push(await this.downloadPartWithBudget({ ...part, provider: reviewed.provider, downloadUrl: source.downloadUrl, allowedHosts: source.allowedHosts, allowSubdomains: source.allowSubdomains, headers: source.headers, requiredProviderDigests: source.requiredProviderDigests }, { signal, onProgress, budget }));
     }
     const verifiedSet = finalizeVerifiedArtifactSet(reviewed, verifiedParts.map(({ partId, measuredSize, sha256, sha512 }) => ({ partId, measuredSize, sha256, sha512 })));
     return deepFreeze({ ...verifiedSet, warnings });

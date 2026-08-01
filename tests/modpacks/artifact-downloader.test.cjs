@@ -9,13 +9,16 @@ const { Readable, PassThrough } = require('node:stream');
 const { ArtifactDownloader } = require('../../electron/services/modpacks/artifacts/artifact-downloader.cjs');
 const { ArtifactCache } = require('../../electron/services/modpacks/artifacts/artifact-cache.cjs');
 const { createArtifactSetPlan } = require('../../electron/services/modpacks/contracts.cjs');
+const { computePlanFingerprint } = require('../../electron/services/modpacks/artifacts/artifact-fingerprint.cjs');
 
 const digest = (data, algorithm) => crypto.createHash(algorithm).update(data).digest('hex');
 
 async function fixture({ responses = new Map(), maxSetBytes, randomUUID } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-download-test-'));
   const cache = new ArtifactCache({ root: path.join(root, 'cache'), workspaceRoot: path.join(root, 'work') });
-  const client = { async request(url) {
+  const requestCalls = [];
+  const client = { async request(url, options) {
+    requestCalls.push({ url, options });
     const result = responses.get(url);
     if (result instanceof Error) throw result;
     if (typeof result === 'function') return result();
@@ -24,16 +27,16 @@ async function fixture({ responses = new Map(), maxSetBytes, randomUUID } = {}) 
     return response;
   } };
   const downloader = new ArtifactDownloader({ client, cache, partialRoot: cache.root, ...(maxSetBytes === undefined ? {} : { maxSetBytes }), ...(randomUUID ? { randomUUID } : {}) });
-  return { root, cache, client, downloader, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
+  return { root, cache, client, downloader, requestCalls, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
 function plan(provider, parts) {
   const normalized = createArtifactSetPlan({
     provider,
     ...(provider === 'local' ? {} : { project: { id: 'project-1', slug: 'project', title: 'Project' }, release: { id: 'release-1', version: '1.0.0', channel: 'release', publishedAt: '2026-08-01T00:00:00.000Z' } }),
-    artifactSet: { kind: parts.length === 1 ? 'single' : 'multipart', primaryPartId: parts[0].partId, groupingScheme: parts.length === 1 ? 'single' : 'part-number', parts: parts.map(({ downloadUrl, provider: _provider, allowedHosts: _allowedHosts, ...part }) => part), providerImmutable: false, attestationStatus: 'unverified' }
+    artifactSet: { kind: parts.length === 1 ? 'single' : 'multipart', primaryPartId: parts[0].partId, groupingScheme: parts.length === 1 ? 'single' : 'part-number', parts: parts.map(({ downloadUrl, provider: _provider, allowedHosts: _allowedHosts, requiredProviderDigests: _requiredProviderDigests, ...part }) => part), providerImmutable: false, attestationStatus: 'unverified' }
   });
-  return { ...normalized, artifactSet: { ...normalized.artifactSet, parts: normalized.artifactSet.parts.map((part, index) => ({ ...part, downloadUrl: parts[index].downloadUrl, allowedHosts: parts[index].allowedHosts })) } };
+  return { ...normalized, artifactSet: { ...normalized.artifactSet, parts: normalized.artifactSet.parts.map((part, index) => ({ ...part, downloadUrl: parts[index].downloadUrl, allowedHosts: parts[index].allowedHosts, ...(parts[index].requiredProviderDigests ? { requiredProviderDigests: parts[index].requiredProviderDigests } : {}) })) } };
 }
 
 function part(content, { provider = 'github', algorithm, value, id = 'part-1', url = 'https://cdn.example/file.zip', size = String(content.length) } = {}) {
@@ -44,20 +47,27 @@ async function partialFiles(root) {
   try { return (await fs.readdir(root, { recursive: true })).filter(name => String(name).endsWith('.partial')); } catch { return []; }
 }
 
-test('SHA-1, SHA-256, and SHA-512 provider digests are verified while local SHA-256 and SHA-512 are always recorded', async t => {
-  for (const algorithm of ['sha1', 'sha256', 'sha512']) {
-    await t.test(algorithm, async () => {
-      const content = Buffer.from(`content-${algorithm}`); const url = `https://cdn.example/${algorithm}`;
-      const f = await fixture({ responses: new Map([[url, { body: content, headers: { 'content-length': String(content.length) } }]]) });
-      try {
-        const result = await f.downloader.downloadSet(plan('github', [part(content, { algorithm, url })]), {});
-        assert.equal(result.type, 'verified-artifact-set');
-        const verified = result.artifactSet.parts[0];
-        assert.equal(verified.calculatedDigests.sha256, digest(content, 'sha256'));
-        assert.equal(verified.calculatedDigests.sha512, digest(content, 'sha512'));
-        assert.equal(await fs.readFile(f.cache.pathForSha256(verified.calculatedDigests.sha256), 'utf8'), content.toString());
-      } finally { await f.cleanup(); }
-    });
+test('GitHub SHA-256 is verified while local SHA-256 and SHA-512 are always recorded', async () => {
+  const content = Buffer.from('github content'); const url = 'https://cdn.example/sha256';
+  const f = await fixture({ responses: new Map([[url, { body: content, headers: { 'content-length': String(content.length) } }]]) });
+  try {
+    const result = await f.downloader.downloadSet(plan('github', [part(content, { algorithm: 'sha256', url })]), {});
+    assert.equal(result.type, 'verified-artifact-set');
+    const verified = result.artifactSet.parts[0];
+    assert.equal(verified.calculatedDigests.sha256, digest(content, 'sha256'));
+    assert.equal(verified.calculatedDigests.sha512, digest(content, 'sha512'));
+    assert.equal(await fs.readFile(f.cache.pathForSha256(verified.calculatedDigests.sha256), 'utf8'), content.toString());
+  } finally { await f.cleanup(); }
+});
+
+test('GitHub rejects singular provider digests other than SHA-256 before requesting bytes', async () => {
+  const content = Buffer.from('github restricted digest');
+  for (const algorithm of ['sha1', 'sha512']) {
+    const p = part(content, { algorithm }); const f = await fixture({ responses: new Map([[p.downloadUrl, { body: content }]]) });
+    try {
+      await assert.rejects(f.downloader.downloadSet(plan('github', [p]), {}), error => error.code === 'INVALID_REQUEST');
+      assert.equal(f.requestCalls.length, 0);
+    } finally { await f.cleanup(); }
   }
 });
 
@@ -96,6 +106,23 @@ test('chunked measured bytes cannot exceed the cumulative set budget', async () 
   try {
     await assert.rejects(f.downloader.downloadSet(plan('github', [p]), {}), error => error.code === 'ARCHIVE_LIMIT_EXCEEDED');
     assert.deepEqual(await partialFiles(f.cache.root), []);
+  } finally { await f.cleanup(); }
+});
+
+test('planned bytes over the set budget fail before any request', async () => {
+  const content = Buffer.from('12345'); const p = part(content); const f = await fixture({ maxSetBytes: 4n, responses: new Map([[p.downloadUrl, { body: content }]]) });
+  try {
+    await assert.rejects(f.downloader.downloadSet(plan('github', [p]), {}), error => error.code === 'ARCHIVE_LIMIT_EXCEEDED');
+    assert.equal(f.requestCalls.length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('chunked bytes beyond the reviewed part size fail immediately below the global limit', async () => {
+  const reviewed = Buffer.from('abc'); const p = part(reviewed); const events = [];
+  const f = await fixture({ maxSetBytes: 100n, responses: new Map([[p.downloadUrl, { chunks: [Buffer.from('ab'), Buffer.from('cd')] }]]) });
+  try {
+    await assert.rejects(f.downloader.downloadSet(plan('github', [p]), { onProgress: event => events.push(event) }), error => error.code === 'HASH_MISMATCH');
+    assert.deepEqual(events.map(event => event.partBytes), ['2']);
   } finally { await f.cleanup(); }
 });
 
@@ -168,5 +195,68 @@ test('download sources require an explicit host allowlist instead of trusting th
   const f = await fixture({ responses: new Map([[p.downloadUrl, { body: content }]]) });
   try {
     await assert.rejects(f.downloader.downloadSet(reviewed, {}), error => error.code === 'INVALID_REQUEST');
+  } finally { await f.cleanup(); }
+});
+
+test('standalone part progress uses reviewed size and returns no cache path or source metadata', async () => {
+  const content = Buffer.from('standalone'); const p = part(content, { algorithm: 'sha256' }); const events = [];
+  const f = await fixture({ responses: new Map([[p.downloadUrl, { body: content }]]) });
+  try {
+    const result = await f.downloader.downloadPart(p, { onProgress: event => events.push(event) });
+    assert.deepEqual(Object.keys(result).sort(), ['measuredSize', 'partId', 'sha256', 'sha512']);
+    assert.equal(events.at(-1).totalBytes, String(content.length));
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes(f.root), false);
+    assert.equal(serialized.includes('https://'), false);
+    assert.equal(serialized.includes('allowedHosts'), false);
+    assert.equal(Object.isFrozen(result), true);
+  } finally { await f.cleanup(); }
+});
+
+function modrinthPart(content, overrides = {}) {
+  const sha1 = digest(content, 'sha1'); const sha512 = digest(content, 'sha512');
+  return part(content, {
+    provider: 'modrinth', algorithm: 'sha512', value: sha512, ...overrides
+  });
+}
+
+test('Modrinth requires transient SHA-1 and SHA-512 plus matching authoritative SHA-512', async t => {
+  const content = Buffer.from('modrinth dual integrity'); const sha1 = digest(content, 'sha1'); const sha512 = digest(content, 'sha512');
+  const cases = [
+    ['missing sha1', { sha512 }, 'MISSING_PROVIDER_DIGEST'],
+    ['missing sha512', { sha1 }, 'MISSING_PROVIDER_DIGEST'],
+    ['mismatched authoritative sha512', { sha1, sha512 }, 'INVALID_REQUEST', { providerDigest: { algorithm: 'sha512', value: 'a'.repeat(128) } }]
+  ];
+  for (const [name, requiredProviderDigests, code, extra = {}] of cases) await t.test(name, async () => {
+    const p = { ...modrinthPart(content), ...extra, requiredProviderDigests }; const f = await fixture({ responses: new Map([[p.downloadUrl, { body: content }]]) });
+    try { await assert.rejects(f.downloader.downloadSet(plan('modrinth', [p]), {}), error => error.code === code); }
+    finally { await f.cleanup(); }
+  });
+});
+
+test('Modrinth verifies SHA-1 and SHA-512 independently', async t => {
+  const content = Buffer.from('modrinth verified bytes'); const sha1 = digest(content, 'sha1'); const sha512 = digest(content, 'sha512');
+  for (const [name, requiredProviderDigests, algorithm] of [
+    ['sha1 mismatch', { sha1: 'a'.repeat(40), sha512 }, 'sha1'],
+    ['sha512 mismatch', { sha1, sha512: 'b'.repeat(128) }, 'sha512']
+  ]) await t.test(name, async () => {
+    const p = modrinthPart(content); p.requiredProviderDigests = requiredProviderDigests;
+    if (algorithm === 'sha512') p.providerDigest = { algorithm: 'sha512', value: requiredProviderDigests.sha512 };
+    const f = await fixture({ responses: new Map([[p.downloadUrl, { body: content }]]) });
+    try { await assert.rejects(f.downloader.downloadSet(plan('modrinth', [p]), {}), error => error.code === 'HASH_MISMATCH' && error.details.algorithm === algorithm); }
+    finally { await f.cleanup(); }
+  });
+});
+
+test('matching Modrinth dual digests verify without persisting transient source metadata', async () => {
+  const content = Buffer.from('modrinth matching bytes'); const p = modrinthPart(content);
+  p.requiredProviderDigests = { sha1: digest(content, 'sha1'), sha512: digest(content, 'sha512') };
+  const f = await fixture({ responses: new Map([[p.downloadUrl, { body: content }]]) });
+  try {
+    const result = await f.downloader.downloadSet(plan('modrinth', [p]), {});
+    assert.equal(result.type, 'verified-artifact-set');
+    assert.equal(JSON.stringify(result).includes('requiredProviderDigests'), false);
+    assert.match(computePlanFingerprint(result), /^[a-f0-9]{64}$/);
+    assert.deepEqual(Object.keys(result.artifactSet.parts[0]).sort(), ['calculatedDigests', 'fileName', 'measuredSize', 'partId', 'providerDigest', 'size']);
   } finally { await f.cleanup(); }
 });

@@ -11,6 +11,15 @@ const CROSS_ORIGIN_SECRETS = new Set(['authorization', 'proxy-authorization', 'c
 function invalidUrl() { return new ModpackError('INVALID_RELEASE_URL', 'Remote release address is not allowed', { details: { reasonCode: 'host-not-allowed' } }); }
 function cancelled() { return new ModpackError('CANCELLED', 'Artifact download was cancelled'); }
 
+async function withAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) throw cancelled();
+  let onAbort;
+  const aborted = new Promise((resolve, reject) => { onAbort = () => reject(cancelled()); signal.addEventListener('abort', onAbort, { once: true }); });
+  try { return await Promise.race([promise, aborted]); }
+  finally { signal.removeEventListener('abort', onAbort); }
+}
+
 function safeHeaders(value) {
   if (value === undefined) return {};
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalidUrl();
@@ -40,7 +49,8 @@ class PinnedHttpsClient {
       const requestIdentity = `${current.origin}${current.pathname}${current.search}`;
       if (visited.has(requestIdentity)) throw invalidUrl();
       visited.add(requestIdentity);
-      const vetted = await resolvePublicAddresses(current.hostname, { lookup: this.lookup });
+      const vetted = await withAbort(resolvePublicAddresses(current.hostname, { lookup: this.lookup }), signal);
+      if (signal?.aborted) throw cancelled();
       const response = await this.requestOnce(current, { headers: requestHeaders, signal, vetted });
       if (!REDIRECTS.has(response.statusCode)) return response;
       response.destroy();
@@ -64,7 +74,7 @@ class PinnedHttpsClient {
       const pinned = vetted[0];
       const finishReject = error => {
         if (settled) return; settled = true; cleanup();
-        reject(error?.code === 'CANCELLED' ? error : invalidUrl());
+        reject(error?.code === 'CANCELLED' || error?.code === 'ABORT_ERR' || signal?.aborted ? cancelled() : invalidUrl());
       };
       const onAbort = () => { const error = cancelled(); request.destroy(error); finishReject(error); };
       const cleanup = () => signal?.removeEventListener('abort', onAbort);
@@ -73,7 +83,9 @@ class PinnedHttpsClient {
         request = this.requestImpl(url, {
           method: 'GET', headers, signal, servername: url.hostname.endsWith('.') ? url.hostname.slice(0, -1) : url.hostname,
           rejectUnauthorized: true, checkServerIdentity: tls.checkServerIdentity,
-          lookup: (_hostname, _options, callback) => callback(null, pinned.address, pinned.family)
+          lookup: (_hostname, lookupOptions, callback) => lookupOptions?.all
+            ? callback(null, [{ address: pinned.address, family: pinned.family }])
+            : callback(null, pinned.address, pinned.family)
         }, response => {
           if (settled) { response.destroy(); return; }
           const peer = normalizeAddress(response.socket?.remoteAddress);

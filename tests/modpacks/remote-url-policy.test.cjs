@@ -33,6 +33,19 @@ test('host matching normalizes case, IDNs, and one terminal DNS dot', () => {
   assert.equal(validateRemoteUrl('https://xn--bcher-kva.example/file', { allowedHosts: ['bücher.example'] }).hostname, 'xn--bcher-kva.example');
 });
 
+test('provider URL policy rejects IPv4, IPv6, bracketed, and scoped literal hosts before DNS', () => {
+  for (const value of [
+    'https://8.8.8.8/file',
+    'https://127.0.0.1/file',
+    'https://[2606:4700:4700::1111]/file',
+    'https://[::ffff:8.8.8.8]/file',
+    'https://[fe80::1%25eth0]/file'
+  ]) {
+    const allowedHost = value.includes('[') ? value.slice(value.indexOf('['), value.indexOf(']') + 1) : new URL(value).hostname;
+    assert.throws(() => validateRemoteUrl(value, { allowedHosts: [allowedHost] }), invalidReleaseUrl, value);
+  }
+});
+
 test('resolution rejects all IPv4 non-public, reserved, documentation, and CGNAT ranges', async () => {
   const rejected = [
     '0.0.0.0', '10.1.2.3', '100.64.0.1', '127.0.0.1', '169.254.1.1',
@@ -71,6 +84,23 @@ test('resolution accepts public IPv4, IPv6, and public IPv4-mapped IPv6 answers'
   ];
   const resolved = await resolvePublicAddresses('downloads.example', { lookup: async () => answers });
   assert.deepEqual(resolved.map(({ address, family }) => ({ address, family })), answers);
+});
+
+test('resolution rejects DNS family mismatches and scoped address forms', async () => {
+  for (const answer of [
+    { address: '8.8.8.8', family: 6 },
+    { address: '2606:4700:4700::1111', family: 4 },
+    { address: '::ffff:8.8.8.8', family: 4 },
+    { address: 'fe80::1%eth0', family: 6 }
+  ]) {
+    await assert.rejects(resolvePublicAddresses('downloads.example', { lookup: async () => [answer] }), invalidReleaseUrl, JSON.stringify(answer));
+  }
+});
+
+test('mapped IPv6 keeps family 6 and rejects its private IPv4 payload', async () => {
+  const publicMapped = await resolvePublicAddresses('downloads.example', { lookup: async () => [{ address: '::ffff:8.8.8.8', family: 6 }] });
+  assert.deepEqual(publicMapped, [{ address: '::ffff:8.8.8.8', family: 6 }]);
+  await assert.rejects(resolvePublicAddresses('downloads.example', { lookup: async () => [{ address: '::ffff:10.0.0.1', family: 6 }] }), invalidReleaseUrl);
 });
 
 test('one non-public answer rejects the entire mixed DNS result', async () => {

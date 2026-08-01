@@ -1,7 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const { getEventListeners } = require('node:events');
 const { Readable } = require('node:stream');
+const https = require('node:https');
+const selfsigned = require('selfsigned');
 
 const { PinnedHttpsClient } = require('../../electron/services/modpacks/network/pinned-https-client.cjs');
 
@@ -113,4 +116,90 @@ test('request and redirect failures expose no query, token, provider body, or UR
     const rendered = JSON.stringify({ message: error.message, details: error.details, public: error.toPublicResult() });
     return error.code === 'INVALID_RELEASE_URL' && !rendered.includes('top-secret') && !rendered.includes('private-body') && !rendered.includes('https://');
   });
+});
+
+async function localTlsFixture(certificateHost) {
+  const generated = await selfsigned.generate([{ name: 'commonName', value: certificateHost }], {
+    days: 1, keySize: 2048, algorithm: 'sha256', extensions: [{ name: 'subjectAltName', altNames: [{ type: 2, value: certificateHost }] }]
+  });
+  const server = https.createServer({ key: generated.private, cert: generated.cert }, (_request, response) => response.end('trusted-body'));
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const port = server.address().port;
+  const request = (url, options, callback) => {
+    const routed = new URL(url); routed.port = String(port);
+    return https.request(routed, { ...options, ca: generated.cert, lookup: (_hostname, lookupOptions, done) => lookupOptions?.all ? done(null, [{ address: '127.0.0.1', family: 4 }]) : done(null, '127.0.0.1', 4) }, response => {
+      Object.defineProperty(response.socket, 'remoteAddress', { configurable: true, value: '8.8.8.8' });
+      callback(response);
+    });
+  };
+  return { request, close: () => new Promise(resolve => server.close(resolve)) };
+}
+
+test('actual local HTTPS accepts a trusted certificate for the vetted hostname', async () => {
+  const tlsFixture = await localTlsFixture('download.test');
+  const client = new PinnedHttpsClient({ lookup: async () => [{ address: '8.8.8.8', family: 4 }], request: tlsFixture.request });
+  try {
+    const response = await client.request('https://download.test/file', { allowedHosts: ['download.test'] });
+    let body = ''; for await (const chunk of response) body += chunk;
+    assert.equal(body, 'trusted-body');
+  } finally { await tlsFixture.close(); }
+});
+
+test('actual local HTTPS rejects a trusted certificate for the wrong hostname', async () => {
+  const tlsFixture = await localTlsFixture('wrong.test');
+  const client = new PinnedHttpsClient({ lookup: async () => [{ address: '8.8.8.8', family: 4 }], request: tlsFixture.request });
+  try {
+    await assert.rejects(client.request('https://download.test/file', { allowedHosts: ['download.test'] }), invalid);
+  } finally { await tlsFixture.close(); }
+});
+
+test('abort before connect returns CANCELLED without DNS or request activity', async () => {
+  const controller = new AbortController(); controller.abort(); let lookups = 0; let requests = 0;
+  const client = new PinnedHttpsClient({ lookup: async () => { lookups += 1; return [{ address: '8.8.8.8', family: 4 }]; }, request: () => { requests += 1; } });
+  await assert.rejects(client.request('https://cdn.example/file', { allowedHosts: ['cdn.example'], signal: controller.signal }), error => error.code === 'CANCELLED');
+  assert.equal(lookups, 0); assert.equal(requests, 0); assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('abort during a pending request destroys it, returns CANCELLED, and removes listeners', async () => {
+  const controller = new AbortController(); let destroyed = false;
+  const request = () => { const req = new EventEmitter(); req.end = () => {}; req.destroy = () => { destroyed = true; queueMicrotask(() => req.emit('error', Object.assign(new Error('aborted'), { code: 'ABORT_ERR' }))); }; return req; };
+  const client = new PinnedHttpsClient({ lookup: async () => [{ address: '8.8.8.8', family: 4 }], request });
+  const pending = client.request('https://cdn.example/file', { allowedHosts: ['cdn.example'], signal: controller.signal });
+  await new Promise(resolve => setImmediate(resolve)); controller.abort();
+  await assert.rejects(pending, error => error.code === 'CANCELLED');
+  assert.equal(destroyed, true); assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('abort at a redirect DNS boundary returns CANCELLED before another request', async () => {
+  const controller = new AbortController(); let resolveSecond; let lookupCount = 0; let requestCount = 0;
+  const lookup = async () => { lookupCount += 1; if (lookupCount === 1) return [{ address: '8.8.8.8', family: 4 }]; return new Promise(resolve => { resolveSecond = resolve; }); };
+  const redirect = new TrackedResponse({ statusCode: 302, headers: { location: '/final' } });
+  const request = (_url, options, callback) => { requestCount += 1; const req = new EventEmitter(); req.destroy = error => error && queueMicrotask(() => req.emit('error', error)); req.end = () => options.lookup('cdn.example', {}, () => callback(redirect)); return req; };
+  const client = new PinnedHttpsClient({ lookup, request });
+  const pending = client.request('https://cdn.example/start', { allowedHosts: ['cdn.example'], signal: controller.signal });
+  while (!resolveSecond) await new Promise(resolve => setImmediate(resolve));
+  controller.abort();
+  const outcome = await Promise.race([
+    pending.then(() => 'resolved', error => error.code),
+    new Promise(resolve => setTimeout(() => resolve('timeout'), 100))
+  ]);
+  resolveSecond([{ address: '8.8.8.8', family: 4 }]);
+  assert.equal(outcome, 'CANCELLED');
+  assert.equal(requestCount, 1); assert.equal(redirect.destroyed, true); assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('abort after final response destroys the body with CANCELLED and releases listeners', async () => {
+  const controller = new AbortController(); const h = harness({ 'https://cdn.example/file': {} });
+  const response = await h.client.request('https://cdn.example/file', { allowedHosts: ['cdn.example'], signal: controller.signal });
+  const errorPromise = new Promise(resolve => response.once('error', resolve)); controller.abort();
+  const error = await errorPromise;
+  assert.equal(error.code, 'CANCELLED'); assert.equal(response.destroyed, true);
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('successful final response close releases the abort listener', async () => {
+  const controller = new AbortController(); const h = harness({ 'https://cdn.example/file': {} });
+  const response = await h.client.request('https://cdn.example/file', { allowedHosts: ['cdn.example'], signal: controller.signal });
+  response.destroy(); await new Promise(resolve => response.once('close', resolve));
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
 });
