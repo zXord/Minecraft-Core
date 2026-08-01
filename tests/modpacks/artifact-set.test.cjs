@@ -52,3 +52,10 @@ test('fingerprints verified byte identity even when provider metadata is unchang
   const changedBytes = finalizeVerifiedArtifactSet(reviewed, [{ partId: 'asset-1', measuredSize: '10', sha256: 'c'.repeat(64), sha512: 'd'.repeat(128) }]);
   assert.notEqual(computePlanFingerprint(first), computePlanFingerprint(changedBytes));
 });
+
+test('rejects a verified fingerprint whose measured size no longer matches the reviewed size', () => {
+  const verified = finalizeVerifiedArtifactSet(plan(), [{ partId: 'asset-1', measuredSize: '10', sha256: 'a'.repeat(64), sha512: 'b'.repeat(128) }]);
+  const mutated = JSON.parse(JSON.stringify(verified));
+  mutated.artifactSet.parts[0].measuredSize = '9';
+  assert.throws(() => computePlanFingerprint(mutated), error => error.code === 'INVALID_REQUEST');
+});

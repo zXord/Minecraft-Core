@@ -39,6 +39,21 @@ test('commits verified bytes to the content-addressed SHA-256 path without readF
   assert.equal(await f.cache.verifyEntry({ sha256, size: String(content.length) }), true);
 });
 
+test('retries partial file-handle writes and verifies the persisted target bytes before publish', async (t) => {
+  const shortWriteFs = { ...fs, open: async (target, flags, ...rest) => {
+    const handle = await fs.open(target, flags, ...rest);
+    if (flags !== 'wx') return handle;
+    return {
+      read: handle.read.bind(handle), close: handle.close.bind(handle), sync: handle.sync.bind(handle),
+      write: async (buffer, offset = 0, length = buffer.length - offset, position = null) => handle.write(buffer, offset, Math.min(length, 3), position)
+    };
+  } };
+  const f = await fixture({ fsApi: shortWriteFs }); t.after(f.cleanup);
+  const content = Buffer.from('short write regression'.repeat(100)); const sha256 = digest(content);
+  await f.cache.commitPart({ partialPath: await partial(f.root, 'short-write.part', content), sha256, measuredSize: String(content.length) });
+  assert.equal(await f.cache.verifyEntry({ sha256, size: String(content.length) }), true);
+});
+
 test('race commits verify the winner and never accept truncated or same-size wrong-hash cache content', async (t) => {
   const f = await fixture(); t.after(f.cleanup);
   const content = Buffer.from('same archive'); const sha256 = digest(content);
@@ -80,6 +95,32 @@ test('rejects reparse workspace components and forged or tampered verified sets'
   await fs.writeFile(f.cache.pathForSha256(part.calculatedDigests.sha256), 'forged');
   await assert.rejects(f.cache.materializeSet(verifiedSet([part]), path.join(f.workspaceRoot, 'tampered')), error => error.code === 'HASH_MISMATCH');
   await assert.rejects(f.cache.materializeSet({ type: 'verified-artifact-set', artifactSet: { primaryPartId: 'part-1', parts: [{ ...part, calculatedDigests: { sha256: part.calculatedDigests.sha256, sha512: 'nope' } }], setDigest: 'a'.repeat(64) } }, path.join(f.workspaceRoot, 'forged')), error => error.code === 'INVALID_REQUEST');
+});
+
+test('refuses symlinked partials and cache entries where file symlinks are supported', async (t) => {
+  const f = await fixture(); t.after(f.cleanup);
+  const external = await fs.mkdtemp(path.join(os.tmpdir(), 'minecraft-external-')); t.after(() => fs.rm(external, { recursive: true, force: true }));
+  const content = Buffer.from('outside bytes'); const sha256 = digest(content);
+  const outsidePartial = path.join(external, 'outside.part'); await fs.writeFile(outsidePartial, content);
+  const linkedPartial = path.join(f.root, 'partials', 'linked.part'); await fs.mkdir(path.dirname(linkedPartial), { recursive: true });
+  try { await fs.symlink(outsidePartial, linkedPartial, 'file'); } catch (error) { if (error.code === 'EPERM') { t.skip('file symlinks require Windows privilege'); return; } throw error; }
+  await assert.rejects(f.cache.commitPart({ partialPath: linkedPartial, sha256, measuredSize: String(content.length) }), error => error.code === 'INVALID_REQUEST');
+  const realPartial = await partial(f.root, 'real.part', content); await f.cache.commitPart({ partialPath: realPartial, sha256, measuredSize: String(content.length) });
+  const entry = f.cache.pathForSha256(sha256); await fs.rm(entry); const outsideEntry = path.join(external, 'entry'); await fs.writeFile(outsideEntry, content); await fs.symlink(outsideEntry, entry, 'file');
+  assert.equal(await f.cache.verifyEntry({ sha256, size: String(content.length) }), false);
+});
+
+test('refuses junctioned cache prefixes and controlled workspace roots', async (t) => {
+  const f = await fixture(); t.after(f.cleanup);
+  const content = Buffer.from('outside bytes'); const sha256 = digest(content);
+  const prefixRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'minecraft-prefix-')); t.after(() => fs.rm(prefixRoot, { recursive: true, force: true }));
+  const prefixCacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'minecraft-prefix-cache-')); t.after(() => fs.rm(prefixCacheRoot, { recursive: true, force: true }));
+  const prefixWorkspace = path.join(prefixRoot, 'workspaces'); const prefixCache = new ArtifactCache({ root: prefixRoot, workspaceRoot: prefixWorkspace }); await fs.symlink(prefixCacheRoot, path.join(prefixRoot, 'sha256'), 'junction');
+  await assert.rejects(prefixCache.commitPart({ partialPath: await partial(prefixRoot, 'prefix.part', content), sha256, measuredSize: String(content.length) }), error => error.code === 'INVALID_REQUEST');
+  const external = await fs.mkdtemp(path.join(os.tmpdir(), 'minecraft-external-workspace-')); t.after(() => fs.rm(external, { recursive: true, force: true }));
+  const linkedWorkspace = path.join(f.root, 'workspace-link'); await fs.symlink(external, linkedWorkspace, 'junction');
+  const workspaceCache = new ArtifactCache({ root: f.root, workspaceRoot: linkedWorkspace });
+  await assert.rejects(workspaceCache.materializeSet(verifiedSet([verifiedPart('p', 'server.zip', content)]), path.join(linkedWorkspace, 'input')), error => error.code === 'INVALID_REQUEST');
 });
 
 test('removes an unreferenced cache entry only after every reference is released', async (t) => {
