@@ -45,6 +45,30 @@ test('public errors only preserve closed safe scalar details for their code', ()
   assert.equal(Object.isFrozen(result), true);
 });
 
+test('public errors drop provider bodies, authorization tokens, archive output, and command-shaped reason values', () => {
+  for (const reason of [
+    '{"error":"upstream body","token":"secret"}',
+    'Authorization: Bearer super-secret-token',
+    '7-Zip output: Enter password (secret)',
+    'cmd.exe /c 7z x C:\\secret\\archive.rar'
+  ]) {
+    const result = new ModpackError('MANIFEST_INVALID', 'Manifest could not be read', { details: { reason } }).toPublicResult();
+    assert.deepEqual(result.error.details, {}, reason);
+  }
+});
+
+test('public errors preserve only documented reason-code enums', () => {
+  const accepted = new ModpackError('MANIFEST_INVALID', 'Manifest could not be read', {
+    details: { reasonCode: 'invalid-json' }
+  }).toPublicResult();
+  const rejected = new ModpackError('MANIFEST_INVALID', 'Manifest could not be read', {
+    details: { reasonCode: 'provider-body' }
+  }).toPublicResult();
+
+  assert.deepEqual(accepted.error.details, { reasonCode: 'invalid-json' });
+  assert.deepEqual(rejected.error.details, {});
+});
+
 test('error construction rejects unapproved codes and unsafe public messages', () => {
   assert.throws(() => new ModpackError('DATABASE_DOWN', 'Database down'), /Unknown modpack failure code/);
   assert.throws(() => new ModpackError('HASH_MISMATCH', 'Read C:\\secret'), /safe message/i);

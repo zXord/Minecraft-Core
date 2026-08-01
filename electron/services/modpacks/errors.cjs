@@ -8,7 +8,7 @@ const FAILURE_CODES = Object.freeze([
 ]);
 
 const DETAIL_FIELDS = Object.freeze({
-  INVALID_RELEASE_URL: { reason: 'safeText' },
+  INVALID_RELEASE_URL: { reasonCode: ['malformed-url', 'non-https', 'credentials-not-allowed', 'host-not-allowed'] },
   REPOSITORY_NOT_FOUND: { provider: 'provider', repositoryId: 'id' },
   RELEASE_NOT_FOUND: { provider: 'provider', releaseId: 'id' },
   ASSET_AMBIGUOUS: { count: 'decimal' },
@@ -19,11 +19,11 @@ const DETAIL_FIELDS = Object.freeze({
   ENCRYPTED_ARCHIVE: {},
   MULTIPART_VOLUME_MISSING: { partId: 'id' },
   ARCHIVE_LIMIT_EXCEEDED: { limit: 'limit', actual: 'decimal' },
-  UNSAFE_ARCHIVE_ENTRY: { reason: 'safeText' },
-  ARCHIVE_ENTRY_COLLISION: { reason: 'safeText' },
+  UNSAFE_ARCHIVE_ENTRY: { reasonCode: ['path-traversal', 'link-entry', 'non-regular-entry', 'path-depth', 'path-length'] },
+  ARCHIVE_ENTRY_COLLISION: { reasonCode: ['normalized-path-collision', 'file-directory-collision'] },
   EXTRACTOR_UNAVAILABLE: {},
   EXTRACTOR_FAILED: {},
-  MANIFEST_INVALID: { reason: 'safeText' },
+  MANIFEST_INVALID: { reasonCode: ['invalid-json', 'unsupported-format', 'missing-required-field', 'invalid-environment', 'invalid-hash'] },
   CLIENT_ONLY_PACK: {},
   MISSING_PROVIDER_DIGEST: { partId: 'id' },
   HASH_MISMATCH: { algorithm: 'algorithm', expected: 'digest', actual: 'digest' },
@@ -77,8 +77,8 @@ function isDigest(value) {
 }
 
 function isAllowedDetail(kind, value) {
+  if (Array.isArray(kind)) return kind.includes(value);
   switch (kind) {
-    case 'safeText': return isSafeText(value);
     case 'id': return isIdentifier(value);
     case 'decimal': return isDecimal(value);
     case 'digest': return isDigest(value);

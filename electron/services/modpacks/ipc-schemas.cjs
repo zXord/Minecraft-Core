@@ -18,6 +18,7 @@ const runtimeTupleSchema = {
 };
 
 function detailSchema(kind) {
+  if (Array.isArray(kind)) return { enum: kind };
   const common = { type: 'string' };
   if (kind === 'decimal') return { type: 'string', pattern: '^(0|[1-9][0-9]*)$' };
   if (kind === 'algorithm') return { enum: ['sha1', 'sha256', 'sha512'] };
@@ -56,8 +57,13 @@ const validators = Object.freeze({
 });
 
 function cloneJson(value) {
-  if (value === undefined) return undefined;
-  return JSON.parse(JSON.stringify(value));
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new TypeError('Value is not JSON serializable');
+    return JSON.parse(serialized);
+  } catch {
+    throw new ModpackError('INVALID_REQUEST', 'Request must contain JSON data', { details: { field: 'request' } });
+  }
 }
 
 function validateSchema(schemaName, value) {

@@ -75,7 +75,12 @@ function normalizeCalculatedDigests(value, field) {
 
 function normalizeFileName(value, field) {
   assertNonEmptyString(value, field, { maxLength: 255 });
-  if (value !== value.trim() || value.includes('/') || value.includes('\\') || value === '.' || value === '..' || /[.: ]$/.test(value)) {
+  const windowsStem = value.split('.', 1)[0].replace(/[ .]+$/g, '').toUpperCase();
+  const windowsDeviceNames = new Set(['CON', 'PRN', 'AUX', 'NUL', 'CLOCK$', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9']);
+  if (
+    value !== value.trim() || value === '.' || value === '..' || /[<>:"/\\|?*]/.test(value) || /[. ]$/.test(value) ||
+    windowsDeviceNames.has(windowsStem)
+  ) {
     invalidRequest('Request file name is invalid', field);
   }
   return value;
@@ -132,6 +137,7 @@ function normalizeArtifactSet(value) {
   if (!GROUPING_SCHEMES.has(value.groupingScheme)) invalidRequest('Artifact grouping scheme is invalid', 'artifactSet.groupingScheme');
   if (!Array.isArray(value.parts) || value.parts.length === 0) invalidRequest('Artifact set parts are required', 'artifactSet.parts');
   if (value.kind === 'single' && (value.parts.length !== 1 || value.groupingScheme !== 'single')) invalidRequest('Single artifact sets require one single part', 'artifactSet');
+  if (value.kind === 'multipart' && (value.parts.length < 2 || value.groupingScheme === 'single')) invalidRequest('Multipart artifact sets require multiple grouped parts', 'artifactSet');
   const parts = value.parts.map(normalizePlanPart);
   const partIds = new Set(parts.map((part) => part.partId));
   const fileNames = new Set(parts.map((part) => part.fileName.toLocaleLowerCase('en-US')));
@@ -184,8 +190,8 @@ function createArtifactSetPlan(input) {
 }
 
 function finalizeVerifiedArtifactSet(plan, verifiedParts) {
-  if (!plan || plan.type !== 'artifact-set-plan' || !plan.artifactSet) invalidRequest('Artifact plan is invalid', 'plan');
-  if (!Array.isArray(verifiedParts) || verifiedParts.length !== plan.artifactSet.parts.length) invalidRequest('Verified artifact parts are invalid', 'verifiedParts');
+  const reviewedPlan = revalidateArtifactSetPlan(plan);
+  if (!Array.isArray(verifiedParts) || verifiedParts.length !== reviewedPlan.artifactSet.parts.length) invalidRequest('Verified artifact parts are invalid', 'verifiedParts');
   const verifiedById = new Map();
   for (let index = 0; index < verifiedParts.length; index += 1) {
     const part = verifiedParts[index];
@@ -201,21 +207,76 @@ function finalizeVerifiedArtifactSet(plan, verifiedParts) {
       }
     });
   }
-  const parts = plan.artifactSet.parts.map((plannedPart) => {
+  const parts = reviewedPlan.artifactSet.parts.map((plannedPart) => {
     const measured = verifiedById.get(plannedPart.partId);
     if (!measured) invalidRequest('Verified artifact part is missing', 'verifiedParts');
     if (measured.measuredSize !== plannedPart.size) throw new ModpackError('HASH_MISMATCH', 'Artifact size did not match the reviewed plan');
     return { ...plannedPart, measuredSize: measured.measuredSize, calculatedDigests: measured.calculatedDigests };
   });
-  const artifactSet = { ...plan.artifactSet, parts, setDigest: computeArtifactSetDigest(parts) };
-  return deepFreeze({ ...plan, type: 'verified-artifact-set', artifactSet });
+  const artifactSet = { ...reviewedPlan.artifactSet, parts, setDigest: computeArtifactSetDigest(parts) };
+  return deepFreeze({
+    type: 'verified-artifact-set',
+    provider: reviewedPlan.provider,
+    ...(reviewedPlan.project ? { project: reviewedPlan.project } : {}),
+    ...(reviewedPlan.release ? { release: reviewedPlan.release } : {}),
+    artifactSet
+  });
 }
 
 function assertArtifactSetUnchanged(expected, actual) {
-  if (!expected || !actual || !expected.artifactSet || !actual.artifactSet || expected.artifactSet.setDigest !== actual.artifactSet.setDigest) {
+  const expectedIdentity = expected && expected.artifactSet && {
+    kind: expected.artifactSet.kind,
+    primaryPartId: expected.artifactSet.primaryPartId,
+    groupingScheme: expected.artifactSet.groupingScheme,
+    setDigest: expected.artifactSet.setDigest
+  };
+  const actualIdentity = actual && actual.artifactSet && {
+    kind: actual.artifactSet.kind,
+    primaryPartId: actual.artifactSet.primaryPartId,
+    groupingScheme: actual.artifactSet.groupingScheme,
+    setDigest: actual.artifactSet.setDigest
+  };
+  if (!expectedIdentity || !actualIdentity || JSON.stringify(expectedIdentity) !== JSON.stringify(actualIdentity)) {
     throw new ModpackError('PLAN_STALE', 'The reviewed artifact set has changed');
   }
   return actual;
+}
+
+function revalidateArtifactSetPlan(plan) {
+  if (!plan || typeof plan !== 'object' || plan.type !== 'artifact-set-plan') invalidRequest('Artifact plan is invalid', 'plan');
+  const artifactSet = plan.artifactSet;
+  if (!artifactSet || typeof artifactSet !== 'object' || !Array.isArray(artifactSet.parts)) invalidRequest('Artifact plan is invalid', 'plan.artifactSet');
+  const project = plan.project && typeof plan.project === 'object' ? {
+    id: plan.project.id,
+    slug: plan.project.slug,
+    title: plan.project.title
+  } : undefined;
+  const release = plan.release && typeof plan.release === 'object' ? {
+    id: plan.release.id,
+    version: plan.release.version,
+    channel: plan.release.channel,
+    publishedAt: plan.release.publishedAt
+  } : undefined;
+  return createArtifactSetPlan({
+    provider: plan.provider,
+    ...(project ? { project } : {}),
+    ...(release ? { release } : {}),
+    artifactSet: {
+      kind: artifactSet.kind,
+      primaryPartId: artifactSet.primaryPartId,
+      groupingScheme: artifactSet.groupingScheme,
+      parts: artifactSet.parts.map((part) => ({
+        partId: part && part.partId,
+        ...(part && part.providerAssetId === undefined ? {} : { providerAssetId: part && part.providerAssetId }),
+        fileName: part && part.fileName,
+        size: part && part.size,
+        ...(part && part.updatedAt === undefined ? {} : { updatedAt: part && part.updatedAt }),
+        ...(part && part.providerDigest === undefined ? {} : { providerDigest: part && part.providerDigest })
+      })),
+      providerImmutable: artifactSet.providerImmutable,
+      attestationStatus: artifactSet.attestationStatus
+    }
+  });
 }
 
 function normalizeRuntimeTuple(input) {
