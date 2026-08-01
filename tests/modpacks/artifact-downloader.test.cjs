@@ -213,6 +213,32 @@ test('standalone part progress uses reviewed size and returns no cache path or s
   } finally { await f.cleanup(); }
 });
 
+test('standalone parts reject unsafe canonical identifiers before network access or DTO creation', async () => {
+  const content = Buffer.from('unsafe id bytes');
+  const unsafeIds = [
+    'part?token=top-secret',
+    '../escape',
+    'folder\\escape',
+    'part\r\ncontrol',
+    `a${'b'.repeat(128)}`
+  ];
+  for (const partId of unsafeIds) {
+    const p = { ...part(content, { algorithm: 'sha256' }), partId };
+    const f = await fixture({ responses: new Map([[p.downloadUrl, { body: content }]]) });
+    try {
+      const outcome = await f.downloader.downloadPart(p, {}).then(value => ({ value }), error => ({ error }));
+      assert.equal(outcome.value, undefined, partId);
+      assert.equal(outcome.error?.code, 'INVALID_REQUEST', partId);
+      assert.equal(f.requestCalls.length, 0, partId);
+      const publicText = JSON.stringify(outcome.error.toPublicResult());
+      assert.equal(publicText.includes(partId), false, partId);
+      assert.equal(publicText.includes('top-secret'), false, partId);
+      assert.equal(publicText.includes('?'), false, partId);
+      assert.equal(publicText.includes('..'), false, partId);
+    } finally { await f.cleanup(); }
+  }
+});
+
 function modrinthPart(content, overrides = {}) {
   const sha1 = digest(content, 'sha1'); const sha512 = digest(content, 'sha512');
   return part(content, {

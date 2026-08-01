@@ -97,6 +97,12 @@ test('resolution rejects DNS family mismatches and scoped address forms', async 
   }
 });
 
+test('resolution rejects a globally routable IPv6 answer carrying a zone identifier', async () => {
+  await assert.rejects(resolvePublicAddresses('downloads.example', {
+    lookup: async () => [{ address: '2606:4700:4700::1111%eth0', family: 6 }]
+  }), invalidReleaseUrl);
+});
+
 test('mapped IPv6 keeps family 6 and rejects its private IPv4 payload', async () => {
   const publicMapped = await resolvePublicAddresses('downloads.example', { lookup: async () => [{ address: '::ffff:8.8.8.8', family: 6 }] });
   assert.deepEqual(publicMapped, [{ address: '::ffff:8.8.8.8', family: 6 }]);

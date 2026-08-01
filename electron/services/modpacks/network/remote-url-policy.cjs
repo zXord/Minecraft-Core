@@ -29,14 +29,14 @@ function validateRemoteUrl(value, { allowedHosts, allowSubdomains = false } = {}
 }
 
 function parsedPublicAddress(address) {
-  if (typeof address !== 'string' || !ipaddr.isValid(address)) return null;
+  if (typeof address !== 'string' || address.includes('%') || !ipaddr.isValid(address)) return null;
   let parsed = ipaddr.parse(address);
   if (parsed.kind() === 'ipv6' && parsed.isIPv4MappedAddress()) parsed = parsed.toIPv4Address();
   return parsed.range() === 'unicast' ? parsed : null;
 }
 
 function addressFamilyMatches(address, family) {
-  if (typeof address !== 'string' || !ipaddr.isValid(address)) return false;
+  if (typeof address !== 'string' || address.includes('%') || !ipaddr.isValid(address)) return false;
   const kind = ipaddr.parse(address).kind();
   return kind === 'ipv4' ? family === 4 : family === 6;
 }

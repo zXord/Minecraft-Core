@@ -8,6 +8,7 @@ const { finalizeVerifiedArtifactSet } = require('../contracts.cjs');
 const { validateCompleteArtifactSet } = require('./artifact-set.cjs');
 
 const DIGEST_LENGTHS = Object.freeze({ sha1: 40, sha256: 64, sha512: 128 });
+const PART_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function limitExceeded(actual) {
   return new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Artifact download exceeded the configured byte limit', {
@@ -74,7 +75,7 @@ class ArtifactDownloader {
   }
 
   async downloadPartWithBudget(partPlan, { signal, onProgress, budget }) {
-    if (!partPlan || typeof partPlan !== 'object' || !decimalBytes(partPlan.size) || typeof partPlan.partId !== 'string' || !partPlan.partId || typeof partPlan.downloadUrl !== 'string') {
+    if (!partPlan || typeof partPlan !== 'object' || !decimalBytes(partPlan.size) || !PART_ID.test(partPlan.partId || '') || typeof partPlan.downloadUrl !== 'string') {
       throw new ModpackError('INVALID_REQUEST', 'Artifact download plan is invalid', { details: { field: 'plan' } });
     }
     if (!Array.isArray(partPlan.allowedHosts) || partPlan.allowedHosts.length === 0 || partPlan.allowedHosts.some(host => typeof host !== 'string' || !host)) {
