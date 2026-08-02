@@ -87,12 +87,35 @@ function readServerConfig(serverPath) {
   }
 }
 
+function detectExactPreparedRuntime(serverPath) {
+  const metadataPath = path.join(serverPath, '.minecraft-core-state', 'runtime.json');
+  try {
+    const stat = fs.lstatSync(metadataPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 2 * 1024 * 1024) return null;
+    const parsed = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+    const runtime = parsed?.runtime;
+    if (!runtime || !['neoforge', 'quilt'].includes(runtime.loaderFamily)) return null;
+    const { validatePreparedRuntime } = require('../services/loader-install-service.cjs');
+    const validation = validatePreparedRuntime(serverPath, runtime);
+    return {
+      loader: validation.runtime.loaderFamily,
+      loaderVersion: validation.runtime.loaderVersion,
+      detectedFrom: 'runtime-metadata'
+    };
+  } catch {
+    return null;
+  }
+}
+
 function detectLoaderFromFiles(serverPath) {
   if (!serverPath || !fs.existsSync(serverPath)) {
     return { loader: null, loaderVersion: null, detectedFrom: 'none' };
   }
 
   try {
+    const preparedRuntime = detectExactPreparedRuntime(serverPath);
+    if (preparedRuntime) return preparedRuntime;
+
     const entries = fs.readdirSync(serverPath, { withFileTypes: true });
     const fileNames = entries.map(entry => entry.name.toLowerCase());
     const fileSet = new Set(fileNames);
@@ -103,33 +126,13 @@ function detectLoaderFromFiles(serverPath) {
       return { loader: 'fabric', loaderVersion: null, detectedFrom: hasFabricLauncher ? 'fabric-launcher' : 'fabric-directory' };
     }
 
-    const neoforgeEntry = fileNames.find(name => name.includes('neoforge'));
-    if (neoforgeEntry) {
-      const versionMatch = neoforgeEntry.match(/neoforge[.-]?([\d.]+)/);
-      return {
-        loader: 'neoforge',
-        loaderVersion: versionMatch ? versionMatch[1] : null,
-        detectedFrom: 'neoforge-jar'
-      };
-    }
-
-    const forgeEntry = fileNames.find(name => name.includes('forge'));
+    const forgeEntry = fileNames.find(name => name.includes('forge') && !name.includes('neoforge'));
     if (forgeEntry) {
       const versionMatch = forgeEntry.match(/forge[.-]?([\d.]+)/);
       return {
         loader: 'forge',
         loaderVersion: versionMatch ? versionMatch[1] : null,
         detectedFrom: 'forge-jar'
-      };
-    }
-
-    const quiltEntry = fileNames.find(name => name.includes('quilt')); // Check for Quilt server jars
-    if (quiltEntry) {
-      const versionMatch = quiltEntry.match(/quilt[.-]?([\d.]+)/);
-      return {
-        loader: 'quilt',
-        loaderVersion: versionMatch ? versionMatch[1] : null,
-        detectedFrom: 'quilt-jar'
       };
     }
 

@@ -1,7 +1,42 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveServerLoader } = require('../utils/server-loader.cjs');
+const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 const { FABRIC_LAUNCH_JAR, getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
+const { validatePreparedRuntime } = require('./loader-install-service.cjs');
+
+const SUPPORTED_LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+const READY_MARKERS = Object.freeze([
+  'Done (',
+  'For help, type "help"'
+]);
+const FATAL_MARKERS = Object.freeze([
+  'UnsupportedClassVersionError',
+  'Could not reserve enough space for object heap',
+  'Could not find or load main class',
+  'Failed to start the minecraft server',
+  'Exception in thread "main"'
+]);
+
+function codedLaunchError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function commonPlan({ type, loader, jar, args, cwd, runtime, assets }) {
+  const plan = {
+    type,
+    loader,
+    jar,
+    args,
+    cwd,
+    readyMarkers: [...READY_MARKERS],
+    fatalMarkers: [...FATAL_MARKERS],
+    runtime: runtime || null
+  };
+  if (assets !== undefined) plan.assets = assets;
+  return plan;
+}
 
 function readServerProperties(serverPath) {
   const filePath = path.join(serverPath, 'server.properties');
@@ -84,7 +119,8 @@ function getVanillaLaunchJar(serverPath) {
     return lower.includes('server')
       && !lower.includes('installer')
       && !lower.includes('fabric')
-      && !lower.includes('forge');
+      && !lower.includes('forge')
+      && !lower.includes('quilt');
   });
 
   return fallbackName ? path.join(serverPath, fallbackName) : null;
@@ -267,29 +303,7 @@ function readArgumentFileEntries(filePath) {
   return tokenizeArgumentString(meaningfulLines.join(' '));
 }
 
-function normalizeForgeArgs(args, baseDir) {
-  const normalized = [];
-
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index];
-    if (token === '-jar' || token === '-cp' || token === '-classpath' || token === '--module-path') {
-      const nextToken = args[index + 1];
-      normalized.push(token);
-      if (nextToken) {
-        const resolvedPath = path.isAbsolute(nextToken) ? nextToken : path.resolve(baseDir, nextToken);
-        normalized.push(resolvedPath);
-        index += 1;
-      }
-      continue;
-    }
-
-    normalized.push(token);
-  }
-
-  return normalized;
-}
-
-function resolveForgeLaunchPlan(serverPath, maxRam, expected = {}) {
+function resolveForgeLaunchPlan(serverPath, maxRam, expected = {}, runtime = null) {
   const assets = findForgeLaunchAssets(serverPath, expected);
   if (!assets.forgeArgs) {
     const error = new Error('Forge launch assets are missing. Repair the server before starting it.');
@@ -309,17 +323,29 @@ function resolveForgeLaunchPlan(serverPath, maxRam, expected = {}) {
   }
   args.push(`-Xmx${maxRam}G`, '-Xms1G', forgeArgFile, 'nogui');
 
-  return {
+  return commonPlan({
     type: 'forge',
     loader: 'forge',
+    jar: null,
     args,
+    cwd: serverPath,
+    runtime,
     assets
-  };
+  });
 }
 
-function resolveLaunchPlan(serverPath, options = {}) {
+function resolveLaunchPlan(serverPath, options = {}, { runtimeTuple = null } = {}) {
   const resolvedLoaderInfo = resolveServerLoader(serverPath);
-  const resolvedLoader = options.loader || resolvedLoaderInfo.loader || 'vanilla';
+  const explicitLoader = options.loader === undefined || options.loader === null
+    ? null
+    : normalizeLoaderName(options.loader);
+  const resolvedLoader = explicitLoader || normalizeLoaderName(resolvedLoaderInfo.loader) || 'vanilla';
+  if (!SUPPORTED_LOADERS.has(resolvedLoader)) {
+    throw codedLaunchError('UNSUPPORTED_LOADER', `Unsupported loader: ${resolvedLoader || 'unknown'}`);
+  }
+  if (runtimeTuple && runtimeTuple.loaderFamily !== resolvedLoader) {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared runtime does not match the requested loader.');
+  }
   const maxRam = Number.isFinite(Number(options.maxRam)) ? Number(options.maxRam) : 4;
   const minecraftVersion = options.minecraftVersion || null;
   const loaderVersion = options.loaderVersion || resolvedLoaderInfo.loaderVersion || null;
@@ -340,18 +366,48 @@ function resolveLaunchPlan(serverPath, options = {}) {
       throw error;
     }
 
-    return {
+    return commonPlan({
       type: 'jar',
       loader: 'fabric',
       jar: launchJar,
-      args: [`-Xmx${maxRam}G`, '-jar', launchJar, 'nogui']
-    };
+      args: [`-Xmx${maxRam}G`, '-Xms1G', '-jar', launchJar, 'nogui'],
+      cwd: serverPath,
+      runtime: runtimeTuple
+    });
   }
 
   if (resolvedLoader === 'forge') {
     return resolveForgeLaunchPlan(serverPath, maxRam, {
       minecraftVersion,
       loaderVersion
+    }, runtimeTuple);
+  }
+
+  if (resolvedLoader === 'neoforge') {
+    if (!runtimeTuple) throw codedLaunchError('RUNTIME_INCOMPLETE', 'NeoForge runtime identity is missing.');
+    const validation = validatePreparedRuntime(serverPath, runtimeTuple);
+    const argsFile = path.join(serverPath, ...validation.loader.argsFile.split('/'));
+    return commonPlan({
+      type: 'neoforge',
+      loader: 'neoforge',
+      jar: null,
+      args: [`-Xmx${maxRam}G`, '-Xms1G', `@${path.relative(serverPath, argsFile)}`, 'nogui'],
+      cwd: serverPath,
+      runtime: validation.runtime
+    });
+  }
+
+  if (resolvedLoader === 'quilt') {
+    if (!runtimeTuple) throw codedLaunchError('RUNTIME_INCOMPLETE', 'Quilt runtime identity is missing.');
+    const validation = validatePreparedRuntime(serverPath, runtimeTuple);
+    const launchJar = path.join(serverPath, ...validation.loader.launcherJar.split('/'));
+    return commonPlan({
+      type: 'jar',
+      loader: 'quilt',
+      jar: launchJar,
+      args: [`-Xmx${maxRam}G`, '-Xms1G', '-jar', launchJar, 'nogui'],
+      cwd: serverPath,
+      runtime: validation.runtime
     });
   }
 
@@ -362,12 +418,14 @@ function resolveLaunchPlan(serverPath, options = {}) {
     throw error;
   }
 
-  return {
+  return commonPlan({
     type: 'jar',
-    loader: resolvedLoader || 'vanilla',
+    loader: 'vanilla',
     jar: launchJar,
-    args: [`-Xmx${maxRam}G`, '-jar', launchJar, 'nogui']
-  };
+    args: [`-Xmx${maxRam}G`, '-Xms1G', '-jar', launchJar, 'nogui'],
+    cwd: serverPath,
+    runtime: runtimeTuple
+  });
 }
 
 module.exports = {

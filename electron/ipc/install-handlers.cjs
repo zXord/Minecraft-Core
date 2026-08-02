@@ -2,8 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  downloadMinecraftServer,
-  installFabric
+  downloadMinecraftServer
 } = require('../services/download-manager.cjs');
 const { ServerJavaManager } = require('../services/server-java-manager.cjs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
@@ -15,7 +14,8 @@ const {
   installServerLoader,
   getLoaderVersions,
   normalizeLoader: normalizeLoaderName,
-  getForgeRuntimeHealthIssues
+  getForgeRuntimeHealthIssues,
+  validatePreparedRuntime
 } = require('../services/loader-install-service.cjs');
 
 const logger = getLoggerHandlers();
@@ -116,6 +116,25 @@ async function getLoaderHealthIssues(targetPath, loader, loaderVersion = null, m
     }
     const runtimeIssues = await getForgeRuntimeHealthIssues(targetPath, minecraftVersion, loaderVersion);
     return [...issues, ...runtimeIssues];
+  }
+
+  if (loader === 'neoforge' || loader === 'quilt') {
+    if (!minecraftVersion || !loaderVersion) return [`${loader === 'neoforge' ? 'NeoForge' : 'Quilt'} runtime identity`];
+    try {
+      const manager = new ServerJavaManager(targetPath);
+      const requirements = await manager.getJavaRequirementsForMinecraft(minecraftVersion);
+      validatePreparedRuntime(targetPath, {
+        minecraftVersion,
+        loaderFamily: loader,
+        loaderVersion,
+        javaMajor: requirements.requiredJavaVersion,
+        os: 'win32',
+        architecture: 'x64'
+      });
+      return [];
+    } catch {
+      return [`${loader === 'neoforge' ? 'NeoForge' : 'Quilt'} runtime`];
+    }
   }
 
   return [];
@@ -400,9 +419,11 @@ function createInstallHandlers(win) {
         }
 
         let javaPath = null;
+        let javaMajor = null;
         if (effectiveLoader !== 'vanilla') {
           const javaInfo = await ensureServerJavaReady(win, targetPath, mcVersion);
           javaPath = javaInfo.javaPath;
+          javaMajor = javaInfo.javaRequirements.requiredJavaVersion;
         }
 
         const result = await installServerLoader({
@@ -411,6 +432,7 @@ function createInstallHandlers(win) {
           loader: effectiveLoader,
           loaderVersion: effectiveLoaderVersion,
           javaPath,
+          javaMajor,
           logChannel: 'install-log',
           progressChannel: effectiveLoader === 'fabric' ? 'fabric-install-progress' : 'loader-install-progress'
         });
@@ -441,7 +463,7 @@ function createInstallHandlers(win) {
           win.webContents.send('install-error', err.message);
         }
 
-        return { success: false, error: err.message };
+        return { success: false, error: err.message, code: err.code || 'LOADER_INSTALL_FAILED' };
       }
     },
 
@@ -620,6 +642,7 @@ function createInstallHandlers(win) {
             loader: effectiveLoader,
             loaderVersion: effectiveLoaderVersion,
             javaPath: javaReady.javaPath,
+            javaMajor: javaReady.javaRequirements.requiredJavaVersion,
             logChannel: 'repair-log',
             progressChannel: 'repair-progress'
           });

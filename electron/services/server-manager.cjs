@@ -1,6 +1,5 @@
 const fs = require('fs');
 const os = require('os');
-const path = require('path');
 const process = require('process');
 const { spawn } = require('child_process');
 const pidusage = require('pidusage');
@@ -9,7 +8,7 @@ const eventBus = require('../utils/event-bus.cjs');
 const appStore = require('../utils/app-store.cjs');
 const { ServerJavaManager } = require('./server-java-manager.cjs');
 const { readServerConfig, getDefaultServerConfig, detectMinecraftVersion } = require('../utils/config-manager.cjs');
-const { resolveServerLoader } = require('../utils/server-loader.cjs');
+const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 const { resolveLaunchPlan, syncServerPort } = require('./server-launcher.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 
@@ -42,7 +41,11 @@ function createDefaultState(instanceId, targetPath = null) {
     metricsInterval: null,
     lastMetricsUpdateAt: 0,
     cloudSyncWarningSent: false,
-    shutdownRequest: null
+    shutdownRequest: null,
+    readyMarkers: [],
+    fatalMarkers: [],
+    runtime: null,
+    startupOutcome: null
   };
 }
 
@@ -399,6 +402,27 @@ function handleLogLine(state, text) {
   }
 
   maybeSendCloudSyncWarning(state, trimmed);
+  if (state.status === 'starting' && state.startupOutcome === null) {
+    const fatalMarker = state.fatalMarkers.find(marker => trimmed.includes(marker));
+    if (fatalMarker) {
+      state.startupOutcome = 'fatal';
+      state.status = 'error';
+      emitServerStatus(state);
+    } else if (state.readyMarkers.some(marker => trimmed.includes(marker))) {
+      state.startupOutcome = 'ready';
+      state.status = 'running';
+      emitServerStatus(state);
+      startMetricsReporting(state);
+      eventBus.emit('server-started', {
+        instanceId: state.instanceId,
+        targetPath: state.targetPath,
+        port: state.port,
+        maxRam: state.maxRam,
+        loader: state.loader,
+        runtime: state.runtime
+      });
+    }
+  }
   const isListResponse = /There are \d+ of a max of \d+ players online/.test(trimmed);
 
   if (trimmed !== state.lastLine) {
@@ -505,7 +529,7 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
   const config = readServerConfig(targetPath, defaults) || defaults;
   const minecraftVersion = config.version || detectMinecraftVersion(targetPath) || '1.20.1';
   const loaderInfo = resolveServerLoader(targetPath);
-  const loader = config.loader || loaderInfo.loader || 'vanilla';
+  const loader = normalizeLoaderName(config.loader || loaderInfo.loader || 'vanilla');
   const loaderVersion = config.loaderVersion || config.fabric || loaderInfo.loaderVersion || null;
 
   state.targetPath = targetPath;
@@ -519,6 +543,10 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
   state.cloudSyncWarningSent = false;
   state.stdoutBuffer = '';
   state.lastLine = '';
+  state.readyMarkers = [];
+  state.fatalMarkers = [];
+  state.runtime = null;
+  state.startupOutcome = null;
 
   emitServerStatus(state);
   emitServerLog(state, `[INFO] Preparing ${loader} server startup...`);
@@ -527,12 +555,23 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
     syncServerPort(targetPath, state.port);
 
     const javaRequirements = await ensureJavaReadyForServer(targetPath, minecraftVersion);
+    const runtimeTuple = ['neoforge', 'quilt'].includes(loader)
+      ? {
+          minecraftVersion,
+          loaderFamily: loader,
+          loaderVersion,
+          javaMajor: javaRequirements.requiredJavaVersion,
+          os: 'win32',
+          architecture: 'x64'
+        }
+      : null;
     const launchPlan = resolveLaunchPlan(targetPath, {
       loader,
       maxRam: state.maxRam,
       minecraftVersion,
-      loaderVersion
-    });
+      loaderVersion,
+      javaMajor: javaRequirements.requiredJavaVersion
+    }, { runtimeTuple });
 
     const javaPath = javaRequirements.javaPath;
     const serverIdentifier = `minecraft-core-server-${state.instanceId}-${Date.now()}`;
@@ -558,13 +597,17 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
     emitServerLog(state, `[INFO] Starting server with Java: ${javaPath}`);
 
     const child = spawn(javaPath, spawnArgs, {
-      cwd: targetPath,
+      cwd: launchPlan.cwd,
       detached: false,
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
     state.process = child;
     state.startMs = Date.now();
+    state.loader = launchPlan.loader;
+    state.readyMarkers = [...launchPlan.readyMarkers];
+    state.fatalMarkers = [...launchPlan.fatalMarkers];
+    state.runtime = launchPlan.runtime;
     child.serverInfo = {
       id: serverIdentifier,
       instanceId: state.instanceId,
@@ -576,7 +619,11 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
       loaderVersion,
       minecraftVersion,
       jar: launchPlan.jar || null,
-      launchType: launchPlan.type
+      launchType: launchPlan.type,
+      cwd: launchPlan.cwd,
+      runtime: launchPlan.runtime,
+      readyMarkers: [...launchPlan.readyMarkers],
+      fatalMarkers: [...launchPlan.fatalMarkers]
     };
 
     child.stdout.on('data', (chunk) => {
@@ -596,6 +643,17 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
     child.stderr.on('data', (chunk) => {
       const text = chunk.toString();
       maybeSendCloudSyncWarning(state, text);
+      if (state.status === 'starting') {
+        for (const line of text.split(/\r?\n/).filter(Boolean)) {
+          const fatalMarker = state.fatalMarkers.find(marker => line.includes(marker));
+          if (fatalMarker) {
+            state.startupOutcome = 'fatal';
+            state.status = 'error';
+            emitServerStatus(state);
+            break;
+          }
+        }
+      }
       emitServerLog(state, `[STDERR] ${text.trimEnd()}`);
     });
 
@@ -657,17 +715,6 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
         sendListCommand(state);
       }
     }, 120000);
-
-    state.status = 'running';
-    emitServerStatus(state);
-    startMetricsReporting(state);
-    eventBus.emit('server-started', {
-      instanceId: state.instanceId,
-      targetPath,
-      port: state.port,
-      maxRam: state.maxRam,
-      loader
-    });
 
     return {
       success: true,
