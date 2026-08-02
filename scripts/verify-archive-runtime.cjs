@@ -12,6 +12,15 @@ const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_NOTICE_BYTES = 128 * 1024;
 const MAX_PROCESS_BYTES = 1024 * 1024;
 
+const ARCHIVE_DOWNLOAD_POLICY = deepFreeze({
+  schemaVersion: 1,
+  initialUrl: 'https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.msi',
+  redirectHosts: ['github.com', 'release-assets.githubusercontent.com'],
+  finalHosts: ['release-assets.githubusercontent.com'],
+  maxRedirects: 5,
+  deadlineMs: 300000
+});
+
 const ARCHIVE_RUNTIME_MANIFEST = deepFreeze({
   schemaVersion: 1,
   version: '26.02',
@@ -72,6 +81,11 @@ function exactKeys(value, expected) {
 function sameScalarObject(value, expected) {
   if (!exactKeys(value, Object.keys(expected))) return false;
   return Object.entries(expected).every(([key, wanted]) => value[key] === wanted);
+}
+
+function sameStringArray(value, expected) {
+  return Array.isArray(value) && value.length === expected.length &&
+    value.every((entry, index) => typeof entry === 'string' && entry === expected[index]);
 }
 
 function parseJsonWithoutDuplicateKeys(text) {
@@ -234,6 +248,17 @@ function validateManifest(manifest) {
   return manifest;
 }
 
+function validateDownloadPolicy(policy) {
+  if (!exactKeys(policy, ['schemaVersion', 'initialUrl', 'redirectHosts', 'finalHosts', 'maxRedirects', 'deadlineMs'])) throw unavailable();
+  if (policy.schemaVersion !== ARCHIVE_DOWNLOAD_POLICY.schemaVersion ||
+    policy.initialUrl !== ARCHIVE_DOWNLOAD_POLICY.initialUrl ||
+    !sameStringArray(policy.redirectHosts, ARCHIVE_DOWNLOAD_POLICY.redirectHosts) ||
+    !sameStringArray(policy.finalHosts, ARCHIVE_DOWNLOAD_POLICY.finalHosts) ||
+    policy.maxRedirects !== ARCHIVE_DOWNLOAD_POLICY.maxRedirects ||
+    policy.deadlineMs !== ARCHIVE_DOWNLOAD_POLICY.deadlineMs) throw unavailable();
+  return policy;
+}
+
 async function verifyAmd64Pe(filePath) {
   const handle = await fsp.open(filePath, 'r');
   try {
@@ -256,6 +281,7 @@ function spawnBounded(executable, args, { timeoutMs = 30000, maxStdoutBytes = MA
     const stdout = [];
     const stderr = [];
     let child;
+    let terminationError = null;
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
@@ -273,26 +299,31 @@ function spawnBounded(executable, args, { timeoutMs = 30000, maxStdoutBytes = MA
       reject(error);
       return;
     }
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error('deadline'));
-    }, timeoutMs);
-    child.once('error', error => finish(error));
+    const terminate = error => {
+      if (settled || terminationError) return;
+      terminationError = error;
+      try { child.kill(); } catch { /* close/error remains authoritative */ }
+    };
+    const timer = setTimeout(() => terminate(new Error('deadline')), timeoutMs);
+    child.once('error', error => {
+      if (!terminationError) finish(error);
+    });
     child.stdout.on('data', chunk => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > maxStdoutBytes) {
-        child.kill();
-        finish(new Error('stdout limit'));
+        terminate(new Error('stdout limit'));
       } else stdout.push(chunk);
     });
     child.stderr.on('data', chunk => {
       stderrBytes += chunk.length;
       if (stderrBytes > maxStderrBytes) {
-        child.kill();
-        finish(new Error('stderr limit'));
+        terminate(new Error('stderr limit'));
       } else stderr.push(chunk);
     });
-    child.once('close', code => finish(null, { code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) }));
+    child.once('close', code => {
+      if (terminationError) finish(terminationError);
+      else finish(null, { code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+    });
   });
 }
 
@@ -338,14 +369,20 @@ async function verifyArchiveRuntime(root, options = {}) {
     const rootStat = await fsp.lstat(repositoryRoot);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw unavailable();
 
-    await assertDirectory(repositoryRoot, ['build-resources', 'archive-runtime'], ['7zip-26.02.json']);
+    await assertDirectory(repositoryRoot, ['build-resources', 'archive-runtime'], ['7zip-26.02.json', '7zip-download-policy.json']);
     await assertDirectory(repositoryRoot, ['vendor', '7zip', 'x64'], RUNTIME_NAMES);
     await assertDirectory(repositoryRoot, ['third-party', '7zip'], NOTICE_NAMES);
+
+    const policyFile = await measureFile(repositoryRoot, ['build-resources', 'archive-runtime', '7zip-download-policy.json'], { maxBytes: MAX_MANIFEST_BYTES, capture: true });
+    let policyText;
+    try { policyText = new TextDecoder('utf-8', { fatal: true }).decode(policyFile.bytes); } catch { throw unavailable(); }
+    const policy = validateDownloadPolicy(parseJsonWithoutDuplicateKeys(policyText));
 
     const manifestFile = await measureFile(repositoryRoot, ['build-resources', 'archive-runtime', '7zip-26.02.json'], { maxBytes: MAX_MANIFEST_BYTES, capture: true });
     let manifestText;
     try { manifestText = new TextDecoder('utf-8', { fatal: true }).decode(manifestFile.bytes); } catch { throw unavailable(); }
     const manifest = validateManifest(parseJsonWithoutDuplicateKeys(manifestText));
+    if (!policy.finalHosts.includes(manifest.download.finalHost)) throw unavailable();
 
     const files = [];
     for (const name of RUNTIME_NAMES) {
@@ -392,6 +429,7 @@ async function verifyArchiveRuntime(root, options = {}) {
 }
 
 module.exports = {
+  ARCHIVE_DOWNLOAD_POLICY,
   ARCHIVE_RUNTIME_MANIFEST,
   verifyArchiveRuntime
 };

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "initialUrl": "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.msi",
+  "redirectHosts": [
+    "github.com",
+    "release-assets.githubusercontent.com"
+  ],
+  "finalHosts": [
+    "release-assets.githubusercontent.com"
+  ],
+  "maxRedirects": 5,
+  "deadlineMs": 300000
+}

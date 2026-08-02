@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
+const crypto = require('node:crypto');
+const childProcess = require('node:child_process');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -11,6 +13,7 @@ const {
 
 const repositoryRoot = path.resolve(__dirname, '..', '..');
 const runtimeFileNames = ['7z.exe', '7z.dll', 'License.txt'];
+const policyFileName = '7zip-download-policy.json';
 
 async function makeRuntimeCopy() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minecraft-core-archive-runtime-test-'));
@@ -20,6 +23,10 @@ async function makeRuntimeCopy() {
   await fs.copyFile(
     path.join(repositoryRoot, 'build-resources', 'archive-runtime', '7zip-26.02.json'),
     path.join(root, 'build-resources', 'archive-runtime', '7zip-26.02.json')
+  );
+  await fs.copyFile(
+    path.join(repositoryRoot, 'build-resources', 'archive-runtime', policyFileName),
+    path.join(root, 'build-resources', 'archive-runtime', policyFileName)
   );
   for (const name of runtimeFileNames) {
     await fs.copyFile(path.join(repositoryRoot, 'vendor', '7zip', 'x64', name), path.join(root, 'vendor', '7zip', 'x64', name));
@@ -253,4 +260,142 @@ test('the exported manifest constants remain the only accepted upstream identiti
   assert.equal(ARCHIVE_RUNTIME_MANIFEST.architecture, 'x64');
   assert.equal(ARCHIVE_RUNTIME_MANIFEST.msi.sha256, 'db407a4f6d4999e5c7bc00ce8a882be94717b56e7fa68140fe3f12605d91643e');
   assert.equal(ARCHIVE_RUNTIME_MANIFEST.source.sha256, 'c7502dd4557481f52ccf1b3e680329f1fdd207e79a25544afeb3106325474944');
+});
+
+test('acquisition and verification consume one closed final-host policy', async () => {
+  const policy = JSON.parse(await fs.readFile(
+    path.join(repositoryRoot, 'build-resources', 'archive-runtime', policyFileName),
+    'utf8'
+  ));
+  assert.deepEqual(policy, {
+    schemaVersion: 1,
+    initialUrl: ARCHIVE_RUNTIME_MANIFEST.msi.url,
+    redirectHosts: ['github.com', 'release-assets.githubusercontent.com'],
+    finalHosts: ['release-assets.githubusercontent.com'],
+    maxRedirects: 5,
+    deadlineMs: 300000
+  });
+
+  await withRuntimeCopy(async root => {
+    const manifest = await readManifest(root);
+    manifest.download.finalHost = 'objects.githubusercontent.com';
+    await writeManifest(root, manifest);
+    await assert.rejects(verifyArchiveRuntime(root), unavailable);
+  });
+
+  await withRuntimeCopy(async root => {
+    const policyPath = path.join(root, 'build-resources', 'archive-runtime', policyFileName);
+    const changed = { ...policy, finalHosts: [...policy.finalHosts, 'objects.githubusercontent.com'] };
+    await fs.writeFile(policyPath, `${JSON.stringify(changed, null, 2)}\n`, 'utf8');
+    await assert.rejects(verifyArchiveRuntime(root), unavailable);
+  });
+});
+
+test('archive runtime line-ending policy preserves exact upstream bytes across git settings', async () => {
+  const attributes = await fs.readFile(path.join(repositoryRoot, '.gitattributes'), 'utf8');
+  assert.match(attributes, /^vendor\/7zip\/x64\/7z\.exe binary$/m);
+  assert.match(attributes, /^vendor\/7zip\/x64\/7z\.dll binary$/m);
+  assert.match(attributes, /^vendor\/7zip\/x64\/License\.txt binary$/m);
+  assert.match(attributes, /^third-party\/7zip\/\*\.txt text eol=lf$/m);
+  assert.match(attributes, /^third-party\/7zip\/\*\.md text eol=lf$/m);
+
+  const license = await fs.readFile(path.join(repositoryRoot, 'vendor', '7zip', 'x64', 'License.txt'));
+  assert.equal(license.length, 6031);
+  assert.equal(crypto.createHash('sha256').update(license).digest('hex'), ARCHIVE_RUNTIME_MANIFEST.files['License.txt'].sha256);
+  assert.equal(license.includes(Buffer.from('\r\n')), true);
+
+  for (const name of ['LGPL-2.1-or-later.txt', 'BSD-notice.txt', 'unRAR-restriction.txt', 'NOTICE.md']) {
+    const bytes = await fs.readFile(path.join(repositoryRoot, 'third-party', '7zip', name));
+    assert.equal(bytes.includes(Buffer.from('\r\n')), false, name);
+  }
+
+  const check = childProcess.spawnSync('git', ['check-attr', 'text', 'eol', 'binary', '--',
+    'vendor/7zip/x64/License.txt', 'third-party/7zip/NOTICE.md'], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    shell: false,
+    windowsHide: true
+  });
+  assert.equal(check.status, 0);
+  assert.match(check.stdout, /License\.txt: text: unset/);
+  assert.match(check.stdout, /NOTICE\.md: eol: lf/);
+});
+
+test('fresh index checkouts preserve runtime identities with autocrlf enabled or disabled', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minecraft-core-archive-eol-'));
+  try {
+    for (const mode of ['true', 'false']) {
+      const destination = path.join(root, mode);
+      await fs.mkdir(destination);
+      const checkout = childProcess.spawnSync('git', [
+        '-c',
+        `core.autocrlf=${mode}`,
+        'checkout-index',
+        '--all',
+        '--force',
+        `--prefix=${destination}${path.sep}`
+      ], {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        shell: false,
+        windowsHide: true
+      });
+      assert.equal(checkout.status, 0, checkout.stderr);
+      const license = await fs.readFile(path.join(destination, 'vendor', '7zip', 'x64', 'License.txt'));
+      assert.equal(license.length, 6031, mode);
+      assert.equal(
+        crypto.createHash('sha256').update(license).digest('hex'),
+        ARCHIVE_RUNTIME_MANIFEST.files['License.txt'].sha256,
+        mode
+      );
+      for (const name of ['LGPL-2.1-or-later.txt', 'BSD-notice.txt', 'unRAR-restriction.txt', 'NOTICE.md']) {
+        const notice = await fs.readFile(path.join(destination, 'third-party', '7zip', name));
+        assert.equal(notice.includes(Buffer.from('\r\n')), false, `${mode}:${name}`);
+      }
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('acquisition source uses bounded body reads, safe publication wrappers, and a post-commit cleanup phase', async () => {
+  const source = await fs.readFile(path.join(repositoryRoot, 'scripts', 'acquire-7zip.ps1'), 'utf8');
+  assert.match(source, /ReadAsync\([^\r\n]*cancellationToken/);
+  assert.match(source, /ReadAsync\([^\r\n]*\$downloadCancellation\.Token/);
+  assert.doesNotMatch(source, /ReadToEndAsync\(/);
+  assert.match(source, /Assert-SafeMutationPath/);
+  assert.match(source, /Move-SafeItem/);
+  assert.match(source, /Remove-SafeItem/);
+  assert.match(source, /\$commitComplete\s*=\s*\$true/);
+  const commitOffset = source.indexOf('$commitComplete = $true');
+  const cleanupOffset = source.indexOf('Remove-SafeItem', commitOffset);
+  assert.ok(commitOffset > 0 && cleanupOffset > commitOffset);
+});
+
+test('acquisition containment self-test rejects a redirecting junction without touching its target', () => {
+  const windowsPowerShell = path.join(
+    process.env.SystemRoot || process.env.WINDIR,
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe'
+  );
+  const result = childProcess.spawnSync(windowsPowerShell, [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    path.join(repositoryRoot, 'scripts', 'acquire-7zip.ps1'),
+    '-PolicySelfTest'
+  ], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    shell: false,
+    windowsHide: true,
+    timeout: 30000
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /containment self-test passed/i);
 });

@@ -11,7 +11,7 @@
                    "url":  "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-src.7z",
                    "sha256":  "c7502dd4557481f52ccf1b3e680329f1fdd207e79a25544afeb3106325474944"
                },
-    "acquiredAt":  "2026-08-01T23:09:19.3513018+00:00",
+    "acquiredAt":  "2026-08-02T00:12:30.4205189+00:00",
     "download":  {
                      "finalHost":  "release-assets.githubusercontent.com",
                      "size":  1999872,
