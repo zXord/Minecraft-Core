@@ -43,6 +43,11 @@ function throwIfCancelled(signal) {
   if (signal?.aborted) throw cancelled();
 }
 
+function rethrowCancellation(signal, error) {
+  if (error instanceof ModpackError && error.code === 'CANCELLED') throw error;
+  if (signal?.aborted || error?.code === 'ABORT_ERR') throw cancelled();
+}
+
 function limitExceeded(actual) {
   return new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Local archive bytes exceeded the configured limit', {
     details: { limit: 'maxArtifactSetBytes', actual: actual.toString() }
@@ -219,7 +224,7 @@ class LocalArtifactSource {
     try {
       reparse = await this.reparseInspector.isReparsePoint(selectedPath, signal ? { signal } : undefined);
     } catch (error) {
-      if (error?.code === 'ABORT_ERR') throw error;
+      rethrowCancellation(signal, error);
       throw selection ? invalidSelection() : staleSelection();
     }
     throwIfCancelled(signal);
@@ -349,6 +354,7 @@ class LocalArtifactSource {
     try {
       identity = captureIdentity(await this.fs.lstat(selectedPath, { bigint: true }));
     } catch (error) {
+      rethrowCancellation(signal, error);
       if (error instanceof ModpackError && error.code === 'INVALID_REQUEST') throw staleSelection();
       throw staleSelection();
     }
@@ -357,10 +363,11 @@ class LocalArtifactSource {
     return identity;
   }
 
-  async handleIdentity(handle) {
+  async handleIdentity(handle, signal) {
     try {
       return captureIdentity(await handle.stat({ bigint: true }));
-    } catch {
+    } catch (error) {
+      rethrowCancellation(signal, error);
       throw staleSelection();
     }
   }
@@ -383,11 +390,12 @@ class LocalArtifactSource {
       this.assertIdentity(record.identity, initialPathIdentity);
       try {
         sourceHandle = await this.fs.open(record.path, 'r');
-      } catch {
+      } catch (error) {
+        rethrowCancellation(signal, error);
         throw staleSelection();
       }
       throwIfCancelled(signal);
-      const initialHandleIdentity = await this.handleIdentity(sourceHandle);
+      const initialHandleIdentity = await this.handleIdentity(sourceHandle, signal);
       throwIfCancelled(signal);
       this.assertIdentity(record.identity, initialHandleIdentity);
       await this.assertPathIsNotReparse(record.path, { signal });
@@ -422,6 +430,7 @@ class LocalArtifactSource {
           try {
             await onProgress(event);
           } catch (cause) {
+            rethrowCancellation(signal, cause);
             throw new ModpackError('INVALID_REQUEST', 'Local archive progress callback failed', { cause, details: { field: 'options.onProgress' } });
           }
         }
@@ -433,7 +442,7 @@ class LocalArtifactSource {
       const targetStat = await targetHandle.stat({ bigint: true });
       throwIfCancelled(signal);
       if (!targetStat.isFile() || isReparseLike(targetStat) || BigInt(targetStat.size) !== partMeasured) throw hashMismatch();
-      const precommitHandleIdentity = await this.handleIdentity(sourceHandle);
+      const precommitHandleIdentity = await this.handleIdentity(sourceHandle, signal);
       throwIfCancelled(signal);
       this.assertIdentity(record.identity, precommitHandleIdentity);
       await this.assertPathIsNotReparse(record.path, { signal });
@@ -447,7 +456,7 @@ class LocalArtifactSource {
       await this.cache.commitPart({ partialPath, sha256: calculated.sha256, measuredSize: partMeasured.toString() });
       partialPath = null;
       throwIfCancelled(signal);
-      const finalHandleIdentity = await this.handleIdentity(sourceHandle);
+      const finalHandleIdentity = await this.handleIdentity(sourceHandle, signal);
       throwIfCancelled(signal);
       this.assertIdentity(record.identity, finalHandleIdentity);
       await this.assertPathIsNotReparse(record.path, { signal });
@@ -502,8 +511,8 @@ class LocalArtifactSource {
       throwIfCancelled(signal);
       return finalizeVerifiedArtifactSet(plan, verified);
     } catch (error) {
+      rethrowCancellation(signal, error);
       if (error instanceof ModpackError) throw error;
-      if (signal?.aborted || error?.code === 'ABORT_ERR') throw cancelled();
       throw new ModpackError('INVALID_REQUEST', 'Local archive ingestion failed', { cause: error });
     } finally {
       this.registry.invalidate(selectionId);

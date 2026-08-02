@@ -7,6 +7,7 @@ const test = require('node:test');
 
 const { ArtifactCache } = require('../../electron/services/modpacks/artifacts/artifact-cache.cjs');
 const { createArtifactSetPlan } = require('../../electron/services/modpacks/contracts.cjs');
+const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
 const { ARCHIVE_LIMITS } = require('../../electron/services/modpacks/limits.cjs');
 const { SelectionRegistry } = require('../../electron/services/modpacks/local/selection-registry.cjs');
 const { LocalArtifactSource } = require('../../electron/services/modpacks/local/local-artifact-source.cjs');
@@ -792,6 +793,144 @@ test('cancellation after source open or any post-copy await can never resolve a 
       assert.deepEqual(await partialFiles(f.cache.root), []);
     });
   }
+});
+
+test('cancellation wins when every awaited boundary rejects after abort', async (t) => {
+  for (const stage of [
+    'reparse-inspector',
+    'current-identity',
+    'source-open',
+    'handle-identity',
+    'target-sync-modpack-error',
+    'progress-callback',
+    'cache-commit-modpack-error'
+  ]) {
+    await t.test(stage, async (t) => {
+      const signal = new TrackingSignal();
+      const content = Buffer.alloc(100_000, 0x71);
+      let selectedPath;
+      let selectedLstats = 0;
+      let reparseCalls = 0;
+      let sourceOpened = 0;
+      let sourceClosed = 0;
+      let targetOpened = 0;
+      let targetClosed = 0;
+      const rejectingFs = {
+        ...fs,
+        lstat: async (target, options) => {
+          if (target === selectedPath) {
+            selectedLstats += 1;
+            if (stage === 'current-identity' && selectedLstats === 2) {
+              signal.abort();
+              throw new Error('delayed path identity rejection');
+            }
+          }
+          return fs.lstat(target, options);
+        },
+        open: async (target, flags, ...rest) => {
+          if (target === selectedPath && flags === 'r' && stage === 'source-open') {
+            signal.abort();
+            throw new Error('delayed source open rejection');
+          }
+          const handle = await fs.open(target, flags, ...rest);
+          if (target === selectedPath && flags === 'r') {
+            sourceOpened += 1;
+            return proxyHandle(handle, {
+              stat: async options => {
+                const result = await handle.stat(options);
+                if (stage === 'handle-identity') {
+                  signal.abort();
+                  throw new Error('delayed handle identity rejection');
+                }
+                return result;
+              },
+              close: async () => {
+                sourceClosed += 1;
+                return handle.close();
+              }
+            });
+          }
+          if (flags === 'wx') {
+            targetOpened += 1;
+            return proxyHandle(handle, {
+              sync: async () => {
+                await handle.sync();
+                if (stage === 'target-sync-modpack-error') {
+                  signal.abort();
+                  throw new ModpackError('HASH_MISMATCH', 'Synthetic downstream mismatch');
+                }
+              },
+              close: async () => {
+                targetClosed += 1;
+                return handle.close();
+              }
+            });
+          }
+          return handle;
+        }
+      };
+      const f = await fixture({
+        files: { 'server.zip': content },
+        fsApi: rejectingFs,
+        reparseInspector: {
+          async isReparsePoint() {
+            reparseCalls += 1;
+            if (stage === 'reparse-inspector' && reparseCalls === 2) {
+              signal.abort();
+              throw new Error('delayed reparse inspection rejection');
+            }
+            return false;
+          }
+        },
+        cacheDecorator(cache) {
+          if (stage !== 'cache-commit-modpack-error') return;
+          cache.commitPart = async () => {
+            signal.abort();
+            throw new ModpackError('HASH_MISMATCH', 'Synthetic cache mismatch');
+          };
+        }
+      });
+      t.after(f.cleanup);
+      selectedPath = f.paths.get('server.zip');
+      const selected = await f.source.selectWithNativeDialog({ allowMultipart: false });
+      const options = {
+        signal,
+        ...(stage === 'progress-callback' ? {
+          async onProgress() {
+            signal.abort();
+            throw new ModpackError('INVALID_REQUEST', 'Synthetic callback failure');
+          }
+        } : {})
+      };
+      await assert.rejects(
+        f.source.ingestSelection(selected.selectionId, options),
+        error => error.code === 'CANCELLED'
+      );
+      assert.equal(sourceClosed, sourceOpened);
+      assert.equal(targetClosed, targetOpened);
+      assert.equal(signal.listeners.size, 0);
+      assert.deepEqual(await partialFiles(f.cache.root), []);
+      assert.deepEqual(await fs.readFile(selectedPath), content);
+      await assert.rejects(f.source.ingestSelection(selected.selectionId, {}), error => error.code === 'PLAN_STALE');
+    });
+  }
+});
+
+test('a genuine non-abort downstream ModpackError preserves its original code', async (t) => {
+  const f = await fixture({
+    cacheDecorator(cache) {
+      cache.commitPart = async () => {
+        throw new ModpackError('HASH_MISMATCH', 'Synthetic cache mismatch');
+      };
+    }
+  });
+  t.after(f.cleanup);
+  const selected = await f.source.selectWithNativeDialog({ allowMultipart: false });
+  await assert.rejects(
+    f.source.ingestSelection(selected.selectionId, {}),
+    error => error.code === 'HASH_MISMATCH'
+  );
+  assert.deepEqual(await partialFiles(f.cache.root), []);
 });
 
 test('a failing signal listener cleanup cannot strand source handles or controlled partials', async (t) => {
