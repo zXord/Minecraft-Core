@@ -122,3 +122,29 @@ test('NeoForge and Quilt filenames alone are not treated as installed runtimes',
     fs.rmSync(quiltPath, { recursive: true, force: true });
   }
 });
+
+test('a corrupt app-owned runtime marker can never fall through to Vanilla', () => {
+  for (const [family, marker] of [
+    ['neoforge', '{"formatVersion":1,"runtime":'],
+    ['quilt', JSON.stringify({
+      formatVersion: 1,
+      runtime: makeRuntimeTuple('quilt', '0.26.4'),
+      loader: { family: 'quilt' },
+      artifacts: []
+    })]
+  ]) {
+    const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), `mc-core-${family}-corrupt-marker-`));
+    try {
+      fs.writeFileSync(path.join(serverPath, 'server.jar'), 'vanilla-looking fallback');
+      fs.mkdirSync(path.join(serverPath, '.minecraft-core-state'), { recursive: true });
+      fs.writeFileSync(path.join(serverPath, '.minecraft-core-state', 'runtime.json'), marker);
+      assert.throws(
+        () => resolveLaunchPlan(serverPath, { maxRam: 4 }),
+        error => error.code === 'RUNTIME_INCOMPLETE',
+        family
+      );
+    } finally {
+      fs.rmSync(serverPath, { recursive: true, force: true });
+    }
+  }
+});

@@ -45,6 +45,12 @@ const normalizeLoader = (value) => {
   return loaderAliasMap[normalized] || normalized;
 };
 
+function runtimeIncomplete() {
+  const error = new Error('The prepared server runtime is incomplete.');
+  error.code = 'RUNTIME_INCOMPLETE';
+  return error;
+}
+
 const loaderVersionKeys = ['loaderVersion', 'loader_version', 'loader-version'];
 const loaderTypeKeys = ['loader', 'loaderType', 'loader_type', 'modLoader', 'serverLoader'];
 const loaderByVersionKey = {
@@ -91,10 +97,10 @@ function detectExactPreparedRuntime(serverPath) {
   const metadataPath = path.join(serverPath, '.minecraft-core-state', 'runtime.json');
   try {
     const stat = fs.lstatSync(metadataPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 2 * 1024 * 1024) return null;
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 2 * 1024 * 1024) throw runtimeIncomplete();
     const parsed = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
     const runtime = parsed?.runtime;
-    if (!runtime || !['neoforge', 'quilt'].includes(runtime.loaderFamily)) return null;
+    if (!runtime || !['neoforge', 'quilt'].includes(runtime.loaderFamily)) throw runtimeIncomplete();
     const { validatePreparedRuntime } = require('../services/loader-install-service.cjs');
     const validation = validatePreparedRuntime(serverPath, runtime);
     return {
@@ -102,19 +108,21 @@ function detectExactPreparedRuntime(serverPath) {
       loaderVersion: validation.runtime.loaderVersion,
       detectedFrom: 'runtime-metadata'
     };
-  } catch {
-    return null;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    if (error?.code === 'RUNTIME_INCOMPLETE') throw error;
+    throw runtimeIncomplete();
   }
 }
 
-function detectLoaderFromFiles(serverPath) {
+function detectLoaderFromFiles(serverPath, preparedRuntime = undefined) {
   if (!serverPath || !fs.existsSync(serverPath)) {
     return { loader: null, loaderVersion: null, detectedFrom: 'none' };
   }
 
   try {
-    const preparedRuntime = detectExactPreparedRuntime(serverPath);
-    if (preparedRuntime) return preparedRuntime;
+    const exactRuntime = preparedRuntime === undefined ? detectExactPreparedRuntime(serverPath) : preparedRuntime;
+    if (exactRuntime) return exactRuntime;
 
     const entries = fs.readdirSync(serverPath, { withFileTypes: true });
     const fileNames = entries.map(entry => entry.name.toLowerCase());
@@ -176,6 +184,7 @@ function detectLoaderFromFiles(serverPath) {
       };
     }
   } catch (error) {
+    if (error?.code === 'RUNTIME_INCOMPLETE') throw error;
     getLogger().warn('Failed to inspect server files for loader detection', {
       category: 'mods',
       data: {
@@ -199,7 +208,13 @@ function resolveServerLoader(serverPath) {
     source: 'unknown'
   };
 
-  const config = readServerConfig(serverPath);
+  const preparedRuntime = serverPath ? detectExactPreparedRuntime(serverPath) : null;
+  if (preparedRuntime) {
+    result.loader = preparedRuntime.loader;
+    result.loaderVersion = preparedRuntime.loaderVersion;
+    result.source = preparedRuntime.detectedFrom;
+  }
+  const config = preparedRuntime ? null : readServerConfig(serverPath);
   if (config) {
     for (const key of loaderTypeKeys) {
       if (config[key]) {
@@ -254,7 +269,7 @@ function resolveServerLoader(serverPath) {
   }
 
   if (!result.loader) {
-    const detected = detectLoaderFromFiles(serverPath);
+    const detected = detectLoaderFromFiles(serverPath, preparedRuntime);
     if (detected.loader) {
       result.loader = detected.loader;
       result.loaderVersion = detected.loaderVersion || result.loaderVersion;

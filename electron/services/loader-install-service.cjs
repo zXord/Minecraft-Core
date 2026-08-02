@@ -21,6 +21,7 @@ const { spawn } = require('child_process');
 const AdmZip = require('adm-zip');
 const { fetch } = require('../utils/fetch.cjs');
 const { PinnedHttpsClient } = require('./modpacks/network/pinned-https-client.cjs');
+const { isSafeWindowsBasename } = require('./modpacks/windows-basename.cjs');
 const { normalizeRuntimeTuple } = require('./modpacks/contracts.cjs');
 const minecraftRuntimeUtils = require('./minecraft-launcher/utils.cjs');
 const {
@@ -30,8 +31,10 @@ const {
 
 const RUNTIME_USER_AGENT = 'Minecraft-Core/26.6.1 RuntimeManager';
 const NEOFORGE_HOST = 'maven.neoforged.net';
+const NEOFORGE_ORIGIN = `https://${NEOFORGE_HOST}`;
 const NEOFORGE_METADATA_URL = `https://${NEOFORGE_HOST}/releases/net/neoforged/neoforge/maven-metadata.xml`;
 const QUILT_META_HOST = 'meta.quiltmc.org';
+const QUILT_META_ORIGIN = `https://${QUILT_META_HOST}`;
 const QUILT_META_BASE_URL = `https://${QUILT_META_HOST}/v3/versions/loader`;
 const QUILT_MAVEN_ROOTS = Object.freeze(new Map([
   ['maven.quiltmc.org', '/repository/release/'],
@@ -51,6 +54,11 @@ const SAFE_MINECRAFT_VERSION = /^\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9._-]+)?$/;
 const SUPPORTED_RUNTIME_LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
 const QUILT_LAUNCHER_MAIN = 'org.quiltmc.loader.impl.launch.server.QuiltServerLauncher';
 const QUILT_SERVER_MAIN = 'org.quiltmc.loader.impl.launch.knot.KnotServer';
+const MOJANG_META_HOST = 'piston-meta.mojang.com';
+const MOJANG_META_ORIGIN = `https://${MOJANG_META_HOST}`;
+const MOJANG_DATA_HOST = 'piston-data.mojang.com';
+const MOJANG_DATA_ORIGIN = `https://${MOJANG_DATA_HOST}`;
+const MOJANG_VERSION_MANIFEST_URL = `${MOJANG_META_ORIGIN}/mc/game/version_manifest_v2.json`;
 
 let logger = null;
 function getLogger() {
@@ -100,6 +108,23 @@ function unsupportedLoader(loader) {
   return codedError('UNSUPPORTED_LOADER', `Unsupported loader: ${loader || 'unknown'}`);
 }
 
+function normalizeRuntimeInstallError(error) {
+  let normalized;
+  if (error?.code === 'CANCELLED') {
+    normalized = codedError('CANCELLED', 'Runtime preparation was cancelled.');
+  } else if (error?.code === 'LOADER_VERSION_UNAVAILABLE') {
+    normalized = unavailable();
+  } else if (error?.code === 'LOADER_VERSION_REQUIRED') {
+    normalized = codedError('LOADER_VERSION_REQUIRED', 'An exact loader version is required.');
+  } else if (error?.code === 'UNSUPPORTED_LOADER') {
+    normalized = unsupportedLoader('unknown');
+  } else {
+    normalized = runtimeIncomplete();
+  }
+  if (error?.preserveWorkspace === true) normalized.preserveWorkspace = true;
+  return normalized;
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
@@ -126,6 +151,12 @@ function validLoaderVersion(value) {
   return typeof value === 'string' && value === value.trim() && SAFE_VERSION.test(value);
 }
 
+function validExactQuiltLoaderVersion(value) {
+  return validLoaderVersion(value) &&
+    /^\d+(?:\.\d+)+(?:-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?$/.test(value) &&
+    !/^(?:latest|recommended|stable|release)$/i.test(value);
+}
+
 function assertRuntimeIdentifiers(minecraftVersion, loaderVersion, { requireLoader = true } = {}) {
   if (!validMinecraftVersion(minecraftVersion)) throw unavailable();
   if (requireLoader && !validLoaderVersion(loaderVersion)) {
@@ -143,7 +174,8 @@ function safeRelativePath(value) {
     /^[\\/]/.test(value) || /^[A-Za-z]:/.test(value) || value.includes(':')) return null;
   const normalized = value.replaceAll('\\', '/');
   const segments = normalized.split('/');
-  if (segments.some(segment => !segment || segment === '.' || segment === '..' || /[. ]$/.test(segment))) return null;
+  if (segments.some(segment => !segment || segment === '.' || segment === '..' ||
+    /[. ]$/.test(segment) || !isSafeWindowsBasename(segment))) return null;
   return segments.join(path.sep);
 }
 
@@ -228,6 +260,7 @@ function requestTransport(options = {}) {
 async function requestRuntimeBytes(url, {
   transport,
   allowedHosts,
+  allowedOrigins,
   maxBytes,
   timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   signal,
@@ -248,6 +281,7 @@ async function requestRuntimeBytes(url, {
       headers: { 'User-Agent': RUNTIME_USER_AGENT, Accept: '*/*' },
       signal: controller.signal,
       allowedHosts,
+      allowedOrigins,
       allowSubdomains: false,
       maxRedirects: 5
     });
@@ -335,6 +369,7 @@ function runBoundedProcess({
   timeoutMs = DEFAULT_INSTALL_TIMEOUT_MS,
   maxStdoutBytes = DEFAULT_STDOUT_BYTES,
   maxStderrBytes = DEFAULT_STDERR_BYTES,
+  terminationGraceMs = 5000,
   shell = false,
   windowsHide = true,
   spawnImpl = spawn
@@ -345,6 +380,7 @@ function runBoundedProcess({
   const deadline = positiveSafeInteger(timeoutMs, DEFAULT_INSTALL_TIMEOUT_MS, 60 * 60 * 1000);
   const stdoutLimit = positiveSafeInteger(maxStdoutBytes, DEFAULT_STDOUT_BYTES, 64 * 1024 * 1024);
   const stderrLimit = positiveSafeInteger(maxStderrBytes, DEFAULT_STDERR_BYTES, 8 * 1024 * 1024);
+  const terminationGrace = positiveSafeInteger(terminationGraceMs, 5000, 60 * 1000);
   return new Promise((resolve, reject) => {
     let child;
     let settled = false;
@@ -353,9 +389,12 @@ function runBoundedProcess({
     let stderr = '';
     let timer = null;
     let escalationTimer = null;
+    let forcedSettlementTimer = null;
+    let processError = null;
     const cleanup = () => {
       clearTimeout(timer);
       clearTimeout(escalationTimer);
+      clearTimeout(forcedSettlementTimer);
       signal?.removeEventListener('abort', onAbort);
     };
     const finish = (error, value) => {
@@ -367,11 +406,17 @@ function runBoundedProcess({
     const terminateAndWait = error => {
       if (settled || terminationError) return;
       terminationError = error;
-      try { child.kill(); } catch { /* the error/exit event remains authoritative */ }
+      try { child.kill(); } catch { /* bounded settlement below remains authoritative */ }
+      if (settled) return;
       escalationTimer = setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch { /* continue waiting for process exit */ }
-      }, 5000);
+        try { child.kill('SIGKILL'); } catch { /* bounded settlement below remains authoritative */ }
+      }, Math.max(1, Math.floor(terminationGrace / 2)));
       escalationTimer.unref?.();
+      forcedSettlementTimer = setTimeout(() => {
+        terminationError.preserveWorkspace = true;
+        finish(terminationError);
+      }, terminationGrace);
+      forcedSettlementTimer.unref?.();
     };
     const onAbort = () => terminateAndWait(codedError('CANCELLED', 'Runtime preparation was cancelled.'));
     if (signal?.aborted) {
@@ -390,21 +435,37 @@ function runBoundedProcess({
       return;
     }
     const collect = (current, chunk, limit) => {
-      const next = Buffer.byteLength(current) + Buffer.byteLength(chunk);
-      if (next > limit) {
-        terminateAndWait(runtimeIncomplete('The official loader installer produced excessive output.'));
+      try {
+        const next = Buffer.byteLength(current) + Buffer.byteLength(chunk);
+        if (next > limit) {
+          terminateAndWait(runtimeIncomplete('The official loader installer produced excessive output.'));
+          return current;
+        }
+        return current + chunk.toString('utf8');
+      } catch {
+        terminateAndWait(runtimeIncomplete());
         return current;
       }
-      return current + chunk.toString('utf8');
     };
-    child.stdout.on('data', chunk => { stdout = collect(stdout, chunk, stdoutLimit); });
-    child.stderr.on('data', chunk => { stderr = collect(stderr, chunk, stderrLimit); });
-    child.once('error', () => {
-      if (!terminationError) finish(runtimeIncomplete());
+    child.stdout.on('data', chunk => { if (!settled) stdout = collect(stdout, chunk, stdoutLimit); });
+    child.stderr.on('data', chunk => { if (!settled) stderr = collect(stderr, chunk, stderrLimit); });
+    child.stdout.on('error', () => { if (!settled) terminateAndWait(runtimeIncomplete()); });
+    child.stderr.on('error', () => { if (!settled) terminateAndWait(runtimeIncomplete()); });
+    child.on('error', () => {
+      if (settled) return;
+      processError = runtimeIncomplete();
+      if (!terminationError) terminateAndWait(processError);
     });
-    child.once('exit', (code) => {
+    child.once('exit', () => {
+      // Deliberately wait for close: Node emits close only after child stdio is quiescent.
+    });
+    child.once('close', (code) => {
       if (terminationError) {
         finish(terminationError);
+        return;
+      }
+      if (processError) {
+        finish(processError);
         return;
       }
       if (code !== 0) {
@@ -453,7 +514,8 @@ async function validateManagedJava({ javaPath, expectedMajor, processRunner = ru
 function normalizeRuntime(input) {
   try {
     const runtime = normalizeRuntimeTuple(input);
-    if (!validMinecraftVersion(runtime.minecraftVersion) || !validLoaderVersion(runtime.loaderVersion)) throw runtimeIncomplete();
+    if (!validMinecraftVersion(runtime.minecraftVersion) || !validLoaderVersion(runtime.loaderVersion) ||
+      (runtime.loaderFamily === 'quilt' && !validExactQuiltLoaderVersion(runtime.loaderVersion))) throw runtimeIncomplete();
     return runtime;
   } catch (error) {
     if (error?.code === 'RUNTIME_INCOMPLETE') throw error;
@@ -506,20 +568,31 @@ function writeNewControlledFile(root, filePath, bytes) {
 
 function createRuntimeWorkspace(targetRoot, family) {
   targetRoot = assertCanonicalDirectory(targetRoot);
-  const stagingParent = ensureControlledDirectory(targetRoot, path.join(targetRoot, '.minecraft-core-state', 'runtime-staging'));
-  if (!inside(fs.realpathSync.native(targetRoot), fs.realpathSync.native(stagingParent))) throw runtimeIncomplete();
-  const workspace = fs.mkdtempSync(path.join(stagingParent, `${family}-`));
-  const serverRoot = path.join(workspace, 'server');
-  fs.mkdirSync(serverRoot);
-  return { workspace, serverRoot };
+  let workspace = null;
+  try {
+    const stagingParent = ensureControlledDirectory(targetRoot, path.join(targetRoot, '.minecraft-core-state', 'runtime-staging'));
+    if (!inside(fs.realpathSync.native(targetRoot), fs.realpathSync.native(stagingParent))) throw runtimeIncomplete();
+    workspace = fs.mkdtempSync(path.join(stagingParent, `${family}-`));
+    const serverRoot = path.join(workspace, 'server');
+    fs.mkdirSync(serverRoot);
+    return { workspace, serverRoot };
+  } catch {
+    cleanupRuntimeWorkspace(targetRoot, workspace);
+    throw runtimeIncomplete();
+  }
 }
 
 function cleanupRuntimeWorkspace(targetRoot, workspace) {
-  if (typeof workspace !== 'string' || !inside(path.join(targetRoot, '.minecraft-core-state', 'runtime-staging'), workspace)) return;
-  try { fs.rmSync(workspace, { recursive: true, force: true }); } catch { /* best effort */ }
+  const stateDirectory = path.join(targetRoot, '.minecraft-core-state');
   const stagingParent = path.join(targetRoot, '.minecraft-core-state', 'runtime-staging');
+  if (typeof workspace === 'string' && inside(stagingParent, workspace)) {
+    try { fs.rmSync(workspace, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
   try {
     if (fs.existsSync(stagingParent) && fs.readdirSync(stagingParent).length === 0) fs.rmdirSync(stagingParent);
+  } catch { /* best effort */ }
+  try {
+    if (fs.existsSync(stateDirectory) && fs.readdirSync(stateDirectory).length === 0) fs.rmdirSync(stateDirectory);
   } catch { /* best effort */ }
 }
 
@@ -790,6 +863,7 @@ async function getNeoForgeVersions(minecraftVersion, options = {}) {
     const result = await requestRuntimeBytes(NEOFORGE_METADATA_URL, {
       transport: requestTransport(options),
       allowedHosts: [NEOFORGE_HOST],
+      allowedOrigins: [NEOFORGE_ORIGIN],
       maxBytes: options.maxMetadataBytes ?? DEFAULT_METADATA_BYTES,
       timeoutMs: options.timeoutMs,
       signal: options.signal
@@ -825,6 +899,7 @@ async function resolveNeoForgeInstaller(options) {
   const common = {
     transport,
     allowedHosts: [NEOFORGE_HOST],
+    allowedOrigins: [NEOFORGE_ORIGIN],
     timeoutMs: options.timeoutMs,
     signal: options.signal
   };
@@ -958,7 +1033,7 @@ function validateQuiltPair(value, minecraftVersion, expectedLoaderVersion = null
     !hasOnlyKeys(value.hashed, ['maven', 'version', 'file_size', 'hashes']) ||
     !hasOnlyKeys(value.intermediary, ['maven', 'version', 'stable'])) throw unavailable();
   const loaderVersion = value.loader.version;
-  if (!validLoaderVersion(loaderVersion) || (expectedLoaderVersion !== null && loaderVersion !== expectedLoaderVersion) ||
+  if (!validExactQuiltLoaderVersion(loaderVersion) || (expectedLoaderVersion !== null && loaderVersion !== expectedLoaderVersion) ||
     value.loader.maven !== `org.quiltmc:quilt-loader:${loaderVersion}` ||
     value.hashed.version !== minecraftVersion || value.hashed.maven !== `org.quiltmc:hashed:${minecraftVersion}` ||
     value.intermediary.version !== minecraftVersion || value.intermediary.maven !== `net.fabricmc:intermediary:${minecraftVersion}`) throw unavailable();
@@ -985,6 +1060,7 @@ async function getQuiltVersions(minecraftVersion, options = {}) {
     const result = await requestRuntimeBytes(url, {
       transport: requestTransport(options),
       allowedHosts: [QUILT_META_HOST],
+      allowedOrigins: [QUILT_META_ORIGIN],
       maxBytes: options.maxMetadataBytes ?? DEFAULT_METADATA_BYTES,
       timeoutMs: options.timeoutMs,
       signal: options.signal
@@ -1005,9 +1081,12 @@ function mavenCoordinateToPath(coordinate) {
   const [group, artifact, version] = parts;
   const groupPattern = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,191}$/;
   const artifactPattern = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
-  if (!groupPattern.test(group) || group.split('.').some(segment => !segment || segment === '.' || segment === '..') ||
-    !artifactPattern.test(artifact) || !validLoaderVersion(version) || artifact.endsWith('.') || artifact.endsWith(' ')) throw runtimeIncomplete();
-  return `${group.replaceAll('.', '/')}/${artifact}/${version}/${artifact}-${version}.jar`;
+  const groupSegments = group.split('.');
+  const fileName = `${artifact}-${version}.jar`;
+  if (!groupPattern.test(group) || groupSegments.some(segment => !segment || !isSafeWindowsBasename(segment)) ||
+    !artifactPattern.test(artifact) || !isSafeWindowsBasename(artifact) || !validLoaderVersion(version) ||
+    !isSafeWindowsBasename(version) || !isSafeWindowsBasename(fileName)) throw runtimeIncomplete();
+  return `${groupSegments.join('/')}/${artifact}/${version}/${fileName}`;
 }
 
 function validateQuiltRepository(value) {
@@ -1051,12 +1130,16 @@ function validateQuiltProfile(value, minecraftVersion, loaderVersion) {
 async function resolveQuiltPairAndProfile(options) {
   const { minecraftVersion, loaderVersion } = options;
   assertRuntimeIdentifiers(minecraftVersion, loaderVersion);
+  if (!validExactQuiltLoaderVersion(loaderVersion)) {
+    throw codedError('LOADER_VERSION_REQUIRED', 'An exact loader version is required.');
+  }
   const transport = requestTransport(options);
   const pairUrl = `${QUILT_META_BASE_URL}/${encodeURIComponent(minecraftVersion)}/${encodeURIComponent(loaderVersion)}`;
   const profileUrl = `${pairUrl}/server/json`;
   const requestOptions = {
     transport,
     allowedHosts: [QUILT_META_HOST],
+    allowedOrigins: [QUILT_META_ORIGIN],
     maxBytes: options.maxMetadataBytes ?? DEFAULT_METADATA_BYTES,
     timeoutMs: options.timeoutMs,
     signal: options.signal
@@ -1075,20 +1158,23 @@ async function resolveQuiltPairAndProfile(options) {
   }
 }
 
-function expectedQuiltDigest(pair, coordinate) {
+function expectedQuiltVerification(pair, coordinate) {
   const candidates = [pair.loader, pair.hashed, pair.intermediary];
   const match = candidates.find(entry => entry.maven === coordinate);
-  if (!match?.hashes) return null;
+  if (!match) return null;
+  const digests = [];
   for (const algorithm of ['sha512', 'sha256', 'sha1']) {
-    if (match.hashes[algorithm]) {
-      return {
+    if (match.hashes?.[algorithm]) {
+      digests.push({
         algorithm,
-        digest: match.hashes[algorithm].toLowerCase(),
-        size: Number.isSafeInteger(match.file_size) ? match.file_size : null
-      };
+        digest: match.hashes[algorithm].toLowerCase()
+      });
     }
   }
-  return null;
+  return {
+    digests,
+    size: Number.isSafeInteger(match.file_size) ? match.file_size : null
+  };
 }
 
 function assertJarBytes(bytes) {
@@ -1106,6 +1192,7 @@ async function downloadQuiltLibraries(root, libraries, pair, options) {
       response = await requestRuntimeBytes(url, {
         transport,
         allowedHosts: [new URL(library.repository).hostname],
+        allowedOrigins: [new URL(library.repository).origin],
         maxBytes: options.maxLibraryBytes ?? DEFAULT_LIBRARY_BYTES,
         timeoutMs: options.timeoutMs,
         signal: options.signal
@@ -1115,9 +1202,11 @@ async function downloadQuiltLibraries(root, libraries, pair, options) {
       throw runtimeIncomplete();
     }
     assertJarBytes(response.body);
-    const expected = expectedQuiltDigest(pair, library.coordinate);
-    if (expected && (digestBuffer(response.body, expected.algorithm) !== expected.digest ||
-      (expected.size !== null && response.body.length !== expected.size))) throw runtimeIncomplete();
+    const expected = expectedQuiltVerification(pair, library.coordinate);
+    if (expected && ((expected.size !== null && response.body.length !== expected.size) ||
+      expected.digests.some(({ algorithm, digest }) => digestBuffer(response.body, algorithm) !== digest))) {
+      throw runtimeIncomplete();
+    }
     const destination = resolveControlledPath(root, `libraries/${library.relativePath}`);
     writeNewControlledFile(root, destination, response.body);
     downloaded.push({ ...library, relativePath: `libraries/${library.relativePath}` });
@@ -1878,11 +1967,14 @@ async function prepareRuntimeIdentity(options, loaderFamily) {
 async function installNeoForgeServer(options) {
   const { root, runtime } = await prepareRuntimeIdentity(options, 'neoforge');
   const installer = await resolveNeoForgeInstaller(options);
-  const { workspace, serverRoot } = createRuntimeWorkspace(root, 'neoforge');
-  const installerPath = path.join(workspace, `neoforge-${runtime.loaderVersion}-installer.jar`);
-  writeNewControlledFile(workspace, installerPath, installer.bytes);
+  let workspace = null;
   let preserveWorkspace = false;
   try {
+    const created = createRuntimeWorkspace(root, 'neoforge');
+    workspace = created.workspace;
+    const { serverRoot } = created;
+    const installerPath = path.join(workspace, `neoforge-${runtime.loaderVersion}-installer.jar`);
+    writeNewControlledFile(workspace, installerPath, installer.bytes);
     validateNeoForgeInstallerProfile(installerPath, runtime.minecraftVersion, runtime.loaderVersion);
     const processRunner = options.processRunner || runBoundedProcess;
     if (typeof processRunner !== 'function' || typeof options.javaPath !== 'string' || !path.isAbsolute(options.javaPath)) throw runtimeIncomplete();
@@ -1920,22 +2012,138 @@ async function installNeoForgeServer(options) {
     return { success: true, loader: 'neoforge', loaderVersion: runtime.loaderVersion, runtime };
   } catch (error) {
     preserveWorkspace = error?.preserveWorkspace === true;
-    throw error;
+    throw normalizeRuntimeInstallError(error);
   } finally {
-    if (!preserveWorkspace) cleanupRuntimeWorkspace(root, workspace);
+    if (workspace && !preserveWorkspace) cleanupRuntimeWorkspace(root, workspace);
   }
 }
 
-async function defaultEnsureQuiltBaseRuntime({ targetPath, minecraftVersion, logChannel, progressChannel }) {
-  await ensureBaseMinecraftServerLayout(targetPath, minecraftVersion, logChannel, progressChannel);
+function officialDigestEntries(value) {
+  if (!isPlainObject(value)) throw runtimeIncomplete();
+  const lengths = { sha1: 40, sha256: 64, sha512: 128 };
+  const unknownDigest = Object.keys(value).some(key => /^sha\d+$/i.test(key) && !Object.hasOwn(lengths, key));
+  if (unknownDigest) throw runtimeIncomplete();
+  const digests = [];
+  for (const [algorithm, length] of Object.entries(lengths)) {
+    if (value[algorithm] === undefined) continue;
+    if (typeof value[algorithm] !== 'string' || !new RegExp(`^[a-fA-F0-9]{${length}}$`).test(value[algorithm])) {
+      throw runtimeIncomplete();
+    }
+    digests.push({ algorithm, digest: value[algorithm].toLowerCase() });
+  }
+  if (digests.length === 0) throw runtimeIncomplete();
+  return digests;
+}
+
+function verifyOfficialDigests(bytes, digests) {
+  if (digests.some(({ algorithm, digest }) => digestBuffer(bytes, algorithm) !== digest)) throw runtimeIncomplete();
+}
+
+function exactMojangUrl(value, origin, pathname) {
+  let url;
+  try { url = new URL(value); } catch { throw runtimeIncomplete(); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.origin !== origin ||
+    url.pathname !== pathname || url.search || url.hash) throw runtimeIncomplete();
+  return url.toString();
+}
+
+function resolveMojangVersionEntry(manifest, minecraftVersion) {
+  if (!isPlainObject(manifest) || !hasExactKeys(manifest, ['latest', 'versions']) ||
+    !isPlainObject(manifest.latest) || !Array.isArray(manifest.versions) ||
+    manifest.versions.length === 0 || manifest.versions.length > 4096) throw runtimeIncomplete();
+  const matches = manifest.versions.filter(entry => isPlainObject(entry) && entry.id === minecraftVersion);
+  if (matches.length !== 1) throw runtimeIncomplete();
+  const entry = matches[0];
+  if (!hasOnlyKeys(entry, ['id', 'type', 'url', 'time', 'releaseTime', 'sha1', 'sha256', 'sha512', 'complianceLevel']) ||
+    typeof entry.url !== 'string') throw runtimeIncomplete();
+  const digests = officialDigestEntries(entry);
+  const sha1 = digests.find(digest => digest.algorithm === 'sha1')?.digest;
+  if (!sha1) throw runtimeIncomplete();
+  const url = exactMojangUrl(entry.url, MOJANG_META_ORIGIN, `/v1/packages/${sha1}/${minecraftVersion}.json`);
+  return { url, digests };
+}
+
+function resolveMojangServerDownload(metadata, minecraftVersion, maxBytes) {
+  if (!isPlainObject(metadata) || metadata.id !== minecraftVersion || !isPlainObject(metadata.downloads) ||
+    !isPlainObject(metadata.downloads.server)) throw runtimeIncomplete();
+  const server = metadata.downloads.server;
+  if (!hasOnlyKeys(server, ['url', 'size', 'sha1', 'sha256', 'sha512']) ||
+    typeof server.url !== 'string' || !Number.isSafeInteger(server.size) || server.size <= 0 || server.size > maxBytes) {
+    throw runtimeIncomplete();
+  }
+  const digests = officialDigestEntries(server);
+  const sha1 = digests.find(digest => digest.algorithm === 'sha1')?.digest;
+  if (!sha1) throw runtimeIncomplete();
+  const url = exactMojangUrl(server.url, MOJANG_DATA_ORIGIN, `/v1/objects/${sha1}/server.jar`);
+  return { url, size: server.size, digests };
+}
+
+async function defaultEnsureQuiltBaseRuntime({
+  targetPath,
+  minecraftVersion,
+  logChannel,
+  progressChannel,
+  transport: suppliedTransport,
+  timeoutMs,
+  maxMetadataBytes = DEFAULT_METADATA_BYTES,
+  maxRuntimeBytes = DEFAULT_RUNTIME_BYTES,
+  signal
+}) {
+  try {
+    const root = assertCanonicalDirectory(targetPath);
+    if (!validMinecraftVersion(minecraftVersion)) throw runtimeIncomplete();
+    const transport = requestTransport({ transport: suppliedTransport });
+    const metadataLimit = positiveSafeInteger(maxMetadataBytes, DEFAULT_METADATA_BYTES, 16 * 1024 * 1024);
+    const runtimeLimit = positiveSafeInteger(maxRuntimeBytes, DEFAULT_RUNTIME_BYTES, DEFAULT_RUNTIME_BYTES);
+    emitLog(logChannel, `Preparing the exact Minecraft ${minecraftVersion} server runtime...`);
+    emitProgress(progressChannel, { percent: 20, speed: 'Resolving pinned Minecraft metadata...' }, 'quilt');
+    const manifestResponse = await requestRuntimeBytes(MOJANG_VERSION_MANIFEST_URL, {
+      transport,
+      allowedHosts: [MOJANG_META_HOST],
+      allowedOrigins: [MOJANG_META_ORIGIN],
+      maxBytes: metadataLimit,
+      timeoutMs,
+      signal
+    });
+    const versionEntry = resolveMojangVersionEntry(parseBoundedJson(manifestResponse.body), minecraftVersion);
+    const versionResponse = await requestRuntimeBytes(versionEntry.url, {
+      transport,
+      allowedHosts: [MOJANG_META_HOST],
+      allowedOrigins: [MOJANG_META_ORIGIN],
+      maxBytes: metadataLimit,
+      timeoutMs,
+      signal
+    });
+    verifyOfficialDigests(versionResponse.body, versionEntry.digests);
+    const server = resolveMojangServerDownload(parseBoundedJson(versionResponse.body), minecraftVersion, runtimeLimit);
+    const serverResponse = await requestRuntimeBytes(server.url, {
+      transport,
+      allowedHosts: [MOJANG_DATA_HOST],
+      allowedOrigins: [MOJANG_DATA_ORIGIN],
+      maxBytes: runtimeLimit,
+      timeoutMs,
+      signal
+    });
+    if (serverResponse.body.length !== server.size) throw runtimeIncomplete();
+    verifyOfficialDigests(serverResponse.body, server.digests);
+    assertJarBytes(serverResponse.body);
+    writeNewControlledFile(root, path.join(root, 'server.jar'), serverResponse.body);
+    emitProgress(progressChannel, { percent: 40, speed: 'Minecraft server runtime prepared' }, 'quilt');
+  } catch (error) {
+    if (error?.code === 'CANCELLED') throw error;
+    throw runtimeIncomplete();
+  }
 }
 
 async function installQuiltServer(options) {
   const { root, runtime } = await prepareRuntimeIdentity(options, 'quilt');
   const { pair, libraries } = await resolveQuiltPairAndProfile(options);
-  const { workspace, serverRoot } = createRuntimeWorkspace(root, 'quilt');
+  let workspace = null;
   let preserveWorkspace = false;
   try {
+    const created = createRuntimeWorkspace(root, 'quilt');
+    workspace = created.workspace;
+    const { serverRoot } = created;
     const downloadedLibraries = await downloadQuiltLibraries(serverRoot, libraries, pair, options);
     const ensureBaseRuntime = options.ensureBaseRuntime || defaultEnsureQuiltBaseRuntime;
     if (typeof ensureBaseRuntime !== 'function') throw runtimeIncomplete();
@@ -1945,6 +2153,10 @@ async function installQuiltServer(options) {
       javaPath: options.javaPath,
       logChannel: options.logChannel,
       progressChannel: options.progressChannel,
+      transport: options.transport,
+      timeoutMs: options.timeoutMs,
+      maxMetadataBytes: options.maxMojangMetadataBytes ?? options.maxMetadataBytes,
+      maxRuntimeBytes: options.maxMojangServerBytes ?? options.maxRuntimeBytes,
       signal: options.signal
     });
     requireJar(serverRoot, path.join(serverRoot, 'server.jar'));
@@ -1964,9 +2176,9 @@ async function installQuiltServer(options) {
     return { success: true, loader: 'quilt', loaderVersion: runtime.loaderVersion, runtime };
   } catch (error) {
     preserveWorkspace = error?.preserveWorkspace === true;
-    throw error;
+    throw normalizeRuntimeInstallError(error);
   } finally {
-    if (!preserveWorkspace) cleanupRuntimeWorkspace(root, workspace);
+    if (workspace && !preserveWorkspace) cleanupRuntimeWorkspace(root, workspace);
   }
 }
 
@@ -2117,6 +2329,9 @@ async function installServerLoader(options = {}, loader, minecraftVersion, loade
   const loggerInstance = getLogger();
   const normalizedLoader = normalizeLoader(options.loader);
   if (!SUPPORTED_RUNTIME_LOADERS.has(normalizedLoader)) throw unsupportedLoader(normalizedLoader);
+  if (normalizedLoader === 'quilt' && !validExactQuiltLoaderVersion(options.loaderVersion)) {
+    throw codedError('LOADER_VERSION_REQUIRED', 'An exact loader version is required.');
+  }
   const resultBase = {
     success: true,
     loader: normalizedLoader,
@@ -2268,6 +2483,7 @@ module.exports = {
     publishStagedRuntime,
     getNeoForgeMinecraftPrefix,
     mavenCoordinateToPath,
+    safeRelativePath,
     validateQuiltRepository,
     normalizeQuiltLibraries
   }

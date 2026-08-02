@@ -39,9 +39,9 @@ class PinnedHttpsClient {
     this.lookup = lookup; this.requestImpl = request;
   }
 
-  async request(value, { headers, signal, allowedHosts, allowSubdomains = false, maxRedirects = 5 } = {}) {
+  async request(value, { headers, signal, allowedHosts, allowedOrigins, allowSubdomains = false, maxRedirects = 5 } = {}) {
     if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 20) throw invalidUrl();
-    let current = validateRemoteUrl(value, { allowedHosts, allowSubdomains });
+    let current = validateRemoteUrl(value, { allowedHosts, allowedOrigins, allowSubdomains });
     let requestHeaders = safeHeaders(headers);
     const visited = new Set();
     for (let redirects = 0; ; redirects += 1) {
@@ -59,7 +59,7 @@ class PinnedHttpsClient {
       if (typeof location !== 'string' || !location || /[\r\n]/.test(location)) throw invalidUrl();
       let next;
       try { next = new URL(location, current); } catch { throw invalidUrl(); }
-      next = validateRemoteUrl(next, { allowedHosts, allowSubdomains });
+      next = validateRemoteUrl(next, { allowedHosts, allowedOrigins, allowSubdomains });
       if (next.origin !== current.origin) {
         requestHeaders = Object.fromEntries(Object.entries(requestHeaders).filter(([name]) => !CROSS_ORIGIN_SECRETS.has(name)));
       }

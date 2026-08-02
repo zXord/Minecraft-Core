@@ -109,6 +109,31 @@ test('redirect requests stay GET-only, reject unsafe framing headers, and strip 
   await assert.rejects(h.client.request('https://one.example/start', { allowedHosts: ['one.example'], headers: { 'content-length': '10' } }), invalid);
 });
 
+test('pinned redirects remain inside the exact allowed origin set and reject explicit ports before DNS', async () => {
+  const redirect = new TrackedResponse({
+    statusCode: 302,
+    headers: { location: 'https://two.example/final' }
+  });
+  const h = harness({
+    'https://one.example/start': { response: redirect },
+    'https://two.example/final': {}
+  });
+  await assert.rejects(h.client.request('https://one.example/start', {
+    allowedHosts: ['one.example', 'two.example'],
+    allowedOrigins: ['https://one.example']
+  }), invalid);
+  assert.equal(h.calls.length, 1);
+  assert.equal(redirect.bodyReads, 0);
+
+  const alternate = harness({});
+  await assert.rejects(alternate.client.request('https://one.example:444/file', {
+    allowedHosts: ['one.example'],
+    allowedOrigins: ['https://one.example']
+  }), invalid);
+  assert.equal(alternate.lookupCalls.length, 0);
+  assert.equal(alternate.calls.length, 0);
+});
+
 test('request and redirect failures expose no query, token, provider body, or URL in ModpackError', async () => {
   const secretUrl = 'https://cdn.example/file?token=top-secret';
   const h = harness({ [secretUrl]: { error: new Error(`provider failed for ${secretUrl}: private-body`) } });

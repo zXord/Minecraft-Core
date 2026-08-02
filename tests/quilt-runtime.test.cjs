@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Readable } = require('node:stream');
+const https = require('node:https');
 const AdmZip = require('adm-zip');
 
 const {
@@ -23,6 +24,7 @@ const PAIR_URL = `${LIST_URL}/${VERSION}`;
 const PROFILE_URL = `${PAIR_URL}/server/json`;
 const QUILT_MAVEN = 'https://maven.quiltmc.org/repository/release/';
 const FABRIC_MAVEN = 'https://maven.fabricmc.net/';
+const MOJANG_MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
 
 function jarBytes(label) {
   const zip = new AdmZip();
@@ -138,6 +140,37 @@ function tuple() {
   };
 }
 
+function mojangRoutes(serverBytes = jarBytes('server')) {
+  const serverSha1 = crypto.createHash('sha1').update(serverBytes).digest('hex');
+  const serverUrl = `https://piston-data.mojang.com/v1/objects/${serverSha1}/server.jar`;
+  const versionMetadata = {
+    id: GAME,
+    type: 'release',
+    downloads: {
+      server: {
+        sha1: serverSha1,
+        size: serverBytes.length,
+        url: serverUrl
+      }
+    }
+  };
+  const versionBytes = Buffer.from(JSON.stringify(versionMetadata));
+  const versionSha1 = crypto.createHash('sha1').update(versionBytes).digest('hex');
+  const versionUrl = `https://piston-meta.mojang.com/v1/packages/${versionSha1}/${GAME}.json`;
+  return {
+    routes: new Map([
+      [MOJANG_MANIFEST_URL, {
+        latest: { release: GAME, snapshot: GAME },
+        versions: [{ id: GAME, type: 'release', url: versionUrl, sha1: versionSha1 }]
+      }],
+      [versionUrl, versionBytes],
+      [serverUrl, serverBytes]
+    ]),
+    serverUrl,
+    versionUrl
+  };
+}
+
 test('Quilt versions come from the exact game endpoint with a proper User-Agent and no latest fallback', async () => {
   const transport = fakeTransport(new Map([[LIST_URL, [pair('0.26.3'), pair(), pair('0.27.0-beta.1')]]]));
   const versions = await getLoaderVersions('quilt', GAME, { transport });
@@ -145,6 +178,7 @@ test('Quilt versions come from the exact game endpoint with a proper User-Agent 
   assert.deepEqual(transport.calls.map(call => call.url), [LIST_URL]);
   assert.match(transport.calls[0].options.headers['User-Agent'], /^Minecraft-Core\//);
   assert.equal(transport.calls[0].url.includes('/latest'), false);
+  assert.deepEqual(transport.calls[0].options.allowedOrigins, ['https://meta.quiltmc.org']);
 });
 
 test('Quilt rejects empty, mismatched, hostile, and oversized Meta responses', async () => {
@@ -190,6 +224,9 @@ test('Quilt resolves the exact pair, maps strict Maven paths, and reconstructs a
   assert.equal(result.loader, 'quilt');
   assert.deepEqual(result.runtime, tuple());
   assert.deepEqual(transport.calls.slice(0, 2).map(call => call.url), [PAIR_URL, PROFILE_URL]);
+  for (const call of transport.calls) {
+    assert.deepEqual(call.options.allowedOrigins, [new URL(call.url).origin]);
+  }
   assert.equal(transport.calls.some(call => call.url.includes('/latest')), false);
   assert.equal(fs.readFileSync(path.join(root, 'run.ps1'), 'utf8'), 'pack supplied');
   assert.equal(fs.readFileSync(path.join(root, 'quilt-installer.jar'), 'utf8'), 'pack supplied');
@@ -208,6 +245,15 @@ test('Quilt resolves the exact pair, maps strict Maven paths, and reconstructs a
     loaderVersion: VERSION,
     source: 'runtime-metadata'
   });
+  fs.writeFileSync(path.join(root, '.minecraft-core.json'), JSON.stringify({
+    loader: 'vanilla',
+    loaderVersion: GAME
+  }));
+  assert.deepEqual(resolveServerLoader(root), {
+    loader: 'quilt',
+    loaderVersion: VERSION,
+    source: 'runtime-metadata'
+  });
 });
 
 test('strict Quilt Maven mapping rejects classifiers, unsafe hosts, credentials, ports, and collisions', () => {
@@ -219,7 +265,12 @@ test('strict Quilt Maven mapping rejects classifiers, unsafe hosts, credentials,
     'org.quiltmc:quilt-loader:0.26.4:all',
     'org.quiltmc:quilt-loader',
     '../org:loader:1.0',
-    'org.quiltmc:loader:1.0@zip'
+    'org.quiltmc:loader:1.0@zip',
+    'org.CON.quiltmc:loader:1.0',
+    'org.quiltmc:COM1:1.0',
+    'org.quiltmc:loader:NUL',
+    'org.quiltmc:COM¹:1.0',
+    'org.CONIN$:loader:1.0'
   ]) {
     assert.throws(() => __testUtils.mavenCoordinateToPath(coordinate), error => error.code === 'RUNTIME_INCOMPLETE');
   }
@@ -237,6 +288,35 @@ test('strict Quilt Maven mapping rejects classifiers, unsafe hosts, credentials,
     ]).libraries),
     error => error.code === 'RUNTIME_INCOMPLETE'
   );
+  for (const relativePath of [
+    'libraries/CON/file.jar',
+    'libraries/aux.txt/file.jar',
+    'libraries/COM¹/file.jar',
+    'libraries/CONIN$/file.jar'
+  ]) {
+    assert.equal(__testUtils.safeRelativePath(relativePath), null, relativePath);
+  }
+});
+
+test('semantic Quilt aliases and ranges are rejected before Java resolution or network access', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-quilt-alias-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const loaderVersion of ['latest', 'recommended', 'stable', '1.x', '0.26+', '[0.20,1.0)']) {
+    let javaResolutions = 0;
+    const transport = fakeTransport(new Map());
+    await assert.rejects(installServerLoader({
+      targetPath: root,
+      minecraftVersion: GAME,
+      loader: 'quilt',
+      loaderVersion,
+      javaPath: path.join(root, 'java.exe'),
+      resolveJavaVersion: async () => { javaResolutions += 1; return { requiredJavaVersion: 17 }; },
+      validateJava: async () => 17,
+      transport
+    }), error => error.code === 'LOADER_VERSION_REQUIRED', loaderVersion);
+    assert.equal(javaResolutions, 0, loaderVersion);
+    assert.equal(transport.calls.length, 0, loaderVersion);
+  }
 });
 
 test('Quilt exact pair/profile mismatch is unavailable and never chooses the first loader', async (t) => {
@@ -264,6 +344,102 @@ test('Quilt exact pair/profile mismatch is unavailable and never chooses the fir
       [PROFILE_URL, { ...profile(), inheritsFrom: '1.20.2' }]
     ]))
   }), error => error.code === 'LOADER_VERSION_UNAVAILABLE');
+});
+
+test('Quilt verifies every official digest supplied for each downloaded library', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-quilt-all-digests-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const tamperedPair = pair();
+  tamperedPair.loader.hashes.sha1 = '0'.repeat(40);
+  const { routes, serverBytes } = routesForInstall();
+  routes.set(PAIR_URL, tamperedPair);
+  await assert.rejects(installServerLoader({
+    targetPath: root,
+    minecraftVersion: GAME,
+    loader: 'quilt',
+    loaderVersion: VERSION,
+    javaPath: path.join(root, 'java.exe'),
+    javaMajor: 17,
+    transport: fakeTransport(routes),
+    validateJava: async () => 17,
+    ensureBaseRuntime: async ({ targetPath }) => fs.writeFileSync(path.join(targetPath, 'server.jar'), serverBytes)
+  }), error => error.code === 'RUNTIME_INCOMPLETE');
+  assert.equal(fs.existsSync(path.join(root, 'quilt-server-launch.jar')), false);
+});
+
+test('production Quilt base acquisition uses only bounded pinned Mojang endpoints and verifies official digests', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-quilt-mojang-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { routes } = routesForInstall();
+  const mojang = mojangRoutes();
+  for (const entry of mojang.routes) routes.set(...entry);
+  const transport = fakeTransport(routes);
+  const legacyGet = https.get;
+  https.get = () => { throw new Error('legacy raw https.get must not be used for Quilt'); };
+  try {
+    const result = await installServerLoader({
+      targetPath: root,
+      minecraftVersion: GAME,
+      loader: 'quilt',
+      loaderVersion: VERSION,
+      javaPath: path.join(root, 'java.exe'),
+      javaMajor: 17,
+      transport,
+      validateJava: async () => 17,
+      timeoutMs: 1000
+    });
+    assert.equal(result.loader, 'quilt');
+  } finally {
+    https.get = legacyGet;
+  }
+  assert.deepEqual(
+    transport.calls.filter(call => call.url.includes('mojang.com')).map(call => call.url),
+    [MOJANG_MANIFEST_URL, mojang.versionUrl, mojang.serverUrl]
+  );
+  for (const call of transport.calls.filter(call => call.url.includes('mojang.com'))) {
+    assert.deepEqual(call.options.allowedOrigins, [new URL(call.url).origin]);
+    assert.ok(call.options.signal instanceof AbortSignal);
+  }
+  assert.equal(validatePreparedRuntime(root, tuple()).valid, true);
+});
+
+test('production Quilt base acquisition fails closed on malformed UTF-8 and cancellation', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-quilt-mojang-reject-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const first = routesForInstall().routes;
+  first.set(MOJANG_MANIFEST_URL, Buffer.from([0xc3, 0x28]));
+  const legacyGet = https.get;
+  https.get = () => { throw new Error('legacy raw https.get must not be used for Quilt'); };
+  try {
+    await assert.rejects(installServerLoader({
+      targetPath: root,
+      minecraftVersion: GAME,
+      loader: 'quilt',
+      loaderVersion: VERSION,
+      javaPath: path.join(root, 'java.exe'),
+      javaMajor: 17,
+      transport: fakeTransport(first),
+      validateJava: async () => 17
+    }), error => error.code === 'RUNTIME_INCOMPLETE');
+  } finally {
+    https.get = legacyGet;
+  }
+
+  const controller = new AbortController();
+  controller.abort();
+  const cancelledTransport = fakeTransport(new Map());
+  await assert.rejects(installServerLoader({
+    targetPath: root,
+    minecraftVersion: GAME,
+    loader: 'quilt',
+    loaderVersion: VERSION,
+    javaPath: path.join(root, 'java.exe'),
+    javaMajor: 17,
+    transport: cancelledTransport,
+    validateJava: async () => 17,
+    signal: controller.signal
+  }), error => error.code === 'CANCELLED');
+  assert.equal(cancelledTransport.calls.length, 0);
 });
 
 test('Quilt validation rejects partial or mutated libraries and launch never falls back to Vanilla', async (t) => {

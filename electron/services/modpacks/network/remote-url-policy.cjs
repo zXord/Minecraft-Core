@@ -13,18 +13,36 @@ function normalizedHostname(value) {
   return domainToASCII(withoutDot).toLowerCase();
 }
 
-function validateRemoteUrl(value, { allowedHosts, allowSubdomains = false } = {}) {
+function normalizedHttpsOrigin(value) {
+  let url;
+  try { url = value instanceof URL ? new URL(value.href) : new URL(value); }
+  catch { return ''; }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port ||
+    url.pathname !== '/' || url.search || url.hash) return '';
+  const hostname = normalizedHostname(url.hostname);
+  return hostname ? `https://${hostname}` : '';
+}
+
+function validateRemoteUrl(value, { allowedHosts, allowedOrigins, allowSubdomains = false } = {}) {
   let url;
   try { url = value instanceof URL ? new URL(value.href) : new URL(value); }
   catch { rejectUrl('malformed-url'); }
   if (url.protocol !== 'https:') rejectUrl('non-https');
   if (url.username || url.password) rejectUrl('credentials-not-allowed');
+  if (url.port) rejectUrl('port-not-allowed');
   const addressHost = url.hostname.startsWith('[') && url.hostname.endsWith(']') ? url.hostname.slice(1, -1) : url.hostname;
   if (ipaddr.isValid(addressHost)) rejectUrl();
   if (!Array.isArray(allowedHosts) || allowedHosts.length === 0 || typeof allowSubdomains !== 'boolean') rejectUrl();
   const hostname = normalizedHostname(url.hostname);
   const allowed = allowedHosts.map(normalizedHostname).filter(Boolean);
   if (!hostname || !allowed.some(host => hostname === host || (allowSubdomains && hostname.endsWith(`.${host}`)))) rejectUrl();
+  if (allowedOrigins !== undefined) {
+    if (!Array.isArray(allowedOrigins) || allowedOrigins.length === 0) rejectUrl('origin-not-allowed');
+    const normalizedOrigins = allowedOrigins.map(normalizedHttpsOrigin);
+    if (normalizedOrigins.some(origin => !origin) || !normalizedOrigins.includes(`https://${hostname}`)) {
+      rejectUrl('origin-not-allowed');
+    }
+  }
   return url;
 }
 

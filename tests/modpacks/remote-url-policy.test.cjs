@@ -28,6 +28,35 @@ test('host policy is exact unless subdomains are explicitly allowed', () => {
   assert.throws(() => validateRemoteUrl('https://downloads.example.evil.test/file', { allowedHosts: ['downloads.example'], allowSubdomains: true }), invalidReleaseUrl);
 });
 
+test('remote URLs reject every explicit port and enforce an exact allowed origin', () => {
+  for (const value of [
+    'https://downloads.example:444/file',
+    'https://downloads.example:8443/file'
+  ]) {
+    assert.throws(
+      () => validateRemoteUrl(value, {
+        allowedHosts: ['downloads.example'],
+        allowedOrigins: ['https://downloads.example']
+      }),
+      invalidReleaseUrl
+    );
+  }
+  assert.equal(
+    validateRemoteUrl('https://downloads.example/file', {
+      allowedHosts: ['downloads.example'],
+      allowedOrigins: ['https://downloads.example']
+    }).origin,
+    'https://downloads.example'
+  );
+  assert.throws(
+    () => validateRemoteUrl('https://downloads.example/file', {
+      allowedHosts: ['downloads.example'],
+      allowedOrigins: ['https://cdn.example']
+    }),
+    invalidReleaseUrl
+  );
+});
+
 test('host matching normalizes case, IDNs, and one terminal DNS dot', () => {
   assert.equal(validateRemoteUrl('https://DOWNLOADS.EXAMPLE./file', { allowedHosts: ['downloads.example'] }).hostname, 'downloads.example.');
   assert.equal(validateRemoteUrl('https://xn--bcher-kva.example/file', { allowedHosts: ['bücher.example'] }).hostname, 'xn--bcher-kva.example');

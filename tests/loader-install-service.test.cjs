@@ -126,31 +126,78 @@ test('unknown loaders fail explicitly instead of behaving as Vanilla', async () 
   );
 });
 
-test('bounded installer termination waits for child exit before rejecting', async () => {
+test('bounded installer completion waits for close so all stdio is quiescent', async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
-  let exited = false;
+  child.kill = () => true;
+  const pending = runBoundedProcess({
+    command: path.resolve('C:', 'managed-java', 'bin', 'java.exe'),
+    args: ['-jar', path.resolve('C:', 'runtime', 'installer.jar')],
+    cwd: path.resolve('C:', 'runtime'),
+    timeoutMs: 1000,
+    spawnImpl: () => child
+  });
+  let settled = false;
+  pending.finally(() => { settled = true; });
+  child.stdout.emit('data', Buffer.from('before-exit'));
+  child.emit('exit', 0, null);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+  child.stdout.emit('data', Buffer.from('-after-exit'));
+  child.stderr.emit('data', Buffer.from('stderr-after-exit'));
+  child.emit('close', 0, null);
+  assert.deepEqual(await pending, {
+    code: 0,
+    stdout: 'before-exit-after-exit',
+    stderr: 'stderr-after-exit'
+  });
+});
+
+test('bounded installer kill and error paths settle even when the child never closes', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
   child.kill = () => {
-    setTimeout(() => {
-      child.emit('error', new Error('termination in progress'));
-    }, 5);
-    setTimeout(() => {
-      exited = true;
-      child.emit('exit', null, 'SIGTERM');
-    }, 25);
-    return true;
+    queueMicrotask(() => child.emit('error', new Error('kill failed before close')));
+    throw new Error('kill failed');
   };
-  const startedAt = Date.now();
-  await assert.rejects(runBoundedProcess({
+  const pending = runBoundedProcess({
     command: path.resolve('C:', 'managed-java', 'bin', 'java.exe'),
     args: ['-jar', path.resolve('C:', 'runtime', 'installer.jar')],
     cwd: path.resolve('C:', 'runtime'),
     timeoutMs: 5,
+    terminationGraceMs: 20,
     spawnImpl: () => child
-  }), error => error.code === 'RUNTIME_INCOMPLETE');
-  assert.equal(exited, true);
-  assert.ok(Date.now() - startedAt >= 20);
+  });
+  const outcome = await Promise.race([
+    pending.then(() => ({ resolved: true }), error => ({ error })),
+    new Promise(resolve => setTimeout(() => resolve({ testTimeout: true }), 200))
+  ]);
+  assert.equal(outcome.testTimeout, undefined);
+  assert.equal(outcome.error?.code, 'RUNTIME_INCOMPLETE');
+  assert.equal(outcome.error?.preserveWorkspace, true);
+});
+
+test('bounded installer stream errors are contained and still wait for close', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => true;
+  const pending = runBoundedProcess({
+    command: path.resolve('C:', 'managed-java', 'bin', 'java.exe'),
+    args: ['-jar', path.resolve('C:', 'runtime', 'installer.jar')],
+    cwd: path.resolve('C:', 'runtime'),
+    timeoutMs: 1000,
+    spawnImpl: () => child
+  });
+  let settled = false;
+  pending.catch(() => { settled = true; });
+  child.stdout.emit('error', new Error('stream failed'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+  child.emit('close', null, 'SIGTERM');
+  await assert.rejects(pending, error => error.code === 'RUNTIME_INCOMPLETE');
 });
 
 test('failed publish rollback retains the only backup when restore itself fails', () => {

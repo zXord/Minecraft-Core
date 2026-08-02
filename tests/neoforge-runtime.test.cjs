@@ -78,6 +78,18 @@ function tuple() {
   };
 }
 
+function refreshArtifactRecord(root, relativePath) {
+  const metadataPath = path.join(root, '.minecraft-core-state', 'runtime.json');
+  const record = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+  const artifact = record.artifacts.find(candidate => candidate.relativePath === relativePath);
+  assert.ok(artifact, `missing artifact record for ${relativePath}`);
+  const bytes = fs.readFileSync(path.join(root, ...relativePath.split('/')));
+  artifact.size = bytes.length;
+  artifact.sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  artifact.sha512 = crypto.createHash('sha512').update(bytes).digest('hex');
+  fs.writeFileSync(metadataPath, `${JSON.stringify(record, null, 2)}\n`);
+}
+
 test('NeoForge version mapping is exact for legacy and calver Minecraft identities', () => {
   assert.equal(__testUtils.getNeoForgeMinecraftPrefix('1.20.2'), '20.2.');
   assert.equal(__testUtils.getNeoForgeMinecraftPrefix('1.21'), '21.0.');
@@ -96,6 +108,7 @@ test('NeoForge metadata uses only the authoritative bounded endpoint and preserv
   assert.equal(transport.calls[0].url, METADATA_URL);
   assert.match(transport.calls[0].options.headers['User-Agent'], /^Minecraft-Core\//);
   assert.deepEqual(transport.calls[0].options.allowedHosts, ['maven.neoforged.net']);
+  assert.deepEqual(transport.calls[0].options.allowedOrigins, ['https://maven.neoforged.net']);
 });
 
 test('NeoForge metadata rejects entities, duplicate versions, malformed XML, and oversized bytes', async () => {
@@ -202,6 +215,81 @@ test('NeoForge installer failure leaves candidate runtime output unpublished', a
   assert.equal(fs.existsSync(path.join(root, 'server.jar')), false);
   assert.equal(fs.existsSync(path.join(root, 'libraries')), false);
   assert.equal(fs.existsSync(path.join(root, '.minecraft-core-state', 'runtime.json')), false);
+});
+
+test('NeoForge staging write failures are cleaned and normalized without local path disclosure', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-stage-write-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const installer = installerJar();
+  const digest = crypto.createHash('sha512').update(installer).digest('hex');
+  const originalOpenSync = fs.openSync;
+  fs.openSync = function injectedOpenFailure(filePath, ...args) {
+    if (typeof filePath === 'string' && filePath.endsWith('-installer.jar')) {
+      throw Object.assign(new Error(`EACCES while opening ${filePath}`), {
+        code: 'EACCES',
+        path: filePath
+      });
+    }
+    return originalOpenSync.call(this, filePath, ...args);
+  };
+  let failure;
+  try {
+    await installServerLoader({
+      targetPath: root,
+      minecraftVersion: '1.21.1',
+      loader: 'neoforge',
+      loaderVersion: VERSION,
+      javaPath: path.join(root, 'java.exe'),
+      javaMajor: 21,
+      transport: fakeTransport(new Map([
+        [METADATA_URL, metadataXml([VERSION])],
+        [`${INSTALLER_URL}.sha512`, digest],
+        [INSTALLER_URL, installer]
+      ])),
+      validateJava: async () => 21,
+      processRunner: async () => ({ code: 0, stdout: '', stderr: '' })
+    });
+  } catch (error) {
+    failure = error;
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  assert.equal(failure?.code, 'RUNTIME_INCOMPLETE');
+  assert.equal(String(failure?.message).includes(root), false);
+  assert.equal(JSON.stringify(failure).includes(root), false);
+  const stagingRoot = path.join(root, '.minecraft-core-state', 'runtime-staging');
+  assert.equal(fs.existsSync(stagingRoot) ? fs.readdirSync(stagingRoot).length : 0, 0);
+});
+
+test('NeoForge preserves staging when process quiescence could not be proven', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-nonquiescent-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const installer = installerJar();
+  const digest = crypto.createHash('sha512').update(installer).digest('hex');
+  await assert.rejects(installServerLoader({
+    targetPath: root,
+    minecraftVersion: '1.21.1',
+    loader: 'neoforge',
+    loaderVersion: VERSION,
+    javaPath: path.join(root, 'java.exe'),
+    javaMajor: 21,
+    transport: fakeTransport(new Map([
+      [METADATA_URL, metadataXml([VERSION])],
+      [`${INSTALLER_URL}.sha512`, digest],
+      [INSTALLER_URL, installer]
+    ])),
+    validateJava: async () => 21,
+    processRunner: async () => {
+      const error = Object.assign(new Error('child did not close'), {
+        code: 'RUNTIME_INCOMPLETE',
+        preserveWorkspace: true
+      });
+      throw error;
+    }
+  }), error => error.code === 'RUNTIME_INCOMPLETE' && error.preserveWorkspace === true);
+  const stagingRoot = path.join(root, '.minecraft-core-state', 'runtime-staging');
+  assert.equal(fs.readdirSync(stagingRoot).length, 1);
+  assert.equal(fs.existsSync(path.join(root, 'server.jar')), false);
 });
 
 test('NeoForge refuses a target reached through a reparse ancestor before execution', async (t) => {
@@ -351,17 +439,40 @@ test('NeoForge launch uses only the exact Windows arg file and app-controlled JV
 test('NeoForge validation rejects escaping argument-file references and mutated artifacts', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-tamper-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const runtimeDir = path.join(root, 'libraries', 'net', 'neoforged', 'neoforge', VERSION);
-  fs.mkdirSync(path.join(root, '.minecraft-core-state'), { recursive: true });
-  fs.mkdirSync(runtimeDir, { recursive: true });
-  fs.writeFileSync(path.join(root, 'server.jar'), jarBytes('server'));
-  fs.writeFileSync(path.join(root, 'user_jvm_args.txt'), '# args\n');
-  fs.writeFileSync(path.join(runtimeDir, `neoforge-${VERSION}-universal.jar`), jarBytes('neo'));
-  fs.writeFileSync(path.join(runtimeDir, 'win_args.txt'), '@../../../../../../outside.txt\n');
-  fs.writeFileSync(path.join(root, '.minecraft-core-state', 'runtime.json'), JSON.stringify({
-    formatVersion: 1,
-    runtime: tuple(),
-    artifacts: []
-  }));
+  const installer = installerJar();
+  const digest = crypto.createHash('sha512').update(installer).digest('hex');
+  await installServerLoader({
+    targetPath: root,
+    minecraftVersion: '1.21.1',
+    loader: 'neoforge',
+    loaderVersion: VERSION,
+    javaPath: path.join(root, 'java.exe'),
+    javaMajor: 21,
+    transport: fakeTransport(new Map([
+      [METADATA_URL, metadataXml([VERSION])],
+      [`${INSTALLER_URL}.sha512`, digest],
+      [INSTALLER_URL, installer]
+    ])),
+    validateJava: async () => 21,
+    processRunner: async request => {
+      const runtimeDir = path.join(request.cwd, 'libraries', 'net', 'neoforged', 'neoforge', VERSION);
+      fs.mkdirSync(runtimeDir, { recursive: true });
+      fs.writeFileSync(path.join(request.cwd, 'server.jar'), jarBytes('server'));
+      fs.writeFileSync(path.join(request.cwd, 'user_jvm_args.txt'), '# args\n');
+      fs.writeFileSync(path.join(runtimeDir, `neoforge-${VERSION}-universal.jar`), jarBytes('neo'));
+      fs.writeFileSync(path.join(runtimeDir, 'win_args.txt'), `--module-path libraries/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar\n`);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+  });
+  const argsRelative = `libraries/net/neoforged/neoforge/${VERSION}/win_args.txt`;
+  const universalRelative = `libraries/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar`;
+  const argsPath = path.join(root, ...argsRelative.split('/'));
+  fs.writeFileSync(argsPath, '@../../../../../../outside.txt\n');
+  refreshArtifactRecord(root, argsRelative);
+  assert.throws(() => validatePreparedRuntime(root, tuple()), error => error.code === 'RUNTIME_INCOMPLETE');
+
+  fs.writeFileSync(argsPath, `--module-path ${universalRelative}\n`);
+  refreshArtifactRecord(root, argsRelative);
+  fs.appendFileSync(path.join(root, ...universalRelative.split('/')), 'mutated');
   assert.throws(() => validatePreparedRuntime(root, tuple()), error => error.code === 'RUNTIME_INCOMPLETE');
 });
