@@ -2,6 +2,7 @@ const { TextDecoder } = require('node:util');
 const { createArtifactSetPlan } = require('../contracts.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const { ARCHIVE_LIMITS } = require('../limits.cjs');
+const { isSafeWindowsBasename } = require('../windows-basename.cjs');
 const { groupMultipartCandidates } = require('../artifacts/multipart-names.cjs');
 const { parsePublicGitHubUrl } = require('./github-url.cjs');
 
@@ -9,6 +10,10 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_PAGE = 10000;
 const MAX_ASSET_PAGES = 10;
 const MAX_RETRY_MS = 24 * 60 * 60 * 1000;
+const MAX_SECONDARY_LIMIT_BODY_BYTES = 16 * 1024;
+const SECONDARY_LIMIT_BACKOFF_MS = 60 * 1000;
+const SECONDARY_LIMIT_MESSAGE = 'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.';
+const SECONDARY_LIMIT_DOCUMENTATION_URL = 'https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api';
 const MAX_ARTIFACT_SET_BYTES = BigInt(ARCHIVE_LIMITS.maxArtifactSetBytes);
 const DECIMAL_ID = /^[1-9][0-9]*$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -49,9 +54,9 @@ function unavailable() {
   return new ModpackError('INVALID_RELEASE_URL', 'GitHub service is unavailable', { retryable: true });
 }
 
-function repositoryNotFound(repositoryId) {
+function repositoryNotFound() {
   return new ModpackError('REPOSITORY_NOT_FOUND', 'GitHub repository was not found', {
-    details: { provider: 'github', ...(repositoryId ? { repositoryId } : {}) }
+    details: { provider: 'github' }
   });
 }
 
@@ -102,10 +107,19 @@ function timestamp(value, { nullable = false } = {}) {
 
 function fileName(value) {
   safeText(value, 255);
-  const windowsStem = value.split('.', 1)[0].replace(/[ .]+$/g, '').toLocaleUpperCase('en-US');
-  const device = /^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])$/;
-  if (value !== value.trim() || value === '.' || value === '..' || /[<>:"/\\|?*]/.test(value) || /[. ]$/.test(value) || device.test(windowsStem)) throw invalidResponse();
+  if (!isSafeWindowsBasename(value)) throw invalidResponse();
   return value;
+}
+
+function isExactSecondaryLimitBody(body) {
+  if (body.length < 1 || body.length > MAX_SECONDARY_LIMIT_BODY_BYTES) return false;
+  let value;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); }
+  catch { return false; }
+  if (!plain(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 2 && keys.includes('message') && keys.includes('documentation_url') &&
+    value.message === SECONDARY_LIMIT_MESSAGE && value.documentation_url === SECONDARY_LIMIT_DOCUMENTATION_URL;
 }
 
 function providerDigest(value) {
@@ -141,12 +155,12 @@ function normalizedNow(clock) {
 
 function normalizeRepository(value) {
   if (!plain(value) || !plain(value.owner) || typeof value.private !== 'boolean' || typeof value.archived !== 'boolean' || typeof value.disabled !== 'boolean') throw invalidResponse();
+  if (value.private || value.visibility !== 'public') throw repositoryNotFound();
   const repositoryId = decimalIdFromResponse(value.id);
   const owner = safeText(value.owner.login, 39);
   const repo = safeText(value.name, 100);
   const parsed = parsePublicGitHubUrl(`https://github.com/${owner}/${repo}`);
   if (parsed.kind !== 'repository' || value.full_name !== `${owner}/${repo}`) throw invalidResponse();
-  if (value.private || value.visibility !== 'public') throw repositoryNotFound(repositoryId);
   return {
     repositoryId, owner, repo, fullName: `${owner}/${repo}`, visibility: 'public',
     archived: value.archived, disabled: value.disabled
@@ -259,11 +273,15 @@ class GitHubReleasesSource {
     this.failureCounts = new Map();
   }
 
-  retryError(key, headers) {
+  retryError(key, headers, { minimumBackoffMs = 0 } = {}) {
     const now = normalizedNow(this.clock);
-    const attempt = (this.failureCounts.get(key) || 0) + 1;
+    const attempt = Math.min(31, (this.failureCounts.get(key) || 0) + 1);
     this.failureCounts.set(key, attempt);
-    const backoffMs = Math.min(this.maxBackoffMs, this.baseBackoffMs * (2 ** Math.min(attempt - 1, 30)));
+    const exponent = BigInt(Math.min(attempt - 1, 30));
+    const backoffBase = BigInt(Math.max(this.baseBackoffMs, minimumBackoffMs));
+    const backoffLimit = BigInt(minimumBackoffMs > 0 ? MAX_RETRY_MS : this.maxBackoffMs);
+    const exponentialBackoff = backoffBase * (1n << exponent);
+    const backoffMs = Number(exponentialBackoff > backoffLimit ? backoffLimit : exponentialBackoff);
     let retryAfterMs = 0;
     if (headers.retryAfter !== undefined) {
       if (/^(0|[1-9][0-9]*)$/.test(headers.retryAfter)) retryAfterMs = Math.min(MAX_RETRY_MS, Number(headers.retryAfter) * 1000);
@@ -276,7 +294,7 @@ class GitHubReleasesSource {
     }
     let resetDelay = 0;
     let rateLimitResetAt;
-    if (headers.rateLimitReset !== undefined) {
+    if (headers.rateLimitReset !== undefined && headers.rateLimitRemaining === '0') {
       if (!/^[1-9][0-9]*$/.test(headers.rateLimitReset)) throw invalidResponse();
       const resetMs = Number(headers.rateLimitReset) * 1000;
       if (!Number.isSafeInteger(resetMs)) throw invalidResponse();
@@ -308,13 +326,16 @@ class GitHubReleasesSource {
       });
     }
     const headers = normalizeHeaders(response.headers);
+    const secondaryLimited = response.statusCode === 403 && headers.retryAfter === undefined && headers.rateLimitRemaining !== '0' &&
+      isExactSecondaryLimitBody(response.body);
     const rateLimited = response.statusCode === 429 || (response.statusCode === 403 &&
-      (headers.retryAfter !== undefined || headers.rateLimitReset !== undefined || headers.rateLimitRemaining === '0'));
+      (headers.retryAfter !== undefined || headers.rateLimitRemaining === '0' || secondaryLimited));
+    const requiresSafeBackoff = secondaryLimited || (response.statusCode === 429 && headers.retryAfter === undefined && headers.rateLimitRemaining !== '0');
     if (response.statusCode === 404 || (response.statusCode === 403 && !rateLimited)) {
       throw missingKind === 'repository' ? repositoryNotFound(missingId) : missingKind === 'release' ? releaseNotFound(missingId) : unavailable();
     }
     if (rateLimited) {
-      throw this.retryError(key, headers);
+      throw this.retryError(key, headers, { minimumBackoffMs: requiresSafeBackoff ? SECONDARY_LIMIT_BACKOFF_MS : 0 });
     }
     if (response.statusCode === 304) {
       if (!allowNotModified || response.body.length !== 0) throw invalidResponse();
@@ -387,14 +408,15 @@ class GitHubReleasesSource {
     } else {
       if (!Array.isArray(response.value) || response.value.length > 100) throw invalidResponse();
       const releases = response.value.map(item => normalizeRelease(item, repository.repositoryId));
-      if (new Set(releases.map(item => item.releaseId)).size !== releases.length || new Set(releases.map(item => item.tagName)).size !== releases.length) throw invalidResponse();
       const nextPage = pageFromLink(response.headers.link, { kind: 'releases', repository });
       if (nextPage !== null && nextPage !== page + 1) throw invalidResponse();
-      if (releases.some(item => priorReleaseIds.includes(item.releaseId) || priorTags.includes(item.tagName))) throw invalidResponse();
       this.rememberEtag(key, response.headers);
       pageData = deepFreeze({ releases, nextPage, etag: response.headers.etag ?? null });
       this.responseCache.set(key, pageData);
     }
+    if (new Set(pageData.releases.map(item => item.releaseId)).size !== pageData.releases.length ||
+      new Set(pageData.releases.map(item => item.tagName)).size !== pageData.releases.length ||
+      pageData.releases.some(item => priorReleaseIds.includes(item.releaseId) || priorTags.includes(item.tagName))) throw invalidResponse();
     let nextCursor = null;
     if (pageData.nextPage !== null) {
       nextCursor = `github-page-${++this.cursorSequence}`;
@@ -489,12 +511,14 @@ class GitHubReleasesSource {
     const choices = grouped.map(choice => {
       const combinedSize = choice.parts.reduce((sum, part) => sum + BigInt(part.size), 0n);
       const overLimit = combinedSize > MAX_ARTIFACT_SET_BYTES;
+      const structuralReason = choice.disabledReason || (choice.kind === 'multipart' && choice.parts.length < 2 ? 'missing-volume' : null);
+      const disabledReason = structuralReason || (overLimit ? 'size-limit' : null);
       return deepFreeze({
         ...choice,
         role: 'provisional',
         combinedSize: combinedSize.toString(),
-        complete: !choice.disabled && !overLimit,
-        ...(overLimit ? { disabled: true, disabledReason: 'size-limit' } : {})
+        complete: disabledReason === null,
+        ...(disabledReason ? { disabled: true, disabledReason } : {})
       });
     });
     const status = choices.some(choice => choice.complete) ? 'ready' : 'NO_INSTALLABLE_ASSET';

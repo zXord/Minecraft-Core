@@ -9,6 +9,7 @@ const GROUPING_SCHEMES = new Set(['single', 'part-number', 'rar-rxx', 'numbered-
 const ATTESTATION_STATUSES = new Set(['unavailable', 'unverified', 'verified']);
 const LOADER_FAMILIES = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
 const DIGEST_LENGTHS = Object.freeze({ sha1: 40, sha256: 64, sha512: 128 });
+const APP_ISSUED_VERIFIED_ARTIFACT_SETS = new WeakSet();
 
 function invalidRequest(message, field) {
   throw new ModpackError('INVALID_REQUEST', message, { details: field ? { field } : undefined });
@@ -209,13 +210,19 @@ function finalizeVerifiedArtifactSet(plan, verifiedParts) {
     return { ...plannedPart, measuredSize: measured.measuredSize, calculatedDigests: measured.calculatedDigests };
   });
   const artifactSet = { ...reviewedPlan.artifactSet, parts, setDigest: computeArtifactSetDigest(parts) };
-  return deepFreeze({
+  const verifiedArtifactSet = deepFreeze({
     type: 'verified-artifact-set',
     provider: reviewedPlan.provider,
     ...(reviewedPlan.project ? { project: reviewedPlan.project } : {}),
     ...(reviewedPlan.release ? { release: reviewedPlan.release } : {}),
     artifactSet
   });
+  APP_ISSUED_VERIFIED_ARTIFACT_SETS.add(verifiedArtifactSet);
+  return verifiedArtifactSet;
+}
+
+function isAppIssuedVerifiedArtifactSet(value) {
+  return Boolean(value) && typeof value === 'object' && APP_ISSUED_VERIFIED_ARTIFACT_SETS.has(value);
 }
 
 function assertArtifactSetUnchanged(expected, actual) {
@@ -298,5 +305,6 @@ module.exports = {
   computeArtifactSetDigest,
   createArtifactSetPlan,
   finalizeVerifiedArtifactSet,
+  isAppIssuedVerifiedArtifactSet,
   normalizeRuntimeTuple
 };

@@ -6,6 +6,7 @@ const {
   computeArtifactSetDigest,
   createArtifactSetPlan,
   finalizeVerifiedArtifactSet,
+  isAppIssuedVerifiedArtifactSet,
   normalizeRuntimeTuple
 } = require('../../electron/services/modpacks/contracts.cjs');
 const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
@@ -73,6 +74,10 @@ test('verified artifact sets require measured SHA-256 and SHA-512 results', () =
   });
   assert.equal(verified.artifactSet.parts[0].measuredSize, '9007199254740992');
   assert.equal(Object.isFrozen(verified), true);
+  assert.equal(isAppIssuedVerifiedArtifactSet(verified), true);
+  assert.equal(isAppIssuedVerifiedArtifactSet(structuredClone(verified)), false);
+  assert.equal(isAppIssuedVerifiedArtifactSet(JSON.parse(JSON.stringify(verified))), false);
+  assert.equal(Object.keys(verified).some(key => /brand|trusted/i.test(key)), false);
   assert.throws(
     () => finalizeVerifiedArtifactSet(plan, [{ partId: 'asset-303', measuredSize: '1', sha256: 'b'.repeat(64) }]),
     error => error.code === 'INVALID_REQUEST'

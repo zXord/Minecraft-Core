@@ -101,9 +101,29 @@ test('resolves URL hints to a canonical public numeric repository identity using
 test('normalizes private inaccessible and not-found repositories to the same redacted public failure', async () => {
   for (const response of [jsonResponse({ message: 'private token=secret' }, 404), jsonResponse(repository({ private: true, visibility: 'private' }))]) {
     const { source } = sourceFor(() => response);
-    await assert.rejects(source.getRepositoryIdentity('https://github.com/Hint/Pack'), error =>
-      error.code === 'REPOSITORY_NOT_FOUND' && !String(error.message).includes('secret') && !String(error.message).includes('private'));
+    await assert.rejects(source.getRepositoryIdentity('https://github.com/Hint/Pack'), error => {
+      assert.equal(error.code, 'REPOSITORY_NOT_FOUND');
+      assert.equal(error.details?.repositoryId, undefined);
+      assert.equal(error.toPublicResult().error.details.repositoryId, undefined);
+      assert.equal(JSON.stringify(error.toPublicResult()).includes(String(REPOSITORY_ID)), false);
+      assert.equal(String(error.message).includes('secret'), false);
+      assert.equal(String(error.message).includes('private'), false);
+      return true;
+    });
   }
+});
+
+test('redacts a learned numeric repository ID when a previously public repository becomes inaccessible', async () => {
+  const { source } = sourceFor((path) => path === '/repos/Hint/Pack'
+    ? jsonResponse(repository())
+    : jsonResponse({ message: 'private token=secret' }, 403));
+  const identity = await bind(source);
+  await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error => {
+    assert.equal(error.code, 'REPOSITORY_NOT_FOUND');
+    assert.equal(error.details?.repositoryId, undefined);
+    assert.equal(JSON.stringify(error.toPublicResult()).includes(identity.repositoryId), false);
+    return true;
+  });
 });
 
 test('validates bounded Buffer-only fatal-UTF8 JSON and repository field identity at the boundary', async () => {
@@ -253,6 +273,39 @@ test('uses cached ETags for conditional release requests and handles 304 without
   assert.equal(http.calls.length, 3);
 });
 
+test('rechecks duplicate release IDs and tags against cursor history on cached 304 pages', async () => {
+  for (const duplicateField of ['releaseId', 'tagName']) {
+    let pageOneRequests = 0;
+    let pageTwoRequests = 0;
+    const { source } = sourceFor((path, options) => {
+      if (path === '/repos/Hint/Pack') return jsonResponse(repository());
+      if (options.query.page === '1') {
+        pageOneRequests += 1;
+        const item = pageOneRequests === 1
+          ? release()
+          : release({ id: duplicateField === 'releaseId' ? 202 : 203, tag_name: duplicateField === 'tagName' ? 'v2' : 'v3' });
+        return jsonResponse([item], 200, {
+          link: '<https://api.github.com/repositories/101/releases?per_page=100&page=2>; rel="next"'
+        });
+      }
+      pageTwoRequests += 1;
+      if (pageTwoRequests === 1) {
+        return jsonResponse([release({ id: 202, tag_name: 'v2' })], 200, { etag: '"page-two"' });
+      }
+      assert.equal(options.headers['If-None-Match'], '"page-two"');
+      return { statusCode: 304, headers: { etag: '"page-two"' }, body: Buffer.alloc(0) };
+    });
+    const identity = await bind(source);
+    const initialFirst = await source.listReleases({ ...identity, includePrereleases: false });
+    await source.listReleases({ ...identity, includePrereleases: false, cursor: initialFirst.pagination.nextCursor });
+    const changedFirst = await source.listReleases({ ...identity, includePrereleases: false });
+    await assert.rejects(
+      source.listReleases({ ...identity, includePrereleases: false, cursor: changedFirst.pagination.nextCursor }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
+});
+
 test('emits bounded safe Retry-After rate-reset and exponential metadata without sleeping', async () => {
   let failures = 0;
   const { source } = sourceFor((path) => {
@@ -287,6 +340,60 @@ test('treats a 403 with only zero remaining quota as retryable rate limiting', a
   await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error =>
     error.code === 'INVALID_RELEASE_URL' && error.retryable &&
     error.retryMetadata.backoffMs === 1000 && !String(error.message).includes('secret'));
+});
+
+test('recognizes only the exact bounded fatal-UTF8 GitHub secondary-limit body on a headerless 403', async () => {
+  const exactBody = {
+    message: 'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+    documentation_url: 'https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api'
+  };
+  const { source } = sourceFor((path) => {
+    if (path === '/repos/Hint/Pack') return jsonResponse(repository());
+    return jsonResponse(exactBody, 403);
+  }, { baseBackoffMs: 1000, maxBackoffMs: 8000 });
+  const identity = await bind(source);
+  for (const expectedBackoff of [60_000, 120_000]) {
+    await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error => {
+      assert.equal(error.code, 'INVALID_RELEASE_URL');
+      assert.equal(error.retryable, true);
+      assert.deepEqual(error.retryMetadata, {
+        retryAfterMs: 0,
+        backoffMs: expectedBackoff,
+        nextAttemptAfterMs: expectedBackoff
+      });
+      assert.equal(Object.isFrozen(error.retryMetadata), true);
+      assert.equal(Object.values(error.retryMetadata).every(value => Number.isSafeInteger(value)), true);
+      return true;
+    });
+  }
+});
+
+test('near-match malformed oversized and reset-only 403 responses remain redacted non-retryable repository failures', async () => {
+  const message = 'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.';
+  const documentation_url = 'https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api';
+  const responses = [
+    jsonResponse({ message: `${message} `, documentation_url }, 403),
+    jsonResponse({ message, documentation_url: `${documentation_url}#secondary` }, 403),
+    jsonResponse({ message, documentation_url, status: '403' }, 403),
+    { statusCode: 403, headers: {}, body: Buffer.from([0xc3, 0x28]) },
+    jsonResponse({ message, documentation_url, padding: 'x'.repeat(20 * 1024) }, 403),
+    { statusCode: 403, headers: {}, body: Buffer.from(`${' '.repeat(20 * 1024)}${JSON.stringify({ message, documentation_url })}`, 'utf8') },
+    jsonResponse({ message: 'forbidden token=secret' }, 403, {
+      'x-ratelimit-reset': String(Math.floor(NOW / 1000) + 30),
+      'x-ratelimit-remaining': '5'
+    })
+  ];
+  for (const response of responses) {
+    const { source } = sourceFor((path) => path === '/repos/Hint/Pack' ? jsonResponse(repository()) : response);
+    const identity = await bind(source);
+    await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error => {
+      assert.equal(error.code, 'REPOSITORY_NOT_FOUND');
+      assert.equal(error.retryable, false);
+      assert.equal(error.details?.repositoryId, undefined);
+      assert.equal(String(error.message).includes('secret'), false);
+      return true;
+    });
+  }
 });
 
 test('gets an exact non-draft release and rejects mismatched IDs drafts and public 404s safely', async () => {
@@ -361,6 +468,40 @@ test('returns a safe NO_INSTALLABLE_ASSET outcome when no uploaded installable a
   assert.equal(result.status, 'NO_INSTALLABLE_ASSET');
   assert.deepEqual(result.actions, ['import-local', 'create-empty']);
   assert.deepEqual(result.choices, []);
+});
+
+test('keeps a lone multipart primary provisional and rejects it as an incomplete install selection', async () => {
+  const { source } = sourceFor((path) => {
+    if (path === '/repos/Hint/Pack') return jsonResponse(repository());
+    if (path === '/repos/Canonical/Pack/releases/201') return jsonResponse(release());
+    return jsonResponse([asset({ name: 'server-pack.part1.rar', digest: null })]);
+  });
+  const identity = await bind(source);
+  const result = await source.listUploadedAssets({ repositoryId: identity.repositoryId, releaseId: '201' });
+  assert.equal(result.status, 'NO_INSTALLABLE_ASSET');
+  assert.equal(result.choices.length, 1);
+  assert.equal(result.choices[0].kind, 'multipart');
+  assert.equal(result.choices[0].complete, false);
+  assert.equal(result.choices[0].disabled, true);
+  assert.equal(result.choices[0].disabledReason, 'missing-volume');
+  await assert.rejects(source.buildArtifactSetPlan({
+    repositoryId: identity.repositoryId, releaseId: '201', selectedAssetIds: ['301']
+  }), error => error.code === 'MULTIPART_VOLUME_MISSING');
+});
+
+test('rejects Windows device aliases from GitHub including superscript-digit and stream device names', async () => {
+  for (const name of ['COM¹.zip', 'LPT².rar', 'CONIN$.zip', 'CONOUT$.mrpack']) {
+    const { source } = sourceFor((path) => {
+      if (path === '/repos/Hint/Pack') return jsonResponse(repository());
+      if (path === '/repos/Canonical/Pack/releases/201') return jsonResponse(release());
+      return jsonResponse([asset({ name })]);
+    });
+    const identity = await bind(source);
+    await assert.rejects(
+      source.listUploadedAssets({ repositoryId: identity.repositoryId, releaseId: '201' }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
 });
 
 test('paginates asset lists internally using validated Link pages and rejects duplicate IDs across pages', async () => {

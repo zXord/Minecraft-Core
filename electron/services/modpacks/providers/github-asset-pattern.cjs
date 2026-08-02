@@ -1,5 +1,6 @@
 const { normalizeRuntimeTuple } = require('../contracts.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
+const { isSafeWindowsBasename, isSafeWindowsBasenamePattern } = require('../windows-basename.cjs');
 
 const ROLES = new Set(['server-pack', 'mrpack', 'prepared-server', 'archive']);
 const GROUPING_SCHEMES = new Set(['single', 'part-number', 'rar-rxx', 'numbered-volume']);
@@ -27,15 +28,13 @@ function hasControl(value) {
   });
 }
 
-function actualFileName(value, field) {
-  if (typeof value !== 'string' || value.length < 1 || value.length > 255 || value !== value.trim() || /[<>:"\\/|?]/.test(value) || hasControl(value) || /[. ]$/.test(value)) invalid(field);
-  const stem = value.split('.', 1)[0].replace(/[ .]+$/g, '').toLocaleUpperCase('en-US');
-  if (/^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])$/.test(stem)) invalid(field);
+function actualFileName(value, field, { pattern = false } = {}) {
+  if (!(pattern ? isSafeWindowsBasenamePattern(value) : isSafeWindowsBasename(value))) invalid(field);
   return value.normalize('NFC').toLocaleLowerCase('en-US');
 }
 
 function compileMatcher(value, field) {
-  const normalized = actualFileName(value, field);
+  const normalized = actualFileName(value, field, { pattern: true });
   if ([...normalized].some(character => '?[](){}+^$|'.includes(character))) invalid(field);
   const stars = normalized.split('*').length - 1;
   if (stars > 1) invalid(field);

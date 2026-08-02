@@ -62,6 +62,15 @@ test('rejects regex code evaluator and catastrophic or ambiguous user expression
   assert.throws(() => compileAssetPattern({ ...reviewed(), evaluator: 'return true' }), error => error.code === 'INVALID_REQUEST');
 });
 
+test('rejects Windows device aliases including superscript digits in reviewed and persisted matchers', () => {
+  for (const filenameMatcher of ['COM¹.zip', 'LPT².rar', 'CONIN$.zip', 'CONOUT$.mrpack']) {
+    assert.throws(() => compileAssetPattern(reviewed({ filenameMatcher })), error => error.code === 'INVALID_REQUEST');
+  }
+  const pattern = structuredClone(compileAssetPattern(reviewed()));
+  pattern.filenameMatchers = [{ kind: 'literal', value: 'com¹.zip' }];
+  assert.throws(() => matchAssetPattern(pattern, [candidate('301')]), error => error.code === 'INVALID_REQUEST');
+});
+
 test('returns high confidence only for exactly one complete exact-evidence asset set', () => {
   const result = matchAssetPattern(compileAssetPattern(reviewed()), [candidate('301')]);
   assert.deepEqual(result, { type: 'HIGH_CONFIDENCE', selectedAssetIds: ['301'] });
@@ -131,4 +140,5 @@ test('tampered persisted patterns and duplicate or unsafe candidate IDs fail clo
   assert.throws(() => matchAssetPattern(compileAssetPattern(reviewed()), [candidate('301', { assetIds: ['301', '301'], fileNames: ['a.zip', 'b.zip'] })]), error => error.code === 'INVALID_REQUEST');
   assert.throws(() => matchAssetPattern(compileAssetPattern(reviewed()), [candidate('../301')]), error => error.code === 'INVALID_REQUEST');
   assert.throws(() => matchAssetPattern(compileAssetPattern(reviewed()), [candidate('301', { fileNames: ['CON.zip'] })]), error => error.code === 'INVALID_REQUEST');
+  assert.throws(() => matchAssetPattern(compileAssetPattern(reviewed()), [candidate('301', { fileNames: ['COM¹.zip'] })]), error => error.code === 'INVALID_REQUEST');
 });

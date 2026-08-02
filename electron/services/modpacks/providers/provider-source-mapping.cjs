@@ -1,4 +1,5 @@
 const { ModpackError, deepFreeze } = require('../errors.cjs');
+const { isAppIssuedVerifiedArtifactSet } = require('../contracts.cjs');
 const { parsePublicGitHubUrl } = require('./github-url.cjs');
 
 const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -26,20 +27,39 @@ function decimalId(value, field) {
   return value;
 }
 
-function acceptTrustedUpstreamMapping({ modrinthProjectId, githubRepositoryId, url } = {}) {
+async function acceptTrustedUpstreamMapping({ modrinthProjectId, githubRepositoryId, url } = {}, { resolveRepositoryIdentity } = {}) {
+  if (typeof resolveRepositoryIdentity !== 'function') invalid('resolveRepositoryIdentity');
+  modrinthProjectId = providerId(modrinthProjectId, 'modrinthProjectId');
+  githubRepositoryId = decimalId(githubRepositoryId, 'githubRepositoryId');
   const parsed = parsePublicGitHubUrl(url);
   if (parsed.kind !== 'repository') invalid('url');
+  let resolved;
+  try { resolved = await resolveRepositoryIdentity(url); }
+  catch (error) {
+    if (error instanceof ModpackError) throw error;
+    invalid('url');
+  }
+  if (!plain(resolved) || resolved.visibility !== 'public') invalid('url');
+  const resolvedRepositoryId = decimalId(resolved.repositoryId, 'githubRepositoryId');
+  let resolvedUrl;
+  try {
+    resolvedUrl = parsePublicGitHubUrl(`https://github.com/${resolved.owner}/${resolved.repo}`);
+  } catch { invalid('url'); }
+  if (resolvedUrl.kind !== 'repository') invalid('url');
+  if (resolvedRepositoryId !== githubRepositoryId) invalid('githubRepositoryId');
+  const sameName = (left, right) => left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US');
+  if (!sameName(parsed.owner, resolvedUrl.owner) || !sameName(parsed.repo, resolvedUrl.repo)) invalid('url');
   return deepFreeze({
     type: 'provider-source-mapping', version: 1,
-    modrinthProjectId: providerId(modrinthProjectId, 'modrinthProjectId'),
-    githubRepositoryId: decimalId(githubRepositoryId, 'githubRepositoryId'),
-    githubOwner: parsed.owner,
-    githubRepo: parsed.repo
+    modrinthProjectId,
+    githubRepositoryId: resolvedRepositoryId,
+    githubOwner: resolvedUrl.owner,
+    githubRepo: resolvedUrl.repo
   });
 }
 
 function trustedBytes(value) {
-  if (!plain(value) || value.type !== 'verified-artifact-set' || !plain(value.artifactSet) || !Array.isArray(value.artifactSet.parts) ||
+  if (!isAppIssuedVerifiedArtifactSet(value) || !plain(value) || value.type !== 'verified-artifact-set' || !plain(value.artifactSet) || !Array.isArray(value.artifactSet.parts) ||
     value.artifactSet.parts.length < 1 || value.artifactSet.parts.length > 1000) return null;
   const result = [];
   for (const part of value.artifactSet.parts) {
