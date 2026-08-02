@@ -6,6 +6,9 @@ const ROLES = new Set(['server-pack', 'mrpack', 'prepared-server', 'archive']);
 const GROUPING_SCHEMES = new Set(['single', 'part-number', 'rar-rxx', 'numbered-volume']);
 const SHA256 = /^[a-f0-9]{64}$/;
 const ID = /^[1-9][0-9]*$/;
+const MAX_OVERRIDE_NODES = 4096;
+const MAX_OVERRIDE_UTF8_BYTES = 64 * 1024;
+const MAX_MATCH_WORK = 32 * 1024;
 
 function invalid(field) {
   throw new ModpackError('INVALID_REQUEST', 'GitHub asset pattern is invalid', {
@@ -81,22 +84,46 @@ function normalizeOverrideString(value, field) {
   return value.normalize('NFC');
 }
 
-function normalizeOverrides(value, field = 'userOverrides', depth = 0) {
+function newOverrideBudget() {
+  return { nodes: 0, utf8Bytes: 0 };
+}
+
+function consumeOverrideBudget(budget, utf8Bytes, field) {
+  budget.nodes += 1;
+  budget.utf8Bytes += utf8Bytes;
+  if (budget.nodes > MAX_OVERRIDE_NODES || budget.utf8Bytes > MAX_OVERRIDE_UTF8_BYTES) invalid(field);
+}
+
+function normalizeOverrides(value, field = 'userOverrides', budget = newOverrideBudget(), depth = 0) {
   if (depth > 8) invalid(field);
-  if (value === null || typeof value === 'boolean') return value;
-  if (typeof value === 'string') return normalizeOverrideString(value, field);
+  if (value === null) {
+    consumeOverrideBudget(budget, 4, field);
+    return value;
+  }
+  if (typeof value === 'boolean') {
+    consumeOverrideBudget(budget, value ? 4 : 5, field);
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = normalizeOverrideString(value, field);
+    consumeOverrideBudget(budget, Buffer.byteLength(JSON.stringify(normalized), 'utf8'), field);
+    return normalized;
+  }
   if (typeof value === 'number') {
     if (!Number.isSafeInteger(value)) invalid(field);
+    consumeOverrideBudget(budget, Buffer.byteLength(String(value), 'utf8'), field);
     return value;
   }
   if (Array.isArray(value)) {
     if (value.length > 64) invalid(field);
-    return value.map((item, index) => normalizeOverrides(item, `${field}.${index}`, depth + 1));
+    consumeOverrideBudget(budget, 2 + Math.max(0, value.length - 1), field);
+    return value.map((item, index) => normalizeOverrides(item, `${field}.${index}`, budget, depth + 1));
   }
   if (!plain(value)) invalid(field);
   const keys = Object.keys(value).sort();
   if (keys.length > 64 || keys.some(key => !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key))) invalid(field);
-  return Object.fromEntries(keys.map(key => [key, normalizeOverrides(value[key], `${field}.${key}`, depth + 1)]));
+  consumeOverrideBudget(budget, 2 + Math.max(0, keys.length - 1) + keys.reduce((total, key) => total + Buffer.byteLength(JSON.stringify(key), 'utf8') + 1, 0), field);
+  return Object.fromEntries(keys.map(key => [key, normalizeOverrides(value[key], `${field}.${key}`, budget, depth + 1)]));
 }
 
 function normalizeFingerprint(value, field) {
@@ -128,11 +155,11 @@ function compileAssetPattern(reviewedSelection) {
     archiveRootFingerprint: normalizeFingerprint(reviewedSelection.archiveRootFingerprint, 'reviewedSelection.archiveRootFingerprint'),
     runtimeEvidence: normalizeRuntimeTuple(reviewedSelection.runtimeEvidence),
     multipartStructure: structure,
-    userOverrides: normalizeOverrides(reviewedSelection.userOverrides)
+    userOverrides: normalizeOverrides(reviewedSelection.userOverrides, 'reviewedSelection.userOverrides', newOverrideBudget())
   });
 }
 
-function normalizePattern(pattern) {
+function normalizePattern(pattern, overrideBudget) {
   if (!plain(pattern)) invalid('pattern');
   known(pattern, [
     'type', 'version', 'filenameMatchers', 'reviewedRole', 'archiveRootFingerprint',
@@ -147,7 +174,7 @@ function normalizePattern(pattern) {
     archiveRootFingerprint: normalizeFingerprint(pattern.archiveRootFingerprint, 'pattern.archiveRootFingerprint'),
     runtimeEvidence: normalizeRuntimeTuple(pattern.runtimeEvidence),
     multipartStructure: structure,
-    userOverrides: normalizeOverrides(pattern.userOverrides)
+    userOverrides: normalizeOverrides(pattern.userOverrides, 'pattern.userOverrides', overrideBudget)
   };
 }
 
@@ -156,7 +183,7 @@ function decimalId(value, field) {
   return value;
 }
 
-function normalizeCandidate(candidate, index) {
+function normalizeCandidate(candidate, index, overrideBudget) {
   const field = `releaseAssets.${index}`;
   if (!plain(candidate)) invalid(field);
   known(candidate, [
@@ -179,7 +206,7 @@ function normalizeCandidate(candidate, index) {
     archiveRootFingerprint: normalizeFingerprint(candidate.archiveRootFingerprint, `${field}.archiveRootFingerprint`),
     runtimeEvidence: normalizeRuntimeTuple(candidate.runtimeEvidence),
     multipartStructure: structure,
-    userOverrides: normalizeOverrides(candidate.userOverrides, `${field}.userOverrides`)
+    userOverrides: normalizeOverrides(candidate.userOverrides, `${field}.userOverrides`, overrideBudget)
   };
 }
 
@@ -193,10 +220,25 @@ function same(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function assertMatchWorkBudget(pattern, releaseAssets) {
+  const matcherCount = Array.isArray(pattern?.filenameMatchers) ? pattern.filenameMatchers.length : 0;
+  let work = matcherCount;
+  for (const candidate of releaseAssets) {
+    work += matcherCount;
+    if (plain(candidate)) {
+      if (Array.isArray(candidate.assetIds)) work += candidate.assetIds.length;
+      if (Array.isArray(candidate.fileNames)) work += candidate.fileNames.length;
+    }
+    if (work > MAX_MATCH_WORK) invalid('releaseAssets');
+  }
+}
+
 function matchAssetPattern(pattern, releaseAssets) {
-  const expected = normalizePattern(pattern);
   if (!Array.isArray(releaseAssets) || releaseAssets.length > 1000) invalid('releaseAssets');
-  const matches = releaseAssets.map(normalizeCandidate).filter(candidate =>
+  assertMatchWorkBudget(pattern, releaseAssets);
+  const overrideBudget = newOverrideBudget();
+  const expected = normalizePattern(pattern, overrideBudget);
+  const matches = releaseAssets.map((candidate, index) => normalizeCandidate(candidate, index, overrideBudget)).filter(candidate =>
     candidate.complete && candidate.evidenceComplete &&
     candidate.fileNames.length === expected.filenameMatchers.length &&
     candidate.fileNames.every((fileName, index) => matcherMatches(expected.filenameMatchers[index], fileName)) &&

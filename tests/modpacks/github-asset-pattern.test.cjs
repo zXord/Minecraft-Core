@@ -142,3 +142,44 @@ test('tampered persisted patterns and duplicate or unsafe candidate IDs fail clo
   assert.throws(() => matchAssetPattern(compileAssetPattern(reviewed()), [candidate('301', { fileNames: ['CON.zip'] })]), error => error.code === 'INVALID_REQUEST');
   assert.throws(() => matchAssetPattern(compileAssetPattern(reviewed()), [candidate('301', { fileNames: ['COM¹.zip'] })]), error => error.code === 'INVALID_REQUEST');
 });
+
+test('aggregate override node and UTF-8 budgets reject renderer-sized values', () => {
+  let hundredThousandLeaves = true;
+  for (let depth = 0; depth < 5; depth += 1) hundredThousandLeaves = Array(10).fill(hundredThousandLeaves);
+  const oversizedUtf8 = Array.from({ length: 64 }, () => Array(8).fill('é'.repeat(256)));
+  for (const userOverrides of [hundredThousandLeaves, oversizedUtf8]) {
+    assert.throws(
+      () => compileAssetPattern(reviewed({ userOverrides })),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
+});
+
+test('matching rejects an excessive matcher-candidate product before deep normalization', () => {
+  const partCount = 300;
+  const multipartStructure = { kind: 'multipart', groupingScheme: 'part-number', partCount, primaryIndex: 0 };
+  const filenameMatchers = Array.from({ length: partCount }, (_, index) => `part${String(index).padStart(3, '0')}-*.rar`);
+  const fileNames = Array.from({ length: partCount }, (_, index) => `part${String(index).padStart(3, '0')}-v1.rar`);
+  const assetIds = Array.from({ length: partCount }, (_, index) => String(index + 1));
+  const pattern = compileAssetPattern(reviewed({ filenameMatcher: undefined, filenameMatchers, multipartStructure }));
+  const oversizedCandidates = Array(300).fill({
+    assetIds, fileNames, reviewedRole: 'server-pack', archiveRootFingerprint: rootFingerprint,
+    runtimeEvidence: runtime, multipartStructure, userOverrides: { selectedRoot: 'server' }, complete: true
+  });
+  assert.throws(
+    () => matchAssetPattern(pattern, oversizedCandidates),
+    error => error.code === 'INVALID_REQUEST'
+  );
+});
+
+test('matching shares one aggregate override budget across every candidate', () => {
+  const pattern = compileAssetPattern(reviewed());
+  const perCandidateOverrides = Array(10).fill(Array(10).fill(true));
+  const candidates = Array.from({ length: 100 }, (_, index) => candidate(String(index + 1), {
+    userOverrides: perCandidateOverrides
+  }));
+  assert.throws(
+    () => matchAssetPattern(pattern, candidates),
+    error => error.code === 'INVALID_REQUEST'
+  );
+});

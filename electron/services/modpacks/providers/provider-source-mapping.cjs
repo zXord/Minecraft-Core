@@ -6,6 +6,7 @@ const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const DECIMAL_ID = /^[1-9][0-9]*$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const SHA512 = /^[a-f0-9]{128}$/;
+const APP_ISSUED_MAPPINGS = new WeakSet();
 
 function invalid(field) {
   throw new ModpackError('INVALID_REQUEST', 'Provider source mapping is invalid', {
@@ -49,13 +50,15 @@ async function acceptTrustedUpstreamMapping({ modrinthProjectId, githubRepositor
   if (resolvedRepositoryId !== githubRepositoryId) invalid('githubRepositoryId');
   const sameName = (left, right) => left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US');
   if (!sameName(parsed.owner, resolvedUrl.owner) || !sameName(parsed.repo, resolvedUrl.repo)) invalid('url');
-  return deepFreeze({
+  const mapping = deepFreeze({
     type: 'provider-source-mapping', version: 1,
     modrinthProjectId,
     githubRepositoryId: resolvedRepositoryId,
     githubOwner: resolvedUrl.owner,
     githubRepo: resolvedUrl.repo
   });
+  APP_ISSUED_MAPPINGS.add(mapping);
+  return mapping;
 }
 
 function trustedBytes(value) {
@@ -86,7 +89,7 @@ function sourceIdentity(value) {
 }
 
 function normalizedAcceptedMapping(value) {
-  if (!plain(value)) return null;
+  if (!plain(value) || !APP_ISSUED_MAPPINGS.has(value)) return null;
   const keys = Object.keys(value);
   if (keys.length !== 6 || !['type', 'version', 'modrinthProjectId', 'githubRepositoryId', 'githubOwner', 'githubRepo'].every(key => keys.includes(key))) return null;
   if (value.type !== 'provider-source-mapping' || value.version !== 1 || typeof value.modrinthProjectId !== 'string' || !PROVIDER_ID.test(value.modrinthProjectId) ||

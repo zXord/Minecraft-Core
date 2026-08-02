@@ -35,6 +35,11 @@ const GITHUB_ASSET_HEADERS = deepFreeze({
   'X-GitHub-Api-Version': '2026-03-10',
   'User-Agent': 'Minecraft-Core'
 });
+const APP_ISSUED_GITHUB_PLANS = new WeakMap();
+
+function getAppIssuedGitHubPlanEvidence(plan) {
+  return plan && typeof plan === 'object' ? APP_ISSUED_GITHUB_PLANS.get(plan) ?? null : null;
+}
 
 function plain(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
@@ -609,18 +614,8 @@ class GitHubReleasesSource {
     const warnings = chosenAssets.filter(item => !item.providerDigest).map(item => ({
       code: 'MISSING_PROVIDER_DIGEST', partId: `asset-${item.assetId}`
     }));
-    return deepFreeze({
+    const plan = deepFreeze({
       ...persisted,
-      artifactSet: {
-        ...persisted.artifactSet,
-        parts: persisted.artifactSet.parts.map(part => ({
-          ...part,
-          downloadUrl: `https://api.github.com/repos/${repository.owner}/${repository.repo}/releases/assets/${part.providerAssetId}`,
-          allowedHosts: [...GITHUB_ASSET_HOSTS],
-          allowSubdomains: false,
-          headers: { ...GITHUB_ASSET_HEADERS }
-        }))
-      },
       sourceEvidence: {
         repositoryId: repository.repositoryId,
         releaseId: release.releaseId,
@@ -631,11 +626,29 @@ class GitHubReleasesSource {
       },
       warnings
     });
+    APP_ISSUED_GITHUB_PLANS.set(plan, deepFreeze({
+      repositoryId: repository.repositoryId,
+      owner: repository.owner,
+      repo: repository.repo,
+      releaseId: release.releaseId,
+      projectSlug: repository.fullName,
+      setDigest: persisted.artifactSet.setDigest,
+      kind: persisted.artifactSet.kind,
+      groupingScheme: persisted.artifactSet.groupingScheme,
+      primaryPartId: persisted.artifactSet.primaryPartId,
+      parts: persisted.artifactSet.parts.map(part => ({
+        partId: part.partId,
+        providerAssetId: part.providerAssetId
+      }))
+    }));
+    return plan;
   }
 }
 
 module.exports = {
   GITHUB_API_HEADERS,
+  GITHUB_ASSET_HEADERS,
   GITHUB_ASSET_HOSTS,
-  GitHubReleasesSource
+  GitHubReleasesSource,
+  getAppIssuedGitHubPlanEvidence
 };

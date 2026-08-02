@@ -6,9 +6,17 @@ const { ARCHIVE_LIMITS } = require('../limits.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const { finalizeVerifiedArtifactSet } = require('../contracts.cjs');
 const { validateCompleteArtifactSet } = require('./artifact-set.cjs');
+const {
+  GITHUB_ASSET_HEADERS,
+  GITHUB_ASSET_HOSTS,
+  getAppIssuedGitHubPlanEvidence
+} = require('../providers/github-releases-source.cjs');
+const { parsePublicGitHubUrl } = require('../providers/github-url.cjs');
 
 const DIGEST_LENGTHS = Object.freeze({ sha1: 40, sha256: 64, sha512: 128 });
 const PART_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const DECIMAL_ID = /^[1-9][0-9]*$/;
+const GITHUB_DOWNLOAD_AUTHORITY = Symbol('github-download-authority');
 
 function limitExceeded(actual) {
   return new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Artifact download exceeded the configured byte limit', {
@@ -25,6 +33,44 @@ function safeDownloadFailure() { return new ModpackError('INVALID_RELEASE_URL', 
 function decimalBytes(value) { return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value); }
 function isInside(parent, child) { const relative = path.relative(parent, child); return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative)); }
 function validDigest(value, algorithm) { return typeof value === 'string' && new RegExp(`^[a-f0-9]{${DIGEST_LENGTHS[algorithm]}}$`).test(value); }
+function invalidDownloadPlan() { return new ModpackError('INVALID_REQUEST', 'Artifact download plan is invalid', { details: { field: 'plan' } }); }
+
+function isSafeDecimalId(value) {
+  return typeof value === 'string' && DECIMAL_ID.test(value) && BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER);
+}
+
+function githubAcquisitionEvidence(plan, reviewed) {
+  const evidence = getAppIssuedGitHubPlanEvidence(plan);
+  if (!evidence || !Object.isFrozen(plan) || !Object.isFrozen(evidence) || !Object.isFrozen(evidence.parts) ||
+    !reviewed.project || !reviewed.release || !isSafeDecimalId(evidence.repositoryId) || !isSafeDecimalId(evidence.releaseId) ||
+    reviewed.project.id !== evidence.repositoryId || reviewed.project.slug !== evidence.projectSlug || reviewed.project.title !== evidence.projectSlug ||
+    reviewed.release.id !== evidence.releaseId || reviewed.artifactSet.setDigest !== evidence.setDigest ||
+    reviewed.artifactSet.kind !== evidence.kind || reviewed.artifactSet.groupingScheme !== evidence.groupingScheme ||
+    reviewed.artifactSet.primaryPartId !== evidence.primaryPartId || reviewed.artifactSet.parts.length !== evidence.parts.length) {
+    throw invalidDownloadPlan();
+  }
+  let canonical;
+  try { canonical = parsePublicGitHubUrl(`https://github.com/${evidence.owner}/${evidence.repo}`); }
+  catch { throw invalidDownloadPlan(); }
+  if (canonical.kind !== 'repository' || `${canonical.owner}/${canonical.repo}` !== evidence.projectSlug) throw invalidDownloadPlan();
+  const publicEvidence = plan.sourceEvidence;
+  if (!publicEvidence || typeof publicEvidence !== 'object' || !Object.isFrozen(publicEvidence) ||
+    publicEvidence.repositoryId !== evidence.repositoryId || publicEvidence.releaseId !== evidence.releaseId ||
+    !Array.isArray(publicEvidence.selectedAssetIds) || publicEvidence.selectedAssetIds.length !== evidence.parts.length) {
+    throw invalidDownloadPlan();
+  }
+  const byPartId = new Map();
+  for (let index = 0; index < evidence.parts.length; index += 1) {
+    const issued = evidence.parts[index];
+    const part = reviewed.artifactSet.parts[index];
+    if (!issued || !Object.isFrozen(issued) || !isSafeDecimalId(issued.providerAssetId) ||
+      issued.partId !== `asset-${issued.providerAssetId}` || part.partId !== issued.partId ||
+      part.providerAssetId !== issued.providerAssetId || publicEvidence.selectedAssetIds[index] !== issued.providerAssetId ||
+      byPartId.has(issued.partId)) throw invalidDownloadPlan();
+    byPartId.set(issued.partId, issued);
+  }
+  return { ...evidence, byPartId };
+}
 
 function strippedPlan(plan) {
   if (!plan || typeof plan !== 'object' || !plan.artifactSet || !Array.isArray(plan.artifactSet.parts)) return plan;
@@ -74,13 +120,14 @@ class ArtifactDownloader {
     return this.downloadPartWithBudget(partPlan, { signal, onProgress, budget: { used: 0n, max: this.maxSetBytes, total } });
   }
 
-  async downloadPartWithBudget(partPlan, { signal, onProgress, budget }) {
+  async downloadPartWithBudget(partPlan, { signal, onProgress, budget, githubAuthority }) {
     if (!partPlan || typeof partPlan !== 'object' || !decimalBytes(partPlan.size) || !PART_ID.test(partPlan.partId || '') || typeof partPlan.downloadUrl !== 'string') {
-      throw new ModpackError('INVALID_REQUEST', 'Artifact download plan is invalid', { details: { field: 'plan' } });
+      throw invalidDownloadPlan();
     }
     if (!Array.isArray(partPlan.allowedHosts) || partPlan.allowedHosts.length === 0 || partPlan.allowedHosts.some(host => typeof host !== 'string' || !host)) {
-      throw new ModpackError('INVALID_REQUEST', 'Artifact download plan is invalid', { details: { field: 'plan' } });
+      throw invalidDownloadPlan();
     }
+    if (partPlan.provider === 'github' && githubAuthority !== GITHUB_DOWNLOAD_AUTHORITY) throw invalidDownloadPlan();
     if (signal?.aborted) throw cancelled();
     const provider = partPlan.provider;
     const providerDigest = partPlan.providerDigest;
@@ -175,7 +222,8 @@ class ArtifactDownloader {
     const sourceParts = artifactSetPlan?.artifactSet?.parts;
     const reviewed = validateCompleteArtifactSet(strippedPlan(artifactSetPlan)).plan;
     if (!Array.isArray(sourceParts) || sourceParts.length !== reviewed.artifactSet.parts.length) throw new ModpackError('INVALID_REQUEST', 'Artifact download plan is invalid', { details: { field: 'plan' } });
-    const sourceById = new Map(sourceParts.map(part => [part?.partId, part]));
+    const githubEvidence = reviewed.provider === 'github' ? githubAcquisitionEvidence(artifactSetPlan, reviewed) : null;
+    const sourceById = reviewed.provider === 'github' ? null : new Map(sourceParts.map(part => [part?.partId, part]));
     const totalPlanned = reviewed.artifactSet.parts.reduce((sum, part) => sum + BigInt(part.size), 0n);
     if (totalPlanned > this.maxSetBytes) throw limitExceeded(totalPlanned);
     if (reviewed.provider === 'modrinth') {
@@ -185,9 +233,31 @@ class ArtifactDownloader {
     const warnings = reviewed.provider === 'github' ? reviewed.artifactSet.parts.filter(part => !part.providerDigest).map(part => ({ code: 'MISSING_PROVIDER_DIGEST', partId: part.partId })) : [];
     const budget = { used: 0n, max: this.maxSetBytes, total: totalPlanned }; const verifiedParts = [];
     for (const part of reviewed.artifactSet.parts) {
-      const source = sourceById.get(part.partId);
-      if (!source || typeof source.downloadUrl !== 'string') throw new ModpackError('INVALID_REQUEST', 'Artifact download plan is invalid', { details: { field: 'plan' } });
-      verifiedParts.push(await this.downloadPartWithBudget({ ...part, provider: reviewed.provider, downloadUrl: source.downloadUrl, allowedHosts: source.allowedHosts, allowSubdomains: source.allowSubdomains, headers: source.headers, requiredProviderDigests: source.requiredProviderDigests }, { signal, onProgress, budget }));
+      let requestPolicy;
+      if (reviewed.provider === 'github') {
+        const issued = githubEvidence.byPartId.get(part.partId);
+        if (!issued) throw invalidDownloadPlan();
+        requestPolicy = {
+          downloadUrl: `https://api.github.com/repos/${githubEvidence.owner}/${githubEvidence.repo}/releases/assets/${issued.providerAssetId}`,
+          allowedHosts: [...GITHUB_ASSET_HOSTS],
+          allowSubdomains: false,
+          headers: { ...GITHUB_ASSET_HEADERS }
+        };
+      } else {
+        const source = sourceById.get(part.partId);
+        if (!source || typeof source.downloadUrl !== 'string') throw invalidDownloadPlan();
+        requestPolicy = {
+          downloadUrl: source.downloadUrl,
+          allowedHosts: source.allowedHosts,
+          allowSubdomains: source.allowSubdomains,
+          headers: source.headers,
+          requiredProviderDigests: source.requiredProviderDigests
+        };
+      }
+      verifiedParts.push(await this.downloadPartWithBudget({ ...part, provider: reviewed.provider, ...requestPolicy }, {
+        signal, onProgress, budget,
+        ...(reviewed.provider === 'github' ? { githubAuthority: GITHUB_DOWNLOAD_AUTHORITY } : {})
+      }));
     }
     const verifiedSet = finalizeVerifiedArtifactSet(reviewed, verifiedParts.map(({ partId, measuredSize, sha256, sha512 }) => ({ partId, measuredSize, sha256, sha512 })));
     return deepFreeze({ ...verifiedSet, warnings });

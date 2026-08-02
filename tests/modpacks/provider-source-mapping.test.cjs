@@ -140,6 +140,28 @@ test('an explicit permanent-ID mapping establishes cross-provider equivalence', 
   assert.equal(artifactsAreEquivalent(right, left, [mapping]), true);
 });
 
+test('mapping clones and structural forgeries require exact public re-resolution before reuse', async () => {
+  const accepted = await acceptTrustedUpstreamMapping({
+    modrinthProjectId: 'm1', githubRepositoryId: '123456789', url: 'https://github.com/Example-Org/Server-Pack'
+  }, { resolveRepositoryIdentity: exactResolver() });
+  const left = { provider: 'modrinth', project: { id: 'm1' } };
+  const right = { provider: 'github', project: { id: '123456789' } };
+  const forged = {
+    type: 'provider-source-mapping', version: 1, modrinthProjectId: 'm1',
+    githubRepositoryId: '123456789', githubOwner: 'Example-Org', githubRepo: 'Server-Pack'
+  };
+  assert.equal(artifactsAreEquivalent(left, right, [structuredClone(accepted)]), false);
+  assert.equal(artifactsAreEquivalent(left, right, [JSON.parse(JSON.stringify(accepted))]), false);
+  assert.equal(artifactsAreEquivalent(left, right, [forged]), false);
+
+  const reaccepted = await acceptTrustedUpstreamMapping({
+    modrinthProjectId: accepted.modrinthProjectId,
+    githubRepositoryId: accepted.githubRepositoryId,
+    url: `https://github.com/${accepted.githubOwner}/${accepted.githubRepo}`
+  }, { resolveRepositoryIdentity: exactResolver() });
+  assert.equal(artifactsAreEquivalent(left, right, [reaccepted]), true);
+});
+
 test('names slugs tags filenames provider digests and coincident cross-provider IDs never establish equivalence', () => {
   const left = {
     provider: 'modrinth', project: { id: 'same', slug: 'pack' }, release: { version: 'v1' },

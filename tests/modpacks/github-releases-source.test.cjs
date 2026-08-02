@@ -533,7 +533,7 @@ test('rejects asset Link metadata that skips a page in the exact release asset s
   await assert.rejects(source.listUploadedAssets({ repositoryId: identity.repositoryId, releaseId: '201' }), error => error.code === 'INVALID_REQUEST');
 });
 
-test('builds an explicitly selected exact-ID artifact plan and derives only the numeric GitHub asset API request', async () => {
+test('builds an explicitly selected plan that retains only numeric GitHub acquisition identity', async () => {
   const { source } = sourceFor((path) => {
     if (path === '/repos/Hint/Pack') return jsonResponse(repository());
     if (path === '/repos/Canonical/Pack/releases/201') return jsonResponse(release());
@@ -552,14 +552,7 @@ test('builds an explicitly selected exact-ID artifact plan and derives only the 
   assert.equal(plan.artifactSet.primaryPartId, 'asset-301');
   assert.deepEqual(plan.artifactSet.parts[0], {
     partId: 'asset-301', providerAssetId: '301', fileName: 'server-pack.zip', size: '100',
-    updatedAt: '2026-07-01T00:04:00.000Z',
-    downloadUrl: 'https://api.github.com/repos/Canonical/Pack/releases/assets/301',
-    allowedHosts: [...GITHUB_ASSET_HOSTS], allowSubdomains: false,
-    headers: {
-      Accept: 'application/octet-stream',
-      'X-GitHub-Api-Version': '2026-03-10',
-      'User-Agent': 'Minecraft-Core'
-    }
+    updatedAt: '2026-07-01T00:04:00.000Z'
   });
   assert.deepEqual(plan.warnings, [{ code: 'MISSING_PROVIDER_DIGEST', partId: 'asset-301' }]);
   assert.equal(JSON.stringify(plan).includes('browser_download'), false);
