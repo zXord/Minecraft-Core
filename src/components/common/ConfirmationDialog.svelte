@@ -10,14 +10,19 @@
   export let confirmType = 'danger'; // 'danger', 'primary', 'success'
   export let backdropClosable = true;
   export let showCancel = true;
+  export let initialFocus = 'cancel';
+  export let escapeClosable = true;
   const noop = () => {};
   
   // Event dispatcher
-  const dispatch = createEventDispatcher();  // Reference to confirm button for focus management
+  const dispatch = createEventDispatcher();
+  let dialogElement;
+  let cancelButton;
   let confirmButton;
   
   // Track previous focus to restore it when dialog closes
   let previousFocus;
+  let wasVisible = false;
   
   // Handle confirm action
   function handleConfirm() {
@@ -33,11 +38,27 @@
   function handleKeydown(event) {
     if (!visible) return;
     
-    if (event.key === 'Escape') {
+    if (event.key === 'Escape' && escapeClosable) {
+      event.preventDefault();
       handleCancel();
-    } else if (event.key === 'Enter' && document.activeElement !== confirmButton) {
-      // Handle Enter key to confirm dialog when not focused on confirm button
-      handleConfirm();
+    } else if (event.key === 'Tab' && dialogElement) {
+      const focusable = [...dialogElement.querySelectorAll(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      )].filter(element => !element.hasAttribute('hidden'));
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogElement.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !dialogElement.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
   }
   
@@ -49,19 +70,21 @@
   }
   
   // Watch for visibility changes to manage focus
-  $: if (visible) {
+  $: if (visible && !wasVisible) {
+    wasVisible = true;
     // Store current focus before moving it to the dialog
     previousFocus = document.activeElement;
     
-    // Focus the confirm button once the component updates
+    // Destructive confirmations default to the safe Cancel action.
     setTimeout(() => {
-      if (confirmButton) {
-        confirmButton.focus();
-      }
+      const target = initialFocus === 'confirm' ? confirmButton : cancelButton || confirmButton;
+      target?.focus();
     }, 0);
-  } else if (previousFocus) {
+  } else if (!visible && wasVisible) {
+    wasVisible = false;
     // Restore previous focus when dialog closes
-    previousFocus.focus();
+    previousFocus?.focus?.();
+    previousFocus = null;
   }
 </script>
 
@@ -77,6 +100,7 @@
     aria-labelledby="dialog-title"
     aria-describedby="dialog-message"
     tabindex="-1"
+    bind:this={dialogElement}
   >    <div
       class="modal-content"
       role="document"
@@ -95,6 +119,7 @@
             class="cancel-button" 
             on:click={handleCancel}
             type="button"
+            bind:this={cancelButton}
           >
             {cancelText}
           </button>

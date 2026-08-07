@@ -3,7 +3,9 @@ const test = require('node:test');
 
 const {
   compileAssetPattern,
-  matchAssetPattern
+  compileAssetPatternForInspection,
+  matchAssetPattern,
+  matchAssetPatternProvisional
 } = require('../../electron/services/modpacks/providers/github-asset-pattern.cjs');
 
 const runtime = Object.freeze({
@@ -182,4 +184,54 @@ test('matching shares one aggregate override budget across every candidate', () 
     () => matchAssetPattern(pattern, candidates),
     error => error.code === 'INVALID_REQUEST'
   );
+});
+
+test('compiles remembered review intent from the exact selected asset structure and inspected runtime', () => {
+  const pattern = compileAssetPatternForInspection({
+    seed: {
+      fileNames: ['server-pack-v2.0.0.zip'],
+      multipartStructure: singleStructure
+    },
+    version: 'v2.0.0',
+    classificationKind: 'prepared-server-pack',
+    inspectionResult: {
+      selectedRoot: 'server',
+      entries: [
+        { canonicalName: 'server/mods/a.jar', type: 'file' },
+        { canonicalName: 'server/config/a.toml', type: 'file' },
+        { canonicalName: 'client/readme.txt', type: 'file' }
+      ]
+    },
+    runtimeEvidence: runtime,
+    userOverrides: { selectedRoot: 'server', runtimeChoice: null }
+  });
+  assert.deepEqual(pattern.filenameMatchers, [{
+    kind: 'single-wildcard', prefix: 'server-pack-v', suffix: '.zip'
+  }]);
+  assert.equal(pattern.reviewedRole, 'server-pack');
+  assert.match(pattern.archiveRootFingerprint, /^[a-f0-9]{64}$/);
+  assert.deepEqual(pattern.userOverrides, { runtimeChoice: null, selectedRoot: 'server' });
+});
+
+test('provisional future matching requires exactly one complete filename and multipart-structure match', () => {
+  const structure = { kind: 'multipart', groupingScheme: 'part-number', partCount: 2, primaryIndex: 0 };
+  const pattern = compileAssetPattern(reviewed({
+    filenameMatcher: undefined,
+    filenameMatchers: ['pack-*.part1.rar', 'pack-*.part2.rar'],
+    multipartStructure: structure
+  }));
+  const good = {
+    assetIds: ['401', '402'], fileNames: ['pack-v3.part1.rar', 'pack-v3.part2.rar'],
+    multipartStructure: structure, complete: true
+  };
+  assert.deepEqual(matchAssetPatternProvisional(pattern, [good]), {
+    type: 'SINGLE_PROVISIONAL', selectedAssetIds: ['401', '402']
+  });
+  assert.deepEqual(matchAssetPatternProvisional(pattern, [good, { ...good, assetIds: ['501', '502'] }]), {
+    type: 'ASSET_SELECTION_REQUIRED', count: '2'
+  });
+  assert.deepEqual(matchAssetPatternProvisional(pattern, [{
+    ...good,
+    multipartStructure: { ...structure, groupingScheme: 'numbered-volume' }
+  }]), { type: 'ASSET_SELECTION_REQUIRED', count: '0' });
 });

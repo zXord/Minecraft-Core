@@ -88,7 +88,9 @@ function isAllowedDetail(kind, value) {
     case 'loaderFamily': return value === 'vanilla' || value === 'fabric' || value === 'forge' || value === 'neoforge' || value === 'quilt';
     case 'limit': return [
       'maxArtifactSetBytes', 'maxArchiveEntries', 'maxExpandedBytes', 'maxFileExpandedBytes', 'maxPathDepth',
-      'maxNormalizedPathLength', 'maxTechnicalStdoutBytes', 'maxTechnicalStderrBytes', 'maxListTestMs', 'maxExtractionMs', 'maxChildJobMemoryBytes'
+      'maxNormalizedPathLength', 'maxTechnicalStdoutBytes', 'maxTechnicalStderrBytes', 'maxListTestMs', 'maxExtractionMs', 'maxChildJobMemoryBytes',
+      'maxPerEntryCompressionRatio', 'maxAggregateCompressionRatio', 'minPerEntryRatioExpandedBytes', 'minAggregateRatioExpandedBytes',
+      'minPreflightReserveBytes', 'preflightReservePercent'
     ].includes(value);
     case 'field': return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9.]{0,127}$/.test(value);
     default: return false;

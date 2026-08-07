@@ -10,7 +10,10 @@
   // Dynamic route imports - components loaded on demand
   let ServerDashboard;
   let ModsPage;
+  let ModpackPage;
   let SettingsPage;
+  let modpackNavigationTarget = null;
+  let modpackNavigationSequence = 0;
 
   // Cache for loaded route components to prevent re-fetching
   async function loadRoute(routeName) {
@@ -27,6 +30,12 @@
           ModsPage = module.default;
         }
         return ModsPage;
+      case 'modpack':
+        if (!ModpackPage) {
+          const module = await import('./routes/ModpackPage.svelte');
+          ModpackPage = module.default;
+        }
+        return ModpackPage;
       case 'settings':
         if (!SettingsPage) {
           const module = await import('./routes/SettingsPage.svelte');
@@ -39,7 +48,7 @@
   import logger from "./utils/logger.js";
 
   // Components
-  import SetupWizard from "./components/setup/SetupWizard.svelte";
+  import ServerSetupWizard from "./components/setup/ServerSetupWizard.svelte";
   import PlayerList from "./components/players/PlayerList.svelte";
   import Backups from "./components/Backups.svelte";
   import ClientInterface from "./components/client/ClientInterface.svelte";
@@ -51,6 +60,7 @@
   import { Toaster } from "svelte-sonner";
   import { showExitConfirmation } from "./stores/exitStore.js";
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
+  import ModpackNotificationCenter from "./components/modpacks/ModpackNotificationCenter.svelte";
   import { getUpdateCount, autoUpdateChecksEnabled } from "./stores/modStore.js";
   const updateCountStore = getUpdateCount();
   import { checkForUpdates, loadServerConfig, loadMods, loadContent, setActiveModServerPath } from "./utils/mods/modAPI.js";
@@ -58,7 +68,7 @@
 
   // --- Flow & Tabs ---
   let step = "loading"; // loading → chooseFolder → chooseVersion → done
-  const tabs = ["dashboard", "players", "mods", "backups", "settings"];
+  const tabs = ["dashboard", "players", "mods", "modpack", "backups", "settings"];
   let path = "";
   let isLoading = true; // Add loading state
 
@@ -908,7 +918,8 @@
 
   // Handle setup completion
   async function handleSetupComplete(event) {
-    const newPath = event.detail.path;
+    const requestedInstanceId = event.detail.instanceId || "";
+    let newPath = requestedInstanceId ? "" : event.detail.path;
     let createdInstance = null;
     logger.info("Setup completed", {
       category: "core",
@@ -921,12 +932,46 @@
       },
     });
 
-    // Update path to the selected folder for the new instance
+    // A completed modpack job publishes the reserved instance in the main
+    // process. Resolve that registered record instead of accepting renderer
+    // filesystem authority or creating a speculative instance.
+    if (requestedInstanceId) {
+      let persisted;
+      try {
+        persisted = await window.electron.invoke("get-instances");
+      } catch (error) {
+        logger.error("Failed to load the published modpack instance", {
+          category: "storage",
+          data: { component: "App", instanceId: requestedInstanceId, error: error?.message || String(error) },
+        });
+        return;
+      }
+      const reserved = Array.isArray(persisted)
+        ? persisted.find((instance) => instance?.id === requestedInstanceId && instance?.type === "server" && instance?.path)
+        : null;
+      if (!reserved) {
+        logger.error("Completed modpack job did not publish its reserved instance", {
+          category: "storage",
+          data: { component: "App", instanceId: requestedInstanceId, modpackJobId: event.detail.modpackJobId || null },
+        });
+        return;
+      }
+      newPath = reserved.path;
+      instances = [
+        ...instances.filter((instance) => instance.id !== reserved.id && instance.path !== reserved.path),
+        reserved,
+      ];
+      currentInstance = reserved;
+      createdInstance = reserved;
+      storeCurrentInstance(reserved);
+    }
+
+    // Update path only after the main-process registration has been resolved.
     path = newPath;
     updateServerPath();
 
     // If no instances exist, this is the initial setup
-    if (instances.length === 0) {
+    if (!createdInstance && instances.length === 0) {
       const inst = {
         id: "default-server",
         name: "Default Server",
@@ -938,7 +983,7 @@
       createdInstance = inst;
       storeCurrentInstance(inst);
       saveInstancesIfNeeded();
-    } else if (instanceType === "server") {
+    } else if (!createdInstance && instanceType === "server") {
       // Create a new server instance
       const nextServerCount = instances.filter((i) => i.type === "server").length + 1;
       const inst = {
@@ -977,7 +1022,14 @@
       refreshServerStatuses();
     }
 
-    // Save settings as well to ensure path is remembered
+    if (requestedInstanceId) {
+      // Publication already persisted the authoritative instance in main.
+      // Do not write the registry or echo its filesystem path back over IPC.
+      step = "done";
+      return;
+    }
+
+    // Legacy manual setup still owns its selected path and settings flow.
     window.electron.invoke("update-settings", {
       instanceId: createdInstance?.id,
       serverPath: newPath,
@@ -1337,6 +1389,23 @@
     }
   }
 
+  async function handleModpackNotificationNavigation(event) {
+    const serverId = event?.detail?.serverId;
+    const target = instances.find((instance) => instance?.type === "server" && instance.id === serverId);
+    if (target && target.id !== currentInstance?.id) {
+      await switchInstance(target);
+    }
+    modpackNavigationSequence += 1;
+    modpackNavigationTarget = {
+      token: modpackNavigationSequence,
+      serverId,
+      notificationId: event?.detail?.notificationId || null,
+      notificationType: event?.detail?.notificationType || null,
+      result: event?.detail?.result || null
+    };
+    navigate("/modpack");
+  }
+
   // Update CSS variable for content area width based on window size
   function updateContentAreaWidth() {
     if (typeof window !== "undefined") {
@@ -1589,7 +1658,7 @@
       {#if step === "chooseFolder"}
         <div class="setup-container">
           {#if instanceType === "server"}
-            <SetupWizard
+            <ServerSetupWizard
               on:setup-complete={(event) => {
                 handleSetupComplete(event);
               }}
@@ -1673,6 +1742,8 @@
                     👥 Players
                   {:else if t === "mods"}
                     🧩 Mods {#if $updateCountStore > 0}<span class="nav-update-badge" title="Pending content updates">{$updateCountStore}</span>{/if}
+                  {:else if t === "modpack"}
+                    📦 Modpack
                   {:else if t === "backups"}
                     💾 Backups
                   {:else if t === "settings"}
@@ -1728,6 +1799,28 @@
                       logger.error(`Mods chunk load failed: ${error.message}`, {
                         category: "ui",
                         data: { component: "App", route: "mods", error: error.message }
+                      });
+                      window.location.reload();
+                    }}>Refresh</button>
+                  </div>
+                {/await}
+              </div>
+            {:else if $route === "/modpack"}
+              <div class="content-panel">
+                {#await loadRoute('modpack')}
+                  <div class="route-loading">
+                    <div class="loading-spinner"></div>
+                    <p>Loading Modpack...</p>
+                  </div>
+                {:then Component}
+                  <svelte:component this={Component} serverPath={activeServerPath} {currentInstance} navigationTarget={modpackNavigationTarget} />
+                {:catch error}
+                  <div class="route-error">
+                    <p>Failed to load the Modpack page. Please try again.</p>
+                    <button on:click={() => {
+                      logger.error(`Modpack chunk load failed: ${error.message}`, {
+                        category: "ui",
+                        data: { component: "App", route: "modpack", error: error.message }
                       });
                       window.location.reload();
                     }}>Refresh</button>
@@ -1882,8 +1975,9 @@
             </div>
           {/if}
         {/if}
-      {/if}
+    {/if}
     </div>
+    <ModpackNotificationCenter on:navigate={handleModpackNotificationNavigation} />
     <ConfirmationDialog
       bind:visible={$showExitConfirmation}
       title="Minecraft Server Running"

@@ -387,7 +387,7 @@ class GitHubReleasesSource {
     return deepFreeze({ ...repository, ...(hint.kind === 'release-tag' ? { tagHint: hint.tag } : {}) });
   }
 
-  async listReleases({ repositoryId, owner, repo, includePrereleases = false, cursor } = {}) {
+  async listReleases({ repositoryId, owner, repo, includePrereleases = false, cursor, etag } = {}) {
     const repository = this.repository(repositoryId);
     if (owner !== repository.owner || repo !== repository.repo || typeof includePrereleases !== 'boolean') throw invalidRequest('repositoryId');
     let page = 1;
@@ -402,6 +402,12 @@ class GitHubReleasesSource {
       priorTags = issued.seenTags;
     }
     const key = `releases:${repository.repositoryId}:${page}`;
+    if (etag !== undefined) {
+      if (cursor !== undefined || typeof etag !== 'string' || !/^(?:W\/)?"[A-Za-z0-9._:+/=-]{1,200}"$/.test(etag)) {
+        throw invalidRequest('etag');
+      }
+      this.etags.set(key, etag);
+    }
     const response = await this.requestJson(`/repos/${repository.owner}/${repository.repo}/releases`, {
       headers: this.requestHeaders(key),
       query: { per_page: '100', page: String(page) }
@@ -409,7 +415,9 @@ class GitHubReleasesSource {
     let pageData;
     if (response.notModified) {
       pageData = this.responseCache.get(key);
-      if (!pageData) throw invalidResponse();
+      if (!pageData) {
+        pageData = deepFreeze({ releases: [], nextPage: null, etag: response.headers.etag ?? etag ?? null });
+      }
     } else {
       if (!Array.isArray(response.value) || response.value.length > 100) throw invalidResponse();
       const releases = response.value.map(item => normalizeRelease(item, repository.repositoryId));

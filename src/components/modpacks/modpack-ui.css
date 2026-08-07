@@ -1,0 +1,66 @@
+.modpack-surface {
+  --mp-accent: #7c83ff;
+  --mp-accent-strong: #646cff;
+  --mp-panel: rgba(21, 24, 34, 0.94);
+  --mp-panel-soft: rgba(255, 255, 255, 0.045);
+  --mp-border: rgba(255, 255, 255, 0.11);
+  --mp-muted: rgba(255, 255, 255, 0.65);
+  --mp-good: #62d89a;
+  --mp-warn: #f4bd62;
+  --mp-danger: #ff7b7b;
+  width: min(1120px, 100%);
+  margin: 0 auto;
+  color: rgba(255, 255, 255, 0.92);
+  text-align: left;
+}
+.mp-panel,
+.mp-card {
+  border: 1px solid var(--mp-border);
+  background: var(--mp-panel);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+}
+
+.mp-panel { padding: 1.25rem; }
+.mp-card { padding: 1rem; }
+.mp-stack { display: grid; gap: 1rem; }
+.mp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.85rem; }
+.mp-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.65rem; }
+.mp-toolbar > .grow { flex: 1 1 260px; }
+.mp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem; }
+.mp-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; }
+.mp-kicker { margin: 0 0 0.25rem; color: #aeb3ff; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+.mp-title { margin: 0; font-size: clamp(1.35rem, 2vw, 2rem); line-height: 1.2; }
+.mp-subtitle { color: var(--mp-muted); margin: 0.4rem 0 0; }
+.mp-muted { color: var(--mp-muted); }
+.mp-success { color: var(--mp-good); }
+.mp-warning { color: var(--mp-warn); }
+.mp-danger { color: var(--mp-danger); }
+.mp-badge { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.22rem 0.5rem; border-radius: 999px; border: 1px solid var(--mp-border); background: var(--mp-panel-soft); color: var(--mp-muted); font-size: 0.78rem; }
+.mp-badge.good { color: var(--mp-good); border-color: rgba(98, 216, 154, 0.35); }
+.mp-badge.warn { color: var(--mp-warn); border-color: rgba(244, 189, 98, 0.35); }
+.mp-badge.danger { color: var(--mp-danger); border-color: rgba(255, 123, 123, 0.35); }
+.mp-button { border: 1px solid var(--mp-border); border-radius: 8px; padding: 0.62rem 0.88rem; background: rgba(255, 255, 255, 0.07); color: white; cursor: pointer; font: inherit; }
+.mp-button:hover:not(:disabled), .mp-button:focus-visible { border-color: rgba(124, 131, 255, 0.72); background: rgba(124, 131, 255, 0.16); }
+.mp-button.primary { background: var(--mp-accent-strong); border-color: var(--mp-accent-strong); }
+.mp-button.danger { background: rgba(255, 123, 123, 0.12); border-color: rgba(255, 123, 123, 0.38); }
+.mp-button:disabled { cursor: not-allowed; opacity: 0.45; }
+.mp-input, .mp-select { box-sizing: border-box; width: 100%; border: 1px solid var(--mp-border); border-radius: 8px; padding: 0.64rem 0.72rem; background: rgba(0, 0, 0, 0.22); color: white; font: inherit; }
+.mp-input:focus, .mp-select:focus { outline: 2px solid rgba(124, 131, 255, 0.5); outline-offset: 1px; }
+.mp-field { display: grid; gap: 0.34rem; color: var(--mp-muted); font-size: 0.86rem; }
+.mp-state { border-left: 4px solid var(--mp-accent); padding: 0.9rem 1rem; border-radius: 8px; background: var(--mp-panel-soft); }
+.mp-state.error { border-left-color: var(--mp-danger); }
+.mp-state.warning { border-left-color: var(--mp-warn); }
+.mp-list { display: grid; gap: 0.6rem; padding: 0; margin: 0; list-style: none; }
+.mp-row { width: 100%; display: flex; align-items: flex-start; justify-content: space-between; gap: 0.8rem; padding: 0.8rem; border: 1px solid var(--mp-border); border-radius: 9px; background: var(--mp-panel-soft); color: inherit; text-align: left; }
+button.mp-row { cursor: pointer; font: inherit; }
+button.mp-row:hover, button.mp-row:focus-visible, .mp-row.selected { border-color: rgba(124, 131, 255, 0.72); background: rgba(124, 131, 255, 0.1); }
+.mp-metric { display: grid; gap: 0.2rem; }
+.mp-metric strong { font-size: 1.15rem; }
+.mp-divider { border: 0; border-top: 1px solid var(--mp-border); margin: 0.3rem 0; }
+.mp-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@media (max-width: 760px) {
+  .mp-split { grid-template-columns: 1fr; }
+  .mp-panel { padding: 0.9rem; }
+}

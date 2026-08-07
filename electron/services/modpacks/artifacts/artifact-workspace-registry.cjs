@@ -9,7 +9,14 @@ function stale() { throw new ModpackError('PLAN_STALE', 'Workspace reference is 
 function assertNoPathFields(value, field = 'value') { if (!value || typeof value !== 'object') return; if (Array.isArray(value)) return value.forEach((entry, index) => assertNoPathFields(entry, `${field}.${index}`)); for (const [key, child] of Object.entries(value)) { if (/(?:^path|path$|directory$)/i.test(key)) invalid(`${field}.${key}`); assertNoPathFields(child, `${field}.${key}`); } }
 function clone(value) { try { return structuredClone(value); } catch { invalid('value'); } }
 function stripPaths(value) { if (!value || typeof value !== 'object') return value; if (Array.isArray(value)) return value.map(stripPaths); return Object.fromEntries(Object.entries(value).filter(([key]) => !/(?:^path|path$|directory$)/i.test(key)).map(([key, child]) => [key, stripPaths(child)])); }
+function samePath(left, right) { const a = path.resolve(left); const b = path.resolve(right); return process.platform === 'win32' ? a.toLocaleLowerCase('en-US') === b.toLocaleLowerCase('en-US') : a === b; }
 function cacheDigests(verifiedSet) { const parts = verifiedSet?.artifactSet?.parts; if (!Array.isArray(parts)) return []; const digests = new Set(); for (const part of parts) { const digest = part?.calculatedDigests?.sha256; if (!SHA256.test(digest || '')) invalid('verifiedSet'); digests.add(digest); } return [...digests]; }
+function sourceBinding(artifactSetId, verifiedSet) {
+  const sourceSetDigest = verifiedSet?.artifactSet?.setDigest;
+  if (!SHA256.test(sourceSetDigest || '')) invalid('verifiedSet.artifactSet.setDigest');
+  const sourceFingerprint = crypto.createHash('sha256').update(JSON.stringify(verifiedSet), 'utf8').digest('hex');
+  return Object.freeze({ sourceArtifactSetId: artifactSetId, sourceSetDigest, sourceFingerprint });
+}
 
 class ArtifactWorkspaceRegistry {
   constructor({ root, artifactCache = null, clock = () => Date.now(), idFactory = () => crypto.randomUUID(), ttlMs = TTL_MS } = {}) {
@@ -34,11 +41,30 @@ class ArtifactWorkspaceRegistry {
   }
   project(record) { const projected = { id: record.id, kind: record.kind, value: stripPaths(clone(record.value)) }; if (record.kind === 'inspection') projected.result = stripPaths(clone(record.value.result)); return deepFreeze(projected); }
   resolveOwnedId(request) { return this.project(this._resolve(request)); }
+  resolveOwnedWorkspace(request) {
+    if (!request || !['input', 'output'].includes(request.kind)) invalid('kind');
+    const record = this._resolve(request);
+    if (typeof record.path !== 'string') stale();
+    const candidate = path.resolve(record.path);
+    const relative = path.relative(this.root, candidate);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || candidate !== path.join(this.root, record.id)) stale();
+    let rootReal; let candidateReal; let stat;
+    try {
+      rootReal = fs.realpathSync.native(this.root);
+      candidateReal = fs.realpathSync.native(candidate);
+      stat = fs.lstatSync(candidate);
+    } catch { stale(); }
+    const realRelative = path.relative(rootReal, candidateReal);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !realRelative || realRelative.startsWith('..') ||
+        path.isAbsolute(realRelative) || !samePath(candidateReal, candidate)) stale();
+    return deepFreeze({ id: record.id, kind: record.kind, path: candidate });
+  }
   async materializeInput({ ownerId, artifactSetId } = {}) {
     this.assertAvailable(ownerId); const artifact = this._resolve({ ownerId, id: artifactSetId, kind: 'artifact-set' }); if (!this.artifactCache || typeof this.artifactCache.materializeSet !== 'function') invalid('artifactCache');
-    const id = this.newId('input'); this.allocatedIds.add(id); const workspacePath = path.join(this.root, id); const record = { id, ownerId, kind: 'input', value: {}, path: workspacePath, cacheDigests: [], lastUsedAt: this.clock(), pinned: false, pending: true };
+    const binding = sourceBinding(artifactSetId, artifact.value);
+    const id = this.newId('input'); this.allocatedIds.add(id); const workspacePath = path.join(this.root, id); const record = { id, ownerId, kind: 'input', value: binding, path: workspacePath, cacheDigests: [], lastUsedAt: this.clock(), pinned: false, pending: true };
     this.records.set(id, record); this.busyOwners.add(ownerId);
-    try { const primaryPath = await this.artifactCache.materializeSet(artifact.value, workspacePath); record.value = { primaryPath }; record.pending = false; record.lastUsedAt = this.clock(); return id; }
+    try { const primaryPath = await this.artifactCache.materializeSet(artifact.value, workspacePath); record.value = { primaryPath, ...binding }; record.pending = false; record.lastUsedAt = this.clock(); return id; }
     catch (error) { this.records.delete(id); fs.rmSync(workspacePath, { recursive: true, force: true }); throw error; }
     finally { this.busyOwners.delete(ownerId); }
   }

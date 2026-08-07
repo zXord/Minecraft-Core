@@ -75,6 +75,43 @@ function downloadPartId(file) {
   return `file-${file.hashes.sha1}-${targetIdentity}`;
 }
 
+function optionalFileChoiceId(file) {
+  const identity = crypto.createHash('sha256')
+    .update(canonicalWindowsPath(file.path), 'utf8')
+    .update('\0', 'utf8')
+    .update(file.hashes.sha512, 'utf8')
+    .digest('hex')
+    .slice(0, 48);
+  return `optional-${identity}`;
+}
+
+function optionalFileRecords(sourceManifest) {
+  const manifest = ensureValidatedMrpackManifest(sourceManifest);
+  return manifest.files
+    .filter(file => file.env.server === 'optional')
+    .map(file => ({ id: optionalFileChoiceId(file), path: file.path }))
+    .sort((left, right) => canonicalWindowsPath(left.path).localeCompare(canonicalWindowsPath(right.path), 'en-US'));
+}
+
+function listOptionalFileChoices(sourceManifest) {
+  return deepFreeze(optionalFileRecords(sourceManifest).map(record => ({
+    id: record.id,
+    label: record.path,
+    defaultSelected: true
+  })));
+}
+
+function resolveOptionalFileChoiceIds(sourceManifest, choiceIds) {
+  if (!Array.isArray(choiceIds)) invalidRequest('optionalFileIds');
+  const byId = new Map(optionalFileRecords(sourceManifest).map(record => [record.id, record]));
+  const selected = new Set();
+  for (const choiceId of choiceIds) {
+    if (typeof choiceId !== 'string' || selected.has(choiceId) || !byId.has(choiceId)) invalidRequest('optionalFileIds');
+    selected.add(choiceId);
+  }
+  return [...byId.values()].filter(record => selected.has(record.id)).map(record => record.path);
+}
+
 function selectedOptionAliases(manifest, selection) {
   const optional = new Map(manifest.files
     .filter(file => file.env.server === 'optional')
@@ -223,4 +260,4 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
   });
 }
 
-module.exports = { buildMrpackServerPlan };
+module.exports = { buildMrpackServerPlan, listOptionalFileChoices, resolveOptionalFileChoiceIds };

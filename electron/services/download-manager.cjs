@@ -6,6 +6,7 @@ const { safeSend } = require('../utils/safe-send.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
 const { fetch } = require('../utils/fetch.cjs');
+const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
 
 // Initialize logger
 const logger = getLoggerHandlers();
@@ -173,6 +174,7 @@ async function downloadWithProgress(url, destPath, channel) {
   
     await new Promise((resolve, reject) => {
       const destDir = path.dirname(destPath);
+      markCurrentServerMutationDirty(destPath);
       
       // Ensure destination directory exists
       if (!fs.existsSync(destDir)) {

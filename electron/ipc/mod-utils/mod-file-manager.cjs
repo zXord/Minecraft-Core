@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const { app } = require('electron'); // Required for app.getPath('userData')
 const AdmZip = require('adm-zip');
 const { safeBaseName, safeFilePath } = require('../../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../../services/server-mutation-context.cjs');
 
 // Simple store implementation to persist mod categories
 const configDir = path.join(app.getPath('userData'), 'config');
@@ -13,11 +14,6 @@ const configFile = path.join(configDir, 'mod-categories.json');
 const UNASSIGNED_MODS_DIRNAME = 'mods_unassigned';
 const UNASSIGNED_MANIFEST_DIRNAME = 'minecraft-core-manifests-unassigned';
 const MOD_METADATA_SIGNATURE_VERSION = 1;
-
-// Create config directory if it doesn't exist
-if (!fsSync.existsSync(configDir)) {
-  fsSync.mkdirSync(configDir, { recursive: true });
-}
 
 // Simple store object to manage mod categories
 const modCategoriesStore = {  get: () => {
@@ -33,6 +29,7 @@ const modCategoriesStore = {  get: () => {
   },
   set: (data) => {
     try {
+      fsSync.mkdirSync(configDir, { recursive: true });
       fsSync.writeFileSync(configFile, JSON.stringify(data, null, 2), 'utf8');
       return true;
     } catch {
@@ -260,7 +257,7 @@ function mergeManifestWithJarMetadata(manifest, meta) {
   };
 }
 
-async function refreshManifestMetadataIfNeeded(manifest, manifestPath, possibleJarPaths) {
+async function refreshManifestMetadataIfNeeded(manifest, manifestPath, possibleJarPaths, { persist = false } = {}) {
   if (!manifest) {
     return null;
   }
@@ -295,7 +292,7 @@ async function refreshManifestMetadataIfNeeded(manifest, manifestPath, possibleJ
     changed = true;
   }
 
-  if (changed) {
+  if (changed && persist) {
     try {
       await fs.writeFile(manifestPath, JSON.stringify(nextManifest, null, 2), 'utf8');
     } catch {
@@ -324,13 +321,7 @@ async function listMods(serverPath) {
   const clientModsDir = path.join(clientPath, 'mods');
   const unassignedModsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
   
-  await fs.mkdir(serverModsDir, { recursive: true });
-  await fs.mkdir(clientModsDir, { recursive: true }).catch(() => {
-    // Ignore client mods directory creation errors
-  });
-  await fs.mkdir(unassignedModsDir, { recursive: true });
-  
-  const serverFiles = await fs.readdir(serverModsDir);
+  const serverFiles = await fs.readdir(serverModsDir).catch(() => []);
   const serverModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));  const serverDisabledModFiles = serverFiles.filter(file => file.toLowerCase().endsWith('.jar.disabled'))
     .map(file => file.replace('.disabled', '')); // Remove .disabled extension for display
   
@@ -409,7 +400,7 @@ async function listMods(serverPath) {
   };
 }
 
-async function getInstalledModInfo(serverPath) {
+async function getInstalledModInfo(serverPath, { persistMetadata = false } = {}) {
   
   if (!serverPath) {
     throw new Error('Server path is required');
@@ -419,10 +410,13 @@ async function getInstalledModInfo(serverPath) {
   const modsDir = path.join(serverPath, 'mods');
   const clientModsDir = path.join(clientPath, 'mods');
   const unassignedModsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
-  await fs.mkdir(modsDir, { recursive: true });
-  await fs.mkdir(clientModsDir, { recursive: true });
-  await fs.mkdir(unassignedModsDir, { recursive: true });
-    const enabledFiles = await fs.readdir(modsDir);
+  if (persistMetadata) {
+    markCurrentServerMutationDirty(serverPath);
+    await fs.mkdir(modsDir, { recursive: true });
+    await fs.mkdir(clientModsDir, { recursive: true });
+    await fs.mkdir(unassignedModsDir, { recursive: true });
+  }
+  const enabledFiles = await fs.readdir(modsDir).catch(() => []);
   const enabledMods = enabledFiles.filter(file => file.toLowerCase().endsWith('.jar') && !file.endsWith('.disabled'));
   
   // Get disabled mods (with .disabled extension)
@@ -469,9 +463,11 @@ async function getInstalledModInfo(serverPath) {
   let modInfo = [];
   
   try {
-    await fs.mkdir(serverManifestDir, { recursive: true });
-    await fs.mkdir(clientManifestDir, { recursive: true });
-    await fs.mkdir(unassignedManifestDir, { recursive: true });
+    if (persistMetadata) {
+      await fs.mkdir(serverManifestDir, { recursive: true });
+      await fs.mkdir(clientManifestDir, { recursive: true });
+      await fs.mkdir(unassignedManifestDir, { recursive: true });
+    }
     
     for (const modFile of allModFiles) {
       const serverManifestPath = path.join(serverManifestDir, `${modFile}.json`);
@@ -506,7 +502,7 @@ async function getInstalledModInfo(serverPath) {
           path.join(clientModsDir, modFile + '.disabled'),
           path.join(unassignedModsDir, modFile),
           path.join(unassignedModsDir, modFile + '.disabled')
-        ]);
+        ], { persist: persistMetadata });
 
         // Ensure fileName property is always set
         manifest.fileName = modFile;
@@ -534,7 +530,7 @@ async function getInstalledModInfo(serverPath) {
 }
 
 // Get installed mod info for a standalone client path
-async function getClientInstalledModInfo(clientPath) {
+async function getClientInstalledModInfo(clientPath, { persistMetadata = false } = {}) {
 
   if (!clientPath) {
     throw new Error('Client path is required');
@@ -543,8 +539,11 @@ async function getClientInstalledModInfo(clientPath) {
   const modsDir = path.join(clientPath, 'mods');
   const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
   
-  await fs.mkdir(modsDir, { recursive: true });
-  await fs.mkdir(manifestDir, { recursive: true });
+  if (persistMetadata) {
+    markCurrentServerMutationDirty(clientPath);
+    await fs.mkdir(modsDir, { recursive: true });
+    await fs.mkdir(manifestDir, { recursive: true });
+  }
 
   const files = await fs.readdir(modsDir).catch(() => []);
   const modFiles = files
@@ -566,7 +565,7 @@ async function getClientInstalledModInfo(clientPath) {
         manifest = await refreshManifestMetadataIfNeeded(manifest, manifestPath, [
           path.join(modsDir, file),
           path.join(modsDir, file + '.disabled')
-        ]);
+        ], { persist: persistMetadata });
       }
 
       // Ensure fileName property is always set
@@ -612,10 +611,12 @@ async function getClientInstalledModInfo(clientPath) {
         modData.metadataSignatureVersion = MOD_METADATA_SIGNATURE_VERSION;
       }
 
-      try {
-        await fs.writeFile(manifestPath, JSON.stringify(modData, null, 2), 'utf8');
-      } catch {
-        // Ignore cache write failures; callers can still use the parsed metadata.
+      if (persistMetadata) {
+        try {
+          await fs.writeFile(manifestPath, JSON.stringify(modData, null, 2), 'utf8');
+        } catch {
+          // Ignore cache write failures; callers can still use the parsed metadata.
+        }
       }
 
       modInfo.push(modData);
@@ -623,6 +624,14 @@ async function getClientInstalledModInfo(clientPath) {
   }
 
   return modInfo;
+}
+
+async function migrateServerModMetadata(serverPath) {
+  return getInstalledModInfo(serverPath, { persistMetadata: true });
+}
+
+async function migrateClientModMetadata(clientPath) {
+  return getClientInstalledModInfo(clientPath, { persistMetadata: true });
 }
 
 async function saveDisabledMods(serverPath, disabledMods) {
@@ -634,6 +643,7 @@ async function saveDisabledMods(serverPath, disabledMods) {
     throw new Error('Disabled mods must be an array');
   }
   
+  markCurrentServerMutationDirty(serverPath);
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
   await fs.mkdir(configDirMgr, { recursive: true });
   
@@ -687,11 +697,8 @@ async function getDisabledMods(serverPath) {
     throw new Error('Server path is required');
   }
   
-  const modsDir = path.join(serverPath, 'mods');
-  await fs.mkdir(modsDir, { recursive: true });
-  
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
-  await fs.mkdir(configDirMgr, { recursive: true });
+  const modsDir = path.join(serverPath, 'mods');
   
   const disabledModsPath = path.join(configDirMgr, 'disabled-mods.json');
   let disabledMods = [];
@@ -729,14 +736,7 @@ async function getDisabledMods(serverPath) {
     }
   }
   
-  // Update the config file with the current state
-  try {
-    await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
-  } catch {
-    // Ignore config file write errors
-  }
-  
-  // Migration: Check old mods_disabled folder for any remaining files
+  // Include legacy disabled files in the read result without migrating them.
   try {
     const oldDisabledModsDir = path.join(serverPath, 'mods_disabled');
     const oldDisabledFiles = await fs.readdir(oldDisabledModsDir);
@@ -748,10 +748,6 @@ async function getDisabledMods(serverPath) {
       }
     }
     
-    if (oldDisabledModFileNames.length > 0) {
-      // Update config with any found old disabled mods
-      await fs.writeFile(disabledModsPath, JSON.stringify(disabledMods, null, 2));
-    }
   } catch {
     // Old folder doesn't exist or can't be read, which is fine
   }
@@ -764,7 +760,6 @@ async function getDisabledMods(serverPath) {
 async function getIgnoredModUpdates(serverPath) {
   if (!serverPath) throw new Error('Server path is required');
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
-  await fs.mkdir(configDirMgr, { recursive: true });
   const ignoredPath = path.join(configDirMgr, 'ignored-mod-updates.json');
   try {
     const raw = await fs.readFile(ignoredPath, 'utf8');
@@ -779,6 +774,7 @@ async function getIgnoredModUpdates(serverPath) {
 async function saveIgnoredModUpdates(serverPath, data) {
   if (!serverPath) throw new Error('Server path is required');
   if (!data || typeof data !== 'object') throw new Error('Ignored updates data must be an object');
+  markCurrentServerMutationDirty(serverPath);
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
   await fs.mkdir(configDirMgr, { recursive: true });
   const ignoredPath = path.join(configDirMgr, 'ignored-mod-updates.json');
@@ -813,6 +809,7 @@ async function addMod(serverPath, modPath) {
   const fileName = safeBaseName(path.basename(modPath), 'mod file name', { allowedExtensions: ['.jar'] });
   const targetPath = safeFilePath(modsDir, fileName, 'mod file name', { allowedExtensions: ['.jar'] });
   
+  markCurrentServerMutationDirty(serverPath);
   await fs.mkdir(modsDir, { recursive: true });
   
   try {
@@ -862,6 +859,7 @@ async function deleteMod(serverPath, modName) {
   
   for (const modPath of possiblePaths) {    try {
       await fs.access(modPath);  // Check if file exists
+      markCurrentServerMutationDirty(serverPath);
       await fs.unlink(modPath);  // Delete the file
       deletedFromPaths.push(modPath);
       // Don't break - continue checking other locations
@@ -884,6 +882,7 @@ async function deleteMod(serverPath, modName) {
   for (const manifestPath of manifestPaths) {
     try {
       await fs.access(manifestPath);
+      markCurrentServerMutationDirty(serverPath);
       await fs.unlink(manifestPath);    } catch (error) {
       // Silently ignore manifest deletion errors as they're not critical
       if (error.code !== 'ENOENT') {
@@ -951,6 +950,7 @@ async function directAddMod({ serverPath, fileName, buffer }) {
   fileName = safeBaseName(fileName, 'file name', { allowedExtensions: ['.jar'] });
   const modsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
   const targetPath = safeFilePath(modsDir, fileName, 'file name', { allowedExtensions: ['.jar'] });
+    markCurrentServerMutationDirty(serverPath);
     await fs.mkdir(modsDir, { recursive: true });
   await fs.writeFile(targetPath, new Uint8Array(buffer));
   
@@ -977,6 +977,7 @@ async function moveModFile({ fileName, newCategory, serverPath }) {
   const unassignedModsDir = path.join(serverPath, UNASSIGNED_MODS_DIRNAME);
   const unassignedManifestDir = path.join(serverPath, UNASSIGNED_MANIFEST_DIRNAME);
 
+  markCurrentServerMutationDirty(serverPath);
   await fs.mkdir(serverModsDir, { recursive: true });
   await fs.mkdir(clientModsDir, { recursive: true }).catch(err => {
     throw new Error(`Could not create client mods directory: ${err.message}`);
@@ -1165,6 +1166,8 @@ module.exports = {
   listMods,
   getInstalledModInfo,
   getClientInstalledModInfo,
+  migrateServerModMetadata,
+  migrateClientModMetadata,
   saveDisabledMods,
   getDisabledMods,
   addMod,

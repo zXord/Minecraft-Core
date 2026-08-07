@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { JavaManager } = require('./minecraft-launcher/java-manager.cjs');
+const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
 const utils = require('./minecraft-launcher/utils.cjs');
 
 /**
@@ -10,12 +11,19 @@ const utils = require('./minecraft-launcher/utils.cjs');
  * Uses server-specific Java directory (serverPath/java/) for each server
  */
 class ServerJavaManager extends JavaManager {
-  constructor(serverPath = null) {
+  constructor(serverPath = null, { onMutation = markCurrentServerMutationDirty } = {}) {
     // Initialize with no client path to use global directory as fallback
     super(null);
-    
+
+    this.onMutation = typeof onMutation === 'function' ? onMutation : markCurrentServerMutationDirty;
+
     // Set server-specific Java directory
     this.setServerPath(serverPath);
+  }
+
+  beforeFilesystemMutation(targetPath) {
+    if (!this.serverPath || typeof this.onMutation !== 'function') return false;
+    return this.onMutation(this.serverPath, targetPath);
   }
   
   /**
@@ -34,10 +42,8 @@ class ServerJavaManager extends JavaManager {
       this.javaBaseDir = path.join(os.homedir(), '.minecraft-core', 'server-java');
     }
     
-    // Ensure Java directory exists
-    if (!fs.existsSync(this.javaBaseDir)) {
-      fs.mkdirSync(this.javaBaseDir, { recursive: true });
-    }
+    // The directory is created lazily by the first write so read-only checks
+    // remain read-only and do not advance the server content revision.
   }
   
   /**

@@ -273,6 +273,24 @@ test('uses cached ETags for conditional release requests and handles 304 without
   assert.equal(http.calls.length, 3);
 });
 
+test('a persisted release ETag can produce a restart-safe 304 without an in-memory response cache', async () => {
+  const { source, http } = sourceFor((path, options) => {
+    if (path === '/repos/Hint/Pack') return jsonResponse(repository());
+    assert.equal(options.headers['If-None-Match'], '"persisted-etag"');
+    return { statusCode: 304, headers: { etag: '"persisted-etag"' }, body: Buffer.alloc(0) };
+  });
+  const identity = await bind(source);
+  const result = await source.listReleases({
+    ...identity,
+    includePrereleases: false,
+    etag: '"persisted-etag"'
+  });
+  assert.equal(result.notModified, true);
+  assert.equal(result.etag, '"persisted-etag"');
+  assert.deepEqual(result.releases, []);
+  assert.equal(http.calls.length, 2);
+});
+
 test('rechecks duplicate release IDs and tags against cursor history on cached 304 pages', async () => {
   for (const duplicateField of ['releaseId', 'tagName']) {
     let pageOneRequests = 0;

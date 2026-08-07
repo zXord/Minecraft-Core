@@ -26,6 +26,8 @@ const { getLoggerHandlers } = require('./ipc/logger-handlers.cjs');
 const { createErrorMonitoringHandlers } = require('./ipc/error-monitoring-handlers.cjs');
 const { createUtilityHandlers } = require('./ipc/utility-handlers.cjs');
 const { createModAvailabilityHandlers } = require('./ipc/mod-availability-handlers.cjs');
+const { createModpackHandlers } = require('./ipc/modpack-handlers.cjs');
+const { createServerMutationPolicy } = require('./services/server-mutation-policy.cjs');
 
 // Import auto-restart services for the one remaining handler
 const {
@@ -40,36 +42,79 @@ const {
  * 
  * @param {Electron.BrowserWindow} win - The main application window
  */
-function setupIpcHandlers(win) {
+function setupIpcHandlers(win, dependencies = {}) {
   if (!win) {
     return;
   }
 
+  const store = dependencies.store || appStore;
+  const fsApi = dependencies.filesystem?.sync || fs;
+  const ipcDependencies = dependencies.ipc || {};
+  const ipcMainApi = ipcDependencies.ipcMain || ipcMain;
+  const registerHandlers = ipcDependencies.registerIpcHandlers || registerIpcHandlers;
+  const backupManagerLoader = ipcDependencies.loadBackupManager || loadBackupManager;
+  const initializePlayerMap = ipcDependencies.initializePlayerIpMap || initializePlayerIpMap;
+  const handlerFactories = {
+    createServerHandlers,
+    createFileHandlers,
+    createPlayerHandlers,
+    createInstallHandlers,
+    createSettingsHandlers,
+    createModHandlers,
+    createClientModHandlers,
+    createConfigHandlers,
+    createServerPropertiesHandlers,
+    createBackupHandlers,
+    createManagementServerHandlers,
+    createBrowserPanelHandlers,
+    createMinecraftLauncherHandlers,
+    createServerJavaHandlers,
+    createAppSettingsHandlers,
+    createUpdateHandlers,
+    createMetricsHandlers,
+    getLoggerHandlers,
+    createErrorMonitoringHandlers,
+    createUtilityHandlers,
+    createModAvailabilityHandlers,
+    createModpackHandlers,
+    ...(ipcDependencies.handlerFactories || {})
+  };
+
   // Initialize track registered handler names
-  registeredHandlers.clear();    // Get all handler modules
-    const fileHandlers = createFileHandlers(win);
-    const modHandlers = createModHandlers(win);
-    const clientModHandlers = createClientModHandlers(win);
-    const serverPropertiesHandlers = createServerPropertiesHandlers();
-    const installHandlers = createInstallHandlers(win);
-    const configHandlers = createConfigHandlers();
-    const playerHandlers = createPlayerHandlers();
-    const serverHandlers = createServerHandlers(win);
-    const settingsHandlers = createSettingsHandlers();
-    const backupHandlers = createBackupHandlers();
-    const managementServerHandlers = createManagementServerHandlers(win);
-  const browserPanelHandlers = createBrowserPanelHandlers(win);
-    const minecraftLauncherHandlers = createMinecraftLauncherHandlers(win);
-    const serverJavaHandlers = createServerJavaHandlers(win);
-    const appSettingsHandlers = createAppSettingsHandlers();
-    const updateHandlers = createUpdateHandlers(win);
-    const metricsHandlers = createMetricsHandlers();
-    const errorMonitoringHandlers = createErrorMonitoringHandlers(win);
-  const utilityHandlers = createUtilityHandlers(win);
-  const modAvailabilityHandlers = createModAvailabilityHandlers();
+  registeredHandlers.clear();
+    const serverMutationPolicy = dependencies.serverMutationPolicy || createServerMutationPolicy({
+      coordinator: dependencies.serverMutationCoordinator,
+      getInstances: () => store.get('instances') || []
+    });
+    // Get all handler modules
+    const fileHandlers = handlerFactories.createFileHandlers(win);
+    const modHandlers = handlerFactories.createModHandlers(win);
+    const clientModHandlers = handlerFactories.createClientModHandlers(win);
+    const serverPropertiesHandlers = handlerFactories.createServerPropertiesHandlers();
+    const installHandlers = handlerFactories.createInstallHandlers(win);
+    const configHandlers = handlerFactories.createConfigHandlers();
+    const playerHandlers = handlerFactories.createPlayerHandlers();
+    const serverHandlers = handlerFactories.createServerHandlers(win);
+    const settingsHandlers = handlerFactories.createSettingsHandlers();
+    const backupHandlers = handlerFactories.createBackupHandlers();
+    const managementServerHandlers = handlerFactories.createManagementServerHandlers(win);
+  const browserPanelHandlers = handlerFactories.createBrowserPanelHandlers(win);
+    const minecraftLauncherHandlers = handlerFactories.createMinecraftLauncherHandlers(win);
+    const serverJavaHandlers = handlerFactories.createServerJavaHandlers(win);
+    const appSettingsHandlers = handlerFactories.createAppSettingsHandlers();
+    const updateHandlers = handlerFactories.createUpdateHandlers(win);
+    const metricsHandlers = handlerFactories.createMetricsHandlers();
+    const errorMonitoringHandlers = handlerFactories.createErrorMonitoringHandlers(win);
+  const utilityHandlers = handlerFactories.createUtilityHandlers(win);
+  const modAvailabilityHandlers = handlerFactories.createModAvailabilityHandlers({
+    startWatcher: ipcDependencies.nativeNotificationsEnabled !== false
+  });
+  const modpackHandlers = dependencies.modpacks
+    ? handlerFactories.createModpackHandlers(dependencies.modpacks)
+    : null;
     
     // Initialize logger handlers (singleton, no creation needed)
-    const loggerHandlers = getLoggerHandlers();
+    const loggerHandlers = handlerFactories.getLoggerHandlers();
     
     // Log system startup
     loggerHandlers.info('Application IPC handlers initialized', {
@@ -84,7 +129,7 @@ function setupIpcHandlers(win) {
 
     
     // Initialize backup manager
-    loadBackupManager();    // Loop through each handler object and register the handlers
+    backupManagerLoader();    // Loop through each handler object and register the handlers
     [
       backupHandlers,
       fileHandlers,
@@ -105,6 +150,7 @@ function setupIpcHandlers(win) {
   errorMonitoringHandlers,
   utilityHandlers,
   modAvailabilityHandlers,
+  modpackHandlers,
       loggerHandlers
     ].forEach((handlers) => {
       if (!handlers) {
@@ -120,13 +166,14 @@ function setupIpcHandlers(win) {
         // Check for existing handler to avoid duplicates
         if (registeredHandlers.has(channel)) {
           // Remove existing handler to prevent conflicts
-          ipcMain.removeHandler(channel);
+          ipcMainApi.removeHandler(channel);
           registeredHandlers.delete(channel);
         }
         
         // Ensure handler has the correct signature for ipcMain.handle
-        const wrappedHandler = (event, ...args) => handler(event, ...args);
-        ipcMain.handle(channel, wrappedHandler);
+        const coordinatedHandler = serverMutationPolicy.wrapHandler(channel, handler);
+        const wrappedHandler = (event, ...args) => coordinatedHandler(event, ...args);
+        ipcMainApi.handle(channel, wrappedHandler);
         registeredHandlers.add(channel);
       });    });
     
@@ -161,10 +208,10 @@ function setupIpcHandlers(win) {
     });
     
     // Register auto-restart handlers
-    registerIpcHandlers({
+    registerHandlers(serverMutationPolicy.wrapHandlers({
       'get-auto-restart': (_e, targetPath) => getAutoRestartState(targetPath),
       'set-auto-restart': (_e, options) => setAutoRestartOptions(options)
-    });
+    }));
     
     // Register app settings handlers
     Object.entries(appSettingsHandlers).forEach(([channel, handler]) => {
@@ -176,21 +223,21 @@ function setupIpcHandlers(win) {
       // Check for existing handler to avoid duplicates
       if (registeredHandlers.has(channel)) {
         // Remove existing handler to prevent conflicts
-        ipcMain.removeHandler(channel);
+        ipcMainApi.removeHandler(channel);
         registeredHandlers.delete(channel);
       }
       
       // Ensure handler has the correct signature for ipcMain.handle
       const wrappedHandler = (event, ...args) => handler(event, ...args);
-      ipcMain.handle(channel, wrappedHandler);
+      ipcMainApi.handle(channel, wrappedHandler);
       registeredHandlers.add(channel);
     });
       // delete-instance handler is registered in settings-handlers.cjs
     
     // Initialize player-IP map with the last server path
-    const lastServerPath = appStore.get('lastServerPath');
-    if (lastServerPath && fs.existsSync(lastServerPath)) {
-      initializePlayerIpMap(lastServerPath);
+    const lastServerPath = store.get('lastServerPath');
+    if (lastServerPath && fsApi.existsSync(lastServerPath)) {
+      initializePlayerMap(lastServerPath);
     }
     
   

@@ -11,8 +11,14 @@
   import { getProjectPageAction, getProjectSource, getProjectSourceLabel, normalizeModrinthProjectDetails } from '../../utils/mods/modrinthProjectLinks.js';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { modAvailabilityWatchStore } from '../../stores/modAvailabilityWatchStore.js';
+  import { navigate } from '../../router.js';
 
   export let serverPath = '';
+  export let modpackManaged = false;
+
+  function openModpackManagement() {
+    navigate('/modpack');
+  }
 
   let mcVersions = [];
   let fabricVersions = [];
@@ -796,6 +802,13 @@
   }
 </script>
 
+{#if modpackManaged}
+  <div class="managed-version-route">
+    <strong>This server version is managed by its Modpack.</strong>
+    <p>Use the Modpack tab to review exact pack versions, update or downgrade with a compatible world restore point, and switch packs safely.</p>
+    <button type="button" on:click={openModpackManagement}>Open Modpack version management</button>
+  </div>
+{:else}
 <div class="version-updater">  <div class="version-select">    <select bind:value={selectedMC} on:change={onMCChange}>
       <option value="" disabled selected>Select Minecraft Version</option>
       {#each mcVersions as v (v)}
@@ -1300,8 +1313,19 @@
     <span>Create restore point before updating</span>
   </label>
 </ConfirmationDialog>
+{/if}
 
 <style>
+  .managed-version-route {
+    display: grid;
+    gap: 0.65rem;
+    padding: 1rem;
+    border: 1px solid rgba(100, 108, 255, 0.35);
+    border-radius: 8px;
+    background: rgba(100, 108, 255, 0.08);
+  }
+  .managed-version-route p { margin: 0; color: rgba(255, 255, 255, 0.7); }
+  .managed-version-route button { justify-self: start; background: #646cff; color: white; }
   /* Remove ALL old container styling - this component is now wrapped in cards */
   .version-updater {
     background: none !important;

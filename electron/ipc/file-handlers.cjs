@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const fsPromises = require('fs/promises');
+const crypto = require('node:crypto');
 const { dialog, shell } = require('electron');
 const appStore = require('../utils/app-store.cjs');
 const {
@@ -12,6 +13,10 @@ const {
 const { createZip } = require('../utils/backup-util.cjs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
 const { isPathInside } = require('../utils/security-boundaries.cjs');
+const {
+  getServerMutationCoordinator,
+  markCurrentServerMutationDirty
+} = require('../services/server-mutation-context.cjs');
 
 const logger = getLoggerHandlers();
 const ALLOWED_CHECKSUM_ALGORITHMS = new Set(['sha1', 'sha256', 'sha512', 'md5']);
@@ -590,6 +595,17 @@ function createFileHandlers(win) {
           return folder;
         }
 
+        return await getServerMutationCoordinator().runMutation(
+          { instanceId: null, serverPath: folder },
+          {
+            operation: 'initialize-server-folder',
+            operationId: `server-folder-${crypto.randomUUID()}`,
+            revisionMode: 'auto',
+            quiesce: null
+          },
+          async lease => {
+            lease.markDirty();
+
         // Create needed directories
         const requiredDirs = ['mods', 'logs', 'config'];
         
@@ -684,7 +700,9 @@ function createFileHandlers(win) {
           }
         });
 
-        return folder;
+            return folder;
+          }
+        );
       } catch (error) {
         const duration = Date.now() - startTime;
         logger.error(`Folder selection failed: ${error.message}`, {
@@ -787,6 +805,7 @@ function createFileHandlers(win) {
           return null;
         }
 
+        const configPath = path.join(targetPath, '.minecraft-core.json');
         const config = readServerConfig(targetPath, getPortableServerConfigDefaults(targetPath));
 
         if (!config) {
@@ -984,6 +1003,7 @@ function createFileHandlers(win) {
           }
         });
 
+        markCurrentServerMutationDirty(targetPath);
         fs.writeFileSync(eulaPath, content);
         const duration = Date.now() - startTime;
 
@@ -1304,6 +1324,7 @@ async function deleteWorld(serverPath) {
       }
     });
 
+    markCurrentServerMutationDirty(serverPath);
     await fsPromises.mkdir(backupPath, { recursive: true });
     
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');

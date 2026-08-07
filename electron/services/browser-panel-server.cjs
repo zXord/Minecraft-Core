@@ -2,7 +2,6 @@
 // Browser Panel Server - decoupled from Management Server
 const express = require('express');
 const https = require('https');
-const { randomBytes } = require('crypto');
 // No fs/path needed here currently
 const appStore = require('../utils/app-store.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
@@ -29,6 +28,9 @@ const serverPropsHandlers = require('../ipc/server-properties-handlers.cjs');
 // Mods/info handlers (server mods, shaders, resourcepacks, and search/info)
 const serverModHandlers = require('../ipc/mod-handlers/server-mod-handlers.cjs');
 const modInfoHandlers = require('../ipc/mod-handlers/mod-info-handlers.cjs');
+const { createManagementServerHandlers } = require('../ipc/management-server-handlers.cjs');
+const { createServerMutationPolicy } = require('./server-mutation-policy.cjs');
+const { createCoordinatedBrowserHandlers } = require('./browser-writer-delegates.cjs');
 // Using ServerJavaManager directly for browser server; no IPC wrapper needed
 const { ServerJavaManager } = require('./server-java-manager.cjs');
 // Auto-restart service (reuse existing logic/state)
@@ -51,7 +53,7 @@ const DEFAULT_SERVER_SETTINGS = {
   autoStartManagement: false
 };
 
-function getServerConfigDefaults(serverPath = '') {
+function getServerConfigDefaults() {
   const appSettings = appStore.get('serverSettings') || DEFAULT_SERVER_SETTINGS;
   return getDefaultServerConfig({
     managementPort: appSettings.managementPort,
@@ -118,50 +120,6 @@ function requireVisibleRunningServerPath() {
     requireVisibleServerPath(currentPath);
   }
   return currentPath;
-}
-
-function generateInviteSecret() {
-  return randomBytes(24).toString('base64url');
-}
-
-function ensureManagementInviteSecret(serverPath) {
-  const effectiveServerPath = requireVisibleServerPath(serverPath);
-  ensureEncryptionAvailable();
-  const instance = findVisibleServerInstanceByPath(effectiveServerPath);
-  const config = readServerConfig(effectiveServerPath, getServerConfigDefaults(effectiveServerPath));
-  let secret = typeof config?.managementInviteSecret === 'string' ? config.managementInviteSecret.trim() : '';
-
-  if (!secret && instance?.managementInviteSecret) {
-    try {
-      secret = unpackSecret(instance.managementInviteSecret);
-    } catch {
-      secret = '';
-    }
-  }
-
-  if (!secret) {
-    secret = generateInviteSecret();
-  }
-
-  updateServerConfig(effectiveServerPath, {
-    managementInviteSecret: secret,
-    managementInviteHost: typeof config?.managementInviteHost === 'string' ? config.managementInviteHost : ''
-  }, getServerConfigDefaults(effectiveServerPath));
-
-  if (instance) {
-    const instances = appStore.get('instances') || [];
-    const index = instances.findIndex((item) => item && item.id === instance.id);
-    if (index >= 0) {
-      instances[index] = {
-        ...instances[index],
-        managementInviteSecret: packSecret(secret),
-        managementInviteHost: typeof config?.managementInviteHost === 'string' ? config.managementInviteHost : ''
-      };
-      appStore.set('instances', instances);
-    }
-  }
-
-  return { serverPath: effectiveServerPath, secret, instance };
 }
 
 function sanitizeSettingsForPanel(settings) {
@@ -242,7 +200,7 @@ function saveBackupSettings(serverPath, settings) {
   return merged;
 }
 class BrowserPanelServer {
-  constructor() {
+  constructor({ mutationPolicy = null, handlerGroups = null } = {}) {
     this.app = express();
     this.server = null;
     this.port = 8081; // separate default
@@ -256,8 +214,34 @@ class BrowserPanelServer {
   this.authWindowMs = 10 * 60 * 1000;
   this.authMaxFailures = 6;
   this.authLockMs = 15 * 60 * 1000;
+    this.serverMutationPolicy = mutationPolicy || createServerMutationPolicy({
+      getInstances: () => appStore.get('instances') || []
+    });
+    const rawHandlerGroups = handlerGroups || {
+      management: createManagementServerHandlers(null),
+      player: playerHandlers.createPlayerHandlers(),
+      serverProperties: serverPropsHandlers.createServerPropertiesHandlers(),
+      serverMods: serverModHandlers.createServerModHandlers(null),
+      backups: {
+        'backups:delete': (_event, request) => backupService.deleteBackup(request),
+        'backups:rename': (_event, request) => backupService.renameBackup(request),
+        'backups:restore': (_event, request) => backupService.restoreBackup(request)
+      }
+    };
+    this.browserWriterHandlers = createCoordinatedBrowserHandlers({
+      mutationPolicy: this.serverMutationPolicy,
+      ...rawHandlerGroups
+    });
     this.setupMiddleware();
     this.setupRoutes();
+  }
+
+  runCoordinatedWriter(channel, args, work) {
+    const handler = this.serverMutationPolicy.wrapHandler(
+      channel,
+      (_event, ...handlerArgs) => work(...handlerArgs)
+    );
+    return handler({ sender: { id: 'browser' } }, ...args);
   }
 
   getRequestIp(req) {
@@ -463,15 +447,14 @@ class BrowserPanelServer {
     this.app.post('/api/management/start', express.json(), async (req, res) => {
       try {
         const { port = 8080, serverPath = null } = req.body || {};
-        const inviteState = serverPath ? ensureManagementInviteSecret(serverPath) : null;
-        const management = getManagementServer();
-        if (inviteState?.secret) {
-          management.setInviteSecret(inviteState.secret);
-        }
-        const result = await management.start(port, inviteState?.serverPath || null);
+        const effectiveServerPath = serverPath || appStore.get('lastServerPath') || null;
+        const result = await this.browserWriterHandlers.management['start-management-server'](
+          { sender: { id: 'browser' } },
+          { port, serverPath: effectiveServerPath }
+        );
         try {
           if (result && result.success) {
-            const payload = { isRunning: true, port: result.port, serverPath: inviteState?.serverPath || null };
+            const payload = { isRunning: true, port: result.port, serverPath: effectiveServerPath };
             // Notify browser UI clients immediately
             emitEvent('management-server-status', payload);
             // Notify desktop renderer too
@@ -501,30 +484,31 @@ class BrowserPanelServer {
         res.status(500).json({ success: false, error: e.message });
       }
     });
-    this.app.post('/api/management/update-path', express.json(), (req, res) => {
+    this.app.post('/api/management/update-path', express.json(), async (req, res) => {
       try {
         const { serverPath } = req.body || {};
-        const inviteState = serverPath ? ensureManagementInviteSecret(serverPath) : null;
-        const management = getManagementServer();
-        if (inviteState?.secret) {
-          management.setInviteSecret(inviteState.secret);
-        }
-        management.updateServerPath(inviteState?.serverPath || null);
+        const effectiveServerPath = serverPath || appStore.get('lastServerPath') || null;
+        const result = await this.browserWriterHandlers.management['update-management-server-path'](
+          { sender: { id: 'browser' } },
+          { serverPath: effectiveServerPath }
+        );
         try {
-          emitEvent('management-server-path-updated', inviteState?.serverPath || null);
-          safeSend('management-server-path-updated', inviteState?.serverPath || null);
+          emitEvent('management-server-path-updated', result?.serverPath || null);
+          safeSend('management-server-path-updated', result?.serverPath || null);
         } catch { /* ignore notify error */ }
-        res.json({ success: true, serverPath: inviteState?.serverPath || null });
+        res.json(result);
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
     });
-    this.app.post('/api/management/set-external-host', express.json(), (req, res) => {
+    this.app.post('/api/management/set-external-host', express.json(), async (req, res) => {
       try {
-        const { host } = req.body || {};
-        const management = getManagementServer();
-        management.setExternalHost(host || null);
-        res.json({ success: true, externalHost: host || null, downloadHost: management.getModDownloadHost() });
+        const { host, serverPath, instanceId } = req.body || {};
+        const result = await this.browserWriterHandlers.management['set-management-server-external-host'](
+          { sender: { id: 'browser' } },
+          { hostIP: host, serverPath: serverPath || appStore.get('lastServerPath') || null, instanceId }
+        );
+        res.json(result);
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
@@ -789,17 +773,21 @@ class BrowserPanelServer {
         res.status(500).json({ success: false, error: e.message });
       }
     });
-    this.app.post('/api/auto-restart', express.json(), (req, res) => {
+    this.app.post('/api/auto-restart', express.json(), async (req, res) => {
       try {
         const options = req.body || {};
-        const state = setAutoRestartOptions(options);
+        const state = await this.runCoordinatedWriter(
+          'set-auto-restart',
+          [options],
+          request => setAutoRestartOptions(request)
+        );
         try { emitEvent('auto-restart-status', state); } catch { /* ignore SSE */ }
         res.json(state);
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
     });
-    this.app.post('/api/settings', express.json(), (req, res) => {
+    this.app.post('/api/settings', express.json(), async (req, res) => {
       try {
         const { port, maxRam, managementPort, serverPath, autoStartMinecraft, autoStartManagement } = req.body || {};
         // Basic validation similar to IPC handler
@@ -815,32 +803,45 @@ class BrowserPanelServer {
         if (serverPath !== undefined && (typeof serverPath !== 'string' || serverPath.trim() === '')) {
           return res.status(400).json({ success: false, error: 'Invalid server path' });
         }
-        const current = {
-          ...DEFAULT_SERVER_SETTINGS,
-          ...(appStore.get('serverSettings') || {})
-        };
-        const updated = {
-          ...current,
-          ...(port !== undefined ? { port } : {}),
-          ...(maxRam !== undefined ? { maxRam } : {}),
-          ...(managementPort !== undefined ? { managementPort } : {}),
-          ...(autoStartMinecraft !== undefined ? { autoStartMinecraft: !!autoStartMinecraft } : {}),
-          ...(autoStartManagement !== undefined ? { autoStartManagement: !!autoStartManagement } : {})
-        };
-        appStore.set('serverSettings', updated);
-        const trackedServerPath = resolveTrackedServerPath(serverPath);
-        if (serverPath !== undefined) {
-          appStore.set('lastServerPath', trackedServerPath || null);
-        }
-        const effectiveServerPath = trackedServerPath || resolveTrackedServerPath(appStore.get('lastServerPath') || '');
-        if (effectiveServerPath) {
-          updateServerConfig(effectiveServerPath, {
-            managementPort: updated.managementPort,
-            autoStartMinecraft: updated.autoStartMinecraft,
-            autoStartManagement: updated.autoStartManagement
-          }, getServerConfigDefaults(effectiveServerPath));
-        }
-        res.json({ success: true, settings: { ...getMergedServerSettings(effectiveServerPath), serverPath: effectiveServerPath } });
+        const requestedPath = resolveTrackedServerPath(serverPath) ||
+          resolveTrackedServerPath(appStore.get('lastServerPath') || '');
+        const result = await this.runCoordinatedWriter(
+          'update-settings',
+          [{ serverPath: requestedPath }],
+          () => {
+            const current = {
+              ...DEFAULT_SERVER_SETTINGS,
+              ...(appStore.get('serverSettings') || {})
+            };
+            const updated = {
+              ...current,
+              ...(port !== undefined ? { port } : {}),
+              ...(maxRam !== undefined ? { maxRam } : {}),
+              ...(managementPort !== undefined ? { managementPort } : {}),
+              ...(autoStartMinecraft !== undefined ? { autoStartMinecraft: !!autoStartMinecraft } : {}),
+              ...(autoStartManagement !== undefined ? { autoStartManagement: !!autoStartManagement } : {})
+            };
+            appStore.set('serverSettings', updated);
+            const trackedServerPath = resolveTrackedServerPath(serverPath);
+            if (serverPath !== undefined) {
+              appStore.set('lastServerPath', trackedServerPath || null);
+            }
+            const effectiveServerPath = trackedServerPath ||
+              resolveTrackedServerPath(appStore.get('lastServerPath') || '');
+            if (effectiveServerPath) {
+              updateServerConfig(effectiveServerPath, {
+                managementPort: updated.managementPort,
+                autoStartMinecraft: updated.autoStartMinecraft,
+                autoStartManagement: updated.autoStartManagement
+              }, getServerConfigDefaults(effectiveServerPath));
+            }
+            return {
+              success: true,
+              settings: { ...getMergedServerSettings(effectiveServerPath), serverPath: effectiveServerPath }
+            };
+          }
+        );
+        res.json(result);
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
@@ -1119,7 +1120,10 @@ class BrowserPanelServer {
       try {
         const { serverPath, name } = req.body || {};
         if (!serverPath || !name) return res.json({ success: false, error: 'Missing serverPath or name' });
-        const result = await backupService.deleteBackup({ serverPath, name });
+        const result = await this.browserWriterHandlers.backups['backups:delete'](
+          { sender: { id: 'browser' } },
+          { serverPath, name }
+        );
         if (result && result.success) {
           emitEvent('backup-notification', { type: 'success', title: 'Backup deleted', message: `Deleted ${name}`, serverPath, name });
         }
@@ -1132,7 +1136,10 @@ class BrowserPanelServer {
       try {
         const { serverPath, oldName, newName } = req.body || {};
         if (!serverPath || !oldName || !newName) return res.json({ success: false, error: 'Missing parameters' });
-  await backupService.renameBackup({ serverPath, oldName, newName });
+  await this.browserWriterHandlers.backups['backups:rename'](
+    { sender: { id: 'browser' } },
+    { serverPath, oldName, newName }
+  );
   emitEvent('backup-notification', { type: 'info', title: 'Backup renamed', message: `${oldName} → ${newName}`, serverPath, name: newName });
         res.json({ success: true });
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -1143,7 +1150,10 @@ class BrowserPanelServer {
       try {
         const { serverPath, name, serverStatus } = req.body || {};
         if (!serverPath || !name) return res.json({ success: false, error: 'Missing parameters' });
-        const result = await backupService.restoreBackup({ serverPath, name, serverStatus });
+        const result = await this.browserWriterHandlers.backups['backups:restore'](
+          { sender: { id: 'browser' } },
+          { serverPath, name, serverStatus }
+        );
         if (result && result.success) {
           emitEvent('backup-notification', { type: 'success', title: 'Backup restored', message: `Restored ${name}`, serverPath, name });
         }
@@ -1205,24 +1215,30 @@ class BrowserPanelServer {
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
 
-    this.app.post('/api/backups/automation', express.json(), (req, res) => {
+    this.app.post('/api/backups/automation', express.json(), async (req, res) => {
       try {
         const { enabled, frequency, type, retentionCount, runOnLaunch, hour, minute, day, serverPath } = req.body || {};
         const effectiveServerPath = typeof serverPath === 'string' && serverPath
           ? serverPath
           : (appStore.get('lastServerPath') || '');
-        const prev = getBackupSettings(effectiveServerPath);
-        const updated = saveBackupSettings(effectiveServerPath, {
-          enabled: !!enabled,
-          frequency: Number.isFinite(frequency) ? frequency : (prev.frequency || 86400000),
-          type: typeof type === 'string' ? type : (prev.type || 'world'),
-          retentionCount: Number.isFinite(retentionCount) ? retentionCount : (prev.retentionCount || 100),
-          runOnLaunch: !!runOnLaunch,
-          hour: Number.isFinite(hour) ? hour : (prev.hour || 3),
-          minute: Number.isFinite(minute) ? minute : (prev.minute || 0),
-          day: Number.isFinite(day) ? day : (prev.day || 0),
-          lastRun: prev.lastRun || null
-        });
+        const updated = await this.runCoordinatedWriter(
+          'backups:configure-automation',
+          [{ serverPath: effectiveServerPath }],
+          () => {
+            const prev = getBackupSettings(effectiveServerPath);
+            return saveBackupSettings(effectiveServerPath, {
+              enabled: !!enabled,
+              frequency: Number.isFinite(frequency) ? frequency : (prev.frequency || 86400000),
+              type: typeof type === 'string' ? type : (prev.type || 'world'),
+              retentionCount: Number.isFinite(retentionCount) ? retentionCount : (prev.retentionCount || 100),
+              runOnLaunch: !!runOnLaunch,
+              hour: Number.isFinite(hour) ? hour : (prev.hour || 3),
+              minute: Number.isFinite(minute) ? minute : (prev.minute || 0),
+              day: Number.isFinite(day) ? day : (prev.day || 0),
+              lastRun: prev.lastRun || null
+            });
+          }
+        );
         res.json({ success: true, settings: updated });
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
@@ -1247,7 +1263,7 @@ class BrowserPanelServer {
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
 
-    this.app.post('/api/backups/retention', express.json(), (req, res) => {
+    this.app.post('/api/backups/retention', express.json(), async (req, res) => {
       try {
         const { serverPath, settings } = req.body || {};
         if (!serverPath || typeof serverPath !== 'string') return res.json({ success: false, error: 'Invalid server path' });
@@ -1262,8 +1278,15 @@ class BrowserPanelServer {
           countRetentionEnabled: !!settings.countRetentionEnabled,
           maxCountValue: Math.max(1, parseInt(settings.maxCountValue) || 14)
         };
-        const key = `retentionSettings_${Buffer.from(serverPath).toString('base64')}`;
-        appStore.set(key, validated);
+        await this.runCoordinatedWriter(
+          'backups:save-retention-settings',
+          [{ serverPath }],
+          () => {
+            const key = `retentionSettings_${Buffer.from(serverPath).toString('base64')}`;
+            appStore.set(key, validated);
+            return { success: true };
+          }
+        );
         res.json({ success: true });
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
@@ -1274,34 +1297,41 @@ class BrowserPanelServer {
         const { serverPath, policy, dryRun = false } = req.body || {};
         if (!serverPath || typeof serverPath !== 'string') return res.json({ success: false, error: 'Invalid server path' });
         if (!policy || typeof policy !== 'object') return res.json({ success: false, error: 'Invalid policy' });
-        const backups = await backupService.listBackupsWithMetadata(serverPath);
-        const fs = require('fs'); const path = require('path');
-        // Add sizes to backups for policy evaluation
-        const withSizes = backups.map((b) => {
-          let size = 0;
-          try { size = fs.statSync(path.join(serverPath, 'backups', b.name)).size; } catch { size = b.size || 0; }
-          return { ...b, size };
-        });
-        const rp = new RetentionPolicy({
-          maxSize: policy.maxSize || null,
-          maxAge: policy.maxAge || null,
-          maxCount: policy.maxCount || null,
-          preserveRecent: Math.max(1, policy.preserveRecent || 1)
-        });
-        const toDelete = await rp.evaluateBackups(withSizes);
-        let spaceSaved = 0;
-        const deletedBackups = [];
-        if (!dryRun) {
-          for (const b of toDelete) {
-            try {
-              const r = await backupService.deleteBackup({ serverPath, name: b.name });
-              if (r && r.success) {
-                deletedBackups.push(b);
-                spaceSaved += b.size || 0;
+        const outcome = await this.runCoordinatedWriter(
+          'backups:apply-retention-policy',
+          [{ serverPath }],
+          async () => {
+            const backups = await backupService.listBackupsWithMetadata(serverPath);
+            const fs = require('fs'); const path = require('path');
+            const withSizes = backups.map((b) => {
+              let size = 0;
+              try { size = fs.statSync(path.join(serverPath, 'backups', b.name)).size; } catch { size = b.size || 0; }
+              return { ...b, size };
+            });
+            const rp = new RetentionPolicy({
+              maxSize: policy.maxSize || null,
+              maxAge: policy.maxAge || null,
+              maxCount: policy.maxCount || null,
+              preserveRecent: Math.max(1, policy.preserveRecent || 1)
+            });
+            const toDelete = await rp.evaluateBackups(withSizes);
+            let spaceSaved = 0;
+            const deletedBackups = [];
+            if (!dryRun) {
+              for (const b of toDelete) {
+                try {
+                  const r = await backupService.deleteBackup({ serverPath, name: b.name });
+                  if (r && r.success) {
+                    deletedBackups.push(b);
+                    spaceSaved += b.size || 0;
+                  }
+                } catch { /* ignore */ }
               }
-            } catch { /* ignore */ }
+            }
+            return { deletedBackups, spaceSaved };
           }
-        }
+        );
+        const { deletedBackups, spaceSaved } = outcome;
         if (!dryRun && deletedBackups.length) {
           emitEvent('backup-notification', { type: 'info', title: 'Retention applied', message: `Deleted ${deletedBackups.length} backups`, serverPath, count: deletedBackups.length, spaceSaved });
         }
@@ -1318,7 +1348,7 @@ class BrowserPanelServer {
         const fs = require('fs');
         const dir = path.join(serverPath, 'backups');
         if (!fs.existsSync(dir)) {
-          try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
+          return res.json({ success: true, message: 'No backup directory exists yet' });
         }
         // already watching?
         if (this.backupWatchers.has(serverPath)) {
@@ -1355,17 +1385,19 @@ class BrowserPanelServer {
     this.app.get('/api/players/read', (req, res) => {
       try {
         const { listName, serverPath } = req.query || {};
-        const handlers = playerHandlers.createPlayerHandlers();
-        const data = handlers['read-players']({ sender: { id: 'browser' } }, listName, serverPath);
+        const data = this.browserWriterHandlers.player['read-players'](
+          { sender: { id: 'browser' } }, listName, serverPath
+        );
         res.json({ success: true, data });
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
 
-    this.app.post('/api/players/add', express.json(), (req, res) => {
+    this.app.post('/api/players/add', express.json(), async (req, res) => {
       try {
         const { listName, serverPath, entry } = req.body || {};
-        const handlers = playerHandlers.createPlayerHandlers();
-        const data = handlers['add-player']({ sender: { id: 'browser' } }, listName, serverPath, entry);
+        const data = await this.browserWriterHandlers.player['add-player'](
+          { sender: { id: 'browser' } }, listName, serverPath, entry
+        );
         try {
           // Notify all connected UIs to refresh lists
           emitEvent('players-list-changed', { listName, serverPath, action: 'add', entry });
@@ -1374,11 +1406,12 @@ class BrowserPanelServer {
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
 
-    this.app.post('/api/players/remove', express.json(), (req, res) => {
+    this.app.post('/api/players/remove', express.json(), async (req, res) => {
       try {
         const { listName, serverPath, entry } = req.body || {};
-        const handlers = playerHandlers.createPlayerHandlers();
-        const data = handlers['remove-player']({ sender: { id: 'browser' } }, listName, serverPath, entry);
+        const data = await this.browserWriterHandlers.player['remove-player'](
+          { sender: { id: 'browser' } }, listName, serverPath, entry
+        );
         try {
           emitEvent('players-list-changed', { listName, serverPath, action: 'remove', entry });
         } catch { /* ignore SSE */ }
@@ -1389,8 +1422,9 @@ class BrowserPanelServer {
     this.app.get('/api/players/last-banned', (req, res) => {
       try {
         const { serverPath } = req.query || {};
-        const handlers = playerHandlers.createPlayerHandlers();
-        const data = handlers['get-last-banned-player']({ sender: { id: 'browser' } }, serverPath);
+        const data = this.browserWriterHandlers.player['get-last-banned-player'](
+          { sender: { id: 'browser' } }, serverPath
+        );
         res.json({ success: true, ...data });
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
@@ -1399,8 +1433,9 @@ class BrowserPanelServer {
     this.app.get('/api/server-properties/read', (req, res) => {
       try {
         const { serverPath } = req.query || {};
-        const handlers = serverPropsHandlers.createServerPropertiesHandlers();
-        const p = handlers['read-server-properties']({ sender: { id: 'browser' } }, serverPath);
+        const p = this.browserWriterHandlers.serverProperties['read-server-properties'](
+          { sender: { id: 'browser' } }, serverPath
+        );
         Promise.resolve(p).then((out) => res.json(out)).catch((e) => res.status(500).json({ success: false, error: e.message }));
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
@@ -1408,8 +1443,9 @@ class BrowserPanelServer {
     this.app.post('/api/server-properties/write', express.json(), (req, res) => {
       try {
         const { serverPath, properties } = req.body || {};
-        const handlers = serverPropsHandlers.createServerPropertiesHandlers();
-        const p = handlers['write-server-properties']({ sender: { id: 'browser' } }, { serverPath, properties });
+        const p = this.browserWriterHandlers.serverProperties['write-server-properties'](
+          { sender: { id: 'browser' } }, { serverPath, properties }
+        );
         Promise.resolve(p).then((out) => res.json(out)).catch((e) => res.status(500).json({ success: false, error: e.message }));
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
@@ -1417,8 +1453,9 @@ class BrowserPanelServer {
     this.app.post('/api/server-properties/restore-default', express.json(), (req, res) => {
       try {
         const { serverPath } = req.body || {};
-        const handlers = serverPropsHandlers.createServerPropertiesHandlers();
-        const p = handlers['restore-backup-properties']({ sender: { id: 'browser' } }, serverPath);
+        const p = this.browserWriterHandlers.serverProperties['restore-backup-properties'](
+          { sender: { id: 'browser' } }, serverPath
+        );
         Promise.resolve(p).then((out) => res.json(out)).catch((e) => res.status(500).json({ success: false, error: e.message }));
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
     });
@@ -1438,10 +1475,16 @@ class BrowserPanelServer {
     this.app.post('/api/java/ensure', express.json(), async (req, res) => {
       try {
         const { minecraftVersion, serverPath } = req.body || {};
-        if (serverPath) this.serverJavaManager.setServerPath(serverPath);
-        const out = await this.serverJavaManager.ensureJavaForMinecraft(
-          minecraftVersion,
-          (progress) => emitEvent('server-java-download-progress', { minecraftVersion, serverPath, ...progress })
+        const out = await this.runCoordinatedWriter(
+          'server-java-ensure',
+          [{ serverPath }],
+          async () => {
+            if (serverPath) this.serverJavaManager.setServerPath(serverPath);
+            return this.serverJavaManager.ensureJavaForMinecraft(
+              minecraftVersion,
+              (progress) => emitEvent('server-java-download-progress', { minecraftVersion, serverPath, ...progress })
+            );
+          }
         );
         res.json(out);
       } catch (e) { res.status(500).json({ success: false, error: e.message }); }
@@ -1479,7 +1522,7 @@ class BrowserPanelServer {
     this.app.get('/api/mods/list', (req, res) => {
       try {
         const { serverPath, contentType = 'mods' } = req.query || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         let p;
         if (contentType === 'shaders') p = handlers['list-shaders']({ sender: { id: 'browser' } }, serverPath);
         else if (contentType === 'resourcepacks') p = handlers['list-resourcepacks']({ sender: { id: 'browser' } }, serverPath);
@@ -1494,7 +1537,7 @@ class BrowserPanelServer {
     this.app.get('/api/mods/installed-info', (req, res) => {
       try {
         const { serverPath } = req.query || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['get-installed-mod-info']({ sender: { id: 'browser' } }, serverPath);
         Promise.resolve(p)
           .then((out) => res.json(out))
@@ -1506,7 +1549,7 @@ class BrowserPanelServer {
     this.app.post('/api/mods/save-disabled', express.json(), (req, res) => {
       try {
         const { serverPath, disabledMods } = req.body || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['save-disabled-mods']({ sender: { id: 'browser' } }, serverPath, disabledMods || []);
         Promise.resolve(p)
           .then((out) => res.json(out))
@@ -1518,7 +1561,7 @@ class BrowserPanelServer {
     this.app.post('/api/mods/delete', express.json(), (req, res) => {
       try {
         const { serverPath, itemName, contentType = 'mods' } = req.body || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         let p;
         if (contentType === 'shaders') p = handlers['delete-shader']({ sender: { id: 'browser' } }, serverPath, itemName);
         else if (contentType === 'resourcepacks') p = handlers['delete-resourcepack']({ sender: { id: 'browser' } }, serverPath, itemName);
@@ -1533,7 +1576,7 @@ class BrowserPanelServer {
     this.app.post('/api/mods/move-file', express.json(), (req, res) => {
       try {
         const { fileName, newCategory, serverPath } = req.body || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['move-mod-file']({ sender: { id: 'browser' } }, { fileName, newCategory, serverPath });
         Promise.resolve(p)
           .then((out) => { try { emitEvent('mods-changed', { serverPath, action: 'move', fileName, newCategory, contentType: 'mods' }); } catch { /* ignore emit error */ } res.json(out); })
@@ -1545,7 +1588,7 @@ class BrowserPanelServer {
     this.app.post('/api/mods/install', express.json(), (req, res) => {
       try {
         const { serverPath, contentData, contentType = 'mods' } = req.body || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         let p;
         if (contentType === 'shaders') p = handlers['install-shader-with-fallback']({ sender: { id: 'browser' } }, serverPath, contentData);
         else if (contentType === 'resourcepacks') p = handlers['install-resourcepack-with-fallback']({ sender: { id: 'browser' } }, serverPath, contentData);
@@ -1560,7 +1603,7 @@ class BrowserPanelServer {
     this.app.post('/api/mods/check-disabled-updates', express.json(), (req, res) => {
       try {
         const { serverPath, mcVersion } = req.body || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['check-disabled-mod-updates']({ sender: { id: 'browser' } }, { serverPath, mcVersion });
         Promise.resolve(p)
           .then((out) => res.json(out))
@@ -1572,7 +1615,7 @@ class BrowserPanelServer {
     this.app.post('/api/mods/enable-and-update', express.json(), (req, res) => {
       try {
         const body = req.body || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['enable-and-update-mod']({ sender: { id: 'browser' } }, body);
         Promise.resolve(p)
           .then((out) => res.json(out))
@@ -1646,7 +1689,7 @@ class BrowserPanelServer {
     // Mod categories persistence
     this.app.get('/api/mods/categories', (_req, res) => {
       try {
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['get-mod-categories']({ sender: { id: 'browser' } });
         Promise.resolve(p)
           .then((out) => res.json(out))
@@ -1656,7 +1699,7 @@ class BrowserPanelServer {
     this.app.post('/api/mods/categories', express.json(), (req, res) => {
       try {
         const { categories } = req.body || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['save-mod-categories']({ sender: { id: 'browser' } }, categories || []);
         Promise.resolve(p)
           .then((out) => res.json(out))
@@ -1668,7 +1711,7 @@ class BrowserPanelServer {
     this.app.get('/api/mods/disabled', (req, res) => {
       try {
         const { serverPath } = req.query || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['get-disabled-mods']({ sender: { id: 'browser' } }, serverPath);
         Promise.resolve(p)
           .then((out) => res.json(out))
@@ -1680,7 +1723,7 @@ class BrowserPanelServer {
     this.app.post('/api/mods/check-compatibility', express.json(), (req, res) => {
       try {
         const args = req.body || {};
-        const handlers = serverModHandlers.createServerModHandlers(null);
+        const handlers = this.browserWriterHandlers.serverMods;
         const p = handlers['check-mod-compatibility']({ sender: { id: 'browser' } }, args);
         Promise.resolve(p)
           .then((out) => res.json(out))

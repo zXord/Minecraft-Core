@@ -16,6 +16,7 @@ const {
   safeBaseName,
   safeFilePath
 } = require('../../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../../services/server-mutation-context.cjs');
 
 function safeJarFileName(value, label = 'mod file name') {
   return safeBaseName(value, label, { allowedExtensions: ['.jar'] });
@@ -34,13 +35,6 @@ function safeClientManifestPath(manifestDir, fileName) {
   const safeName = safeBaseName(fileName, 'manifest owner name');
   return safeFilePath(manifestDir, `${safeName}.json`, 'manifest file name', {
     allowedExtensions: ['.json']
-  });
-}
-
-function safeClientModsPath(clientPath, fileName) {
-  const safeName = safeJarFileName(fileName);
-  return safeFilePath(path.join(clientPath, 'mods'), safeName, 'mod file name', {
-    allowedExtensions: ['.jar']
   });
 }
 
@@ -246,28 +240,6 @@ function createClientModHandlers(win) {
                       versionNumber = ver.version_number || ver.versionNumber || versionNumber;
                       projectId = ver.project_id || ver.projectId || projectId;
                       manifestName = manifestName || ver.name || ver.title || manifestName;
-                      // Persist enrichment
-                      try {
-                        const existing = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : {};
-                        const updated = {
-                          ...existing,
-                          projectId: projectId || existing.projectId || null,
-                          versionId: versionId || existing.versionId || null,
-                          versionNumber: versionNumber || existing.versionNumber || null,
-                          name: manifestName || existing.name || null,
-                          source: existing.source || source
-                        };
-                        fs.writeFileSync(manifestPath, JSON.stringify(updated, null, 2));
-                        logger.debug('Enriched asset manifest via hash lookup', {
-                          category: 'mods',
-                          data: { handler: 'list-client-assets', subdir, fileName, projectId: updated.projectId, versionId: updated.versionId, versionNumber: updated.versionNumber }
-                        });
-                      } catch (persistErr) {
-                        logger.debug('Failed to persist manifest after hash enrichment', {
-                          category: 'mods',
-                          data: { handler: 'list-client-assets', subdir, fileName, error: persistErr?.message }
-                        });
-                      }
                     }
                   } catch (hashLookupErr) {
                     logger.debug('Modrinth hash lookup failed or no match', {
@@ -324,21 +296,6 @@ function createClientModHandlers(win) {
                 if (best) {
                   projectId = best.id || best.project_id || null;
                   manifestName = manifestName || best.name || best.title || null;
-                  // Persist enrichment back to manifest for future reads
-                  try {
-                    const existing = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : {};
-                    const updated = { ...existing, projectId, name: manifestName };
-                    fs.writeFileSync(manifestPath, JSON.stringify(updated, null, 2));
-                    logger.debug('Enriched asset manifest with projectId', {
-                      category: 'mods',
-                      data: { handler: 'list-client-assets', subdir, fileName, projectId }
-                    });
-                  } catch (persistErr) {
-                    logger.debug('Failed to persist enriched asset manifest', {
-                      category: 'mods',
-                      data: { handler: 'list-client-assets', subdir, fileName, error: persistErr?.message }
-                    });
-                  }
                 }
               }
             } catch (enrichErr) {
@@ -421,6 +378,11 @@ function createClientModHandlers(win) {
         });
         throw error;
       }
+    },
+
+    'migrate-client-mod-metadata': async (_e, clientPath) => {
+      const safeClientPath = assertKnownClientPath(clientPath);
+      return modFileManager.migrateClientModMetadata(safeClientPath);
     },
 
     'check-client-mod-compatibility': async (_e, options) => {
@@ -602,6 +564,7 @@ function createClientModHandlers(win) {
         const safeClientPath = assertKnownClientPath(clientPath);
         const safeDownloadUrl = safeModDownloadUrl(modInfo.downloadUrl);
         const modsDir = path.join(safeClientPath, 'mods');
+        markCurrentServerMutationDirty(safeClientPath);
         await fs.promises.mkdir(modsDir, { recursive: true });
         const sourceName = String(modInfo.fileName || modInfo.name || modInfo.projectId || 'mod')
           .replace(/[^a-zA-Z0-9_.-]/g, '_');
@@ -773,6 +736,7 @@ function createClientModHandlers(win) {
       }
 
       try {
+        markCurrentServerMutationDirty(clientPath || path.dirname(path.dirname(safeModPath)));
         fs.renameSync(safeModPath, disabledPath);
         
         logger.info('Client mod disabled successfully', {
@@ -839,6 +803,7 @@ function createClientModHandlers(win) {
         const safeClientPath = assertKnownClientPath(clientPath);
         const modsDir = path.join(safeClientPath, 'mods');
         if (!fs.existsSync(modsDir)) {
+          markCurrentServerMutationDirty(safeClientPath);
           fs.mkdirSync(modsDir, { recursive: true });
         }
         let updatedCount = 0;
@@ -875,6 +840,7 @@ function createClientModHandlers(win) {
           const newFileName = safeJarFileName(fileToDownload.filename);
           const safeDownloadUrl = safeModDownloadUrl(fileToDownload.url);
           const newModPath = safeFilePath(modsDir, newFileName, 'mod file name', { allowedExtensions: ['.jar'] });
+          markCurrentServerMutationDirty(safeClientPath);
           if (oldFileName && fs.existsSync(safeFilePath(modsDir, oldFileName, 'mod file name', { allowedExtensions: ['.jar'] }))) {
             await disableMod(modsDir, oldFileName);
           }
@@ -1021,6 +987,7 @@ function createClientModHandlers(win) {
           const safeFileName = safeJarFileName(modToDisable.fileName);
           const modPath = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
           if (fs.existsSync(modPath)) {
+            markCurrentServerMutationDirty(safeClientPath);
             await disableMod(modsDir, safeFileName);
             disabledCount++;
             
@@ -1214,6 +1181,7 @@ function createClientModHandlers(win) {
         }
 
         const modsDir = path.join(safeClientPath, 'mods');
+        markCurrentServerMutationDirty(safeClientPath);
         await fs.promises.mkdir(modsDir, { recursive: true });
 
         let updatedCount = 0;
@@ -1503,6 +1471,7 @@ function createClientModHandlers(win) {
         
         // Delete the manifest file to force re-reading from jar
         if (fs.existsSync(manifestPath)) {
+          markCurrentServerMutationDirty(safeClientPath);
           await fs.promises.unlink(manifestPath);
           logger.debug('Deleted manifest file', {
             category: 'storage',

@@ -223,6 +223,53 @@ test('listBackupsWithMetadata removes stale incomplete backups but keeps fresh o
   });
 });
 
+test('corrupt lifecycle-looking metadata is never deleted by cleanup or ordinary delete', async () => {
+  await withBackupService(async (backupService) => {
+    await withTempServer(async ({ backupDir, serverPath }) => {
+      const name = 'restore-point-corrupt.zip';
+      const zipPath = path.join(backupDir, name);
+      const metadataPath = zipPath.replace(/\.zip$/i, '.json');
+      const staleDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+      await fsp.writeFile(zipPath, 'diagnostic restore bytes');
+      await fsp.writeFile(metadataPath, JSON.stringify({
+        kind: 'minecraft-core-lifecycle-restore-point',
+        pins: [],
+        status: 'in-progress',
+        size: 0,
+        timestamp: staleDate.toISOString()
+      }));
+      await fsp.utimes(zipPath, staleDate, staleDate);
+      await fsp.utimes(metadataPath, staleDate, staleDate);
+
+      const cleanup = await backupService.cleanupIncompleteBackups(serverPath, { olderThanMs: 0, now: Date.now() });
+      assert.equal(cleanup.deleted, 0);
+      assert.equal(fs.existsSync(zipPath), true);
+      assert.equal(fs.existsSync(metadataPath), true);
+      const deletion = await backupService.deleteBackup({ serverPath, name });
+      assert.equal(deletion.success, false);
+      assert.match(deletion.error, /pinned|restore point/i);
+      assert.equal(fs.existsSync(zipPath), true);
+    });
+  });
+});
+
+test('metadata-only lifecycle identity on an ordinary backup name is fail-closed', async () => {
+  await withBackupService(async (backupService) => {
+    await withTempServer(async ({ backupDir, serverPath }) => {
+      const name = 'backup-full-ambiguous.zip';
+      const zipPath = path.join(backupDir, name);
+      await fsp.writeFile(zipPath, 'diagnostic restore bytes');
+      await fsp.writeFile(zipPath.replace(/\.zip$/i, '.json'), JSON.stringify({
+        kind: 'minecraft-core-lifecycle-restore-point',
+        pins: []
+      }));
+      const deletion = await backupService.deleteBackup({ serverPath, name });
+      assert.equal(deletion.success, false);
+      assert.equal(fs.existsSync(zipPath), true);
+    });
+  });
+});
+
 test('createZip reports a stable precomputed source byte total', async () => {
   await withTempServer(async ({ root }) => {
     const sourceDir = path.join(root, 'source');

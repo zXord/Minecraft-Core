@@ -11,9 +11,14 @@
     "dev:vite": "vite dev",
     "dev:electron": "wait-on --timeout 30000 http-get://localhost:5173 && electron . || wait-on --timeout 30000 http-get://localhost:5174 && electron .",
     "test": "node --test",
+    "test:modpacks": "node --test tests/modpacks/*.test.cjs",
+    "test:failure-matrix": "node --test tests/modpacks/lifecycle-failure-matrix.test.cjs",
+    "test:e2e:modpacks": "playwright test tests/e2e/modpack-setup.spec.js tests/e2e/modpack-lifecycle.spec.js tests/e2e/modpack-recovery-accessibility.spec.js --workers=1",
+    "smoke:packaged:modpacks": "node scripts/run-modpack-packaged-smoke.mjs",
     "build": "vite build && node scripts/post-build.mjs",
     "build:icons": "node scripts/generate-icon.cjs",
     "verify:archive-runtime": "node scripts/verify-archive-runtime.cjs",
+    "verify:packaged-archive": "node scripts/verify-packaged-archive.cjs",
     "start": "electron .",
     "prod": "npm run build && npm run start",
     "pack": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder --dir",
@@ -21,7 +26,9 @@
     "release": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder --publish=always"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@eslint/js": "^9.28.0",
+    "@playwright/test": "1.62.1",
     "@typescript-eslint/eslint-plugin": "^8.34.0",
     "@typescript-eslint/parser": "^8.34.0",
     "concurrently": "^9.1.2",
@@ -63,7 +70,8 @@
     "selfsigned": "^5.2.0",
     "svelte": "^5.36.8",
     "svelte-sonner": "^1.0.1",
-    "uuid": "^11.1.1"
+    "uuid": "^11.1.1",
+    "yauzl": "2.10.0"
   },
   "overrides": {
     "undici": "7.28.0",
@@ -82,11 +90,47 @@
     },
     "files": [
       "dist/**/*",
+      "!dist/win-unpacked",
+      "!dist/win-unpacked/**/*",
+      "!dist/Minecraft-Core-Setup-*.exe",
+      "!dist/Minecraft-Core-Setup-*.exe.blockmap",
+      "!dist/latest.yml",
+      "!dist/builder-*.yml",
       "electron/**/*",
       "package.json",
       "icon.png",
       "build-resources/icon.ico",
       "config/dev-config.cjs"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/7zip/${arch}",
+        "to": "archive/7zip",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "vendor/archive-worker/${arch}",
+        "to": "archive/worker",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "third-party/7zip",
+        "to": "archive/licenses",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build-resources/archive-runtime",
+        "to": "archive/manifests",
+        "filter": [
+          "*.json"
+        ]
+      }
     ],
     "copyright": "Copyright © 2025 zXord",
     "win": {
@@ -97,6 +141,7 @@
       "icon": "build-resources/icon.ico",
       "signAndEditExecutable": false
     },
+    "beforePack": "scripts/verify-packaged-archive.cjs",
     "afterPack": "scripts/afterPack.cjs",
     "nsis": {
       "oneClick": false,

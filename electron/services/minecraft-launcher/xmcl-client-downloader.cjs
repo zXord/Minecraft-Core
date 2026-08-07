@@ -12,6 +12,7 @@ const {
   getLoaderVersions,
   normalizeLoader: normalizeLoaderName
 } = require('../loader-install-service.cjs');
+const { markCurrentServerMutationDirty } = require('../server-mutation-context.cjs');
 
 // XMCL Configuration - Optimized to prevent stuck downloads
 const XMCL_CONFIG = {
@@ -547,7 +548,7 @@ class XMCLClientDownloader {
         : loaderProfiles.filter((profile) => profile.loaderType === requestedLoader);
 
       const rankedProfiles = (preferredProfiles.length > 0 ? preferredProfiles : loaderProfiles).slice().sort((a, b) => {
-        if (!!requestedLoaderVersion) {
+        if (requestedLoaderVersion) {
           const aMatches = this.areLoaderVersionsEquivalent(
             requestedLoader,
             a.loaderVersion,
@@ -1205,6 +1206,7 @@ class XMCLClientDownloader {
       
       if (!fs.existsSync(lastVersionFile)) {
         // First time check - save the version and no cleanup needed
+        markCurrentServerMutationDirty(clientPath);
         fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
         return false;
       }
@@ -1213,6 +1215,7 @@ class XMCLClientDownloader {
       
       if (lastVersion !== requiredVersion) {
         // Version changed - update the file
+        markCurrentServerMutationDirty(clientPath);
         fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
         
         return true;
@@ -1255,6 +1258,7 @@ class XMCLClientDownloader {
         // Remove everything else
         const versionPath = path.join(versionsDir, versionDir);
         try {
+          markCurrentServerMutationDirty(clientPath);
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
           // TODO: Add proper logging - Cleaned up old version

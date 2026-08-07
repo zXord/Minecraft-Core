@@ -177,6 +177,16 @@ test('production Windows inspector detects a real directory junction and permits
   await fs.writeFile(regular, Buffer.from('regular'));
   await fs.symlink(target, junction, 'junction');
   const inspector = new WindowsReparseInspector();
+  assert.equal(await inspector.isReparsePoint(process.cwd()), false);
   assert.equal(await inspector.isReparsePoint(regular), false);
   assert.equal(await inspector.isReparsePoint(junction), true);
+});
+
+test('production probe classifies only name-surrogate tags as redirecting reparses', () => {
+  const source = require('node:fs').readFileSync(path.join(__dirname, '..', '..', 'electron', 'services', 'modpacks', 'local', 'windows-reparse-inspector.cjs'), 'utf8');
+  assert.match(source, /FileAttributeTagInfo\s*=\s*9/);
+  assert.match(source, /0x20000000/);
+  assert.match(source, /GetFileInformationByHandle/);
+  assert.match(source, /GetFinalPathNameByHandle/);
+  assert.doesNotMatch(source, /FileAttributes\.ReparsePoint\)\s*!=\s*0\s*\}\s*$/m);
 });

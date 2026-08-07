@@ -8,6 +8,13 @@ on:
       - '.github/workflows/release.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-core-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   check-version:
     runs-on: ubuntu-latest
@@ -24,72 +31,193 @@ jobs:
         run: |
           set -euo pipefail
 
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          
-          # If manually triggered, always build
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Manual trigger - building version $CURRENT_VERSION"
-          else
-            # Build if the current package version has not been released yet.
-            if ! git ls-remote --exit-code --tags origin "refs/tags/v$CURRENT_VERSION" >/dev/null 2>&1; then
-              echo "changed=true" >> $GITHUB_OUTPUT
-              echo "Release tag v$CURRENT_VERSION does not exist yet"
-              exit 0
-            fi
-
-            # For push events, check for version changes
-            PREVIOUS_VERSION=$(git show HEAD~1:package.json | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8')).version")
-            
-            echo "Current version: $CURRENT_VERSION"
-            echo "Previous version: $PREVIOUS_VERSION"
-            
-            if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
-              echo "changed=true" >> $GITHUB_OUTPUT
-              echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
-            else
-              echo "changed=false" >> $GITHUB_OUTPUT
-              echo "No version change detected"
-            fi
+          if [ "$GITHUB_REF" != 'refs/heads/main' ]; then
+            echo "Releases can only be created from refs/heads/main" >&2
+            exit 1
           fi
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          if ! [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "package.json contains an invalid release version" >&2
+            exit 1
+          fi
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/v$CURRENT_VERSION" >/dev/null 2>&1
+          TAG_QUERY_STATUS=$?
+          set -e
+          if [ "$TAG_QUERY_STATUS" -eq 0 ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Release tag v$CURRENT_VERSION already exists; refusing to overwrite an immutable version"
+            exit 0
+          fi
+          if [ "$TAG_QUERY_STATUS" -ne 2 ]; then
+            echo "Could not verify whether release tag v$CURRENT_VERSION exists" >&2
+            exit 1
+          fi
+
+          echo "changed=true" >> $GITHUB_OUTPUT
+          echo "Release tag v$CURRENT_VERSION does not exist yet"
 
   build-and-release:
     needs: check-version
     if: needs.check-version.outputs.version_changed == 'true'
     runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
     
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: 'npm'
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.204'
+
+      - name: Require Windows x64 host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          if ($architecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
+            throw "The release archive worker requires a Windows X64 host; observed $architecture."
+          }
       
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify or acquire pinned 7-Zip runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $requiredRuntimeFiles = @(
+            'vendor/7zip/x64/7z.exe',
+            'vendor/7zip/x64/7z.dll',
+            'vendor/7zip/x64/License.txt'
+          )
+          if ($requiredRuntimeFiles.Where({ -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -gt 0) {
+            powershell -NoProfile -ExecutionPolicy Bypass -File scripts/acquire-7zip.ps1
+            if ($LASTEXITCODE -ne 0) { throw 'Pinned 7-Zip acquisition failed.' }
+          }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/acquire-7zip.ps1 -PolicySelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned 7-Zip acquisition policy self-test failed.' }
+          npm run verify:archive-runtime
+
+      - name: Build pinned Windows x64 archive worker
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-archive-worker.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Archive worker build failed.' }
+
+      - name: Run complete test suite
+        run: npm test
+
+      - name: Run focused modpack suite
+        run: npm run test:modpacks
+
+      - name: Run lifecycle failure matrix
+        run: npm run test:failure-matrix
       
       - name: Build Vite app
         run: npm run build
+
+      - name: Run modpack Electron E2E
+        run: npm run test:e2e:modpacks
+
+      - name: Build unpacked Windows app
+        run: npm run pack
+
+      - name: Verify packaged archive runtime
+        run: npm run verify:packaged-archive
+
+      - name: Run packaged modpack smoke
+        run: npm run smoke:packaged:modpacks
       
-      - name: Build Electron app
+      - name: Build Windows installer
         run: npm run dist
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-verify final installer payload
+        run: npm run verify:packaged-archive
+
+      - name: Re-smoke final installer payload
+        run: npm run smoke:packaged:modpacks
+
+      - name: Verify exact release artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (& node -p "require('./package.json').version").Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw 'Release version is invalid.'
+          }
+          $distRoot = [IO.Path]::GetFullPath('dist')
+          $distItem = Get-Item -LiteralPath $distRoot -Force
+          if (-not $distItem.PSIsContainer -or $null -ne $distItem.LinkType) {
+            throw 'Release output root is not an exact directory.'
+          }
+          $installerName = "Minecraft-Core-Setup-$version.exe"
+          $installerPath = Join-Path $distRoot $installerName
+          $blockmapPath = "$installerPath.blockmap"
+          $latestPath = Join-Path $distRoot 'latest.yml'
+          function Assert-ExactReleaseFile {
+            param([string]$Path, [string]$Name)
+            $item = Get-Item -LiteralPath $Path -Force
+            if ($item.PSIsContainer -or $item.Length -lt 1 -or $null -ne $item.LinkType -or
+                -not [string]::Equals($item.Name, $Name, [StringComparison]::Ordinal)) {
+              throw "Release artifact $Name is not one exact regular file."
+            }
+            $resolved = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $Path).Path)
+            if (-not [string]::Equals($resolved, [IO.Path]::GetFullPath($Path), [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Release artifact $Name redirects."
+            }
+            return $item
+          }
+          $installer = Assert-ExactReleaseFile -Path $installerPath -Name $installerName
+          [void](Assert-ExactReleaseFile -Path $blockmapPath -Name "$installerName.blockmap")
+          [void](Assert-ExactReleaseFile -Path $latestPath -Name 'latest.yml')
+          $installers = @(Get-ChildItem -LiteralPath $distRoot -File -Filter 'Minecraft-Core-Setup-*.exe')
+          $blockmaps = @(Get-ChildItem -LiteralPath $distRoot -File -Filter 'Minecraft-Core-Setup-*.exe.blockmap')
+          if ($installers.Count -ne 1 -or $blockmaps.Count -ne 1) {
+            throw 'Release output contains an ambiguous installer or blockmap set.'
+          }
+          $expectedSha512 = [Convert]::ToBase64String(
+            [Security.Cryptography.SHA512]::HashData([IO.File]::ReadAllBytes($installer.FullName))
+          )
+          $latest = [IO.File]::ReadAllText($latestPath)
+          $escapedVersion = [Regex]::Escape($version)
+          $escapedName = [Regex]::Escape($installerName)
+          $escapedSha512 = [Regex]::Escape($expectedSha512)
+          if ($latest -notmatch "(?m)^version:\s*$escapedVersion\s*$" -or
+              $latest -notmatch "(?m)^path:\s*$escapedName\s*$" -or
+              $latest -notmatch "(?m)^\s*-\s+url:\s*$escapedName\s*$" -or
+              $latest -notmatch "(?m)^sha512:\s*$escapedSha512\s*$") {
+            throw 'latest.yml does not bind the exact installer version, name, and SHA512.'
+          }
       
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
           name: Minecraft Core v${{ needs.check-version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           draft: false
           prerelease: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          overwrite_files: false
+          token: ${{ secrets.GITHUB_TOKEN }}
           files: |
-            dist/*.exe
-            dist/*.blockmap
+            dist/Minecraft-Core-Setup-${{ needs.check-version.outputs.version }}.exe
+            dist/Minecraft-Core-Setup-${{ needs.check-version.outputs.version }}.exe.blockmap
             dist/latest.yml
           body: |
             ### Download
@@ -100,5 +228,3 @@ jobs:
             1. Download the `.exe` file
             2. Run the installer
             3. Follow the setup wizard
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

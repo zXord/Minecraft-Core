@@ -1,0 +1,13 @@
+{
+    "schemaVersion":  1,
+    "architecture":  "x64",
+    "runtimeIdentifier":  "win-x64",
+    "targetFramework":  "net8.0-windows",
+    "sdkVersion":  "10.0.204",
+    "files":  {
+                  "ArchiveWorker.exe":  {
+                                            "size":  67744371,
+                                            "sha256":  "8a7653cfbfece23e2ad6dcd62584021309ce5df0c91e0a76212c3ae1e7d32489"
+                                        }
+              }
+}

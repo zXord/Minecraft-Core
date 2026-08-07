@@ -17,6 +17,7 @@ const {
   safeBaseName,
   safeFilePath
 } = require('../../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../../services/server-mutation-context.cjs');
 
 function assertKnownClientPath(clientPath) {
   if (typeof clientPath !== 'string' || !clientPath.trim()) {
@@ -325,6 +326,7 @@ function createManualModHandlers() {
             
             // Check in enabled mods directory
             if (fs.existsSync(filePath)) {
+              markCurrentServerMutationDirty(safeClientPath);
               fs.unlinkSync(filePath);
               removedFiles.push({ fileName: safeFileName, location: 'enabled' });
               found = true;
@@ -332,6 +334,7 @@ function createManualModHandlers() {
               // Check for disabled mod with .disabled extension
               filePath = safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] });
               if (fs.existsSync(filePath)) {
+                markCurrentServerMutationDirty(safeClientPath);
                 fs.unlinkSync(filePath);
                 removedFiles.push({ fileName: safeFileName, location: 'disabled' });
                 found = true;
@@ -395,6 +398,7 @@ function createManualModHandlers() {
         }
         
         // Move the file
+        markCurrentServerMutationDirty(safeClientPath);
         fs.renameSync(sourceFile, targetFile);
         
         return { 
@@ -450,6 +454,7 @@ function createManualModHandlers() {
           : safeFilePath(modsDir, newFileName, 'mod file name', { allowedExtensions: ['.jar'] });
         
         // Download the new version
+        markCurrentServerMutationDirty(safeClientPath);
         const writer = createWriteStream(targetPath);
         const response = await axios({
           url: safeDownloadUrl,
@@ -740,6 +745,7 @@ function createManualModHandlers() {
         const safeClientPath = assertKnownClientPath(clientPath);
         const modsDir = path.join(safeClientPath, 'mods');
         if (!fs.existsSync(modsDir)) {
+          markCurrentServerMutationDirty(safeClientPath);
           fs.mkdirSync(modsDir, { recursive: true });
         }
 
@@ -764,6 +770,8 @@ function createManualModHandlers() {
             const newFileName = safeJarFileName(fileToDownload.filename);
             const safeDownloadUrl = safeModDownloadUrl(fileToDownload.url);
             const newModPath = safeFilePath(modsDir, newFileName, 'mod file name', { allowedExtensions: ['.jar'] });
+
+            markCurrentServerMutationDirty(safeClientPath);
 
             if (oldFileName && fs.existsSync(safeFilePath(modsDir, oldFileName, 'mod file name', { allowedExtensions: ['.jar'] }))) {
               await disableMod(modsDir, oldFileName);
@@ -847,6 +855,7 @@ function createManualModHandlers() {
             const safeFileName = safeJarFileName(modToDisable.fileName);
             const modPath = safeFilePath(modsDir, safeFileName, 'mod file name', { allowedExtensions: ['.jar'] });
             if (fs.existsSync(modPath)) {
+              markCurrentServerMutationDirty(safeClientPath);
               await disableMod(modsDir, safeFileName);
               disabledCount++;
             } else {

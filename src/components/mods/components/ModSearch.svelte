@@ -464,9 +464,7 @@
     // Only allow switching to modrinth for now
     if (source !== "modrinth") {
       // Show a message to the user
-      successMessage.set(
-        "CurseForge support is coming soon. Using Modrinth for now.",
-      );
+      successMessage.set("CurseForge browsing is unavailable in this build.");
       return;
     }
 
@@ -640,15 +638,16 @@
         </button>
         <button
           type="button"
-          class="source-button coming-soon"
+          class="source-button unavailable"
           disabled={true}
-          title="Coming soon"
+          title="CurseForge browsing is unavailable in this build."
           aria-checked="false"
           role="radio"
         >
-          CurseForge (Coming Soon)
+          CurseForge (Unavailable)
         </button>
       </div>
+      <p class="source-unavailable-copy">CurseForge browsing is unavailable in this build.</p>
 
       <div class="search-input-container">
         <input
@@ -1027,10 +1026,15 @@
     background: rgba(255, 255, 255, 0.2);
   }
 
-  .source-button.coming-soon {
+  .source-button.unavailable {
     opacity: 0.5;
-    text-decoration: line-through;
     cursor: not-allowed;
+  }
+
+  .source-unavailable-copy {
+    margin: -0.15rem 0 0.5rem;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.82rem;
   }
 
   .search-input-container {

@@ -1,12 +1,24 @@
 // Config file management utilities
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');
 const AdmZip = require('adm-zip');
 const { resolveServerLoader } = require('./server-loader.cjs');
 const { unpackSecret } = require('./secure-store.cjs');
+const durableFsModule = require('./durable-fs.cjs');
+const {
+  assertOperationId,
+  normalizeContentRevision,
+  withContentRevisionLock
+} = require('../services/server-content-revision.cjs');
+const { ModpackError } = require('../services/modpacks/errors.cjs');
+const { markCurrentServerMutationDirty } = require('../services/server-mutation-context.cjs');
 
 const SERVER_CONFIG_FILENAME = '.minecraft-core.json';
 const CLIENT_CONFIG_FILENAME = 'client-config.json';
+const WRITE_OPTION_KEYS = new Set([
+  'expectedContentRevision', 'nextContentRevision', 'allowRevisionOverride', 'operationId', 'durableFs'
+]);
 
 const DEFAULT_AUTO_RESTART = Object.freeze({
   enabled: false,
@@ -83,6 +95,7 @@ function getDefaultServerConfig(defaultSettings = {}) {
     : (isPlainObject(defaultSettings.backupSettings) ? defaultSettings.backupSettings : {});
 
   return {
+    contentRevision: 0,
     version: defaultSettings.version ?? null,
     fabric: defaultSettings.fabric ?? null,
     loader: defaultSettings.loader ?? null,
@@ -474,6 +487,7 @@ function normalizeServerConfig(config = {}, defaultSettings = {}, serverPath = n
   const normalized = {
     ...defaults,
     ...source,
+    contentRevision: normalizeContentRevision(source.contentRevision, defaults.contentRevision),
     port: coerceNumber(source.port, defaults.port),
     maxRam: coerceNumber(source.maxRam, defaults.maxRam),
     managementPort: coerceNumber(source.managementPort, defaults.managementPort),
@@ -495,6 +509,14 @@ function normalizeServerConfig(config = {}, defaultSettings = {}, serverPath = n
       ? source.managedBy
       : defaults.managedBy
   };
+
+  if (Object.prototype.hasOwnProperty.call(source, 'contentRevision') &&
+      (!Number.isSafeInteger(source.contentRevision) || source.contentRevision < 0)) {
+    getLogger().warn('Normalized an invalid server content revision to zero', {
+      category: 'settings',
+      data: { function: 'normalizeServerConfig', reason: 'invalid_content_revision' }
+    });
+  }
 
   return serverPath ? enrichServerConfig(normalized, serverPath) : normalized;
 }
@@ -524,7 +546,8 @@ function normalizeClientConfig(config = {}) {
     serverProtocol: serverProtocol === 'http' ? 'http' : 'https',
     clientId,
     clientName,
-    lastConnected: typeof config.lastConnected === 'string' ? config.lastConnected : ''
+    lastConnected: typeof config.lastConnected === 'string' ? config.lastConnected : '',
+    contentRevision: normalizeContentRevision(config.contentRevision, 0)
   };
 
   const unpackClientSecret = (value, fieldName) => {
@@ -693,26 +716,136 @@ function readServerConfig(serverPath, defaultSettings = {}) {
   return normalizeServerConfig(parsedConfig, defaultSettings, serverPath);
 }
 
-function writeServerConfig(serverPath, config, defaultSettings = {}) {
+function invalidRevisionRequest() {
+  return new ModpackError('INVALID_REQUEST', 'The content revision request is invalid');
+}
+
+function staleRevision() {
+  return new ModpackError('PLAN_STALE', 'The server changed after this operation was planned');
+}
+
+function assertExplicitRevision(value) {
+  if (!Number.isSafeInteger(value) || value < 0) throw invalidRevisionRequest();
+  return value;
+}
+
+function isStrictPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function assertWriteOptions(options) {
+  if (!isStrictPlainObject(options) || Object.keys(options).some(key => !WRITE_OPTION_KEYS.has(key))) {
+    throw invalidRevisionRequest();
+  }
+  if (options.allowRevisionOverride !== undefined && typeof options.allowRevisionOverride !== 'boolean') {
+    throw invalidRevisionRequest();
+  }
+  const hasNext = options.nextContentRevision !== undefined;
+  if ((options.allowRevisionOverride === true) !== hasNext) throw invalidRevisionRequest();
+  if (options.operationId !== undefined) assertOperationId(options.operationId);
+  if (options.durableFs !== undefined && (!isStrictPlainObject(options.durableFs) ||
+      typeof options.durableFs.readFileBounded !== 'function' ||
+      typeof options.durableFs.writeJsonAtomic !== 'function' || typeof options.durableFs.sha256File !== 'function')) {
+    throw invalidRevisionRequest();
+  }
+  return options;
+}
+
+function readPersistedConfigForWrite(configPath, durableFs) {
+  try {
+    const bytes = durableFs.readFileBounded(configPath, {
+      allowMissing: true,
+      maxBytes: durableFsModule.MAX_JSON_BYTES
+    });
+    if (bytes === null) return { exists: false, value: {}, sha256: null };
+    const value = durableFsModule.strictJsonClone(JSON.parse(bytes.toString('utf8')));
+    if (!isStrictPlainObject(value)) throw new TypeError('Config must be a plain object');
+    return {
+      exists: true,
+      value,
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex')
+    };
+  } catch (error) {
+    if (error instanceof ModpackError) throw error;
+    throw new ModpackError('COMMIT_FAILED', 'The existing server configuration cannot be updated safely', { cause: error });
+  }
+}
+
+function writeServerConfigLocked(serverPath, safeConfig, defaultSettings, options, durableFs, persistedOverride = null) {
+  const configPath = getServerConfigPath(serverPath);
+  const persisted = persistedOverride || readPersistedConfigForWrite(configPath, durableFs);
+  const current = normalizeServerConfig(persisted.value, defaultSettings, serverPath);
+  const currentRevision = normalizeContentRevision(current.contentRevision, 0);
+
+  if (options.expectedContentRevision !== undefined) {
+    const expected = assertExplicitRevision(options.expectedContentRevision);
+    if (expected !== currentRevision) throw staleRevision();
+  }
+
+  let nextRevision = currentRevision;
+  if (options.nextContentRevision !== undefined) {
+    if (options.expectedContentRevision === undefined) throw invalidRevisionRequest();
+    nextRevision = assertExplicitRevision(options.nextContentRevision);
+    if (currentRevision >= Number.MAX_SAFE_INTEGER || nextRevision !== currentRevision + 1) {
+      throw invalidRevisionRequest();
+    }
+  } else if (Object.prototype.hasOwnProperty.call(safeConfig, 'contentRevision')) {
+    const submittedRevision = assertExplicitRevision(safeConfig.contentRevision);
+    if (submittedRevision !== currentRevision) throw staleRevision();
+  }
+
+  const normalized = normalizeServerConfig({ ...current, ...safeConfig }, defaultSettings, serverPath);
+  normalized.contentRevision = nextRevision;
+  markCurrentServerMutationDirty(serverPath);
+  durableFs.writeJsonAtomic(configPath, normalized, {
+    expectedTargetSha256: persisted.exists ? persisted.sha256 : null
+  });
+  return normalized;
+}
+
+function writeServerConfig(serverPath, config, defaultSettings = {}, options = {}) {
   if (!serverPath) {
     return null;
   }
 
-  if (!fs.existsSync(serverPath)) {
-    fs.mkdirSync(serverPath, { recursive: true });
+  assertWriteOptions(options);
+  if (!fs.existsSync(serverPath) || !fs.lstatSync(serverPath).isDirectory()) throw invalidRevisionRequest();
+  if (!isStrictPlainObject(config)) throw invalidRevisionRequest();
+  let safeConfig;
+  try {
+    safeConfig = durableFsModule.strictJsonClone(config);
+  } catch (error) {
+    throw new ModpackError('INVALID_REQUEST', 'The server configuration is invalid', { cause: error });
   }
-
-  const normalized = normalizeServerConfig(config, defaultSettings, serverPath);
-  const configPath = getServerConfigPath(serverPath);
-  fs.writeFileSync(configPath, JSON.stringify(normalized, null, 2), 'utf8');
-  return normalized;
+  const operationId = options.operationId || `config-${crypto.randomUUID()}`;
+  const durableFs = options.durableFs || durableFsModule;
+  return withContentRevisionLock(serverPath, operationId, () => {
+    return writeServerConfigLocked(serverPath, safeConfig, defaultSettings, options, durableFs);
+  });
 }
 
-function updateServerConfig(serverPath, updates, defaultSettings = {}) {
-  const current = readServerConfig(serverPath, defaultSettings)
-    || getDefaultServerConfig(defaultSettings);
-  const nextPartial = typeof updates === 'function' ? updates(cloneValue(current)) : { ...current, ...(updates || {}) };
-  return writeServerConfig(serverPath, nextPartial, defaultSettings);
+function updateServerConfig(serverPath, updates, defaultSettings = {}, options = {}) {
+  if (!fs.existsSync(serverPath) || !fs.lstatSync(serverPath).isDirectory()) throw invalidRevisionRequest();
+  if (typeof updates === 'function') {
+    assertWriteOptions(options);
+    const durableFs = options.durableFs || durableFsModule;
+    const operationId = options.operationId || `config-${crypto.randomUUID()}`;
+    return withContentRevisionLock(serverPath, operationId, () => {
+      const persisted = readPersistedConfigForWrite(getServerConfigPath(serverPath), durableFs);
+      const current = normalizeServerConfig(persisted.value, defaultSettings, serverPath);
+      const result = updates(cloneValue(current));
+      if (!isStrictPlainObject(result)) throw invalidRevisionRequest();
+      let safeResult;
+      try {
+        safeResult = durableFsModule.strictJsonClone(result);
+      } catch (error) {
+        throw new ModpackError('INVALID_REQUEST', 'The server configuration is invalid', { cause: error });
+      }
+      return writeServerConfigLocked(serverPath, safeResult, defaultSettings, options, durableFs, persisted);
+    });
+  }
+  if (!isStrictPlainObject(updates)) throw invalidRevisionRequest();
+  return writeServerConfig(serverPath, updates, defaultSettings, options);
 }
 
 /**

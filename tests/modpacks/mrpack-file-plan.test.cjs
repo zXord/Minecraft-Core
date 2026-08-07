@@ -2,7 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { validateMrpackManifest } = require('../../electron/services/modpacks/mrpack/mrpack-parser.cjs');
-const { buildMrpackServerPlan } = require('../../electron/services/modpacks/mrpack/mrpack-file-plan.cjs');
+const {
+  buildMrpackServerPlan,
+  listOptionalFileChoices,
+  resolveOptionalFileChoiceIds
+} = require('../../electron/services/modpacks/mrpack/mrpack-file-plan.cjs');
 const { ARCHIVE_LIMITS } = require('../../electron/services/modpacks/limits.cjs');
 
 function archiveFile(path, size) {
@@ -59,6 +63,30 @@ test('server optional files default included and accept only an exact selected o
   assert.equal(included.downloads[1].selected, true);
   assert.throws(() => buildMrpackServerPlan({ manifest: pack, selectedOptionalFiles: ['mods/not-declared.jar'], archiveEntries: [] }), error => error.code === 'INVALID_REQUEST');
   assert.throws(() => buildMrpackServerPlan({ manifest: pack, selectedOptionalFiles: ['mods/optional.jar', 'MODS/OPTIONAL.JAR'], archiveEntries: [] }), error => error.code === 'INVALID_REQUEST');
+});
+
+test('renderer-facing optional selections use deterministic opaque IDs that resolve only inside the reviewed manifest', () => {
+  const pack = manifest([
+    file('mods/required.jar'),
+    file('mods/optional-a.jar', 'optional'),
+    file('config/optional-b.toml', 'optional', {
+      hashes: { sha1: 'c'.repeat(40), sha512: 'd'.repeat(128) }
+    })
+  ]);
+  const choices = listOptionalFileChoices(pack);
+  assert.equal(choices.length, 2);
+  assert.deepEqual(choices.map(choice => ({ label: choice.label, defaultSelected: choice.defaultSelected })), [
+    { label: 'config/optional-b.toml', defaultSelected: true },
+    { label: 'mods/optional-a.jar', defaultSelected: true }
+  ]);
+  assert.equal(new Set(choices.map(choice => choice.id)).size, 2);
+  for (const choice of choices) {
+    assert.match(choice.id, /^optional-[a-f0-9]{48}$/);
+    assert.doesNotMatch(choice.id, /mods|config|jar|toml/i);
+  }
+  assert.deepEqual(resolveOptionalFileChoiceIds(pack, [choices[1].id]), ['mods/optional-a.jar']);
+  assert.throws(() => resolveOptionalFileChoiceIds(pack, ['optional-' + 'f'.repeat(48)]), error => error.code === 'INVALID_REQUEST');
+  assert.throws(() => resolveOptionalFileChoiceIds(pack, [choices[0].id, choices[0].id]), error => error.code === 'INVALID_REQUEST');
 });
 
 test('excludes server-unsupported entries and rejects an explicitly client-only pack', () => {

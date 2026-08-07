@@ -19,6 +19,7 @@ const {
   safeBaseName,
   safeFilePath
 } = require('../../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../../services/server-mutation-context.cjs');
 
 const ALLOWED_CHECKSUM_ALGORITHMS = new Set(['sha1', 'sha256', 'sha512', 'md5']);
 const ALLOWED_MOD_FILE_SUFFIXES = ['.jar', '.jar.disabled', '.zip', '.json'];
@@ -187,6 +188,10 @@ function createServerModHandlers(win) {
         });
         throw error;
       }
+    },
+
+    'migrate-server-mod-metadata': async (_e, serverPath) => {
+      return modFileManager.migrateServerModMetadata(serverPath);
     },
 
     'save-disabled-mods': async (_e, serverPath, disabledMods) => {
@@ -1535,6 +1540,7 @@ function createServerModHandlers(win) {
       });
 
       try {
+        markCurrentServerMutationDirty(safeFilePathForIntegrity);
         await fileIntegrityService.storeFileChecksum(safeFilePathForIntegrity, checksum, safeAlgorithm, metadata);
         
         logger.debug('File checksum stored successfully', {
@@ -1792,6 +1798,7 @@ function createServerModHandlers(win) {
           if (redownloadResult.success) {
             // Replace the corrupted file with the new download
             const fsPromises = require('fs/promises');
+            markCurrentServerMutationDirty(serverPath);
             await fsPromises.copyFile(redownloadResult.filePath, filePath);
             await fsPromises.unlink(redownloadResult.filePath); // Clean up temp file
             
@@ -2319,6 +2326,9 @@ function createServerModHandlers(win) {
 
         // Remove the old disabled files BEFORE installing new version
         let removedFiles = [];
+        if (serverDisabledExists || clientDisabledExists || legacyDisabledExists) {
+          markCurrentServerMutationDirty(serverPath);
+        }
         if (serverDisabledExists) {
           fs.unlinkSync(disabledFilePath);
           removedFiles.push('server');
@@ -2926,13 +2936,9 @@ function createServerModHandlers(win) {
       try {
         const shadersPath = path.join(serverPath, 'client', 'shaderpacks');
         
-        // Create shaderpacks directory if it doesn't exist
+        // Listing is read-only; an absent content directory is an empty list.
         if (!fs.existsSync(shadersPath)) {
-          fs.mkdirSync(shadersPath, { recursive: true });
-          logger.info('Created shaderpacks directory', {
-            category: 'mods',
-            data: { handler: 'list-shaders', shadersPath }
-          });
+          return { shaderFiles: [], mods: [] };
         }
 
         const files = fs.readdirSync(shadersPath);
@@ -3084,13 +3090,9 @@ function createServerModHandlers(win) {
       try {
         const resourcePacksPath = path.join(serverPath, 'client', 'resourcepacks');
         
-        // Create resourcepacks directory if it doesn't exist
+        // Listing is read-only; an absent content directory is an empty list.
         if (!fs.existsSync(resourcePacksPath)) {
-          fs.mkdirSync(resourcePacksPath, { recursive: true });
-          logger.info('Created resourcepacks directory', {
-            category: 'mods',
-            data: { handler: 'list-resourcepacks', resourcePacksPath }
-          });
+          return { resourcePackFiles: [], mods: [] };
         }
 
         const files = fs.readdirSync(resourcePacksPath);
@@ -3246,6 +3248,7 @@ function createServerModHandlers(win) {
         });
         
         if (fs.existsSync(shaderPath)) {
+          markCurrentServerMutationDirty(serverPath);
           fs.unlinkSync(shaderPath);
           
           logger.info('Server shader deleted successfully', {
@@ -3302,6 +3305,7 @@ function createServerModHandlers(win) {
         });
         
         if (fs.existsSync(resourcePackPath)) {
+          markCurrentServerMutationDirty(serverPath);
           fs.unlinkSync(resourcePackPath);
           
           logger.info('Server resource pack deleted successfully', {

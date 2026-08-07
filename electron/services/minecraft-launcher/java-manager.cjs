@@ -15,6 +15,8 @@ const {
 
 // Java Manager class to handle downloading and managing Java runtimes
 class JavaManager {
+  beforeFilesystemMutation() {}
+
   constructor(clientPath = null) {
     this.platform = this.getPlatformString();
     this.architecture = this.getArchitectureString();
@@ -31,6 +33,7 @@ class JavaManager {
     
     // Ensure Java directory exists
     if (!fs.existsSync(this.javaBaseDir)) {
+      this.beforeFilesystemMutation(this.javaBaseDir);
       fs.mkdirSync(this.javaBaseDir, { recursive: true });
     }
   }
@@ -45,6 +48,7 @@ class JavaManager {
     
     // Ensure Java directory exists
     if (!fs.existsSync(this.javaBaseDir)) {
+      this.beforeFilesystemMutation(this.javaBaseDir);
       fs.mkdirSync(this.javaBaseDir, { recursive: true });
     }
   }
@@ -417,12 +421,14 @@ class JavaManager {
     
     const tempDir = path.join(this.javaBaseDir, 'temp');
     if (!fs.existsSync(tempDir)) {
+      this.beforeFilesystemMutation(tempDir);
       fs.mkdirSync(tempDir, { recursive: true });
     }
     
     const tempFile = safeFilePath(tempDir, filename, 'Java archive file name', {
       allowedExtensions: ['.zip', '.tar.gz']
     });
+    this.beforeFilesystemMutation(tempFile);
     const fileStream = fs.createWriteStream(tempFile);
     
     // Track download progress
@@ -451,6 +457,7 @@ class JavaManager {
 
     const actualChecksum = this.calculateFileHash(tempFile, 'sha256').toLowerCase();
     if (actualChecksum !== expectedChecksum) {
+      this.beforeFilesystemMutation(tempFile);
       fs.unlinkSync(tempFile);
       throw new Error('Java runtime checksum verification failed');
     }
@@ -463,6 +470,7 @@ class JavaManager {
     await this.extractJava(tempFile, javaVersion);
     
     // Clean up temp file
+    this.beforeFilesystemMutation(tempFile);
     fs.unlinkSync(tempFile);
     
     // CRITICAL: Verify that flattening actually produced a findable Java executable
@@ -513,6 +521,7 @@ class JavaManager {
     
     // Remove existing installation
     if (fs.existsSync(extractPath)) {
+      this.beforeFilesystemMutation(extractPath);
       fs.rmSync(extractPath, { recursive: true, force: true });
     }
     
@@ -529,11 +538,15 @@ class JavaManager {
       await this.removeDirectoryWithRetry(extractPath, 3);
     }
 
-    fs.mkdirSync(extractPath, { recursive: true });
+    if (!fs.existsSync(extractPath)) {
+      this.beforeFilesystemMutation(extractPath);
+      fs.mkdirSync(extractPath, { recursive: true });
+    }
 
     const AdmZip = require('adm-zip');
     const zip = new (/** @type {any} */ (AdmZip))(zipPath);
     this.assertArchiveEntriesSafe(zip.getEntries().map((entry) => entry.entryName), extractPath);
+    this.beforeFilesystemMutation(extractPath);
     zip.extractAllTo(extractPath, true);
     await this.flattenJavaDirectory(extractPath);
   }
@@ -558,6 +571,7 @@ class JavaManager {
       const nested = path.join(extractPath, nestedRoots[0]);
 
       const tmp = extractPath + `_tmp_${Date.now()}`;
+      this.beforeFilesystemMutation(extractPath);
       fs.renameSync(nested, tmp);
       // wipe out the original extractPath (it should now be empty)
       fs.rmSync(extractPath, { recursive: true, force: true });
@@ -575,8 +589,12 @@ class JavaManager {
     this.assertArchiveEntriesSafe(String(listing.stdout || '').split(/\r?\n/).filter(Boolean), extractPath);
     
     return new Promise((resolve, reject) => {
-      fs.mkdirSync(extractPath, { recursive: true });
+      if (!fs.existsSync(extractPath)) {
+        this.beforeFilesystemMutation(extractPath);
+        fs.mkdirSync(extractPath, { recursive: true });
+      }
       
+      this.beforeFilesystemMutation(extractPath);
       const tar = spawn('tar', ['-xzf', tarPath, '-C', extractPath], {
         stdio: ['ignore', 'pipe', 'pipe']
       });
@@ -650,6 +668,10 @@ class JavaManager {
   // The original `JavaManager` had two `removeDirectoryWithRetry` methods. I'll assume the more comprehensive one (the second one in the original file) is the one to keep.
   // Upon review, the second one is more robust. I've used that one here.
   async removeDirectoryWithRetry(dirPath, maxRetries = 5) { // This is the more robust version.
+    if (fs.existsSync(dirPath)) {
+      this.beforeFilesystemMutation(dirPath);
+    }
+
     // First, try to kill any Java processes that might be holding files
     await this.killClientJavaProcesses(dirPath);
     

@@ -1,3 +1,5 @@
+const crypto = require('node:crypto');
+
 const { normalizeRuntimeTuple } = require('../contracts.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const { isSafeWindowsBasename, isSafeWindowsBasenamePattern } = require('../windows-basename.cjs');
@@ -159,6 +161,87 @@ function compileAssetPattern(reviewedSelection) {
   });
 }
 
+function reviewedRoleForClassification(value) {
+  if (value === 'mrpack-server') return 'mrpack';
+  if (value === 'prepared-server-pack') return 'server-pack';
+  if (value === 'loader-installer-bundle') return 'prepared-server';
+  invalid('classificationKind');
+}
+
+function matcherFromVersion(fileName, version) {
+  actualFileName(fileName, 'seed.fileNames');
+  if (typeof version !== 'string' || version.length < 1 || version.length > 128 || hasControl(version)) invalid('version');
+  const tokens = [];
+  if (/^[vV].+/u.test(version)) tokens.push(version.slice(1));
+  tokens.push(version);
+  for (const token of tokens) {
+    if (token.length < 1) continue;
+    const lowerName = fileName.toLocaleLowerCase('en-US');
+    const lowerToken = token.toLocaleLowerCase('en-US');
+    const first = lowerName.indexOf(lowerToken);
+    if (first < 0 || lowerName.indexOf(lowerToken, first + lowerToken.length) >= 0) continue;
+    const candidate = `${fileName.slice(0, first)}*${fileName.slice(first + token.length)}`;
+    try {
+      compileMatcher(candidate, 'seed.fileNames');
+      return candidate;
+    } catch {}
+  }
+  return fileName;
+}
+
+function structuralRootFingerprint(inspectionResult, classificationKind) {
+  if (!plain(inspectionResult) || !Array.isArray(inspectionResult.entries) || inspectionResult.entries.length > 250_000) {
+    invalid('inspectionResult');
+  }
+  const selectedRoot = inspectionResult.selectedRoot ?? null;
+  if (selectedRoot !== null && (typeof selectedRoot !== 'string' || selectedRoot.length < 1 || selectedRoot.length > 1024 || hasControl(selectedRoot))) {
+    invalid('inspectionResult.selectedRoot');
+  }
+  const root = selectedRoot?.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '') || null;
+  const features = new Set();
+  for (let index = 0; index < inspectionResult.entries.length; index += 1) {
+    const entry = inspectionResult.entries[index];
+    if (!plain(entry)) invalid(`inspectionResult.entries.${index}`);
+    const rawName = entry.canonicalName ?? entry.path ?? entry.entryName;
+    if (typeof rawName !== 'string' || rawName.length < 1 || rawName.length > 16_384 || hasControl(rawName)) invalid(`inspectionResult.entries.${index}`);
+    let relative = rawName.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '');
+    if (root) {
+      if (relative.toLocaleLowerCase('en-US') === root.toLocaleLowerCase('en-US')) continue;
+      if (!relative.toLocaleLowerCase('en-US').startsWith(`${root.toLocaleLowerCase('en-US')}/`)) continue;
+      relative = relative.slice(root.length + 1);
+    }
+    const parts = relative.split('/').filter(Boolean);
+    if (parts.length < 1) continue;
+    if (parts.length > 1) features.add(`directory:${parts[0].normalize('NFC').toLocaleLowerCase('en-US')}`);
+    else features.add(`file:${parts[0].normalize('NFC').toLocaleLowerCase('en-US')}`);
+  }
+  return crypto.createHash('sha256').update(JSON.stringify({
+    classificationKind,
+    features: [...features].sort((left, right) => left.localeCompare(right, 'en-US'))
+  }), 'utf8').digest('hex');
+}
+
+function compileAssetPatternForInspection({
+  seed, version, classificationKind, inspectionResult, runtimeEvidence, userOverrides
+} = {}) {
+  if (!plain(seed)) invalid('seed');
+  known(seed, ['fileNames', 'multipartStructure'], 'seed');
+  const structure = normalizeStructure(seed.multipartStructure, 'seed.multipartStructure');
+  if (!Array.isArray(seed.fileNames) || seed.fileNames.length !== structure.partCount) invalid('seed.fileNames');
+  const fileNames = seed.fileNames.map((name, index) => {
+    actualFileName(name, `seed.fileNames.${index}`);
+    return name;
+  });
+  return compileAssetPattern({
+    filenameMatchers: fileNames.map(name => matcherFromVersion(name, version)),
+    reviewedRole: reviewedRoleForClassification(classificationKind),
+    archiveRootFingerprint: structuralRootFingerprint(inspectionResult, classificationKind),
+    runtimeEvidence,
+    multipartStructure: structure,
+    userOverrides
+  });
+}
+
 function normalizePattern(pattern, overrideBudget) {
   if (!plain(pattern)) invalid('pattern');
   known(pattern, [
@@ -252,4 +335,35 @@ function matchAssetPattern(pattern, releaseAssets) {
   return deepFreeze({ type: 'HIGH_CONFIDENCE', selectedAssetIds: matches[0].assetIds });
 }
 
-module.exports = { compileAssetPattern, matchAssetPattern };
+function normalizeProvisionalCandidate(candidate, index) {
+  const field = `releaseAssets.${index}`;
+  if (!plain(candidate)) invalid(field);
+  known(candidate, ['assetIds', 'fileNames', 'multipartStructure', 'complete'], field);
+  if (!Array.isArray(candidate.assetIds) || candidate.assetIds.length < 1 || candidate.assetIds.length > 1000) invalid(`${field}.assetIds`);
+  const assetIds = candidate.assetIds.map((id, assetIndex) => decimalId(id, `${field}.assetIds.${assetIndex}`));
+  if (new Set(assetIds).size !== assetIds.length || !Array.isArray(candidate.fileNames) || candidate.fileNames.length !== assetIds.length) invalid(field);
+  const fileNames = candidate.fileNames.map((name, assetIndex) => actualFileName(name, `${field}.fileNames.${assetIndex}`));
+  const multipartStructure = normalizeStructure(candidate.multipartStructure, `${field}.multipartStructure`);
+  if (multipartStructure.partCount !== assetIds.length || typeof candidate.complete !== 'boolean') invalid(field);
+  return { assetIds, fileNames, multipartStructure, complete: candidate.complete };
+}
+
+function matchAssetPatternProvisional(pattern, releaseAssets) {
+  if (!Array.isArray(releaseAssets) || releaseAssets.length > 1000) invalid('releaseAssets');
+  assertMatchWorkBudget(pattern, releaseAssets);
+  const expected = normalizePattern(pattern, newOverrideBudget());
+  const matches = releaseAssets.map(normalizeProvisionalCandidate).filter(candidate =>
+    candidate.complete && candidate.fileNames.length === expected.filenameMatchers.length &&
+    candidate.fileNames.every((fileName, index) => matcherMatches(expected.filenameMatchers[index], fileName)) &&
+    same(candidate.multipartStructure, expected.multipartStructure)
+  );
+  if (matches.length !== 1) return deepFreeze({ type: 'ASSET_SELECTION_REQUIRED', count: String(matches.length) });
+  return deepFreeze({ type: 'SINGLE_PROVISIONAL', selectedAssetIds: matches[0].assetIds });
+}
+
+module.exports = {
+  compileAssetPattern,
+  compileAssetPatternForInspection,
+  matchAssetPattern,
+  matchAssetPatternProvisional
+};

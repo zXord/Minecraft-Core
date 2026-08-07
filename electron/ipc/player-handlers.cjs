@@ -4,6 +4,7 @@ const fs = require('fs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
 const appStore = require('../utils/app-store.cjs');
 const { isPathInside } = require('../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../services/server-mutation-context.cjs');
 
 // Keep track of player names associated with IPs
 const playerIpMap = new Map();
@@ -289,19 +290,14 @@ function createPlayerHandlers() {
                   if (specialName) {
                     item.playerName = specialName;
                     
-                    // Also update our in-memory map and persistent file
+                    // Keep hydration read-only. Explicit player-list mutations persist mappings.
                     playerIpMap.set(item.ip, specialName);
-                    mapData[item.ip] = specialName;
-                    fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
                   }
                 }
               }
               
               return item;
             });
-            
-            // Save the processed data back to ensure format consistency
-            fs.writeFileSync(file, JSON.stringify(processedData, null, 2));
             
             logger.info('Successfully processed banned IPs list', {
               category: 'core',
@@ -321,26 +317,6 @@ function createPlayerHandlers() {
         } catch {
           return [];
         }
-    },
-    
-    'write-file': (_e, filePath, content) => {
-        if (!filePath || typeof filePath !== 'string') {
-          throw new Error('Invalid file path');
-        }
-        
-        if (!content || typeof content !== 'string') {
-          throw new Error('Invalid file content');
-        }
-        
-        // Make sure the directory exists
-        const dir = path.dirname(filePath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        
-        // Write the file
-        fs.writeFileSync(filePath, content);
-        return { success: true };
     },
     
     'add-player': (_e, listName, serverPath, entry) => {
@@ -398,6 +374,7 @@ function createPlayerHandlers() {
             mapData = JSON.parse(fs.readFileSync(playerMapFile, 'utf-8'));
           }
           mapData[entry] = playerName;
+          markCurrentServerMutationDirty(serverPath);
           fs.writeFileSync(playerMapFile, JSON.stringify(mapData, null, 2));
         }// Format objects based on the list type
         let newEntry = entry;
@@ -426,8 +403,9 @@ function createPlayerHandlers() {
         }
         
         // Add to list if not already there
+        let added = false;
         if (Array.isArray(list)) {
-          const exists = list.some(item => 
+          const exists = list.some(item =>
             (typeof item === 'string' && item === entry) ||
             (item && typeof item === 'object' && 
               ((item.name && item.name === entry) || (item.ip && item.ip === entry)))
@@ -435,10 +413,14 @@ function createPlayerHandlers() {
           
           if (!exists) {
             list.push(newEntry);
+            added = true;
           }
         } else {
           list = [newEntry];
+          added = true;
         }
+
+        if (!added) return list;
         
         // Ensure directory exists
         const dir = path.dirname(file);
@@ -446,6 +428,7 @@ function createPlayerHandlers() {
           fs.mkdirSync(dir, { recursive: true });
         }
         
+        markCurrentServerMutationDirty(serverPath);
         fs.writeFileSync(file, JSON.stringify(list, null, 2));
         return list;
     },
@@ -489,6 +472,7 @@ function createPlayerHandlers() {
         }
         
         // For banned-ips, check if IP already exists
+        let added = false;
         if (listName === 'banned-ips' && detailsObj.ip) {
           const exists = list.some(item => 
             (typeof item === 'string' && item === detailsObj.ip) ||
@@ -497,11 +481,15 @@ function createPlayerHandlers() {
           
           if (!exists) {
             list.push(detailsObj);
+            added = true;
           }
         } else {
           // For other lists
           list.push(detailsObj);
+          added = true;
         }
+
+        if (!added) return list;
         
         // Ensure directory exists
         const dir = path.dirname(file);
@@ -509,6 +497,7 @@ function createPlayerHandlers() {
           fs.mkdirSync(dir, { recursive: true });
         }
         
+        markCurrentServerMutationDirty(serverPath);
         fs.writeFileSync(file, JSON.stringify(list, null, 2));
         return list;
     },
@@ -647,7 +636,10 @@ function createPlayerHandlers() {
           }
           return item !== entry;
         });
-        
+
+        if (newList.length === rawList.length) return rawList;
+
+        markCurrentServerMutationDirty(serverPath);
         fs.writeFileSync(file, JSON.stringify(newList, null, 2));
         return newList;
     }

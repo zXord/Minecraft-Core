@@ -1,12 +1,19 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { PassThrough } = require('node:stream');
 const AdmZip = require('adm-zip');
 
 const { resolveLaunchPlan } = require('../electron/services/server-launcher.cjs');
 const { resolveServerLoader } = require('../electron/utils/server-loader.cjs');
+const {
+  createServerProcessRunner,
+  parseNetstatListeningEndpoints,
+  parseNetstatListeningPids
+} = require('../electron/services/server-process-runner.cjs');
 
 function makeTempForgeServer() {
   const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-forge-'));
@@ -37,6 +44,83 @@ function makeRuntimeTuple(loaderFamily, loaderVersion, minecraftVersion = '1.20.
     javaMajor,
     os: 'win32',
     architecture: 'x64'
+  };
+}
+
+class FakeChild extends EventEmitter {
+  constructor(pid) {
+    super();
+    this.pid = pid;
+    this.exitCode = null;
+    this.signalCode = null;
+    this.killed = false;
+    this.stdout = new PassThrough();
+    this.stderr = new PassThrough();
+    this.stdin = {
+      destroyed: false,
+      writes: [],
+      write: value => {
+        this.stdin.writes.push(value);
+        if (this.onStdinWrite) this.onStdinWrite(value);
+        return true;
+      }
+    };
+  }
+
+  finish(code = 0, signal = null) {
+    if (this.exitCode !== null || this.signalCode !== null) return;
+    this.exitCode = code;
+    this.signalCode = signal;
+    this.stdout.end();
+    this.stderr.end();
+    this.emit('exit', code, signal);
+    this.emit('close', code, signal);
+  }
+
+  kill(signal = 'SIGKILL') {
+    this.killed = true;
+    this.finish(null, signal);
+    return true;
+  }
+}
+
+function runnerFixture({ loader = 'vanilla', listenerEndpoints, pid = 4200 } = {}) {
+  const child = new FakeChild(pid);
+  const spawnCalls = [];
+  const plan = {
+    type: loader === 'forge' ? 'forge' : 'jar',
+    loader,
+    jar: loader === 'forge' ? null : `C:\\Minecraft\\server-${loader}.jar`,
+    args: [`-Xmx4G`, '-jar', `server-${loader}.jar`, 'nogui'],
+    cwd: 'C:\\Minecraft\\Runner',
+    readyMarkers: [`READY-${loader}`],
+    fatalMarkers: [`FATAL-${loader}`],
+    runtime: makeRuntimeTuple(loader, loader === 'vanilla' ? '1.20.1' : 'test-loader')
+  };
+  const runner = createServerProcessRunner({
+    getListeningEndpoints: async () => listenerEndpoints || [{ host: '127.0.0.1', port: 25565, pid }],
+    resolveLaunchPlan() {
+      return plan;
+    },
+    spawnProcess(file, args, options) {
+      spawnCalls.push({ file, args, options });
+      return child;
+    }
+  });
+  return { child, plan, runner, spawnCalls };
+}
+
+function launchRequest(loader = 'vanilla', overrides = {}) {
+  return {
+    serverPath: 'C:\\Minecraft\\Runner',
+    instanceId: 'runner-instance',
+    runtime: makeRuntimeTuple(loader, loader === 'vanilla' ? '1.20.1' : 'test-loader'),
+    javaPath: 'C:\\Java\\bin\\java.exe',
+    maxRam: 4,
+    operationId: `health-${loader}`,
+    publishEvents: false,
+    onLine() {},
+    ...overrides
   };
 }
 
@@ -147,4 +231,187 @@ test('a corrupt app-owned runtime marker can never fall through to Vanilla', () 
       fs.rmSync(serverPath, { recursive: true, force: true });
     }
   }
+});
+
+test('shared process runner binds every loader marker and emits only operation-scoped complete lines', async () => {
+  for (const loader of ['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']) {
+    const lines = [];
+    const { child, plan, runner, spawnCalls } = runnerFixture({ loader, pid: 4300 + lines.length });
+    child.onStdinWrite = value => {
+      if (value === 'stop\n') setImmediate(() => child.finish(0, null));
+    };
+    const handle = runner.launchServerProcess(launchRequest(loader, {
+      onLine: value => lines.push(value)
+    }));
+
+    assert.equal(handle.pid, child.pid);
+    assert.equal(handle.isLive(), true);
+    assert.equal(handle.publishEvents, false);
+    assert.deepEqual(handle.readyMarkers, plan.readyMarkers);
+    assert.deepEqual(handle.fatalMarkers, plan.fatalMarkers);
+    assert.deepEqual(spawnCalls, [{
+      file: 'C:\\Java\\bin\\java.exe',
+      args: [`-Dminecraft.core.server.id=health-${loader}`, ...plan.args],
+      options: {
+        cwd: plan.cwd,
+        detached: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true
+      }
+    }]);
+
+    child.stdout.write(`prefix READY-${loader.slice(0, 2)}`);
+    child.stdout.write(`${loader.slice(2)} suffix\r`);
+    child.stdout.write('\nsecond line\n');
+    const ready = await handle.waitForReady({ timeoutMs: 500 });
+    assert.deepEqual(ready, { marker: `READY-${loader}`, pid: child.pid });
+    assert.deepEqual(lines, [
+      { line: `prefix READY-${loader} suffix`, operationId: `health-${loader}`, pid: child.pid, stream: 'stdout' },
+      { line: 'second line', operationId: `health-${loader}`, pid: child.pid, stream: 'stdout' }
+    ]);
+    assert.equal(await handle.ownsEndpoint({ host: '127.0.0.1', port: 25565, timeoutMs: 500 }), true);
+
+    const stopped = await handle.stopFully({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    assert.deepEqual(stopped, {
+      clean: true,
+      closed: true,
+      exitCode: 0,
+      forced: false,
+      signal: null
+    });
+    assert.equal(handle.isLive(), false);
+    assert.deepEqual(child.stdin.writes, ['stop\n']);
+  }
+});
+
+test('shared process runner rejects fatal output and premature child exit without leaking lines', async () => {
+  const fatalFixture = runnerFixture({ loader: 'fabric', pid: 4401 });
+  const fatalHandle = fatalFixture.runner.launchServerProcess(launchRequest('fabric'));
+  fatalFixture.child.stderr.write('sensitive C:\\server FATAL-fabric signed-url?token=x\n');
+  await assert.rejects(
+    fatalHandle.waitForReady({ timeoutMs: 500 }),
+    error => {
+      assert.equal(error.code, 'HEALTH_CHECK_FAILED');
+      assert.equal(error.message.includes('sensitive'), false);
+      assert.equal(error.message.includes('token'), false);
+      return true;
+    }
+  );
+  fatalFixture.child.finish(1, null);
+
+  const exitFixture = runnerFixture({ loader: 'quilt', pid: 4402 });
+  const exitHandle = exitFixture.runner.launchServerProcess(launchRequest('quilt'));
+  exitFixture.child.finish(1, null);
+  await assert.rejects(exitHandle.waitForReady({ timeoutMs: 500 }), error => error.code === 'HEALTH_CHECK_FAILED');
+
+  const errorFixture = runnerFixture({ loader: 'vanilla', pid: 4403 });
+  const errorHandle = errorFixture.runner.launchServerProcess(launchRequest('vanilla'));
+  errorFixture.child.emit('error', new Error('spawn stream failed'));
+  assert.equal(errorHandle.isLive(), false);
+  await assert.rejects(errorHandle.waitForReady({ timeoutMs: 500 }), error => error.code === 'HEALTH_CHECK_FAILED');
+  errorFixture.child.finish(1, null);
+});
+
+test('shared process runner enforces ready deadlines, abort cleanup, listener ownership, and forced close', async () => {
+  const wrongOwner = runnerFixture({
+    loader: 'vanilla',
+    listenerEndpoints: [{ host: '127.0.0.1', port: 25565, pid: 9999 }],
+    pid: 4501
+  });
+  const wrongHandle = wrongOwner.runner.launchServerProcess(launchRequest('vanilla'));
+  assert.equal(await wrongHandle.ownsEndpoint({ host: '127.0.0.1', port: 25565, timeoutMs: 100 }), false);
+
+  await assert.rejects(
+    wrongHandle.waitForReady({ timeoutMs: 20 }),
+    error => error.code === 'HEALTH_CHECK_FAILED'
+  );
+  const abort = new AbortController();
+  const waiting = wrongHandle.waitForReady({ timeoutMs: 500, signal: abort.signal });
+  abort.abort();
+  await assert.rejects(waiting, error => error.code === 'CANCELLED');
+
+  const stopped = await wrongHandle.stopFully({ gracefulTimeoutMs: 10, killTimeoutMs: 100 });
+  assert.equal(stopped.forced, true);
+  assert.equal(stopped.closed, true);
+  assert.equal(wrongOwner.child.killed, true);
+  assert.equal(wrongOwner.child.stdout.listenerCount('data'), 0);
+  assert.equal(wrongOwner.child.stderr.listenerCount('data'), 0);
+  assert.equal(wrongOwner.child.listenerCount('error'), 0);
+  assert.equal(wrongOwner.child.listenerCount('close'), 0);
+});
+
+test('netstat listener parsing preserves local addresses so wildcard listeners cannot prove loopback ownership', async () => {
+  const output = [
+    '  Proto  Local Address          Foreign Address        State           PID',
+    '  TCP    127.0.0.1:25565        0.0.0.0:0              LISTENING       4321',
+    '  TCP    0.0.0.0:25565          0.0.0.0:0              LISTENING       4321',
+    '  TCP    [::]:25565             [::]:0                 LISTENING       8765',
+    '  TCP    127.0.0.1:25566        0.0.0.0:0              LISTENING       9999',
+    '  TCP    127.0.0.1:25565        127.0.0.1:50000        ESTABLISHED     1111',
+    '  UDP    0.0.0.0:25565          *:*                                    2222'
+  ].join('\r\n');
+  assert.deepEqual(parseNetstatListeningEndpoints(output), [
+    { host: '127.0.0.1', port: 25565, pid: 4321 },
+    { host: '0.0.0.0', port: 25565, pid: 4321 },
+    { host: '::', port: 25565, pid: 8765 },
+    { host: '127.0.0.1', port: 25566, pid: 9999 }
+  ]);
+  assert.deepEqual(parseNetstatListeningPids(output, 25565), [4321, 8765]);
+  assert.deepEqual(parseNetstatListeningPids(output, 25566), [9999]);
+  assert.deepEqual(parseNetstatListeningPids('not netstat output', 25565), []);
+
+  const exact = runnerFixture({
+    pid: 4321,
+    listenerEndpoints: parseNetstatListeningEndpoints(output)
+  });
+  const exactHandle = exact.runner.launchServerProcess(launchRequest());
+  assert.equal(await exactHandle.ownsEndpoint({ host: '127.0.0.1', port: 25565, timeoutMs: 100 }), true);
+  assert.equal(await exactHandle.ownsEndpoint({ host: '192.168.1.20', port: 25565, timeoutMs: 100 }), false);
+  exact.child.finish(0, null);
+
+  const wildcard = runnerFixture({
+    pid: 8765,
+    listenerEndpoints: parseNetstatListeningEndpoints(output)
+  });
+  const wildcardHandle = wildcard.runner.launchServerProcess(launchRequest());
+  assert.equal(await wildcardHandle.ownsEndpoint({ host: '127.0.0.1', port: 25565, timeoutMs: 100 }), false);
+  assert.equal(await wildcardHandle.ownsEndpoint({ host: '::1', port: 25565, timeoutMs: 100 }), false);
+  for (const host of ['0.0.0.0', '::']) {
+    await assert.rejects(
+      wildcardHandle.ownsEndpoint({ host, port: 25565, timeoutMs: 100 }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
+  await assert.rejects(
+    wildcardHandle.ownsEndpoint({
+      allowWildcard: true,
+      host: '::1',
+      port: 25565,
+      timeoutMs: 100
+    }),
+    error => error.code === 'INVALID_REQUEST'
+  );
+  wildcard.child.finish(0, null);
+});
+
+test('shared process runner validates its closed request before spawn', () => {
+  const { runner, spawnCalls } = runnerFixture();
+  const invalid = [
+    { serverPath: 'relative' },
+    { instanceId: '' },
+    { maxRam: 0 },
+    { javaPath: 'java.exe' },
+    { operationId: '../unsafe' },
+    { publishEvents: 'false' },
+    { onLine: true },
+    { runtime: { ...makeRuntimeTuple('vanilla', '1.20.1'), extra: true } },
+    { extra: true }
+  ];
+  for (const change of invalid) {
+    assert.throws(
+      () => runner.launchServerProcess({ ...launchRequest(), ...change }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
+  assert.equal(spawnCalls.length, 0);
 });

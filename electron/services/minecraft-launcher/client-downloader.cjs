@@ -9,6 +9,7 @@ const {
   assertSafeRemoteUrl,
   resolveSafeRedirectUrl
 } = require('../../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../server-mutation-context.cjs');
 
 class ClientDownloader {
   constructor(javaManager, eventEmitter) {
@@ -2039,6 +2040,7 @@ Specification-Vendor: FabricMC
       
       if (!fs.existsSync(lastVersionFile)) {
         // First time check - save the version and no cleanup needed
+        markCurrentServerMutationDirty(clientPath);
         fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
         return false;
       }
@@ -2047,6 +2049,7 @@ Specification-Vendor: FabricMC
       
       if (lastVersion !== requiredVersion) {
         // Version changed - update the file
+        markCurrentServerMutationDirty(clientPath);
         fs.writeFileSync(lastVersionFile, requiredVersion, 'utf8');
         
         return true;
@@ -2089,6 +2092,7 @@ Specification-Vendor: FabricMC
         // Remove everything else
         const versionPath = path.join(versionsDir, versionDir);
         try {
+          markCurrentServerMutationDirty(clientPath);
           fs.rmSync(versionPath, { recursive: true, force: true });
           cleanedVersions.push(versionDir);
           // TODO: Add proper logging - Cleaned up old version

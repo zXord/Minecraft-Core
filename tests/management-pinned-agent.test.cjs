@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const https = require('node:https');
 const net = require('node:net');
@@ -23,6 +24,7 @@ async function withTlsUtils(fn) {
   const tlsUtilsPath = path.resolve(__dirname, '../electron/utils/tls-utils.cjs');
   const configManagerPath = path.resolve(__dirname, '../electron/utils/config-manager.cjs');
   const secureStorePath = path.resolve(__dirname, '../electron/utils/secure-store.cjs');
+  const durableFsPath = path.resolve(__dirname, '../electron/utils/durable-fs.cjs');
   const originalLoad = Module._load;
   const store = {};
 
@@ -64,6 +66,14 @@ async function withTlsUtils(fn) {
   delete require.cache[secureStorePath];
 
   try {
+    require(durableFsPath).configureDurableFs({
+      allowedRoots: [root],
+      durableClient: {
+        moveWriteThrough: fs.renameSync,
+        replaceFileWriteThrough: fs.renameSync,
+        flushDirectory() {}
+      }
+    });
     const tlsUtils = require(tlsUtilsPath);
     return await fn({ root, tlsUtils });
   } finally {

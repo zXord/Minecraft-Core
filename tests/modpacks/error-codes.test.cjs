@@ -45,6 +45,27 @@ test('public errors only preserve closed safe scalar details for their code', ()
   assert.equal(Object.isFrozen(result), true);
 });
 
+test('archive policy exposes only the six exact ratio and reserve limit identifiers', () => {
+  const identifiers = [
+    'maxPerEntryCompressionRatio',
+    'maxAggregateCompressionRatio',
+    'minPerEntryRatioExpandedBytes',
+    'minAggregateRatioExpandedBytes',
+    'minPreflightReserveBytes',
+    'preflightReservePercent'
+  ];
+  for (const limit of identifiers) {
+    const result = new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Archive policy limit was exceeded', {
+      details: { limit, actual: '1001' }
+    }).toPublicResult();
+    assert.deepEqual(result.error.details, { limit, actual: '1001' });
+  }
+  const rejected = new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Archive policy limit was exceeded', {
+    details: { limit: 'customRatioLimit', actual: '1001' }
+  }).toPublicResult();
+  assert.deepEqual(rejected.error.details, { actual: '1001' });
+});
+
 test('public errors drop provider bodies, authorization tokens, archive output, and command-shaped reason values', () => {
   for (const reason of [
     '{"error":"upstream body","token":"secret"}',

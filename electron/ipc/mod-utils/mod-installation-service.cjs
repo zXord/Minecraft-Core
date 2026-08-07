@@ -15,6 +15,7 @@ const {
   safeBaseName,
   safeFilePath
 } = require('../../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../../services/server-mutation-context.cjs');
 
 // Placeholder for API service functions - these will be imported later
 // For now, we might have to define minimal stubs or expect them to be passed if complex
@@ -181,6 +182,7 @@ async function installModToServer(win, serverPath, modDetails) {
       }
     });
 
+    markCurrentServerMutationDirty(serverPath);
     await fs.mkdir(modsDir, { recursive: true });
     await fs.mkdir(clientModsDir, { recursive: true });
     if (unassignedModsDir) {
@@ -965,6 +967,7 @@ async function installModToClient(win, modData) {
     }
 
     const clientModsDir = path.join(modData.clientPath, targetSubDir);
+    markCurrentServerMutationDirty(modData.clientPath);
     await fs.mkdir(clientModsDir, { recursive: true });
     const clientManifestDir = path.join(modData.clientPath, 'minecraft-core-manifests');
     await fs.mkdir(clientManifestDir, { recursive: true });

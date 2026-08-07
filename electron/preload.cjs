@@ -2,6 +2,18 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 let ipcChannelsLogged = false;
 const listenerMap = new Map();
+const MODPACK_INVOKE_CHANNELS = Object.freeze([
+  'modpacks:search-catalog', 'modpacks:get-project', 'modpacks:list-versions', 'modpacks:list-github-releases',
+  'modpacks:list-github-assets', 'modpacks:select-local-archive', 'modpacks:reserve-server-destination',
+  'modpacks:inspect', 'modpacks:preflight',
+  'modpacks:preflight-management', 'modpacks:start-operation', 'modpacks:cancel-job', 'modpacks:get-job', 'modpacks:get-state',
+  'modpacks:list-history', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
+  'modpacks:ack-notification', 'modpacks:check-updates', 'modpacks:update-tracking', 'modpacks:verify',
+  'modpacks:perform-safe-action'
+]);
+const MODPACK_EVENT_CHANNELS = Object.freeze([
+  'modpacks:job-progress', 'modpacks:job-log', 'modpacks:state-changed', 'modpacks:notification'
+]);
 
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
@@ -11,6 +23,7 @@ contextBridge.exposeInMainWorld('electron', {
   
     
     const validChannels = [
+      ...MODPACK_INVOKE_CHANNELS,
       'select-mod-files',
       'handle-dropped-files', 
       'get-dropped-file-paths',
@@ -291,6 +304,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   on: (channel, listener) => {
     const validChannels = [
+      ...MODPACK_EVENT_CHANNELS,
       'server-log', 
       'server-status', 
       'metrics-update', 
@@ -369,6 +383,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   removeListener: (channel, listener) => {
     const validChannels = [
+      ...MODPACK_EVENT_CHANNELS,
       'server-log', 
       'server-status', 
       'metrics-update', 
@@ -446,6 +461,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   removeAllListeners: (channel) => {
     const validChannels = [
+      ...MODPACK_EVENT_CHANNELS,
       'server-log', 
       'server-status', 
       'metrics-update', 

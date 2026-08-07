@@ -70,28 +70,9 @@ function createConfigHandlers() {
           }
         });
 
-        let rawConfig = null;
-        try {
-          rawConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-        } catch (parseError) {
-          logger.warn('Failed to parse raw config before normalization', {
-            category: 'settings',
-            data: {
-              handler: 'read-config',
-              errorType: parseError.constructor.name,
-              errorMessage: parseError.message,
-              configPath
-            }
-          });
-        }
-
         const config = readServerConfig(serverPath);
         if (!config) {
           return null;
-        }
-
-        if (!rawConfig || JSON.stringify(rawConfig) !== JSON.stringify(config)) {
-          fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
         }
         
         const duration = Date.now() - startTime;

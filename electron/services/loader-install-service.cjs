@@ -2389,6 +2389,64 @@ async function installServerLoader(options = {}, loader, minecraftVersion, loade
   throw unsupportedLoader(normalizedLoader);
 }
 
+async function prepareManagedServerRuntime(options = {}) {
+  if (!isPlainObject(options) || typeof options.targetPath !== 'string' || !path.isAbsolute(options.targetPath) ||
+      !isPlainObject(options.runtime) || typeof options.javaPath !== 'string' || !path.isAbsolute(options.javaPath)) {
+    throw runtimeIncomplete();
+  }
+  const root = assertCanonicalDirectory(options.targetPath);
+  const runtime = normalizeRuntime(options.runtime);
+  const validatedMajor = await (options.validateJava || validateManagedJava)({
+    javaPath: options.javaPath,
+    expectedMajor: runtime.javaMajor,
+    processRunner: options.processRunner || runBoundedProcess,
+    signal: options.signal
+  });
+  if (validatedMajor !== runtime.javaMajor) throw runtimeIncomplete('The selected Java runtime has the wrong major version.');
+
+  if (runtime.loaderFamily === 'vanilla') {
+    await defaultEnsureQuiltBaseRuntime({
+      targetPath: root,
+      minecraftVersion: runtime.minecraftVersion,
+      transport: options.transport,
+      timeoutMs: options.timeoutMs,
+      maxMetadataBytes: options.maxMetadataBytes,
+      maxRuntimeBytes: options.maxRuntimeBytes,
+      signal: options.signal
+    });
+    publishRuntimeMetadata(root, runtime, { family: 'vanilla', serverJar: 'server.jar' },
+      listRegularFiles(root).map(file => file.source));
+    return validatePreparedRuntime(root, runtime);
+  }
+
+  await installServerLoader({
+    ...options,
+    targetPath: root,
+    loader: runtime.loaderFamily,
+    minecraftVersion: runtime.minecraftVersion,
+    loaderVersion: runtime.loaderVersion,
+    javaMajor: runtime.javaMajor,
+    os: runtime.os,
+    architecture: runtime.architecture
+  });
+
+  if (runtime.loaderFamily === 'fabric') {
+    publishRuntimeMetadata(root, runtime, { family: 'fabric', launcherJar: 'fabric-server-launch.jar' },
+      listRegularFiles(root).map(file => file.source));
+  } else if (runtime.loaderFamily === 'forge') {
+    const expectedSuffix = `libraries/net/minecraftforge/forge/${runtime.minecraftVersion}-${runtime.loaderVersion}/win_args.txt`
+      .toLocaleLowerCase('en-US');
+    const candidates = listRegularFiles(root)
+      .filter(file => portableRelative(root, file.source).toLocaleLowerCase('en-US') === expectedSuffix);
+    if (candidates.length !== 1) throw runtimeIncomplete();
+    publishRuntimeMetadata(root, runtime, {
+      family: 'forge',
+      argsFile: portableRelative(root, candidates[0].source)
+    }, listRegularFiles(root).map(file => file.source));
+  }
+  return validatePreparedRuntime(root, runtime);
+}
+
 async function installClientLoader(options = {}) {
   const normalizedLoader = normalizeLoader(options.loader);
 
@@ -2471,6 +2529,7 @@ module.exports = {
   normalizeLoader,
   getLoaderVersions,
   installServerLoader,
+  prepareManagedServerRuntime,
   installClientLoader,
   getForgeRuntimeHealthIssues,
   validatePreparedRuntime,

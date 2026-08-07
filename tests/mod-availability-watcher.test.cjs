@@ -8,6 +8,7 @@ const Module = require('module');
 async function withWatcherModule(resolveLoaderImpl, fn) {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-watch-'));
   const safeSendEvents = [];
+  let dirtyMarks = 0;
   const originalLoad = Module._load;
   const loaderStub = {
     resolveServerLoader: resolveLoaderImpl,
@@ -20,8 +21,27 @@ async function withWatcherModule(resolveLoaderImpl, fn) {
     }
     if (request.endsWith('app-store.cjs')) {
       return {
-        get: () => ({}),
+        get: (key) => key === 'instances'
+          ? [{ id: 'server-watch', type: 'server', path: tmpRoot }]
+          : {},
         set: () => {}
+      };
+    }
+    if (request.endsWith('server-mutation-context.cjs')) {
+      return {
+        getCurrentServerMutationLease: () => ({
+          assertOwnedPath(candidate) {
+            assert.equal(path.resolve(candidate), path.resolve(tmpRoot));
+          }
+        }),
+        getServerMutationCoordinator() {
+          throw new Error('ambient lease should be reused');
+        },
+        markCurrentServerMutationDirty(candidate) {
+          assert.equal(path.resolve(candidate), path.resolve(tmpRoot));
+          dirtyMarks += 1;
+          return true;
+        }
       };
     }
     if (request.endsWith('server-loader.cjs')) {
@@ -37,7 +57,7 @@ async function withWatcherModule(resolveLoaderImpl, fn) {
   try {
     await watcher.clearModAvailabilityWatches(tmpRoot);
     await watcher.clearModAvailabilityHistory(tmpRoot);
-    await fn({ watcher, serverPath: tmpRoot, safeSendEvents });
+    await fn({ watcher, serverPath: tmpRoot, safeSendEvents, getDirtyMarks: () => dirtyMarks });
   } finally {
     try {
       await watcher.clearModAvailabilityWatches(tmpRoot);

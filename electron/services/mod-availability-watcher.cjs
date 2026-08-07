@@ -4,10 +4,16 @@
 
 const fs = require('fs');
 const fsp = require('fs/promises');
+const crypto = require('node:crypto');
 const path = require('path');
 const { safeSend } = require('../utils/safe-send.cjs');
 const appStore = require('../utils/app-store.cjs');
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
+const {
+  getCurrentServerMutationLease,
+  getServerMutationCoordinator,
+  markCurrentServerMutationDirty
+} = require('./server-mutation-context.cjs');
 
 let logger = null;
 try {
@@ -73,8 +79,39 @@ async function ensureDir(dir) {
   await fsp.mkdir(dir, { recursive: true }).catch(() => {});
 }
 
+function getRegisteredServerSelector(serverPath) {
+  const normalized = normalizeServerPath(serverPath);
+  const instances = appStore.get('instances') || [];
+  const instance = instances.find(candidate => (
+    candidate &&
+    candidate.type === 'server' &&
+    normalizeServerPath(candidate.path) === normalized
+  ));
+  if (!instance) throw new Error('Server path is not a registered server instance');
+  return { instanceId: instance.id || null, serverPath: instance.path };
+}
+
+async function runAvailabilityMutation(serverPath, operation, work) {
+  const currentLease = getCurrentServerMutationLease();
+  if (currentLease) {
+    currentLease.assertOwnedPath(serverPath);
+    return work();
+  }
+
+  const coordinator = getServerMutationCoordinator();
+  return coordinator.runMutation(
+    getRegisteredServerSelector(serverPath),
+    {
+      operation,
+      operationId: `mod-watch-${crypto.randomUUID()}`,
+      revisionMode: 'auto',
+      quiesce: null
+    },
+    work
+  );
+}
+
 async function loadWatches(serverPath) {
-  await ensureDir(getConfigDir(serverPath));
   const file = getWatchFile(serverPath);
   let raw;
   try { raw = await fsp.readFile(file, 'utf8'); } catch { raw = null; }
@@ -91,14 +128,16 @@ async function loadWatches(serverPath) {
 }
 
 async function saveWatches(serverPath, state) {
-  await ensureDir(getConfigDir(serverPath));
-  const file = getWatchFile(serverPath);
-  const toWrite = { watches: state.watches || [], lastCheck: state.lastCheck || null, nextCheck: state.nextCheck || null };
-  await fsp.writeFile(file, JSON.stringify(toWrite, null, 2)).catch(() => {});
+  return runAvailabilityMutation(serverPath, 'save-mod-availability-watches', async () => {
+    markCurrentServerMutationDirty(serverPath);
+    await ensureDir(getConfigDir(serverPath));
+    const file = getWatchFile(serverPath);
+    const toWrite = { watches: state.watches || [], lastCheck: state.lastCheck || null, nextCheck: state.nextCheck || null };
+    await fsp.writeFile(file, JSON.stringify(toWrite, null, 2));
+  });
 }
 
 async function loadHistory(serverPath) {
-  await ensureDir(getConfigDir(serverPath));
   const file = getHistoryFile(serverPath);
   let raw;
   try { raw = await fsp.readFile(file, 'utf8'); } catch { raw = null; }
@@ -113,9 +152,12 @@ async function loadHistory(serverPath) {
 }
 
 async function saveHistory(serverPath, history) {
-  await ensureDir(getConfigDir(serverPath));
-  const file = getHistoryFile(serverPath);
-  await fsp.writeFile(file, JSON.stringify(history, null, 2)).catch(() => {});
+  return runAvailabilityMutation(serverPath, 'save-mod-availability-history', async () => {
+    markCurrentServerMutationDirty(serverPath);
+    await ensureDir(getConfigDir(serverPath));
+    const file = getHistoryFile(serverPath);
+    await fsp.writeFile(file, JSON.stringify(history, null, 2));
+  });
 }
 
 function makeWatchKey(w) {
@@ -171,13 +213,16 @@ async function removeWatch({ serverPath, projectId, targetMc, targetFabric, targ
   const resolvedLoader = (targetLoader || detectedLoader || (targetFabric ? 'fabric' : null)) || null;
   const resolvedLoaderVersion = targetLoaderVersion || detectedLoaderVersion || targetFabric || null;
   const key = `${projectId}::${targetMc}::${resolvedLoader || ''}::${resolvedLoaderVersion || ''}`;
-  state.watches = state.watches.filter(w => makeWatchKey(w) !== key);
+  const remaining = state.watches.filter(w => makeWatchKey(w) !== key);
+  if (remaining.length === state.watches.length) return state.watches;
+  state.watches = remaining;
   await saveWatches(serverPath, state);
   return state.watches;
 }
 
 async function clearWatches(serverPath) {
   const state = await hydrateServerState(serverPath);
+  if (state.watches.length === 0) return true;
   state.watches = [];
   await saveWatches(serverPath, state);
   return true;
@@ -193,6 +238,8 @@ async function getHistory(serverPath) {
 }
 
 async function clearHistory(serverPath) {
+  const history = await loadHistory(serverPath);
+  if (history.length === 0) return true;
   await saveHistory(serverPath, []);
   return true;
 }
@@ -206,24 +253,26 @@ async function performCheck() {
   const start = Date.now();
   let totalWatches = 0;
   for (const [serverPath, state] of serverWatchState.entries()) {
-    if (!state.watches || state.watches.length === 0) {
+    await runAvailabilityMutation(serverPath, 'check-mod-availability', async () => {
+      if (!state.watches || state.watches.length === 0) {
+        scheduleNext(state);
+        await saveWatches(serverPath, state);
+        return;
+      }
+      totalWatches += state.watches.length;
+      state.lastCheck = new Date().toISOString();
+      // Keep history publication and watch removal under one server reservation.
+      const remaining = [];
+      for (const watch of state.watches) {
+        const fulfilled = await checkSingleWatch(serverPath, watch).catch(() => false);
+        if (!fulfilled) {
+          remaining.push(watch);
+        }
+      }
+      state.watches = remaining;
       scheduleNext(state);
       await saveWatches(serverPath, state);
-      continue;
-    }
-    totalWatches += state.watches.length;
-    state.lastCheck = new Date().toISOString();
-    // Iterate sequentially (volume low, interval high)
-    const remaining = [];
-    for (const watch of state.watches) {
-      const fulfilled = await checkSingleWatch(serverPath, watch).catch(() => false);
-      if (!fulfilled) {
-        remaining.push(watch);
-      }
-    }
-    state.watches = remaining;
-    scheduleNext(state);
-    await saveWatches(serverPath, state);
+    });
   }
   log('debug', 'Mod availability periodic check complete', { totalWatches, durationMs: Date.now() - start });
 }
@@ -326,7 +375,9 @@ function startWatcher() {
     hydrateServerState(serverPath).then(() => {}).catch(() => {});
   }
   intervalHandle = setInterval(() => {
-    performCheck();
+    performCheck().catch((error) => {
+      log('warn', 'Mod availability periodic check failed', { error: error.message });
+    });
   }, 5 * 60 * 1000); // Run lightweight loop every 5 min to see if a full period passed
 
   // Also a timer to run the heavy check only when due
@@ -335,9 +386,13 @@ function startWatcher() {
     for (const [serverPath, state] of serverWatchState.entries()) {
       if (!state.nextCheck) {
         scheduleNext(state);
-        saveWatches(serverPath, state);
+        saveWatches(serverPath, state).catch((error) => {
+          log('warn', 'Failed to persist the next mod availability check', { error: error.message, serverPath });
+        });
       } else if (new Date(state.nextCheck).getTime() <= now) {
-        performCheck();
+        performCheck().catch((error) => {
+          log('warn', 'Mod availability scheduled check failed', { error: error.message });
+        });
         break; // performCheck iterates all; break to avoid duplicate
       }
     }

@@ -11,6 +11,96 @@ const KILL_WAIT_MS = 1_000;
 const POWERSHELL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $maximumInputBytes = 131072
+$probeSource = @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public static class MinecraftCoreReparseProbe
+{
+    private const uint FileReadAttributes = 0x00000080;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint FileShareDelete = 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const uint FileAttributeReparsePoint = 0x00000400;
+    private const uint IoReparseTagNameSurrogate = 0x20000000;
+    private const int FileAttributeTagInfo = 9;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileAttributeTagInformation
+    {
+        internal uint FileAttributes;
+        internal uint ReparseTag;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        internal uint FileAttributes;
+        internal long CreationTime;
+        internal long LastAccessTime;
+        internal long LastWriteTime;
+        internal uint VolumeSerialNumber;
+        internal uint FileSizeHigh;
+        internal uint FileSizeLow;
+        internal uint NumberOfLinks;
+        internal uint FileIndexHigh;
+        internal uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int informationClass,
+        out FileAttributeTagInformation information, uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
+
+    public static bool IsNameSurrogate(string value)
+    {
+        string expected = Path.GetFullPath(value);
+        using (SafeFileHandle handle = CreateFile(expected, FileReadAttributes, FileShareRead | FileShareWrite | FileShareDelete,
+            IntPtr.Zero, OpenExisting, FileFlagOpenReparsePoint | FileFlagBackupSemantics, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) throw new IOException("Reparse handle unavailable");
+            FileAttributeTagInformation beforeTag;
+            FileAttributeTagInformation afterTag;
+            ByHandleFileInformation beforeIdentity;
+            ByHandleFileInformation afterIdentity;
+            if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, out beforeTag, (uint)Marshal.SizeOf(typeof(FileAttributeTagInformation))) ||
+                !GetFileInformationByHandle(handle, out beforeIdentity)) throw new IOException("Reparse identity unavailable");
+            bool hasReparse = (beforeTag.FileAttributes & FileAttributeReparsePoint) != 0;
+            if (hasReparse != (beforeTag.ReparseTag != 0)) throw new InvalidDataException("Reparse tag invalid");
+            var finalPath = new StringBuilder(32768);
+            uint length = GetFinalPathNameByHandle(handle, finalPath, (uint)finalPath.Capacity, 0);
+            if (length == 0 || length >= finalPath.Capacity) throw new IOException("Reparse final path unavailable");
+            string actual = finalPath.ToString();
+            if (actual.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("UNC path rejected");
+            if (actual.StartsWith(@"\\?\", StringComparison.Ordinal)) actual = actual.Substring(4);
+            if (!string.Equals(expected, Path.GetFullPath(actual), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Reparse path redirected");
+            if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, out afterTag, (uint)Marshal.SizeOf(typeof(FileAttributeTagInformation))) ||
+                !GetFileInformationByHandle(handle, out afterIdentity)) throw new IOException("Reparse identity unavailable");
+            if (beforeTag.FileAttributes != afterTag.FileAttributes || beforeTag.ReparseTag != afterTag.ReparseTag ||
+                beforeIdentity.VolumeSerialNumber != afterIdentity.VolumeSerialNumber ||
+                beforeIdentity.FileIndexHigh != afterIdentity.FileIndexHigh || beforeIdentity.FileIndexLow != afterIdentity.FileIndexLow)
+                throw new InvalidDataException("Reparse identity changed");
+            return (beforeTag.ReparseTag & IoReparseTagNameSurrogate) != 0;
+        }
+    }
+}
+'@
+Add-Type -TypeDefinition $probeSource -Language CSharp
 $inputStream = [Console]::OpenStandardInput()
 $memory = New-Object System.IO.MemoryStream
 $buffer = New-Object byte[] 4096
@@ -27,8 +117,7 @@ try {
   $properties = @($payload.PSObject.Properties)
   if ($properties.Count -ne 1 -or $properties[0].Name -cne 'path' -or $payload.path -isnot [string] -or
       $payload.path.Length -lt 1 -or $payload.path.Length -gt 32767 -or -not [System.IO.Path]::IsPathRooted($payload.path)) { exit 65 }
-  $attributes = [System.IO.File]::GetAttributes($payload.path)
-  if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+  if ([MinecraftCoreReparseProbe]::IsNameSurrogate($payload.path)) {
     $response = '{"version":1,"isReparsePoint":true}'
   } else {
     $response = '{"version":1,"isReparsePoint":false}'

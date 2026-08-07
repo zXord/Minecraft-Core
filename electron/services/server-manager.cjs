@@ -1,3 +1,4 @@
+const crypto = require('node:crypto');
 const fs = require('fs');
 const os = require('os');
 const process = require('process');
@@ -9,14 +10,22 @@ const appStore = require('../utils/app-store.cjs');
 const { ServerJavaManager } = require('./server-java-manager.cjs');
 const { readServerConfig, getDefaultServerConfig, detectMinecraftVersion } = require('../utils/config-manager.cjs');
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
-const { resolveLaunchPlan, syncServerPort } = require('./server-launcher.cjs');
+const { syncServerPort } = require('./server-launcher.cjs');
+const { launchServerProcess } = require('./server-process-runner.cjs');
+const {
+  getCurrentServerMutationLease,
+  getServerMutationCoordinator,
+  runWithServerMutationLease
+} = require('./server-mutation-context.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 
 const logger = getLoggerHandlers();
 
 const serverStates = new Map();
+const lifecycleAdoptions = new Map();
 const METRICS_INTERVAL_MS = 2000;
 const LIST_COMMAND_THROTTLE = 30000;
+const FAILED_START_STOP_TIMEOUT_MS = 5000;
 
 function createDefaultState(instanceId, targetPath = null) {
   return {
@@ -500,11 +509,247 @@ async function ensureJavaReadyForServer(targetPath, minecraftVersion) {
   return requirements;
 }
 
+function releaseStartLease(state, startLease, operation) {
+  try {
+    startLease.release();
+    return null;
+  } catch (releaseError) {
+    logger.error(`Server start lease release failed: ${releaseError.message}`, {
+      category: 'server',
+      instanceId: state.instanceId,
+      data: {
+        service: 'ServerManager',
+        operation,
+        errorType: releaseError.constructor.name,
+        code: releaseError.code || null
+      }
+    });
+    return releaseError;
+  }
+}
+
+function releaseStartLeaseAfterClose(state, startLease, processHandle) {
+  Promise.resolve(processHandle.closed).then(
+    (closeEvidence) => {
+      const validExitCode = closeEvidence?.exitCode === null || Number.isSafeInteger(closeEvidence?.exitCode);
+      const validSignal = closeEvidence?.signal === null ||
+        (typeof closeEvidence?.signal === 'string' && closeEvidence.signal.length > 0);
+      let confirmedNotLive = false;
+      try { confirmedNotLive = processHandle.isLive() === false; } catch {
+        // Invalid liveness evidence retains the lease fail-closed.
+      }
+      if (!closeEvidence || typeof closeEvidence !== 'object' || Array.isArray(closeEvidence) ||
+          !validExitCode || !validSignal || !confirmedNotLive) {
+        logger.error('Server process close evidence was invalid; retaining the start lease', {
+          category: 'server',
+          instanceId: state.instanceId,
+          data: {
+            service: 'ServerManager',
+            operation: 'serverProcess.close.validate'
+          }
+        });
+        return;
+      }
+      releaseStartLease(state, startLease, 'serverProcess.close.releaseLease');
+    },
+    (error) => {
+      logger.error('Server process close evidence failed; retaining the start lease', {
+        category: 'server',
+        instanceId: state.instanceId,
+        data: {
+          service: 'ServerManager',
+          operation: 'serverProcess.close.await',
+          errorType: error?.constructor?.name || 'Error',
+          code: error?.code || null
+        }
+      });
+    }
+  );
+}
+
+function reportStartFailure(state, startLease, targetPath, error, { releaseLease = true } = {}) {
+  let reportedError = error;
+  if (releaseLease) {
+    const releaseError = releaseStartLease(state, startLease, 'startMinecraftServer.failure.releaseLease');
+    if (releaseError) reportedError = releaseError;
+  }
+  clearStateTimers(state);
+  state.process = null;
+  state.status = 'error';
+  state.startMs = null;
+  emitServerStatus(state);
+  emitServerLog(state, `[ERROR] ${reportedError.message}`);
+
+  logger.error(`Server start failed: ${reportedError.message}`, {
+    category: 'server',
+    instanceId: state.instanceId,
+    data: {
+      service: 'ServerManager',
+      operation: 'startMinecraftServer',
+      targetPath,
+      errorType: reportedError.constructor.name,
+      code: reportedError.code || null
+    }
+  });
+
+  return {
+    success: false,
+    instanceId: state.instanceId,
+    error: reportedError.message || 'Server failed to start.',
+    code: reportedError.code || 'SERVER_START_FAILED',
+    details: reportedError.details || null
+  };
+}
+
+function adoptValidatedLifecycleProcess(request) {
+  const allowedKeys = new Set([
+    'eventId', 'handoff', 'instanceId', 'jobId', 'maxRam', 'port', 'runtime', 'serverPath'
+  ]);
+  if (!request || typeof request !== 'object' || Array.isArray(request) ||
+      Object.keys(request).some(key => !allowedKeys.has(key)) ||
+      typeof request.eventId !== 'string' || typeof request.jobId !== 'string' ||
+      request.eventId !== `modpack-runtime-handoff:${request.jobId}` ||
+      typeof request.instanceId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(request.instanceId) ||
+      typeof request.serverPath !== 'string' || !request.serverPath || !request.handoff ||
+      typeof request.handoff !== 'object') {
+    throw new Error('Validated lifecycle handoff is invalid');
+  }
+  const existingAdoption = lifecycleAdoptions.get(request.eventId);
+  if (existingAdoption) {
+    if (existingAdoption.instanceId !== request.instanceId || existingAdoption.serverPath !== request.serverPath ||
+        !existingAdoption.processHandle.isLive()) throw new Error('Validated lifecycle handoff is stale');
+    return existingAdoption.result;
+  }
+
+  const { processHandle, startLease } = request.handoff;
+  const child = processHandle?.child;
+  if (!processHandle || typeof processHandle.isLive !== 'function' || processHandle.isLive() !== true ||
+      processHandle.publishEvents !== false || !Number.isSafeInteger(processHandle.pid) || processHandle.pid <= 0 ||
+      !child || child.pid !== processHandle.pid || !child.stdout || !child.stderr || !child.stdin ||
+      typeof child.on !== 'function' || !startLease || startLease.kind !== 'start' ||
+      startLease.operation !== 'server-health-live' || startLease.operationId !== processHandle.operationId ||
+      startLease.instanceId !== request.instanceId || startLease.serverPath !== request.serverPath ||
+      typeof startLease.assertOwnedPath !== 'function' || typeof startLease.release !== 'function') {
+    throw new Error('Validated lifecycle handoff cannot be proven');
+  }
+  startLease.assertOwnedPath(request.serverPath);
+  if (Array.from(serverStates.values()).some(item => item.process === child ||
+      (item.process && (item.instanceId === request.instanceId || item.targetPath === request.serverPath)))) {
+    throw new Error('A different managed process already owns this server');
+  }
+  const state = getOrCreateState({ instanceId: request.instanceId, targetPath: request.serverPath });
+  if (state.process) throw new Error('A managed process already owns this server');
+  const launchPlan = processHandle.launchPlan;
+  if (!launchPlan || typeof launchPlan !== 'object' || !Array.isArray(launchPlan.readyMarkers) ||
+      !Array.isArray(launchPlan.fatalMarkers) || !launchPlan.runtime) {
+    throw new Error('Validated lifecycle launch evidence is incomplete');
+  }
+  const config = readServerConfig(request.serverPath, buildConfigDefaultsFromStore()) || buildConfigDefaultsFromStore();
+  const port = Number.isSafeInteger(request.port) && request.port > 0 && request.port <= 65535
+    ? request.port : toNumber(config.port, 25565);
+  const maxRam = typeof request.maxRam === 'number' && Number.isFinite(request.maxRam) && request.maxRam > 0
+    ? request.maxRam : toNumber(config.maxRam, 4);
+  const runtime = request.runtime || launchPlan.runtime;
+
+  state.targetPath = request.serverPath;
+  state.port = port;
+  state.maxRam = maxRam;
+  state.loader = launchPlan.loader;
+  state.status = 'running';
+  state.startMs = Date.now();
+  state.shutdownRequest = null;
+  state.playersInfo = { count: 0, names: [] };
+  state.cloudSyncWarningSent = false;
+  state.stdoutBuffer = '';
+  state.lastLine = '';
+  state.readyMarkers = [...launchPlan.readyMarkers];
+  state.fatalMarkers = [...launchPlan.fatalMarkers];
+  state.runtime = runtime;
+  state.startupOutcome = 'ready';
+  state.process = child;
+
+  child.serverProcessHandle = processHandle;
+  child.serverInfo = {
+    id: processHandle.operationId,
+    instanceId: state.instanceId,
+    port,
+    maxRam,
+    startTime: state.startMs,
+    targetPath: state.targetPath,
+    loader: launchPlan.loader,
+    loaderVersion: runtime.loaderVersion,
+    minecraftVersion: runtime.minecraftVersion,
+    jar: launchPlan.jar || null,
+    launchType: launchPlan.type,
+    cwd: launchPlan.cwd,
+    runtime,
+    readyMarkers: [...launchPlan.readyMarkers],
+    fatalMarkers: [...launchPlan.fatalMarkers]
+  };
+
+  child.stdout.on('data', chunk => {
+    state.stdoutBuffer += chunk.toString();
+    const lines = state.stdoutBuffer.split(/\r?\n/);
+    state.stdoutBuffer = lines.pop() || '';
+    lines.forEach(line => handleLogLine(state, line));
+  });
+  child.stdout.on('end', () => {
+    if (state.stdoutBuffer.trim()) handleLogLine(state, state.stdoutBuffer);
+    state.stdoutBuffer = '';
+  });
+  child.stderr.on('data', chunk => emitServerLog(state, `[STDERR] ${chunk.toString().trimEnd()}`));
+  child.on('error', error => emitServerLog(state, `[ERROR] Server process error: ${error.message}`));
+  child.on('exit', (code, signal) => {
+    const wasManualShutdown = state.shutdownRequest === 'stop' || state.shutdownRequest === 'kill';
+    const isNormalExit = wasManualShutdown || code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
+    clearStateTimers(state);
+    state.process = null;
+    state.status = 'stopped';
+    state.startMs = null;
+    state.shutdownRequest = null;
+    state.playersInfo = { count: 0, names: [] };
+    lifecycleAdoptions.delete(request.eventId);
+    emitServerStatus(state);
+    if (isNormalExit) eventBus.emit('server-normal-exit', { instanceId: state.instanceId });
+    else {
+      eventBus.emit('server-crashed', {
+        instanceId: state.instanceId,
+        serverInfo: { targetPath: state.targetPath, port: state.port, maxRam: state.maxRam, loader: state.loader },
+        exitCode: code,
+        signal
+      });
+    }
+  });
+
+  clearListInterval(state);
+  state.listInterval = setInterval(() => {
+    if (state.process && !state.process.killed && !state.intensivePlayerCheckMode) sendListCommand(state);
+  }, 120000);
+  startMetricsReporting(state);
+  emitServerStatus(state);
+  eventBus.emit('server-started', {
+    instanceId: state.instanceId,
+    targetPath: state.targetPath,
+    port: state.port,
+    maxRam: state.maxRam,
+    loader: state.loader,
+    runtime: state.runtime
+  });
+  const result = Object.freeze({ adopted: true, instanceId: state.instanceId, pid: child.pid });
+  lifecycleAdoptions.set(request.eventId, {
+    instanceId: state.instanceId,
+    processHandle,
+    result,
+    serverPath: state.targetPath
+  });
+  return result;
+}
+
 async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
   const args = normalizeStartArguments(targetPathOrOptions, port, maxRam);
   const { targetPath, instanceId: requestedInstanceId } = args;
 
-  if (!targetPath || !fs.existsSync(targetPath)) {
+  if (!targetPath) {
     return {
       success: false,
       error: 'Invalid server path',
@@ -525,225 +770,28 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
     };
   }
 
-  const defaults = buildConfigDefaultsFromStore();
-  const config = readServerConfig(targetPath, defaults) || defaults;
-  const minecraftVersion = config.version || detectMinecraftVersion(targetPath) || '1.20.1';
-  const loaderInfo = resolveServerLoader(targetPath);
-  const loader = normalizeLoaderName(config.loader || loaderInfo.loader || 'vanilla');
-  const loaderVersion = config.loaderVersion || config.fabric || loaderInfo.loaderVersion || null;
-
-  state.targetPath = targetPath;
-  state.port = args.port || toNumber(config.port, 25565);
-  state.maxRam = args.maxRam || toNumber(config.maxRam, 4);
-  state.loader = loader;
-  state.status = 'starting';
-  state.startMs = null;
-  state.shutdownRequest = null;
-  state.playersInfo = { count: 0, names: [] };
-  state.cloudSyncWarningSent = false;
-  state.stdoutBuffer = '';
-  state.lastLine = '';
-  state.readyMarkers = [];
-  state.fatalMarkers = [];
-  state.runtime = null;
-  state.startupOutcome = null;
-
-  emitServerStatus(state);
-  emitServerLog(state, `[INFO] Preparing ${loader} server startup...`);
-
+  let startLease;
   try {
-    syncServerPort(targetPath, state.port);
-
-    const javaRequirements = await ensureJavaReadyForServer(targetPath, minecraftVersion);
-    const runtimeTuple = ['neoforge', 'quilt'].includes(loader)
-      ? {
-          minecraftVersion,
-          loaderFamily: loader,
-          loaderVersion,
-          javaMajor: javaRequirements.requiredJavaVersion,
-          os: 'win32',
-          architecture: 'x64'
-        }
-      : null;
-    const launchPlan = resolveLaunchPlan(targetPath, {
-      loader,
-      maxRam: state.maxRam,
-      minecraftVersion,
-      loaderVersion,
-      javaMajor: javaRequirements.requiredJavaVersion
-    }, { runtimeTuple });
-
-    const javaPath = javaRequirements.javaPath;
-    const serverIdentifier = `minecraft-core-server-${state.instanceId}-${Date.now()}`;
-    const spawnArgs = [`-Dminecraft.core.server.id=${serverIdentifier}`, ...launchPlan.args];
-
-    logger.info('Spawning Minecraft server process', {
-      category: 'server',
-      instanceId: state.instanceId,
-      data: {
-        service: 'ServerManager',
-        operation: 'startMinecraftServer',
-        targetPath,
-        loader,
-        loaderVersion,
-        minecraftVersion,
-        port: state.port,
-        maxRam: state.maxRam,
-        javaPath,
-        spawnArgs
+    startLease = await getServerMutationCoordinator().acquireStart(
+      { instanceId, serverPath: targetPath },
+      {
+        operation: 'server-start',
+        operationId: `server-start-${crypto.randomUUID()}`,
+        parentMutationLease: getCurrentServerMutationLease()
       }
-    });
-
-    emitServerLog(state, `[INFO] Starting server with Java: ${javaPath}`);
-
-    const child = spawn(javaPath, spawnArgs, {
-      cwd: launchPlan.cwd,
-      detached: false,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    state.process = child;
-    state.startMs = Date.now();
-    state.loader = launchPlan.loader;
-    state.readyMarkers = [...launchPlan.readyMarkers];
-    state.fatalMarkers = [...launchPlan.fatalMarkers];
-    state.runtime = launchPlan.runtime;
-    child.serverInfo = {
-      id: serverIdentifier,
-      instanceId: state.instanceId,
-      port: state.port,
-      maxRam: state.maxRam,
-      startTime: state.startMs,
-      targetPath,
-      loader,
-      loaderVersion,
-      minecraftVersion,
-      jar: launchPlan.jar || null,
-      launchType: launchPlan.type,
-      cwd: launchPlan.cwd,
-      runtime: launchPlan.runtime,
-      readyMarkers: [...launchPlan.readyMarkers],
-      fatalMarkers: [...launchPlan.fatalMarkers]
-    };
-
-    child.stdout.on('data', (chunk) => {
-      state.stdoutBuffer += chunk.toString();
-      const lines = state.stdoutBuffer.split(/\r?\n/);
-      state.stdoutBuffer = lines.pop() || '';
-      lines.forEach((line) => handleLogLine(state, line));
-    });
-
-    child.stdout.on('end', () => {
-      if (state.stdoutBuffer.trim()) {
-        handleLogLine(state, state.stdoutBuffer);
-      }
-      state.stdoutBuffer = '';
-    });
-
-    child.stderr.on('data', (chunk) => {
-      const text = chunk.toString();
-      maybeSendCloudSyncWarning(state, text);
-      if (state.status === 'starting') {
-        for (const line of text.split(/\r?\n/).filter(Boolean)) {
-          const fatalMarker = state.fatalMarkers.find(marker => line.includes(marker));
-          if (fatalMarker) {
-            state.startupOutcome = 'fatal';
-            state.status = 'error';
-            emitServerStatus(state);
-            break;
-          }
-        }
-      }
-      emitServerLog(state, `[STDERR] ${text.trimEnd()}`);
-    });
-
-    child.on('error', (error) => {
-      logger.error(`Server process error: ${error.message}`, {
-        category: 'server',
-        instanceId: state.instanceId,
-        data: {
-          service: 'ServerManager',
-          operation: 'serverProcess.error',
-          errorType: error.constructor.name,
-          targetPath
-        }
-      });
-      emitServerLog(state, `[ERROR] Server process error: ${error.message}`);
-    });
-
-    child.on('exit', (code, signal) => {
-      const wasManualShutdown = state.shutdownRequest === 'stop' || state.shutdownRequest === 'kill';
-      const isNormalExit = wasManualShutdown || code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
-
-      clearStateTimers(state);
-      state.process = null;
-      state.status = 'stopped';
-      state.startMs = null;
-      state.shutdownRequest = null;
-      state.playersInfo = { count: 0, names: [] };
-      emitServerStatus(state);
-      sendMetricsUpdate({
-        cpuPct: 0,
-        memUsedMB: 0,
-        systemTotalRamMB: Number((os.totalmem() / 1024 / 1024).toFixed(1)),
-        maxRamMB: state.maxRam * 1024,
-        uptime: '0h 0m 0s',
-        players: 0,
-        names: []
-      }, { instanceId: state.instanceId });
-
-      if (!isNormalExit) {
-        eventBus.emit('server-crashed', {
-          instanceId: state.instanceId,
-          serverInfo: {
-            targetPath,
-            port: state.port,
-            maxRam: state.maxRam,
-            loader
-          },
-          exitCode: code,
-          signal
-        });
-      } else {
-        eventBus.emit('server-normal-exit', { instanceId: state.instanceId });
-      }
-    });
-
-    clearListInterval(state);
-    state.listInterval = setInterval(() => {
-      if (state.process && !state.process.killed && !state.intensivePlayerCheckMode) {
-        sendListCommand(state);
-      }
-    }, 120000);
-
-    return {
-      success: true,
-      instanceId: state.instanceId,
-      pid: child.pid,
-      javaPath,
-      jar: launchPlan.jar || null,
-      loader
-    };
+    );
   } catch (error) {
-    clearStateTimers(state);
-    state.process = null;
-    state.status = 'error';
-    state.startMs = null;
-    emitServerStatus(state);
-    emitServerLog(state, `[ERROR] ${error.message}`);
-
-    logger.error(`Server start failed: ${error.message}`, {
+    logger.error(`Server start gate rejected the request: ${error.message}`, {
       category: 'server',
       instanceId: state.instanceId,
       data: {
         service: 'ServerManager',
-        operation: 'startMinecraftServer',
+        operation: 'startMinecraftServer.acquireStart',
         targetPath,
         errorType: error.constructor.name,
         code: error.code || null
       }
     });
-
     return {
       success: false,
       instanceId: state.instanceId,
@@ -751,6 +799,255 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
       code: error.code || 'SERVER_START_FAILED',
       details: error.details || null
     };
+  }
+
+  const startServerWithinLease = async () => {
+    if (!fs.existsSync(targetPath)) {
+      startLease.release();
+      return {
+        success: false,
+        error: 'Invalid server path',
+        code: 'INVALID_SERVER_PATH'
+      };
+    }
+
+    const defaults = buildConfigDefaultsFromStore();
+    const config = readServerConfig(targetPath, defaults) || defaults;
+    const minecraftVersion = config.version || detectMinecraftVersion(targetPath) || '1.20.1';
+    const loaderInfo = resolveServerLoader(targetPath);
+    const loader = normalizeLoaderName(config.loader || loaderInfo.loader || 'vanilla');
+    const loaderVersion = config.loaderVersion || config.fabric || loaderInfo.loaderVersion || null;
+
+    state.targetPath = targetPath;
+    state.port = args.port || toNumber(config.port, 25565);
+    state.maxRam = args.maxRam || toNumber(config.maxRam, 4);
+    state.loader = loader;
+    state.status = 'starting';
+    state.startMs = null;
+    state.shutdownRequest = null;
+    state.playersInfo = { count: 0, names: [] };
+    state.cloudSyncWarningSent = false;
+    state.stdoutBuffer = '';
+    state.lastLine = '';
+    state.readyMarkers = [];
+    state.fatalMarkers = [];
+    state.runtime = null;
+    state.startupOutcome = null;
+
+    emitServerStatus(state);
+    emitServerLog(state, `[INFO] Preparing ${loader} server startup...`);
+
+    let child = null;
+    let processHandle = null;
+    try {
+      syncServerPort(targetPath, state.port);
+
+      const javaRequirements = await ensureJavaReadyForServer(targetPath, minecraftVersion);
+      const javaPath = javaRequirements.javaPath;
+      const runtimeTuple = {
+        minecraftVersion,
+        loaderFamily: loader,
+        loaderVersion: loaderVersion || minecraftVersion,
+        javaMajor: javaRequirements.requiredJavaVersion,
+        os: 'win32',
+        architecture: 'x64'
+      };
+      const serverIdentifier = `server-${crypto.randomUUID()}`;
+      try {
+        processHandle = launchServerProcess({
+          serverPath: targetPath,
+          instanceId: state.instanceId,
+          runtime: runtimeTuple,
+          javaPath,
+          maxRam: state.maxRam,
+          operationId: serverIdentifier,
+          publishEvents: true,
+          onLine() {}
+        });
+      } catch (error) {
+        if (error?.code === 'HEALTH_CHECK_FAILED') {
+          throw new Error('Server process failed to launch', { cause: error });
+        }
+        throw error;
+      }
+      child = processHandle.child;
+      releaseStartLeaseAfterClose(state, startLease, processHandle);
+      const launchPlan = processHandle.launchPlan;
+      const spawnArgs = [`-Dminecraft.core.server.id=${serverIdentifier}`, ...launchPlan.args];
+
+      logger.info('Spawning Minecraft server process', {
+        category: 'server',
+        instanceId: state.instanceId,
+        data: {
+          service: 'ServerManager',
+          operation: 'startMinecraftServer',
+          targetPath,
+          loader,
+          loaderVersion,
+          minecraftVersion,
+          port: state.port,
+          maxRam: state.maxRam,
+          javaPath,
+          spawnArgs
+        }
+      });
+
+      emitServerLog(state, `[INFO] Starting server with Java: ${javaPath}`);
+
+      state.process = child;
+      state.startMs = Date.now();
+      state.loader = launchPlan.loader;
+      state.readyMarkers = [...launchPlan.readyMarkers];
+      state.fatalMarkers = [...launchPlan.fatalMarkers];
+      state.runtime = launchPlan.runtime;
+      child.serverInfo = {
+        id: serverIdentifier,
+        instanceId: state.instanceId,
+        port: state.port,
+        maxRam: state.maxRam,
+        startTime: state.startMs,
+        targetPath,
+        loader,
+        loaderVersion,
+        minecraftVersion,
+        jar: launchPlan.jar || null,
+        launchType: launchPlan.type,
+        cwd: launchPlan.cwd,
+        runtime: launchPlan.runtime,
+        readyMarkers: [...launchPlan.readyMarkers],
+        fatalMarkers: [...launchPlan.fatalMarkers]
+      };
+      child.serverProcessHandle = processHandle;
+
+      child.stdout.on('data', (chunk) => {
+        state.stdoutBuffer += chunk.toString();
+        const lines = state.stdoutBuffer.split(/\r?\n/);
+        state.stdoutBuffer = lines.pop() || '';
+        lines.forEach((line) => handleLogLine(state, line));
+      });
+
+      child.stdout.on('end', () => {
+        if (state.stdoutBuffer.trim()) {
+          handleLogLine(state, state.stdoutBuffer);
+        }
+        state.stdoutBuffer = '';
+      });
+
+      child.stderr.on('data', (chunk) => {
+        const text = chunk.toString();
+        maybeSendCloudSyncWarning(state, text);
+        if (state.status === 'starting') {
+          for (const line of text.split(/\r?\n/).filter(Boolean)) {
+            const fatalMarker = state.fatalMarkers.find(marker => line.includes(marker));
+            if (fatalMarker) {
+              state.startupOutcome = 'fatal';
+              state.status = 'error';
+              emitServerStatus(state);
+              break;
+            }
+          }
+        }
+        emitServerLog(state, `[STDERR] ${text.trimEnd()}`);
+      });
+
+      child.on('error', (error) => {
+        logger.error(`Server process error: ${error.message}`, {
+          category: 'server',
+          instanceId: state.instanceId,
+          data: {
+            service: 'ServerManager',
+            operation: 'serverProcess.error',
+            errorType: error.constructor.name,
+            targetPath
+          }
+        });
+        emitServerLog(state, `[ERROR] Server process error: ${error.message}`);
+      });
+
+      child.on('exit', (code, signal) => {
+        const wasManualShutdown = state.shutdownRequest === 'stop' || state.shutdownRequest === 'kill';
+        const isNormalExit = wasManualShutdown || code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
+
+        clearStateTimers(state);
+        state.process = null;
+        state.status = 'stopped';
+        state.startMs = null;
+        state.shutdownRequest = null;
+        state.playersInfo = { count: 0, names: [] };
+        emitServerStatus(state);
+        sendMetricsUpdate({
+          cpuPct: 0,
+          memUsedMB: 0,
+          systemTotalRamMB: Number((os.totalmem() / 1024 / 1024).toFixed(1)),
+          maxRamMB: state.maxRam * 1024,
+          uptime: '0h 0m 0s',
+          players: 0,
+          names: []
+        }, { instanceId: state.instanceId });
+
+        if (!isNormalExit) {
+          eventBus.emit('server-crashed', {
+            instanceId: state.instanceId,
+            serverInfo: {
+              targetPath,
+              port: state.port,
+              maxRam: state.maxRam,
+              loader
+            },
+            exitCode: code,
+            signal
+          });
+        } else {
+          eventBus.emit('server-normal-exit', { instanceId: state.instanceId });
+        }
+      });
+
+      startLease.markRunning({ pid: child.pid });
+
+      clearListInterval(state);
+      state.listInterval = setInterval(() => {
+        if (state.process && !state.process.killed && !state.intensivePlayerCheckMode) {
+          sendListCommand(state);
+        }
+      }, 120000);
+
+      return {
+        success: true,
+        instanceId: state.instanceId,
+        pid: child.pid,
+        javaPath,
+        jar: launchPlan.jar || null,
+        loader
+      };
+    } catch (error) {
+      const releaseLease = processHandle === null;
+      if (processHandle) {
+        try {
+          await processHandle.stopFully({
+            gracefulTimeoutMs: FAILED_START_STOP_TIMEOUT_MS,
+            killTimeoutMs: FAILED_START_STOP_TIMEOUT_MS
+          });
+        } catch (cleanupError) {
+          logger.error(`Failed server start cleanup could not prove process close: ${cleanupError.message}`, {
+            category: 'server',
+            instanceId: state.instanceId,
+            data: {
+              service: 'ServerManager',
+              operation: 'startMinecraftServer.cleanup',
+              errorType: cleanupError.constructor.name,
+              code: cleanupError.code || null
+            }
+          });
+        }
+      }
+      return reportStartFailure(state, startLease, targetPath, error, { releaseLease });
+    }
+  };
+
+  try {
+    return await runWithServerMutationLease(startLease, startServerWithinLease);
+  } catch (error) {
+    return reportStartFailure(state, startLease, targetPath, error);
   }
 }
 
@@ -1067,6 +1364,7 @@ async function shutdownMinecraftServer(selector = {}, options = {}) {
 }
 
 module.exports = {
+  adoptValidatedLifecycleProcess,
   startMinecraftServer,
   stopMinecraftServer,
   killMinecraftServer,

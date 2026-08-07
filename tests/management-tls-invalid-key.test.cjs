@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -10,6 +11,7 @@ async function withTlsTest(fn) {
   const tlsUtilsPath = path.resolve(__dirname, '../electron/utils/tls-utils.cjs');
   const secureStorePath = path.resolve(__dirname, '../electron/utils/secure-store.cjs');
   const configManagerPath = path.resolve(__dirname, '../electron/utils/config-manager.cjs');
+  const durableFsPath = path.resolve(__dirname, '../electron/utils/durable-fs.cjs');
   const originalLoad = Module._load;
   const tlsStore = {};
 
@@ -73,6 +75,14 @@ async function withTlsTest(fn) {
   delete require.cache[configManagerPath];
 
   try {
+    require(durableFsPath).configureDurableFs({
+      allowedRoots: [root],
+      durableClient: {
+        moveWriteThrough: fs.renameSync,
+        replaceFileWriteThrough: fs.renameSync,
+        flushDirectory() {}
+      }
+    });
     return await fn({ root, tlsUtilsPath });
   } finally {
     delete require.cache[tlsUtilsPath];

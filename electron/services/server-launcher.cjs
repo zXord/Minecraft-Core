@@ -3,6 +3,7 @@ const path = require('path');
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 const { FABRIC_LAUNCH_JAR, getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
 const { validatePreparedRuntime } = require('./loader-install-service.cjs');
+const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
 
 const SUPPORTED_LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
 const READY_MARKERS = Object.freeze([
@@ -90,6 +91,7 @@ function writeServerProperties(serverPath, properties) {
     nextLines.push('');
   }
 
+  markCurrentServerMutationDirty(serverPath);
   fs.writeFileSync(current.filePath, nextLines.join('\n'), 'utf8');
 }
 
@@ -276,6 +278,7 @@ function ensureForgeRootShim(serverPath, argsFilePath) {
     || fs.statSync(rootShimPath).size !== fs.statSync(sourceShimPath).size;
 
   if (shouldCopy) {
+    markCurrentServerMutationDirty(serverPath);
     fs.copyFileSync(sourceShimPath, rootShimPath);
   }
 

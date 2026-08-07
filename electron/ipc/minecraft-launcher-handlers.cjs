@@ -26,6 +26,7 @@ const {
   safeBaseName,
   safeFilePath
 } = require('../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../services/server-mutation-context.cjs');
 
 // In-memory lock to prevent race conditions during state operations
 let stateLockPromise = Promise.resolve();
@@ -341,6 +342,7 @@ async function saveExpectedModState(clientPath, requiredMods, optionalMods, win 
     const stateFile = path.join(stateDir, 'expected-mods.json');
     
     try {
+      markCurrentServerMutationDirty(clientPath);
       // Use async fs operations to avoid blocking event loop
       try {
         await fsPromises.access(stateDir);
@@ -414,13 +416,7 @@ async function loadExpectedModState(clientPath, win = null) {
     try {
       state = JSON.parse(data);
     } catch {
-      // TODO: Add proper logging - Corrupted state file, resetting
-      // Delete corrupted file and start fresh
-      try {
-        await fsPromises.unlink(stateFile);
-      } catch {
-        // TODO: Add proper logging - Could not delete corrupted state file
-      }
+      // Hydration is read-only; explicit clear/reconcile actions own any repair.
       return { success: true, requiredMods: new Set(), optionalMods: new Set(), acknowledgedDeps: new Set() };
     }
     
@@ -447,9 +443,7 @@ async function loadExpectedModState(clientPath, win = null) {
         acknowledgedDeps = new Set(state.acknowledgedDependencies);
       }
       
-      // Save migrated format to new schema
-      // TODO: Add proper logging - [STATE-MIGRATION] Migrating state to new schema version 1
-      await saveExpectedModState(clientPath, requiredMods, optionalMods, win, acknowledgedDeps);
+      // Return the legacy data in normalized form without rewriting during hydration.
     }
 
     return { success: true, requiredMods, optionalMods, acknowledgedDeps };
@@ -477,6 +471,7 @@ async function clearExpectedModState(clientPath) {
   
   try {
     if (fs.existsSync(stateFile)) {
+      markCurrentServerMutationDirty(clientPath);
       await fsPromises.unlink(stateFile);
 
       return { success: true, message: 'Persistent mod state cleared' };
@@ -677,6 +672,7 @@ async function writeCachedManifestChecksum(clientPath, modRecord, checksum) {
     const stats = await fsPromises.stat(modRecord.fullPath);
     const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
     const manifestPath = path.join(manifestDir, `${modRecord.fileName}.json`);
+    markCurrentServerMutationDirty(clientPath);
     await fsPromises.mkdir(manifestDir, { recursive: true });
 
     let manifest = {};
@@ -1119,7 +1115,9 @@ function createMinecraftLauncherHandlers(win) {
         
         const result = await launcher.authenticateWithMicrosoft();
         if (result.success && clientPath) {
-          await launcher.saveAuthData(clientPath).catch(() => {});
+          const safeClientPath = assertKnownClientPath(clientPath);
+          markCurrentServerMutationDirty(safeClientPath);
+          await launcher.saveAuthData(safeClientPath).catch(() => {});
         }
         
         return result;
@@ -1139,7 +1137,9 @@ function createMinecraftLauncherHandlers(win) {
     
     'minecraft-save-auth': async (_e, { clientPath }) => {
       try {
-        const result = await launcher.saveAuthData(assertKnownClientPath(clientPath));
+        const safeClientPath = assertKnownClientPath(clientPath);
+        markCurrentServerMutationDirty(safeClientPath);
+        const result = await launcher.saveAuthData(safeClientPath);
         return result;
       } catch (error) {
         return { success: false, error: getIpcErrorMessage(error) };
@@ -1178,6 +1178,7 @@ function createMinecraftLauncherHandlers(win) {
           return { success: false, error: 'Selected client instance does not have reusable login data' };
         }
 
+        markCurrentServerMutationDirty(resolvedTargetPath);
         await fsPromises.mkdir(resolvedTargetPath, { recursive: true });
         const targetAuthFile = path.join(resolvedTargetPath, 'xmcl-auth.json');
         const importedAuthData = {
@@ -1204,7 +1205,9 @@ function createMinecraftLauncherHandlers(win) {
       try {
         const result = await launcher.checkAndRefreshAuth();
         if (result.success && result.refreshed && clientPath) {
-          await launcher.saveAuthData(clientPath).catch(() => {});
+          const safeClientPath = assertKnownClientPath(clientPath);
+          markCurrentServerMutationDirty(safeClientPath);
+          await launcher.saveAuthData(safeClientPath).catch(() => {});
         }
 
         return result;
@@ -1221,6 +1224,7 @@ function createMinecraftLauncherHandlers(win) {
           const safeClientPath = assertKnownClientPath(clientPath);
           const authFile = path.join(safeClientPath, 'xmcl-auth.json');
           if (fs.existsSync(authFile)) {
+            markCurrentServerMutationDirty(safeClientPath);
             fs.unlinkSync(authFile);
         }
         
@@ -1433,6 +1437,7 @@ function createMinecraftLauncherHandlers(win) {
         let availableFallbackSource = null;
 
         if (!fs.existsSync(manifestDir)) {
+          markCurrentServerMutationDirty(clientPath);
           fs.mkdirSync(manifestDir, { recursive: true });
         }
 
@@ -1541,6 +1546,7 @@ function createMinecraftLauncherHandlers(win) {
                 // Try download
                 const requestOptions = await buildManagementRequestOptions(downloadUrl, serverInfo);
                   await new Promise((resolve, reject) => {
+                    markCurrentServerMutationDirty(clientPath);
                     const file = fs.createWriteStream(modPath);
                     let downloadedBytes = 0;
                     let totalBytes = 0;
@@ -1564,6 +1570,7 @@ function createMinecraftLauncherHandlers(win) {
                         }
                         const redirectRequest = createGetRequest(redirectUrl, redirectOptions, serverInfo, (redirectResponse) => {
                         if (redirectResponse.statusCode === 200) {
+                          markCurrentServerMutationDirty(clientPath);
                           const file2 = fs.createWriteStream(modPath);
                           totalBytes = parseInt(redirectResponse.headers['content-length'], 10) || 0;
                           downloadedBytes = 0;
@@ -1863,6 +1870,7 @@ function createMinecraftLauncherHandlers(win) {
               // (⬇️  Downloading ${mod.fileName} from: ${mod.downloadUrl})
               const requestOptions = await buildManagementRequestOptions(mod.downloadUrl, serverInfo);
               await new Promise((resolve, reject) => {
+                markCurrentServerMutationDirty(clientPath);
                 const file = fs.createWriteStream(modPath);
                 
                 let downloadedBytes = 0;
@@ -1884,6 +1892,7 @@ function createMinecraftLauncherHandlers(win) {
                     }
                     createGetRequest(redirectUrl, redirectOptions, serverInfo, (redirectResponse) => {
                       if (redirectResponse.statusCode === 200) {
+                        markCurrentServerMutationDirty(clientPath);
                         const file2 = fs.createWriteStream(modPath);
                         
                         // Set up progress tracking for redirect
@@ -2191,9 +2200,11 @@ function createMinecraftLauncherHandlers(win) {
               const manifestPath = path.join(manifestDir, `${modFile}.json`);
               if (!fs.existsSync(manifestPath) && !allowed.has(modFile)) {
                   if (!fs.existsSync(manifestDir)) {
+                    markCurrentServerMutationDirty(clientPath);
                     fs.mkdirSync(manifestDir, { recursive: true });
                   }
                   const installationDate = new Date().toISOString();
+                  markCurrentServerMutationDirty(clientPath);
                   fs.writeFileSync(manifestPath, JSON.stringify({ 
                     fileName: modFile, 
                     source: 'manual', 
@@ -2266,6 +2277,7 @@ function createMinecraftLauncherHandlers(win) {
         const subdir = normalizeAssetType(type);
         const installDir = path.join(safeClientPath, subdir);
         const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
+        markCurrentServerMutationDirty(safeClientPath);
         if (!fs.existsSync(installDir)) fs.mkdirSync(installDir, { recursive: true });
         if (!fs.existsSync(manifestDir)) fs.mkdirSync(manifestDir, { recursive: true });
 
@@ -2513,6 +2525,7 @@ function createMinecraftLauncherHandlers(win) {
         // After that, never touch servers.dat or options.txt again so user modifications are preserved
         const serversInitializedFile = path.join(clientPath, '.servers-initialized');
         if (!fs.existsSync(serversInitializedFile)) {
+          markCurrentServerMutationDirty(clientPath);
           // First time launch - add server entry
         await ensureServersDat(
           clientPath,
@@ -2535,6 +2548,9 @@ function createMinecraftLauncherHandlers(win) {
           }), 'utf8');
         }
         // If flag file exists, never touch servers.dat again - user modifications are preserved
+
+        // Launch preparation can extract natives, repair profiles, and refresh saved auth.
+        markCurrentServerMutationDirty(assertKnownClientPath(clientPath));
         
         if (useProperLauncher) {
           const loaderType = serverInfo?.loaderType || serverInfo?.loader || (serverInfo?.fabric ? 'fabric' : 'vanilla');
@@ -3423,7 +3439,9 @@ function createMinecraftLauncherHandlers(win) {
     },
     'minecraft-check-client': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
       try {
-        const result = await launcher.checkMinecraftClient(clientPath, minecraftVersion, { requiredMods, serverInfo });
+        const result = await launcher.checkMinecraftClient(
+          assertKnownClientPath(clientPath), minecraftVersion, { requiredMods, serverInfo }
+        );
         return { success: true, ...result };
       } catch (error) {
         return { success: false, error: error.message };
@@ -3432,7 +3450,9 @@ function createMinecraftLauncherHandlers(win) {
 
     'minecraft-check-client-sync': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
       try {
-        const result = await launcher.checkMinecraftClient(clientPath, minecraftVersion, { requiredMods, serverInfo });
+        const result = await launcher.checkMinecraftClient(
+          assertKnownClientPath(clientPath), minecraftVersion, { requiredMods, serverInfo }
+        );
         return { success: true, ...result };
       } catch (error) {
         return { success: false, error: error.message };
@@ -3441,6 +3461,7 @@ function createMinecraftLauncherHandlers(win) {
     
     'minecraft-download-client': async (_e, { clientPath, minecraftVersion, requiredMods = [], serverInfo = null }) => {
       try {
+        const safeClientPath = assertKnownClientPath(clientPath);
         const downloadOptions = { 
           requiredMods, 
           serverInfo 
@@ -3450,7 +3471,8 @@ function createMinecraftLauncherHandlers(win) {
           downloadOptions.serverIp = serverInfo.serverIp;
         }
         
-        const result = await launcher.downloadMinecraftClientSimple(clientPath, minecraftVersion, downloadOptions);
+        markCurrentServerMutationDirty(safeClientPath);
+        const result = await launcher.downloadMinecraftClientSimple(safeClientPath, minecraftVersion, downloadOptions);
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -3459,7 +3481,9 @@ function createMinecraftLauncherHandlers(win) {
     
     'minecraft-clear-client': async (_e, { clientPath, minecraftVersion }) => {
       try {
-        const result = await launcher.clearMinecraftClient(assertKnownClientPath(clientPath), minecraftVersion);
+        const safeClientPath = assertKnownClientPath(clientPath);
+        markCurrentServerMutationDirty(safeClientPath);
+        const result = await launcher.clearMinecraftClient(safeClientPath, minecraftVersion);
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -3468,7 +3492,9 @@ function createMinecraftLauncherHandlers(win) {
 
     'minecraft-clear-client-full': async (_e, { clientPath, minecraftVersion }) => {
       try {
-        const result = await launcher.clearMinecraftClientFull(assertKnownClientPath(clientPath), minecraftVersion);
+        const safeClientPath = assertKnownClientPath(clientPath);
+        markCurrentServerMutationDirty(safeClientPath);
+        const result = await launcher.clearMinecraftClientFull(safeClientPath, minecraftVersion);
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -3477,7 +3503,9 @@ function createMinecraftLauncherHandlers(win) {
 
     'minecraft-clear-assets': async (_e, { clientPath }) => {
       try {
-        const result = await launcher.clearAssets(assertKnownClientPath(clientPath));
+        const safeClientPath = assertKnownClientPath(clientPath);
+        markCurrentServerMutationDirty(safeClientPath);
+        const result = await launcher.clearAssets(safeClientPath);
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -3507,6 +3535,7 @@ function createMinecraftLauncherHandlers(win) {
         
         if (enabled) {
           if (fs.existsSync(disabledModPath)) {
+            markCurrentServerMutationDirty(safeClientPath);
             fs.renameSync(disabledModPath, modPath);
             utils.invalidateFileChecksumCache(disabledModPath);
             utils.invalidateFileChecksumCache(modPath);
@@ -3520,6 +3549,7 @@ function createMinecraftLauncherHandlers(win) {
           }
         } else {
           if (fs.existsSync(modPath)) {
+            markCurrentServerMutationDirty(safeClientPath);
             fs.renameSync(modPath, disabledModPath);
             utils.invalidateFileChecksumCache(modPath);
             utils.invalidateFileChecksumCache(disabledModPath);
@@ -3552,6 +3582,7 @@ function createMinecraftLauncherHandlers(win) {
 
         if (enabled) {
           if (fs.existsSync(disabledPath)) {
+            markCurrentServerMutationDirty(safeClientPath);
             fs.renameSync(disabledPath, filePath);
             return { success: true, action: 'enabled' };
           } else if (fs.existsSync(filePath)) {
@@ -3561,6 +3592,7 @@ function createMinecraftLauncherHandlers(win) {
           }
         } else {
           if (fs.existsSync(filePath)) {
+            markCurrentServerMutationDirty(safeClientPath);
             fs.renameSync(filePath, disabledPath);
             return { success: true, action: 'disabled' };
           } else if (fs.existsSync(disabledPath)) {
@@ -3588,6 +3620,9 @@ function createMinecraftLauncherHandlers(win) {
         const disabledPath = safeFilePath(dir, `${safeFileName}.disabled`, 'disabled asset file name', { allowedExtensions: ['.zip.disabled'] });
 
         let deleted = false;
+        if (fs.existsSync(filePath) || fs.existsSync(disabledPath)) {
+          markCurrentServerMutationDirty(safeClientPath);
+        }
         if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); deleted = true; }
         if (fs.existsSync(disabledPath)) { fs.unlinkSync(disabledPath); deleted = true; }
         return deleted ? { success: true, action: 'deleted' } : { success: false, error: 'File not found' };
@@ -3609,6 +3644,9 @@ function createMinecraftLauncherHandlers(win) {
         const disabledModPath = safeFilePath(modsDir, `${safeFileName}.disabled`, 'disabled mod file name', { allowedExtensions: ['.jar.disabled'] });
 
         let deleted = false;
+        if (fs.existsSync(modPath) || fs.existsSync(disabledModPath)) {
+          markCurrentServerMutationDirty(safeClientPath);
+        }
         if (fs.existsSync(modPath)) {
           fs.unlinkSync(modPath);
           utils.invalidateFileChecksumCache(modPath);
@@ -3637,8 +3675,9 @@ function createMinecraftLauncherHandlers(win) {
           return { success: false, error: 'Client path is required' };
         }
 
-        const modsDir = path.join(clientPath, 'mods');
-        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const modsDir = path.join(safeClientPath, 'mods');
+        const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
 
         if (!fs.existsSync(modsDir)) {
           return { success: true, removed: [] };
@@ -3656,6 +3695,7 @@ function createMinecraftLauncherHandlers(win) {
           const base = file.replace('.disabled', '');
           if (!allowed.has(base)) {
             const filePath = path.join(modsDir, file);
+            markCurrentServerMutationDirty(safeClientPath);
             fs.unlinkSync(filePath);
             utils.invalidateFileChecksumCache(filePath);
             modAnalysisUtils.invalidateMetadataCache(filePath);
@@ -3679,8 +3719,9 @@ function createMinecraftLauncherHandlers(win) {
           return { success: false, error: 'Client path and mods to remove are required' };
         }
 
-        const modsDir = path.join(clientPath, 'mods');
-        const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
+        const safeClientPath = assertKnownClientPath(clientPath);
+        const modsDir = path.join(safeClientPath, 'mods');
+        const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
         const successfullyRemovedMods = [];
 
         if (!fs.existsSync(modsDir)) {
@@ -3700,6 +3741,7 @@ function createMinecraftLauncherHandlers(win) {
             if (targetFile) {
               const actualPath = path.join(modsDir, targetFile);
 
+              markCurrentServerMutationDirty(safeClientPath);
               fs.unlinkSync(actualPath);
               removed = true;
 

@@ -17,8 +17,11 @@ const storedAutoRestart = appStore.get('autoRestart') || { enabled: false, delay
 let autoRestartEnabled = storedAutoRestart.enabled;
 let autoRestartDelay = storedAutoRestart.delay; // Default delay in seconds
 let autoRestartTimer = null;
+let pendingAutoRestartPath = null;
 let serverCrashCount = 0;
 let maxCrashesBeforeDisable = storedAutoRestart.maxCrashes;
+let listenersInitialized = false;
+const recoveryHolds = new Map();
 
 function applyAutoRestartState(source = {}) {
   const defaults = getDefaultServerConfig().autoRestart || { enabled: false, delay: 10, maxCrashes: 3 };
@@ -27,10 +30,78 @@ function applyAutoRestartState(source = {}) {
   maxCrashesBeforeDisable = typeof source.maxCrashes === 'number' ? source.maxCrashes : defaults.maxCrashes;
 }
 
-// Set up event listeners
-eventBus.on('server-crashed', handleServerCrash);
-eventBus.on('server-normal-exit', handleNormalExit);
-eventBus.on('server-started', handleServerStarted);
+function serverPathKey(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return path.resolve(value.trim()).normalize('NFC').toLocaleLowerCase('en-US');
+}
+
+function restartTargetPath(restartInfo) {
+  const serverInfo = restartInfo?.serverInfo;
+  if (typeof serverInfo?.targetPath === 'string' && serverInfo.targetPath.trim()) return serverInfo.targetPath.trim();
+  if (typeof serverInfo?.jar === 'string' && serverInfo.jar.trim()) return path.dirname(serverInfo.jar);
+  return null;
+}
+
+function initializeAutoRestartListeners() {
+  if (listenersInitialized) return false;
+  eventBus.on('server-crashed', handleServerCrash);
+  eventBus.on('server-normal-exit', handleNormalExit);
+  eventBus.on('server-started', handleServerStarted);
+  listenersInitialized = true;
+  return true;
+}
+
+function disposeAutoRestartListeners() {
+  if (!listenersInitialized) return false;
+  eventBus.removeListener('server-crashed', handleServerCrash);
+  eventBus.removeListener('server-normal-exit', handleNormalExit);
+  eventBus.removeListener('server-started', handleServerStarted);
+  listenersInitialized = false;
+  cancelAutoRestart();
+  return true;
+}
+
+function isRecoveryHeld(serverPath) {
+  const key = serverPathKey(serverPath);
+  return key ? recoveryHolds.has(key) : recoveryHolds.size > 0;
+}
+
+function beginRecoveryHold({ serverPath, operationId } = {}) {
+  const key = serverPathKey(serverPath);
+  if (!key || typeof operationId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(operationId)) {
+    throw new TypeError('Recovery hold is invalid');
+  }
+  const current = recoveryHolds.get(key);
+  if (current && current !== operationId) throw new Error('A different recovery operation already holds this server');
+  recoveryHolds.set(key, operationId);
+  if (pendingAutoRestartPath === key) cancelAutoRestart();
+  return Object.freeze({ held: true, operationId, serverPath });
+}
+
+function restoreRecoveryAutoRestart({ serverPath, operationId, enabled } = {}) {
+  const key = serverPathKey(serverPath);
+  if (!key || typeof operationId !== 'string' || recoveryHolds.get(key) !== operationId || typeof enabled !== 'boolean') {
+    throw new TypeError('Recovery hold does not match');
+  }
+  const defaults = getDefaultServerConfig();
+  const config = readServerConfig(serverPath, defaults);
+  const current = config?.autoRestart || defaults.autoRestart || { enabled: false, delay: 10, maxCrashes: 3 };
+  const preserved = {
+    enabled,
+    delay: typeof current.delay === 'number' ? current.delay : 10,
+    maxCrashes: typeof current.maxCrashes === 'number' ? current.maxCrashes : 3
+  };
+  updateServerConfig(serverPath, { autoRestart: preserved }, defaults);
+  applyAutoRestartState(preserved);
+  recoveryHolds.delete(key);
+  return Object.freeze({ restored: true, enabled, serverPath });
+}
+
+function hasPendingAutoRestart(serverPath = null) {
+  if (!autoRestartTimer) return false;
+  const key = serverPathKey(serverPath);
+  return key ? pendingAutoRestartPath === key : true;
+}
 
 /**
  * Schedule an auto-restart for a crashed server
@@ -38,6 +109,9 @@ eventBus.on('server-started', handleServerStarted);
  * @param {object} restartInfo - Information about the server that crashed
  */
 function scheduleAutoRestart(restartInfo) {
+  const requestedPath = restartTargetPath(restartInfo);
+  const requestedKey = serverPathKey(requestedPath);
+  if (requestedKey && recoveryHolds.has(requestedKey)) return false;
   serverCrashCount++;
   
   if (serverCrashCount >= maxCrashesBeforeDisable) {
@@ -49,7 +123,7 @@ function scheduleAutoRestart(restartInfo) {
       maxCrashes: maxCrashesBeforeDisable,
       crashCount: serverCrashCount
     });
-    return;
+    return false;
   }
   
   const seconds = autoRestartDelay;
@@ -58,8 +132,13 @@ function scheduleAutoRestart(restartInfo) {
   if (autoRestartTimer) {
     clearTimeout(autoRestartTimer);
   }
+  pendingAutoRestartPath = requestedKey;
   
   autoRestartTimer = setTimeout(() => {
+    autoRestartTimer = null;
+    const scheduledKey = pendingAutoRestartPath;
+    pendingAutoRestartPath = null;
+    if (scheduledKey && recoveryHolds.has(scheduledKey)) return;
     safeSend('server-log', `[INFO] Auto-restarting server now...`);
     safeSend('server-status', 'restarting');
     
@@ -118,6 +197,7 @@ function scheduleAutoRestart(restartInfo) {
         safeSend('server-log', `[INFO] Auto-restarting server at ${targetPathToRestart} with port ${portToRestart} and RAM ${maxRamToRestart}GB`);
         
         setTimeout(() => {
+          if (isRecoveryHeld(targetPathToRestart)) return;
           const requestAccepted = eventBus.emit('request-server-start', {
             targetPath: targetPathToRestart,
             port: portToRestart,
@@ -136,6 +216,7 @@ function scheduleAutoRestart(restartInfo) {
       safeSend('server-log', `[ERROR] Auto-restart failed: ${restartErr.message}`);
     }
   }, seconds * 1000);
+  return true;
 }
 
 /**
@@ -145,6 +226,7 @@ function cancelAutoRestart() {
   if (autoRestartTimer) {
     clearTimeout(autoRestartTimer);
     autoRestartTimer = null;
+    pendingAutoRestartPath = null;
     safeSend('server-log', `[INFO] Auto-restart canceled`);
   }
 }
@@ -235,7 +317,11 @@ function getAutoRestartState(targetPath = null) {
  * @param {object} restartInfo - Information about the server that crashed
  */
 function handleServerCrash(restartInfo) {
-  
+  const targetPath = restartTargetPath(restartInfo);
+  if (targetPath && isRecoveryHeld(targetPath)) {
+    safeSend('server-log', `[INFO] Auto-restart is suspended while server recovery is active.`);
+    return;
+  }
   if (autoRestartEnabled) {
     // Handle auto-restart logic
     scheduleAutoRestart(restartInfo);
@@ -276,10 +362,85 @@ function initFromServerConfig(serverPath) {
   applyAutoRestartState(config?.autoRestart || getDefaultServerConfig().autoRestart);
 }
 
+function createRecoveryRuntimePolicy({ runtimeController } = {}) {
+  if (!runtimeController || typeof runtimeController !== 'object' ||
+      typeof runtimeController.ensureStopped !== 'function' ||
+      typeof runtimeController.adoptValidatedHandoff !== 'function') {
+    throw new TypeError('Recovery runtime controller is invalid');
+  }
+  const adopted = new Map();
+  function normalizeAdoption(request) {
+    if (!request || typeof request !== 'object' || Array.isArray(request) ||
+        typeof request.eventId !== 'string' || typeof request.jobId !== 'string' ||
+        request.eventId !== `modpack-runtime-handoff:${request.jobId}` ||
+        typeof request.instanceId !== 'string' || !request.handoff || typeof request.handoff !== 'object') {
+      throw new Error('Validated runtime handoff request is invalid');
+    }
+    const leasePath = request.handoff.startLease?.serverPath;
+    const serverPath = request.serverPath || leasePath;
+    const requestedKey = serverPathKey(serverPath);
+    const leaseKey = serverPathKey(leasePath);
+    if (!requestedKey || !leaseKey || requestedKey !== leaseKey) {
+      throw new Error('Validated runtime handoff path is invalid');
+    }
+    return Object.freeze({ ...request, serverPath });
+  }
+  return Object.freeze({
+    suspend(request) {
+      return beginRecoveryHold({ serverPath: request.serverPath, operationId: request.operationId });
+    },
+    async ensureStopped(request) {
+      const result = await runtimeController.ensureStopped(request);
+      if (!result || (result.stopped !== true && result.success !== true && result.alreadyStopped !== true)) {
+        throw new Error('Server runtime could not be proven stopped');
+      }
+      return result;
+    },
+    async adoptValidatedHandoff(request) {
+      const normalized = normalizeAdoption(request);
+      const prior = adopted.get(normalized.eventId);
+      if (prior) {
+        if (prior.instanceId !== normalized.instanceId || prior.jobId !== normalized.jobId ||
+            prior.serverPathKey !== serverPathKey(normalized.serverPath) ||
+            prior.processHandle !== normalized.handoff.processHandle || prior.startLease !== normalized.handoff.startLease) {
+          throw new Error('Validated runtime handoff identity does not match the prior adoption');
+        }
+        return prior.result;
+      }
+      const result = await runtimeController.adoptValidatedHandoff(normalized);
+      if (!result || result.adopted !== true) throw new Error('Validated runtime handoff was not adopted');
+      const frozen = Object.freeze({ ...result, adopted: true });
+      adopted.set(normalized.eventId, Object.freeze({
+        instanceId: normalized.instanceId,
+        jobId: normalized.jobId,
+        processHandle: normalized.handoff.processHandle,
+        result: frozen,
+        serverPathKey: serverPathKey(normalized.serverPath),
+        startLease: normalized.handoff.startLease
+      }));
+      return frozen;
+    },
+    restoreAutoRestart(request) {
+      return restoreRecoveryAutoRestart({
+        serverPath: request.serverPath,
+        operationId: request.operationId,
+        enabled: request.enabled
+      });
+    }
+  });
+}
+
 module.exports = {
+  beginRecoveryHold,
   cancelAutoRestart,
+  createRecoveryRuntimePolicy,
+  disposeAutoRestartListeners,
   setAutoRestartOptions,
   getAutoRestartState,
+  hasPendingAutoRestart,
+  initializeAutoRestartListeners,
+  isRecoveryHeld,
   resetCrashCount,
-  initFromServerConfig
+  initFromServerConfig,
+  restoreRecoveryAutoRestart
 };

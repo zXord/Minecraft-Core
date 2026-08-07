@@ -5,6 +5,12 @@ const AdmZip = require('adm-zip');
 const { sendServerCommand, getServerState } = require('./server-manager.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
+const { withBackupMutationLock } = require('./backup-mutation-lock.cjs');
+const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
+const {
+  METADATA_KIND: LIFECYCLE_METADATA_KIND,
+  normalizeMetadata: normalizeLifecycleMetadata
+} = require('./modpack-lifecycle/restore-point-service.cjs');
 // Lazy-load retention policy when needed
 let RetentionPolicy = null;
 
@@ -131,6 +137,50 @@ function getBackupMetaPath(zipPath) {
   return zipPath.replace(/\.zip$/i, '.json');
 }
 
+function getLifecycleRestorePointState(zipPath) {
+  const looksLikeRestorePoint = path.basename(zipPath).startsWith('restore-point-');
+  const metadataPaths = [getBackupMetaPath(zipPath), zipPath.replace(/\.zip$/i, '.pending.json')];
+  let lifecycle = false;
+  let pinned = false;
+  let corrupt = false;
+  let sidecars = 0;
+  for (const metadataPath of metadataPaths) {
+    if (!fs.existsSync(metadataPath)) continue;
+    sidecars += 1;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+      if (parsed?.kind === LIFECYCLE_METADATA_KIND || looksLikeRestorePoint) {
+        lifecycle = true;
+        let metadata;
+        try {
+          metadata = normalizeLifecycleMetadata(parsed);
+        } catch {
+          pinned = true;
+          corrupt = true;
+          continue;
+        }
+        if (metadata.name !== path.basename(zipPath)) {
+          pinned = true;
+          corrupt = true;
+        } else if (metadataPath.endsWith('.pending.json') || metadata.pins.length > 0) {
+          pinned = true;
+        }
+      }
+    } catch {
+      if (looksLikeRestorePoint || lifecycle) {
+        lifecycle = true;
+        pinned = true;
+        corrupt = true;
+      }
+    }
+  }
+  if (lifecycle && sidecars > 1) return { lifecycle: true, pinned: true, corrupt: true };
+  if (lifecycle) return { lifecycle, pinned, corrupt };
+  return looksLikeRestorePoint
+    ? { lifecycle: true, pinned: true, corrupt: true }
+    : { lifecycle: false, pinned: false, corrupt: false };
+}
+
 function isIncompleteBackupMetadata(metadata) {
   if (!metadata || typeof metadata !== 'object') {
     return false;
@@ -164,6 +214,10 @@ function getLatestBackupSidecarTime(zipPath, metaPath, metadata) {
 }
 
 async function cleanupIncompleteBackups(serverPath, options = {}) {
+  return withBackupMutationLock(serverPath, () => cleanupIncompleteBackupsUnlocked(serverPath, options));
+}
+
+async function cleanupIncompleteBackupsUnlocked(serverPath, options = {}) {
   const backupDir = getBackupDir(serverPath);
   const olderThanMs = Number.isFinite(options.olderThanMs)
     ? Math.max(0, Number(options.olderThanMs))
@@ -187,12 +241,19 @@ async function cleanupIncompleteBackups(serverPath, options = {}) {
       continue;
     }
 
+    const zipName = metaFile.toLowerCase().endsWith('.pending.json')
+      ? metaFile.replace(/\.pending\.json$/i, '.zip')
+      : metaFile.replace(/\.json$/i, '.zip');
+    const zipPath = path.join(backupDir, zipName);
+    if (getLifecycleRestorePointState(zipPath).lifecycle) {
+      skipped++;
+      continue;
+    }
+
     if (!isIncompleteBackupMetadata(metadata)) {
       continue;
     }
 
-    const zipName = metaFile.replace(/\.json$/i, '.zip');
-    const zipPath = path.join(backupDir, zipName);
     const zipKey = normalizePathForCompare(zipPath);
     if (activeBackupPaths.has(zipKey)) {
       skipped++;
@@ -793,24 +854,33 @@ async function listBackupsWithMetadata(serverPath, options = {}) {
 
 async function deleteBackup({ serverPath, name }) {
   try {
-    const zipPath = getSafeBackupZipPath(serverPath, name);
-    const metaPath = getBackupMetaPath(zipPath);
-    if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-    if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
-    return { success: true };
+    return await withBackupMutationLock(serverPath, async () => {
+      const zipPath = getSafeBackupZipPath(serverPath, name);
+      const metaPath = getBackupMetaPath(zipPath);
+      const restorePoint = getLifecycleRestorePointState(zipPath);
+      if (restorePoint.pinned) throw new Error('This lifecycle restore point is pinned and cannot be deleted.');
+      if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+      return { success: true };
+    });
   } catch (err) {
     return { success: false, error: err.message };
   }
 }
 
 async function renameBackup({ serverPath, oldName, newName }) {
-  const oldZip = getSafeBackupZipPath(serverPath, oldName);
-  const oldMeta = getBackupMetaPath(oldZip);
-  const newZip = getSafeBackupZipPath(serverPath, newName);
-  const newMeta = getBackupMetaPath(newZip);
-  if (fs.existsSync(newZip)) throw new Error('A backup with that name already exists');
-  fs.renameSync(oldZip, newZip);
-  if (fs.existsSync(oldMeta)) fs.renameSync(oldMeta, newMeta);
+  return withBackupMutationLock(serverPath, async () => {
+    const oldZip = getSafeBackupZipPath(serverPath, oldName);
+    const oldMeta = getBackupMetaPath(oldZip);
+    const newZip = getSafeBackupZipPath(serverPath, newName);
+    const newMeta = getBackupMetaPath(newZip);
+    const restorePoint = getLifecycleRestorePointState(oldZip);
+    if (restorePoint.pinned) throw new Error('This lifecycle restore point is pinned and cannot be renamed.');
+    if (restorePoint.lifecycle) throw new Error('Lifecycle restore point names are immutable.');
+    if (fs.existsSync(newZip)) throw new Error('A backup with that name already exists');
+    fs.renameSync(oldZip, newZip);
+    if (fs.existsSync(oldMeta)) fs.renameSync(oldMeta, newMeta);
+  });
 }
 
 async function restoreBackup({ serverPath, name, serverStatus }) {
@@ -819,7 +889,6 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
     if (isTargetServerRunning(serverPath)) {
       return { success: false, error: 'Cannot restore while server is running. Please stop the server first.' };
     }
-    const backupDir = getBackupDir(serverPath);
     const zipPath = getSafeBackupZipPath(serverPath, name);
     const metaPath = getBackupMetaPath(zipPath);
     if (!fs.existsSync(zipPath)) {
@@ -868,6 +937,9 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
         return { success: false, error: 'Failed to create pre-restore backup: ' + err.message };
       }
     }
+    const zip = new (/** @type {any} */ (AdmZip))(zipPath);
+    validateZipEntriesStayInside(zip, serverPath);
+    markCurrentServerMutationDirty(serverPath);
     // For world-type backups, delete only world folders first
     if (isWorldType) {
       for (const folder of ['world', 'world_nether', 'world_the_end']) {
@@ -878,8 +950,6 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
       }
     }
     // For full backups, just extract and overwrite everything
-    const zip = new (/** @type {any} */ (AdmZip))(zipPath);
-    validateZipEntriesStayInside(zip, serverPath);
     zip.extractAllTo(serverPath, true);
     return { success: true, message: 'Backup restored successfully.', preRestoreBackup: preRestoreBackupName };
   } catch (err) {

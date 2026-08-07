@@ -1,7 +1,15 @@
 // Main electron entry point
 const path = require('path');
-const { app, BrowserWindow, Menu, Tray, ipcMain, shell, session } = require('electron');
-const { setupIpcHandlers } = require('./ipc-handlers.cjs');
+const { app, BrowserWindow, Menu, Tray, Notification, dialog, ipcMain, shell, session } = require('electron');
+const fs = require('fs');
+const { createRuntimeFlags } = require('./bootstrap/runtime-flags.cjs');
+const runtimeFlags = createRuntimeFlags({ isPackaged: Boolean(app.isPackaged) });
+if (runtimeFlags.testMode) {
+  process.env.MINECRAFT_CORE_USER_DATA_DIR = runtimeFlags.isolatedUserDataPath;
+}
+const { createMainBootstrap } = require('./bootstrap/create-main-bootstrap.cjs');
+const { createModpackServiceGraph } = require('./bootstrap/create-modpack-service-graph.cjs');
+const { loadTestIpcOverrides, loadTestModpackFactory, loadTestRecoveryFactory, resolveServiceGraphUserData } = require('./bootstrap/load-test-modpack-factory.cjs');
 const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
 const { setMainWindow } = require('./utils/safe-send.cjs');
 const appStore = require('./utils/app-store.cjs');
@@ -10,8 +18,8 @@ const { shouldAllowNavigation } = require('./utils/navigation-policy.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const { getTlsFingerprint, normalizeFingerprint } = require('./utils/tls-utils.cjs');
 const { shouldUseDevServer } = require('./utils/runtime-mode.cjs');
-const fs = require('fs');
 const { getUpdateService } = require('./services/update-service.cjs');
+const { installServerMutationCoordinator } = require('./services/server-mutation-context.cjs');
 const devConfig = require('../config/dev-config.cjs');
 
 // Initialize logger service early
@@ -486,7 +494,7 @@ function isAllowedWindowNavigation(contents, targetUrl) {
   return shouldAllowNavigation(targetUrl, { isMainWindow, allowedFilePaths });
 }
 
-app.on('web-contents-created', (_event, contents) => {
+function handleWebContentsCreated(_event, contents) {
   contents.setWindowOpenHandler(({ url }) => {
     if (isAllowedWindowNavigation(contents, url)) return { action: 'allow' };
     openExternalSafely(url);
@@ -498,18 +506,60 @@ app.on('web-contents-created', (_event, contents) => {
     event.preventDefault();
     openExternalSafely(url);
   });
-});
+}
 
-app.on('certificate-error', (event, _webContents, url, _error, certificate, callback) => {
+function handleCertificateError(event, _webContents, url, _error, certificate, callback) {
   if (shouldTrustAppCertificate(url, certificate)) {
     event.preventDefault();
     callback(true);
     return;
   }
   callback(false);
-});
+}
+
+let applicationHandlersInstalled = false;
+
+function installApplicationHandlers() {
+  if (applicationHandlersInstalled) return false;
+  app.on('web-contents-created', handleWebContentsCreated);
+  app.on('certificate-error', handleCertificateError);
+  app.on('window-all-closed', handleWindowAllClosed);
+  app.on('before-quit', handleBeforeQuit);
+  app.on('activate', handleActivate);
+  applicationHandlersInstalled = true;
+  return true;
+}
+
+function removeApplicationHandlers() {
+  if (!applicationHandlersInstalled || typeof app.removeListener !== 'function') return false;
+  app.removeListener('web-contents-created', handleWebContentsCreated);
+  app.removeListener('certificate-error', handleCertificateError);
+  app.removeListener('window-all-closed', handleWindowAllClosed);
+  app.removeListener('before-quit', handleBeforeQuit);
+  app.removeListener('activate', handleActivate);
+  applicationHandlersInstalled = false;
+  return true;
+}
 
 let handlersInitialized = false;
+let autoRestartListenersInitialized = false;
+
+function initializePostRecoveryListeners() {
+  if (autoRestartListenersInitialized) return false;
+  const { initializeAutoRestartListeners } = require('./services/auto-restart.cjs');
+  initializeAutoRestartListeners();
+  autoRestartListenersInitialized = true;
+  return true;
+}
+
+function disposeApplicationStartup() {
+  if (autoRestartListenersInitialized) {
+    const { disposeAutoRestartListeners } = require('./services/auto-restart.cjs');
+    disposeAutoRestartListeners();
+    autoRestartListenersInitialized = false;
+  }
+  return removeApplicationHandlers();
+}
 
 // Global reference to the main window
 let win;
@@ -959,28 +1009,6 @@ function createWindow() {
     }
   });
 
-  // Auto-start Browser Control Panel if configured
-  try {
-    const settings = appStore.get('appSettings') || {};
-    const bp = settings.browserPanel || {};
-    if (bp.enabled && bp.autoStart) {
-      try {
-        const { getBrowserPanel } = require('./services/browser-panel-server.cjs');
-        const panel = getBrowserPanel();
-        const port = bp.port || 8081;
-        panel.start(port).then((res) => {
-          if (logger) {
-            logger.info('Browser Panel auto-start attempted', { category: 'core', data: { success: !!(res && res.success), port, error: res && !res.success ? res.error : undefined } });
-          }
-        });
-      } catch (e) {
-        if (logger) {
-          logger.error(`Browser Panel auto-start failed: ${e.message}`, { category: 'core', data: { errorType: e.constructor.name } });
-        }
-      }
-    }
-  } catch { /* ignore */ }
-  
   win.on('close', () => {
     if (logger) {
       logger.info('Window close event triggered', {
@@ -1064,7 +1092,9 @@ function createWindow() {
       });
     }
     
-    setupIpcHandlers(win);
+    initializePostRecoveryListeners();
+    const { setupIpcHandlers } = require('./ipc-handlers.cjs');
+    setupIpcHandlers(win, serviceGraph);
     handlersInitialized = true;
     
     if (logger) {
@@ -1348,111 +1378,154 @@ function createWindow() {
   });
 }
 
-// Set app name explicitly to avoid version display
-app.setName('Minecraft Core');
+let serviceGraph = null;
+let mainBootstrap = null;
+let appWatchdogProcess = null;
+let watchdogListenersInstalled = false;
+let browserPanelInstance = null;
+let updateServiceInstance = null;
 
-// Set Windows App User Model ID for proper taskbar icon grouping
-// This must match the appId in package.json build configuration
-if (process.platform === 'win32') {
-  app.setAppUserModelId('com.minecraft-core.app');
+function handleWindowAllClosed() {
+  // Always quit when X button is used to close the window
+  // The minimize to tray feature should ONLY work with the minimize button
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
 }
 
-// Initialize app when ready
-app.whenReady().then(() => {
-  // Clean up any old runtime files from previous sessions
-  cleanupRuntimeFiles();
+function destroyTray() {
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
+}
 
-  setupCertificateVerification();
-  
-  Menu.setApplicationMenu(null);
-  
-  // Create system tray
-  createTray();
-  
-  createWindow();
-  
-  // Initialize update service and start periodic checks
-  const updateService = getUpdateService();
-  updateService.startPeriodicChecks();
-  
-  // Start app watchdog only when a Minecraft server starts
-  const eventBus = require('./utils/event-bus.cjs');
-  const { spawn } = require('child_process');
-  let appWatchdogProcess = null;
-  const appWatchdogPath = path.join(__dirname, 'watchdog', 'app-watchdog.cjs');
+function handleBeforeQuit() {
+  void mainBootstrap?.dispose();
+}
 
-  eventBus.on('server-started', () => {
-    if (!fs.existsSync(appWatchdogPath)) {
-      return;
-    }
-    if (appWatchdogProcess) {
-      return;
-    }
+function handleActivate() {
+  // On macOS, recreate the window when clicking dock icon
+  if (BrowserWindow.getAllWindows().length === 0) {
+    const recreation = mainBootstrap?.createWindowAfterRecovery?.();
+    if (!recreation) return;
+    void Promise.resolve(recreation).then(mainWindow => {
+      if (mainWindow) setMainWindow(mainWindow);
+    }).catch(error => {
+      logStartupError('Window activation was blocked because startup recovery is unavailable', error);
+    });
+  }
+}
+
+function stopAppWatchdog() {
+  const { getRuntimePaths } = require('./utils/runtime-paths.cjs');
+  const runtimePaths = getRuntimePaths();
+  let pid = null;
+  if (fs.existsSync(runtimePaths.appWatchdogPid)) {
     try {
-      appWatchdogProcess = spawn(process.execPath, [
-        appWatchdogPath,
-        process.pid.toString(),
-        'minecraft-core-app'
-      ], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-        shell: false,
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: '1'
-        }
-      });
-      appWatchdogProcess.on('error', (error) => {
-        console.warn(`Failed to start app watchdog: ${error.message}`);
-        appWatchdogProcess = null;
-      });
-      appWatchdogProcess.unref();
-    } catch (error) {
-      console.warn(`Failed to spawn app watchdog: ${error.message}`);
+      pid = parseInt(fs.readFileSync(runtimePaths.appWatchdogPid, 'utf8'));
+    } catch {
+      pid = null;
+    }
+  }
+  if (pid) {
+    try {
+      const { execFileSync } = require('child_process');
+      execFileSync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true });
+      fs.unlinkSync(runtimePaths.appWatchdogPid);
+    } catch {
+      pid = null;
+    }
+  }
+  appWatchdogProcess = null;
+}
+
+function launchAppWatchdog() {
+  const appWatchdogPath = path.join(__dirname, 'watchdog', 'app-watchdog.cjs');
+  if (!fs.existsSync(appWatchdogPath) || appWatchdogProcess) return;
+  try {
+    const { spawn } = require('child_process');
+    appWatchdogProcess = spawn(process.execPath, [
+      appWatchdogPath,
+      process.pid.toString(),
+      'minecraft-core-app'
+    ], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      shell: false,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+    });
+    appWatchdogProcess.on('error', (error) => {
+      console.warn(`Failed to start app watchdog: ${error.message}`);
       appWatchdogProcess = null;
-    }
-  });
-  
-  // Stop the app watchdog when the server stops or crashes
-  function stopAppWatchdog() {
-    const { getRuntimePaths } = require('./utils/runtime-paths.cjs');
-    const runtimePaths = getRuntimePaths();
-    let pid = null;
-    if (fs.existsSync(runtimePaths.appWatchdogPid)) {
-      try {
-        pid = parseInt(fs.readFileSync(runtimePaths.appWatchdogPid, 'utf8'));
-      } catch {
-        pid = null;
-      }
-    }
-    if (pid) {
-      try {
-        const { execSync } = require('child_process');
-        execSync(`taskkill /PID ${pid} /F`);
-        fs.unlinkSync(runtimePaths.appWatchdogPid);
-      } catch {
-        pid = null;
-      }
-    }
+    });
+    appWatchdogProcess.unref();
+  } catch (error) {
+    console.warn(`Failed to spawn app watchdog: ${error.message}`);
     appWatchdogProcess = null;
   }
+}
 
+function startAppWatchdogMonitoring() {
+  if (watchdogListenersInstalled) return false;
+  const eventBus = require('./utils/event-bus.cjs');
+  eventBus.on('server-started', launchAppWatchdog);
   eventBus.on('server-normal-exit', stopAppWatchdog);
   eventBus.on('server-crashed', stopAppWatchdog);
-  
-  // DON'T start metrics on app startup - only when server starts
-  // startMetricsReporting();
-  
-  // Initialize with last server path if available
-  // IMPORTANT: Wait for the web contents to be ready before sending data
-  win.webContents.once('did-finish-load', () => {
+  watchdogListenersInstalled = true;
+  return true;
+}
+
+function stopAppWatchdogMonitoring() {
+  if (watchdogListenersInstalled) {
+    const eventBus = require('./utils/event-bus.cjs');
+    eventBus.removeListener('server-started', launchAppWatchdog);
+    eventBus.removeListener('server-normal-exit', stopAppWatchdog);
+    eventBus.removeListener('server-crashed', stopAppWatchdog);
+    watchdogListenersInstalled = false;
+  }
+  stopAppWatchdog();
+}
+
+async function startConfiguredPublicManagementListeners() {
+  const settings = appStore.get('appSettings') || {};
+  const browserPanel = settings.browserPanel || {};
+  if (!browserPanel.enabled || !browserPanel.autoStart) return { success: true, skipped: true };
+  try {
+    const { getBrowserPanel } = require('./services/browser-panel-server.cjs');
+    browserPanelInstance = getBrowserPanel();
+    const port = browserPanel.port || 8081;
+    const result = await browserPanelInstance.start(port);
+    logger?.info('Browser Panel auto-start attempted', {
+      category: 'core',
+      data: { success: Boolean(result?.success), port, error: result && !result.success ? result.error : undefined }
+    });
+    return result;
+  } catch (error) {
+    logger?.error(`Browser Panel auto-start failed: ${error.message}`, {
+      category: 'core',
+      data: { errorType: error.constructor.name }
+    });
+    return { success: false, error: error.message };
+  }
+}
+
+async function stopConfiguredPublicManagementListeners() {
+  const panel = browserPanelInstance;
+  browserPanelInstance = null;
+  await panel?.stop?.();
+}
+
+function initializeLastServer(mainWindow) {
+  // IMPORTANT: Wait for the web contents to be ready before sending data.
+  mainWindow.webContents.once('did-finish-load', () => {
     try {
       let lastServerPath = appStore.get('lastServerPath');
       const instances = appStore.get('instances') || [];
-      const serverInstances = instances.filter((inst) => inst && inst.type === 'server' && inst.path);
-      const matchingServerInstance = serverInstances.find((inst) => inst.path === lastServerPath);
-      const firstExistingServerInstance = serverInstances.find((inst) => fs.existsSync(inst.path));
+      const serverInstances = instances.filter(instance => instance && instance.type === 'server' && instance.path);
+      const matchingServerInstance = serverInstances.find(instance => instance.path === lastServerPath);
+      const firstExistingServerInstance = serverInstances.find(instance => fs.existsSync(instance.path));
 
       if (matchingServerInstance && fs.existsSync(matchingServerInstance.path)) {
         lastServerPath = matchingServerInstance.path;
@@ -1463,79 +1536,115 @@ app.whenReady().then(() => {
         appStore.set('lastServerPath', null);
         lastServerPath = null;
       }
-      
-      if (lastServerPath && win && win.webContents) {
-        // Ensure config file exists with defaults
-        const serverSettings = appStore.get('serverSettings') || {
-          port: 25565,
-          maxRam: 4,
-          autoStartMinecraft: false,
-          autoStartManagement: false
-        };
-        const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
-        
-        // Create a default config if needed
-        ensureConfigFile(lastServerPath, {
-          version: null,
-          port: serverSettings.port,
-          maxRam: serverSettings.maxRam,
-          autoRestart: {
-            enabled: autoRestart.enabled,
-            delay: autoRestart.delay, 
-            maxCrashes: autoRestart.maxCrashes
-          }
-        });
-        
-        // Send updated path to renderer with a small delay to ensure renderer is ready
-        setTimeout(() => {
-          win.webContents.send('update-server-path', lastServerPath);
-          
-          // Restore server settings (port and RAM)
-          if (serverSettings) {
-            win.webContents.send('restore-server-settings', serverSettings);
-          }
-        }, 500); // Small delay to ensure renderer is fully ready
-        
-        // Initialize auto-restart settings from this server's config
-        const { initFromServerConfig } = require('./services/auto-restart.cjs');
-        initFromServerConfig(lastServerPath);
-      }
+
+      if (!lastServerPath || !win?.webContents) return;
+      const serverSettings = appStore.get('serverSettings') || {
+        port: 25565,
+        maxRam: 4,
+        autoStartMinecraft: false,
+        autoStartManagement: false
+      };
+      const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
+      ensureConfigFile(lastServerPath, {
+        version: null,
+        port: serverSettings.port,
+        maxRam: serverSettings.maxRam,
+        autoRestart: {
+          enabled: autoRestart.enabled,
+          delay: autoRestart.delay,
+          maxCrashes: autoRestart.maxCrashes
+        }
+      });
+      setTimeout(() => {
+        win.webContents.send('update-server-path', lastServerPath);
+        win.webContents.send('restore-server-settings', serverSettings);
+      }, 500);
+      const { initFromServerConfig } = require('./services/auto-restart.cjs');
+      initFromServerConfig(lastServerPath);
     } catch {
       return;
     }
   });
-  
-  // Setup cleanup handlers
-  setupAppCleanup(app, win);
-}).catch((error) => {
+}
+
+const updaterController = {
+  start() {
+    updateServiceInstance = getUpdateService();
+    return updateServiceInstance.startPeriodicChecks();
+  },
+  dispose() {
+    return updateServiceInstance?.stopPeriodicChecks?.();
+  }
+};
+
+const trayController = {
+  start: createTray,
+  dispose: destroyTray
+};
+
+const watchdogController = {
+  start: startAppWatchdogMonitoring,
+  dispose: stopAppWatchdogMonitoring
+};
+
+const managementServerController = {
+  listen: startConfiguredPublicManagementListeners,
+  dispose: stopConfiguredPublicManagementListeners
+};
+
+const runtimeRoot = path.resolve(__dirname, '..');
+const userDataPath = resolveServiceGraphUserData({ runtimeFlags, app, runtimeRoot });
+const modpackFactory = loadTestModpackFactory({ isPackaged: Boolean(app.isPackaged) });
+const recoveryFactory = loadTestRecoveryFactory({ isPackaged: Boolean(app.isPackaged) });
+const testIpcOverrides = loadTestIpcOverrides({ isPackaged: Boolean(app.isPackaged) });
+
+serviceGraph = createModpackServiceGraph({
+  app,
+  store: appStore,
+  userDataPath,
+  dialog,
+  Notification,
+  shell,
+  runtimeRoots: {
+    resourcesPath: app.isPackaged && typeof process.resourcesPath === 'string' ? process.resourcesPath : runtimeRoot,
+    runtimeRoot,
+    isPackaged: Boolean(app.isPackaged),
+    arch: process.arch
+  },
+  windowFactory: createWindow,
+  getWindow: () => win,
+  modpackFactory,
+  recoveryFactory,
+  ipc: { nativeNotificationsEnabled: runtimeFlags.nativeNotificationsEnabled, ...(testIpcOverrides || {}) },
+  updater: updaterController,
+  tray: trayController,
+  watchdog: watchdogController,
+  managementServer: managementServerController,
+  startup: {
+    installSecurity: installApplicationHandlers,
+    cleanupRuntime: cleanupRuntimeFiles,
+    configureAfterReady() {
+      setupCertificateVerification();
+      Menu.setApplicationMenu(null);
+    },
+    afterWindowCreated(mainWindow) {
+      initializeLastServer(mainWindow);
+      setupAppCleanup(app, mainWindow);
+    },
+    dispose: disposeApplicationStartup
+  }
+});
+installServerMutationCoordinator(serviceGraph.coordinator);
+
+mainBootstrap = createMainBootstrap({
+  electronApi: { app, BrowserWindow, Menu, Tray, ipcMain, shell, session },
+  serviceGraph,
+  runtimeFlags
+});
+mainBootstrap.initializeBeforeReady();
+
+app.whenReady().then(() => mainBootstrap.onReady()).catch((error) => {
   logStartupError('Application startup failed before main window could load', error);
-});
-
-// Quit when all windows are closed (except on macOS)
-app.on('window-all-closed', () => {
-  // Always quit when X button is used to close the window
-  // The minimize to tray feature should ONLY work with the minimize button
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
-// Clean up tray on quit
-app.on('before-quit', () => {
-  if (tray) {
-    tray.destroy();
-    tray = null;
-  }
-});
-
-app.on('activate', () => {
-  // On macOS, recreate the window when clicking dock icon
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-    
-    // Reset the main window reference but don't register handlers again
-    setMainWindow(win);
-  }
 });
 
 // Export the window instance so other modules can access it

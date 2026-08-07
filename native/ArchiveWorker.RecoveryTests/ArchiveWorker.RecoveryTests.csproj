@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\ArchiveWorker\Sandbox\AclRecoveryPolicy.cs" Link="AclRecoveryPolicy.cs" />
+    <Compile Include="..\ArchiveWorker\Sandbox\AclAccessMaskPolicy.cs" Link="AclAccessMaskPolicy.cs" />
+    <Compile Include="..\ArchiveWorker\Sandbox\NamedMutexScope.cs" Link="NamedMutexScope.cs" />
+    <Compile Include="..\ArchiveWorker\Security\PathInputPolicy.cs" Link="PathInputPolicy.cs" />
+    <Compile Include="..\ArchiveWorker\Security\NativeFilePath.cs" Link="NativeFilePath.cs" />
+    <Compile Include="..\ArchiveWorker\Security\ReparseTagPolicy.cs" Link="ReparseTagPolicy.cs" />
+    <Compile Include="..\ArchiveWorker\Protocol\FrameReader.cs" Link="FrameReader.cs" />
+    <Compile Include="..\ArchiveWorker\Protocol\TextChunker.cs" Link="TextChunker.cs" />
+  </ItemGroup>
+</Project>

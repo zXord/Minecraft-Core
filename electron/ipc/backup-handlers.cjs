@@ -134,18 +134,17 @@ class BackupSizeTracker {
 
       const backupDir = path.join(serverPath, 'backups');
 
-      // Check if backup directory exists, create if needed
+      // Size reads are observational; backup creation owns directory setup.
       try {
         if (!fs.existsSync(backupDir)) {
-          logger.info('Backup directory does not exist, creating it', {
+          logger.debug('Backup directory does not exist', {
             category: 'backup',
             data: { backupDir }
           });
-          fs.mkdirSync(backupDir, { recursive: true });
           return { totalSize: 0, backupCount: 0, cached: false };
         }
       } catch (dirError) {
-        logger.error('Failed to access or create backup directory', {
+        logger.error('Failed to access backup directory', {
           category: 'backup',
           data: {
             backupDir,
@@ -299,17 +298,17 @@ class BackupSizeTracker {
         this.watchers.delete(serverPath);
       }
 
-      // Ensure backup directory exists
+      // Watch setup is observational; an explicit backup creation owns mkdir.
       try {
         if (!fs.existsSync(backupDir)) {
-          fs.mkdirSync(backupDir, { recursive: true });
-          logger.info('Created backup directory for watcher', {
+          logger.debug('Backup directory is not available for watching', {
             category: 'backup',
             data: { backupDir }
           });
+          return false;
         }
       } catch (dirError) {
-        throw new Error(`Cannot create backup directory: ${dirError.message}`);
+        throw new Error(`Cannot access backup directory: ${dirError.message}`);
       }
 
       // Create watcher with error handling

@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const appStore = require('../utils/app-store.cjs');
 const { isPathInside } = require('../utils/security-boundaries.cjs');
+const { markCurrentServerMutationDirty } = require('../services/server-mutation-context.cjs');
 
 function assertKnownServerPath(serverPath) {
   if (typeof serverPath !== 'string' || !serverPath.trim()) {
@@ -33,7 +34,6 @@ function createServerPropertiesHandlers() {
         serverPath = assertKnownServerPath(serverPath);
         
         const propertiesFilePath = path.join(serverPath, 'server.properties');
-        const backupFilePath = path.join(serverPath, 'server.properties.default');
         
         // Check if file exists
         if (!fs.existsSync(propertiesFilePath)) {
@@ -42,11 +42,6 @@ function createServerPropertiesHandlers() {
             error: 'server.properties file not found. Run the server for the first time to generate this file.',
             filePath: propertiesFilePath 
           };
-        }
-        
-        // Create default backup if not present
-        if (!fs.existsSync(backupFilePath)) {
-          fs.copyFileSync(propertiesFilePath, backupFilePath);
         }
         
         // Read and parse the file
@@ -68,15 +63,20 @@ function createServerPropertiesHandlers() {
         }
         
         const propertiesFilePath = path.join(serverPath, 'server.properties');
+        const defaultBackupPath = path.join(serverPath, 'server.properties.default');
+
+        // Convert properties object before crossing the mutation boundary.
+        const fileContent = serializePropertiesFile(properties);
+        markCurrentServerMutationDirty(serverPath);
         
         // Make a backup of the original file
         if (fs.existsSync(propertiesFilePath)) {
+          if (!fs.existsSync(defaultBackupPath)) {
+            fs.copyFileSync(propertiesFilePath, defaultBackupPath);
+          }
           const backupPath = `${propertiesFilePath}.bak`;
           fs.copyFileSync(propertiesFilePath, backupPath);
         }
-        
-        // Convert properties object to file format
-        const fileContent = serializePropertiesFile(properties);
         
         // Write to file
         fs.writeFileSync(propertiesFilePath, fileContent, 'utf-8');
@@ -104,6 +104,7 @@ function createServerPropertiesHandlers() {
         
         // Convert to file format and write
         const fileContent = serializePropertiesFile(defaultProperties);
+        markCurrentServerMutationDirty(serverPath);
         fs.writeFileSync(propertiesFilePath, fileContent, 'utf-8');
         
         return { success: true, properties: defaultProperties };
@@ -122,6 +123,7 @@ function createServerPropertiesHandlers() {
           return { success: false, error: 'No default backup file found. Run the server first.' };
         }
         // Restore backup
+        markCurrentServerMutationDirty(serverPath);
         fs.copyFileSync(backupFilePath, propertiesFilePath);
         // Read restored file
         const fileContent = fs.readFileSync(propertiesFilePath, 'utf-8');

@@ -61,7 +61,7 @@ async function withModFileManager(fn) {
   }
 }
 
-test('client installed mod info persists parsed jar metadata into a manifest', async () => {
+test('client installed mod info is read-only until explicit metadata migration', async () => {
   await withModFileManager(async (modFileManager, root) => {
     const clientPath = path.join(root, 'client');
     const jarName = 'cached-test-mod-1.2.3.jar';
@@ -73,6 +73,10 @@ test('client installed mod info persists parsed jar metadata into a manifest', a
 
     assert.equal(info.length, 1);
     assert.equal(info[0].name, 'Cached Test Mod');
+    assert.equal(fs.existsSync(manifestPath), false);
+
+    const migrated = await modFileManager.migrateClientModMetadata(clientPath);
+    assert.equal(migrated.length, 1);
     assert.equal(fs.existsSync(manifestPath), true);
 
     const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8'));

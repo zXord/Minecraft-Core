@@ -24,9 +24,10 @@ function log(level, message, data) {
   }
 }
 
-function createModAvailabilityHandlers() {
+function createModAvailabilityHandlers({ startWatcher = true } = {}) {
+  if (typeof startWatcher !== 'boolean') throw new TypeError('Mod availability handler options are invalid');
   // Ensure background watcher started
-  startModAvailabilityWatcher();
+  if (startWatcher) startModAvailabilityWatcher();
   return {
     'mod-watch:add': async (_e, { serverPath, projectId, modName, fileName, targetMc, targetFabric, targetLoader, targetLoaderVersion }) => {
       log('info', 'Adding mod availability watch', { serverPath, projectId, targetMc, targetFabric, targetLoader, targetLoaderVersion });

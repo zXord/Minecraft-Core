@@ -13,6 +13,7 @@
   import InstanceSettings from "../components/settings/InstanceSettings.svelte";
   import { errorMessage } from "../stores/modStore.js";
   import logger from "../utils/logger.js";
+  import { modpackApi } from "../utils/modpacks/modpackApi.js";
 
   // Enhanced state management
   let showCopyConfirmation = false;
@@ -31,6 +32,7 @@
   let serverConfigLoading = false;
   let javaVersion = null;
   let javaStatus = null;
+  let modpackState = null;
   $: javaStatusLabel = javaVersion
     ? (javaStatus?.isAvailable
       ? `Java ${javaVersion} ready`
@@ -119,6 +121,13 @@
 
     try {
       await initializeSettingsPage();
+      if (currentInstance?.id) {
+        try {
+          modpackState = await modpackApi.getState(currentInstance.id);
+        } catch {
+          modpackState = null;
+        }
+      }
       const initDuration = Date.now() - startTime;
 
       logger.info("SettingsPage initialization completed", {
@@ -629,7 +638,7 @@
           <h3>📦 Version Management</h3>
         </div>
         <div class="card-content">
-          <VersionUpdater {serverPath} />
+          <VersionUpdater {serverPath} modpackManaged={Boolean(modpackState?.modpackManaged)} />
         </div>
       </div>
 

@@ -25,6 +25,7 @@ const {
 const {
   stopAndDisposeManagementServers
 } = require('../services/management-server.cjs');
+const { markCurrentServerMutationDirty } = require('../services/server-mutation-context.cjs');
 
 const logger = getLoggerHandlers();
 
@@ -261,10 +262,6 @@ function getPreferredStoredServerPath() {
   const lastServerPath = appStore.get('lastServerPath') || '';
   const matchedInstance = serverInstances.find((instance) => instance.path === lastServerPath);
   const preferredPath = matchedInstance?.path || serverInstances[0].path;
-
-  if (preferredPath && preferredPath !== lastServerPath) {
-    appStore.set('lastServerPath', preferredPath);
-  }
 
   return preferredPath;
 }
@@ -1259,28 +1256,7 @@ function createSettingsHandlers() {
             const config = readServerConfig(instance.path, getServerConfigDefaults(instance.path));
             let packedSecret = config && config.managementInviteSecret
               ? getPackedInviteSecretFromFolder(instance.path)
-              : '';
-
-            if ((!config || !config.managementInviteSecret) && instance.managementInviteSecret) {
-              try {
-                ensureEncryptionAvailable();
-                const plainSecret = unpackSecret(instance.managementInviteSecret);
-                if (plainSecret) {
-                  const updatedConfig = updateServerConfig(instance.path, {
-                    ...(config || {}),
-                    managementInviteSecret: plainSecret,
-                    managementInviteHost: typeof config?.managementInviteHost === 'string' && config.managementInviteHost
-                      ? config.managementInviteHost
-                      : (typeof instance.managementInviteHost === 'string' ? instance.managementInviteHost : '')
-                  }, getServerConfigDefaults(instance.path));
-                  packedSecret = updatedConfig && updatedConfig.managementInviteSecret
-                    ? getPackedInviteSecretFromFolder(instance.path)
-                    : packedSecret;
-                }
-              } catch {
-                packedSecret = '';
-              }
-            }
+              : (existingInstance?.managementInviteSecret || instance.managementInviteSecret || '');
 
             return {
               ...instance,
@@ -1315,17 +1291,6 @@ function createSettingsHandlers() {
 
           return instance;
         });
-
-        if (JSON.stringify(hydratedInstances) !== JSON.stringify(validInstances)) {
-          appStore.set('instances', hydratedInstances);
-        }
-
-        instanceContext.updateInstances(hydratedInstances);
-
-        const serverInstance = hydratedInstances.find((instance) => instance && instance.type === 'server' && instance.path);
-        if (serverInstance && serverInstance.path) {
-          appStore.set('lastServerPath', serverInstance.path);
-        }
 
         const duration = Date.now() - startTime;
         
@@ -1851,6 +1816,7 @@ function createSettingsHandlers() {
             }
           });
 
+          markCurrentServerMutationDirty(clientPath);
           fs.mkdirSync(clientPath, { recursive: true });
 
           logger.info('Client directory created successfully', {
@@ -1905,7 +1871,10 @@ function createSettingsHandlers() {
           clientId: clientId || `client-${Date.now()}`,
           clientName: clientName || 'Unnamed Client',
           lastConnected: new Date().toISOString(),
-          serverProtocol: storedProtocol || 'https'
+          serverProtocol: storedProtocol || 'https',
+          contentRevision: Number.isSafeInteger(existingConfig.contentRevision) && existingConfig.contentRevision >= 0
+            ? existingConfig.contentRevision
+            : 0
         };
         if (storedToken) {
           config.sessionToken = storedToken;
@@ -1933,6 +1902,7 @@ function createSettingsHandlers() {
           ...(config.sessionToken ? { sessionToken: packSecret(config.sessionToken) } : {}),
           ...(config.inviteSecret ? { inviteSecret: packSecret(config.inviteSecret) } : {})
         };
+        markCurrentServerMutationDirty(clientPath);
         await fsPromises.writeFile(configFile, JSON.stringify(configForDisk, null, 2));
 
         logger.info('Client configuration file saved successfully', {

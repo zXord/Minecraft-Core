@@ -8,16 +8,20 @@ const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const { verifyPackagedArchive } = require('./verify-packaged-archive.cjs');
 
 const execFileAsync = promisify(execFile);
 
 exports.default = async function(context) {
-    // Only process Windows builds
-    if (context.electronPlatformName !== 'win32') {
-        return;
-    }
-
     const appOutDir = context.appOutDir;
+    // Archive security is release-critical. Unsupported targets or any packaged
+    // runtime/worker/notice/manifest/containment failure must abort packaging.
+    await verifyPackagedArchive({
+        appOutDir,
+        architecture: context.arch,
+        platform: context.electronPlatformName
+    });
+
     const exePath = path.join(appOutDir, 'Minecraft Core.exe');
     const iconPath = path.resolve(__dirname, '../build-resources/icon.ico');
 

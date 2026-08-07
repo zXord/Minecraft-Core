@@ -13,7 +13,10 @@ function registryFixture({ idFactory } = {}) {
   return { registry, root, advance(ms) { now += ms; }, cleanup() { fs.rmSync(root, { recursive: true, force: true }); } };
 }
 
-const verifiedSet = Object.freeze({ type: 'verified-artifact-set', artifactSet: Object.freeze({ primaryPartId: 'part-1', parts: Object.freeze([]) }) });
+const verifiedSet = Object.freeze({
+  type: 'verified-artifact-set',
+  artifactSet: Object.freeze({ primaryPartId: 'part-1', parts: Object.freeze([]), setDigest: 'a'.repeat(64) })
+});
 
 test('workspace IDs are owner-bound and never substitute paths', (t) => {
   const f = registryFixture(); t.after(f.cleanup);
@@ -21,6 +24,22 @@ test('workspace IDs are owner-bound and never substitute paths', (t) => {
   assert.throws(
     () => f.registry.resolveOwnedId({ ownerId: 'plan-b', id, kind: 'output' }),
     error => error.code === 'PLAN_STALE'
+  );
+});
+
+test('trusted composition resolves only an owner-bound materialized workspace', (t) => {
+  const f = registryFixture(); t.after(f.cleanup);
+  const id = f.registry.createStagingOutput({ ownerId: 'plan-a' });
+  const resolved = f.registry.resolveOwnedWorkspace({ ownerId: 'plan-a', id, kind: 'output' });
+  assert.deepEqual(resolved, { id, kind: 'output', path: path.join(f.root, id) });
+  assert.equal(Object.isFrozen(resolved), true);
+  assert.throws(
+    () => f.registry.resolveOwnedWorkspace({ ownerId: 'plan-b', id, kind: 'output' }),
+    error => error.code === 'PLAN_STALE'
+  );
+  assert.throws(
+    () => f.registry.resolveOwnedWorkspace({ ownerId: 'plan-a', id, kind: 'artifact-set' }),
+    error => error.code === 'INVALID_REQUEST'
   );
 });
 
@@ -127,7 +146,30 @@ test('materializes a registered set into an owner-bound input ID without returni
   assert.match(inputDirectoryId, /^input-/);
   const snapshot = f.registry.resolveOwnedId({ ownerId: 'plan-a', id: inputDirectoryId, kind: 'input' });
   assert.equal(Object.hasOwn(snapshot.value, 'primaryPath'), false);
+  assert.equal(snapshot.value.sourceArtifactSetId, artifactSetId);
+  assert.equal(snapshot.value.sourceSetDigest, verifiedSet.artifactSet.setDigest);
+  assert.match(snapshot.value.sourceFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(fs.existsSync(path.join(f.root, inputDirectoryId, 'server.zip')), true);
+});
+
+test('input binding is immutable and differs for two same-owner sets with equal filenames', async (t) => {
+  const f = registryFixture(); t.after(f.cleanup);
+  f.registry.artifactCache = { materializeSet: async (_set, destination) => {
+    fs.mkdirSync(destination, { recursive: true });
+    fs.writeFileSync(path.join(destination, 'same.zip'), 'archive');
+    return path.join(destination, 'same.zip');
+  } };
+  const first = { ...verifiedSet, artifactSet: { ...verifiedSet.artifactSet, setDigest: 'a'.repeat(64) } };
+  const second = { ...verifiedSet, artifactSet: { ...verifiedSet.artifactSet, setDigest: 'b'.repeat(64) } };
+  const firstSetId = f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet: first });
+  const secondSetId = f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet: second });
+  const firstInputId = await f.registry.materializeInput({ ownerId: 'plan-a', artifactSetId: firstSetId });
+  const secondInputId = await f.registry.materializeInput({ ownerId: 'plan-a', artifactSetId: secondSetId });
+  const firstInput = f.registry.resolveOwnedId({ ownerId: 'plan-a', id: firstInputId, kind: 'input' }).value;
+  const secondInput = f.registry.resolveOwnedId({ ownerId: 'plan-a', id: secondInputId, kind: 'input' }).value;
+  assert.equal(firstInput.sourceArtifactSetId, firstSetId);
+  assert.equal(secondInput.sourceArtifactSetId, secondSetId);
+  assert.notEqual(firstInput.sourceFingerprint, secondInput.sourceFingerprint);
 });
 
 test('materialization reserves owner state so transfer, release, and expiry cannot orphan it', async (t) => {

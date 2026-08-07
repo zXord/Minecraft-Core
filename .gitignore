@@ -11,11 +11,16 @@ node_modules
 dist
 dist-ssr
 *.local
+playwright-report/
+test-results/
 
 # Build artifacts
 build/*.exe
 build/*.msi
 build/*.ico
+native/**/bin/
+native/**/obj/
+.tmp/
 
 # Auto-generated build files
 electron/logger-window.html
