@@ -30,6 +30,7 @@ const { RestorePointService, normalizeMetadata } = require('../services/modpack-
 const { initializeStartupRecovery } = require('../services/modpack-lifecycle/startup-recovery-bootstrap.cjs');
 const { createVerifiedRestoreExtractor } = require('../services/modpack-lifecycle/verified-restore-extractor.cjs');
 const { createDurableFs } = require('../utils/durable-fs.cjs');
+const { configureServerConfigDurableFsFactory } = require('../utils/config-manager.cjs');
 const instanceContext = require('../utils/instance-context.cjs');
 const { WindowsDurableFsClient } = require('../utils/windows-durable-fs-client.cjs');
 const { getRequiredJavaVersion } = require('../services/minecraft-launcher/utils.cjs');
@@ -271,7 +272,7 @@ function deriveRecoveryRuntimeTuple(config) {
   }
 }
 
-function createRuntimeConfigResolver({ durableFs, fsSync, record, stateRepository }) {
+function createRuntimeConfigResolver({ fsSync, record, stateRepository }) {
   return async ({ authority }) => {
     const durable = runtimeOutcome(record, authority);
     if (durable?.runtime && typeof durable.maxRam === 'number' && Number.isSafeInteger(durable.port)) return durable;
@@ -470,7 +471,7 @@ async function createProductionRecoveryServices(input) {
         port: durableRuntime?.port,
         recoveryRegistry: registry,
         reparseInspector,
-        resolveRecoveryRuntimeConfig: createRuntimeConfigResolver({ durableFs, fsSync, record, stateRepository }),
+        resolveRecoveryRuntimeConfig: createRuntimeConfigResolver({ fsSync, record, stateRepository }),
         revisionPublisher,
         runtime: durableRuntime?.runtime,
         runtimePolicy,
@@ -551,6 +552,10 @@ function createModpackServiceGraph(deps = {}) {
   const processFactory = requireFunction(deps.processFactory || childProcess.spawn, 'processFactory');
   const workerFactory = requireFunction(deps.workerFactory || (options => new ArchiveWorkerClient(options)), 'workerFactory');
   const windowFactory = requireFunction(deps.windowFactory, 'windowFactory');
+  const productionDurableFsFactory = requireFunction(
+    deps.durableFsFactory || createProductionDurableFsFactory({ fsSync, randomUUID, runtimeRoots }),
+    'durableFsFactory'
+  );
 
   const modpackPaths = createModpackPaths(userDataPath);
   const paths = Object.freeze({ userData: userDataPath, modpacks: modpackPaths });
@@ -593,7 +598,16 @@ function createModpackServiceGraph(deps = {}) {
     randomId: () => randomBytes(24).toString('base64url')
   });
 
-  const coordinator = deps.coordinator || new ServerMutationCoordinator(deps.coordinatorOptions || {});
+  const suppliedCoordinatorOptions = deps.coordinatorOptions || {};
+  const coordinatorOptionsArePlain = suppliedCoordinatorOptions && typeof suppliedCoordinatorOptions === 'object' &&
+    !Array.isArray(suppliedCoordinatorOptions) && Object.getPrototypeOf(suppliedCoordinatorOptions) === Object.prototype;
+  const coordinatorHasDurability = coordinatorOptionsArePlain &&
+    (Object.hasOwn(suppliedCoordinatorOptions, 'durableFs') ||
+      Object.hasOwn(suppliedCoordinatorOptions, 'durableFsFactory'));
+  const coordinatorOptions = coordinatorOptionsArePlain && !coordinatorHasDurability
+    ? { ...suppliedCoordinatorOptions, durableFsFactory: productionDurableFsFactory }
+    : suppliedCoordinatorOptions;
+  const coordinator = deps.coordinator || new ServerMutationCoordinator(coordinatorOptions);
   const serverMutationPolicy = deps.serverMutationPolicy || createServerMutationPolicy({
     coordinator,
     getInstances: () => store.get('instances') || [],
@@ -611,7 +625,7 @@ function createModpackServiceGraph(deps = {}) {
           const services = await recoveryFactory({
             clock,
             coordinator,
-            durableFsFactory: deps.recoveryDurableFsFactory,
+            durableFsFactory: deps.recoveryDurableFsFactory || productionDurableFsFactory,
             fsSync,
             healthTimeoutMs: deps.recoveryHealthTimeoutMs,
             healthValidator: deps.recoveryHealthValidator,
@@ -666,7 +680,7 @@ function createModpackServiceGraph(deps = {}) {
         coordinator,
         dialog: deps.dialog || null,
         durableFsFactory: deps.modpackDurableFsFactory || deps.recoveryDurableFsFactory ||
-          createProductionDurableFsFactory({ fsSync, randomUUID, runtimeRoots }),
+          productionDurableFsFactory,
         fsPromises,
         fsSync,
         getWindow: deps.getWindow || (() => null),
@@ -727,10 +741,10 @@ function createModpackServiceGraph(deps = {}) {
     }
     return startupPromise;
   };
-  const afterWindowCreated = async graph => {
+  const afterWindowCreated = async (window, graph) => {
+    if (typeof startupInput.afterWindowCreated === 'function') await startupInput.afterWindowCreated(window, graph);
     modpackServices?.nativeNotificationBridge?.start?.();
     await modpackServices?.releaseMonitor?.start?.();
-    if (typeof startupInput.afterWindowCreated === 'function') await startupInput.afterWindowCreated(graph);
   };
   const dispose = async graph => {
     modpackServices?.releaseMonitor?.stop?.();
@@ -746,6 +760,8 @@ function createModpackServiceGraph(deps = {}) {
     afterWindowCreated,
     dispose
   });
+
+  configureServerConfigDurableFsFactory(productionDurableFsFactory);
 
   return Object.freeze({
     app,

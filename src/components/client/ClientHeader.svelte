@@ -1,8 +1,10 @@
 
 <script>
   import { clientState, setActiveTab } from '../../stores/clientStore.js';
+  import ModpackNotificationCenter from '../modpacks/ModpackNotificationCenter.svelte';
   export let tabs = ['play', 'mods', 'settings'];
   export let onOpenAppSettings = () => {};
+  export let onModpackNotificationNavigate = () => {};
 
   $: state = $clientState;
 
@@ -14,14 +16,17 @@
 <header class="client-header">
   <div class="header-title-row">
     <h1>Minecraft Client</h1>
-    <button 
-      class="app-settings-button" 
-      on:click={onOpenAppSettings}
-      title="App Settings"
-      aria-label="Open app settings"
-    >
-      ⚙️
-    </button>
+    <div class="header-actions">
+      <ModpackNotificationCenter connectStore={false} on:navigate={onModpackNotificationNavigate} />
+      <button
+        class="app-settings-button"
+        on:click={onOpenAppSettings}
+        title="App Settings"
+        aria-label="Open app settings"
+      >
+        ⚙️
+      </button>
+    </div>
   </div>
   <div class="modern-client-tabs">
 
@@ -69,9 +74,16 @@
     text-align: center;
   }
 
-  .app-settings-button {
+  .header-actions {
     position: absolute;
     right: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+  }
+
+  .app-settings-button {
+    position: relative;
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.2);
     color: rgba(255, 255, 255, 0.8);
@@ -147,6 +159,10 @@
     .header-title-row {
       padding: 0 1rem;
   }
+
+    .header-actions {
+      right: 1rem;
+    }
 
     .modern-client-tabs {
     flex-direction: column;

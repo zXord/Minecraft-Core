@@ -827,7 +827,7 @@ async function createLifecycleHarness() {
     async resolveInstance(instanceId) {
       const serverPath = instancePaths.get(instanceId);
       if (!serverPath) throw new ModpackError('PLAN_STALE', 'Unknown lifecycle fixture instance');
-      return { instanceId, serverPath };
+      return { instanceId, serverPath, priorRunning: false };
     }
   };
   const service = new ModpackLifecycleService({

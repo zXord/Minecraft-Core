@@ -7,6 +7,8 @@
   import ModpackPlanReview from '../components/modpacks/ModpackPlanReview.svelte';
   import ModpackJobProgress from '../components/modpacks/ModpackJobProgress.svelte';
   import ModpackRecoveryPanel from '../components/modpacks/ModpackRecoveryPanel.svelte';
+  import ModpackNotificationCenter from '../components/modpacks/ModpackNotificationCenter.svelte';
+  import { filterRecoveryRecordsForServer } from '../stores/modpackNotificationStore.js';
   import ModpackSourceChoice from '../components/setup/ModpackSourceChoice.svelte';
   import ModrinthPackBrowser from '../components/setup/ModrinthPackBrowser.svelte';
   import GitHubReleasePicker from '../components/setup/GitHubReleasePicker.svelte';
@@ -44,10 +46,12 @@
   let errorRegion;
   let focusedFlow = null;
   let focusedError = null;
+  let contextualNotificationSequence = 0;
 
   $: serverId = currentInstance?.id || '';
   $: isManaged = Boolean(state?.modpackManaged);
   $: recoveryItems = Array.isArray(recovery) ? recovery : recovery?.items || [];
+  $: currentServerRecoveryItems = filterRecoveryRecordsForServer(recoveryItems, serverId);
   $: restorePoints = history.filter(item => item.restorePointId);
   $: if (navigationTarget?.token && navigationTarget.token !== handledNavigationToken) {
     applyNavigationTarget(navigationTarget);
@@ -97,6 +101,14 @@
     } else {
       activeSection = 'overview';
     }
+  }
+
+  function handleContextualNotificationNavigation(event) {
+    contextualNotificationSequence += 1;
+    applyNavigationTarget({
+      token: `contextual-${contextualNotificationSequence}`,
+      ...event.detail
+    });
   }
 
   async function refresh() {
@@ -333,11 +345,26 @@
 </script>
 
 <div class="modpack-surface modpack-page mp-stack" bind:this={pageRoot}>
-  <header class="page-header mp-toolbar"><div class="grow"><p class="mp-kicker">Server lifecycle</p><h1 class="mp-title">Modpack</h1><p class="mp-subtitle">Install, verify, update, downgrade, switch, repair, roll back, detach, or uninstall with reviewed durable transactions.</p></div>{#if flow !== 'dashboard'}<button class="mp-button" type="button" on:click={returnToDashboard}>Back to Modpack overview</button>{/if}</header>
+  <header class="page-header mp-toolbar">
+    <div class="grow"><p class="mp-kicker">Server lifecycle</p><h1 class="mp-title">Modpack</h1><p class="mp-subtitle">Install, verify, update, downgrade, switch, repair, roll back, detach, or uninstall with reviewed durable transactions.</p></div>
+    <div class="page-actions">
+      {#if flow !== 'dashboard'}
+        <button class="mp-button" type="button" on:click={returnToDashboard}>Back to Modpack overview</button>
+      {/if}
+      <ModpackNotificationCenter
+        variant="contextual"
+        {serverId}
+        managed={isManaged}
+        recoveryCount={currentServerRecoveryItems.length}
+        connectStore={false}
+        on:navigate={handleContextualNotificationNavigation}
+      />
+    </div>
+  </header>
 
   {#if error}<section class="mp-state error page-error" bind:this={errorRegion} tabindex="-1" aria-live="assertive"><strong>{error.code || 'Modpack action unavailable'}</strong><p>{error.message}</p><button class="mp-button" type="button" on:click={() => (error = null)}>Dismiss</button></section>{/if}
 
-  {#if recoveryItems.length > 0}<ModpackRecoveryPanel {serverId} records={recovery} on:recovered={refresh} />{/if}
+  {#if currentServerRecoveryItems.length > 0}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} on:recovered={refresh} />{/if}
 
   {#if flow === 'dashboard'}
     <nav class="section-tabs" aria-label="Modpack sections">
@@ -348,7 +375,7 @@
     {:else if activeSection === 'actions'}<ModpackActionPanel {state} {busy} {verification} on:verify={verifyModpack} on:repair={() => beginSource('repair')} on:rollback={() => beginManagedOperation('rollback-restore-point')} on:detach={() => beginManagedOperation('detach')} on:uninstall={() => beginManagedOperation('uninstall')} />
     {:else if activeSection === 'history'}
       <section class="mp-panel mp-stack" aria-label="Modpack history"><div><p class="mp-kicker">Durable audit history</p><h2 class="mp-title">Lifecycle operations</h2><p class="mp-subtitle">Managed files and user additions remain distinguished in every recorded revision.</p></div>{#if history.length === 0}<div class="mp-state">No modpack history has been recorded for this server.</div>{:else}<ol class="history-list">{#each history as item (`${item.operationId}-${item.sequence}`)}<li><div><strong>{item.kind?.replaceAll('-', ' ') || 'operation'}</strong><span>{item.outcome || 'recorded'} · {new Date(item.timestamp).toLocaleString()}</span></div><span class="mp-badge">revision {item.sourceRevision ?? '—'} → {item.targetRevision ?? '—'}</span></li>{/each}</ol>{/if}{#if historyCursor}<button class="mp-button" type="button" on:click={loadOlderHistory} disabled={busy}>Load older history</button>{/if}</section>
-    {:else}<ModpackRecoveryPanel {serverId} records={recovery} on:recovered={refresh} />{/if}
+    {:else}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} on:recovered={refresh} />{/if}
   {:else if flow === 'source'}
     <ModpackSourceChoice on:select={(event) => event.detail.source === 'local' ? selectLocalArchive() : (flow = event.detail.source)} on:back={returnToDashboard} />
   {:else if flow === 'modrinth'}
@@ -372,6 +399,7 @@
   @import '../components/modpacks/modpack-ui.css';
   .modpack-page { padding: 0.5rem 0 2rem; }
   .page-header { padding: 0.4rem 0; }
+  .page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.55rem; min-height: 42px; }
   .section-tabs { display: flex; gap: 0.45rem; overflow-x: auto; padding: 0.4rem; border: 1px solid var(--mp-border); border-radius: 10px; background: rgba(0, 0, 0, 0.15); }
   .section-tabs button { flex: 1 0 auto; min-width: 110px; border: 1px solid transparent; border-radius: 7px; padding: 0.6rem 0.8rem; background: transparent; color: var(--mp-muted); }
   .section-tabs button.active { color: white; background: rgba(124, 131, 255, 0.15); border-color: rgba(124, 131, 255, 0.35); }

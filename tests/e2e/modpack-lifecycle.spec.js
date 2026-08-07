@@ -225,3 +225,84 @@ test('uninstall removes only unchanged managed files and leaves a files-only ser
     await fixture.close();
   }
 });
+
+test('modpack notification attention is grouped in the header and becomes contextual on the Modpack page', async () => {
+  const fixture = await harness.launchModpackApp({
+    profile: 'managed',
+    additionalNotifications: [{
+      notificationId: 'notification-other-server',
+      serverId: 'server-other',
+      title: 'Other server update',
+      message: 'This actionable notice must remain globally available.',
+      timestamp: '2026-08-01T12:00:01.000Z',
+      read: false,
+      source: { provider: 'github' },
+      release: { version: '3.0.0' },
+      action: { actionId: 'open-details', opaqueRef: 'action-reference-other' }
+    }]
+  });
+  try {
+    const { page } = fixture;
+    const header = page.locator('.server-header');
+    const globalBell = header.getByRole('button', { name: /Modpack notifications, 2 unread/u });
+    const settings = header.getByRole('button', { name: 'Open app settings' });
+    await expect(globalBell).toBeVisible();
+    await expect(settings).toBeVisible();
+
+    const [bellBox, settingsBox] = await Promise.all([globalBell.boundingBox(), settings.boundingBox()]);
+    expect(bellBox).not.toBeNull();
+    expect(settingsBox).not.toBeNull();
+    expect(bellBox.x + bellBox.width <= settingsBox.x || settingsBox.x + settingsBox.width <= bellBox.x).toBe(true);
+
+    const modpackTab = page.locator('.server-tabs').getByRole('button', { name: /Modpack/u });
+    await expect(modpackTab).toHaveAccessibleName('Modpack, 1 unread notification');
+    await expect(modpackTab.locator('.nav-update-badge')).toHaveText('1');
+    await fixture.openModpack();
+    const crossServerBell = header.getByRole('button', { name: /Modpack notifications, 1 unread/u });
+    await expect(crossServerBell).toBeVisible();
+    await crossServerBell.click();
+    const globalPanel = header.getByRole('region', { name: 'Persistent modpack notifications' });
+    await expect(globalPanel.getByText('Other server update', { exact: true })).toBeVisible();
+    await expect(globalPanel.getByText('Exact modpack update available', { exact: true })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(globalPanel).toHaveCount(0);
+    await expect(crossServerBell).toBeFocused();
+    await crossServerBell.click();
+    await globalPanel.getByRole('button', { name: 'Close notifications' }).click();
+    await expect(globalPanel).toHaveCount(0);
+    await expect(crossServerBell).toBeFocused();
+
+    const contextualBell = page.locator('.modpack-page .notification-host.contextual').getByRole('button', {
+      name: /Modpack notifications, 1 unread/u
+    });
+    await expect(contextualBell).toBeVisible();
+    await page.getByRole('button', { name: 'Versions' }).click();
+    await page.getByRole('button', { name: 'Switch modpack' }).click();
+    await expect(contextualBell).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Back to Modpack overview' })).toBeVisible();
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('another server recovery does not surface on a pristine active server', async () => {
+  const fixture = await harness.launchModpackApp({
+    profile: 'unmanaged',
+    notificationRecords: [],
+    recoveryRecords: [{
+      recoveryId: 'recovery-other-server',
+      serverId: 'server-other',
+      phase: 'blocked',
+      automaticPossible: false,
+      actions: [{ actionId: 'review-recovery', label: 'Review recovery' }]
+    }]
+  });
+  try {
+    const { page } = fixture;
+    await fixture.openModpack();
+    await expect(page.locator('.modpack-page .notification-host.contextual')).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Modpack recovery' })).toHaveCount(0);
+  } finally {
+    await fixture.close();
+  }
+});

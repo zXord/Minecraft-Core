@@ -246,12 +246,15 @@ async function waitForAbortable(promise, signal) {
 class ServerMutationCoordinator {
   constructor(options = {}) {
     assertExactKeys(options, new Set([
-      'bumpContentRevision', 'context', 'durableFs', 'readContentRevision'
+      'bumpContentRevision', 'context', 'durableFs', 'durableFsFactory', 'readContentRevision'
     ]));
+    if (options.durableFs !== undefined && options.durableFsFactory !== undefined) throw invalidRequest();
+    if (options.durableFsFactory !== undefined && typeof options.durableFsFactory !== 'function') throw invalidRequest();
     this.context = options.context || sharedServerMutationContext;
     this.readContentRevision = options.readContentRevision || revisionApi.readContentRevision;
     this.bumpContentRevision = options.bumpContentRevision || revisionApi.bumpContentRevision;
-    this.durableFs = options.durableFs || durableFs;
+    this.durableFs = options.durableFs || (options.durableFsFactory ? null : durableFs);
+    this.durableFsFactory = options.durableFsFactory || null;
     if (!this.context || typeof this.context.getCurrentLease !== 'function' ||
         typeof this.context.runWithLease !== 'function' ||
         typeof this.readContentRevision !== 'function' || typeof this.bumpContentRevision !== 'function') {
@@ -763,15 +766,18 @@ class ServerMutationCoordinator {
   _bumpRevision(record, expectedRevision, operationId) {
     if (!record.serverPath) throw invalidRequest();
     try {
+      const revisionDurableFs = this.durableFsFactory
+        ? this.durableFsFactory([record.serverPath])
+        : this.durableFs;
       const result = this.bumpContentRevision(record.serverPath, {
         expectedRevision,
         operationId,
-        durableFs: this.durableFs
+        durableFs: revisionDurableFs
       });
       if (result && typeof result.then === 'function') throw new TypeError('Revision writes must be synchronous');
       return assertSafeRevision(result);
     } catch (error) {
-      throw error instanceof ModpackError ? error : commitFailure(error);
+      throw commitFailure(error);
     }
   }
 

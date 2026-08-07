@@ -185,7 +185,15 @@ function initialNotifications() {
   }];
 }
 
-function makeScenario({ profile, root, crashPoint = null, userDataOverride = null }) {
+function makeScenario({
+  profile,
+  root,
+  crashPoint = null,
+  userDataOverride = null,
+  notificationRecords = null,
+  additionalNotifications = [],
+  recoveryRecords = []
+}) {
   const userData = userDataOverride ? path.resolve(userDataOverride) : path.join(root, 'user-data');
   const serverRoot = path.join(root, 'servers', 'fixture-server');
   const scenarioFile = path.join(root, 'scenario.json');
@@ -224,8 +232,10 @@ function makeScenario({ profile, root, crashPoint = null, userDataOverride = nul
     serverId: SERVER_ID,
     state,
     history: managedProfile ? initialHistory() : [],
-    notifications: initialNotifications(),
-    recovery: [],
+    notifications: notificationRecords === null
+      ? [...initialNotifications(), ...clone(additionalNotifications)]
+      : clone(notificationRecords),
+    recovery: clone(recoveryRecords),
     crashPoint,
     crashMarker: null,
     operationSequence: 1,
@@ -245,7 +255,15 @@ function makeScenario({ profile, root, crashPoint = null, userDataOverride = nul
   return { root, userData, serverRoot, scenarioFile };
 }
 
-function prepareProfile({ profile = 'managed', crashPoint = null, root = null, userDataPath = null } = {}) {
+function prepareProfile({
+  profile = 'managed',
+  crashPoint = null,
+  root = null,
+  userDataPath = null,
+  notificationRecords = null,
+  additionalNotifications = [],
+  recoveryRecords = []
+} = {}) {
   const selectedRoot = root || fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-e2e-'));
   const scenarioFile = path.join(selectedRoot, 'scenario.json');
   return fs.existsSync(scenarioFile)
@@ -253,7 +271,15 @@ function prepareProfile({ profile = 'managed', crashPoint = null, root = null, u
       const existing = readJson(scenarioFile);
       return { userData: existing.userData, serverRoot: existing.serverRoot, scenarioFile };
     })() }
-    : makeScenario({ profile, root: selectedRoot, crashPoint, userDataOverride: userDataPath });
+    : makeScenario({
+      profile,
+      root: selectedRoot,
+      crashPoint,
+      userDataOverride: userDataPath,
+      notificationRecords,
+      additionalNotifications,
+      recoveryRecords
+    });
 }
 
 async function launchElectron(prepared, { executablePath = null, env = {} } = {}) {
@@ -303,7 +329,7 @@ async function launchModpackApp(options = {}) {
     canonicalCount() { return fs.existsSync(prepared.serverRoot) ? 1 : 0; },
     serverTreeHash() { return snapshotReadOnlyFixture(prepared.serverRoot); },
     async openModpack() {
-      await running.page.getByRole('button', { name: '📦 Modpack', exact: true }).click();
+      await running.page.locator('.server-tabs').getByRole('button', { name: /^Modpack(?:,|$)/u }).click();
       await running.page.getByRole('heading', { name: 'Modpack', exact: true }).waitFor();
     },
     async kill() {

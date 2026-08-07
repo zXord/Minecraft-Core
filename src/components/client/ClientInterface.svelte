@@ -23,6 +23,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // App settings handler
   export let onOpenAppSettings = () => {};
+  export let onModpackNotificationNavigate = () => {};
   
   // Minecraft version compatibility checker
   function checkMinecraftVersionCompatibility(modVersion, targetVersion) {
@@ -3664,7 +3665,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 </style>
 
 <div class="client-wrapper">
-  <ClientHeader {tabs} {onOpenAppSettings} />
+  <ClientHeader {tabs} {onOpenAppSettings} {onModpackNotificationNavigate} />
   <div class="client-interface">
   {#if pendingDownloadSourceSwitch}
     <div class="download-source-banner">

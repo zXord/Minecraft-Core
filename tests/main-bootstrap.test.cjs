@@ -138,17 +138,31 @@ test('production startup completes recovery before launches and dispose is rever
     'security:configure',
     'tray:start',
     'window:create',
+    'window:after',
     'updater:start',
     'watchdog:start',
     'notifications:start',
     'management:listen',
-    'window:after',
     'management:dispose',
     'notifications:dispose',
     'watchdog:dispose',
     'updater:dispose',
     'tray:dispose',
     'startup:dispose'
+  ]);
+});
+
+test('after-window setup runs immediately after window publication and before background services', async () => {
+  const { bootstrap, order } = bootstrapFixture({ testMode: false });
+
+  await bootstrap.onReady();
+
+  const windowIndex = order.indexOf('window:create');
+  assert.notEqual(windowIndex, -1);
+  assert.deepEqual(order.slice(windowIndex, windowIndex + 3), [
+    'window:create',
+    'window:after',
+    'updater:start'
   ]);
 });
 
@@ -166,6 +180,108 @@ test('startup fails closed before window creation when no recovery boundary is i
 
   await assert.rejects(bootstrap.onReady(), /recovery/i);
   assert.equal(windowsCreated, 0);
+});
+
+test('startup adopts a window published by a void factory before after-window hooks', async () => {
+  const userDataPath = path.join(os.tmpdir(), 'minecraft-core-void-window-factory');
+  const window = Object.freeze({ id: 17 });
+  let publishedWindow = null;
+  let observedWindow = null;
+  const runtimeFlags = createRuntimeFlags({
+    env: { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1', MINECRAFT_CORE_USER_DATA_DIR: userDataPath },
+    platform: 'win32'
+  });
+  const bootstrap = createMainBootstrap({
+    electronApi: {
+      app: { setName() {}, setAppUserModelId() {}, setPath() {} }
+    },
+    serviceGraph: {
+      paths: { userData: userDataPath },
+      startup: {
+        async initializeRecovery() {},
+        afterWindowCreated(value) { observedWindow = value; }
+      },
+      window: {
+        create() { publishedWindow = window; },
+        get() { return publishedWindow; }
+      }
+    },
+    runtimeFlags
+  });
+
+  const result = await bootstrap.onReady();
+
+  assert.equal(result, window);
+  assert.equal(observedWindow, window);
+});
+
+test('window recreation adopts a replacement published by a void factory', async () => {
+  const userDataPath = path.join(os.tmpdir(), 'minecraft-core-void-window-recreation');
+  const windows = [Object.freeze({ id: 21 }), Object.freeze({ id: 22 })];
+  const observedWindows = [];
+  let publishedWindow = null;
+  let createCount = 0;
+  const runtimeFlags = createRuntimeFlags({
+    env: { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1', MINECRAFT_CORE_USER_DATA_DIR: userDataPath },
+    platform: 'win32'
+  });
+  const bootstrap = createMainBootstrap({
+    electronApi: {
+      app: { setName() {}, setAppUserModelId() {}, setPath() {} }
+    },
+    serviceGraph: {
+      paths: { userData: userDataPath },
+      startup: {
+        async initializeRecovery() {},
+        afterWindowCreated(value) { observedWindows.push(value); }
+      },
+      window: {
+        create() {
+          publishedWindow = windows[createCount];
+          createCount += 1;
+        },
+        get() { return publishedWindow; }
+      }
+    },
+    runtimeFlags
+  });
+
+  assert.equal(await bootstrap.onReady(), windows[0]);
+  publishedWindow = null;
+
+  const replacement = await bootstrap.createWindowAfterRecovery();
+
+  assert.equal(replacement, windows[1]);
+  assert.deepEqual(observedWindows, windows);
+});
+
+test('startup rejects a factory that neither returns nor publishes a window', async () => {
+  const userDataPath = path.join(os.tmpdir(), 'minecraft-core-missing-window-publication');
+  let afterWindowCalls = 0;
+  const runtimeFlags = createRuntimeFlags({
+    env: { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1', MINECRAFT_CORE_USER_DATA_DIR: userDataPath },
+    platform: 'win32'
+  });
+  const bootstrap = createMainBootstrap({
+    electronApi: {
+      app: { setName() {}, setAppUserModelId() {}, setPath() {} }
+    },
+    serviceGraph: {
+      paths: { userData: userDataPath },
+      startup: {
+        async initializeRecovery() {},
+        afterWindowCreated() { afterWindowCalls += 1; }
+      },
+      window: {
+        create() {},
+        get() { return null; }
+      }
+    },
+    runtimeFlags
+  });
+
+  await assert.rejects(bootstrap.onReady(), /did not publish a window/u);
+  assert.equal(afterWindowCalls, 0);
 });
 
 test('production main entry delegates lifecycle ownership to the injected bootstrap', () => {

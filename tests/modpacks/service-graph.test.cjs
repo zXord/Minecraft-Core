@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
@@ -9,6 +10,7 @@ const {
   deriveRecoveryRuntimeTuple,
   createLiveInstanceResolver
 } = require('../../electron/bootstrap/create-modpack-service-graph.cjs');
+const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
 
 function fakeModpackComposition(overrides = {}) {
   const lifecycleService = { marker: 'production-lifecycle' };
@@ -140,6 +142,7 @@ test('live instance resolver reads the current exact server record on every call
 
 test('startup recovery composes and initializes the complete modpack IPC graph before exposure', async () => {
   const order = [];
+  const windowToken = Object.freeze({ id: 73 });
   const composedProviders = { modrinth: { fake: 'modrinth' }, github: { fake: 'github' } };
   const recoveryServices = {
     registry: { async initialize() { return { records: [], corrupt: [], blocks: [], globalBlock: false }; } },
@@ -162,6 +165,13 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
   });
   let factoryCalls = 0;
   const { graph } = graphFixture({
+    startup: {
+      afterWindowCreated(window, graphValue) {
+        order.push('startup:after-window');
+        assert.equal(window, windowToken);
+        assert.equal(graphValue, graph);
+      }
+    },
     async recoveryFactory() { return recoveryServices; },
     async modpackFactory(input) {
       factoryCalls += 1;
@@ -186,8 +196,8 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
   assert.equal(graph.modpacks.outcomeActionService, composition.outcomeActionService);
   assert.deepEqual(order, ['modpacks:compose', 'modpacks:initialize']);
 
-  await graph.startup.afterWindowCreated?.(graph);
-  assert.deepEqual(order.slice(-2), ['notifications:start', 'monitor:start']);
+  await graph.startup.afterWindowCreated?.(windowToken, graph);
+  assert.deepEqual(order.slice(-3), ['startup:after-window', 'notifications:start', 'monitor:start']);
   await graph.startup.dispose?.(graph);
   assert.deepEqual(order.slice(-3), ['monitor:stop', 'notifications:stop', 'modpacks:dispose']);
 });
@@ -228,6 +238,61 @@ test('service graph shares injected transport, clock, roots, factories, and coor
   });
 });
 
+test('service graph gives the production coordinator exact-root revision durability', async (t) => {
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-graph-durable-'));
+  t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
+  const configPath = path.join(serverPath, '.minecraft-core.json');
+  fs.writeFileSync(configPath, JSON.stringify({ contentRevision: 0, preserved: true }));
+  const store = {
+    get(key) {
+      return key === 'instances'
+        ? [{ id: 'server-durable', name: 'Durable', type: 'server', path: serverPath }]
+        : null;
+    }
+  };
+  const requestedRoots = [];
+  let sequence = 0;
+  const { graph } = graphFixture({
+    coordinator: undefined,
+    serverMutationPolicy: undefined,
+    store,
+    durableFsFactory(allowedRoots) {
+      requestedRoots.push([...allowedRoots]);
+      return createDurableFs({
+        fsApi: fs,
+        durableClient: {
+          flushDirectory() {},
+          moveWriteThrough(sourcePath, destinationPath) {
+            fs.renameSync(sourcePath, destinationPath);
+          },
+          replaceFileWriteThrough(sourcePath, destinationPath) {
+            fs.renameSync(sourcePath, destinationPath);
+          }
+        },
+        allowedRoots,
+        tempNameFactory: () => `graph-revision-${++sequence}`
+      });
+    }
+  });
+  graph.coordinator.completeStartupRecovery([]);
+  const saveDisabledMods = graph.serverMutationPolicy.wrapHandler(
+    'save-disabled-mods',
+    async () => ({ success: true })
+  );
+
+  await saveDisabledMods({ sender: { id: 1 } }, serverPath, []);
+
+  const persisted = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(persisted.contentRevision, 1);
+  assert.equal(persisted.preserved, true);
+  assert.deepEqual(requestedRoots, [[serverPath]]);
+  const startLease = await graph.coordinator.acquireStart(
+    { instanceId: 'server-durable', serverPath },
+    { operation: 'start-server', operationId: 'start-after-durable-write', parentMutationLease: null }
+  );
+  assert.equal(startLease.release(), true);
+});
+
 test('service graph preserves explicit provider adapters instead of constructing hidden globals', () => {
   const modrinth = { name: 'fake-modrinth' };
   const github = { name: 'fake-github' };
@@ -237,6 +302,33 @@ test('service graph preserves explicit provider adapters instead of constructing
   assert.equal(graph.providers.modrinth, modrinth);
   assert.equal(graph.providers.github, github);
   assert.equal(graph.providers.local, local);
+});
+
+test('a modpack-only durable override cannot become config coordinator or recovery authority', async () => {
+  const modpackDurableFsFactory = () => ({ subsystem: 'modpack-only' });
+  let recoveryDurableFsFactory = null;
+  let observedModpackDurableFsFactory = null;
+  const recoveryServices = {
+    registry: { async initialize() { return { records: [], corrupt: [], blocks: [], globalBlock: false }; } },
+    recoveryService: { async recoverAll() { return { recovered: [], unresolved: [] }; } },
+    runtimeVerifier: { async verifyBeforeRecovery() { return { quiescent: true }; } }
+  };
+  const { graph } = graphFixture({
+    modpackDurableFsFactory,
+    async recoveryFactory(input) {
+      recoveryDurableFsFactory = input.durableFsFactory;
+      return recoveryServices;
+    },
+    async modpackFactory(input) {
+      observedModpackDurableFsFactory = input.durableFsFactory;
+      return fakeModpackComposition();
+    }
+  });
+
+  await graph.startup.initializeRecovery(graph);
+
+  assert.equal(observedModpackDurableFsFactory, modpackDurableFsFactory);
+  assert.notEqual(recoveryDurableFsFactory, modpackDurableFsFactory);
 });
 
 test('startup recovery derives an exact legacy runtime tuple when no managed state exists yet', () => {

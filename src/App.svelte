@@ -3,7 +3,7 @@
   /// <reference path="./electron.d.ts" />
   import { onMount, onDestroy, setContext } from "svelte";
   import { serverState } from "./stores/serverState.js";
-  import { errorMessage, cacheModInstanceState, restoreModInstanceState, resetModInstanceState } from "./stores/modStore.js";
+  import { errorMessage, cacheModInstanceState, restoreModInstanceState, resetModInstanceState, activateIgnoredUpdatesServerPath } from "./stores/modStore.js";
   import { route, navigate } from "./router.js";
   import { setupIpcListeners } from "./modules/serverListeners.js";
 
@@ -61,6 +61,7 @@
   import { showExitConfirmation } from "./stores/exitStore.js";
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
   import ModpackNotificationCenter from "./components/modpacks/ModpackNotificationCenter.svelte";
+  import { deriveModpackNotificationPresentation, modpackNotificationStore } from "./stores/modpackNotificationStore.js";
   import { getUpdateCount, autoUpdateChecksEnabled } from "./stores/modStore.js";
   const updateCountStore = getUpdateCount();
   import { checkForUpdates, loadServerConfig, loadMods, loadContent, setActiveModServerPath } from "./utils/mods/modAPI.js";
@@ -95,6 +96,10 @@
   let errorInfo = null; // Used for storing error details for potential debugging display
   $: activeServerPath =
     currentInstance?.type === "server" ? currentInstance.path || "" : "";
+  $: currentServerNotificationPresentation = deriveModpackNotificationPresentation({
+    items: $modpackNotificationStore.items,
+    serverId: currentInstance?.type === "server" ? currentInstance.id : ''
+  });
 
   // Session tracking
   const sessionId = Date.now().toString();
@@ -264,6 +269,7 @@
     }
 
     setActiveModServerPath(serverPath);
+    void activateIgnoredUpdatesServerPath(serverPath);
     const restored = serverPath ? restoreModInstanceState(serverPath) : false;
 
     if (!restored) {
@@ -475,6 +481,9 @@
   }
 
   onMount(() => {
+    modpackNotificationStore.connect();
+    modpackNotificationStore.listNotifications().catch(() => {});
+
     // Enhanced component lifecycle logging
     logger.debug("App component mounted", {
       category: "ui",
@@ -831,6 +840,7 @@
 
     // Cleanup on component destroy
     return () => {
+      modpackNotificationStore.destroy();
       logger.debug("App component cleanup", {
         category: "ui",
         data: {
@@ -1700,28 +1710,40 @@
           <header class="server-header">
             <div class="header-title-row">
               <h1>Minecraft Core</h1>
-              <button
-                class="app-settings-button"
-                on:click={() => {
-                  logger.info("App settings button clicked", {
-                    category: "ui",
-                    data: {
-                      component: "App",
-                      action: "openAppSettings",
-                    },
-                  });
-                  showAppSettings = true;
-                }}
-                title="App Settings"
-                aria-label="Open app settings"
-              >
-                ⚙️
-              </button>
+              <div class="header-actions">
+                <ModpackNotificationCenter
+                  connectStore={false}
+                  excludeServerId={$route === "/modpack" ? currentInstance?.id || "" : ""}
+                  on:navigate={handleModpackNotificationNavigation}
+                />
+                <button
+                  class="app-settings-button"
+                  on:click={() => {
+                    logger.info("App settings button clicked", {
+                      category: "ui",
+                      data: {
+                        component: "App",
+                        action: "openAppSettings",
+                      },
+                    });
+                    showAppSettings = true;
+                  }}
+                  title="App Settings"
+                  aria-label="Open app settings"
+                >
+                  ⚙️
+                </button>
+              </div>
             </div>
             <div class="server-tabs">
               {#each tabs as t (t)}
                 <button
                   class="server-tab-button {$route === '/' + t ? 'active' : ''}"
+                  aria-label={t === "modpack"
+                    ? currentServerNotificationPresentation.currentServerUnreadCount > 0
+                      ? `Modpack, ${currentServerNotificationPresentation.currentServerUnreadCount} unread ${currentServerNotificationPresentation.currentServerUnreadCount === 1 ? "notification" : "notifications"}`
+                      : "Modpack"
+                    : undefined}
                   on:click={() => {
                     logger.info("Tab navigation", {
                       category: "ui",
@@ -1743,7 +1765,7 @@
                   {:else if t === "mods"}
                     🧩 Mods {#if $updateCountStore > 0}<span class="nav-update-badge" title="Pending content updates">{$updateCountStore}</span>{/if}
                   {:else if t === "modpack"}
-                    📦 Modpack
+                    📦 Modpack {#if currentServerNotificationPresentation.currentServerUnreadCount > 0}<span class="nav-update-badge" aria-hidden="true" title="Unread modpack notifications">{currentServerNotificationPresentation.currentServerUnreadCount}</span>{/if}
                   {:else if t === "backups"}
                     💾 Backups
                   {:else if t === "settings"}
@@ -1913,6 +1935,7 @@
               <ClientInterface
                 instance={currentInstance}
                 onOpenAppSettings={() => (showAppSettings = true)}
+                onModpackNotificationNavigate={handleModpackNotificationNavigation}
                 on:instance-updated={handleClientInstanceUpdated}
                 on:deleted={(e) => {
                   logger.info("Client instance deleted", {
@@ -1977,7 +2000,6 @@
         {/if}
     {/if}
     </div>
-    <ModpackNotificationCenter on:navigate={handleModpackNotificationNavigation} />
     <ConfirmationDialog
       bind:visible={$showExitConfirmation}
       title="Minecraft Server Running"
@@ -2123,6 +2145,14 @@
     width: 100%;
   }
 
+  .header-actions {
+    position: absolute;
+    right: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+  }
+
   h1 {
     margin: 0;
     color: white;
@@ -2130,8 +2160,7 @@
   }
 
   .app-settings-button {
-    position: absolute;
-    right: 0;
+    position: relative;
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.2);
     color: rgba(255, 255, 255, 0.8);

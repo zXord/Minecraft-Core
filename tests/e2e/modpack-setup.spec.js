@@ -67,7 +67,7 @@ test.describe.serial('new server setup', () => {
     await expect(page.getByText('Verifying exact offline fixture bytes', { exact: true })).toHaveAttribute('aria-live', 'polite');
     // Completing initial setup publishes the instance and intentionally returns to
     // the server dashboard; result-focus coverage lives in the management flow.
-    await expect(page.getByRole('button', { name: '📦 Modpack', exact: true })).toBeVisible();
+    await expect(page.locator('.server-tabs').getByRole('button', { name: /^Modpack(?:,|$)/u })).toBeVisible();
     const evidence = fixture.readState();
     expect(evidence.state).toMatchObject({ modpackManaged: true, lifecycleMode: 'managed' });
     expect(evidence.lifecycleCalls).toEqual(expect.arrayContaining([

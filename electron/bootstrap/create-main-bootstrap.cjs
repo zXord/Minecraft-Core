@@ -75,6 +75,15 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
     startedServices.push({ service, name });
   }
 
+  async function createAndResolveWindow() {
+    const createdWindow = await createWindow(serviceGraph);
+    if (createdWindow) return createdWindow;
+    if (!getWindow) throw new TypeError('Window factory did not publish a window');
+    const publishedWindow = await getWindow();
+    if (!publishedWindow) throw new TypeError('Window factory did not publish a window');
+    return publishedWindow;
+  }
+
   async function startReady() {
     initializeBeforeReady();
     if (disposed) throw new Error('Main bootstrap is disposed');
@@ -83,12 +92,12 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
     await cleanupRuntime?.();
     await configureAfterReady?.(serviceGraph);
     await startService(serviceGraph.tray, 'start', runtimeFlags.trayEnabled, 'tray');
-    const window = await createWindow(serviceGraph);
+    const window = await createAndResolveWindow();
+    await afterWindowCreated?.(window, serviceGraph);
     await startService(serviceGraph.updater, 'start', runtimeFlags.updaterEnabled, 'updater');
     await startService(serviceGraph.watchdog, 'start', runtimeFlags.watchdogEnabled, 'watchdog');
     await startService(serviceGraph.nativeNotifications, 'start', runtimeFlags.nativeNotificationsEnabled, 'nativeNotifications');
     await startService(serviceGraph.managementServer, 'listen', runtimeFlags.publicManagementListenersEnabled, 'managementServer');
-    await afterWindowCreated?.(window, serviceGraph);
     return window;
   }
 
@@ -105,7 +114,7 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
         if (!getWindow) return readyWindow;
         const current = await getWindow();
         if (current) return current;
-        const window = await createWindow(serviceGraph);
+        const window = await createAndResolveWindow();
         await afterWindowCreated?.(window, serviceGraph);
         return window;
       })().finally(() => { recreatePromise = null; });

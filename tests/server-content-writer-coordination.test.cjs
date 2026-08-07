@@ -211,6 +211,42 @@ test('failed or no-op content writers do not advance the content revision', asyn
   assert.equal(revisions.get(path.resolve(serverPath).toLocaleLowerCase('en-US')) || 0, 0);
 });
 
+test('ignored-update preference writes are coordinated without advancing server content revision', async () => {
+  const serverPath = path.join(os.tmpdir(), 'minecraft-core-task-14-ignored-preferences');
+  const { coordinator, revisions } = createCoordinator();
+  const policy = createServerMutationPolicy({
+    coordinator,
+    getInstances: () => [{ id: 'server-alpha', type: 'server', path: serverPath }],
+    createOperationId: channel => `content-${channel}`
+  });
+  const handler = policy.wrapHandler(
+    'save-ignored-mod-updates',
+    async () => ({ success: true, changed: true })
+  );
+
+  await handler({ sender: { id: 1 } }, serverPath, '{"Example.jar":{"ids":[],"vers":[]}}');
+
+  assert.equal(revisions.get(path.resolve(serverPath).toLocaleLowerCase('en-US')) || 0, 0);
+});
+
+test('reading an existing management invite does not advance server content revision', async () => {
+  const serverPath = path.join(os.tmpdir(), 'minecraft-core-task-14-existing-invite');
+  const { coordinator, revisions } = createCoordinator();
+  const policy = createServerMutationPolicy({
+    coordinator,
+    getInstances: () => [{ id: 'server-alpha', type: 'server', path: serverPath }],
+    createOperationId: channel => `content-${channel}`
+  });
+  const handler = policy.wrapHandler(
+    'get-management-invite-info',
+    async () => ({ success: true, secret: 'already-present' })
+  );
+
+  await handler({ sender: { id: 1 } }, { instanceId: 'server-alpha', serverPath });
+
+  assert.equal(revisions.get(path.resolve(serverPath).toLocaleLowerCase('en-US')) || 0, 0);
+});
+
 test('browser writer delegates use the same mutation policy as desktop IPC', async () => {
   const serverPath = path.join(os.tmpdir(), 'minecraft-core-task-14-browser');
   const { coordinator } = createCoordinator();
@@ -291,7 +327,10 @@ test('player and mod hydration paths do not create or rewrite server content', a
     });
     assert.deepEqual(await modFileManager.getInstalledModInfo(root), []);
     assert.deepEqual(await modFileManager.getDisabledMods(root), []);
-    assert.deepEqual(await modFileManager.getIgnoredModUpdates(root), {});
+    assert.deepEqual(
+      await modFileManager.getIgnoredModUpdates(root),
+      { found: false, data: {} }
+    );
     assert.equal(fs.existsSync(path.join(root, 'mods')), false);
     assert.equal(fs.existsSync(path.join(root, 'client')), false);
     assert.equal(fs.existsSync(path.join(root, 'minecraft-core-manifests')), false);

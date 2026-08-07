@@ -573,11 +573,8 @@ class ModpackLifecycleService {
 
   async #resolveStateInstance(instanceId) {
     if (!this.instanceResolver || typeof this.instanceResolver.resolveInstance !== 'function') throw invalid();
-    const resolved = await this.instanceResolver.resolveInstance(instanceId);
-    const descriptors = strictObject(resolved, ['instanceId', 'serverPath']);
-    if (descriptors.instanceId.value !== instanceId || typeof descriptors.serverPath.value !== 'string' ||
-        descriptors.serverPath.value.length < 1) throw stale();
-    return { instanceId, serverPath: descriptors.serverPath.value };
+    const resolved = assertResolvedInstance(await this.instanceResolver.resolveInstance(instanceId), instanceId);
+    return { instanceId, serverPath: resolved.serverPath };
   }
 
   async #emitStateChanged(instanceId) {
@@ -593,12 +590,9 @@ class ModpackLifecycleService {
   async #executeVerification({ jobId, instanceId, signal }) {
     try {
       await this.#transition(jobId, 'verifying', 10, 'Verifying managed files', signal);
-      const resolved = await this.instanceResolver.resolveInstance(instanceId);
-      const descriptors = strictObject(resolved, ['instanceId', 'serverPath']);
-      if (descriptors.instanceId.value !== instanceId || typeof descriptors.serverPath.value !== 'string' ||
-          descriptors.serverPath.value.length < 1) throw stale();
+      const resolved = assertResolvedInstance(await this.instanceResolver.resolveInstance(instanceId), instanceId);
       await this.#throwIfCancelled(jobId, signal);
-      const result = await this.stateRepository.verifyManagedFiles(descriptors.serverPath.value);
+      const result = await this.stateRepository.verifyManagedFiles(resolved.serverPath);
       const outcome = await this.#withIssuedActions({
         status: 'completed',
         message: result.healthy ? 'All managed files match the installed manifest' : 'Managed file differences were found',

@@ -48,7 +48,9 @@ const CONTENT_SERVER_WRITER_POLICIES = Object.freeze({
   'start-management-server': serverContentPolicy('start-management-server', 'payload:serverPath|instanceId'),
   'update-management-server-path': serverContentPolicy('update-management-server-path', 'payload:serverPath|instanceId'),
   'set-management-server-external-host': serverContentPolicy('set-management-server-external-host', 'payload:serverPath|instanceId'),
-  'get-management-invite-info': serverContentPolicy('ensure-management-invite', 'payload:serverPath|instanceId'),
+  'get-management-invite-info': serverContentPolicy('ensure-management-invite', 'payload:serverPath|instanceId', {
+    markOnSuccess: false
+  }),
   'set-management-invite-host': serverContentPolicy('set-management-invite-host', 'payload:serverPath|instanceId'),
   'regenerate-management-invite-secret': serverContentPolicy('regenerate-management-invite-secret', 'payload:serverPath|instanceId'),
 
@@ -58,7 +60,10 @@ const CONTENT_SERVER_WRITER_POLICIES = Object.freeze({
 
   'direct-add-mod': serverContentPolicy('direct-add-mod', 'payload:serverPath'),
   'save-disabled-mods': serverContentPolicy('save-disabled-mods', 'arg:0'),
-  'save-ignored-mod-updates': serverContentPolicy('save-ignored-mod-updates', 'arg:0'),
+  'save-ignored-mod-updates': serverContentPolicy('save-ignored-mod-updates', 'arg:0', {
+    revisionMode: 'none',
+    markOnSuccess: false
+  }),
   'install-mod': serverContentPolicy('install-server-mod', 'arg:0'),
   'install-mod-with-fallback': serverContentPolicy('install-server-mod-fallback', 'arg:0'),
   'download-mod-with-fallback': serverContentPolicy('download-server-mod-fallback', 'payload:serverPath'),

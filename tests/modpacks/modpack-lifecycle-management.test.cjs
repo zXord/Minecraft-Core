@@ -283,7 +283,7 @@ function serviceForManagement({
     instanceResolver: {
       resolveInstance(instanceId) {
         if (instanceId !== 'server-one') throw new ModpackError('PLAN_STALE', 'Unknown instance');
-        return { instanceId, serverPath };
+        return { instanceId, serverPath, priorRunning: false };
       }
     },
     stateRepository,
@@ -301,6 +301,21 @@ async function waitForPhase(store, jobId, phase) {
   }
   assert.fail(`job ${jobId} did not reach ${phase}: ${store.phases.get(jobId)?.join(', ')}`);
 }
+
+test('state and history accept the production resolved-instance contract', async (t) => {
+  const context = fixture(t);
+  const execution = serviceForManagement({
+    ...context,
+    operationKind: 'detach'
+  });
+
+  const state = await execution.service.getState('server-one');
+  const history = await execution.service.listHistory('server-one', { cursor: null, limit: 50 });
+
+  assert.equal(state.instanceId, 'server-one');
+  assert.equal(state.modpackManaged, true);
+  assert.deepEqual(history, { instanceId: 'server-one', items: [], nextCursor: null });
+});
 
 test('detach removes no server file while disabling active management', async (t) => {
   const context = fixture(t);
@@ -320,7 +335,7 @@ test('detach removes no server file while disabling active management', async (t
   assert.equal(execution.calls.includes('createRestorePoint'), true);
 });
 
-test('verify hashes managed content in a read-only job and offers no repair when bytes match', async (t) => {
+test('verification accepts the production resolved-instance contract and hashes managed content', async (t) => {
   const context = fixture(t);
   const issuances = [];
   const execution = serviceForManagement({

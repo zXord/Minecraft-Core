@@ -2,7 +2,7 @@
 const { getManagementServer } = require('../services/management-server.cjs');
 const appStore = require('../utils/app-store.cjs');
 const { ensureEncryptionAvailable, packSecret, unpackSecret } = require('../utils/secure-store.cjs');
-const { getManagementTlsConfig } = require('../utils/tls-utils.cjs');
+const { getExistingManagementTlsConfig } = require('../utils/tls-utils.cjs');
 const { randomBytes } = require('crypto');
 const {
   getDefaultServerConfig,
@@ -109,30 +109,36 @@ function ensureInviteSecret(serverPath) {
   const config = readPortableServerConfig(serverPath);
   if (!instance && !config) return { instance: null, secret: '' };
   let secret = '';
+  let instanceSecret = '';
   if (config && typeof config.managementInviteSecret === 'string' && config.managementInviteSecret.trim()) {
     secret = config.managementInviteSecret.trim();
   }
-  if (!secret && instance && instance.managementInviteSecret) {
+  if (instance && instance.managementInviteSecret) {
     try {
-      secret = unpackSecret(instance.managementInviteSecret);
+      instanceSecret = unpackSecret(instance.managementInviteSecret);
     } catch {
-      secret = '';
+      instanceSecret = '';
     }
   }
+  if (!secret) secret = instanceSecret;
   if (!secret) {
     secret = generateInviteSecret();
   }
+  const configuredHost = getConfiguredInviteHost(serverPath, instance);
   if (serverPath) {
     persistInviteMetadata(serverPath, {
-      host: getConfiguredInviteHost(serverPath, instance),
+      host: configuredHost,
       secret
     });
   }
   if (instance) {
-    updateServerInstance(serverPath, {
-      managementInviteSecret: packSecret(secret),
-      managementInviteHost: getConfiguredInviteHost(serverPath, instance)
-    });
+    const updates = {};
+    const instanceHost = typeof instance.managementInviteHost === 'string'
+      ? instance.managementInviteHost.trim()
+      : '';
+    if (instanceSecret !== secret) updates.managementInviteSecret = packSecret(secret);
+    if (instanceHost !== configuredHost) updates.managementInviteHost = configuredHost;
+    if (Object.keys(updates).length > 0) updateServerInstance(serverPath, updates);
   }
   return { instance: findServerInstanceByPath(serverPath), secret };
 }
@@ -348,7 +354,7 @@ function createManagementServerHandlers(win) {
         await managementServer.refreshPublicHostIfStale();
         let fingerprint = '';
         try {
-          const tlsConfig = await getManagementTlsConfig(targetPath);
+          const tlsConfig = getExistingManagementTlsConfig(targetPath);
           fingerprint = tlsConfig && tlsConfig.fingerprint ? tlsConfig.fingerprint : '';
         } catch {
           fingerprint = '';

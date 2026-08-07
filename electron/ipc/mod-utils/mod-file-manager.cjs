@@ -757,32 +757,79 @@ async function getDisabledMods(serverPath) {
 
 // ---------------- Ignored Mod Updates Persistence -----------------
 // Structure: { [fileName]: { ids: string[], vers: string[] } }
+function canonicalJsonValue(value, seen = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (!value || typeof value !== 'object' || seen.has(value)) {
+    throw new Error('Ignored updates data must contain plain JSON values');
+  }
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) return value.map(item => canonicalJsonValue(item, seen));
+    if (Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length > 0) {
+      throw new Error('Ignored updates data must contain plain JSON objects');
+    }
+    const normalized = {};
+    for (const key of Object.keys(value).sort((left, right) => left.localeCompare(right, 'en-US'))) {
+      normalized[key] = canonicalJsonValue(value[key], seen);
+    }
+    return normalized;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function canonicalIgnoredUpdates(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Ignored updates data must be an object');
+  }
+  const value = canonicalJsonValue(data);
+  return {
+    compact: JSON.stringify(value),
+    formatted: JSON.stringify(value, null, 2)
+  };
+}
+
 async function getIgnoredModUpdates(serverPath) {
   if (!serverPath) throw new Error('Server path is required');
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
   const ignoredPath = path.join(configDirMgr, 'ignored-mod-updates.json');
+  let raw;
   try {
-    const raw = await fs.readFile(ignoredPath, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return {};
-    return parsed;
-  } catch {
-    return {};
+    raw = await fs.readFile(ignoredPath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { found: false, data: {} };
+    throw error;
   }
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Ignored updates data must be an object');
+  }
+  return { found: true, data: parsed };
 }
 
 async function saveIgnoredModUpdates(serverPath, data) {
   if (!serverPath) throw new Error('Server path is required');
-  if (!data || typeof data !== 'object') throw new Error('Ignored updates data must be an object');
-  markCurrentServerMutationDirty(serverPath);
+  const canonical = canonicalIgnoredUpdates(data);
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
-  await fs.mkdir(configDirMgr, { recursive: true });
   const ignoredPath = path.join(configDirMgr, 'ignored-mod-updates.json');
+  let raw = null;
   try {
-    await fs.writeFile(ignoredPath, JSON.stringify(data, null, 2));
-  } catch {
-    // Silent failure; caller can decide to log if needed
+    raw = await fs.readFile(ignoredPath, 'utf8');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    if (canonical.compact === '{}') return false;
   }
+  if (raw !== null) {
+    try {
+      if (canonicalIgnoredUpdates(JSON.parse(raw)).compact === canonical.compact) return false;
+    } catch { /* malformed content is replaced below */ }
+  }
+
+  markCurrentServerMutationDirty(serverPath);
+  await fs.mkdir(configDirMgr, { recursive: true });
+  await fs.writeFile(ignoredPath, canonical.formatted);
   return true;
 }
 

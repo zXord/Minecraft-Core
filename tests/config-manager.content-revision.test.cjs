@@ -67,6 +67,66 @@ test('ordinary config writes preserve the current revision and unknown keys', (t
   assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).contentRevision, 4);
 });
 
+test('a semantically unchanged complete config update preserves the exact file bytes', (t) => {
+  const { serverPath, configPath, durableFs } = fixture(t);
+  const current = {
+    ...getDefaultServerConfig(),
+    contentRevision: 4,
+    managementInviteHost: '',
+    managementInviteSecret: 'existing-secret',
+    custom: { keep: true }
+  };
+  const original = `${JSON.stringify(current, null, 2)}\n`;
+  fs.writeFileSync(configPath, original);
+  const oldTime = new Date('2020-01-02T03:04:05.000Z');
+  fs.utimesSync(configPath, oldTime, oldTime);
+
+  const result = updateServerConfig(serverPath, {
+    managementInviteHost: '',
+    managementInviteSecret: 'existing-secret'
+  }, {}, { durableFs });
+
+  assert.equal(result.contentRevision, 4);
+  assert.deepEqual(result.custom, { keep: true });
+  assert.equal(fs.readFileSync(configPath, 'utf8'), original);
+  assert.equal(fs.statSync(configPath).mtimeMs, oldTime.getTime());
+});
+
+test('a semantically unchanged config update rejects a target changed after its bounded read', (t) => {
+  const { serverPath, configPath, durableFs } = fixture(t);
+  const current = {
+    ...getDefaultServerConfig(),
+    contentRevision: 4,
+    managementInviteHost: '',
+    managementInviteSecret: 'existing-secret'
+  };
+  fs.writeFileSync(configPath, JSON.stringify(current));
+  let raced = false;
+  const racingDurableFs = {
+    ...durableFs,
+    readFileBounded(filePath, options) {
+      const bytes = durableFs.readFileBounded(filePath, options);
+      if (!raced) {
+        raced = true;
+        fs.writeFileSync(configPath, JSON.stringify({
+          ...current,
+          managementInviteHost: 'external.example'
+        }));
+      }
+      return bytes;
+    }
+  };
+
+  assert.throws(
+    () => updateServerConfig(serverPath, {
+      managementInviteHost: '',
+      managementInviteSecret: 'existing-secret'
+    }, {}, { durableFs: racingDurableFs }),
+    error => error.code === 'PLAN_STALE'
+  );
+  assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).managementInviteHost, 'external.example');
+});
+
 test('renderer-style writes cannot raise or lower contentRevision directly', (t) => {
   const { serverPath, configPath, durableFs } = fixture(t);
   fs.writeFileSync(configPath, JSON.stringify({ contentRevision: 4, maxRam: 4 }));

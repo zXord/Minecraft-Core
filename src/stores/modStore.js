@@ -1431,10 +1431,18 @@ function compareVersions(versionA, versionB) {
 let hasUpdates = null;
 let updateCount = null;
 let categorizedMods = null;
-let ignoredUpdatesLoaded = false;
+let ignoredUpdatesApplyingHydration = false;
+let ignoredUpdatesHydratedPath = '';
+let ignoredUpdatesLegacyMigrationAttempted = false;
+let ignoredUpdatesActivePath = '';
+let ignoredUpdatesActiveHydration = null;
+const ignoredUpdatesHydrationsByPath = new Map();
+const ignoredUpdatesLastSerializedByPath = new Map();
+const ignoredUpdatesPersistTimersByPath = new Map();
+const ignoredUpdatesSaveChainsByPath = new Map();
 // Persistence strategy: prefer server path file via IPC, fallback to localStorage
 const IGNORED_UPDATES_LOCAL_KEY = 'minecraft-core:ignored-updates';
-let ignoredUpdatesMigrated = false;
+const IGNORED_UPDATES_LOAD_ERROR = 'Ignored update preferences could not be loaded. Your changes will be kept until the server can be read safely.';
 // (IgnorePersist logging removed)
 
 // Helper: extract a plausible filesystem path from arbitrary value (object/string)
@@ -1497,142 +1505,345 @@ async function _getServerPath() {
   }
 }
 
-async function _loadIgnoredFromBackend() {
-  try {
-  const sp = await _getServerPath();
-  if (!sp){ return null; }
-  if (!window.electron || !window.electron.invoke){ return null; }
-    const data = await window.electron.invoke('get-ignored-mod-updates', sp);
-  if (data && typeof data === 'object'){ return data; }
-  } catch { /* ignore */ }
-  return null;
+function _ignoredUpdatesPathKey(serverPath) {
+  return typeof serverPath === 'string' ? serverPath.trim().toLowerCase() : '';
 }
 
-async function _saveIgnoredToBackend(map) {
+function _ignoredUpdatesFallbackKey(pathKey) {
+  return `${IGNORED_UPDATES_LOCAL_KEY}:${encodeURIComponent(pathKey)}`;
+}
+
+function _ignoredUpdatesPendingKey(pathKey) {
+  return `${IGNORED_UPDATES_LOCAL_KEY}:pending:${encodeURIComponent(pathKey)}`;
+}
+
+function _isPlainIgnoredUpdates(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function _loadIgnoredFromBackend(serverPath = '') {
   try {
-  const sp = await _getServerPath();
+    const sp = serverPath || await _getServerPath();
+    if (!sp || !window.electron || !window.electron.invoke) {
+      return { success: false, error: 'Ignored update storage is unavailable' };
+    }
+    const result = await window.electron.invoke('get-ignored-mod-updates', sp);
+    if (result?.success !== true || !_isPlainIgnoredUpdates(result.data)) {
+      return { success: false, error: result?.error || 'Ignored update storage returned an invalid response' };
+    }
+    return { success: true, found: result.found === true, data: result.data };
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) };
+  }
+}
+
+async function _saveIgnoredJsonToBackend(serverPath, json) {
+  try {
+  const sp = serverPath || await _getServerPath();
     if (!sp) return false;
     if (!window.electron || !window.electron.invoke) return false;
-    const obj = {};
-    for (const [fileName, rec] of map.entries()) {
-      obj[fileName] = { ids: Array.from(rec.ids||[]), vers: Array.from(rec.vers||[]) };
-    }
-  let json;
-  try { json = JSON.stringify(obj); } catch { return false; }
-  await window.electron.invoke('save-ignored-mod-updates', sp, json);
-  // saved
-    return true;
+    const result = await window.electron.invoke('save-ignored-mod-updates', sp, json);
+    return result?.success === true;
   } catch { return false; }
 }
 
-// Ensure backend file exists even with empty map
-async function _ensureBackendIgnoredFile() {
-  try {
-  const sp = await _getServerPath();
-  if (!sp){ return; }
-  if (!window.electron || !window.electron.invoke){ return; }
-    // Call save with existing map (may be empty) to force file creation
-    const map = get(ignoredUpdates) || new Map();
-    await _saveIgnoredToBackend(map);
-  // ensure file attempted
-  } catch { /* ignore */ }
+function _serializeIgnoredUpdates(map) {
+  const obj = {};
+  for (const [fileName, rec] of (map || new Map()).entries()) {
+    obj[fileName] = { ids: Array.from(rec.ids||[]), vers: Array.from(rec.vers||[]) };
+  }
+  return JSON.stringify(obj);
 }
 
-// Load ignored updates from localStorage once
-async function loadIgnoredUpdates() {
-  if (ignoredUpdatesLoaded) return;
-  ignoredUpdatesLoaded = true;
-  let parsed = await _loadIgnoredFromBackend();
-  if (!parsed) {
-    try {
-      const raw = localStorage.getItem(IGNORED_UPDATES_LOCAL_KEY);
-      if (raw) parsed = JSON.parse(raw);
-    } catch { /* ignore */ }
-  }
-  if (parsed && typeof parsed === 'object') {
-    const map = new Map();
-    for (const [fileName, data] of Object.entries(parsed)) {
-      if (data && typeof data === 'object') {
-        const ids = new SvelteSet(Array.isArray(data.ids) ? data.ids : []);
-        const vers = new SvelteSet(Array.isArray(data.vers) ? data.vers : []);
-        map.set(fileName, { ids, vers });
-      }
-    }
-    ignoredUpdates.set(map);
-  // initialized ignored updates store
-  }
-  // After load, attempt to create backend file if server path already set and no file existed
-  setTimeout(_ensureBackendIgnoredFile, 500);
-}
-loadIgnoredUpdates();
-
-async function attemptIgnoredUpdatesMigration() {
-  if (ignoredUpdatesMigrated) return;
-  try {
-  const sp = await _getServerPath();
-  if (!sp){ return; }
-    const map = get(ignoredUpdates);
-    // Migrate even if empty so file is created
-    ignoredUpdatesMigrated = true; // mark before to avoid duplicate attempts
-  _saveIgnoredToBackend(map || new Map()).then(saved => {
-      if (!saved) {
-        ignoredUpdatesMigrated = false; // allow retry
-      }
+function _ignoredUpdatesMapFromData(data) {
+  const map = new Map();
+  if (!_isPlainIgnoredUpdates(data)) return map;
+  for (const [fileName, record] of Object.entries(data)) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+    map.set(fileName, {
+      ids: new SvelteSet(Array.isArray(record.ids) ? record.ids.map(String) : []),
+      vers: new SvelteSet(Array.isArray(record.vers) ? record.vers.map(String) : [])
     });
-  } catch { /* ignore */ }
+  }
+  return map;
 }
 
-// Wrap serverPath.set to detect when user selects/changes server path
-try {
-  if (typeof window !== 'undefined' && window.serverPath && typeof window.serverPath.set === 'function' && !window.serverPath['__ignoredWrap']) {
-    const originalSet = window.serverPath.set;
-    window.serverPath.set = function(path) {
-      const result = originalSet.call(this, path);
-      // Fire and forget async migration
-      setTimeout(() => { attemptIgnoredUpdatesMigration(); }, 0);
-      return result;
-    };
-    window.serverPath['__ignoredWrap'] = true;
+function _applyIgnoredUpdateMutation(map, mutation) {
+  if (mutation.kind === 'clear') {
+    map.delete(mutation.fileName);
+    return;
   }
-} catch { /* ignore */ }
+  const record = map.get(mutation.fileName) || { ids: new SvelteSet(), vers: new SvelteSet() };
+  if (mutation.versionId) record.ids.add(mutation.versionId);
+  if (mutation.versionNumber) {
+    record.vers.add(mutation.versionNumber);
+    record.vers.add(mutation.versionNumber.trim().toLowerCase().replace(/^v/, ''));
+  }
+  map.set(mutation.fileName, record);
+}
 
-// Also attempt migration shortly after load in case serverPath already set
-setTimeout(() => { attemptIgnoredUpdatesMigration(); }, 1000);
+function _normalizeIgnoredUpdateMutation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      typeof value.fileName !== 'string' || !value.fileName) {
+    return null;
+  }
+  if (value.kind === 'clear') {
+    return { kind: 'clear', fileName: value.fileName };
+  }
+  if (value.kind !== 'ignore') return null;
+  return {
+    kind: 'ignore',
+    fileName: value.fileName,
+    versionId: typeof value.versionId === 'string' ? value.versionId : '',
+    versionNumber: typeof value.versionNumber === 'string' ? value.versionNumber : ''
+  };
+}
+
+function _readIgnoredUpdatesPending(pathKey) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(_ignoredUpdatesPendingKey(pathKey)) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(_normalizeIgnoredUpdateMutation).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function _writeIgnoredUpdatesPending(record) {
+  try {
+    const key = _ignoredUpdatesPendingKey(record.pathKey);
+    if (record.pending.length > 0) {
+      localStorage.setItem(key, JSON.stringify(record.pending));
+    } else {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // Keep the in-memory journal when local storage is unavailable.
+  }
+}
+
+function _appendIgnoredUpdatesPending(record, mutation) {
+  record.pending.push(mutation);
+  _writeIgnoredUpdatesPending(record);
+}
+
+function _pendingIgnoredUpdatesMap(pending) {
+  const map = new Map();
+  for (const mutation of pending) _applyIgnoredUpdateMutation(map, mutation);
+  return map;
+}
+
+function _readIgnoredUpdatesFallback(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return _isPlainIgnoredUpdates(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function _legacyIgnoredUpdatesBelongTo(pathKey) {
+  try {
+    const current = JSON.parse(localStorage.getItem('currentInstance') || 'null');
+    return current?.type === 'server' && _ignoredUpdatesPathKey(current.path) === pathKey;
+  } catch {
+    return false;
+  }
+}
+
+function _enqueueIgnoredUpdatesSave(serverPath, serialized) {
+  const pathKey = _ignoredUpdatesPathKey(serverPath);
+  if (!pathKey) return Promise.resolve(false);
+  ignoredUpdatesLastSerializedByPath.set(pathKey, serialized);
+  const previous = ignoredUpdatesSaveChainsByPath.get(pathKey) || Promise.resolve();
+  const save = previous.catch(() => {}).then(async () => {
+    const saved = await _saveIgnoredJsonToBackend(serverPath, serialized);
+    const fallbackKey = _ignoredUpdatesFallbackKey(pathKey);
+    try {
+      if (saved) localStorage.removeItem(fallbackKey);
+      else localStorage.setItem(fallbackKey, serialized);
+    } catch { /* ignore */ }
+    return saved;
+  });
+  ignoredUpdatesSaveChainsByPath.set(pathKey, save);
+  void save.finally(() => {
+    if (ignoredUpdatesSaveChainsByPath.get(pathKey) === save) {
+      ignoredUpdatesSaveChainsByPath.delete(pathKey);
+    }
+  });
+  return save;
+}
+
+function _scheduleIgnoredUpdatesSave(serverPath, serialized) {
+  const pathKey = _ignoredUpdatesPathKey(serverPath);
+  if (!pathKey) return;
+  ignoredUpdatesLastSerializedByPath.set(pathKey, serialized);
+  const currentTimer = ignoredUpdatesPersistTimersByPath.get(pathKey);
+  if (currentTimer) clearTimeout(currentTimer);
+  const timer = setTimeout(() => {
+    ignoredUpdatesPersistTimersByPath.delete(pathKey);
+    void _enqueueIgnoredUpdatesSave(serverPath, serialized);
+  }, 250);
+  ignoredUpdatesPersistTimersByPath.set(pathKey, timer);
+}
+
+async function _hydrateIgnoredUpdates(record) {
+  const loaded = await _loadIgnoredFromBackend(record.serverPath);
+  const isActive = () => ignoredUpdatesActiveHydration === record &&
+    _ignoredUpdatesPathKey(ignoredUpdatesActivePath) === record.pathKey;
+  if (!loaded.success) {
+    record.failed = true;
+    record.settled = true;
+    if (isActive()) errorMessage.set(IGNORED_UPDATES_LOAD_ERROR);
+    return false;
+  }
+
+  let hydratedMap = _ignoredUpdatesMapFromData(loaded.data);
+  const backendSerialized = _serializeIgnoredUpdates(hydratedMap);
+  const fallbackKey = _ignoredUpdatesFallbackKey(record.pathKey);
+  const scopedFallback = _readIgnoredUpdatesFallback(fallbackKey);
+  let restoreScopedFallback = false;
+  let migrateLegacy = false;
+
+  if (scopedFallback) {
+    hydratedMap = _ignoredUpdatesMapFromData(scopedFallback);
+    restoreScopedFallback = true;
+  } else if (isActive() && !ignoredUpdatesLegacyMigrationAttempted) {
+    ignoredUpdatesLegacyMigrationAttempted = true;
+    const legacy = _readIgnoredUpdatesFallback(IGNORED_UPDATES_LOCAL_KEY);
+    if (legacy && hydratedMap.size === 0 && _legacyIgnoredUpdatesBelongTo(record.pathKey)) {
+      hydratedMap = _ignoredUpdatesMapFromData(legacy);
+      migrateLegacy = true;
+    }
+  }
+
+  for (const mutation of record.pending) _applyIgnoredUpdateMutation(hydratedMap, mutation);
+  const serialized = _serializeIgnoredUpdates(hydratedMap);
+  record.failed = false;
+  record.hydrated = true;
+  record.serialized = serialized;
+  record.visibleMap = hydratedMap;
+
+  if (isActive()) {
+    ignoredUpdatesLastSerializedByPath.set(record.pathKey, serialized);
+    ignoredUpdatesApplyingHydration = true;
+    try {
+      ignoredUpdates.set(hydratedMap);
+    } finally {
+      ignoredUpdatesApplyingHydration = false;
+    }
+    ignoredUpdatesHydratedPath = record.serverPath;
+    ignoredUpdatesActiveHydration = null;
+    if (get(errorMessage) === IGNORED_UPDATES_LOAD_ERROR) errorMessage.set('');
+  }
+
+  if (serialized !== backendSerialized || restoreScopedFallback || migrateLegacy || record.pending.length > 0) {
+    const saved = await _enqueueIgnoredUpdatesSave(record.serverPath, serialized);
+    if (saved) {
+      record.pending = [];
+      _writeIgnoredUpdatesPending(record);
+    }
+    if (saved && migrateLegacy) {
+      try { localStorage.removeItem(IGNORED_UPDATES_LOCAL_KEY); } catch { /* ignore */ }
+    }
+  }
+  record.settled = true;
+  if (ignoredUpdatesHydrationsByPath.get(record.pathKey) === record) {
+    ignoredUpdatesHydrationsByPath.delete(record.pathKey);
+  }
+  return true;
+}
+
+async function activateIgnoredUpdatesServerPath(serverPathValue = '') {
+  const serverPath = typeof serverPathValue === 'string'
+    ? serverPathValue
+    : _extractPathCandidate(serverPathValue);
+  const pathKey = _ignoredUpdatesPathKey(serverPath);
+  if (!pathKey) {
+    ignoredUpdatesActivePath = '';
+    ignoredUpdatesActiveHydration = null;
+    ignoredUpdatesHydratedPath = '';
+    ignoredUpdatesApplyingHydration = true;
+    try { ignoredUpdates.set(new Map()); } finally { ignoredUpdatesApplyingHydration = false; }
+    return false;
+  }
+  if (_ignoredUpdatesPathKey(ignoredUpdatesHydratedPath) === pathKey && !ignoredUpdatesActiveHydration) {
+    ignoredUpdatesActivePath = serverPath;
+    return true;
+  }
+  let record = ignoredUpdatesHydrationsByPath.get(pathKey);
+  if (!record) {
+    const pending = _readIgnoredUpdatesPending(pathKey);
+    record = {
+      serverPath,
+      pathKey,
+      pending,
+      visibleMap: _pendingIgnoredUpdatesMap(pending),
+      hydrated: false,
+      serialized: '',
+      settled: false,
+      failed: false,
+      promise: null
+    };
+    ignoredUpdatesHydrationsByPath.set(pathKey, record);
+  } else {
+    record.serverPath = serverPath;
+  }
+  ignoredUpdatesActivePath = serverPath;
+  ignoredUpdatesActiveHydration = record;
+  ignoredUpdatesHydratedPath = '';
+  ignoredUpdatesApplyingHydration = true;
+  try { ignoredUpdates.set(record.visibleMap); } finally { ignoredUpdatesApplyingHydration = false; }
+  if (record.hydrated) {
+    ignoredUpdatesLastSerializedByPath.set(record.pathKey, record.serialized);
+    ignoredUpdatesHydratedPath = serverPath;
+    ignoredUpdatesActiveHydration = null;
+    if (get(errorMessage) === IGNORED_UPDATES_LOAD_ERROR) errorMessage.set('');
+  }
+  if (!record.settled && record.promise) {
+    return record.promise;
+  }
+  record.settled = false;
+  record.failed = false;
+  record.hydrated = false;
+  record.serialized = '';
+  record.promise = _hydrateIgnoredUpdates(record);
+  return record.promise;
+}
+
+async function loadIgnoredUpdates(serverPathValue = '') {
+  const serverPath = serverPathValue || await _getServerPath();
+  return activateIgnoredUpdatesServerPath(serverPath);
+}
+void loadIgnoredUpdates();
 
 // Persist ignored updates on change (debounced)
-let _ignorePersistTimer = null;
 ignoredUpdates.subscribe(($map) => {
-  if (_ignorePersistTimer) clearTimeout(_ignorePersistTimer);
-  _ignorePersistTimer = setTimeout(async () => {
-    // Attempt backend save first; fallback to localStorage
-    const savedToBackend = await _saveIgnoredToBackend($map);
-    if (!savedToBackend) {
-      try {
-        const obj = {};
-        for (const [fileName, rec] of $map.entries()) {
-          obj[fileName] = { ids: Array.from(rec.ids||[]), vers: Array.from(rec.vers||[]) };
-        }
-        localStorage.setItem(IGNORED_UPDATES_LOCAL_KEY, JSON.stringify(obj));
-      } catch { /* ignore */ }
-    }
-  // After any change, attempt migration if not done yet
-  attemptIgnoredUpdatesMigration();
-  }, 250);
+  if (ignoredUpdatesApplyingHydration || !ignoredUpdatesHydratedPath) return;
+  const serverPath = ignoredUpdatesHydratedPath;
+  const pathKey = _ignoredUpdatesPathKey(serverPath);
+  let serialized;
+  try { serialized = _serializeIgnoredUpdates($map); } catch { return; }
+  if (serialized === ignoredUpdatesLastSerializedByPath.get(pathKey)) return;
+  _scheduleIgnoredUpdatesSave(serverPath, serialized);
 });
 
 function ignoreUpdate(fileName, versionId, versionNumber) {
   if (!fileName) return;
+  const mutation = {
+    kind: 'ignore',
+    fileName,
+    versionId: versionId ? String(versionId) : '',
+    versionNumber: versionNumber ? String(versionNumber) : ''
+  };
+  if (ignoredUpdatesActiveHydration &&
+      ignoredUpdatesActiveHydration.pathKey === _ignoredUpdatesPathKey(ignoredUpdatesActivePath)) {
+    _appendIgnoredUpdatesPending(ignoredUpdatesActiveHydration, mutation);
+  }
   ignoredUpdates.update(map => {
-    const rec = map.get(fileName) || { ids: new SvelteSet(), vers: new SvelteSet() };
-    if (versionId) rec.ids.add(String(versionId));
-    if (versionNumber) {
-      const raw = String(versionNumber);
-      rec.vers.add(raw);
-      // Also store normalized variant (lowercase, strip leading 'v') for robust matching
-      const norm = raw.trim().toLowerCase().replace(/^v/, '');
-      rec.vers.add(norm);
-    }
-    map.set(fileName, rec);
+    _applyIgnoredUpdateMutation(map, mutation);
     return map;
   });
 }
@@ -1656,6 +1867,10 @@ function isUpdateIgnored(fileName, versionId, versionNumber) {
 
 function clearIgnoredUpdates(fileName) {
   if (!fileName) return;
+  if (ignoredUpdatesActiveHydration &&
+      ignoredUpdatesActiveHydration.pathKey === _ignoredUpdatesPathKey(ignoredUpdatesActivePath)) {
+    _appendIgnoredUpdatesPending(ignoredUpdatesActiveHydration, { kind: 'clear', fileName });
+  }
   ignoredUpdates.update(map => { map.delete(fileName); return map; });
 }
 
@@ -1947,6 +2162,7 @@ export {
   disabledMods,
   disabledModUpdates,
   ignoredUpdates,
+  activateIgnoredUpdatesServerPath,
   ignoreUpdate,
   isUpdateIgnored,
   clearIgnoredUpdates,

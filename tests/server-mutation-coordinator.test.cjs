@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -8,6 +10,7 @@ const {
 const {
   createServerMutationContext
 } = require('../electron/services/server-mutation-context.cjs');
+const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
 
 const ALPHA_PATH = 'C:\\Minecraft\\Alpha';
 const BETA_PATH = 'C:\\Minecraft\\Beta';
@@ -326,6 +329,84 @@ test('revision write failure fails closed while releasing the mutation reservati
   );
   await assert.rejects(
     coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('blocked-after-bump')),
+    code('RECOVERY_REQUIRED')
+  );
+});
+
+test('production revision writes create durability scoped to the exact server root', async (t) => {
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-coordinator-durable-'));
+  t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
+  const configPath = path.join(serverPath, '.minecraft-core.json');
+  fs.writeFileSync(configPath, JSON.stringify({ contentRevision: 3, preserved: true }));
+  const requestedRoots = [];
+  let sequence = 0;
+  const coordinator = new ServerMutationCoordinator({
+    durableFsFactory(allowedRoots) {
+      requestedRoots.push([...allowedRoots]);
+      return createDurableFs({
+        fsApi: fs,
+        durableClient: {
+          flushDirectory() {},
+          moveWriteThrough(sourcePath, destinationPath) {
+            fs.renameSync(sourcePath, destinationPath);
+          },
+          replaceFileWriteThrough(sourcePath, destinationPath) {
+            fs.renameSync(sourcePath, destinationPath);
+          }
+        },
+        allowedRoots,
+        tempNameFactory: () => `coordinator-revision-${++sequence}`
+      });
+    }
+  });
+  completeEmptyRecovery(coordinator);
+
+  await coordinator.runMutation(
+    selector('server-durable', serverPath),
+    mutationOptions('durable-root-write', { revisionMode: 'auto' }),
+    async lease => lease.markDirty()
+  );
+
+  assert.deepEqual(requestedRoots, [[serverPath]]);
+  const persisted = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(persisted.contentRevision, 4);
+  assert.equal(persisted.preserved, true);
+});
+
+test('coordinator rejects ambiguous durable filesystem injection', () => {
+  assert.throws(
+    () => new ServerMutationCoordinator({
+      durableFs: Object.freeze({}),
+      durableFsFactory() { return Object.freeze({}); }
+    }),
+    code('INVALID_REQUEST')
+  );
+});
+
+test('durable filesystem factory failure leaves the exact server fail-closed', async () => {
+  const { context } = fixture();
+  const coordinator = new ServerMutationCoordinator({
+    context,
+    readContentRevision: () => 0,
+    durableFsFactory() {
+      throw new Error('durability unavailable');
+    }
+  });
+  completeEmptyRecovery(coordinator);
+
+  await assert.rejects(
+    coordinator.runMutation(
+      selector('alpha', ALPHA_PATH),
+      mutationOptions('durable-factory-failure', { revisionMode: 'auto' }),
+      async lease => lease.markDirty()
+    ),
+    code('COMMIT_FAILED')
+  );
+  await assert.rejects(
+    coordinator.acquireStart(
+      selector('alpha', ALPHA_PATH),
+      startOptions('blocked-after-durable-factory-failure')
+    ),
     code('RECOVERY_REQUIRED')
   );
 });

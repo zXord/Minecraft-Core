@@ -123,3 +123,22 @@ test('management TLS regenerates when stored encrypted private key cannot be dec
     assert.notEqual(updatedConfig.managementTls.key, 'enc:not-a-decryptable-private-key');
   });
 });
+
+test('reading absent management TLS does not generate or persist certificate material', async () => {
+  await withTlsTest(async ({ root, tlsUtilsPath }) => {
+    const serverPath = path.join(root, 'server');
+    const configPath = path.join(serverPath, '.minecraft-core.json');
+    await fsp.mkdir(serverPath, { recursive: true });
+    const original = `${JSON.stringify({ contentRevision: 4, managementTls: null }, null, 2)}\n`;
+    await fsp.writeFile(configPath, original);
+    const oldTime = new Date('2020-01-02T03:04:05.000Z');
+    await fsp.utimes(configPath, oldTime, oldTime);
+
+    const { getExistingManagementTlsConfig } = require(tlsUtilsPath);
+    const existing = getExistingManagementTlsConfig(serverPath);
+
+    assert.equal(existing, null);
+    assert.equal(await fsp.readFile(configPath, 'utf8'), original);
+    assert.equal((await fsp.stat(configPath)).mtimeMs, oldTime.getTime());
+  });
+});

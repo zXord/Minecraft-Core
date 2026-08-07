@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
 const AdmZip = require('adm-zip');
 const { resolveServerLoader } = require('./server-loader.cjs');
 const { unpackSecret } = require('./secure-store.cjs');
@@ -19,6 +20,8 @@ const CLIENT_CONFIG_FILENAME = 'client-config.json';
 const WRITE_OPTION_KEYS = new Set([
   'expectedContentRevision', 'nextContentRevision', 'allowRevisionOverride', 'operationId', 'durableFs'
 ]);
+
+let serverConfigDurableFsFactory = null;
 
 const DEFAULT_AUTO_RESTART = Object.freeze({
   enabled: false,
@@ -733,6 +736,38 @@ function isStrictPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
 
+function isDurableFsCapability(value) {
+  return isStrictPlainObject(value) &&
+    typeof value.readFileBounded === 'function' &&
+    typeof value.writeJsonAtomic === 'function' &&
+    typeof value.sha256File === 'function';
+}
+
+function configureServerConfigDurableFsFactory(factory) {
+  if (typeof factory !== 'function') {
+    throw new TypeError('Server config durable filesystem factory must be a function');
+  }
+  serverConfigDurableFsFactory = factory;
+  return factory;
+}
+
+function createServerConfigDurableFs(serverPath) {
+  try {
+    const durableFs = typeof serverConfigDurableFsFactory === 'function'
+      ? serverConfigDurableFsFactory(Object.freeze([path.resolve(serverPath)]))
+      : durableFsModule.getConfiguredDurableFs();
+    if (!isDurableFsCapability(durableFs)) {
+      throw new TypeError('Server config durable filesystem factory returned an invalid capability');
+    }
+    return durableFs;
+  } catch (error) {
+    const message = typeof serverConfigDurableFsFactory === 'function'
+      ? 'Server configuration durability is unavailable'
+      : 'Server configuration durability is not configured';
+    throw new ModpackError('COMMIT_FAILED', message, { cause: error });
+  }
+}
+
 function assertWriteOptions(options) {
   if (!isStrictPlainObject(options) || Object.keys(options).some(key => !WRITE_OPTION_KEYS.has(key))) {
     throw invalidRevisionRequest();
@@ -743,9 +778,7 @@ function assertWriteOptions(options) {
   const hasNext = options.nextContentRevision !== undefined;
   if ((options.allowRevisionOverride === true) !== hasNext) throw invalidRevisionRequest();
   if (options.operationId !== undefined) assertOperationId(options.operationId);
-  if (options.durableFs !== undefined && (!isStrictPlainObject(options.durableFs) ||
-      typeof options.durableFs.readFileBounded !== 'function' ||
-      typeof options.durableFs.writeJsonAtomic !== 'function' || typeof options.durableFs.sha256File !== 'function')) {
+  if (options.durableFs !== undefined && !isDurableFsCapability(options.durableFs)) {
     throw invalidRevisionRequest();
   }
   return options;
@@ -796,6 +829,10 @@ function writeServerConfigLocked(serverPath, safeConfig, defaultSettings, option
 
   const normalized = normalizeServerConfig({ ...current, ...safeConfig }, defaultSettings, serverPath);
   normalized.contentRevision = nextRevision;
+  if (persisted.exists && isDeepStrictEqual(persisted.value, normalized)) {
+    if (durableFs.sha256File(configPath) !== persisted.sha256) throw staleRevision();
+    return normalized;
+  }
   markCurrentServerMutationDirty(serverPath);
   durableFs.writeJsonAtomic(configPath, normalized, {
     expectedTargetSha256: persisted.exists ? persisted.sha256 : null
@@ -818,7 +855,7 @@ function writeServerConfig(serverPath, config, defaultSettings = {}, options = {
     throw new ModpackError('INVALID_REQUEST', 'The server configuration is invalid', { cause: error });
   }
   const operationId = options.operationId || `config-${crypto.randomUUID()}`;
-  const durableFs = options.durableFs || durableFsModule;
+  const durableFs = options.durableFs || createServerConfigDurableFs(serverPath);
   return withContentRevisionLock(serverPath, operationId, () => {
     return writeServerConfigLocked(serverPath, safeConfig, defaultSettings, options, durableFs);
   });
@@ -828,7 +865,7 @@ function updateServerConfig(serverPath, updates, defaultSettings = {}, options =
   if (!fs.existsSync(serverPath) || !fs.lstatSync(serverPath).isDirectory()) throw invalidRevisionRequest();
   if (typeof updates === 'function') {
     assertWriteOptions(options);
-    const durableFs = options.durableFs || durableFsModule;
+    const durableFs = options.durableFs || createServerConfigDurableFs(serverPath);
     const operationId = options.operationId || `config-${crypto.randomUUID()}`;
     return withContentRevisionLock(serverPath, operationId, () => {
       const persisted = readPersistedConfigForWrite(getServerConfigPath(serverPath), durableFs);
@@ -1043,6 +1080,7 @@ module.exports = {
   CLIENT_CONFIG_FILENAME,
   DEFAULT_AUTO_RESTART,
   DEFAULT_BACKUP_AUTOMATION,
+  configureServerConfigDurableFsFactory,
   getDefaultServerConfig,
   getServerConfigPath,
   getClientConfigPath,

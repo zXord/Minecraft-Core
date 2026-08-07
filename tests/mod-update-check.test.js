@@ -69,16 +69,21 @@ test('Update Check Concurrency - executes checks periodically when app is runnin
   let checkCount = 0;
   let mockIsCheckingUpdates = false;
 
-  // Simulate interval-based checking
-  const intervalId = setInterval(() => {
-    if (!mockIsCheckingUpdates) {
-      checkCount++;
-    }
-  }, intervalMs);
-
-  // Wait for 3 intervals
-  await new Promise(resolve => setTimeout(resolve, intervalMs * 3.5));
-  clearInterval(intervalId);
+  // Wait for three observed callbacks instead of assuming an unloaded event loop.
+  await new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => {
+      clearInterval(intervalId);
+      reject(new Error(`Timed out after ${checkCount} periodic checks`));
+    }, 2000);
+    const intervalId = setInterval(() => {
+      if (!mockIsCheckingUpdates) checkCount++;
+      if (checkCount >= 3) {
+        clearTimeout(deadline);
+        clearInterval(intervalId);
+        resolve();
+      }
+    }, intervalMs);
+  });
 
   // Should have run at least 3 times
   assert.ok(checkCount >= 3, `Expected at least 3 checks, got ${checkCount}`);
@@ -302,11 +307,11 @@ test('Startup update checks are not duplicated by follow-up timers or ModSearch 
   const appSource = fs.readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
   const modSearchSource = fs.readFileSync(new URL('../src/components/mods/components/ModSearch.svelte', import.meta.url), 'utf8');
 
-  const primeServerModState = appSource.match(/async function primeServerModState\(serverPath\) \{[\s\S]*?\n  \}/)?.[0] || '';
+  const primeServerModState = appSource.match(/async function primeServerModState\(serverPath\) \{[\s\S]*?\n {2}\}/)?.[0] || '';
   assert.ok(primeServerModState.includes('await checkForUpdates(serverPath)'), 'startup should keep the one primary update check');
   assert.equal(/setTimeout\(\s*\(\)\s*=>[\s\S]*?checkForUpdates\(scheduledPath\)/.test(primeServerModState), false);
   assert.equal(/setTimeout\(runUpdateCheck,/.test(appSource), false);
 
-  const initializeForServerPath = modSearchSource.match(/async function initializeForServerPath\(resetFilters = false\) \{[\s\S]*?\n  \}/)?.[0] || '';
+  const initializeForServerPath = modSearchSource.match(/async function initializeForServerPath\(resetFilters = false\) \{[\s\S]*?\n {2}\}/)?.[0] || '';
   assert.equal(/checkForUpdates\(/.test(initializeForServerPath), false);
 });

@@ -607,6 +607,7 @@ module.exports = {
   configureDurableFs,
   createDurableFs,
   flushDirectory,
+  getConfiguredDurableFs,
   readFileBounded,
   strictJsonClone,
   renameDurable,

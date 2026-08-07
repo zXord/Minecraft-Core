@@ -415,6 +415,25 @@ async function getManagementTlsConfig(serverPathOrExtraHosts = null, maybeExtraH
   return getOrCreateTlsConfig(MANAGEMENT_KEY, extraHosts, { serverPath });
 }
 
+function getExistingManagementTlsConfig(serverPath = null) {
+  const folderEntry = typeof serverPath === 'string' && serverPath
+    ? getManagementTlsFromFolder(serverPath)
+    : null;
+  const entry = folderEntry || safeGetTlsStore()[MANAGEMENT_KEY] || null;
+  if (!entry || !entry.cert || !entry.key) return null;
+  try {
+    const key = unpackStoredTlsKey(entry.key);
+    if (!isPrivateKeyPem(key)) return null;
+    return {
+      cert: entry.cert,
+      key,
+      fingerprint: getFingerprintForCert(entry.cert) || normalizeFingerprint(entry.fingerprint || '')
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function getBrowserPanelTlsConfig(extraHosts = []) {
   return getOrCreateTlsConfig(PANEL_KEY, extraHosts);
 }
@@ -433,6 +452,7 @@ module.exports = {
   MANAGEMENT_KEY,
   PANEL_KEY,
   normalizeFingerprint,
+  getExistingManagementTlsConfig,
   getManagementTlsConfig,
   getBrowserPanelTlsConfig,
   getManagementHttpsAgent,
