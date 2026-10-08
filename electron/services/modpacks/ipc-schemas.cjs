@@ -60,14 +60,15 @@ const validators = Object.freeze({
 const MODPACK_INVOKE_CHANNELS = Object.freeze([
   'modpacks:search-catalog', 'modpacks:get-project', 'modpacks:list-versions', 'modpacks:list-github-releases',
   'modpacks:list-github-assets', 'modpacks:select-local-archive', 'modpacks:reserve-server-destination',
-  'modpacks:inspect', 'modpacks:preflight',
+  'modpacks:release-server-destination', 'modpacks:inspect', 'modpacks:cancel-inspection', 'modpacks:preflight',
   'modpacks:preflight-management', 'modpacks:start-operation', 'modpacks:cancel-job', 'modpacks:get-job', 'modpacks:get-state',
-  'modpacks:list-history', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
+  'modpacks:list-history', 'modpacks:list-rollback-options', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
   'modpacks:ack-notification', 'modpacks:check-updates', 'modpacks:update-tracking', 'modpacks:verify',
   'modpacks:perform-safe-action'
 ]);
 const MODPACK_EVENT_CHANNELS = Object.freeze([
-  'modpacks:job-progress', 'modpacks:job-log', 'modpacks:state-changed', 'modpacks:notification'
+  'modpacks:job-progress', 'modpacks:job-log', 'modpacks:state-changed', 'modpacks:notification',
+  'modpacks:inspection-progress', 'modpacks:preflight-progress'
 ]);
 
 const idSchema = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$' };
@@ -146,7 +147,10 @@ const planningSelectionsSchema = closed({
   acknowledgeMissingProviderDigest: { type: 'boolean' },
   acknowledgeDowngradeWorldRisk: { type: 'boolean' },
   selectedRoot: selectedArchiveRootSchema,
-  runtimeChoice: runtimeChoiceSchema
+  runtimeChoice: runtimeChoiceSchema,
+  maxRam: { anyOf: [{ type: 'integer', minimum: 1, maximum: 64 }, { type: 'null' }] },
+  serverPort: { anyOf: [{ type: 'integer', minimum: 1025, maximum: 65535 }, { type: 'null' }] },
+  networkAccess: { anyOf: [{ enum: ['pack-default', 'loopback'] }, { type: 'null' }] }
 }, ['optionalFileIds', 'conflictChoices', 'acknowledgeMissingProviderDigest']);
 
 const trackingRecordSchema = closed({
@@ -197,6 +201,7 @@ const requestSchemas = Object.freeze({
   }, ['repositoryId', 'releaseId']),
   'modpacks:select-local-archive': closed({ allowMultipart: { type: 'boolean' } }),
   'modpacks:reserve-server-destination': emptyRequest,
+  'modpacks:release-server-destination': closed({ instanceId: shortIdSchema }),
   'modpacks:inspect': {
     type: 'object', additionalProperties: false, required: ['provider'],
     properties: {
@@ -208,7 +213,8 @@ const requestSchemas = Object.freeze({
       assetIds: { type: 'array', minItems: 1, maxItems: 256, uniqueItems: true, items: idSchema },
       selectionId: idSchema,
       rememberAssetPattern: { type: 'boolean' },
-      linkedModrinthProjectId: shortIdSchema
+      linkedModrinthProjectId: shortIdSchema,
+      requestId: shortIdSchema
     },
     allOf: [{
       if: { type: 'object', required: ['provider'], properties: { provider: { const: 'github' } } },
@@ -222,19 +228,27 @@ const requestSchemas = Object.freeze({
       }
     }]
   },
+  'modpacks:cancel-inspection': {
+    oneOf: [
+      closed({ requestId: shortIdSchema }),
+      closed({ inspectionId: shortIdSchema })
+    ]
+  },
   'modpacks:preflight': closed({
     inspectionId: shortIdSchema,
     instanceId: shortIdSchema,
     operationKind: { enum: [
       'install-new', 'install-existing', 'update', 'downgrade', 'switch', 'repair', 'rollback-restore-point',
-      'verify', 'files-only', 'import-files-only-new', 'detach', 'uninstall', 'uninstall-managed'
+      'files-only', 'import-files-only-new', 'detach', 'uninstall'
     ] },
-    selections: planningSelectionsSchema
-  }),
+    selections: planningSelectionsSchema,
+    requestId: shortIdSchema
+  }, ['inspectionId', 'instanceId', 'operationKind', 'selections']),
   'modpacks:preflight-management': closed({
     serverId: shortIdSchema,
     operationKind: { enum: ['detach', 'uninstall', 'repair', 'rollback-restore-point'] },
-    selectionRef: nullableIdSchema
+    selectionRef: nullableIdSchema,
+    requestId: shortIdSchema
   }, ['serverId', 'operationKind']),
   'modpacks:start-operation': closed({ planId: shortIdSchema, planFingerprint: fingerprintSchema, choices: executionChoicesSchema }),
   'modpacks:cancel-job': closed({ jobId: shortIdSchema }),
@@ -245,6 +259,7 @@ const requestSchemas = Object.freeze({
     cursor: { anyOf: [{ type: 'string', minLength: 1, maxLength: 512 }, { type: 'null' }] },
     limit: { type: 'integer', minimum: 1, maximum: 200 }
   }, ['serverId']),
+  'modpacks:list-rollback-options': closed({ serverId: shortIdSchema }),
   'modpacks:list-recovery': emptyRequest,
   'modpacks:recover': closed({ recoveryId: shortIdSchema, actionId: shortIdSchema }),
   'modpacks:list-notifications': closed({
@@ -264,6 +279,41 @@ const requestValidators = Object.freeze(Object.fromEntries(MODPACK_INVOKE_CHANNE
 ])));
 const resultValidator = ajv.compile(resultSchema);
 const eventValidator = ajv.compile({ $ref: 'minecraft-core-safe-json' });
+const inspectionProgressEventValidator = ajv.compile(closed({
+  requestId: shortIdSchema,
+  phase: { enum: ['resolving', 'downloading', 'verifying', 'materialize', 'list', 'validate', 'classify', 'complete'] },
+  transferredBytes: { type: 'integer', minimum: 0, maximum: 16 * 1024 * 1024 * 1024 },
+  totalBytes: { type: 'integer', minimum: 0, maximum: 16 * 1024 * 1024 * 1024 },
+  percent: { type: 'integer', minimum: 0, maximum: 100 }
+}, ['requestId', 'phase']));
+const preflightProgressEventValidator = ajv.compile(closed({
+  requestId: shortIdSchema,
+  phase: { enum: [
+    'validating-destination', 'preparing-candidate', 'scanning-server', 'verifying-restore-point', 'calculating-changes',
+    'checking-capacity', 'sealing-plan', 'complete'
+  ] },
+  activity: { enum: [
+    'extracting', 'verifying-archive', 'downloading-pack-files', 'assembling-files', 'hashing-candidate-files'
+  ] },
+  completedItems: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  totalItems: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  processedBytes: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  totalBytes: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }
+}, ['requestId', 'phase']));
+
+function validPreflightProgressMetrics(value) {
+  const itemPair = Object.hasOwn(value, 'completedItems') === Object.hasOwn(value, 'totalItems');
+  const bytePair = Object.hasOwn(value, 'processedBytes') === Object.hasOwn(value, 'totalBytes');
+  if (!itemPair || !bytePair) return false;
+  if (Object.hasOwn(value, 'completedItems') && value.completedItems > value.totalItems) return false;
+  if (Object.hasOwn(value, 'processedBytes') && value.processedBytes > value.totalBytes) return false;
+  const hasCandidateDetail = Object.hasOwn(value, 'activity') || Object.hasOwn(value, 'completedItems') ||
+    Object.hasOwn(value, 'processedBytes');
+  if (!hasCandidateDetail) return true;
+  if (value.phase === 'preparing-candidate') return true;
+  return value.phase === 'verifying-restore-point' &&
+    (!Object.hasOwn(value, 'activity') || value.activity === 'verifying-archive');
+}
 
 const REQUEST_FORBIDDEN_KEY = /(?:path|directory|destination|command|arguments?|executable|token|secret|password|headers?|authorization|cookie|cache|workspace|provider.?internal|artifactSetId|inputDirectoryId|outputDirectoryId|planningSessionId)/i;
 const PUBLIC_FORBIDDEN_KEY = /(?:path|url|uri|directory|destination|command|arguments?|executable|token|secret|password|headers?|authorization|cookie|cache|workspace|provider.?internal|artifactSetId|inputDirectoryId|outputDirectoryId|planningSessionId|native.?error|stack|cause|errno|syscall)/i;
@@ -296,7 +346,9 @@ function assertNoAuthority(value, { channel, output = false, allowRemoteDisplay 
     const displayUrlKey = output && ['modpacks:search-catalog', 'modpacks:get-project'].includes(channel) &&
       /^(?:iconUrlCandidate|galleryUrlCandidates|urlCandidate|upstreamLinkCandidates)$/u.test(key);
     const outcomeDestinationKey = output && channel === 'modpacks:perform-safe-action' && field === 'result' && key === 'destination';
-    if (!repositoryUrlKey && !validatedConflictPathsKey && !validatedConflictPathEntry && !displayUrlKey && !outcomeDestinationKey &&
+    const archiveLimitMeasurementKey = output && channel === 'modpacks:inspect' && field === 'result.limitEvidence.totals' &&
+      ['directoryCount', 'maximumPathLength'].includes(key);
+    if (!repositoryUrlKey && !validatedConflictPathsKey && !validatedConflictPathEntry && !displayUrlKey && !outcomeDestinationKey && !archiveLimitMeasurementKey &&
         (output ? PUBLIC_FORBIDDEN_KEY : REQUEST_FORBIDDEN_KEY).test(key)) {
       throw new ModpackError('INVALID_REQUEST', 'Request contains unsupported authority', { details: { field: 'request' } });
     }
@@ -339,7 +391,14 @@ function validateModpackIpcResult(channel, value) {
 function validateModpackIpcEvent(channel, value) {
   if (!MODPACK_EVENT_CHANNELS.includes(channel)) throw new ModpackError('INVALID_REQUEST', 'Modpack IPC event channel is invalid');
   const candidate = cloneJson(value);
-  if (!eventValidator(candidate)) throw new ModpackError('INVALID_REQUEST', 'Modpack IPC event is invalid');
+  const valid = channel === 'modpacks:inspection-progress'
+    ? inspectionProgressEventValidator(candidate)
+    : channel === 'modpacks:preflight-progress'
+      ? preflightProgressEventValidator(candidate)
+      : eventValidator(candidate);
+  if (!valid || (channel === 'modpacks:preflight-progress' && !validPreflightProgressMetrics(candidate))) {
+    throw new ModpackError('INVALID_REQUEST', 'Modpack IPC event is invalid');
+  }
   assertNoAuthority(candidate, { channel, output: true }, 'event');
   return deepFreeze(candidate);
 }

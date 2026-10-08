@@ -8,7 +8,10 @@ const { Readable, PassThrough } = require('node:stream');
 
 const { ArtifactDownloader } = require('../../electron/services/modpacks/artifacts/artifact-downloader.cjs');
 const { ArtifactCache } = require('../../electron/services/modpacks/artifacts/artifact-cache.cjs');
-const { createArtifactSetPlan } = require('../../electron/services/modpacks/contracts.cjs');
+const {
+  createArtifactSetPlan,
+  isAppIssuedVerifiedArtifactSet
+} = require('../../electron/services/modpacks/contracts.cjs');
 const { computePlanFingerprint } = require('../../electron/services/modpacks/artifacts/artifact-fingerprint.cjs');
 const {
   GITHUB_ASSET_HOSTS,
@@ -152,6 +155,26 @@ test('GitHub downloads require the exact issued plan and derive canonical reques
   }
 });
 
+test('GitHub asset rate limits are retryable while unrelated forbidden responses stay redacted', async t => {
+  const content = Buffer.from('rate-limited GitHub bytes');
+  const { artifactPlan, downloadUrl } = await issuedGitHubPlan(content);
+  for (const [name, response, expectedCode, expectedRetryable] of [
+    ['exhausted primary quota', { statusCode: 403, headers: { 'x-ratelimit-remaining': '0' } }, 'RATE_LIMITED', true],
+    ['explicit too-many-requests response', { statusCode: 429 }, 'RATE_LIMITED', true],
+    ['unrelated forbidden response', { statusCode: 403, headers: { 'x-ratelimit-remaining': '12' } }, 'INVALID_RELEASE_URL', false]
+  ]) await t.test(name, async () => {
+    const f = await fixture({ responses: new Map([[downloadUrl, response]]) });
+    try {
+      await assert.rejects(f.downloader.downloadSet(artifactPlan, {}), error => {
+        const publicText = JSON.stringify(error.toPublicResult());
+        return error.code === expectedCode && error.retryable === expectedRetryable &&
+          !publicText.includes(downloadUrl) && !publicText.includes('github.com');
+      });
+      assert.deepEqual(await partialFiles(f.cache.root), []);
+    } finally { await f.cleanup(); }
+  });
+});
+
 test('GitHub SHA-256 is verified while local SHA-256 and SHA-512 are always recorded', async () => {
   const content = Buffer.from('github content'); const { artifactPlan, downloadUrl: url } = await issuedGitHubPlan(content);
   const f = await fixture({ responses: new Map([[url, { body: content, headers: { 'content-length': String(content.length) } }]]) });
@@ -186,6 +209,16 @@ test('Modrinth requires a provider digest while GitHub reports a safe missing-di
     const result = await f.downloader.downloadSet(artifactPlan, {});
     assert.deepEqual(result.warnings, [{ code: 'MISSING_PROVIDER_DIGEST', partId: 'asset-301' }]);
     assert.equal(result.type, 'verified-artifact-set');
+  } finally { await f.cleanup(); }
+});
+
+test('downloaded artifact sets retain app-issued authenticity after warnings are attached', async () => {
+  const content = Buffer.from('archive inspection boundary');
+  const { artifactPlan, downloadUrl } = await issuedGitHubPlan(content, { includeDigest: false });
+  const f = await fixture({ responses: new Map([[downloadUrl, { body: content }]]) });
+  try {
+    const result = await f.downloader.downloadSet(artifactPlan, {});
+    assert.equal(isAppIssuedVerifiedArtifactSet(result), true);
   } finally { await f.cleanup(); }
 });
 

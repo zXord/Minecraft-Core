@@ -43,6 +43,8 @@ internal static partial class NativeMethods
     internal const uint ProcessQueryLimitedInformation = 0x00001000;
     internal const uint Synchronize = 0x00100000;
     internal const int ErrorInvalidParameter = 87;
+    internal const int ErrorFileNotFound = 2;
+    internal const int ErrorPathNotFound = 3;
     internal const uint TokenQuery = 0x0008;
     internal const int TokenIsAppContainer = 29;
     internal const int TokenCapabilities = 30;

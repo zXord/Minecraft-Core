@@ -59,8 +59,8 @@ function linkedController(signal) {
 function emitProgress(callback, phase) {
   if (callback === undefined) return;
   if (typeof callback !== 'function') invalid('onProgress');
-  try { callback(deepFreeze({ phase })); }
-  catch (error) { throw failed(error); }
+  try { Promise.resolve(callback(deepFreeze({ phase }))).catch(() => {}); }
+  catch { /* inspection progress is best effort */ }
 }
 
 function concreteFamily(magic) {
@@ -124,31 +124,6 @@ async function listArchive(workerClient, context, archiveFamily, signal) {
     output.destroy();
     await parser;
     throw failed(primaryFailure);
-  } finally {
-    link.close();
-  }
-}
-
-async function testArchive(workerClient, context, archiveFamily, signal) {
-  const link = linkedController(signal);
-  let callbackFailure = null;
-  try {
-    await workerClient.run(workerRequest(context, 'test', archiveFamily), {
-      signal: link.controller.signal,
-      onFrame(frame) {
-        try {
-          if (frame.type !== 'stdout' && frame.type !== 'stderr') throw new Error('Unexpected archive test frame');
-          scanDiagnostic(frame);
-        } catch (error) {
-          callbackFailure = error;
-          link.controller.abort();
-        }
-      }
-    });
-    if (callbackFailure) throw callbackFailure;
-  } catch (error) {
-    if (signal?.aborted) throw cancelled();
-    throw failed(callbackFailure || error);
   } finally {
     link.close();
   }
@@ -312,9 +287,6 @@ class ArchiveInspector {
       const policy = validateArchiveEntries(parsed.entries, ARCHIVE_LIMITS);
       const roots = rootAnalysis(policy.entries);
 
-      emitProgress(onProgress, 'test');
-      await testArchive(this.workerClient, context, concrete, signal);
-
       emitProgress(onProgress, 'classify');
       const entriesByName = new Map(policy.entries.map(entry => [entry.path, entry]));
       const classification = await classifyArchive({
@@ -334,7 +306,7 @@ class ArchiveInspector {
       const result = deepFreeze({
         type: 'archive-inspection',
         archiveFamily: magic.archiveFamily,
-        integrity: 'tested',
+        integrity: 'deferred-to-extraction',
         artifactSet: {
           completeness: 'verified-complete-set',
           fingerprint: context.fingerprint
@@ -343,7 +315,7 @@ class ArchiveInspector {
           family: concrete === 'zip' ? 'zip' : 'rar',
           concreteFamily: concrete,
           version: parsed.engineVersion,
-          tested: true
+          tested: false
         },
         entries: publicEntries(policy.entries),
         rootCandidates: roots.rootCandidates,
@@ -363,7 +335,7 @@ class ArchiveInspector {
       throw failed(error);
     } finally {
       if (context && !promoted) {
-        try { this.materializer.workspaceRegistry.releaseOwner(context.ownerId); } catch { /* retain the primary failure */ }
+        try { await this.materializer.workspaceRegistry.releaseOwner(context.ownerId); } catch { /* retain the primary failure */ }
       }
     }
   }

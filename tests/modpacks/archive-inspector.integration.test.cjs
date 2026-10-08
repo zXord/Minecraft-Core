@@ -197,7 +197,7 @@ test('every checked-in archive fixture has its exact reviewed SHA-256', async ()
   }
 });
 
-test('known multipart names remain provisional until engine verification', async t => {
+test('known multipart names remain provisional until engine metadata verification', async t => {
   const sourceParts = [
     { partId: 'one', fileName: 'multipart.part0001.rar', bytes: Buffer.from('526172211a07010001020304', 'hex') },
     { partId: 'two', fileName: 'multipart.part0002.rar', bytes: Buffer.from('secondary-volume') }
@@ -221,13 +221,13 @@ test('known multipart names remain provisional until engine verification', async
   assert.equal(result.artifactSet.completeness, 'verified-complete-set');
   assert.equal(result.engineEvidence.family, 'rar');
   assert.equal(result.archiveFamily, 'multipart-rar');
-  assert.deepEqual(fixture.events.map(event => event.operation), ['list', 'test']);
+  assert.deepEqual(fixture.events.map(event => event.operation), ['list']);
   assert.ok(fixture.events.every(event => event.family === 'rar5'));
   assert.equal(pathFree(result), true);
   assert.equal(Object.isFrozen(result), true);
 });
 
-test('the exact 7-Zip missing-volume header becomes a path-free multipart failure before integrity testing', async t => {
+test('the exact 7-Zip missing-volume header becomes a path-free multipart failure during listing', async t => {
   const sourceParts = [
     { partId: 'one', fileName: 'multipart.part0001.rar', bytes: Buffer.from('526172211a07000001020304', 'hex') },
     { partId: 'two', fileName: 'multipart.part0002.rar', bytes: Buffer.from('secondary-volume') }
@@ -286,7 +286,7 @@ test('missing, duplicate, extra, secondary-only, wrong-family, and unconfirmed m
   }
 });
 
-test('inspection sequence is materialize, forced list, policy, integrity test, bounded read, and classification', async t => {
+test('inspection defers full stream verification to quarantined extraction instead of decompressing every entry twice', async t => {
   const bytes = Buffer.concat([Buffer.from('504b0304', 'hex'), Buffer.alloc(40)]);
   const sourceParts = [{ partId: 'main', fileName: 'prepared.zip', bytes }];
   const verifiedArtifactSet = makeVerifiedSet(sourceParts);
@@ -303,13 +303,35 @@ test('inspection sequence is materialize, forced list, policy, integrity test, b
 
   const progress = [];
   const result = await fixture.service.inspectArchive({ verifiedArtifactSet, onProgress: value => progress.push(value) });
-  assert.equal(result.integrity, 'tested');
+  assert.equal(result.integrity, 'deferred-to-extraction');
+  assert.equal(result.engineEvidence.tested, false);
   assert.equal(result.selectedRoot, 'wrapper');
   assert.equal(result.classification.kind, 'prepared-server-pack');
   assert.equal(result.classification.runtime.loaderFamily, 'vanilla');
-  assert.deepEqual(fixture.events.map(event => event.operation), ['list', 'test']);
-  assert.deepEqual(progress.map(item => item.phase), ['materialize', 'list', 'validate', 'test', 'classify', 'complete']);
+  assert.deepEqual(fixture.events.map(event => event.operation), ['list']);
+  assert.deepEqual(progress.map(item => item.phase), ['materialize', 'list', 'validate', 'classify', 'complete']);
   assert.ok(progress.every(pathFree));
+});
+
+test('inspection accepts normal zero-byte ZIP directories whose packed metadata is nonzero', async t => {
+  const bytes = Buffer.concat([Buffer.from('504b0304', 'hex'), Buffer.alloc(40)]);
+  const sourceParts = [{ partId: 'main', fileName: 'serverpack.zip', bytes }];
+  const verifiedArtifactSet = makeVerifiedSet(sourceParts);
+  const fixture = await inspectorFixture({
+    verifiedSet: verifiedArtifactSet,
+    sourceParts,
+    listText: slt({ entries: [
+      { path: 'defaultconfigs', type: 'directory', size: '0', packedSize: '2' },
+      { path: 'server.jar', type: 'file', size: '1', packedSize: '1' }
+    ] })
+  });
+  t.after(fixture.cleanup);
+
+  const result = await fixture.service.inspectArchive({ verifiedArtifactSet });
+  assert.equal(result.entries[0].entryName, 'defaultconfigs');
+  assert.equal(result.entries[0].packedSize, '2');
+  assert.equal(result.limitEvidence.totals.packedBytes, '3');
+  assert.deepEqual(fixture.events.map(event => event.operation), ['list']);
 });
 
 test('a worker failure remains the primary list failure when parser input is closed during cleanup', async t => {
@@ -365,7 +387,7 @@ test('materialization rehashes every part before any worker operation', async t 
   assert.deepEqual(fs.readdirSync(fixture.root), []);
 });
 
-test('entry encryption stops before integrity testing and maps to one stable code', async t => {
+test('entry encryption stops during metadata validation and maps to one stable code', async t => {
   const bytes = Buffer.concat([Buffer.from('504b0304', 'hex'), Buffer.alloc(40)]);
   const sourceParts = [{ partId: 'main', fileName: 'encrypted.zip', bytes }];
   const verifiedArtifactSet = makeVerifiedSet(sourceParts);
@@ -444,7 +466,6 @@ test('inspection obtains classification evidence only through a natively bounded
   assert.equal(result.classification.kind, 'mrpack-server');
   assert.deepEqual(fixture.events, [
     { operation: 'list', family: 'zip', maxDataBytes: undefined },
-    { operation: 'test', family: 'zip', maxDataBytes: undefined },
     { operation: 'read-entry', family: 'zip', maxDataBytes: '2097152' }
   ]);
 });
@@ -497,6 +518,55 @@ test('classifies client-only, prepared, installer, backup, conflicts, custom boo
   }
 });
 
+test('classifies a coherent MultiMC launcher export as an exact client-only archive', async () => {
+  const result = await classifyArchive({
+    entries: [
+      directoryEntry('.minecraft'),
+      directoryEntry('.minecraft/config'),
+      fileEntry('.minecraft/config/terrafirmagreg.toml'),
+      fileEntry('.minecraft/mods/client-mod.jar'),
+      directoryEntry('flame'),
+      fileEntry('flame/manifest.json'),
+      fileEntry('instance.cfg'),
+      fileEntry('mmc-pack.json')
+    ],
+    selectedRoot: null,
+    readEntry: async () => assert.fail('MultiMC identity must not require reading client-controlled config')
+  });
+
+  assert.deepEqual(result, {
+    kind: 'multimc-client-only',
+    confidence: 'exact',
+    blocked: true,
+    reasonCode: 'client-launcher-instance',
+    evidence: [
+      { kind: 'multimc-instance-config', entryName: 'instance.cfg' },
+      { kind: 'multimc-pack-manifest', entryName: 'mmc-pack.json' },
+      { kind: 'minecraft-client-root', entryName: '.minecraft' }
+    ]
+  });
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(pathFree(result), true);
+});
+
+test('does not infer a MultiMC client export from incomplete launcher markers', async () => {
+  const partials = [
+    [directoryEntry('.minecraft'), fileEntry('.minecraft/mods/client-mod.jar')],
+    [directoryEntry('.minecraft'), fileEntry('instance.cfg')],
+    [directoryEntry('.minecraft'), fileEntry('mmc-pack.json')],
+    [fileEntry('instance.cfg'), fileEntry('mmc-pack.json')]
+  ];
+  for (const entries of partials) {
+    const result = await classifyArchive({
+      entries,
+      selectedRoot: null,
+      readEntry: async () => assert.fail('partial launcher markers must not be read')
+    });
+    assert.equal(result.kind, 'ambiguous-or-unknown');
+    assert.equal(result.blocked, true);
+  }
+});
+
 test('a convenience script beside a complete supported runtime does not make it unsupported', async () => {
   const result = await classifyArchive({
     entries: [fileEntry('server.jar'), fileEntry('start-server.bat'), fileEntry('README.txt')],
@@ -507,10 +577,33 @@ test('a convenience script beside a complete supported runtime does not make it 
   assert.equal(result.evidence.some(item => item.kind === 'convenience-script'), true);
 });
 
+test('classifies a legacy direct Forge launcher with its server jar without executing convenience scripts', async () => {
+  const result = await classifyArchive({
+    entries: [
+      fileEntry('minecraft_server.1.12.2.jar'),
+      fileEntry('forge-1.12.2-14.23.5.2860.jar'),
+      fileEntry('launch.bat'),
+      fileEntry('launch.sh')
+    ],
+    selectedRoot: null,
+    readEntry: async () => assert.fail('classification must not execute or read a script')
+  });
+  assert.equal(result.kind, 'prepared-server-pack');
+  assert.deepEqual(result.runtime, {
+    minecraftVersion: '1.12.2', loaderFamily: 'forge', loaderVersion: '14.23.5.2860'
+  });
+  assert.equal(result.evidence.some(item => item.kind === 'forge-legacy-launcher'), true);
+  assert.equal(result.evidence.filter(item => item.kind === 'convenience-script').length, 2);
+});
+
 test('standalone inspectArchive keeps dependencies internal and returns no worker/runtime/cache path', async () => {
   await assert.rejects(inspectArchive({ verifiedArtifactSet: null }), hasCode('INVALID_REQUEST'));
 });
 
 function fileEntry(path, size = 1) {
   return { path, canonicalPath: path.normalize('NFC').toLocaleLowerCase('en-US'), type: 'file', size: String(size), packedSize: String(size), encrypted: false };
+}
+
+function directoryEntry(path) {
+  return { path, canonicalPath: path.normalize('NFC').toLocaleLowerCase('en-US'), type: 'directory', size: '0', packedSize: '0', encrypted: false };
 }

@@ -123,8 +123,11 @@ logger.debug('Mounting main App component', {
 
 const startTime = Date.now();
 try {
+  const target = document.getElementById('app');
+  if (!target) throw new Error('Application mount target is missing');
+  target.replaceChildren();
   const app = mount(App, {
-    target: document.getElementById('app')
+    target
   });
 
   const mountDuration = Date.now() - startTime;

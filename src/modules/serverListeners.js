@@ -46,6 +46,10 @@ function normalizeStatusPayload(payload) {
   }
 
   if (payload && typeof payload === 'object') {
+    if (typeof payload.status === 'string') {
+      const mapped = STATUS_MAP[payload.status.toLowerCase()];
+      if (mapped) return { status: mapped, confidence: 'high' };
+    }
     if (typeof payload.isRunning === 'boolean') {
       return { status: payload.isRunning ? 'Running' : 'Stopped', confidence: 'high' };
     }
@@ -191,9 +195,10 @@ export function setupIpcListeners() {
       uptime: metrics.uptime
     }));
 
-    // If metrics are arriving but status is not marked as running, promote it to running.
+    // Active metrics can repair stale inactive states but cannot override an explicit shutdown transition.
     const hasActivity = (metrics?.cpuPct ?? 0) > 0 || (metrics?.memUsedMB ?? 0) > 0 || (metrics?.uptime && metrics.uptime !== '0h 0m 0s');
-    if (hasActivity && get(serverState).status !== 'Running') {
+    const currentStatus = get(serverState).status;
+    if (hasActivity && currentStatus !== 'Running' && currentStatus !== 'Stopping') {
       updateServerStatus('Running');
     }
   });

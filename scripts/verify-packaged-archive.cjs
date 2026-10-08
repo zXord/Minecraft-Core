@@ -13,16 +13,16 @@ const { verifyArchiveRuntime } = require('./verify-archive-runtime.cjs');
 
 const MANIFEST_IDENTITIES = deepFreeze({
   '7zip-26.02.json': {
-    size: 2450,
-    sha256: '86725eae4386f131071d77b4f5c0c12ad4ae28cb227023a3798a70a3d480614c'
+    size: 2395,
+    sha256: '28051d7f423b6a7a32d3bd135aa95f688239a05c957ee87bd8102f40493a5bd3'
   },
   '7zip-download-policy.json': {
     size: 310,
     sha256: '4051244573651ad3194ad069cb2dd97cc58a1f777b6e78967d99dce7d94ce5b9'
   },
   'archive-worker-x64.json': {
-    size: 481,
-    sha256: 'bded48a2a3870835cfd77e4f8837f26db8929530e1f5e3b32d13b7ec34c19891'
+    size: 365,
+    sha256: 'b4c72d9e40448d581b31266b4c9ebcef5f075a342d7f3faa3e3348af28638882'
   }
 });
 
@@ -39,7 +39,7 @@ const CONTAINMENT_FIELDS = deepFreeze([
   'descendantsDenied',
   'unrelatedEnvironmentAbsent',
   'unrelatedHandlesAbsent',
-  'bundleExtractionIsolated',
+  'bundleRuntimeInMemory',
   'standardInputClosed',
   'cleanupKilledSurvivors',
   'temporaryAclRemoved',
@@ -152,6 +152,7 @@ function verificationEvidence(runtime, worker) {
     runtime: { version: runtime.version, handlers: { zip: runtime.handlers.zip, rar: runtime.handlers.rar } },
     worker: {
       runtimeIdentifier: worker.runtimeIdentifier,
+      runtimeMode: worker.runtimeMode,
       size: worker.file.size,
       sha256: worker.file.sha256
     },
@@ -166,7 +167,7 @@ async function verifyClosedArchive({ resourcesRoot, runtimeLayout, workerPath, w
       runtime.handlers.zip !== true || runtime.handlers.rar !== true) throw unavailable();
   const worker = await verifyArchiveWorkerExecutable({ workerPath, workerManifestPath });
   if (worker.architecture !== 'x64' || worker.runtimeIdentifier !== 'win-x64' ||
-      worker.targetFramework !== 'net8.0-windows') throw unavailable();
+      worker.targetFramework !== 'net8.0-windows' || worker.runtimeMode !== 'in-memory-single-file') throw unavailable();
   await runContainmentSelfTest({ resourcesRoot, runtimeLayout, workerPath, workerManifestPath });
   return verificationEvidence(runtime, worker);
 }

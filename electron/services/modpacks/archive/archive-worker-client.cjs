@@ -18,12 +18,20 @@ const MAX_JSON_DEPTH = 32;
 const MAX_JSON_COLLECTION = 1024;
 const MAX_JSON_STRING = 256 * 1024;
 const MAX_BROKER_STDERR_BYTES = 1024 * 1024;
+const SYNC_WORKER_HASH_BUFFER_BYTES = 1024 * 1024;
 const BROKER_CLEANUP_MARGIN_MS = 30 * 1000;
 const DEFAULT_CLEANUP_GRACE_MS = 10 * 1000;
 const DEFAULT_FORCE_CLOSE_WAIT_MS = 5 * 1000;
 const DEFAULT_KEEPALIVE_MS = 5 * 1000;
 const BUNDLE_JOURNAL_NAME = '.minecraft-core-broker-bundle.json';
+const BUNDLE_RUNNING_JOURNAL_NAME = '.minecraft-core-broker-bundle.running.json';
 const MAX_BUNDLE_JOURNAL_BYTES = 4096;
+const MAX_BROKER_BUNDLE_RECOVERY_ENTRIES = 128;
+const MAX_BROKER_OWNED_CLEANUP_ENTRIES = 16 * 1024;
+const MAX_BROKER_OWNED_CLEANUP_DEPTH = 64;
+const BROKER_BUNDLE_ID = /^[a-f0-9]{64}$/;
+const activeBrokerBundles = new Map();
+const brokerRecoveryDiagnostics = new Map();
 const RUN_OPERATIONS = new Set(['list', 'test', 'extract', 'read-entry']);
 const ARCHIVE_FAMILIES = new Set(['mrpack', 'zip', 'rar4', 'rar5']);
 const WORKER_ERROR_CODES = new Set([
@@ -190,21 +198,37 @@ function createOperationBudget({ signal, timeoutMs }) {
         });
       });
     },
+    waitForResource(acquire, release) {
+      this.throwIfAborted();
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          reject(this.error());
+        };
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+        Promise.resolve().then(acquire).then(result => {
+          if (settled) {
+            Promise.resolve().then(() => release(result)).catch(() => {});
+            return;
+          }
+          settled = true;
+          controller.signal.removeEventListener('abort', onAbort);
+          resolve(result);
+        }, error => {
+          if (settled) return;
+          settled = true;
+          controller.signal.removeEventListener('abort', onAbort);
+          reject(error);
+        });
+      });
+    },
     dispose() {
       clearTimeout(timer);
       try { signal?.removeEventListener('abort', onExternalAbort); } catch { /* stable operation result remains authoritative */ }
     }
   };
-}
-
-function processDefinitelyAbsent(processId) {
-  if (!Number.isSafeInteger(processId) || processId < 1 || processId > 0x7fffffff) return false;
-  try {
-    process.kill(processId, 0);
-    return false;
-  } catch (error) {
-    return error?.code === 'ESRCH';
-  }
 }
 
 function exactBundleDirectory(bundleParent, candidate) {
@@ -216,57 +240,355 @@ function exactBundleDirectory(bundleParent, candidate) {
   return resolved;
 }
 
-function removeBrokerBundle(bundleParent, bundleRoot) {
-  const exact = exactBundleDirectory(bundleParent, bundleRoot);
-  fs.rmSync(exact, { recursive: true, force: false });
+function inspectExactPlainDirectory(candidate) {
+  const resolved = path.resolve(candidate);
+  const stat = fs.lstatSync(resolved, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !samePath(fs.realpathSync.native(resolved), resolved)) throw unavailable();
+  return {
+    path: resolved,
+    identity: {
+      dev: stat.dev,
+      ino: stat.ino,
+      birthtimeNs: stat.birthtimeNs,
+      mode: stat.mode
+    }
+  };
 }
 
-function writeBundleJournal(bundleRoot, value, { create = false } = {}) {
-  const required = value.state === 'running' ? ['schemaVersion', 'state', 'ownerPid', 'brokerPid'] : ['schemaVersion', 'state', 'ownerPid'];
-  if (!exactKeys(value, required) || value.schemaVersion !== 1 || !['creating', 'running'].includes(value.state) ||
-      !Number.isSafeInteger(value.ownerPid) || value.ownerPid < 1 ||
+function samePlainDirectoryIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino &&
+    left.birthtimeNs === right.birthtimeNs && left.mode === right.mode;
+}
+
+function plainFileIdentity(stat) {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    birthtimeNs: stat.birthtimeNs,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+    mode: stat.mode,
+    nlink: stat.nlink
+  };
+}
+
+function samePlainFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+    left.birthtimeNs === right.birthtimeNs && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs &&
+    left.mode === right.mode && left.nlink === right.nlink;
+}
+
+function sameImmutableJournalIdentity(left, right) {
+  // Windows ChangeTime can advance after a durable write when a filesystem provider or another
+  // metadata-only observer finishes processing the file. It is advisory only for immutable broker
+  // journals, whose object identity, other metadata, and exact bytes are independently revalidated.
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+    left.birthtimeNs === right.birthtimeNs && left.mtimeNs === right.mtimeNs &&
+    left.mode === right.mode && left.nlink === right.nlink;
+}
+
+function validateBundleRecord(value) {
+  const required = value?.state === 'running'
+    ? ['schemaVersion', 'state', 'bundleId', 'ownerPid', 'brokerPid']
+    : ['schemaVersion', 'state', 'bundleId', 'ownerPid'];
+  if (!exactKeys(value, required) || value.schemaVersion !== 2 || !['creating', 'running'].includes(value.state) ||
+      !BROKER_BUNDLE_ID.test(value.bundleId || '') || !Number.isSafeInteger(value.ownerPid) || value.ownerPid < 1 ||
       (value.state === 'running' && (!Number.isSafeInteger(value.brokerPid) || value.brokerPid < 1))) throw unavailable();
+  return value;
+}
+
+function inspectImmutableBundleRecord(journalPath, expected = null) {
+  const before = fs.lstatSync(journalPath, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
+      before.size < 2n || before.size > BigInt(MAX_BUNDLE_JOURNAL_BYTES)) {
+    throw unavailable();
+  }
+  const body = fs.readFileSync(journalPath);
+  const after = fs.lstatSync(journalPath, { bigint: true });
+  if (!sameImmutableJournalIdentity(plainFileIdentity(before), plainFileIdentity(after)) ||
+      body.length !== Number(before.size)) throw unavailable();
+  let journal;
+  try {
+    journal = parseStrictJson(body);
+  } catch (error) {
+    throw unavailable(error);
+  }
+  validateBundleRecord(journal);
+  const inspected = { journal, body, identity: plainFileIdentity(after) };
+  if (expected && (!sameImmutableJournalIdentity(expected.identity, inspected.identity) || !expected.body.equals(body))) {
+    throw unavailable();
+  }
+  return inspected;
+}
+
+function writeImmutableBundleRecord(bundleRoot, recordName, value) {
+  validateBundleRecord(value);
   const body = Buffer.from(JSON.stringify(value), 'utf8');
   if (body.length < 2 || body.length > MAX_BUNDLE_JOURNAL_BYTES) throw unavailable();
-  const descriptor = fs.openSync(path.join(bundleRoot, BUNDLE_JOURNAL_NAME), create ? 'wx' : 'w');
+  const recordPath = path.join(bundleRoot, recordName);
+  const descriptor = fs.openSync(recordPath, 'wx');
+  let descriptorIdentity;
   try {
     fs.writeFileSync(descriptor, body);
     fs.fsyncSync(descriptor);
+    const stat = fs.fstatSync(descriptor, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n || stat.size !== BigInt(body.length)) throw unavailable();
+    descriptorIdentity = plainFileIdentity(stat);
   } finally {
     fs.closeSync(descriptor);
+  }
+  const inspected = inspectImmutableBundleRecord(recordPath);
+  if (!sameImmutableJournalIdentity(descriptorIdentity, inspected.identity) || !body.equals(inspected.body)) throw unavailable();
+  return inspected;
+}
+
+function exactBrokerBundleParent(appOwnedRoot) {
+  const appRoot = path.resolve(appOwnedRoot);
+  fs.mkdirSync(appRoot, { recursive: true });
+  const inspectedAppRoot = inspectExactPlainDirectory(appRoot);
+  const bundleParent = path.join(inspectedAppRoot.path, 'broker-bundles');
+  fs.mkdirSync(bundleParent, { recursive: true });
+  const inspectedParent = inspectExactPlainDirectory(bundleParent);
+  if (path.dirname(inspectedParent.path) !== inspectedAppRoot.path) throw unavailable();
+  return inspectedParent.path;
+}
+
+function retainedBundleReason(bundleRoot, bundleName) {
+  const authority = activeBrokerBundles.get(path.resolve(bundleRoot));
+  if (authority) {
+    try {
+      const current = inspectExactPlainDirectory(bundleRoot);
+      if (samePlainDirectoryIdentity(current.identity, authority.rootIdentity)) return null;
+    } catch { /* a changed active name is retained as untrusted */ }
+  }
+  const creationPath = path.join(bundleRoot, BUNDLE_JOURNAL_NAME);
+  let creation;
+  try {
+    creation = inspectImmutableBundleRecord(creationPath);
+  } catch {
+    return 'missing-or-malformed-creation-record';
+  }
+  if (creation.journal.state !== 'creating' || bundleName !== `bundle-${creation.journal.bundleId}`) {
+    return 'unrecognized-or-forged-creation-record';
+  }
+  const runningPath = path.join(bundleRoot, BUNDLE_RUNNING_JOURNAL_NAME);
+  try {
+    fs.lstatSync(runningPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 'interrupted-before-running-record';
+    return 'unreadable-running-record';
+  }
+  try {
+    const running = inspectImmutableBundleRecord(runningPath);
+    if (running.journal.state !== 'running' || running.journal.bundleId !== creation.journal.bundleId ||
+        running.journal.ownerPid !== creation.journal.ownerPid) return 'mismatched-running-record';
+    return 'completed-running-record-retained';
+  } catch {
+    return 'partial-or-malformed-running-record';
   }
 }
 
 function recoverBrokerBundles(appOwnedRoot) {
-  const bundleParent = path.join(appOwnedRoot, 'broker-bundles');
-  fs.mkdirSync(bundleParent, { recursive: true });
-  if (!samePath(fs.realpathSync.native(bundleParent), bundleParent)) throw unavailable();
-  for (const name of fs.readdirSync(bundleParent).sort()) {
-    const bundleRoot = exactBundleDirectory(bundleParent, path.join(bundleParent, name));
-    const journalPath = path.join(bundleRoot, BUNDLE_JOURNAL_NAME);
-    if (!fs.existsSync(journalPath)) continue;
-    const stat = fs.lstatSync(journalPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > MAX_BUNDLE_JOURNAL_BYTES) continue;
-    let journal;
-    try { journal = parseStrictJson(fs.readFileSync(journalPath)); } catch { continue; }
-    const running = exactKeys(journal, ['schemaVersion', 'state', 'ownerPid', 'brokerPid']) && journal.schemaVersion === 1 &&
-      journal.state === 'running' && Number.isSafeInteger(journal.ownerPid) && journal.ownerPid > 0 &&
-      Number.isSafeInteger(journal.brokerPid) && journal.brokerPid > 0;
-    if (running && processDefinitelyAbsent(journal.brokerPid)) removeBrokerBundle(bundleParent, bundleRoot);
+  try {
+    const bundleParent = exactBrokerBundleParent(appOwnedRoot);
+    const directory = fs.opendirSync(bundleParent);
+    const names = [];
+    try {
+      while (names.length <= MAX_BROKER_BUNDLE_RECOVERY_ENTRIES) {
+        const entry = directory.readSync();
+        if (!entry) break;
+        names.push(entry.name);
+      }
+    } finally {
+      directory.closeSync();
+    }
+    const diagnostics = [];
+    for (const name of names.slice(0, MAX_BROKER_BUNDLE_RECOVERY_ENTRIES).sort()) {
+      const candidate = path.join(bundleParent, name);
+      if (!name.startsWith('bundle-')) {
+        diagnostics.push({ kind: 'retained-broker-bundle-remnant', bundleName: name, reason: 'unexpected-entry', retained: true });
+        continue;
+      }
+      try {
+        const bundleRoot = exactBundleDirectory(bundleParent, candidate);
+        const reason = retainedBundleReason(bundleRoot, name);
+        if (reason) diagnostics.push({ kind: 'retained-broker-bundle-remnant', bundleName: name, reason, retained: true });
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue;
+        diagnostics.push({ kind: 'retained-broker-bundle-remnant', bundleName: name, reason: 'unsafe-or-raced-entry', retained: true });
+      }
+    }
+    if (names.length > MAX_BROKER_BUNDLE_RECOVERY_ENTRIES) {
+      diagnostics.push({
+        kind: 'retained-broker-bundle-remnant',
+        bundleName: null,
+        reason: 'diagnostic-scan-truncated',
+        retained: true,
+        uninspectedAtLeast: names.length - MAX_BROKER_BUNDLE_RECOVERY_ENTRIES
+      });
+    }
+    brokerRecoveryDiagnostics.set(path.resolve(appOwnedRoot), deepFreeze(diagnostics.map(item => ({ ...item }))));
+    return bundleParent;
+  } catch (error) {
+    if (error instanceof ModpackError && error.code === 'EXTRACTOR_UNAVAILABLE') throw error;
+    throw unavailable(error);
   }
-  return bundleParent;
+}
+
+function getBrokerBundleRecoveryDiagnostics(appOwnedRoot) {
+  const diagnostics = brokerRecoveryDiagnostics.get(path.resolve(appOwnedRoot)) || [];
+  return deepFreeze(diagnostics.map(item => ({ ...item })));
+}
+
+function retainBrokerBundleDiagnostic(bundleParent, bundleRoot, reason) {
+  const appOwnedRoot = path.dirname(path.resolve(bundleParent));
+  const current = brokerRecoveryDiagnostics.get(appOwnedRoot) || [];
+  const bundleName = path.basename(path.resolve(bundleRoot));
+  const wasTruncated = current.some(item => item.reason === 'diagnostic-scan-truncated' || item.reason === 'retention-diagnostics-truncated');
+  let diagnostics = current.filter(item => item.bundleName !== null && item.bundleName !== bundleName);
+  diagnostics.push({ kind: 'retained-broker-bundle-remnant', bundleName, reason, retained: true });
+  if (wasTruncated || diagnostics.length > MAX_BROKER_BUNDLE_RECOVERY_ENTRIES) {
+    diagnostics = diagnostics.slice(-MAX_BROKER_BUNDLE_RECOVERY_ENTRIES);
+    diagnostics.push({
+      kind: 'retained-broker-bundle-remnant',
+      bundleName: null,
+      reason: 'retention-diagnostics-truncated',
+      retained: true
+    });
+  }
+  brokerRecoveryDiagnostics.set(appOwnedRoot, deepFreeze(diagnostics.map(item => ({ ...item }))));
 }
 
 function createBrokerBundle(appOwnedRoot) {
   const bundleParent = recoverBrokerBundles(appOwnedRoot);
-  const bundleRoot = fs.mkdtempSync(path.join(bundleParent, 'bundle-'));
+  const bundleId = crypto.randomBytes(32).toString('hex');
+  const bundleRoot = path.join(bundleParent, `bundle-${bundleId}`);
+  fs.mkdirSync(bundleRoot);
+  const root = inspectExactPlainDirectory(bundleRoot);
   try {
-    writeBundleJournal(bundleRoot, { schemaVersion: 1, state: 'creating', ownerPid: process.pid }, { create: true });
-    return { bundleParent, bundleRoot };
+    const creationRecord = writeImmutableBundleRecord(bundleRoot, BUNDLE_JOURNAL_NAME, {
+      schemaVersion: 2,
+      state: 'creating',
+      bundleId,
+      ownerPid: process.pid
+    });
+    activeBrokerBundles.set(root.path, {
+      bundleParent,
+      bundleRoot: root.path,
+      bundleId,
+      rootIdentity: root.identity,
+      creationRecord,
+      runningRecord: null
+    });
+    return { bundleParent, bundleRoot: root.path, bundleId };
   } catch (error) {
-    try { removeBrokerBundle(bundleParent, bundleRoot); } catch { /* original journal failure remains authoritative */ }
+    activeBrokerBundles.delete(root.path);
     throw error;
   }
+}
+
+function assertOwnedBrokerBundle(bundleParent, bundleRoot) {
+  const exactParent = path.resolve(bundleParent);
+  const exactRoot = path.resolve(bundleRoot);
+  const authority = activeBrokerBundles.get(exactRoot);
+  if (!authority || authority.bundleParent !== exactParent || authority.bundleRoot !== exactRoot ||
+      path.dirname(exactRoot) !== exactParent || path.basename(exactRoot) !== `bundle-${authority.bundleId}`) throw unavailable();
+  const currentRoot = inspectExactPlainDirectory(exactRoot);
+  if (!samePlainDirectoryIdentity(currentRoot.identity, authority.rootIdentity)) {
+    activeBrokerBundles.delete(exactRoot);
+    throw unavailable();
+  }
+  inspectImmutableBundleRecord(path.join(exactRoot, BUNDLE_JOURNAL_NAME), authority.creationRecord);
+  if (authority.runningRecord) {
+    inspectImmutableBundleRecord(path.join(exactRoot, BUNDLE_RUNNING_JOURNAL_NAME), authority.runningRecord);
+  }
+  return authority;
+}
+
+function assertOwnedBrokerRootIdentity(authority) {
+  const current = inspectExactPlainDirectory(authority.bundleRoot);
+  if (!samePlainDirectoryIdentity(current.identity, authority.rootIdentity)) {
+    activeBrokerBundles.delete(authority.bundleRoot);
+    throw unavailable();
+  }
+}
+
+function captureOwnedBrokerTree(authority) {
+  const pending = [{ path: authority.bundleRoot, depth: 0 }];
+  const directories = [];
+  const files = [];
+  let entries = 0;
+  while (pending.length > 0) {
+    const item = pending.pop();
+    if (item.depth > MAX_BROKER_OWNED_CLEANUP_DEPTH) throw unavailable();
+    assertOwnedBrokerRootIdentity(authority);
+    const directory = inspectExactPlainDirectory(item.path);
+    if (item.path === authority.bundleRoot && !samePlainDirectoryIdentity(directory.identity, authority.rootIdentity)) throw unavailable();
+    directories.push(directory);
+    const handle = fs.opendirSync(directory.path);
+    try {
+      while (true) {
+        const entry = handle.readSync();
+        if (!entry) break;
+        entries += 1;
+        if (entries > MAX_BROKER_OWNED_CLEANUP_ENTRIES) throw unavailable();
+        const childPath = path.resolve(directory.path, entry.name);
+        if (path.dirname(childPath) !== directory.path) throw unavailable();
+        const stat = fs.lstatSync(childPath, { bigint: true });
+        if (stat.isSymbolicLink()) throw unavailable();
+        if (stat.isDirectory()) {
+          const child = inspectExactPlainDirectory(childPath);
+          pending.push({ path: child.path, depth: item.depth + 1 });
+        } else if (stat.isFile()) {
+          files.push({ path: childPath, identity: plainFileIdentity(stat), parentIdentity: directory.identity });
+        } else {
+          throw unavailable();
+        }
+      }
+    } finally {
+      handle.closeSync();
+    }
+  }
+  return { directories, files };
+}
+
+function removeBrokerBundle(bundleParent, bundleRoot) {
+  const authority = assertOwnedBrokerBundle(bundleParent, bundleRoot);
+  if (process.platform === 'win32') {
+    // Node exposes no handle-relative/no-follow tree deletion on Windows. Every bundle is bounded by
+    // the worker's extraction limits, retained diagnostically, and left untouched rather than risking
+    // a pathname reparse race. A future native self-cleanup must retain and delete through its own handles.
+    activeBrokerBundles.delete(authority.bundleRoot);
+    retainBrokerBundleDiagnostic(bundleParent, bundleRoot, 'windows-pathname-cleanup-disabled');
+    return Object.freeze({ removed: false, retained: true, reason: 'windows-pathname-cleanup-disabled' });
+  }
+  const tree = captureOwnedBrokerTree(authority);
+  const recordPaths = new Set([
+    path.join(authority.bundleRoot, BUNDLE_JOURNAL_NAME),
+    path.join(authority.bundleRoot, BUNDLE_RUNNING_JOURNAL_NAME)
+  ].map(candidate => path.resolve(candidate)));
+  tree.files.sort((left, right) => Number(recordPaths.has(left.path)) - Number(recordPaths.has(right.path)));
+  for (const file of tree.files) {
+    assertOwnedBrokerRootIdentity(authority);
+    const currentParent = inspectExactPlainDirectory(path.dirname(file.path));
+    if (!samePlainDirectoryIdentity(currentParent.identity, file.parentIdentity)) throw unavailable();
+    const current = fs.lstatSync(file.path, { bigint: true });
+    if (!current.isFile() || current.isSymbolicLink() || !samePlainFileIdentity(file.identity, plainFileIdentity(current))) throw unavailable();
+    fs.unlinkSync(file.path);
+  }
+  for (const directory of tree.directories.sort((left, right) => right.path.length - left.path.length)) {
+    if (directory.path !== authority.bundleRoot) {
+      assertOwnedBrokerRootIdentity(authority);
+      const current = inspectExactPlainDirectory(directory.path);
+      if (!samePlainDirectoryIdentity(current.identity, directory.identity)) throw unavailable();
+    } else {
+      assertOwnedBrokerRootIdentity(authority);
+    }
+    fs.rmdirSync(directory.path);
+  }
+  activeBrokerBundles.delete(authority.bundleRoot);
+  return Object.freeze({ removed: true, retained: false, reason: null });
 }
 
 function encodeFrame(value) {
@@ -494,8 +816,12 @@ async function resolveNativeRequest(request, workspaceRoot, workspaceRegistry, r
     const sha512 = crypto.createHash('sha512');
     let handle;
     try {
-      handle = await budget.wait(fsp.open(partPath, 'r'));
+      handle = await budget.waitForResource(
+        () => fsp.open(partPath, 'r'),
+        lateHandle => lateHandle.close()
+      );
       const before = await handle.stat();
+      budget.throwIfAborted();
       if (!before.isFile() || BigInt(before.size) !== BigInt(part.measuredSize)) throw new ModpackError('HASH_MISMATCH', 'Artifact bytes changed before archive processing');
       for await (const chunk of handle.createReadStream({ autoClose: false, signal: budget.signal })) {
         budget.throwIfAborted();
@@ -543,9 +869,10 @@ async function resolveNativeRequest(request, workspaceRoot, workspaceRegistry, r
 function strictManifest(bytes) {
   let manifest;
   try { manifest = parseStrictJson(bytes); } catch (error) { throw unavailable(error); }
-  if (!exactKeys(manifest, ['schemaVersion', 'architecture', 'runtimeIdentifier', 'targetFramework', 'sdkVersion', 'files']) ||
-      manifest.schemaVersion !== 1 || manifest.architecture !== 'x64' || manifest.runtimeIdentifier !== 'win-x64' ||
+  if (!exactKeys(manifest, ['schemaVersion', 'architecture', 'runtimeIdentifier', 'targetFramework', 'sdkVersion', 'runtimeMode', 'files']) ||
+      manifest.schemaVersion !== 2 || manifest.architecture !== 'x64' || manifest.runtimeIdentifier !== 'win-x64' ||
       manifest.targetFramework !== 'net8.0-windows' || manifest.sdkVersion !== '10.0.204' ||
+      manifest.runtimeMode !== 'in-memory-single-file' ||
       !exactKeys(manifest.files, ['ArchiveWorker.exe']) ||
       !exactKeys(manifest.files['ArchiveWorker.exe'], ['size', 'sha256'])) throw unavailable();
   const file = manifest.files['ArchiveWorker.exe'];
@@ -559,22 +886,168 @@ function verifyPe(bytes) {
   if (pe < 0x40 || pe + 6 > bytes.length || bytes.readUInt32LE(pe) !== 0x00004550 || bytes.readUInt16LE(pe + 4) !== 0x8664) throw unavailable();
 }
 
+function markBrokerBundleRunning(bundleRoot, brokerPid) {
+  if (!Number.isSafeInteger(brokerPid) || brokerPid < 1) throw unavailable();
+  const exactRoot = path.resolve(bundleRoot);
+  const authority = activeBrokerBundles.get(exactRoot);
+  if (!authority) throw unavailable();
+  assertOwnedBrokerBundle(authority.bundleParent, exactRoot);
+  if (authority.runningRecord) throw unavailable();
+  const runningRecord = writeImmutableBundleRecord(exactRoot, BUNDLE_RUNNING_JOURNAL_NAME, {
+    schemaVersion: 2,
+    state: 'running',
+    bundleId: authority.bundleId,
+    ownerPid: process.pid,
+    brokerPid
+  });
+  authority.runningRecord = runningRecord;
+}
+
+function sameOpenedFileStableIdentity(left, right) {
+  return left.isFile() && right.isFile() &&
+    left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+    left.birthtimeNs === right.birthtimeNs && left.mtimeNs === right.mtimeNs &&
+    left.nlink === right.nlink && left.mode === right.mode;
+}
+
+function ctimeSequenceStatus(values) {
+  const first = values[0];
+  let second = null;
+  for (const value of values.slice(1)) {
+    if (second === null) {
+      if (value !== first) second = value;
+      continue;
+    }
+    if (value !== second) return 'unstable';
+  }
+  return second === null ? 'stable' : 'one-transition';
+}
+
+function readExactlySync(descriptor, length, position) {
+  const bytes = Buffer.allocUnsafe(length);
+  let offset = 0;
+  while (offset < length) {
+    const count = fs.readSync(descriptor, bytes, offset, length - offset, position + offset);
+    if (count === 0) throw unavailable();
+    offset += count;
+  }
+  return bytes;
+}
+
+function verifyPeDescriptorSync(descriptor, size) {
+  if (size < 0x40) throw unavailable();
+  const header = readExactlySync(descriptor, 0x40, 0);
+  try {
+    if (header.readUInt16LE(0) !== 0x5a4d) throw unavailable();
+    const pe = header.readUInt32LE(0x3c);
+    if (pe < 0x40 || pe + 6 > size) throw unavailable();
+    const signature = readExactlySync(descriptor, 6, pe);
+    try {
+      if (signature.readUInt32LE(0) !== 0x00004550 || signature.readUInt16LE(4) !== 0x8664) throw unavailable();
+    } finally {
+      signature.fill(0);
+    }
+  } finally {
+    header.fill(0);
+  }
+}
+
+function hashDescriptorSync(descriptor, expectedSize) {
+  const hash = crypto.createHash('sha256');
+  const buffer = Buffer.allocUnsafe(SYNC_WORKER_HASH_BUFFER_BYTES);
+  let position = 0;
+  try {
+    while (position < expectedSize) {
+      const count = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, expectedSize - position), position);
+      if (count === 0) throw unavailable();
+      hash.update(buffer.subarray(0, count));
+      position += count;
+    }
+    if (fs.readSync(descriptor, buffer, 0, 1, position) !== 0) throw unavailable();
+    return hash.digest('hex');
+  } finally {
+    buffer.fill(0);
+  }
+}
+
+function verifyOpenedWorkerPassSync({
+  descriptor,
+  workerPath,
+  file,
+  baseline,
+  initialPathStat = null,
+  initialDescriptorStat = null,
+  priorTerminalCtime = null
+}) {
+  const pathStat = initialPathStat || fs.lstatSync(workerPath, { bigint: true });
+  const descriptorStat = initialDescriptorStat || fs.fstatSync(descriptor, { bigint: true });
+  if (pathStat.isSymbolicLink() ||
+      !sameOpenedFileStableIdentity(baseline, pathStat) ||
+      !sameOpenedFileStableIdentity(baseline, descriptorStat) ||
+      !samePath(fs.realpathSync.native(workerPath), workerPath)) throw unavailable();
+  verifyPeDescriptorSync(descriptor, file.size);
+  if (hashDescriptorSync(descriptor, file.size) !== file.sha256) throw unavailable();
+  const finalDescriptorStat = fs.fstatSync(descriptor, { bigint: true });
+  const finalPathStat = fs.lstatSync(workerPath, { bigint: true });
+  if (finalPathStat.isSymbolicLink() ||
+      !sameOpenedFileStableIdentity(baseline, finalDescriptorStat) ||
+      !sameOpenedFileStableIdentity(baseline, finalPathStat) ||
+      !samePath(fs.realpathSync.native(workerPath), workerPath)) throw unavailable();
+  const ctimes = [
+    ...(priorTerminalCtime === null ? [] : [priorTerminalCtime]),
+    pathStat.ctimeNs,
+    descriptorStat.ctimeNs,
+    finalDescriptorStat.ctimeNs,
+    finalPathStat.ctimeNs
+  ];
+  return Object.freeze({
+    status: ctimeSequenceStatus(ctimes),
+    terminalCtime: finalPathStat.ctimeNs
+  });
+}
+
 function verifyArchiveWorkerExecutableSync({ workerPath, workerManifestPath }) {
   try {
     const manifestStat = fs.lstatSync(workerManifestPath);
-    const workerStat = fs.lstatSync(workerPath);
+    const workerStat = fs.lstatSync(workerPath, { bigint: true });
     if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.size > 64 * 1024 ||
         !workerStat.isFile() || workerStat.isSymbolicLink()) throw unavailable();
     if (!samePath(fs.realpathSync.native(workerPath), workerPath) || !samePath(fs.realpathSync.native(workerManifestPath), workerManifestPath)) throw unavailable();
     const { manifest, file } = strictManifest(fs.readFileSync(workerManifestPath));
-    const bytes = fs.readFileSync(workerPath);
-    if (bytes.length !== file.size || crypto.createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw unavailable();
-    verifyPe(bytes);
+    if (workerStat.size !== BigInt(file.size)) throw unavailable();
+    const descriptor = fs.openSync(workerPath, 'r');
+    try {
+      const openedStat = fs.fstatSync(descriptor, { bigint: true });
+      if (!sameOpenedFileStableIdentity(workerStat, openedStat)) throw unavailable();
+      const firstPass = verifyOpenedWorkerPassSync({
+        descriptor,
+        workerPath,
+        file,
+        baseline: openedStat,
+        initialPathStat: workerStat,
+        initialDescriptorStat: openedStat
+      });
+      if (firstPass.status === 'one-transition') {
+        const secondPass = verifyOpenedWorkerPassSync({
+          descriptor,
+          workerPath,
+          file,
+          baseline: openedStat,
+          priorTerminalCtime: firstPass.terminalCtime
+        });
+        if (secondPass.status !== 'stable') throw unavailable();
+      } else if (firstPass.status !== 'stable') {
+        throw unavailable();
+      }
+    } finally {
+      fs.closeSync(descriptor);
+    }
     return deepFreeze({
       architecture: manifest.architecture,
       runtimeIdentifier: manifest.runtimeIdentifier,
       targetFramework: manifest.targetFramework,
       sdkVersion: manifest.sdkVersion,
+      runtimeMode: manifest.runtimeMode,
       file: { ...file }
     });
   } catch (error) {
@@ -594,15 +1067,21 @@ async function verifyArchiveWorkerExecutable(options) {
     const { manifest, file } = strictManifest(manifestBytes);
     if (workerBytes.length !== file.size || crypto.createHash('sha256').update(workerBytes).digest('hex') !== file.sha256) throw unavailable();
     verifyPe(workerBytes);
-    return deepFreeze({ architecture: manifest.architecture, runtimeIdentifier: manifest.runtimeIdentifier, targetFramework: manifest.targetFramework, sdkVersion: manifest.sdkVersion, file: { ...file } });
+    return deepFreeze({ architecture: manifest.architecture, runtimeIdentifier: manifest.runtimeIdentifier, targetFramework: manifest.targetFramework, sdkVersion: manifest.sdkVersion, runtimeMode: manifest.runtimeMode, file: { ...file } });
   } catch (error) {
     if (error instanceof ModpackError && error.code === 'EXTRACTOR_UNAVAILABLE') throw error;
     throw unavailable(error);
   }
 }
 
-function minimalEnvironment(bundleRoot) {
-  const environment = { DOTNET_BUNDLE_EXTRACT_BASE_DIR: bundleRoot };
+function createExtractionBlockedEnvironment(workerPath) {
+  const resolvedWorkerPath = path.resolve(workerPath);
+  const extractionBlocker = process.platform === 'win32'
+    ? path.toNamespacedPath(resolvedWorkerPath)
+    : resolvedWorkerPath;
+  // The reviewed worker is an extraction-free single-file executable. Pointing the .NET extraction
+  // base at that exact regular file makes any future self-extracting build fail before managed code.
+  const environment = { DOTNET_BUNDLE_EXTRACT_BASE_DIR: extractionBlocker };
   if (process.env.SystemRoot) environment.SystemRoot = process.env.SystemRoot;
   else if (process.env.WINDIR) environment.SystemRoot = process.env.WINDIR;
   return environment;
@@ -684,6 +1163,7 @@ class ArchiveWorkerClient {
     const appRootStat = fs.lstatSync(this.appOwnedRoot);
     if (!appRootStat.isDirectory() || appRootStat.isSymbolicLink() || !samePath(fs.realpathSync.native(this.appOwnedRoot), this.appOwnedRoot)) throw unavailable();
     recoverBrokerBundles(this.appOwnedRoot);
+    this.recoveryDiagnostics = getBrokerBundleRecoveryDiagnostics(this.appOwnedRoot);
   }
 
   async run(request, { signal, onFrame } = {}) {
@@ -729,7 +1209,7 @@ class ArchiveWorkerClient {
     const required = [
       'appContainer', 'zeroCapabilities', 'exactInputRead', 'exactOutputWrite', 'ambientTempReadDenied',
       'ambientTempWriteDenied', 'userDataReadDenied', 'userDataWriteDenied', 'loopbackDenied', 'descendantsDenied',
-      'unrelatedEnvironmentAbsent', 'unrelatedHandlesAbsent', 'bundleExtractionIsolated', 'standardInputClosed',
+      'unrelatedEnvironmentAbsent', 'unrelatedHandlesAbsent', 'bundleRuntimeInMemory', 'standardInputClosed',
       'cleanupKilledSurvivors', 'temporaryAclRemoved', 'profileStoreClean', 'publishedOutputAclClean'
     ];
     if (!exactKeys(evidence, required) || required.some(key => evidence[key] !== true)) throw unavailable();
@@ -748,12 +1228,10 @@ class ArchiveWorkerClient {
       throw unavailable(error);
     }
     budget.throwIfAborted();
-    const { bundleParent, bundleRoot } = createBrokerBundle(this.appOwnedRoot);
     const controlToken = crypto.randomBytes(32).toString('hex');
     let controlChannel;
     try { controlChannel = await budget.wait(this.controlChannelFactory()); }
     catch (error) {
-      try { removeBrokerBundle(bundleParent, bundleRoot); } catch { /* no broker was launched */ }
       if (error instanceof ModpackError) throw error;
       throw unavailable(error);
     }
@@ -767,7 +1245,6 @@ class ArchiveWorkerClient {
       budget.throwIfAborted();
     } catch (error) {
       controlChannel.close();
-      try { removeBrokerBundle(bundleParent, bundleRoot); } catch { /* no broker was launched */ }
       throw error;
     }
     return new Promise((resolve, reject) => {
@@ -795,15 +1272,10 @@ class ArchiveWorkerClient {
         try { budget.signal.removeEventListener('abort', onAbort); } catch { /* keep the stable failure */ }
         controlChannel.close();
       };
-      const cleanupAfterClose = () => {
-        if (!closed) return;
-        try { removeBrokerBundle(bundleParent, bundleRoot); } catch { /* startup recovery owns a confirmed stale bundle */ }
-      };
       const finish = (error, value) => {
         if (settled) return;
         settled = true;
         cleanupTimersAndListener();
-        cleanupAfterClose();
         if (error) reject(error); else resolve(value);
       };
       const writeControl = type => {
@@ -850,7 +1322,7 @@ class ArchiveWorkerClient {
           shell: false,
           windowsHide: true,
           stdio: ['pipe', 'pipe', 'pipe'],
-          env: minimalEnvironment(bundleRoot)
+          env: createExtractionBlockedEnvironment(this.workerPath)
         });
       } catch (error) {
         finish(unavailable(error));
@@ -867,7 +1339,6 @@ class ArchiveWorkerClient {
       child.once('error', error => terminate(unavailable(error)));
       child.once('close', (code, signalName) => {
         closed = true;
-        cleanupAfterClose();
         if (settled) return;
         if (terminationError) { finish(terminationError); return; }
         try { decoder.end(); } catch (error) { finish(error instanceof ModpackError ? error : unavailable(error)); return; }
@@ -881,10 +1352,7 @@ class ArchiveWorkerClient {
         }
         finish(null, { status: terminal });
       });
-      try {
-        writeBundleJournal(bundleRoot, { schemaVersion: 1, state: 'running', ownerPid: process.pid, brokerPid: child.pid });
-        budget.throwIfAborted();
-      } catch (error) {
+      try { budget.throwIfAborted(); } catch (error) {
         terminate(error instanceof ModpackError ? error : unavailable(error));
         return;
       }
@@ -916,9 +1384,12 @@ module.exports = {
   ArchiveWorkerClient,
   MAX_FRAME_BYTES,
   StrictFrameDecoder,
+  createExtractionBlockedEnvironment,
   encodeFrame,
   parseStrictJson,
   createBrokerBundle,
+  getBrokerBundleRecoveryDiagnostics,
+  markBrokerBundleRunning,
   recoverBrokerBundles,
   removeBrokerBundle,
   verifyArchiveWorkerExecutable,

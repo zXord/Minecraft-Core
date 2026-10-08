@@ -85,25 +85,25 @@ function optionalFileChoiceId(file) {
   return `optional-${identity}`;
 }
 
-function optionalFileRecords(sourceManifest) {
+function optionalFileRecords(sourceManifest, side = 'server') {
   const manifest = ensureValidatedMrpackManifest(sourceManifest);
   return manifest.files
-    .filter(file => file.env.server === 'optional')
+    .filter(file => file.env[side] === 'optional')
     .map(file => ({ id: optionalFileChoiceId(file), path: file.path }))
     .sort((left, right) => canonicalWindowsPath(left.path).localeCompare(canonicalWindowsPath(right.path), 'en-US'));
 }
 
-function listOptionalFileChoices(sourceManifest) {
-  return deepFreeze(optionalFileRecords(sourceManifest).map(record => ({
+function listOptionalChoices(sourceManifest, side) {
+  return deepFreeze(optionalFileRecords(sourceManifest, side).map(record => ({
     id: record.id,
     label: record.path,
     defaultSelected: true
   })));
 }
 
-function resolveOptionalFileChoiceIds(sourceManifest, choiceIds) {
+function resolveOptionalChoices(sourceManifest, choiceIds, side) {
   if (!Array.isArray(choiceIds)) invalidRequest('optionalFileIds');
-  const byId = new Map(optionalFileRecords(sourceManifest).map(record => [record.id, record]));
+  const byId = new Map(optionalFileRecords(sourceManifest, side).map(record => [record.id, record]));
   const selected = new Set();
   for (const choiceId of choiceIds) {
     if (typeof choiceId !== 'string' || selected.has(choiceId) || !byId.has(choiceId)) invalidRequest('optionalFileIds');
@@ -112,9 +112,9 @@ function resolveOptionalFileChoiceIds(sourceManifest, choiceIds) {
   return [...byId.values()].filter(record => selected.has(record.id)).map(record => record.path);
 }
 
-function selectedOptionAliases(manifest, selection) {
+function selectedOptionAliases(manifest, selection, side) {
   const optional = new Map(manifest.files
-    .filter(file => file.env.server === 'optional')
+    .filter(file => file.env[side] === 'optional')
     .map(file => [canonicalWindowsPath(file.path), file.path]));
   if (selection === undefined) return null;
   if (!Array.isArray(selection)) invalidRequest();
@@ -130,15 +130,16 @@ function selectedOptionAliases(manifest, selection) {
   return result;
 }
 
-function projectedArchiveOperations(entries) {
+function projectedArchiveOperations(entries, side) {
   const files = [];
   const directories = [];
-  const aliasesByLayer = new Map([['overrides', new Set()], ['server-overrides', new Set()]]);
+  const sideLayer = `${side}-overrides`;
+  const aliasesByLayer = new Map([['overrides', new Set()], [sideLayer, new Set()]]);
   for (const entry of entries) {
     const slash = entry.path.indexOf('/');
     if (slash < 0) continue;
     const prefix = entry.path.slice(0, slash).toLocaleLowerCase('en-US');
-    if (prefix !== 'overrides' && prefix !== 'server-overrides') continue;
+    if (prefix !== 'overrides' && prefix !== sideLayer) continue;
     const targetSource = entry.path.slice(slash + 1);
     let targetPath;
     try { targetPath = normalizeMrpackPath(targetSource); }
@@ -193,13 +194,15 @@ function validateProjectedTargets(downloads, files, directories) {
   }
 }
 
-function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles, archiveEntries = [] } = {}) {
+function buildMrpackPlan({ manifest: sourceManifest, selectedOptionalFiles, archiveEntries = [] } = {}, side) {
   const manifest = ensureValidatedMrpackManifest(sourceManifest);
-  const selected = selectedOptionAliases(manifest, selectedOptionalFiles);
+  const selected = selectedOptionAliases(manifest, selectedOptionalFiles, side);
+  const pathPolicy = side === 'client' ? require('../../client-modpacks/client-content-policy.cjs').clientPathPolicy : null;
   const downloads = [];
   for (const file of manifest.files) {
-    if (file.env.server === 'unsupported') continue;
-    const optional = file.env.server === 'optional';
+    if (file.env[side] === 'unsupported') continue;
+    if (pathPolicy) pathPolicy(file.path);
+    const optional = file.env[side] === 'optional';
     const isSelected = !optional || selected === null || selected.has(canonicalWindowsPath(file.path));
     downloads.push({
       partId: downloadPartId(file),
@@ -225,10 +228,11 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
   }
 
   const entries = normalizeArchiveEntries(archiveEntries);
-  const { files: operations, directories } = projectedArchiveOperations(entries);
+  const { files: operations, directories } = projectedArchiveOperations(entries, side);
+  if (pathPolicy) for (const item of [...operations, ...directories]) pathPolicy(item.targetPath);
   validateProjectedTargets(downloads, operations, directories);
   if (!downloads.some(download => download.selected) && operations.length === 0) {
-    throw new ModpackError('CLIENT_ONLY_PACK', 'Modrinth pack has no supported server content');
+    throw new ModpackError(side === 'server' ? 'CLIENT_ONLY_PACK' : 'MANIFEST_INVALID', `Modrinth pack has no supported ${side} content`);
   }
   const finalByTarget = new Map();
   for (const operation of operations) finalByTarget.set(canonicalWindowsPath(operation.targetPath), operation);
@@ -245,14 +249,14 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
     .map(targetPath => ({ targetPath }));
 
   return deepFreeze({
-    type: 'mrpack-server-plan',
+    type: `mrpack-${side}-plan`,
     manifestVersionId: manifest.versionId,
     runtime: runtimeFromDependencies(manifest.dependencies),
     downloads,
     layers: [
       { name: 'downloads', order: 0 },
       { name: 'overrides', order: 1 },
-      { name: 'server-overrides', order: 2 }
+      { name: `${side}-overrides`, order: 2 }
     ],
     overrideOperations: operations,
     finalOverrides,
@@ -260,4 +264,14 @@ function buildMrpackServerPlan({ manifest: sourceManifest, selectedOptionalFiles
   });
 }
 
-module.exports = { buildMrpackServerPlan, listOptionalFileChoices, resolveOptionalFileChoiceIds };
+const buildMrpackServerPlan = options => buildMrpackPlan(options, 'server');
+const buildMrpackClientPlan = options => buildMrpackPlan(options, 'client');
+const listOptionalFileChoices = manifest => listOptionalChoices(manifest, 'server');
+const listOptionalClientFileChoices = manifest => listOptionalChoices(manifest, 'client');
+const resolveOptionalFileChoiceIds = (manifest, ids) => resolveOptionalChoices(manifest, ids, 'server');
+const resolveOptionalClientFileChoiceIds = (manifest, ids) => resolveOptionalChoices(manifest, ids, 'client');
+
+module.exports = {
+  buildMrpackServerPlan, listOptionalFileChoices, resolveOptionalFileChoiceIds,
+  buildMrpackClientPlan, listOptionalClientFileChoices, resolveOptionalClientFileChoiceIds
+};

@@ -21,6 +21,7 @@ const RECOVERY_RECORD_KEYS = new Set(['operationId', 'selector']);
 const RECOVERY_OUTCOME_KEYS = new Set(['resolved', 'selector']);
 const RECOVERY_COMPLETION_OPTION_KEYS = new Set(['globalBlock']);
 const REVISION_MODES = new Set(['auto', 'lifecycle', 'none']);
+const RECOVERY_COMMIT_PHASES = new Set(['post-publication', 'post-publication-uncertain']);
 
 function invalidRequest(cause) {
   if (cause instanceof ModpackError) return cause;
@@ -58,6 +59,20 @@ function commitFailure(cause) {
 
 function staleRevision() {
   return new ModpackError('PLAN_STALE', 'The server content revision changed during the operation');
+}
+
+function aliasConflict(...records) {
+  for (const record of records) {
+    const block = record?.recoveryBlock || record?.revisionFailure;
+    if (block) throw recoveryRequired(block.operationId);
+  }
+  throw invalidRequest();
+}
+
+function publicationRequiresRecovery(error) {
+  return error instanceof ModpackError &&
+    (error.code === 'COMMIT_FAILED' || error.code === 'PLAN_STALE') &&
+    RECOVERY_COMMIT_PHASES.has(error.commitPhase);
 }
 
 function isPlainObject(value) {
@@ -293,6 +308,14 @@ class ServerMutationCoordinator {
     return prepared.length;
   }
 
+  quarantineMutation(lease) {
+    const state = this.leaseStates.get(lease);
+    if (!state || !state.active || state.record.mutation?.active !== true || lease.kind !== 'mutation') throw invalidRequest();
+    if (state.record.recoveryBlock && state.record.recoveryBlock.operationId !== state.operationId) throw invalidRequest();
+    state.record.recoveryBlock = Object.freeze({ operationId: state.operationId });
+    return true;
+  }
+
   completeStartupRecovery(outcomes, optionsValue = {}) {
     if (!this.recoveryOpen || !Array.isArray(outcomes)) throw invalidRequest();
     const options = normalizeRecoveryCompletionOptions(optionsValue);
@@ -335,12 +358,14 @@ class ServerMutationCoordinator {
     try {
       if (typeof work !== 'function') throw invalidRequest();
       if (this.context.getCurrentLease()) throw invalidRequest();
-      if (!this.recoveryOpen || !this.globalRecoveryBlock) throw recoveryRequired();
       const normalized = normalizeSelector(selectorValue);
       const options = normalizeRecoveryMutationOptions(optionsValue);
       const record = this._findRecord(normalized);
       if (!record || !record.recoveryBlock || record.recoveryBlock.operationId !== options.operationId) {
         throw recoveryRequired(record?.recoveryBlock?.operationId);
+      }
+      if (record.revisionFailure && record.revisionFailure.operationId !== options.operationId) {
+        throw recoveryRequired(record.revisionFailure.operationId);
       }
       if (record.mutation) throw operationInProgress(record.mutation.operationId);
       if (record.start) throw operationInProgress(record.start.operationId);
@@ -353,8 +378,9 @@ class ServerMutationCoordinator {
         operationId: options.operationId,
         options,
         records: [record],
+        recoveryMutation: true,
         recoveryOperationId: options.operationId,
-        startupRecovery: true,
+        startupRecovery: this.recoveryOpen,
         workSettled: false
       };
       record.mutation = reservation;
@@ -371,15 +397,14 @@ class ServerMutationCoordinator {
       const ambient = this.context.getCurrentLease();
       const parentState = this._validateParentLease(options.parentMutationLease, ambient);
       if (ambient && !parentState) throw invalidRequest();
-      const recoveryParent = Boolean(parentState?.reservation?.startupRecovery);
+      const recoveryParent = Boolean(parentState?.reservation?.recoveryMutation);
       if (this.globalRecoveryBlock && !recoveryParent) throw recoveryRequired();
 
       const { ownedRoot, record } = parentState
         ? this._resolveNestedStartRecord(normalized, parentState)
         : { ownedRoot: null, record: this._resolveRecord(normalized) };
       if (recoveryParent) {
-        if (!this.recoveryOpen || !this.globalRecoveryBlock ||
-            parentState.reservation.recoveryOperationId !== parentState.operationId ||
+        if (parentState.reservation.recoveryOperationId !== parentState.operationId ||
             !record.recoveryBlock || record.recoveryBlock.operationId !== parentState.operationId) {
           throw recoveryRequired(record.recoveryBlock?.operationId);
         }
@@ -468,6 +493,7 @@ class ServerMutationCoordinator {
         operationId: options.operationId,
         options,
         records,
+        recoveryMutation: false,
         recoveryOperationId: null,
         startupRecovery: false,
         workSettled: false
@@ -518,6 +544,18 @@ class ServerMutationCoordinator {
         : reservation.leases[0];
       workResult = await this.context.runWithLease(callbackLease, () => work(callbackValue));
       if (options.signal?.aborted) throw cancelled();
+      if (reservation.recoveryMutation && !reservation.startupRecovery && workResult?.resolved === true) {
+        for (const record of records) {
+          if (record.recoveryBlock?.operationId !== reservation.recoveryOperationId) {
+            throw recoveryRequired(record.recoveryBlock?.operationId);
+          }
+          if (record.revisionFailure && record.revisionFailure.operationId !== reservation.recoveryOperationId) {
+            throw recoveryRequired(record.revisionFailure.operationId);
+          }
+          record.recoveryBlock = null;
+          record.revisionFailure = null;
+        }
+      }
     } catch (error) {
       workError = error;
     } finally {
@@ -537,7 +575,7 @@ class ServerMutationCoordinator {
   }
 
   _createMutationLease(reservation, record) {
-    const baseRevision = reservation.startupRecovery
+    const baseRevision = reservation.recoveryMutation
       ? null
       : this._readRevision(record, reservation.operationId);
     const state = {
@@ -623,11 +661,19 @@ class ServerMutationCoordinator {
       const state = this.leaseStates.get(lease);
       if (!state) continue;
       try {
-        if (reservation.options.revisionMode === 'auto' && state.dirty) {
+        if (state.dirty && publicationRequiresRecovery(workError)) {
+          this._markRevisionFailure(state.record, state.operationId);
+        } else if (reservation.options.revisionMode === 'auto' && state.dirty) {
           const next = this._bumpRevision(state.record, state.baseRevision, state.operationId);
           if (next !== state.baseRevision + 1) throw commitFailure();
         } else if (reservation.options.revisionMode === 'lifecycle' && (!workError || state.dirty)) {
           const current = this._readRevision(state.record, state.operationId);
+          // Lifecycle publication owns the revision increment. A failed
+          // operation that leaves the exact base revision intact never
+          // published, even if candidate cleanup or policy restoration marked
+          // the lease dirty. Preserve that primary failure; publication-phase
+          // failures were quarantined above before reaching this branch.
+          if (workError && current === state.baseRevision) continue;
           if (state.baseRevision >= Number.MAX_SAFE_INTEGER || current !== state.baseRevision + 1) {
             throw staleRevision();
           }
@@ -814,14 +860,14 @@ class ServerMutationCoordinator {
   _findRecord(normalized) {
     const byInstance = normalized.instance ? this.instanceAliases.get(normalized.instance.key) : null;
     const byPath = normalized.serverPath ? this.pathAliases.get(normalized.serverPath.key) : null;
-    if (byInstance && byPath && byInstance !== byPath) throw invalidRequest();
+    if (byInstance && byPath && byInstance !== byPath) aliasConflict(byPath, byInstance);
     return byInstance || byPath || null;
   }
 
   _resolveRecord(normalized, { allowIncomplete = false } = {}) {
     const byInstance = normalized.instance ? this.instanceAliases.get(normalized.instance.key) : null;
     const byPath = normalized.serverPath ? this.pathAliases.get(normalized.serverPath.key) : null;
-    if (byInstance && byPath && byInstance !== byPath) throw invalidRequest();
+    if (byInstance && byPath && byInstance !== byPath) aliasConflict(byPath, byInstance);
     let record = byInstance || byPath;
     if (!record) {
       if (!normalized.serverPath && !allowIncomplete) throw invalidRequest();
@@ -829,7 +875,7 @@ class ServerMutationCoordinator {
     }
 
     if (normalized.instance) {
-      if (record.instanceKey && record.instanceKey !== normalized.instance.key) throw invalidRequest();
+      if (record.instanceKey && record.instanceKey !== normalized.instance.key) aliasConflict(record);
       if (!record.instanceKey) {
         record.instanceId = normalized.instance.display;
         record.instanceKey = normalized.instance.key;
@@ -837,7 +883,7 @@ class ServerMutationCoordinator {
       }
     }
     if (normalized.serverPath) {
-      if (record.pathKey && record.pathKey !== normalized.serverPath.key) throw invalidRequest();
+      if (record.pathKey && record.pathKey !== normalized.serverPath.key) aliasConflict(record);
       if (!record.pathKey) {
         record.serverPath = normalized.serverPath.canonical;
         record.pathKey = normalized.serverPath.key;

@@ -4,7 +4,8 @@ const path = require('node:path');
 
 const yauzl = require('yauzl');
 
-const { enumerateArchiveScope } = require('../../utils/backup-util.cjs');
+const { enumerateArchiveScopeCooperatively } = require('../../utils/backup-util.cjs');
+const { MAX_FLUSH_DIRECTORIES } = require('../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { WindowsReparseInspector } = require('../modpacks/local/windows-reparse-inspector.cjs');
 const { inspectServerDirectoryTree } = require('./server-directory-identity.cjs');
@@ -18,10 +19,55 @@ const DEFAULT_LIMITS = Object.freeze({
   maxFileBytes: 256 * 1024 * 1024 * 1024,
   maxPathDepth: 64
 });
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000;
+const MAX_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+const PROGRESS_INTERVAL_MS = 250;
+const COOPERATIVE_HASH_BYTES = 4 * 1024 * 1024;
+const COOPERATIVE_FILESYSTEM_OPERATIONS = 64;
 
 function backupFailure(cause) {
-  if (cause instanceof ModpackError && cause.code === 'BACKUP_FAILED') return cause;
+  if (cause instanceof ModpackError && ['BACKUP_FAILED', 'CANCELLED'].includes(cause.code)) return cause;
   return new ModpackError('BACKUP_FAILED', 'The restore archive could not be extracted safely', { cause });
+}
+
+function cancelled(cause) {
+  return new ModpackError('CANCELLED', 'The modpack operation was cancelled', { cause });
+}
+
+function normalizeSignal(signal) {
+  if (signal === null || signal === undefined) return null;
+  if (!signal || typeof signal !== 'object' || typeof signal.aborted !== 'boolean' ||
+      typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function') {
+    throw backupFailure();
+  }
+  return signal;
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw cancelled();
+}
+
+function defaultYieldControl() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+function createCooperativeCheckpoint(signal) {
+  let bytes = 0;
+  let operations = 0;
+  let lastYieldAt = Date.now();
+  return async (processedBytes = 0) => {
+    throwIfCancelled(signal);
+    bytes += processedBytes;
+    operations += 1;
+    const now = Date.now();
+    if (bytes < COOPERATIVE_HASH_BYTES && operations < COOPERATIVE_FILESYSTEM_OPERATIONS &&
+        now - lastYieldAt < 25) return;
+    bytes = 0;
+    operations = 0;
+    await defaultYieldControl();
+    lastYieldAt = Date.now();
+    throwIfCancelled(signal);
+  };
 }
 
 function plainExact(value, keys) {
@@ -63,6 +109,31 @@ function normalizeLimits(value) {
   return Object.freeze({ ...value });
 }
 
+function createBoundedProgressReporter(onProgress) {
+  if (onProgress === undefined) return () => {};
+  if (typeof onProgress !== 'function') throw backupFailure();
+  let lastPhase = null;
+  let lastPublishedAt = 0;
+  return (value, { force = false } = {}) => {
+    const now = Date.now();
+    const phaseChanged = value.phase !== lastPhase;
+    if (!force && !phaseChanged && now - lastPublishedAt < PROGRESS_INTERVAL_MS) return;
+    lastPhase = value.phase;
+    lastPublishedAt = now;
+    try {
+      Promise.resolve(onProgress(Object.freeze({ ...value }))).catch(() => {});
+    } catch { /* progress observers never decide restore correctness */ }
+  };
+}
+
+function normalizeStreamIdleTimeoutMs(value) {
+  const timeoutMs = value === undefined ? DEFAULT_STREAM_IDLE_TIMEOUT_MS : value;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_STREAM_IDLE_TIMEOUT_MS) {
+    throw backupFailure();
+  }
+  return timeoutMs;
+}
+
 function safeEntryPath(value, type, maxDepth) {
   if (typeof value !== 'string' || !value || value !== value.normalize('NFC') || value.includes('\0') ||
       value.includes('\\') || value.startsWith('/') || path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) {
@@ -77,6 +148,7 @@ function safeEntryPath(value, type, maxDepth) {
   const segments = withoutSlash.split('/');
   if (segments.length > maxDepth || segments.some(segment => !segment || segment === '.' || segment === '..' ||
       segment.length > 255 || segment !== segment.normalize('NFC') || segment.includes(':') ||
+      // eslint-disable-next-line no-control-regex
       /[\u0000-\u001f\u007f]/u.test(segment) || /[ .]$/u.test(segment) || RESERVED_WINDOWS_NAMES.test(segment))) {
     throw backupFailure();
   }
@@ -171,18 +243,48 @@ function sameObject(stat, expected) {
 
 function sameArchiveIdentity(stat, expected) {
   const actual = statIdentity(stat);
-  return Object.keys(actual).every(key => actual[key] === expected[key]);
+  // Retain ctime in serialized evidence for compatibility, but use the pinned
+  // object, write time, size and independently checked digest as authority.
+  return Object.keys(actual).every(key => key === 'ctimeNs' || actual[key] === expected[key]);
 }
 
-function openZip(descriptor, yauzlApi) {
+function sameArchiveOperationStat(stat, initial) {
+  // mode/nlink are local in-operation evidence, not part of the persisted
+  // six-key identity. Advisory ChangeTime must not hide changes to either.
+  return Boolean(stat && stat.isFile() && !stat.isSymbolicLink() &&
+    sameObject(stat, initial) && stat.nlink === initial.nlink);
+}
+
+function openZip(descriptor, yauzlApi, signal) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      reject(cancelled());
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
     yauzlApi.fromFd(descriptor, {
       autoClose: false,
       decodeStrings: true,
       lazyEntries: true,
       strictFileNames: true,
       validateEntrySizes: true
-    }, (error, zip) => error ? reject(error) : resolve(zip));
+    }, (error, zip) => {
+      if (settled) {
+        try { zip?.close(); } catch { /* cancellation already owns the outcome */ }
+        return;
+      }
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve(zip);
+    });
   });
 }
 
@@ -204,24 +306,51 @@ function assertEntryType(entry, declared) {
       (attributes & 0x400) !== 0 || (!isDirectory && (attributes & 0x10) !== 0)) throw backupFailure();
 }
 
-async function walkPinnedZip({ descriptor, expectedScope, faultInjector, sinkFactory, yauzlApi }) {
+async function walkPinnedZip({
+  descriptor,
+  expectedScope,
+  faultInjector,
+  onProgress,
+  phase,
+  signal,
+  sinkFactory,
+  streamIdleTimeoutMs,
+  yauzlApi
+}) {
+  throwIfCancelled(signal);
   const declared = new Map(expectedScope.entries.map(entry => [entry.path, entry]));
   const observed = new Set();
   let measuredTotal = 0;
   let measuredFiles = 0;
-  const zip = await openZip(descriptor, yauzlApi);
+  const checkpoint = createCooperativeCheckpoint(signal);
+  const zip = await openZip(descriptor, yauzlApi, signal);
+  throwIfCancelled(signal);
   try {
     await new Promise((resolve, reject) => {
       let settled = false;
+      let activeStream = null;
+      const abort = () => fail(cancelled());
       const fail = error => {
         if (settled) return;
         settled = true;
+        signal?.removeEventListener('abort', abort);
+        const stream = activeStream;
+        activeStream = null;
+        if (stream && !stream.destroyed) {
+          try { stream.destroy(backupFailure(error)); } catch { /* preserve cancellation or verification failure */ }
+        }
         try { zip.close(); } catch { /* descriptor cleanup remains in the caller */ }
         reject(backupFailure(error));
       };
       zip.once('error', fail);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) {
+        fail(cancelled());
+        return;
+      }
       zip.on('entry', entry => {
         void (async () => {
+          throwIfCancelled(signal);
           const type = entry.fileName.endsWith('/') ? 'directory' : 'file';
           const normalized = safeEntryPath(entry.fileName, type, DEFAULT_LIMITS.maxPathDepth).path;
           const expected = declared.get(normalized);
@@ -230,40 +359,88 @@ async function walkPinnedZip({ descriptor, expectedScope, faultInjector, sinkFac
           observed.add(normalized);
           if (type === 'directory') {
             await faultInjector('archive-directory', { path: normalized });
+            await checkpoint();
+            throwIfCancelled(signal);
             zip.readEntry();
             return;
           }
 
           const stream = await openEntry(zip, entry);
+          if (settled) {
+            try { stream.destroy(); } catch { /* cancellation already owns the outcome */ }
+            return;
+          }
+          activeStream = stream;
+          throwIfCancelled(signal);
           const sink = sinkFactory ? await sinkFactory(expected) : null;
           const hash = crypto.createHash('sha256');
           let measured = 0;
+          let idleTimer = null;
+          let rejectIdle;
+          const idleFailure = new Promise((_, reject) => { rejectIdle = reject; });
+          const clearIdleTimer = () => {
+            if (idleTimer !== null) clearTimeout(idleTimer);
+            idleTimer = null;
+          };
+          const armIdleTimer = () => {
+            clearIdleTimer();
+            idleTimer = setTimeout(() => {
+              const error = backupFailure();
+              try { stream.destroy(error); } catch { /* reject below retains the timeout */ }
+              rejectIdle(error);
+            }, streamIdleTimeoutMs);
+          };
           try {
-            for await (const chunk of stream) {
-              if (!Buffer.isBuffer(chunk)) throw backupFailure();
-              measured += chunk.length;
-              if (!Number.isSafeInteger(measured) || measured > expected.size) throw backupFailure();
-              hash.update(chunk);
-              await sink?.write(chunk);
-            }
+            armIdleTimer();
+            const consume = (async () => {
+              for await (const chunk of stream) {
+                throwIfCancelled(signal);
+                armIdleTimer();
+                if (!Buffer.isBuffer(chunk)) throw backupFailure();
+                measured += chunk.length;
+                if (!Number.isSafeInteger(measured) || measured > expected.size) throw backupFailure();
+                hash.update(chunk);
+                await sink?.write(chunk);
+                throwIfCancelled(signal);
+                onProgress({
+                  phase,
+                  processedBytes: measuredTotal + measured,
+                  totalBytes: expectedScope.totalBytes,
+                  processedItems: measuredFiles,
+                  totalItems: expectedScope.fileCount
+                });
+                await checkpoint(chunk.length);
+              }
+            })();
+            await Promise.race([consume, idleFailure]);
+            clearIdleTimer();
+            throwIfCancelled(signal);
             if (measured !== expected.size || hash.digest('hex') !== expected.sha256) throw backupFailure();
             await sink?.finish();
+            throwIfCancelled(signal);
           } catch (error) {
             await sink?.abort?.();
             throw error;
+          } finally {
+            clearIdleTimer();
+            activeStream = null;
           }
           measuredTotal += measured;
           measuredFiles += 1;
           await faultInjector('archive-file', { path: normalized, size: measured });
+          await checkpoint();
+          throwIfCancelled(signal);
           zip.readEntry();
         })().catch(fail);
       });
       zip.once('end', () => {
         if (settled) return;
         try {
+          throwIfCancelled(signal);
           if (observed.size !== declared.size || measuredTotal !== expectedScope.totalBytes ||
               measuredFiles !== expectedScope.fileCount) throw backupFailure();
           settled = true;
+          signal?.removeEventListener('abort', abort);
           resolve();
         } catch (error) {
           fail(error);
@@ -271,6 +448,7 @@ async function walkPinnedZip({ descriptor, expectedScope, faultInjector, sinkFac
       });
       zip.readEntry();
     });
+    throwIfCancelled(signal);
   } catch (error) {
     throw backupFailure(error);
   }
@@ -283,19 +461,30 @@ function assertRegularArchive(fsApi, archivePath, expectedIdentity, expectedSize
   return stat;
 }
 
-function hashDescriptor(fsApi, descriptor, expectedSize) {
+async function hashDescriptor(fsApi, descriptor, expectedSize, onProgress, signal) {
   const hash = crypto.createHash('sha256');
   const buffer = Buffer.allocUnsafe(1024 * 1024);
+  const checkpoint = createCooperativeCheckpoint(signal);
   let offset = 0;
   try {
     while (true) {
+      throwIfCancelled(signal);
       const count = fsApi.readSync(descriptor, buffer, 0, buffer.length, offset);
       if (!Number.isSafeInteger(count) || count < 0 || count > buffer.length) throw backupFailure();
       if (count === 0) break;
       offset += count;
       if (!Number.isSafeInteger(offset) || offset > expectedSize) throw backupFailure();
       hash.update(buffer.subarray(0, count));
+      onProgress({
+        phase: 'archive-hash',
+        processedBytes: offset,
+        totalBytes: expectedSize,
+        processedItems: 0,
+        totalItems: 0
+      });
+      await checkpoint(count);
     }
+    throwIfCancelled(signal);
     if (offset !== expectedSize) throw backupFailure();
     return hash.digest('hex');
   } finally {
@@ -303,19 +492,44 @@ function hashDescriptor(fsApi, descriptor, expectedSize) {
   }
 }
 
-async function inspectDirectory(reparseInspector, fsApi, directoryPath) {
+async function inspectReparsePoint(reparseInspector, candidate, signal) {
+  throwIfCancelled(signal);
+  try {
+    const result = await reparseInspector.isReparsePoint(candidate, signal ? { signal } : undefined);
+    throwIfCancelled(signal);
+    return result;
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'CANCELLED') throw cancelled(error);
+    throw error;
+  }
+}
+
+async function inspectDirectory(reparseInspector, fsApi, directoryPath, signal = null) {
+  throwIfCancelled(signal);
   const stat = fsApi.lstatSync(directoryPath, { bigint: true });
   if (!stat.isDirectory() || stat.isSymbolicLink() ||
       !sameLocalPath(fsApi.realpathSync.native(directoryPath), directoryPath) ||
-      await reparseInspector.isReparsePoint(directoryPath) !== false) throw backupFailure();
+      await inspectReparsePoint(reparseInspector, directoryPath, signal) !== false) throw backupFailure();
+  throwIfCancelled(signal);
   return objectIdentity(stat);
 }
 
-async function revalidateDirectory(reparseInspector, fsApi, directoryPath, identity) {
+function trackCreatedDirectory(fsApi, state, directoryPath) {
+  const stat = fsApi.lstatSync(directoryPath, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw backupFailure();
+  const identity = objectIdentity(stat);
+  state.directories.set(directoryPath, identity);
+  if (!sameLocalPath(fsApi.realpathSync.native(directoryPath), directoryPath)) throw backupFailure();
+  return identity;
+}
+
+async function revalidateDirectory(reparseInspector, fsApi, directoryPath, identity, signal = null) {
+  throwIfCancelled(signal);
   const stat = fsApi.lstatSync(directoryPath, { bigint: true, throwIfNoEntry: false });
   if (!stat || !stat.isDirectory() || stat.isSymbolicLink() || !sameObject(stat, identity) ||
       !sameLocalPath(fsApi.realpathSync.native(directoryPath), directoryPath) ||
-      await reparseInspector.isReparsePoint(directoryPath) !== false) throw backupFailure();
+      await inspectReparsePoint(reparseInspector, directoryPath, signal) !== false) throw backupFailure();
+  throwIfCancelled(signal);
 }
 
 function directChildPath(root, entryPath) {
@@ -349,8 +563,45 @@ async function cleanupOwnedTree({ durableFs, fsApi, reparseInspector, state }) {
   }
 }
 
+async function flushDirectoryBatch(durableFs, directoryPaths, signal = null) {
+  const seen = new Set();
+  const unique = [];
+  for (const directoryPath of directoryPaths) {
+    const key = process.platform === 'win32'
+      ? path.resolve(directoryPath).toLocaleLowerCase('en-US')
+      : path.resolve(directoryPath);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(path.resolve(directoryPath));
+  }
+  if (typeof durableFs.flushDirectoriesAsync === 'function') {
+    for (let offset = 0; offset < unique.length; offset += MAX_FLUSH_DIRECTORIES) {
+      throwIfCancelled(signal);
+      await durableFs.flushDirectoriesAsync(unique.slice(offset, offset + MAX_FLUSH_DIRECTORIES));
+      await defaultYieldControl();
+      throwIfCancelled(signal);
+    }
+    return;
+  }
+  if (typeof durableFs.flushDirectories === 'function') {
+    for (let offset = 0; offset < unique.length; offset += MAX_FLUSH_DIRECTORIES) {
+      throwIfCancelled(signal);
+      await durableFs.flushDirectories(unique.slice(offset, offset + MAX_FLUSH_DIRECTORIES));
+      await defaultYieldControl();
+      throwIfCancelled(signal);
+    }
+    return;
+  }
+  for (const directoryPath of unique) {
+    throwIfCancelled(signal);
+    await durableFs.flushDirectory(directoryPath);
+    await defaultYieldControl();
+    throwIfCancelled(signal);
+  }
+}
+
 function createVerifiedRestoreExtractor(dependencies = {}) {
-  plainExact(dependencies, ['durableFs', 'fsApi', 'reparseInspector', 'faultInjector', 'limits', 'yauzlApi']
+  plainExact(dependencies, ['durableFs', 'fsApi', 'reparseInspector', 'faultInjector', 'limits', 'streamIdleTimeoutMs', 'yauzlApi']
     .filter(key => Object.hasOwn(dependencies, key)));
   const fsApi = dependencies.fsApi || fs;
   const durableFs = dependencies.durableFs;
@@ -358,6 +609,7 @@ function createVerifiedRestoreExtractor(dependencies = {}) {
     (process.platform === 'win32' ? new WindowsReparseInspector() : Object.freeze({ async isReparsePoint() { return false; } }));
   const faultInjector = dependencies.faultInjector || (async () => {});
   const limits = normalizeLimits(dependencies.limits);
+  const streamIdleTimeoutMs = normalizeStreamIdleTimeoutMs(dependencies.streamIdleTimeoutMs);
   const yauzlApi = dependencies.yauzlApi || yauzl;
   if (!fsApi || ['closeSync', 'fstatSync', 'fsyncSync', 'lstatSync', 'mkdirSync', 'openSync', 'readSync',
     'readFileSync', 'readdirSync', 'realpathSync', 'rmdirSync', 'unlinkSync', 'writeSync'].some(method => typeof fsApi[method] !== 'function') ||
@@ -370,10 +622,16 @@ function createVerifiedRestoreExtractor(dependencies = {}) {
     let success = false;
     const state = { directories: new Map(), files: new Map() };
     try {
-      plainExact(request, [
+      const requestKeys = [
         'archivePath', 'stagingPath', 'expectedArchiveSha256', 'expectedArchiveSize',
         'expectedArchiveIdentity', 'expectedScope', 'operationId'
-      ]);
+      ];
+      if (Object.hasOwn(request, 'onProgress')) requestKeys.push('onProgress');
+      if (Object.hasOwn(request, 'signal')) requestKeys.push('signal');
+      plainExact(request, requestKeys);
+      const reportProgress = createBoundedProgressReporter(request.onProgress);
+      const signal = normalizeSignal(request.signal);
+      throwIfCancelled(signal);
       const archivePath = localPath(request.archivePath);
       const stagingPath = localPath(request.stagingPath);
       if (sameLocalPath(archivePath, stagingPath) || !IDENTIFIER_PATTERN.test(request.operationId) ||
@@ -382,27 +640,72 @@ function createVerifiedRestoreExtractor(dependencies = {}) {
       const expectedIdentity = normalizeArchiveIdentity(request.expectedArchiveIdentity);
       if (expectedIdentity.size !== String(request.expectedArchiveSize)) throw backupFailure();
       const expectedScope = normalizeScope(request.expectedScope, limits);
+      const completeProgress = phase => ({
+        phase,
+        processedBytes: expectedScope.totalBytes,
+        totalBytes: expectedScope.totalBytes,
+        processedItems: expectedScope.fileCount,
+        totalItems: expectedScope.fileCount
+      });
       const parentPath = path.dirname(stagingPath);
       if (fsApi.lstatSync(stagingPath, { bigint: true, throwIfNoEntry: false })) throw backupFailure();
-      const parentIdentity = await inspectDirectory(reparseInspector, fsApi, parentPath);
+      const parentIdentity = await inspectDirectory(reparseInspector, fsApi, parentPath, signal);
 
       const before = assertRegularArchive(fsApi, archivePath, expectedIdentity, request.expectedArchiveSize);
       const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
       descriptor = fsApi.openSync(archivePath, fs.constants.O_RDONLY | noFollow);
       const pinnedBefore = fsApi.fstatSync(descriptor, { bigint: true });
-      if (!pinnedBefore.isFile() || !sameArchiveIdentity(pinnedBefore, expectedIdentity) ||
-          pinnedBefore.dev !== before.dev || pinnedBefore.ino !== before.ino ||
-          hashDescriptor(fsApi, descriptor, request.expectedArchiveSize) !== request.expectedArchiveSha256) throw backupFailure();
+      if (!sameArchiveIdentity(pinnedBefore, expectedIdentity) ||
+          !sameArchiveOperationStat(pinnedBefore, before)) throw backupFailure();
+      const archiveSha256 = await hashDescriptor(
+        fsApi,
+        descriptor,
+        request.expectedArchiveSize,
+        reportProgress,
+        signal
+      );
+      if (archiveSha256 !== request.expectedArchiveSha256) throw backupFailure();
+      throwIfCancelled(signal);
+      reportProgress({
+        phase: 'archive-hash',
+        processedBytes: request.expectedArchiveSize,
+        totalBytes: request.expectedArchiveSize,
+        processedItems: 0,
+        totalItems: 0
+      }, { force: true });
+      throwIfCancelled(signal);
       await faultInjector('archive-pinned', { operationId: request.operationId });
-      await walkPinnedZip({ descriptor, expectedScope, faultInjector, sinkFactory: null, yauzlApi });
+      throwIfCancelled(signal);
+      reportProgress({
+        phase: 'entry-verification', processedBytes: 0, totalBytes: expectedScope.totalBytes,
+        processedItems: 0, totalItems: expectedScope.fileCount
+      }, { force: true });
+      await walkPinnedZip({
+        descriptor,
+        expectedScope,
+        faultInjector,
+        onProgress: reportProgress,
+        phase: 'entry-verification',
+        signal,
+        sinkFactory: null,
+        streamIdleTimeoutMs,
+        yauzlApi
+      });
+      throwIfCancelled(signal);
+      reportProgress(completeProgress('entry-verification'), { force: true });
       const afterPreflight = fsApi.fstatSync(descriptor, { bigint: true });
-      if (!sameArchiveIdentity(afterPreflight, expectedIdentity)) throw backupFailure();
+      const pathAfterPreflight = assertRegularArchive(fsApi, archivePath, expectedIdentity, request.expectedArchiveSize);
+      if (!sameArchiveIdentity(afterPreflight, expectedIdentity) ||
+          !sameArchiveOperationStat(afterPreflight, pinnedBefore) ||
+          !sameArchiveOperationStat(pathAfterPreflight, pinnedBefore)) throw backupFailure();
 
-      await revalidateDirectory(reparseInspector, fsApi, parentPath, parentIdentity);
+      await revalidateDirectory(reparseInspector, fsApi, parentPath, parentIdentity, signal);
+      throwIfCancelled(signal);
       fsApi.mkdirSync(stagingPath, { recursive: false, mode: 0o700 });
-      state.directories.set(stagingPath, await inspectDirectory(reparseInspector, fsApi, stagingPath));
-      await durableFs.flushDirectory(parentPath);
+      const stagingIdentity = trackCreatedDirectory(fsApi, state, stagingPath);
+      await revalidateDirectory(reparseInspector, fsApi, stagingPath, stagingIdentity, signal);
       await faultInjector('staging-created', { stagingPath });
+      throwIfCancelled(signal);
 
       const declaredDirectories = expectedScope.entries
         .filter(entry => entry.type === 'directory')
@@ -410,23 +713,27 @@ function createVerifiedRestoreExtractor(dependencies = {}) {
           const depth = left.path.split('/').length - right.path.split('/').length;
           return depth || left.path.localeCompare(right.path, 'en-US');
         });
+      const directoryCheckpoint = createCooperativeCheckpoint(signal);
       for (const entry of declaredDirectories) {
+        throwIfCancelled(signal);
         const directoryPath = directChildPath(stagingPath, entry.path);
         const parent = path.dirname(directoryPath);
         const trackedParent = state.directories.get(parent);
         if (!trackedParent) throw backupFailure();
-        await revalidateDirectory(reparseInspector, fsApi, parent, trackedParent);
+        await revalidateDirectory(reparseInspector, fsApi, parent, trackedParent, signal);
         fsApi.mkdirSync(directoryPath, { recursive: false, mode: 0o700 });
-        state.directories.set(directoryPath, await inspectDirectory(reparseInspector, fsApi, directoryPath));
-        await durableFs.flushDirectory(parent);
+        const directoryIdentity = trackCreatedDirectory(fsApi, state, directoryPath);
+        await revalidateDirectory(reparseInspector, fsApi, directoryPath, directoryIdentity, signal);
+        await directoryCheckpoint();
       }
 
       const sinkFactory = async entry => {
+        throwIfCancelled(signal);
         const filePath = directChildPath(stagingPath, entry.path);
         const parent = path.dirname(filePath);
         const parentEntry = state.directories.get(parent);
         if (!parentEntry) throw backupFailure();
-        await revalidateDirectory(reparseInspector, fsApi, parent, parentEntry);
+        await revalidateDirectory(reparseInspector, fsApi, parent, parentEntry, signal);
         if (fsApi.lstatSync(filePath, { bigint: true, throwIfNoEntry: false })) throw backupFailure();
         const fileDescriptor = fsApi.openSync(filePath, fs.constants.O_CREAT | fs.constants.O_EXCL |
           fs.constants.O_WRONLY | noFollow, 0o600);
@@ -439,15 +746,20 @@ function createVerifiedRestoreExtractor(dependencies = {}) {
         state.files.set(filePath, objectIdentity(initial));
         return {
           async write(chunk) {
+            throwIfCancelled(signal);
             let offset = 0;
             while (offset < chunk.length) {
+              throwIfCancelled(signal);
               const written = fsApi.writeSync(fileDescriptor, chunk, offset, chunk.length - offset, null);
               if (!Number.isSafeInteger(written) || written < 1 || written > chunk.length - offset) throw backupFailure();
               offset += written;
             }
+            throwIfCancelled(signal);
           },
           async finish() {
+            throwIfCancelled(signal);
             fsApi.fsyncSync(fileDescriptor);
+            throwIfCancelled(signal);
             const pinned = fsApi.fstatSync(fileDescriptor, { bigint: true });
             if (!sameObject(pinned, state.files.get(filePath)) || pinned.nlink !== 1n || pinned.size !== BigInt(entry.size)) {
               throw backupFailure();
@@ -457,9 +769,9 @@ function createVerifiedRestoreExtractor(dependencies = {}) {
             const published = fsApi.lstatSync(filePath, { bigint: true });
             if (!sameObject(published, state.files.get(filePath)) || published.nlink !== 1n ||
                 !sameLocalPath(fsApi.realpathSync.native(filePath), filePath) ||
-                await reparseInspector.isReparsePoint(filePath) !== false) throw backupFailure();
-            await durableFs.flushDirectory(parent);
+                await inspectReparsePoint(reparseInspector, filePath, signal) !== false) throw backupFailure();
             await faultInjector('after-file-flush', { path: entry.path });
+            throwIfCancelled(signal);
           },
           async abort() {
             if (!closed) {
@@ -470,30 +782,64 @@ function createVerifiedRestoreExtractor(dependencies = {}) {
         };
       };
 
-      await walkPinnedZip({ descriptor, expectedScope, faultInjector, sinkFactory, yauzlApi });
+      reportProgress({
+        phase: 'extraction', processedBytes: 0, totalBytes: expectedScope.totalBytes,
+        processedItems: 0, totalItems: expectedScope.fileCount
+      }, { force: true });
+      throwIfCancelled(signal);
+      await walkPinnedZip({
+        descriptor,
+        expectedScope,
+        faultInjector,
+        onProgress: reportProgress,
+        phase: 'extraction',
+        signal,
+        sinkFactory,
+        streamIdleTimeoutMs,
+        yauzlApi
+      });
+      throwIfCancelled(signal);
+      reportProgress(completeProgress('extraction'), { force: true });
+      if (await hashDescriptor(fsApi, descriptor, request.expectedArchiveSize,
+        () => {}, signal) !== request.expectedArchiveSha256) throw backupFailure();
       const pinnedAfter = fsApi.fstatSync(descriptor, { bigint: true });
       const pathAfter = assertRegularArchive(fsApi, archivePath, expectedIdentity, request.expectedArchiveSize);
-      if (!sameArchiveIdentity(pinnedAfter, expectedIdentity) || pinnedAfter.dev !== pathAfter.dev ||
-          pinnedAfter.ino !== pathAfter.ino) throw backupFailure();
+      if (!sameArchiveIdentity(pinnedAfter, expectedIdentity) ||
+          !sameArchiveOperationStat(pinnedAfter, pinnedBefore) ||
+          !sameArchiveOperationStat(pathAfter, pinnedBefore)) throw backupFailure();
 
       const rootIdentity = state.directories.get(stagingPath);
-      await revalidateDirectory(reparseInspector, fsApi, stagingPath, rootIdentity);
+      await revalidateDirectory(reparseInspector, fsApi, stagingPath, rootIdentity, signal);
+      reportProgress({
+        phase: 'output-verification', processedBytes: 0, totalBytes: expectedScope.totalBytes,
+        processedItems: 0, totalItems: expectedScope.fileCount
+      }, { force: true });
+      throwIfCancelled(signal);
       const topLevelItems = fsApi.readdirSync(stagingPath).sort((left, right) => left.localeCompare(right, 'en-US'))
         .map(name => path.join(stagingPath, name));
-      const measuredScope = enumerateArchiveScope(topLevelItems, { fsApi });
+      const measuredScope = await enumerateArchiveScopeCooperatively(topLevelItems, { fsApi, signal });
       if (JSON.stringify(measuredScope) !== JSON.stringify(expectedScope)) throw backupFailure();
-      const inspection = await inspectServerDirectoryTree(stagingPath, { fsApi, reparseInspector });
-      await revalidateDirectory(reparseInspector, fsApi, stagingPath, rootIdentity);
-      for (const [directoryPath, identity] of [...state.directories.entries()].sort(([left], [right]) => right.length - left.length)) {
-        await revalidateDirectory(reparseInspector, fsApi, directoryPath, identity);
-        await durableFs.flushDirectory(directoryPath);
+      throwIfCancelled(signal);
+      const inspection = await inspectServerDirectoryTree(stagingPath, { fsApi, reparseInspector, signal });
+      await revalidateDirectory(reparseInspector, fsApi, stagingPath, rootIdentity, signal);
+      const durableDirectories = [...state.directories.entries()].sort(([left], [right]) => right.length - left.length);
+      for (const [directoryPath, identity] of durableDirectories) {
+        await revalidateDirectory(reparseInspector, fsApi, directoryPath, identity, signal);
       }
-      await durableFs.flushDirectory(parentPath);
+      await flushDirectoryBatch(
+        durableFs,
+        [...durableDirectories.map(([directoryPath]) => directoryPath), parentPath],
+        signal
+      );
       await faultInjector('extraction-verified', { fingerprint: inspection.fingerprint });
+      throwIfCancelled(signal);
+      reportProgress(completeProgress('output-verification'), { force: true });
 
+      throwIfCancelled(signal);
       fsApi.closeSync(descriptor);
       descriptor = null;
       success = true;
+      reportProgress(completeProgress('complete'), { force: true });
       return deepFreeze({
         ok: true,
         destination: stagingPath,

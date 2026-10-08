@@ -1,6 +1,8 @@
 <script>
   export let serverPath = "";
   export let currentInstance = null;
+  export let modpackManaged = null;
+  export let modpackStateGeneration = 0;
   import { onMount, onDestroy, afterUpdate } from "svelte";
   import ServerControls from "../components/server/ServerControls.svelte";
   import ServerMetrics from "../components/server/ServerMetrics.svelte";
@@ -247,7 +249,7 @@
       <button on:click={refreshDashboard}>Retry</button>
     </div>
   {:else}
-    <ServerControls {serverPath} {currentInstance} />
+    <ServerControls {serverPath} {currentInstance} {modpackManaged} {modpackStateGeneration} />
     <ServerMetrics />
     <ServerConsole {currentInstance} />
   {/if}

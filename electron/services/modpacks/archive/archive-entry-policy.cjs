@@ -128,6 +128,7 @@ function validateArchiveEntries(entries, limitsValue) {
   let directoryCount = 0;
   let expandedTotal = 0n;
   let packedTotal = 0n;
+  let regularFilePackedTotal = 0n;
   let maximumDepth = 0;
   let maximumPathLength = 0;
   const maximumFile = BigInt(limits.maxFileExpandedBytes);
@@ -142,7 +143,7 @@ function validateArchiveEntries(entries, limitsValue) {
     const normalized = normalizePath(source.path, limits);
     const size = decimal(source.size);
     const packedSize = decimal(source.packedSize);
-    if (source.type === 'directory' && (size !== 0n || packedSize !== 0n)) unsafe();
+    if (source.type === 'directory' && size !== 0n) unsafe();
     if (source.type === 'file' && size > 0n && packedSize === 0n) unsafe();
     if (source.type === 'file' && size > maximumFile) limitExceeded('maxFileExpandedBytes', size);
     if (source.type === 'file' && size >= perEntryThreshold && size > packedSize * perEntryRatio) {
@@ -150,6 +151,7 @@ function validateArchiveEntries(entries, limitsValue) {
     }
     expandedTotal += size;
     packedTotal += packedSize;
+    if (source.type === 'file') regularFilePackedTotal += packedSize;
     if (expandedTotal > maximumExpanded) limitExceeded('maxExpandedBytes', expandedTotal);
     if (packedTotal > MAX_UINT64) unsafe();
     registerDestination(trie, normalized, source.type);
@@ -175,8 +177,10 @@ function validateArchiveEntries(entries, limitsValue) {
     });
   }
 
-  if (expandedTotal >= aggregateThreshold && expandedTotal > packedTotal * aggregateRatio) {
-    const actual = packedTotal === 0n ? expandedTotal : (expandedTotal + packedTotal - 1n) / packedTotal;
+  if (expandedTotal >= aggregateThreshold && expandedTotal > regularFilePackedTotal * aggregateRatio) {
+    const actual = regularFilePackedTotal === 0n
+      ? expandedTotal
+      : (expandedTotal + regularFilePackedTotal - 1n) / regularFilePackedTotal;
     limitExceeded('maxAggregateCompressionRatio', actual);
   }
 

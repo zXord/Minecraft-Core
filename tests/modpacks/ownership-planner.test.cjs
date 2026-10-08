@@ -240,6 +240,42 @@ test('protected conflict choices produce only actions backed by available file s
   }), error => error.code === 'INVALID_REQUEST');
 });
 
+test('user-owned protected files omitted by the next pack are preserved without a destructive conflict', () => {
+  const oldManifest = { schemaVersion: 1, installationId: 'old', entries: [
+    managed('world/minecraft-core-user.keep', hash(1), {
+      origin: 'user', managementPolicy: 'protected', role: 'world'
+    }),
+    managed('config/user-added.toml', hash(2), {
+      origin: 'user', managementPolicy: 'protected', role: 'configuration'
+    })
+  ] };
+  const liveSnapshot = {
+    kind: 'existing',
+    worldDirectories: ['world'],
+    entries: [
+      live('world/minecraft-core-user.keep', hash(1), { origin: 'user' }),
+      live('config/user-added.toml', hash(2), { origin: 'user' })
+    ]
+  };
+  const incomingManifest = { schemaVersion: 1, installationId: 'new', entries: [] };
+
+  const plan = planOwnership({ oldManifest, liveSnapshot, incomingManifest, conflictChoices: {} });
+
+  assert.deepEqual(plan.actions.map(action => [action.path, action.action]), [
+    ['config/user-added.toml', 'preserve-orphan'],
+    ['world/minecraft-core-user.keep', 'preserve-orphan']
+  ]);
+  assert.equal(plan.conflicts.length, 0);
+  assert.equal(plan.removed.length, 0);
+  assert.equal(plan.confirmation.worldsRetained, true);
+  assert.throws(() => planOwnership({
+    oldManifest,
+    liveSnapshot,
+    incomingManifest,
+    conflictChoices: { paths: { 'world/minecraft-core-user.keep': { choice: 'use-pack' } } }
+  }), error => error.code === 'INVALID_REQUEST');
+});
+
 test('application origin, default JVM arguments, and registered custom launch material stay protected', () => {
   const oldManifest = { schemaVersion: 1, installationId: 'old', entries: [
     managed('config/app-owned.json', hash(1), { origin: 'application', managementPolicy: 'replaceable-managed' }),

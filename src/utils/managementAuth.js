@@ -129,7 +129,8 @@ export async function ensureSessionToken(instance, force = false) {
           serverPort: instance.serverPort,
           clientId,
           clientName,
-          sessionToken: token
+          sessionToken: token,
+          initializeMultiplayer: false
         });
       } catch {
         // ignore persistence errors
@@ -140,4 +141,27 @@ export async function ensureSessionToken(instance, force = false) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Make an authenticated request while preserving a valid mounted session.
+ * Registration occurs only when no token exists, reconnect is explicit, or
+ * the server rejects the existing token with an authorization status.
+ * @param {ManagementInstance | null | undefined} instance
+ * @param {(headers: Record<string, string>) => Promise<any>} request
+ * @param {{forceRegistration?: boolean}} [options]
+ * @returns {Promise<any>}
+ */
+export async function requestWithSessionRecovery(instance, request, { forceRegistration = false } = {}) {
+  if (typeof request !== 'function') throw new TypeError('Authenticated request must be a function');
+  const hadToken = Boolean(getSessionToken(instance));
+  const registrationAttempted = forceRegistration || !hadToken;
+  await ensureSessionToken(instance, forceRegistration);
+
+  const response = await request(buildAuthHeaders(instance));
+  if (![401, 403].includes(response?.status) || registrationAttempted) return response;
+
+  const refreshedToken = await ensureSessionToken(instance, true);
+  if (!refreshedToken) return response;
+  return request(buildAuthHeaders(instance));
 }

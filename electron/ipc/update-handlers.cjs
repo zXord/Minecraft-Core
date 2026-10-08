@@ -33,7 +33,8 @@ function canInstallUpdateNow() {
   return { success: true };
 }
 
-function createUpdateHandlers(win) {
+function createUpdateHandlers(win, { updaterEnabled = true } = {}) {
+  if (typeof updaterEnabled !== 'boolean') throw new TypeError('Updater IPC policy is invalid');
   const updateService = getUpdateService();
   
   // Forward update events to renderer
@@ -191,6 +192,7 @@ function createUpdateHandlers(win) {
 
     // Start periodic update checks
     'start-periodic-checks': async () => {
+      if (!updaterEnabled) return { success: false, disabled: true, error: 'Automatic update checks are disabled' };
       try {
         const result = updateService.startPeriodicChecks();
         return result;

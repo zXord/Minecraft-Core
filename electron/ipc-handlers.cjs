@@ -27,6 +27,7 @@ const { createErrorMonitoringHandlers } = require('./ipc/error-monitoring-handle
 const { createUtilityHandlers } = require('./ipc/utility-handlers.cjs');
 const { createModAvailabilityHandlers } = require('./ipc/mod-availability-handlers.cjs');
 const { createModpackHandlers } = require('./ipc/modpack-handlers.cjs');
+const { createClientPackHandlers } = require('./ipc/client-pack-handlers.cjs');
 const { createServerMutationPolicy } = require('./services/server-mutation-policy.cjs');
 
 // Import auto-restart services for the one remaining handler
@@ -45,6 +46,10 @@ const {
 function setupIpcHandlers(win, dependencies = {}) {
   if (!win) {
     return;
+  }
+  if ((dependencies.modpacks?.clientPackService || dependencies.modpacks?.clientPackIntegration) &&
+      typeof dependencies.clientPackLaunchOptions?.beginManagedLaunch !== 'function') {
+    throw new Error('Matching client services require main-owned launch authority');
   }
 
   const store = dependencies.store || appStore;
@@ -77,6 +82,7 @@ function setupIpcHandlers(win, dependencies = {}) {
     createUtilityHandlers,
     createModAvailabilityHandlers,
     createModpackHandlers,
+    createClientPackHandlers,
     ...(ipcDependencies.handlerFactories || {})
   };
 
@@ -84,10 +90,17 @@ function setupIpcHandlers(win, dependencies = {}) {
   registeredHandlers.clear();
     const serverMutationPolicy = dependencies.serverMutationPolicy || createServerMutationPolicy({
       coordinator: dependencies.serverMutationCoordinator,
+      getClientPackIntegration: dependencies.modpacks ? () => dependencies.modpacks.clientPackIntegration : null,
       getInstances: () => store.get('instances') || []
     });
     // Get all handler modules
-    const fileHandlers = handlerFactories.createFileHandlers(win);
+    const fileHandlers = handlerFactories.createFileHandlers(win, {
+      assertServerDestination: dependencies.modpacks ? async clientPath => {
+        const integration = dependencies.modpacks.clientPackIntegration;
+        if (!integration?.assertServerDestination) throw new Error('Matching client ownership services are not ready');
+        return integration.assertServerDestination(clientPath);
+      } : null
+    });
     const modHandlers = handlerFactories.createModHandlers(win);
     const clientModHandlers = handlerFactories.createClientModHandlers(win);
     const serverPropertiesHandlers = handlerFactories.createServerPropertiesHandlers();
@@ -99,10 +112,12 @@ function setupIpcHandlers(win, dependencies = {}) {
     const backupHandlers = handlerFactories.createBackupHandlers();
     const managementServerHandlers = handlerFactories.createManagementServerHandlers(win);
   const browserPanelHandlers = handlerFactories.createBrowserPanelHandlers(win);
-    const minecraftLauncherHandlers = handlerFactories.createMinecraftLauncherHandlers(win);
+    const minecraftLauncherHandlers = handlerFactories.createMinecraftLauncherHandlers(win, dependencies.clientPackLaunchOptions || {});
     const serverJavaHandlers = handlerFactories.createServerJavaHandlers(win);
     const appSettingsHandlers = handlerFactories.createAppSettingsHandlers();
-    const updateHandlers = handlerFactories.createUpdateHandlers(win);
+    const updateHandlers = handlerFactories.createUpdateHandlers(win, {
+      updaterEnabled: ipcDependencies.updaterEnabled !== false
+    });
     const metricsHandlers = handlerFactories.createMetricsHandlers();
     const errorMonitoringHandlers = handlerFactories.createErrorMonitoringHandlers(win);
   const utilityHandlers = handlerFactories.createUtilityHandlers(win);
@@ -112,6 +127,16 @@ function setupIpcHandlers(win, dependencies = {}) {
   const modpackHandlers = dependencies.modpacks
     ? handlerFactories.createModpackHandlers(dependencies.modpacks)
     : null;
+  const clientPackIpc = dependencies.modpacks?.clientPackService && dependencies.modpacks?.companionService
+    ? handlerFactories.createClientPackHandlers(dependencies.modpacks) : null;
+  if (clientPackIpc) {
+    dependencies.registerClientPackIpcDisposer?.(() => clientPackIpc.dispose());
+    win.once?.('closed', () => { void clientPackIpc.dispose().catch(() => {}); });
+  }
+  if (dependencies.modpacks?.clientPackIntegration) {
+    require('./services/management-server.cjs').configureClientModpackResolver(serverId =>
+      dependencies.modpacks.companionService.getStatus({ serverId }));
+  }
     
     // Initialize logger handlers (singleton, no creation needed)
     const loggerHandlers = handlerFactories.getLoggerHandlers();
@@ -151,6 +176,7 @@ function setupIpcHandlers(win, dependencies = {}) {
   utilityHandlers,
   modAvailabilityHandlers,
   modpackHandlers,
+  clientPackIpc?.handlers,
       loggerHandlers
     ].forEach((handlers) => {
       if (!handlers) {

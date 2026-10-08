@@ -68,8 +68,9 @@ function requestIdentifier(value, field) {
 
 function timestamp(value) {
   text(value, 64);
-  if (!/^\d{4}-\d{2}-\d{2}T/.test(value) || Number.isNaN(Date.parse(value))) throw invalidResponse();
-  return value;
+  const parsed = new Date(value);
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(value) || Number.isNaN(parsed.getTime())) throw invalidResponse();
+  return parsed.toISOString();
 }
 
 function count(value) {

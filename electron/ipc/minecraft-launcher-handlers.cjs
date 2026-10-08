@@ -987,8 +987,8 @@ async function getModrinthDownloadUrl(projectId, versionId, minecraftVersion, lo
   }
 }
 
-function createMinecraftLauncherHandlers(win) {
-  const launcher = getMinecraftLauncher();
+function createMinecraftLauncherHandlers(win, mainOptions = {}) {
+  const launcher = getMinecraftLauncher(mainOptions.beginManagedLaunch ? { beginManagedLaunch: mainOptions.beginManagedLaunch } : undefined);
   
   launcher.on('auth-success', (data) => {
     if (!win.isDestroyed()) {
@@ -2490,6 +2490,8 @@ function createMinecraftLauncherHandlers(win) {
     },
     
     'minecraft-launch': async (_e, options) => {
+      let managedReservation;
+      let reservationTransferred = false;
       try {        const {
           clientPath,
           minecraftVersion,
@@ -2501,13 +2503,25 @@ function createMinecraftLauncherHandlers(win) {
           serverInfo = null,
           maxMemory = null,
           useProperLauncher = true,
+          strictProperLauncher = false,
           showDebugTerminal = false
         } = options;
+        const safeClientPath = assertKnownClientPath(clientPath);
+        if (mainOptions.beginManagedLaunch) managedReservation = await mainOptions.beginManagedLaunch({ clientPath: safeClientPath });
+
+        if (!managedReservation?.authority && strictProperLauncher === true && useProperLauncher !== true) {
+          return {
+            success: false,
+            error: 'Strict proper launch requires the proper launcher',
+            launcherKind: null,
+            fallbackAttempted: false
+          };
+        }
 
         // CRITICAL FIX: Load authentication data for this client path before launching
         // This ensures the launcher has access to auth data even if it wasn't previously loaded
         try {
-          const loadAuthResult = await launcher.loadAuthData(clientPath);
+          const loadAuthResult = await launcher.loadAuthData(safeClientPath);
           if (!loadAuthResult.success) {
             return { 
               success: false, 
@@ -2521,14 +2535,20 @@ function createMinecraftLauncherHandlers(win) {
           };
         }
 
+        if (managedReservation?.authority) {
+          reservationTransferred = true;
+          const result = await launcher.launchMinecraftProper({ clientPath: safeClientPath, maxMemory, showDebugTerminal }, managedReservation);
+          return { ...result, launcherKind: 'proper', fallbackAttempted: false };
+        }
+
         // CRITICAL FIX: Only add server to servers.dat on FIRST launch ever
         // After that, never touch servers.dat or options.txt again so user modifications are preserved
-        const serversInitializedFile = path.join(clientPath, '.servers-initialized');
+        const serversInitializedFile = path.join(safeClientPath, '.servers-initialized');
         if (!fs.existsSync(serversInitializedFile)) {
-          markCurrentServerMutationDirty(clientPath);
+          markCurrentServerMutationDirty(safeClientPath);
           // First time launch - add server entry
         await ensureServersDat(
-          clientPath,
+          safeClientPath,
           serverIp,
           managementPort,
           clientName || 'Minecraft Server',
@@ -2550,14 +2570,16 @@ function createMinecraftLauncherHandlers(win) {
         // If flag file exists, never touch servers.dat again - user modifications are preserved
 
         // Launch preparation can extract natives, repair profiles, and refresh saved auth.
-        markCurrentServerMutationDirty(assertKnownClientPath(clientPath));
+        markCurrentServerMutationDirty(safeClientPath);
         
+        let properLaunchFailed = false;
         if (useProperLauncher) {
           const loaderType = serverInfo?.loaderType || serverInfo?.loader || (serverInfo?.fabric ? 'fabric' : 'vanilla');
           const loaderVersion = serverInfo?.loaderVersion || serverInfo?.fabric || null;
           
+          reservationTransferred = true;
           const properResult = await launcher.launchMinecraftProper({
-            clientPath,
+            clientPath: safeClientPath,
             minecraftVersion,
             serverIp,
             serverPort: parseInt(serverPort),
@@ -2567,13 +2589,22 @@ function createMinecraftLauncherHandlers(win) {
             loaderType,
             loaderVersion,
             showDebugTerminal
-          });
-          if (properResult.success || loaderType === 'forge') {
-            return properResult;
+          }, managedReservation);
+          const explicitProperResult = {
+            ...properResult,
+            launcherKind: 'proper',
+            fallbackAttempted: false
+          };
+          if (properResult.success || loaderType === 'forge' || strictProperLauncher === true) {
+            return explicitProperResult;
           }
+          properLaunchFailed = true;
         }
-          const result = await launcher.launchMinecraft({
-          clientPath,
+        // A failed proper attempt owns its reservation until pre-spawn abort or
+        // exact child close. A fallback must reacquire, never force its release.
+        reservationTransferred = true;
+        const result = await launcher.launchMinecraft({
+          clientPath: safeClientPath,
           minecraftVersion,
           serverIp,
           serverPort: parseInt(serverPort),
@@ -2581,10 +2612,16 @@ function createMinecraftLauncherHandlers(win) {
           serverInfo,
           maxMemory,
           showDebugTerminal
-        });
-        return result;
+        }, properLaunchFailed ? undefined : managedReservation);
+        return {
+          ...result,
+          launcherKind: 'legacy',
+          fallbackAttempted: properLaunchFailed
+        };
       } catch (error) {
         return { success: false, error: error.message };
+      } finally {
+        if (managedReservation && !reservationTransferred) await managedReservation.abortBeforeSpawn();
       }
     },
     

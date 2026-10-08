@@ -90,12 +90,13 @@ class MemoryOperationStore {
     this.records = new Map();
     this.phases = new Map();
     this.nextId = 0;
+    this.failNextGet = false;
   }
 
   async create(request) {
     const jobId = request.jobId ?? `job-generated-${++this.nextId}`;
     const value = {
-      ...request, jobId, phase: 'queued', cancellationRequested: false, progress: null, outcome: null
+      ...request, jobId, phase: 'queued', cancellationRequested: false, progress: null, outcome: null, events: []
     };
     this.records.set(jobId, value);
     this.phases.set(jobId, ['queued']);
@@ -103,6 +104,10 @@ class MemoryOperationStore {
   }
 
   async get(jobId) {
+    if (this.failNextGet) {
+      this.failNextGet = false;
+      throw new ModpackError('COMMIT_FAILED', 'injected one-shot read failure');
+    }
     const value = this.records.get(jobId);
     return value ? deepFreeze(structuredClone(value)) : null;
   }
@@ -117,9 +122,31 @@ class MemoryOperationStore {
     return deepFreeze(structuredClone(value));
   }
 
-  async requestCancellation() {
-    throw new Error('unexpected cancellation');
+  async requestCancellation(jobId) {
+    const value = this.records.get(jobId);
+    if (!value || !isLegalJobTransition(value.phase, 'cancelling', {
+      operationKind: value.operationKind
+    })) throw new ModpackError('PLAN_STALE', 'The cancellation boundary has passed');
+    value.phase = 'cancelling';
+    value.cancellationRequested = true;
+    this.phases.get(jobId).push('cancelling');
+    return deepFreeze(structuredClone(value));
   }
+
+  async appendEvent(jobId, event) {
+    const value = this.records.get(jobId);
+    if (!value || ['completed', 'cancelled', 'rolled-back', 'failed', 'recovery-required'].includes(value.phase)) {
+      throw new ModpackError('PLAN_STALE', 'The job event is stale');
+    }
+    value.events.push(structuredClone(event));
+    return deepFreeze(structuredClone(value));
+  }
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(resolvePromise => { resolve = resolvePromise; });
+  return { promise, resolve };
 }
 
 function fixture(t, { modifiedManaged = false, additionalManaged = false } = {}) {
@@ -199,7 +226,8 @@ function serviceForManagement({
   persistOutcome = null,
   stateEventSink = null,
   managementPlanner = null,
-  outcomeActionIssuer = null
+  outcomeActionIssuer = null,
+  onPlanCreated = null
 }) {
   const operationStore = new MemoryOperationStore();
   const calls = [];
@@ -220,6 +248,7 @@ function serviceForManagement({
   });
   const planRegistry = {
     create(request) {
+      onPlanCreated?.(request);
       return deepFreeze({
         planId: 'plan-generated-management',
         fingerprint: request.fingerprint,
@@ -367,6 +396,127 @@ test('verification accepts the production resolved-instance contract and hashes 
   assert.equal(issuances[0].instanceId, 'server-one');
   assert.deepEqual(snapshotServerContent(context.serverPath), before);
   assert.deepEqual(execution.calls, []);
+});
+
+test('failed verification jobs retain a closed filesystem diagnostic without raw error text', async (t) => {
+  // This fails if the generic failed-job diagnostic is limited to mutation workflows.
+  const context = fixture(t);
+  const error = new ModpackError('COMMIT_FAILED', 'The filesystem operation could not continue', {
+    cause: new Error('C:\\private\\provider-name\\managed.jar raw exception')
+  });
+  Object.defineProperty(error, 'durableFailureKind', { value: 'access-denied' });
+  Object.defineProperty(error, 'durableFailureStage', { value: 'source-open' });
+  context.stateRepository.verifyManagedFiles = () => { throw error; };
+  const execution = serviceForManagement({ ...context, operationKind: 'repair' });
+
+  const queued = await execution.service.verify('server-one');
+  const failed = await waitForPhase(execution.operationStore, queued.jobId, 'failed');
+
+  assert.deepEqual(failed.outcome.failure, {
+    stage: 'filesystem-operation', category: 'access-denied', boundary: 'source-open'
+  });
+  assert.deepEqual(failed.events, [{
+    channel: 'log',
+    message: 'The filesystem operation could not continue',
+    details: { errorCode: 'COMMIT_FAILED' }
+  }]);
+  assert.doesNotMatch(JSON.stringify(failed.outcome), /private|provider|managed\.jar|exception/i);
+  assert.doesNotMatch(JSON.stringify(failed.events), /private|provider|managed\.jar|exception/i);
+});
+
+test('verification cancellation cannot strand a job when hashing completes after cancellation', async (t) => {
+  const context = fixture(t);
+  const hashing = deferred();
+  const entered = deferred();
+  const issuedPhases = [];
+  let repositorySignal = null;
+  context.stateRepository.verifyManagedFiles = async (_serverPath, options) => {
+    repositorySignal = options?.signal ?? null;
+    entered.resolve();
+    await hashing.promise;
+    return { healthy: true, checkedFiles: '1', repairAvailable: false, repair: null, mismatches: [] };
+  };
+  const execution = serviceForManagement({
+    ...context,
+    operationKind: 'repair',
+    outcomeActionIssuer: {
+      async issue(value) {
+        issuedPhases.push(value.phase);
+        return [];
+      }
+    }
+  });
+
+  const queued = await execution.service.verify('server-one');
+  await entered.promise;
+  assert.equal(typeof repositorySignal?.addEventListener, 'function');
+  assert.equal(repositorySignal.aborted, false);
+  const cancelling = await execution.service.cancelJob(queued.jobId);
+  assert.equal(cancelling.phase, 'cancelling');
+  assert.equal(repositorySignal.aborted, true);
+  hashing.resolve();
+
+  const cancelled = await waitForPhase(execution.operationStore, queued.jobId, 'cancelled');
+  assert.equal(cancelled.outcome.status, 'cancelled');
+  assert.deepEqual(cancelled.events, [{
+    channel: 'log',
+    message: 'The modpack operation was cancelled',
+    details: { errorCode: 'CANCELLED' }
+  }]);
+  assert.equal(execution.operationStore.phases.get(queued.jobId).includes('completed'), false);
+  assert.deepEqual(issuedPhases, ['cancelled']);
+});
+
+test('verification retries a transient job read before publishing failure', async (t) => {
+  const context = fixture(t);
+  const verification = deferred();
+  const entered = deferred();
+  context.stateRepository.verifyManagedFiles = async () => {
+    entered.resolve();
+    await verification.promise;
+    throw new ModpackError('COMMIT_FAILED', 'injected verification failure');
+  };
+  const execution = serviceForManagement({ ...context, operationKind: 'repair' });
+
+  const queued = await execution.service.verify('server-one');
+  await entered.promise;
+  execution.operationStore.failNextGet = true;
+  verification.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+
+  const failed = await waitForPhase(execution.operationStore, queued.jobId, 'failed');
+  assert.equal(failed.outcome.status, 'failed');
+});
+
+test('verification completion owns settlement before issuing terminal actions', async (t) => {
+  const context = fixture(t);
+  const actionIssuance = deferred();
+  const actionEntered = deferred();
+  const execution = serviceForManagement({
+    ...context,
+    operationKind: 'repair',
+    outcomeActionIssuer: {
+      async issue() {
+        actionEntered.resolve();
+        await actionIssuance.promise;
+        return [];
+      }
+    }
+  });
+
+  const queued = await execution.service.verify('server-one');
+  await actionEntered.promise;
+  let cancellationSettled = false;
+  const cancellation = execution.service.cancelJob(queued.jobId)
+    .finally(() => { cancellationSettled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(cancellationSettled, false);
+  actionIssuance.resolve();
+
+  const completed = await waitForPhase(execution.operationStore, queued.jobId, 'completed');
+  assert.equal((await cancellation).phase, 'completed');
+  assert.equal(completed.outcome.status, 'completed');
+  assert.equal(execution.operationStore.phases.get(queued.jobId).includes('cancelling'), false);
 });
 
 test('verify offers a targeted repair only when a managed file differs', async (t) => {
@@ -668,7 +818,7 @@ test('uninstall rejects a reparse substitution without touching its external tar
   assert.equal(context.stateRepository.read(context.serverPath).state.modpackManaged, true);
 });
 
-test('verify rejects a managed-file mutation that occurs after that file was hashed', (t) => {
+test('verify rejects a managed-file mutation that occurs after that file was hashed', async (t) => {
   const context = fixture(t, { additionalManaged: true });
   const triggerPath = path.join(context.serverPath, 'mods', 'pack.jar');
   const racedPath = path.join(context.serverPath, 'mods', 'additional-managed.jar');
@@ -689,13 +839,13 @@ test('verify rejects a managed-file mutation that occurs after that file was has
     clock: () => new Date('2026-08-02T04:00:00.000Z')
   });
 
-  assert.throws(
-    () => repository.verifyManagedFiles(context.serverPath),
+  await assert.rejects(
+    repository.verifyManagedFiles(context.serverPath),
     error => error.code === 'PLAN_STALE'
   );
 });
 
-test('verify maps deletion between hashing and the identity recheck to a stale-plan result', (t) => {
+test('verify maps deletion between hashing and the identity recheck to a stale-plan result', async (t) => {
   const context = fixture(t);
   const racedPath = path.join(context.serverPath, 'mods', 'pack.jar');
   let racedLstats = 0;
@@ -714,8 +864,8 @@ test('verify maps deletion between hashing and the identity recheck to a stale-p
     clock: () => new Date('2026-08-02T04:30:00.000Z')
   });
 
-  assert.throws(
-    () => repository.verifyManagedFiles(context.serverPath),
+  await assert.rejects(
+    repository.verifyManagedFiles(context.serverPath),
     error => error.code === 'PLAN_STALE'
   );
 });
@@ -806,6 +956,51 @@ test('detach planning is derived from current managed state without an inspectio
   assert.equal(adapterInput.instance.instanceId, 'server-one');
   assert.equal(adapterInput.instance.serverPath, context.serverPath);
   assert.doesNotMatch(JSON.stringify(created), /(?:serverPath|path|url|cache|workspace|token|secret|password|inspection)/i);
+});
+
+test('management planning forwards safe progress and completes only after registering the reviewed plan', async (t) => {
+  const context = fixture(t);
+  let registered = false;
+  const observed = [];
+  const execution = serviceForManagement({
+    ...context,
+    operationKind: 'detach',
+    onPlanCreated() { registered = true; },
+    managementPlanner: async ({ request, onProgress }) => {
+      onProgress({ phase: 'scanning-server' });
+      onProgress({ phase: 'calculating-changes' });
+      return {
+        plan: deepFreeze({
+          fingerprint: FINGERPRINT,
+          operation: {
+            kind: request.operationKind,
+            serverKind: 'existing',
+            instanceId: request.instanceId,
+            expectedContentRevision: 3,
+            downgrade: false
+          }
+        }),
+        sanitizedView: { operationKind: 'detach' },
+        planningSessionId: 'management-progress-session'
+      };
+    }
+  });
+
+  const created = await execution.service.createManagementPlan({
+    instanceId: 'server-one',
+    operationKind: 'detach'
+  }, {
+    onProgress(event) {
+      if (event.phase === 'scanning-server') throw new Error('renderer observer failed');
+      observed.push({ phase: event.phase, registered });
+    }
+  });
+
+  assert.equal(created.planId, 'plan-generated-management');
+  assert.deepEqual(observed, [
+    { phase: 'calculating-changes', registered: false },
+    { phase: 'complete', registered: true }
+  ]);
 });
 
 test('management planning admits only the four state-derived operations and binds opaque selections to the reviewed plan', async (t) => {

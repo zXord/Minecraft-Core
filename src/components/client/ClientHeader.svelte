@@ -1,10 +1,8 @@
 
 <script>
   import { clientState, setActiveTab } from '../../stores/clientStore.js';
-  import ModpackNotificationCenter from '../modpacks/ModpackNotificationCenter.svelte';
   export let tabs = ['play', 'mods', 'settings'];
   export let onOpenAppSettings = () => {};
-  export let onModpackNotificationNavigate = () => {};
 
   $: state = $clientState;
 
@@ -17,7 +15,6 @@
   <div class="header-title-row">
     <h1>Minecraft Client</h1>
     <div class="header-actions">
-      <ModpackNotificationCenter connectStore={false} on:navigate={onModpackNotificationNavigate} />
       <button
         class="app-settings-button"
         on:click={onOpenAppSettings}

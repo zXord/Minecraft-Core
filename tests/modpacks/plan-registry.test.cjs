@@ -82,7 +82,7 @@ function planningWorkspace(workspaceRegistry) {
   return { outputDirectoryId, planningSessionId };
 }
 
-test('create returns exactly the reviewed view while retaining the internal plan in memory', (t) => {
+test('create returns exactly the reviewed view while retaining the internal plan in memory', async (t) => {
   const { registry, workspaceRegistry } = fixture(t);
   const { outputDirectoryId, planningSessionId } = planningWorkspace(workspaceRegistry);
   const plan = internalPlan();
@@ -107,7 +107,7 @@ test('create returns exactly the reviewed view while retaining the internal plan
 
   plan.source.releaseId = 'mutated';
   sanitizedView.title = 'mutated';
-  const internal = registry.get({ planId: created.planId, fingerprint: created.fingerprint });
+  const internal = await registry.get({ planId: created.planId, fingerprint: created.fingerprint });
   assert.equal(internal.plan.source.releaseId, '42');
   assert.equal(internal.planView.title, 'Reviewed Pack');
   assert.equal(workspaceRegistry.resolveOwnedId({
@@ -117,7 +117,34 @@ test('create returns exactly the reviewed view while retaining the internal plan
   }).id, outputDirectoryId);
 });
 
-test('a fingerprint cannot execute without its one-use plan ID or across server plans', (t) => {
+test('registry retains a reviewed plan larger than the generic JSON clone budget', async (t) => {
+  const { registry, workspaceRegistry } = fixture(t);
+  const { planningSessionId } = planningWorkspace(workspaceRegistry);
+  const planWithoutFingerprint = internalPlan();
+  delete planWithoutFingerprint.fingerprint;
+  planWithoutFingerprint.preconditions = {
+    paths: Array.from({ length: 3_000 }, (_, index) => ({
+      pathKey: `mods/example-${index}.jar`,
+      exists: index % 2 === 0,
+      size: String(index)
+    }))
+  };
+  const plan = {
+    ...planWithoutFingerprint,
+    fingerprint: computePreflightPlanFingerprint(planWithoutFingerprint)
+  };
+
+  const created = registry.create({
+    plan,
+    sanitizedView: publicView(),
+    fingerprint: plan.fingerprint,
+    planningSessionId
+  });
+  const retained = await registry.get({ planId: created.planId, fingerprint: created.fingerprint });
+  assert.equal(retained.plan.preconditions.paths.length, 3_000);
+});
+
+test('a fingerprint cannot execute without its one-use plan ID or across server plans', async (t) => {
   const { registry, workspaceRegistry } = fixture(t);
   const firstWorkspace = planningWorkspace(workspaceRegistry);
   const secondWorkspace = planningWorkspace(workspaceRegistry);
@@ -136,21 +163,21 @@ test('a fingerprint cannot execute without its one-use plan ID or across server 
     planningSessionId: secondWorkspace.planningSessionId
   });
 
-  assert.throws(() => registry.claim({ fingerprint: first.fingerprint }), error => error.code === 'PLAN_STALE');
-  assert.throws(
-    () => registry.claim({ planId: 'wrong', fingerprint: first.fingerprint }),
+  await assert.rejects(registry.claim({ fingerprint: first.fingerprint }), error => error.code === 'PLAN_STALE');
+  await assert.rejects(
+    registry.claim({ planId: 'wrong', fingerprint: first.fingerprint }),
     error => error.code === 'PLAN_STALE'
   );
-  assert.throws(
-    () => registry.claim({ planId: first.planId, fingerprint: second.fingerprint }),
+  await assert.rejects(
+    registry.claim({ planId: first.planId, fingerprint: second.fingerprint }),
     error => error.code === 'PLAN_STALE'
   );
 
-  const claimed = registry.claim({ planId: first.planId, fingerprint: first.fingerprint });
-  assert.equal(claimed.jobId, 'job-registry-3');
+  const claimed = await registry.claim({ planId: first.planId, fingerprint: first.fingerprint });
+  assert.match(claimed.jobId, /^op2-[0-9a-f]{32}$/u);
   assert.equal(claimed.plan.operation.instanceId, 'server-a');
-  assert.throws(() => registry.claim({ planId: first.planId, fingerprint: first.fingerprint }), error => error.code === 'PLAN_STALE');
-  assert.throws(() => registry.get({ planId: first.planId, fingerprint: first.fingerprint }), error => error.code === 'PLAN_STALE');
+  await assert.rejects(registry.claim({ planId: first.planId, fingerprint: first.fingerprint }), error => error.code === 'PLAN_STALE');
+  await assert.rejects(registry.get({ planId: first.planId, fingerprint: first.fingerprint }), error => error.code === 'PLAN_STALE');
   assert.equal(workspaceRegistry.resolveOwnedId({
     ownerId: claimed.jobId,
     id: firstWorkspace.outputDirectoryId,
@@ -163,7 +190,7 @@ test('a fingerprint cannot execute without its one-use plan ID or across server 
   }), error => error.code === 'PLAN_STALE');
 });
 
-test('expiry is fixed at two hours, releases workspaces, and a new registry has no old plans', (t) => {
+test('expiry is fixed at two hours, releases workspaces, and a new registry has no old plans', async (t) => {
   const { advance, dependencies, registry, workspaceRegistry } = fixture(t);
   const workspace = planningWorkspace(workspaceRegistry);
   const plan = internalPlan();
@@ -174,9 +201,9 @@ test('expiry is fixed at two hours, releases workspaces, and a new registry has 
     planningSessionId: workspace.planningSessionId
   });
   advance(60 * 60 * 1000);
-  assert.equal(registry.get({ planId: created.planId, fingerprint: created.fingerprint }).planId, created.planId);
+  assert.equal((await registry.get({ planId: created.planId, fingerprint: created.fingerprint })).planId, created.planId);
   advance(60 * 60 * 1000);
-  assert.throws(() => registry.get({ planId: created.planId, fingerprint: created.fingerprint }), error => error.code === 'PLAN_STALE');
+  await assert.rejects(registry.get({ planId: created.planId, fingerprint: created.fingerprint }), error => error.code === 'PLAN_STALE');
   assert.throws(() => workspaceRegistry.resolveOwnedId({
     ownerId: created.planId,
     id: workspace.outputDirectoryId,
@@ -184,8 +211,8 @@ test('expiry is fixed at two hours, releases workspaces, and a new registry has 
   }), error => error.code === 'PLAN_STALE');
 
   const restarted = new PlanRegistry(dependencies);
-  assert.throws(() => restarted.get({ planId: created.planId, fingerprint: created.fingerprint }), error => error.code === 'PLAN_STALE');
-  assert.equal(registry.invalidate(created.planId), false);
+  await assert.rejects(restarted.get({ planId: created.planId, fingerprint: created.fingerprint }), error => error.code === 'PLAN_STALE');
+  assert.equal(await registry.invalidate(created.planId), false);
   assert.equal(PLAN_TTL_MS, 2 * 60 * 60 * 1000);
 });
 
@@ -237,7 +264,7 @@ test('unsafe reviewed fields and values fail before workspace ownership changes'
   assert.equal(getterCalls, 0);
 });
 
-test('a failed claim transfer leaves the plan available for an exact retry', (t) => {
+test('a failed claim transfer leaves the plan available for an exact retry', async (t) => {
   let failClaim = true;
   const { baseWorkspace, registry, workspaceRegistry } = fixture(t, {
     transferFailure: ({ fromOwnerId }) => fromOwnerId.startsWith('plan-') && failClaim
@@ -250,11 +277,11 @@ test('a failed claim transfer leaves the plan available for an exact retry', (t)
     fingerprint: plan.fingerprint,
     planningSessionId: workspace.planningSessionId
   });
-  assert.throws(
-    () => registry.claim({ planId: created.planId, fingerprint: created.fingerprint }),
+  await assert.rejects(
+    registry.claim({ planId: created.planId, fingerprint: created.fingerprint }),
     /injected ownership transfer failure/
   );
-  assert.equal(registry.get({ planId: created.planId, fingerprint: created.fingerprint }).planId, created.planId);
+  assert.equal((await registry.get({ planId: created.planId, fingerprint: created.fingerprint })).planId, created.planId);
   assert.equal(baseWorkspace.resolveOwnedId({
     ownerId: created.planId,
     id: workspace.outputDirectoryId,
@@ -262,7 +289,7 @@ test('a failed claim transfer leaves the plan available for an exact retry', (t)
   }).id, workspace.outputDirectoryId);
 
   failClaim = false;
-  const claimed = registry.claim({ planId: created.planId, fingerprint: created.fingerprint });
+  const claimed = await registry.claim({ planId: created.planId, fingerprint: created.fingerprint });
   assert.equal(baseWorkspace.resolveOwnedId({
     ownerId: claimed.jobId,
     id: workspace.outputDirectoryId,
@@ -290,7 +317,7 @@ test('registry admission recomputes the fingerprint over server artifact and wor
   }).id, workspace.outputDirectoryId);
 });
 
-test('claim preserves deeply frozen app-issued plan identity for downstream validation', (t) => {
+test('claim preserves deeply frozen app-issued plan identity for downstream validation', async (t) => {
   const { registry, workspaceRegistry } = fixture(t);
   const workspace = planningWorkspace(workspaceRegistry);
   const appIssuedPlan = deepFreeze(internalPlan());
@@ -301,11 +328,11 @@ test('claim preserves deeply frozen app-issued plan identity for downstream vali
     planningSessionId: workspace.planningSessionId
   });
 
-  assert.equal(registry.get({ planId: created.planId, fingerprint: created.fingerprint }).plan, appIssuedPlan);
-  assert.equal(registry.claim({ planId: created.planId, fingerprint: created.fingerprint }).plan, appIssuedPlan);
+  assert.equal((await registry.get({ planId: created.planId, fingerprint: created.fingerprint })).plan, appIssuedPlan);
+  assert.equal((await registry.claim({ planId: created.planId, fingerprint: created.fingerprint })).plan, appIssuedPlan);
 });
 
-test('releaseClaim frees only an exact successfully claimed job owner and rejects replay', (t) => {
+test('releaseClaim frees only an exact successfully claimed job owner and rejects replay', async (t) => {
   const { baseWorkspace, registry, workspaceRegistry } = fixture(t);
   const workspace = planningWorkspace(workspaceRegistry);
   const plan = internalPlan();
@@ -315,27 +342,27 @@ test('releaseClaim frees only an exact successfully claimed job owner and reject
     fingerprint: plan.fingerprint,
     planningSessionId: workspace.planningSessionId
   });
-  const claimed = registry.claim({ planId: created.planId, fingerprint: created.fingerprint });
+  const claimed = await registry.claim({ planId: created.planId, fingerprint: created.fingerprint });
 
-  assert.equal(registry.releaseClaim('job-not-issued'), false);
+  assert.equal(await registry.releaseClaim('job-not-issued'), false);
   assert.equal(baseWorkspace.resolveOwnedId({
     ownerId: claimed.jobId,
     id: workspace.outputDirectoryId,
     kind: 'output'
   }).id, workspace.outputDirectoryId);
-  assert.equal(registry.releaseClaim(claimed.jobId), true);
+  assert.equal(await registry.releaseClaim(claimed.jobId), true);
   assert.throws(() => baseWorkspace.resolveOwnedId({
     ownerId: claimed.jobId,
     id: workspace.outputDirectoryId,
     kind: 'output'
   }), error => error.code === 'PLAN_STALE');
-  assert.equal(registry.releaseClaim(claimed.jobId), false);
+  assert.equal(await registry.releaseClaim(claimed.jobId), false);
 });
 
-test('a failed claimed-workspace release remains tracked for an exact retry', (t) => {
+test('a failed claimed-workspace release remains tracked for an exact retry', async (t) => {
   let failRelease = true;
   const { baseWorkspace, registry, workspaceRegistry } = fixture(t, {
-    releaseFailure: ownerId => ownerId.startsWith('job-') && failRelease
+    releaseFailure: ownerId => ownerId.startsWith('op2-') && failRelease
   });
   const workspace = planningWorkspace(workspaceRegistry);
   const plan = internalPlan();
@@ -345,15 +372,132 @@ test('a failed claimed-workspace release remains tracked for an exact retry', (t
     fingerprint: plan.fingerprint,
     planningSessionId: workspace.planningSessionId
   });
-  const claimed = registry.claim({ planId: created.planId, fingerprint: created.fingerprint });
+  const claimed = await registry.claim({ planId: created.planId, fingerprint: created.fingerprint });
 
-  assert.throws(() => registry.releaseClaim(claimed.jobId), /injected ownership release failure/);
+  await assert.rejects(registry.releaseClaim(claimed.jobId), /injected ownership release failure/);
   assert.equal(baseWorkspace.resolveOwnedId({
     ownerId: claimed.jobId,
     id: workspace.outputDirectoryId,
     kind: 'output'
   }).id, workspace.outputDirectoryId);
   failRelease = false;
-  assert.equal(registry.releaseClaim(claimed.jobId), true);
-  assert.equal(registry.releaseClaim(claimed.jobId), false);
+  assert.equal(await registry.releaseClaim(claimed.jobId), true);
+  assert.equal(await registry.releaseClaim(claimed.jobId), false);
+});
+
+test('dispose awaits release of every unclaimed plan workspace and is idempotent', async (t) => {
+  const { registry, workspaceRegistry } = fixture(t);
+  const workspaces = [planningWorkspace(workspaceRegistry), planningWorkspace(workspaceRegistry)];
+  const created = workspaces.map((workspace, index) => {
+    const plan = internalPlan({ serverId: `server-${index + 1}` });
+    return registry.create({
+      plan,
+      sanitizedView: publicView({ serverId: `server-${index + 1}` }),
+      fingerprint: plan.fingerprint,
+      planningSessionId: workspace.planningSessionId
+    });
+  });
+  const workspacePaths = workspaces.map(workspace => path.join(
+    workspaceRegistry.root,
+    workspace.outputDirectoryId
+  ));
+  assert.equal(workspacePaths.every(candidate => fs.existsSync(candidate)), true);
+
+  assert.equal(await registry.dispose(), 2);
+
+  assert.equal(workspacePaths.every(candidate => !fs.existsSync(candidate)), true);
+  for (const plan of created) {
+    await assert.rejects(
+      registry.get({ planId: plan.planId, fingerprint: plan.fingerprint }),
+      error => error.code === 'PLAN_STALE'
+    );
+  }
+  assert.equal(await registry.dispose(), 0);
+});
+
+test('dispose retains only a failed plan so the exact cleanup can be retried', async (t) => {
+  let failedPlanId = null;
+  let failRelease = true;
+  const { baseWorkspace, registry, workspaceRegistry } = fixture(t, {
+    releaseFailure: ownerId => ownerId === failedPlanId && failRelease
+  });
+  const failedWorkspace = planningWorkspace(workspaceRegistry);
+  const releasedWorkspace = planningWorkspace(workspaceRegistry);
+  const failedPlan = internalPlan({ serverId: 'server-failed' });
+  const releasedPlan = internalPlan({ serverId: 'server-released' });
+  const failed = registry.create({
+    plan: failedPlan,
+    sanitizedView: publicView({ serverId: 'server-failed' }),
+    fingerprint: failedPlan.fingerprint,
+    planningSessionId: failedWorkspace.planningSessionId
+  });
+  const released = registry.create({
+    plan: releasedPlan,
+    sanitizedView: publicView({ serverId: 'server-released' }),
+    fingerprint: releasedPlan.fingerprint,
+    planningSessionId: releasedWorkspace.planningSessionId
+  });
+  failedPlanId = failed.planId;
+
+  await assert.rejects(registry.dispose(), /injected ownership release failure/);
+  assert.equal((await registry.get({ planId: failed.planId, fingerprint: failed.fingerprint })).planId, failed.planId);
+  await assert.rejects(
+    registry.get({ planId: released.planId, fingerprint: released.fingerprint }),
+    error => error.code === 'PLAN_STALE'
+  );
+  assert.equal(baseWorkspace.resolveOwnedId({
+    ownerId: failed.planId,
+    id: failedWorkspace.outputDirectoryId,
+    kind: 'output'
+  }).id, failedWorkspace.outputDirectoryId);
+  assert.throws(() => baseWorkspace.resolveOwnedId({
+    ownerId: released.planId,
+    id: releasedWorkspace.outputDirectoryId,
+    kind: 'output'
+  }), error => error.code === 'PLAN_STALE');
+
+  failRelease = false;
+  assert.equal(await registry.dispose(), 1);
+  await assert.rejects(
+    registry.get({ planId: failed.planId, fingerprint: failed.fingerprint }),
+    error => error.code === 'PLAN_STALE'
+  );
+  assert.equal(await registry.dispose(), 0);
+});
+
+test('dispose retains claimed job ownership for active or recoverable operations', async (t) => {
+  const { registry, workspaceRegistry } = fixture(t);
+  const claimedWorkspace = planningWorkspace(workspaceRegistry);
+  const unclaimedWorkspace = planningWorkspace(workspaceRegistry);
+  const claimedPlan = internalPlan({ serverId: 'server-active' });
+  const unclaimedPlan = internalPlan({ serverId: 'server-unclaimed' });
+  const createdClaimed = registry.create({
+    plan: claimedPlan,
+    sanitizedView: publicView({ serverId: 'server-active' }),
+    fingerprint: claimedPlan.fingerprint,
+    planningSessionId: claimedWorkspace.planningSessionId
+  });
+  registry.create({
+    plan: unclaimedPlan,
+    sanitizedView: publicView({ serverId: 'server-unclaimed' }),
+    fingerprint: unclaimedPlan.fingerprint,
+    planningSessionId: unclaimedWorkspace.planningSessionId
+  });
+  const claimed = await registry.claim({
+    planId: createdClaimed.planId,
+    fingerprint: createdClaimed.fingerprint
+  });
+
+  assert.equal(await registry.dispose(), 1);
+
+  assert.equal(workspaceRegistry.resolveOwnedId({
+    ownerId: claimed.jobId,
+    id: claimedWorkspace.outputDirectoryId,
+    kind: 'output'
+  }).id, claimedWorkspace.outputDirectoryId);
+  assert.equal(fs.existsSync(path.join(
+    workspaceRegistry.root,
+    unclaimedWorkspace.outputDirectoryId
+  )), false);
+  assert.equal(await registry.releaseClaim(claimed.jobId), true);
 });

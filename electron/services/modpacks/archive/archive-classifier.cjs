@@ -7,7 +7,11 @@ const { canonicalWindowsArchivePath } = require('./archive-entry-policy.cjs');
 
 const MRPACK_READ_LIMIT = 2 * 1024 * 1024;
 const CONFIG_READ_LIMIT = 64 * 1024;
+const LAUNCH_SCRIPT_READ_LIMIT = 8 * 1024;
 const LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+const FORGE_AUTO_INSTALL_KEYS = new Set(['minecraftVersion', 'loaderType', 'loaderVersion']);
+const EXACT_MINECRAFT_VERSION = /^\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?$/;
+const EXACT_LOADER_VERSION = /^\d+(?:\.\d+)+(?:-[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?$/;
 
 function invalid(field) {
   throw new ModpackError('INVALID_REQUEST', 'Archive classification request is invalid', {
@@ -72,6 +76,61 @@ function runtime(loaderFamily, minecraftVersion = null, loaderVersion = null) {
   return { minecraftVersion, loaderFamily, loaderVersion };
 }
 
+function decodeBoundedUtf8(bytes) {
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    if (/\r(?!\n)/u.test(text) || [...text].some(character => {
+      const code = character.codePointAt(0);
+      return code === 127 || (code < 32 && ![9, 10, 13].includes(code));
+    })) return null;
+    return text.replaceAll('\r\n', '\n');
+  } catch {
+    return null;
+  }
+}
+
+function parseForgeAutoInstall(bytes) {
+  const text = decodeBoundedUtf8(bytes);
+  if (text === null) return null;
+  const fields = new Map();
+  for (const line of text.split('\n')) {
+    if (line === '' || line.startsWith('#')) continue;
+    if (line.length > 256) return null;
+    const match = /^([A-Za-z][A-Za-z0-9]*)=([^\s=]+)$/u.exec(line);
+    if (!match || !FORGE_AUTO_INSTALL_KEYS.has(match[1]) || fields.has(match[1])) return null;
+    fields.set(match[1], match[2]);
+  }
+  if (fields.size !== FORGE_AUTO_INSTALL_KEYS.size ||
+      !EXACT_MINECRAFT_VERSION.test(fields.get('minecraftVersion')) ||
+      !EXACT_LOADER_VERSION.test(fields.get('loaderVersion'))) return null;
+  const loaderFamily = fields.get('loaderType').toLocaleLowerCase('en-US');
+  if (!['forge', 'neoforge'].includes(loaderFamily)) return null;
+  return runtime(loaderFamily, fields.get('minecraftVersion'), fields.get('loaderVersion'));
+}
+
+function exactForgeAutoInstallScript(bytes, kind) {
+  const text = decodeBoundedUtf8(bytes);
+  if (text === null) return false;
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  const command = kind === 'windows' ? lines[1]?.toLocaleLowerCase('en-US') : lines[1];
+  const match = /^java -xmx([1-9]\d{0,5})m -xms([1-9]\d{0,5})m -jar minecraft_server\.jar nogui$/iu.exec(command);
+  if (!match || Number(match[2]) > Number(match[1])) return false;
+  if (kind === 'windows') {
+    return lines.length === 3 && lines[0].toLocaleLowerCase('en-US') === '@echo off' &&
+      lines[2].toLocaleLowerCase('en-US') === 'pause';
+  }
+  return lines.length === 2 && lines[0] === '#!/bin/bash';
+}
+
+function unsupportedForgeAutoInstall(reasonCode, evidence) {
+  return deepFreeze({
+    kind: 'unsupported-runtime-layout', confidence: 'exact', blocked: true,
+    reasonCode,
+    evidence: boundedEvidence(evidence)
+  });
+}
+
 function manifestRuntime(dependencies) {
   const loaderKey = Object.keys(dependencies).find(key => key !== 'minecraft');
   if (!loaderKey) return runtime('vanilla', dependencies.minecraft, dependencies.minecraft);
@@ -81,6 +140,20 @@ function manifestRuntime(dependencies) {
 
 function preparedEvidence(files) {
   const candidates = [];
+  for (const entry of files.values()) {
+    const match = /^forge-([0-9]+(?:\.[0-9]+){1,2})-([0-9]+(?:\.[0-9]+){1,3})\.jar$/.exec(entry.canonical);
+    if (!match) continue;
+    const server = files.get(`minecraft_server.${match[1]}.jar`) || files.get('server.jar');
+    if (!server) continue;
+    candidates.push({
+      family: 'forge', complete: true,
+      runtime: runtime('forge', match[1], match[2]),
+      evidence: [
+        { kind: 'forge-legacy-launcher', entryName: entry.source.path },
+        { kind: 'minecraft-server-jar', entryName: server.source.path }
+      ]
+    });
+  }
   const fabricLauncher = files.get('fabric-server-launch.jar');
   const fabricLibrary = [...files.values()].find(entry => /^libraries\/net\/fabricmc\/fabric-loader\/([^/]+)\/fabric-loader-\1\.jar$/.test(entry.canonical));
   if (fabricLauncher || fabricLibrary) {
@@ -179,6 +252,23 @@ async function classifyArchive({ entries, readEntry, selectedRoot = null } = {})
     }
   }
 
+  const multiMcInstance = files.get('instance.cfg');
+  const multiMcManifest = files.get('mmc-pack.json');
+  const minecraftClientRoot = normalized.find(entry =>
+    entry.canonical === '.minecraft' && entry.source.type === 'directory') ||
+    normalized.find(entry => entry.canonical.startsWith('.minecraft/'));
+  if (multiMcInstance && multiMcManifest && minecraftClientRoot) {
+    return deepFreeze({
+      kind: 'multimc-client-only', confidence: 'exact', blocked: true,
+      reasonCode: 'client-launcher-instance',
+      evidence: [
+        { kind: 'multimc-instance-config', entryName: multiMcInstance.source.path },
+        { kind: 'multimc-pack-manifest', entryName: multiMcManifest.source.path },
+        { kind: 'minecraft-client-root', entryName: minecraftClientRoot.canonical === '.minecraft' ? minecraftClientRoot.source.path : '.minecraft' }
+      ]
+    });
+  }
+
   const state = files.get('.minecraft-core.json');
   if (state && (files.has('server.properties') || [...files.keys()].some(name => name.startsWith('world/')))) {
     try {
@@ -202,6 +292,52 @@ async function classifyArchive({ entries, readEntry, selectedRoot = null } = {})
   }
 
   const loaderCandidates = preparedEvidence(files);
+  const forgeAutoInstall = files.get('forge-auto-install.txt');
+  if (forgeAutoInstall) {
+    const configEvidence = { kind: 'forge-auto-install-config', entryName: forgeAutoInstall.source.path };
+    const autoRuntime = parseForgeAutoInstall(await readEvidence(
+      readEntry, forgeAutoInstall, 'forge-auto-install-config', CONFIG_READ_LIMIT
+    ));
+    const { scripts, wrappers } = scriptsAndWrappers(files);
+    if (!autoRuntime) {
+      return unsupportedForgeAutoInstall('invalid-forge-auto-install-config', [configEvidence, ...wrappers, ...scripts]);
+    }
+
+    const windowsScript = files.get('start_server.bat');
+    const shellScript = files.get('start_server.sh');
+    const bootstrap = files.get('minecraft_server.jar');
+    const installer = installerEvidence(files);
+    const exactScripts = scripts.length === 2 && windowsScript && shellScript &&
+      exactForgeAutoInstallScript(
+        await readEvidence(readEntry, windowsScript, 'forge-auto-install-windows-script', LAUNCH_SCRIPT_READ_LIMIT),
+        'windows'
+      ) &&
+      exactForgeAutoInstallScript(
+        await readEvidence(readEntry, shellScript, 'forge-auto-install-shell-script', LAUNCH_SCRIPT_READ_LIMIT),
+        'shell'
+      );
+    if (!bootstrap || BigInt(bootstrap.source.size) < 1n || !exactScripts || wrappers.length > 0 ||
+        loaderCandidates.length > 0 || installer) {
+      return unsupportedForgeAutoInstall('forge-auto-install-evidence-mismatch', [
+        configEvidence,
+        ...loaderCandidates.flatMap(candidate => candidate.evidence),
+        ...(installer ? [installer.evidence] : []),
+        ...wrappers,
+        ...scripts
+      ]);
+    }
+    return deepFreeze({
+      kind: 'prepared-server-pack', confidence: 'exact', blocked: false,
+      runtime: autoRuntime,
+      suppliedBootstrapExecuted: false,
+      evidence: [
+        configEvidence,
+        { kind: 'ignored-publisher-bootstrap', entryName: bootstrap.source.path },
+        { kind: 'convenience-script', entryName: windowsScript.source.path },
+        { kind: 'convenience-script', entryName: shellScript.source.path }
+      ]
+    });
+  }
   if (loaderCandidates.length > 1) {
     return deepFreeze({
       kind: 'ambiguous-or-unknown', confidence: 'conflicting', blocked: true,

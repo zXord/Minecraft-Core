@@ -120,10 +120,14 @@ function fixture(t, { unsafePlanView = false } = {}) {
   let durableTemp = 0;
   const durableFs = createDurableFs({
     fsApi: fs,
+    asyncFsApi: fs.promises,
     durableClient: {
       moveWriteThrough(source, destination) { fs.renameSync(source, destination); },
+      async moveWriteThroughAsync(source, destination) { await fs.promises.rename(source, destination); },
       replaceFileWriteThrough(source, destination) { fs.renameSync(source, destination); },
-      flushDirectory() {}
+      async replaceFileWriteThroughAsync(source, destination) { await fs.promises.rename(source, destination); },
+      flushDirectory() {},
+      async flushDirectoryAsync() {}
     },
     allowedRoots: [userDataPath],
     tempNameFactory: () => `lifecycle-${++durableTemp}`
@@ -176,10 +180,12 @@ function fixture(t, { unsafePlanView = false } = {}) {
       assert.equal(received, verifiedSet);
       const ownerId = workspaceRegistry.createPlanningSession();
       const artifactSetId = workspaceRegistry.registerVerifiedSet({ ownerId, verifiedSet: received });
+      const outputDirectoryId = workspaceRegistry.createStagingOutput({ ownerId });
+      fs.writeFileSync(path.join(workspaceRoot, outputDirectoryId, 'inspection.bin'), 'inspection');
       const result = inspectionResult(received);
       const inspectionId = workspaceRegistry.createInspection({ ownerId, artifactSetId, result });
       workspaceRegistry.transferOwnership({ fromOwnerId: ownerId, toOwnerId: inspectionId });
-      lastInspection = { artifactSetId, inspectionId };
+      lastInspection = { artifactSetId, inspectionId, outputDirectoryId };
       return { ...result, inspectionId };
     }
   };
@@ -223,7 +229,9 @@ function fixture(t, { unsafePlanView = false } = {}) {
       const sanitizedView = {
         title: 'Reviewed Pack',
         server: { id: request.instanceId, contentRevision: 7 },
-        source: { provider: 'github', version: '1.2.3' },
+        source: {
+          provider: 'github', repositoryId: '1001', releaseId: '2002', version: '1.2.3'
+        },
         runtime: { loader: 'fabric', minecraft: '1.21.1', loaderVersion: '0.16.14', java: 21 },
         changes: { added: 1, changed: 0, removed: 0, preserved: 2 },
         warnings: []
@@ -289,7 +297,9 @@ test('inspect and plan preserve the exact source internally while the public pla
   assert.deepEqual(created.planView, {
     title: 'Reviewed Pack',
     server: { id: 'server-0001', contentRevision: 7 },
-    source: { provider: 'github', version: '1.2.3' },
+    source: {
+      provider: 'github', repositoryId: '1001', releaseId: '2002', version: '1.2.3'
+    },
     runtime: { loader: 'fabric', minecraft: '1.21.1', loaderVersion: '0.16.14', java: 21 },
     changes: { added: 1, changed: 0, removed: 0, preserved: 2 },
     warnings: []
@@ -298,7 +308,7 @@ test('inspect and plan preserve the exact source internally while the public pla
   assert.doesNotMatch(JSON.stringify(created), /objects\.example|https?:|external-server|artifact-set|workspace/);
   assert.deepEqual(snapshotTree(context.serverPath), before);
 
-  const internal = context.planRegistry.get({ planId: created.planId, fingerprint: created.planFingerprint });
+  const internal = await context.planRegistry.get({ planId: created.planId, fingerprint: created.planFingerprint });
   assert.match(internal.plan.source.downloadUrl, /^https:\/\//);
   assert.equal(internal.plan.serverSnapshot.serverPath, context.serverPath);
   assert.equal(context.workspaceRegistry.resolveOwnedId({
@@ -385,4 +395,35 @@ test('durable job lookup and pre-commit cancellation remain service-owned', asyn
   assert.equal(cancelled.cancellationRequested, true);
   await assert.rejects(context.service.getJob('job-unknown'), error => error.code === 'PLAN_STALE');
   await assert.rejects(context.service.cancelJob('job-unknown'), error => error.code === 'PLAN_STALE');
+});
+
+test('lifecycle disposal releases every active inspection owner, clears its sessions, and is idempotent', async (t) => {
+  const context = fixture(t);
+  await context.operationStore.initialize();
+  const first = await context.service.inspectSource(SOURCE_REQUEST);
+  const firstWorkspace = path.join(
+    context.workspaceRegistry.root,
+    context.lastInspection.outputDirectoryId
+  );
+  const second = await context.service.inspectSource(SOURCE_REQUEST);
+  const secondWorkspace = path.join(
+    context.workspaceRegistry.root,
+    context.lastInspection.outputDirectoryId
+  );
+  assert.equal(fs.existsSync(firstWorkspace), true);
+  assert.equal(fs.existsSync(secondWorkspace), true);
+
+  assert.equal(await context.service.dispose(), 2);
+
+  assert.equal(fs.existsSync(firstWorkspace), false);
+  assert.equal(fs.existsSync(secondWorkspace), false);
+  await assert.rejects(
+    context.service.createPlan(planningRequest(first.inspectionId)),
+    error => error.code === 'PLAN_STALE'
+  );
+  await assert.rejects(
+    context.service.createPlan(planningRequest(second.inspectionId)),
+    error => error.code === 'PLAN_STALE'
+  );
+  assert.equal(await context.service.dispose(), 0);
 });

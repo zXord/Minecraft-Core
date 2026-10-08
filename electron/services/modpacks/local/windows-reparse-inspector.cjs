@@ -6,7 +6,10 @@ const MAX_INPUT_BYTES = 128 * 1024;
 const MAX_OUTPUT_BYTES = 256;
 const MAX_STDERR_BYTES = 8 * 1024;
 const MAX_TIMEOUT_MS = 5_000;
+const MAX_STARTUP_TIMEOUT_MS = 30_000;
 const KILL_WAIT_MS = 1_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 5_000;
+const RETRYABLE_WORKER_EXIT = Symbol('retryable-worker-exit');
 
 const POWERSHELL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -91,7 +94,9 @@ public static class MinecraftCoreReparseProbe
                 throw new InvalidDataException("Reparse path redirected");
             if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, out afterTag, (uint)Marshal.SizeOf(typeof(FileAttributeTagInformation))) ||
                 !GetFileInformationByHandle(handle, out afterIdentity)) throw new IOException("Reparse identity unavailable");
-            if (beforeTag.FileAttributes != afterTag.FileAttributes || beforeTag.ReparseTag != afterTag.ReparseTag ||
+            bool hasReparseAfter = (afterTag.FileAttributes & FileAttributeReparsePoint) != 0;
+            if (hasReparseAfter != (afterTag.ReparseTag != 0)) throw new InvalidDataException("Reparse tag invalid");
+            if (hasReparse != hasReparseAfter || beforeTag.ReparseTag != afterTag.ReparseTag ||
                 beforeIdentity.VolumeSerialNumber != afterIdentity.VolumeSerialNumber ||
                 beforeIdentity.FileIndexHigh != afterIdentity.FileIndexHigh || beforeIdentity.FileIndexLow != afterIdentity.FileIndexLow)
                 throw new InvalidDataException("Reparse identity changed");
@@ -101,6 +106,12 @@ public static class MinecraftCoreReparseProbe
 }
 '@
 Add-Type -TypeDefinition $probeSource -Language CSharp
+function Exit-ReparseProbeFailure($errorRecord) {
+  $exception = $errorRecord.Exception
+  while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
+  if ($exception -is [System.IO.InvalidDataException]) { exit 67 }
+  exit 66
+}
 $inputStream = [Console]::OpenStandardInput()
 $memory = New-Object System.IO.MemoryStream
 $buffer = New-Object byte[] 4096
@@ -127,7 +138,7 @@ try {
   $outputStream.Write($responseBytes, 0, $responseBytes.Length)
   $outputStream.Flush()
 } catch {
-  exit 66
+  Exit-ReparseProbeFailure $_
 } finally {
   $memory.Dispose()
 }
@@ -142,9 +153,60 @@ const POWERSHELL_ARGS = Object.freeze([
   ENCODED_SCRIPT
 ]);
 
+const PERSISTENT_INPUT_MARKER = '$inputStream = [Console]::OpenStandardInput()';
+const persistentInputOffset = POWERSHELL_SCRIPT.indexOf(PERSISTENT_INPUT_MARKER);
+if (persistentInputOffset < 0) throw new Error('Windows reparse probe source is incomplete');
+const PERSISTENT_POWERSHELL_SCRIPT = `${POWERSHELL_SCRIPT.slice(0, persistentInputOffset)}${String.raw`
+$utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+$inputStream = [Console]::OpenStandardInput()
+$outputStream = [Console]::OpenStandardOutput()
+$reader = New-Object System.IO.StreamReader($inputStream, $utf8, $false, 4096, $true)
+try {
+  while (($line = $reader.ReadLine()) -ne $null) {
+    $lineBytes = $utf8.GetByteCount($line)
+    if ($lineBytes -lt 2 -or $lineBytes -gt $maximumInputBytes) { exit 64 }
+    $payload = ConvertFrom-Json -InputObject $line
+    $properties = @($payload.PSObject.Properties)
+    $validIdType = $payload.id -is [int] -or $payload.id -is [long]
+    if ($properties.Count -ne 2 -or $properties[0].Name -cne 'id' -or $properties[1].Name -cne 'path' -or
+        -not $validIdType -or $payload.id -lt 1 -or $payload.id -gt 2147483647 -or
+        $payload.path -isnot [string] -or $payload.path.Length -lt 1 -or $payload.path.Length -gt 32767 -or
+        -not [System.IO.Path]::IsPathRooted($payload.path)) { exit 65 }
+    $result = [MinecraftCoreReparseProbe]::IsNameSurrogate($payload.path)
+    $response = if ($result) {
+      '{"id":' + [string]$payload.id + ',"version":1,"isReparsePoint":true}'
+    } else {
+      '{"id":' + [string]$payload.id + ',"version":1,"isReparsePoint":false}'
+    }
+    $responseBytes = $utf8.GetBytes($response)
+    $outputStream.Write($responseBytes, 0, $responseBytes.Length)
+    $outputStream.WriteByte(10)
+    $outputStream.Flush()
+  }
+} catch {
+  Exit-ReparseProbeFailure $_
+} finally {
+  $reader.Dispose()
+}
+`}`;
+const PERSISTENT_ENCODED_SCRIPT = Buffer.from(PERSISTENT_POWERSHELL_SCRIPT, 'utf16le').toString('base64');
+const PERSISTENT_POWERSHELL_ARGS = Object.freeze([
+  '-NoLogo',
+  '-NoProfile',
+  '-NonInteractive',
+  '-EncodedCommand',
+  PERSISTENT_ENCODED_SCRIPT
+]);
+
 function inspectionError() {
   const error = new Error('Windows reparse-point inspection failed');
   error.code = 'REPARSE_INSPECTION_FAILED';
+  return error;
+}
+
+function unexpectedWorkerExitError(exitCode) {
+  const error = inspectionError();
+  if (exitCode === 66) Object.defineProperty(error, RETRYABLE_WORKER_EXIT, { value: true });
   return error;
 }
 
@@ -289,21 +351,239 @@ function runBoundedPowerShell({ executable, spawnProcess, input, signal, timeout
   });
 }
 
+class PersistentPowerShellProbe {
+  constructor({ executable, spawnProcess, timeoutMs, startupTimeoutMs, idleTimeoutMs }) {
+    this.executable = executable;
+    this.spawnProcess = spawnProcess;
+    this.timeoutMs = timeoutMs;
+    this.startupTimeoutMs = startupTimeoutMs;
+    this.idleTimeoutMs = idleTimeoutMs;
+    this.worker = null;
+    this.requestTail = Promise.resolve();
+    this.nextRequestId = 1;
+  }
+
+  inspect(filePath, signal) {
+    const execute = async () => {
+      if (signal?.aborted) throw abortError();
+      try {
+        return await this.#request(filePath, signal);
+      } catch (error) {
+        if (!error?.[RETRYABLE_WORKER_EXIT] || signal?.aborted) throw error;
+        return this.#request(filePath, signal);
+      }
+    };
+    const pending = this.requestTail.then(execute, execute);
+    this.requestTail = pending.catch(() => {});
+    return pending;
+  }
+
+  close() {
+    if (this.worker) this.#terminate(this.worker, inspectionError(), true);
+  }
+
+  #spawnWorker() {
+    let child;
+    try {
+      child = this.spawnProcess(this.executable, [...PERSISTENT_POWERSHELL_ARGS], {
+        shell: false,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+    } catch {
+      throw inspectionError();
+    }
+    if (!child || typeof child.once !== 'function' || typeof child.kill !== 'function' ||
+        !child.stdin || typeof child.stdin.write !== 'function' || !child.stdout || typeof child.stdout.on !== 'function' ||
+        !child.stderr || typeof child.stderr.on !== 'function') {
+      try { child?.kill?.(); } catch { /* fail closed below */ }
+      throw inspectionError();
+    }
+    const worker = {
+      child,
+      current: null,
+      stdout: Buffer.alloc(0),
+      stderrBytes: 0,
+      idleTimer: null,
+      terminating: false
+    };
+    this.worker = worker;
+    child.stdout.on('data', chunk => this.#handleStdout(worker, chunk));
+    child.stderr.on('data', chunk => this.#handleStderr(worker, chunk));
+    child.stdin.on?.('error', () => this.#terminate(worker, inspectionError()));
+    child.once('error', () => this.#terminate(worker, inspectionError()));
+    child.once('close', (code, closeSignal) => {
+      if (this.worker !== worker) return;
+      this.worker = null;
+      clearTimeout(worker.idleTimer);
+      const current = worker.current;
+      worker.current = null;
+      if (current) {
+        current.cleanup();
+        const error = unexpectedWorkerExitError(code);
+        current.reject(error);
+      }
+      if (!worker.terminating && (code !== 0 || closeSignal !== null)) worker.terminating = true;
+    });
+    child.unref?.();
+    child.stdin.unref?.();
+    child.stdout.unref?.();
+    child.stderr.unref?.();
+    return worker;
+  }
+
+  #request(filePath, signal) {
+    return new Promise((resolve, reject) => {
+      let worker;
+      const coldStart = !this.worker;
+      try { worker = this.worker || this.#spawnWorker(); }
+      catch (error) { reject(error); return; }
+      if (worker.current || worker.terminating) {
+        this.#terminate(worker, inspectionError());
+        reject(inspectionError());
+        return;
+      }
+      clearTimeout(worker.idleTimer);
+      worker.idleTimer = null;
+      const id = this.nextRequestId;
+      this.nextRequestId = id >= 2147483647 ? 1 : id + 1;
+      const input = Buffer.from(`${JSON.stringify({ id, path: filePath })}\n`, 'utf8');
+      if (input.length > MAX_INPUT_BYTES) {
+        reject(inspectionError());
+        return;
+      }
+      let abortListener = null;
+      const timeoutTimer = setTimeout(
+        () => this.#terminate(worker, inspectionError()),
+        coldStart ? this.startupTimeoutMs : this.timeoutMs
+      );
+      const cleanup = () => {
+        clearTimeout(timeoutTimer);
+        if (abortListener) {
+          try { signal.removeEventListener('abort', abortListener); } catch { /* error stays redacted */ }
+        }
+      };
+      worker.current = { id, resolve, reject, cleanup };
+      if (signal) {
+        abortListener = () => this.#terminate(worker, abortError());
+        try { signal.addEventListener('abort', abortListener, { once: true }); }
+        catch {
+          this.#terminate(worker, inspectionError());
+          return;
+        }
+        if (signal.aborted) {
+          abortListener();
+          return;
+        }
+      }
+      try { worker.child.stdin.write(input); }
+      catch { this.#terminate(worker, inspectionError()); }
+    });
+  }
+
+  #handleStdout(worker, chunk) {
+    if (this.worker !== worker || worker.terminating) return;
+    if (!Buffer.isBuffer(chunk) || !worker.current) {
+      this.#terminate(worker, inspectionError());
+      return;
+    }
+    worker.stdout = Buffer.concat([worker.stdout, chunk]);
+    if (worker.stdout.length > MAX_OUTPUT_BYTES) {
+      this.#terminate(worker, inspectionError());
+      return;
+    }
+    const newline = worker.stdout.indexOf(0x0a);
+    if (newline === -1) return;
+    if (newline < 1 || newline !== worker.stdout.length - 1) {
+      this.#terminate(worker, inspectionError());
+      return;
+    }
+    const responseBytes = worker.stdout.subarray(0, newline);
+    worker.stdout = Buffer.alloc(0);
+    let decoded;
+    let response;
+    try {
+      decoded = new TextDecoder('utf-8', { fatal: true }).decode(responseBytes);
+      response = JSON.parse(decoded);
+    } catch {
+      this.#terminate(worker, inspectionError());
+      return;
+    }
+    const current = worker.current;
+    if (!isPlainObject(response) || Object.keys(response).length !== 3 ||
+        response.id !== current.id || response.version !== 1 || typeof response.isReparsePoint !== 'boolean' ||
+        JSON.stringify(response) !== decoded) {
+      this.#terminate(worker, inspectionError());
+      return;
+    }
+    worker.current = null;
+    worker.stderrBytes = 0;
+    current.cleanup();
+    worker.idleTimer = setTimeout(() => this.#terminate(worker, inspectionError(), true), this.idleTimeoutMs);
+    worker.idleTimer.unref?.();
+    current.resolve(response.isReparsePoint);
+  }
+
+  #handleStderr(worker, chunk) {
+    if (this.worker !== worker || worker.terminating) return;
+    if (!Buffer.isBuffer(chunk)) {
+      this.#terminate(worker, inspectionError());
+      return;
+    }
+    worker.stderrBytes += chunk.length;
+    if (worker.stderrBytes > MAX_STDERR_BYTES) this.#terminate(worker, inspectionError());
+  }
+
+  #terminate(worker, error, expected = false) {
+    if (!worker || worker.terminating) return;
+    worker.terminating = true;
+    clearTimeout(worker.idleTimer);
+    if (this.worker === worker) this.worker = null;
+    const current = worker.current;
+    worker.current = null;
+    if (current) {
+      current.cleanup();
+      current.reject(error);
+    }
+    try { worker.child.kill(); } catch { /* bounded escalation below remains authoritative */ }
+    const escalation = setTimeout(() => {
+      try { worker.child.kill('SIGKILL'); } catch { /* the process is already detached from requests */ }
+    }, KILL_WAIT_MS);
+    escalation.unref?.();
+    if (expected) return;
+  }
+}
+
 class WindowsReparseInspector {
   constructor({
     platform = process.platform,
     powershellPath = defaultPowerShellPath(),
     spawnProcess = spawn,
-    timeoutMs = MAX_TIMEOUT_MS
+    timeoutMs = MAX_TIMEOUT_MS,
+    startupTimeoutMs = MAX_STARTUP_TIMEOUT_MS,
+    persistent = spawnProcess === spawn,
+    idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
   } = {}) {
     if (typeof platform !== 'string' || typeof spawnProcess !== 'function' || !Number.isSafeInteger(timeoutMs) ||
-      timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS || (platform === 'win32' && !validPowerShellPath(powershellPath))) {
+      timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS || typeof persistent !== 'boolean' ||
+      !Number.isSafeInteger(startupTimeoutMs) || startupTimeoutMs < 1 || startupTimeoutMs > MAX_STARTUP_TIMEOUT_MS ||
+      !Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 1 || idleTimeoutMs > 60_000 ||
+      (platform === 'win32' && !validPowerShellPath(powershellPath))) {
       throw new TypeError('Windows reparse inspector dependencies are invalid');
     }
     this.platform = platform;
     this.powershellPath = powershellPath;
     this.spawnProcess = spawnProcess;
     this.timeoutMs = timeoutMs;
+    this.persistentProbe = persistent
+      ? new PersistentPowerShellProbe({
+          executable: powershellPath,
+          spawnProcess,
+          timeoutMs,
+          startupTimeoutMs,
+          idleTimeoutMs
+        })
+      : null;
   }
 
   async isReparsePoint(filePath, options) {
@@ -311,6 +591,7 @@ class WindowsReparseInspector {
     if (signal?.aborted) throw abortError();
     if (this.platform !== 'win32' || !isFullyQualifiedWindowsPath(filePath) ||
       filePath.length < 1 || filePath.length > 32767 || filePath.includes('\0')) throw inspectionError();
+    if (this.persistentProbe) return this.persistentProbe.inspect(filePath, signal);
     const input = Buffer.from(JSON.stringify({ path: filePath }), 'utf8');
     if (input.length > MAX_INPUT_BYTES) throw inspectionError();
     const output = await runBoundedPowerShell({
@@ -331,6 +612,10 @@ class WindowsReparseInspector {
     if (!isPlainObject(response) || Object.keys(response).length !== 2 || response.version !== 1 ||
       typeof response.isReparsePoint !== 'boolean' || JSON.stringify(response) !== decoded) throw inspectionError();
     return response.isReparsePoint;
+  }
+
+  close() {
+    this.persistentProbe?.close();
   }
 }
 

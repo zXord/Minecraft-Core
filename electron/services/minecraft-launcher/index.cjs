@@ -8,13 +8,43 @@ const { JavaManager } = require('./java-manager.cjs');
 const { XMCLAuthHandler } = require('./xmcl-auth-handler.cjs');
 const { ClientDownloader } = require('./client-downloader.cjs');
 const XMCLClientDownloader = require('./xmcl-client-downloader.cjs');
-const { ProperMinecraftLauncher } = require('./proper-launcher.cjs');
+const {
+  ProperMinecraftLauncher,
+  isProcessAlive,
+  stopTrackedProcess,
+  waitForSettlementWithin
+} = require('./proper-launcher.cjs');
 const { getLoggerHandlers } = require('../../ipc/logger-handlers.cjs');
-const { escapeWmicLikeLiteral } = require('../../utils/security-boundaries.cjs');
 const { fetch } = require('../../utils/fetch.cjs');
 
 // Initialize logger
 const logger = getLoggerHandlers();
+
+function createProperLaunchAttempt() {
+  let resolveSettled;
+  let isSettled = false;
+  const settled = new Promise(resolve => {
+    resolveSettled = resolve;
+  });
+  return {
+    token: Symbol('proper-launch-attempt'),
+    controller: new AbortController(),
+    properStarted: false,
+    settled,
+    settle(outcome) {
+      if (isSettled) return;
+      isSettled = true;
+      resolveSettled(outcome);
+    }
+  };
+}
+
+function throwIfProperLaunchCancelled(attempt) {
+  if (!attempt?.controller.signal.aborted) return;
+  const error = new Error('Minecraft launch preparation was cancelled.');
+  error.code = 'MINECRAFT_ASSET_CANCELLED';
+  throw error;
+}
 
 // Console hiding removed - fixing the root cause instead (using javaw.exe)
 
@@ -34,7 +64,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 class MinecraftLauncher extends EventEmitter {
-  constructor() {
+  constructor(options = {}) {
     super();
     this.isLaunching = false;
     this.client = null;    // this.authData = null; // Moved to AuthHandler
@@ -72,13 +102,59 @@ class MinecraftLauncher extends EventEmitter {
       this.xmclClientDownloader : this.legacyClientDownloader;
 
     // Add proper launcher for fixing LogUtils issues
-    this.properLauncher = new ProperMinecraftLauncher();
+    this._beginManagedLaunch = options.beginManagedLaunch || null;
+    this.properLauncher = new ProperMinecraftLauncher({ beginManagedLaunch: this._beginManagedLaunch });
+    this.properLauncher.on('launch-progress', data => this.emit('launch-progress', data));
+    this._properLauncherStopForwarder = () => {
+      if (this._activeLauncherKind === 'proper') {
+        this.isLaunching = this.properLauncher.isLaunching;
+        this.client = this.properLauncher.client;
+        if (!this.client) this._activeLauncherKind = null;
+      }
+      this.emit('minecraft-stopped');
+    };
+    this.properLauncher.on('minecraft-stopped', this._properLauncherStopForwarder);
+    this._isProcessAlive = isProcessAlive;
+    this._stopTrackedProcess = stopTrackedProcess;
+    this._activeLauncherKind = null;
+    this._properLaunchAttempt = null;
+    this._properLaunchStopTimeoutMs = 15_000;
 
     // Our new approach logs directly from the spawned Java process
 
 
     // utils.logSystemInfo(); // Use util function
 
+  }
+
+  _finalizeTrackedClient(trackedClient) {
+    if (!trackedClient || this.client !== trackedClient) {
+      return false;
+    }
+    this.isLaunching = false;
+    this.client = null;
+    this._activeLauncherKind = null;
+    this.emit('minecraft-stopped');
+    return true;
+  }
+
+  _handleTrackedProcessError(trackedClient) {
+    if (!trackedClient?.child || trackedClient !== this.client) {
+      return false;
+    }
+    try {
+      const childExited = trackedClient.child.exitCode !== null &&
+        trackedClient.child.exitCode !== undefined ||
+        trackedClient.child.signalCode !== null &&
+        trackedClient.child.signalCode !== undefined;
+      const processAlive = this._isProcessAlive || isProcessAlive;
+      if (!childExited && processAlive(trackedClient.child.pid)) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+    return this._finalizeTrackedClient(trackedClient);
   }
 
 
@@ -475,41 +551,45 @@ class MinecraftLauncher extends EventEmitter {
   }
 
   // Launch Minecraft client
-  async launchMinecraft(options) {
-    const {
-      clientPath,
-      minecraftVersion,
-      serverIp,
-      serverPort,
-      requiredMods = [],
-      serverInfo = null,
-      maxMemory = null, // Accept memory setting from client
-      showDebugTerminal = false
-    } = options;
-
-    logger.info('Starting Minecraft launch process', {
-      category: 'client',
-      data: {
-        service: 'MinecraftLauncher',
-        operation: 'launchMinecraft',
+  async launchMinecraft(options, suppliedReservation = undefined) {
+    let launchReservation = suppliedReservation;
+    let spawnedChild = null;
+    try {
+      if (launchReservation === undefined && this._beginManagedLaunch) {
+        launchReservation = await this._beginManagedLaunch({ clientPath: options?.clientPath });
+      }
+      if (launchReservation?.authority) {
+        await launchReservation.abortBeforeSpawn();
+        return { success: false, error: 'Matching client packs require the exact proper launcher' };
+      }
+    } catch (error) { return { success: false, error: error.message }; }
+    try {
+      const {
+        clientPath,
         minecraftVersion,
         serverIp,
         serverPort,
-        requiredModsCount: requiredMods.length,
-        loaderType: serverInfo?.loaderType,
-        maxMemory,
-        showDebugTerminal,
-        clientPath: clientPath ? path.basename(clientPath) : null
-      }
-    });
+        requiredMods = [],
+        serverInfo = null,
+        maxMemory = null, // Accept memory setting from client
+        showDebugTerminal = false
+      } = options;
 
-
-    // CRITICAL: Check vanilla JAR immediately for LogUtils issue
-
-
-    // PHASE 4 ENHANCEMENT: Continue with actual Minecraft launch
-    try {
-
+      logger.info('Starting Minecraft launch process', {
+        category: 'client',
+        data: {
+          service: 'MinecraftLauncher',
+          operation: 'launchMinecraft',
+          minecraftVersion,
+          serverIp,
+          serverPort,
+          requiredModsCount: requiredMods.length,
+          loaderType: serverInfo?.loaderType,
+          maxMemory,
+          showDebugTerminal,
+          clientPath: clientPath ? path.basename(clientPath) : null
+        }
+      });
       // Determine launch version and setup
       const requestedLoaderType = String(serverInfo?.loaderType || '').trim().toLowerCase();
       const needsFabric = requestedLoaderType === 'fabric';
@@ -996,6 +1076,9 @@ class MinecraftLauncher extends EventEmitter {
         }
       }
 
+      // Ordinary clients also retain a durable, main-owned process identity.
+      if (launchReservation) jvmArgs.push(launchReservation.jvmArgument);
+
       // Final arguments
       const allArgs = [
         ...jvmArgs,
@@ -1121,6 +1204,15 @@ Starting Minecraft with console output...
         });
 
         const child = spawn(showDebugTerminal ? debugJavaPath : javaPath, allArgs, spawnOptions);
+        spawnedChild = child;
+        const trackedClient = { child };
+        this.client = trackedClient;
+        this._activeLauncherKind = 'legacy';
+        // Retain exact-child stop/close handling before any asynchronous identity
+        // publication or optional debug-console wiring can fail.
+        child.on('close', () => this._finalizeTrackedClient(trackedClient));
+        child.on('error', () => this._handleTrackedProcessError(trackedClient));
+        if (launchReservation) await launchReservation.attach(child);
 
         // If debug terminal is enabled, capture and forward output
         if (showDebugTerminal && debugWindow) {
@@ -1174,8 +1266,6 @@ Starting Minecraft with console output...
           child.unref();
         }
 
-        this.client = { child };
-
         logger.info('Minecraft process spawned successfully', {
           category: 'client',
           data: {
@@ -1197,10 +1287,6 @@ Starting Minecraft with console output...
               launchVersion
             }
           });
-
-          this.isLaunching = false;
-          this.client = null;
-          this.emit('minecraft-stopped');
         });
 
         child.on('error', (error) => {
@@ -1214,10 +1300,6 @@ Starting Minecraft with console output...
               launchVersion
             }
           });
-
-          this.isLaunching = false;
-          this.client = null;
-          this.emit('minecraft-stopped');
         });
 
         // Wait a moment to see if launch fails immediately
@@ -1283,8 +1365,10 @@ Starting Minecraft with console output...
           }
         });
 
-        this.isLaunching = false;
-        this.client = null;
+        if (!launchReservation || !spawnedChild || this.client?.child !== spawnedChild) {
+          this.isLaunching = false;
+          this.client = null;
+        }
 
         return {
           success: false,
@@ -1298,20 +1382,27 @@ Starting Minecraft with console output...
           service: 'MinecraftLauncher',
           operation: 'launchMinecraft',
           errorType: mainError.constructor.name,
-          minecraftVersion,
+          minecraftVersion: options?.minecraftVersion,
           critical: true,
           errorStack: mainError.stack
         }
       });
 
-      this.isLaunching = false;
-      this.client = null;
+      if (!launchReservation || !spawnedChild || this.client?.child !== spawnedChild) {
+        this.isLaunching = false;
+        this.client = null;
+      }
 
       return {
         success: false,
         error: mainError.message,
         message: `Failed to launch Minecraft: ${mainError.message}`
       };
+    } finally {
+      if (launchReservation && !spawnedChild) {
+        try { await launchReservation.abortBeforeSpawn(); }
+        catch (error) { return { success: false, error: error.message }; }
+      }
     }
   }
 
@@ -1328,211 +1419,93 @@ Starting Minecraft with console output...
       }
     });
 
-    try {
-
-      let stopped = false;
-
-      // Method 1: Stop via direct process if available
-      if (this.client && this.client.child) {
-        try {
-          logger.info('Stopping Minecraft via direct process', {
-            category: 'client',
-            data: {
-              service: 'MinecraftLauncher',
-              operation: 'stopDirect',
-              pid: this.client.child.pid,
-              killed: this.client.child.killed
-            }
-          });
-
-          // We have direct access to the child process from our spawn call
-          this.client.child.kill('SIGTERM');
-
-          // Wait a moment, then force kill if necessary
-          setTimeout(() => {
-            if (this.client && this.client.child && !this.client.child.killed) {
-              logger.warn('Force killing Minecraft process after timeout', {
-                category: 'client',
-                data: {
-                  service: 'MinecraftLauncher',
-                  operation: 'forceKill',
-                  pid: this.client.child.pid
-                }
-              });
-              this.client.child.kill('SIGKILL');
-            }
-          }, 3000);
-
-          stopped = true;
-
-          logger.info('Minecraft process termination signal sent', {
-            category: 'client',
-            data: {
-              service: 'MinecraftLauncher',
-              operation: 'stopDirect',
-              success: true
-            }
-          });
-        } catch (error) {
-          logger.error(`Failed to stop Minecraft process directly: ${error.message}`, {
-            category: 'client',
-            data: {
-              service: 'MinecraftLauncher',
-              operation: 'stopDirect',
-              errorType: error.constructor.name,
-              pid: this.client?.child?.pid
-            }
-          });
+    const trackedClient = this.client;
+    if (!trackedClient?.child) {
+      const wrapperAttempt = this._properLaunchAttempt;
+      if (wrapperAttempt && !wrapperAttempt.properStarted) {
+        let attemptOutcome = null;
+        const observedAttempt = wrapperAttempt.settled.then(outcome => {
+          attemptOutcome = outcome;
+        });
+        wrapperAttempt.controller.abort();
+        const settled = await waitForSettlementWithin(
+          observedAttempt,
+          Math.max(1, Number(this._properLaunchStopTimeoutMs) || 15_000)
+        );
+        if (!settled || attemptOutcome?.error?.code === 'MINECRAFT_ASSET_CANCEL_TIMEOUT') {
+          return {
+            success: false,
+            error: 'Minecraft launch preparation could not be cancelled safely'
+          };
         }
+        return {
+          success: true,
+          message: 'Minecraft launch preparation cancelled'
+        };
       }
-
-      // Method 2: Targeted Java process killing (Windows-specific fallback)
-      if (process.platform === 'win32') {
-        try {
-          const { exec } = require('child_process');
-          const { promisify } = require('util');
-          const execAsync = promisify(exec);
-
-          logger.debug('Attempting Windows-specific process termination', {
-            category: 'client',
-            data: {
-              service: 'MinecraftLauncher',
-              operation: 'stopWindows',
-              clientPath: this.clientPath ? path.basename(this.clientPath) : null,
-              hasPid: !!(this.client?.child?.pid)
-            }
-          });
-
-          // CRITICAL FIX: Only kill Java processes that are specifically related to this client
-          // DO NOT kill all Java processes as this would stop the Minecraft server!
-
-          // Try to kill only processes running from our client directory
-          if (this.clientPath) {
-            const clientPathEscaped = escapeWmicLikeLiteral(this.clientPath);
-
-            try {
-              logger.debug('Terminating Java processes by client path', {
-                category: 'client',
-                data: {
-                  service: 'MinecraftLauncher',
-                  operation: 'terminateByPath',
-                  clientPath: path.basename(this.clientPath)
-                }
-              });
-
-              // Kill only Java processes with our client path in the command line
-              await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='java.exe'" call terminate`, {
-                windowsHide: true,
-                timeout: 5000
-              });
-
-              await execAsync(`wmic process where "commandline like '%${clientPathEscaped}%' and name='javaw.exe'" call terminate`, {
-                windowsHide: true,
-                timeout: 5000
-              });
-
-              stopped = true;
-
-              logger.info('Java processes terminated by client path', {
-                category: 'client',
-                data: {
-                  service: 'MinecraftLauncher',
-                  operation: 'terminateByPath',
-                  success: true
-                }
-              });
-
-            } catch (pathError) {
-              logger.warn(`Failed to terminate by path, trying PID: ${pathError.message}`, {
-                category: 'client',
-                data: {
-                  service: 'MinecraftLauncher',
-                  operation: 'terminateByPath',
-                  errorType: pathError.constructor.name
-                }
-              });
-
-              if (this.client && this.client.child && this.client.child.pid) {
-                try {
-                  await execAsync(`taskkill /F /PID ${this.client.child.pid}`, { windowsHide: true });
-                  stopped = true;
-
-                  logger.info('Process terminated by PID', {
-                    category: 'client',
-                    data: {
-                      service: 'MinecraftLauncher',
-                      operation: 'terminateByPid',
-                      pid: this.client.child.pid,
-                      success: true
-                    }
-                  });
-                } catch (pidError) {
-                  logger.error(`Failed to terminate by PID: ${pidError.message}`, {
-                    category: 'client',
-                    data: {
-                      service: 'MinecraftLauncher',
-                      operation: 'terminateByPid',
-                      pid: this.client.child.pid,
-                      errorType: pidError.constructor.name
-                    }
-                  });
-                }
-              }
-            }
-          }
-
-        } catch {
-          // TODO: Add proper logging - Failed to kill Java processes
+      const properPreparing = this._activeLauncherKind === 'proper' ||
+        Boolean(this.properLauncher?.isLaunching);
+      if (properPreparing && typeof this.properLauncher?.stopMinecraft === 'function') {
+        const result = await this.properLauncher.stopMinecraft();
+        this.isLaunching = this.properLauncher.isLaunching;
+        this.client = this.properLauncher.client;
+        if (result?.success && !this.client && !this.isLaunching) {
+          this._activeLauncherKind = null;
         }
+        return result;
       }
-
-      // Reset launcher state
       this.isLaunching = false;
-      this.client = null;
-      this.emit('minecraft-stopped');
+      this._activeLauncherKind = null;
+      return {
+        success: true,
+        message: 'Minecraft process cleanup completed (no active process found)'
+      };
+    }
 
-      if (stopped) {
-        logger.info('Minecraft stopped successfully', {
-          category: 'client',
-          data: {
-            service: 'MinecraftLauncher',
-            operation: 'stopMinecraft',
-            success: true,
-            stopped: true
-          }
-        });
-        return { success: true, message: 'Minecraft stopped successfully' };
-      } else {
-        logger.info('Minecraft process cleanup completed (no active process found)', {
-          category: 'client',
-          data: {
-            service: 'MinecraftLauncher',
-            operation: 'stopMinecraft',
-            success: true,
-            stopped: false,
-            reason: 'no_active_process'
-          }
-        });
-        return { success: true, message: 'Minecraft process cleanup completed (no active process found)' };
+    const properOwnsProcess = this._activeLauncherKind === 'proper' ||
+      this.properLauncher?.client?.child === trackedClient.child;
+
+    if (properOwnsProcess) {
+      const result = await this.properLauncher.stopMinecraft();
+      this.isLaunching = this.properLauncher.isLaunching;
+      if (result?.success) {
+        this.client = this.properLauncher.client;
+        if (!this.client) {
+          this._activeLauncherKind = null;
+        }
+      } else if (this.properLauncher.client) {
+        this.client = this.properLauncher.client;
       }
+      return result;
+    }
 
+    let result;
+    try {
+      const stopProcess = this._stopTrackedProcess || stopTrackedProcess;
+      result = await stopProcess(trackedClient.child, {
+        isProcessAlive: this._isProcessAlive || isProcessAlive
+      });
     } catch (error) {
-      logger.error(`Failed to stop Minecraft: ${error.message}`, {
+      result = { success: false, error: error.message };
+    }
+
+    if (!result?.success) {
+      logger.error(`Failed to confirm Minecraft process exit: ${result?.error || 'Unknown error'}`, {
         category: 'client',
         data: {
           service: 'MinecraftLauncher',
           operation: 'stopMinecraft',
-          errorType: error.constructor.name,
-          errorStack: error.stack
+          pid: trackedClient.child.pid
         }
       });
-
-      // Reset state even on error
-      this.isLaunching = false;
-      this.client = null;
-      this.emit('minecraft-stopped');
-      return { success: false, error: error.message };
+      return {
+        success: false,
+        error: result?.error || 'Minecraft process exit could not be confirmed'
+      };
     }
+
+    this._finalizeTrackedClient(trackedClient);
+    return { success: true, message: 'Minecraft stopped successfully' };
   }
 
   // Calculate file checksum for mod verification - MOVED to utils.cjs
@@ -1551,48 +1524,51 @@ Starting Minecraft with console output...
       }
     });
 
+    if (this._properLaunchAttempt && !this._properLaunchAttempt.properStarted) {
+      return {
+        isAuthenticated: !!this.authHandler.authData,
+        isLaunching: true,
+        isRunning: false,
+        username: this.authHandler.authData?.name || null,
+        clientPath: this.clientPath
+      };
+    }
+
+    if (this._activeLauncherKind === 'proper' && this.properLauncher?.getStatus) {
+      const properStatus = this.properLauncher.getStatus();
+      this.isLaunching = properStatus.isLaunching || Boolean(this._properLaunchAttempt);
+      this.client = this.properLauncher.client;
+      if (!this.client && !this._properLaunchAttempt) {
+        this._activeLauncherKind = null;
+      }
+      return {
+        ...properStatus,
+        isAuthenticated: !!this.authHandler.authData,
+        username: this.authHandler.authData?.name || null,
+        clientPath: this.clientPath
+      };
+    }
+
     let isRunning = false;
 
     // Check if we actually have a running process
     if (this.client && this.client.child) {
+      const trackedClient = this.client;
       try {
-        // Check if the process is still alive
-        const pid = this.client.child.pid;
-        if (pid) {
-          // On Windows, we can check if the process exists
-          try {
-            process.kill(pid, 0); // Signal 0 just tests if process exists
-            isRunning = true;
-
-            logger.debug('Process status check: running', {
-              category: 'client',
-              data: {
-                service: 'MinecraftLauncher',
-                operation: 'processStatusCheck',
-                pid,
-                isRunning: true
-              }
-            });
-          } catch {
-            // Process doesn't exist anymore
-            logger.debug('Process status check: not running', {
-              category: 'client',
-              data: {
-                service: 'MinecraftLauncher',
-                operation: 'processStatusCheck',
-                pid,
-                isRunning: false,
-                reason: 'process_not_found'
-              }
-            });
-
-            this.isLaunching = false;
-            this.client = null;
-            isRunning = false;
-          }
+        const childExited = trackedClient.child.exitCode !== null &&
+          trackedClient.child.exitCode !== undefined ||
+          trackedClient.child.signalCode !== null &&
+          trackedClient.child.signalCode !== undefined;
+        const processAlive = this._isProcessAlive || isProcessAlive;
+        if (!childExited && processAlive(trackedClient.child.pid)) {
+          isRunning = true;
+        } else {
+          this._finalizeTrackedClient(trackedClient);
         }
       } catch {
-        isRunning = false;
+        // A probe failure that is not a definitive process exit must remain
+        // conservative so callers do not tear down a still-running client.
+        isRunning = true;
       }
     }
 
@@ -2124,8 +2100,14 @@ Starting Minecraft with console output...
   }
 
   // New method: Use proper launcher for LogUtils fix
-  async launchMinecraftProper(options) {
+  async launchMinecraftProper(options, suppliedReservation = undefined) {
+    let launchAttempt = null;
+    let managedReservation = suppliedReservation;
     try {
+      if (this.isLaunching || this._properLaunchAttempt) {
+        throw new Error('Minecraft is already launching');
+      }
+
       // Set authentication data
       if (this.authHandler.authData) {
         this.properLauncher.setAuthData(this.authHandler.authData);
@@ -2133,36 +2115,72 @@ Starting Minecraft with console output...
         throw new Error('No authentication data available. Please authenticate first.');
       }
 
-      const { requiredJavaVersion } = await require('./utils.cjs').resolveRequiredJavaVersion(options.minecraftVersion);
-      const javaResult = await this.javaManager.ensureJava(requiredJavaVersion);
-      if (!javaResult.success || !javaResult.javaPath) {
-        throw new Error(`Java ${requiredJavaVersion} not available: ${javaResult.error || 'Unknown error'}`);
+      launchAttempt = createProperLaunchAttempt();
+      this._properLaunchAttempt = launchAttempt;
+      this.isLaunching = true;
+      if (managedReservation === undefined && this._beginManagedLaunch) {
+        managedReservation = await this._beginManagedLaunch({ clientPath: options.clientPath }) || null;
+      }
+      options = require('../client-modpacks/client-pack-launch-options.cjs').managedLaunchOptions(options, managedReservation);
+      this.clientPath = options.clientPath;
+      this.javaManager.setClientPath(options.clientPath);
+      this._activeLauncherKind = 'proper';
+      throwIfProperLaunchCancelled(launchAttempt);
+
+      let javaResult = managedReservation?.authority ? { success: true, javaPath: options.javaPath } : null;
+      if (!javaResult) {
+        const { requiredJavaVersion } = await require('./utils.cjs').resolveRequiredJavaVersion(options.minecraftVersion);
+        throwIfProperLaunchCancelled(launchAttempt);
+        javaResult = await this.javaManager.ensureJava(
+          requiredJavaVersion,
+          undefined,
+          { signal: launchAttempt.controller.signal }
+        );
+        throwIfProperLaunchCancelled(launchAttempt);
+        if (!javaResult.success || !javaResult.javaPath) {
+          throw new Error(`Java ${requiredJavaVersion} not available: ${javaResult.error || 'Unknown error'}`);
+        }
       }
 
       // Forward the call to the proper launcher
+      launchAttempt.properStarted = true;
+      throwIfProperLaunchCancelled(launchAttempt);
       const result = await this.properLauncher.launchMinecraft({
         ...options,
         javaPath: javaResult.javaPath,
         showDebugTerminal: !!options.showDebugTerminal
-      });
-
-      // Update our state to match
-      if (result.success) {
+      }, managedReservation);
+      if (this._properLaunchAttempt === launchAttempt) {
         this.isLaunching = this.properLauncher.isLaunching;
         this.client = this.properLauncher.client;
-        this.clientPath = options.clientPath;
-
-        if (!this._properLauncherStopForwarder) {
-          this._properLauncherStopForwarder = () => {
-            this.emit('minecraft-stopped');
-          };
-          this.properLauncher.on('minecraft-stopped', this._properLauncherStopForwarder);
+        if (!result.success && !this.client && !this.isLaunching) {
+          this._activeLauncherKind = null;
         }
+
+        // Update our state to match
+        if (result.success) {
+          this._activeLauncherKind = 'proper';
+        }
+        this._properLaunchAttempt = null;
       }
+      launchAttempt.settle({ success: result.success, result });
 
       return result;
 
     } catch (error) {
+      if (managedReservation && !launchAttempt?.properStarted && error?.code !== 'MINECRAFT_ASSET_CANCEL_TIMEOUT') {
+        try { await managedReservation.abortBeforeSpawn(); }
+        catch (settlementError) { error = settlementError; }
+      }
+      if (launchAttempt) {
+        if (this._properLaunchAttempt === launchAttempt) {
+          this.isLaunching = Boolean(launchAttempt.properStarted && this.properLauncher?.isLaunching);
+          this.client = launchAttempt.properStarted ? this.properLauncher?.client || null : null;
+          if (!this.client && !this.isLaunching) this._activeLauncherKind = null;
+          this._properLaunchAttempt = null;
+        }
+        launchAttempt.settle({ success: false, error });
+      }
       return {
         success: false, error: error.message,
         message: `Failed to launch with proper launcher: ${error.message}`
@@ -2195,9 +2213,14 @@ Starting Minecraft with console output...
 // Singleton instance
 let launcherInstance = null;
 
-function getMinecraftLauncher() {
+function getMinecraftLauncher(options) {
   if (!launcherInstance) {
-    launcherInstance = new MinecraftLauncher();
+    launcherInstance = new MinecraftLauncher(options);
+  } else if (options && Object.hasOwn(options, 'beginManagedLaunch') &&
+      (options.beginManagedLaunch || null) !== launcherInstance._beginManagedLaunch) {
+    const error = new Error('Minecraft launcher is already initialized; managed launch authority must be configured before handler registration');
+    error.code = 'MINECRAFT_LAUNCHER_ALREADY_INITIALIZED';
+    throw error;
   }
   return launcherInstance;
 }

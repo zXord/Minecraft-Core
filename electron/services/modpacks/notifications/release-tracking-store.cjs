@@ -100,10 +100,15 @@ function normalizeFailure(value) {
 
 function normalizeSnapshot(value) {
   if (value === null) return null;
-  strictObject(value, ['releaseId', 'version', 'prerelease', 'publishedAt', 'assetFingerprint', 'installable']);
+  const hasOrderingEvidence = Object.hasOwn(value, 'orderingKnown');
+  strictObject(value, [
+    'releaseId', 'version', 'prerelease', 'publishedAt', 'assetFingerprint', 'installable',
+    ...(hasOrderingEvidence ? ['orderingKnown'] : [])
+  ]);
   if (typeof value.version !== 'string' || value.version.length < 1 || value.version.length > 128 ||
       hasUnsafeControl(value.version) || typeof value.prerelease !== 'boolean' ||
       typeof value.installable !== 'boolean' ||
+      (hasOrderingEvidence && typeof value.orderingKnown !== 'boolean') ||
       (value.assetFingerprint !== null && (typeof value.assetFingerprint !== 'string' || !SHA256.test(value.assetFingerprint)))) throw invalid();
   return {
     releaseId: identifier(value.releaseId),
@@ -111,7 +116,8 @@ function normalizeSnapshot(value) {
     prerelease: value.prerelease,
     publishedAt: timestamp(value.publishedAt),
     assetFingerprint: value.assetFingerprint,
-    installable: value.installable
+    installable: value.installable,
+    ...(hasOrderingEvidence ? { orderingKnown: value.orderingKnown } : {})
   };
 }
 

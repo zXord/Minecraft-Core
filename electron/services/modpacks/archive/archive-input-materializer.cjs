@@ -99,7 +99,7 @@ class ArchiveInputMaterializer {
         ...materialized
       });
     } catch (error) {
-      try { this.workspaceRegistry.releaseOwner(ownerId); } catch { /* preserve the primary failure */ }
+      try { await this.workspaceRegistry.releaseOwner(ownerId); } catch { /* preserve the primary failure */ }
       throw error;
     }
   }
@@ -146,7 +146,7 @@ class ArchiveInputMaterializer {
       const materialized = await this.verifyMaterialized({ inputDirectoryId, verifiedArtifactSet: loaded.verifiedArtifactSet });
       return Object.freeze({ ...loaded, ownerId: inspectionId, inputDirectoryId, ...materialized });
     } catch (error) {
-      try { this.workspaceRegistry.releaseOwner(inspectionId); } catch { /* preserve the primary failure */ }
+      try { await this.workspaceRegistry.releaseOwner(inspectionId); } catch { /* preserve the primary failure */ }
       throw error;
     }
   }

@@ -42,8 +42,8 @@ function release(overrides = {}) {
   return {
     id: RELEASE_ID, node_id: 'RE_kwExample', tag_name: 'v1.0.0', target_commitish: 'main',
     name: 'Version 1', draft: false, prerelease: false, immutable: true,
-    created_at: '2026-07-01T00:00:00.000Z', updated_at: '2026-07-01T00:01:00.000Z',
-    published_at: '2026-07-01T00:02:00.000Z',
+    created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:01:00Z',
+    published_at: '2026-07-01T00:02:00Z',
     zipball_url: 'https://api.github.com/repos/Canonical/Pack/zipball/v1.0.0',
     tarball_url: 'https://api.github.com/repos/Canonical/Pack/tarball/v1.0.0',
     assets_url: 'https://api.github.com/repos/Canonical/Pack/releases/201/assets',
@@ -57,7 +57,7 @@ function asset(overrides = {}) {
     id: ASSET_ID, node_id: 'RA_kwExample', name: 'server-pack.zip', label: 'Server pack',
     uploader: { login: 'publisher' }, content_type: 'application/zip', state: 'uploaded', size: 100,
     digest: `sha256:${SHA256}`, download_count: 42,
-    created_at: '2026-07-01T00:03:00.000Z', updated_at: '2026-07-01T00:04:00.000Z',
+    created_at: '2026-07-01T00:03:00Z', updated_at: '2026-07-01T00:04:00Z',
     browser_download_url: 'https://github.com/Canonical/Pack/releases/download/v1.0.0/server-pack.zip',
     url: 'https://api.github.com/repos/Canonical/Pack/releases/assets/301',
     ...overrides
@@ -273,6 +273,33 @@ test('uses cached ETags for conditional release requests and handles 304 without
   assert.equal(http.calls.length, 3);
 });
 
+test('an explicit null ETag clears a cached release validator for an independent consumer', async () => {
+  let releaseRequests = 0;
+  const { source, http } = sourceFor((path, options) => {
+    if (path === '/repos/Hint/Pack') return jsonResponse(repository());
+    releaseRequests += 1;
+    if (releaseRequests === 1) return jsonResponse([release()], 200, { etag: '"cached-etag"' });
+    assert.equal(Object.hasOwn(options.headers, 'If-None-Match'), false);
+    return jsonResponse([release({ id: 202, tag_name: 'v1.1.0', name: 'Version 1.1.0' })], 200, {
+      etag: '"independent-etag"'
+    });
+  });
+  const identity = await bind(source);
+  const primed = await source.listReleases({ ...identity, includePrereleases: false });
+
+  const independent = await source.listReleases({
+    ...identity,
+    includePrereleases: false,
+    etag: null
+  });
+
+  assert.equal(primed.etag, '"cached-etag"');
+  assert.equal(independent.notModified, false);
+  assert.equal(independent.etag, '"independent-etag"');
+  assert.deepEqual(independent.releases.map(item => item.releaseId), ['202']);
+  assert.equal(http.calls.length, 3);
+});
+
 test('a persisted release ETag can produce a restart-safe 304 without an in-memory response cache', async () => {
   const { source, http } = sourceFor((path, options) => {
     if (path === '/repos/Hint/Pack') return jsonResponse(repository());
@@ -324,7 +351,7 @@ test('rechecks duplicate release IDs and tags against cursor history on cached 3
   }
 });
 
-test('emits bounded safe Retry-After rate-reset and exponential metadata without sleeping', async () => {
+test('emits a distinct safe rate-limit failure with bounded Retry-After reset and exponential metadata', async () => {
   let failures = 0;
   const { source } = sourceFor((path) => {
     if (path === '/repos/Hint/Pack') return jsonResponse(repository());
@@ -341,23 +368,44 @@ test('emits bounded safe Retry-After rate-reset and exponential metadata without
     { retryAfterMs: 10000, rateLimitResetAt: '2026-08-01T12:00:30.000Z', backoffMs: 2000, nextAttemptAfterMs: 30000 }
   ]) {
     await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error => {
-      assert.equal(error.code, 'INVALID_RELEASE_URL');
+      assert.equal(error.code, 'RATE_LIMITED');
       assert.equal(error.retryable, true);
       assert.deepEqual(error.retryMetadata, expected);
+      assert.deepEqual(error.toPublicResult(), {
+        ok: false,
+        error: {
+          code: 'RATE_LIMITED',
+          message: 'GitHub request is rate limited',
+          details: {},
+          retryable: true
+        }
+      });
       assert.equal(String(error.message).includes('secret'), false);
       return true;
     });
   }
 });
 
-test('treats a 403 with only zero remaining quota as retryable rate limiting', async () => {
+test('treats a primary 403 with zero remaining quota as retryable rate limiting', async () => {
   const { source } = sourceFor((path) => path === '/repos/Hint/Pack'
     ? jsonResponse(repository())
-    : jsonResponse({ message: 'quota body token=secret' }, 403, { 'x-ratelimit-remaining': '0' }));
+    : jsonResponse({ message: 'quota body token=secret' }, 403, {
+        'x-ratelimit-remaining': '0',
+        'x-ratelimit-reset': String(Math.floor(NOW / 1000) + 45)
+      }));
   const identity = await bind(source);
-  await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error =>
-    error.code === 'INVALID_RELEASE_URL' && error.retryable &&
-    error.retryMetadata.backoffMs === 1000 && !String(error.message).includes('secret'));
+  await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error => {
+    assert.equal(error.code, 'RATE_LIMITED');
+    assert.equal(error.retryable, true);
+    assert.deepEqual(error.retryMetadata, {
+      retryAfterMs: 0,
+      rateLimitResetAt: '2026-08-01T12:00:45.000Z',
+      backoffMs: 1000,
+      nextAttemptAfterMs: 45000
+    });
+    assert.equal(String(error.message).includes('secret'), false);
+    return true;
+  });
 });
 
 test('recognizes only the exact bounded fatal-UTF8 GitHub secondary-limit body on a headerless 403', async () => {
@@ -372,7 +420,7 @@ test('recognizes only the exact bounded fatal-UTF8 GitHub secondary-limit body o
   const identity = await bind(source);
   for (const expectedBackoff of [60_000, 120_000]) {
     await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error => {
-      assert.equal(error.code, 'INVALID_RELEASE_URL');
+      assert.equal(error.code, 'RATE_LIMITED');
       assert.equal(error.retryable, true);
       assert.deepEqual(error.retryMetadata, {
         retryAfterMs: 0,
@@ -473,6 +521,58 @@ test('lists only uploaded assets while retaining exact IDs ETag digest sizes tim
   assert.equal(JSON.stringify(result).includes('https://'), false);
   assert.equal(Object.isFrozen(result.assets[0].providerDigest), true);
   assert.deepEqual(http.calls[2].options.query, { per_page: '100', page: '1' });
+});
+
+test('normalizes a strict parameterized GitHub asset media type to its base type', async () => {
+  const { source } = sourceFor((path) => {
+    if (path === '/repos/Hint/Pack') return jsonResponse(repository());
+    if (path === '/repos/Canonical/Pack/releases/201') return jsonResponse(release());
+    return jsonResponse([asset({ content_type: 'Application/JSON; Charset=UTF-8; profile="release asset"' })]);
+  });
+  const identity = await bind(source);
+  const result = await source.listUploadedAssets({ repositoryId: identity.repositoryId, releaseId: '201' });
+  assert.equal(result.assets[0].contentType, 'application/json');
+});
+
+test('rejects malformed, duplicate, and control-bearing GitHub asset media types', async () => {
+  for (const content_type of [
+    'application/json;',
+    'application/json; charset=',
+    'application/json; charset="unterminated',
+    'application/json; charset=utf-8; CHARSET=latin1',
+    'application/json; charset=utf-8\n'
+  ]) {
+    const { source } = sourceFor((path) => {
+      if (path === '/repos/Hint/Pack') return jsonResponse(repository());
+      if (path === '/repos/Canonical/Pack/releases/201') return jsonResponse(release());
+      return jsonResponse([asset({ content_type })]);
+    });
+    const identity = await bind(source);
+    await assert.rejects(
+      source.listUploadedAssets({ repositoryId: identity.repositoryId, releaseId: '201' }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
+});
+
+test('rejects malformed or ambiguous GitHub retry headers instead of creating retry metadata', async () => {
+  const responses = [
+    jsonResponse({ message: 'limited' }, 429, { 'retry-after': '-1' }),
+    jsonResponse({ message: 'limited' }, 429, { 'retry-after': 'Aug 2 2026 12:00:00 GMT' }),
+    jsonResponse({ message: 'limited' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1.5' }),
+    jsonResponse({ message: 'limited' }, 429, { 'Retry-After': '5', 'retry-after': '10' })
+  ];
+  for (const response of responses) {
+    const { source } = sourceFor((requestPath) => requestPath === '/repos/Hint/Pack'
+      ? jsonResponse(repository())
+      : response);
+    const identity = await bind(source);
+    await assert.rejects(source.listReleases({ ...identity, includePrereleases: false }), error => {
+      assert.equal(error.code, 'INVALID_REQUEST');
+      assert.equal(error.retryMetadata, undefined);
+      return true;
+    });
+  }
 });
 
 test('returns a safe NO_INSTALLABLE_ASSET outcome when no uploaded installable asset exists', async () => {

@@ -7,13 +7,11 @@ function unavailable(cause) {
   return new ModpackError('EXTRACTOR_UNAVAILABLE', 'Verified archive processing is unavailable', { cause });
 }
 
-async function getBundledArchiveRuntime({
+function resolveBundledArchiveRuntimePaths({
   resourcesPath,
   runtimeRoot,
   arch,
-  isPackaged,
-  verifyRuntime = verifyArchiveRuntime,
-  verifyWorker = verifyArchiveWorkerExecutable
+  isPackaged
 } = {}) {
   try {
     if (arch !== 'x64' || typeof isPackaged !== 'boolean') throw unavailable();
@@ -35,21 +33,12 @@ async function getBundledArchiveRuntime({
       workerManifestPath = path.join(resourcesRoot, 'build-resources', 'archive-runtime', 'archive-worker-x64.json');
     }
 
-    const runtimeLayout = isPackaged ? 'packaged' : 'repository';
-    const runtime = await verifyRuntime(resourcesRoot, { layout: runtimeLayout });
-    if (runtime?.version !== '26.02' || runtime?.architecture !== 'x64' ||
-        runtime?.handlers?.zip !== true || runtime?.handlers?.rar !== true) throw unavailable();
-
-    const worker = await verifyWorker({ workerPath, workerManifestPath });
-    if (worker?.architecture !== 'x64' || worker?.runtimeIdentifier !== 'win-x64') throw unavailable();
-
     return deepFreeze({
       resourcesRoot,
-      runtimeLayout,
+      runtimeLayout: isPackaged ? 'packaged' : 'repository',
       enginePath,
       workerPath,
       workerManifestPath,
-      engineVersion: runtime.version,
       architecture: 'x64'
     });
   } catch (error) {
@@ -58,4 +47,34 @@ async function getBundledArchiveRuntime({
   }
 }
 
-module.exports = { getBundledArchiveRuntime };
+async function getBundledArchiveRuntime({
+  resourcesPath,
+  runtimeRoot,
+  arch,
+  isPackaged,
+  verifyRuntime = verifyArchiveRuntime,
+  verifyWorker = verifyArchiveWorkerExecutable
+} = {}) {
+  try {
+    const runtimePaths = resolveBundledArchiveRuntimePaths({ resourcesPath, runtimeRoot, arch, isPackaged });
+    const runtime = await verifyRuntime(runtimePaths.resourcesRoot, { layout: runtimePaths.runtimeLayout });
+    if (runtime?.version !== '26.02' || runtime?.architecture !== 'x64' ||
+        runtime?.handlers?.zip !== true || runtime?.handlers?.rar !== true) throw unavailable();
+
+    const worker = await verifyWorker({
+      workerPath: runtimePaths.workerPath,
+      workerManifestPath: runtimePaths.workerManifestPath
+    });
+    if (worker?.architecture !== 'x64' || worker?.runtimeIdentifier !== 'win-x64') throw unavailable();
+
+    return deepFreeze({
+      ...runtimePaths,
+      engineVersion: runtime.version
+    });
+  } catch (error) {
+    if (error instanceof ModpackError && error.code === 'EXTRACTOR_UNAVAILABLE') throw error;
+    throw unavailable(error);
+  }
+}
+
+module.exports = { getBundledArchiveRuntime, resolveBundledArchiveRuntimePaths };

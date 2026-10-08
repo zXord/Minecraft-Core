@@ -2,7 +2,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
+const { isNetworkAccess } = require('../../utils/server-network-properties.cjs');
+const {
+  isUnprovenHealthProcessError,
+  stopValidatedHandoff
+} = require('../server-health-validator.cjs');
 const { consumeReservedTarget } = require('./reserved-target-authority.cjs');
+const {
+  failureDiagnosticFromError,
+  normalizeFailureDiagnostic,
+  normalizePublicationFailureDiagnostic,
+  publicationFailureDiagnosticFromError
+} = require('./publication-failure-diagnostic.cjs');
 const transaction = require('./server-directory-transaction.cjs');
 const {
   assertServerDirectoryIdentity,
@@ -15,6 +26,35 @@ const PRE_PUBLICATION_PHASES = new Set([
   'preflight', 'snapshotting', 'staging', 'validating-candidate'
 ]);
 const COMMITTED_PHASES = new Set(['committed-healthy', 'cleanup', 'cleanup-pending']);
+const CLEANUP_YIELD_BATCH = 64;
+const CLEANUP_YIELD_INTERVAL_MS = 16;
+
+function defaultCleanupYield() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+async function yieldCleanupBatch(context, progress, directoryPath, directoryIdentity) {
+  progress.entries += 1;
+  const now = Date.now();
+  if (progress.entries % CLEANUP_YIELD_BATCH !== 0 &&
+      now - progress.lastYieldAt < CLEANUP_YIELD_INTERVAL_MS) return;
+  await (context.yieldControl || defaultCleanupYield)();
+  progress.lastYieldAt = Date.now();
+  if (context.signal?.aborted) throw recoveryRequired();
+  await assertServerDirectoryIdentity(directoryPath, directoryIdentity, {
+    fsApi: context.fsApi,
+    reparseInspector: context.reparseInspector
+  });
+}
+
+async function flushCleanupDirectory(context, directoryPath) {
+  if (typeof context.durableFs.flushDirectoryAsync === 'function') {
+    await context.durableFs.flushDirectoryAsync(directoryPath);
+  } else {
+    context.durableFs.flushDirectory(directoryPath);
+    await (context.yieldControl || defaultCleanupYield)();
+  }
+}
 
 function invalid(cause) {
   if (cause instanceof ModpackError) return cause;
@@ -32,6 +72,10 @@ function isHealthFailure(error) {
 
 function sameIdentity(left, right) {
   return Boolean(left && right && left.volumeSerial === right.volumeSerial && left.fileId === right.fileId);
+}
+
+function sameNullableIdentity(left, right) {
+  return (left === null && right === null) || sameIdentity(left, right);
 }
 
 function pathKey(value) {
@@ -97,6 +141,54 @@ function lstatIfPresent(fsApi, candidate) {
   }
 }
 
+async function removeDirectoryByIdentity({ context, directoryPath, directoryIdentity }) {
+  const fsApi = context.fsApi;
+  const progress = { entries: 0, lastYieldAt: Date.now() };
+  await assertServerDirectoryIdentity(directoryPath, directoryIdentity, {
+    fsApi,
+    reparseInspector: context.reparseInspector
+  });
+  async function removeContents(directory, currentIdentity) {
+    const names = fsApi.readdirSync(directory).sort((left, right) => left.localeCompare(right, 'en-US'));
+    for (const name of names) {
+      const candidate = path.join(directory, name);
+      const before = lstatIfPresent(fsApi, candidate);
+      if (!before || before.isSymbolicLink() || await context.reparseInspector.isReparsePoint(candidate) !== false) {
+        throw recoveryRequired();
+      }
+      if (before.isDirectory()) {
+        const identity = await identifyServerDirectory(candidate, {
+          fsApi,
+          reparseInspector: context.reparseInspector
+        });
+        await removeContents(candidate, identity);
+        await assertServerDirectoryIdentity(candidate, identity, {
+          fsApi,
+          reparseInspector: context.reparseInspector
+        });
+        fsApi.rmdirSync(candidate);
+        await yieldCleanupBatch(context, progress, directory, currentIdentity);
+      } else if (before.isFile() && BigInt(before.nlink) === 1n) {
+        const after = lstatIfPresent(fsApi, candidate);
+        if (!after || after.dev !== before.dev || after.ino !== before.ino ||
+            after.birthtimeNs !== before.birthtimeNs || BigInt(after.nlink) !== 1n) throw recoveryRequired();
+        fsApi.unlinkSync(candidate);
+        await yieldCleanupBatch(context, progress, directory, currentIdentity);
+      } else {
+        throw recoveryRequired();
+      }
+    }
+  }
+  await removeContents(directoryPath, directoryIdentity);
+  await assertServerDirectoryIdentity(directoryPath, directoryIdentity, {
+    fsApi,
+    reparseInspector: context.reparseInspector
+  });
+  fsApi.rmdirSync(directoryPath);
+  await flushCleanupDirectory(context, path.dirname(directoryPath));
+  return { removed: true };
+}
+
 function defaultDirectoryAuthority() {
   return Object.freeze({
     exists(directoryPath, context = null) {
@@ -148,47 +240,26 @@ function defaultDirectoryAuthority() {
       return { directoryIdentity };
     },
 
-    async removeOperationOwned({ context, directoryPath, directoryIdentity, fingerprint }) {
-      await this.verifyOperationOwned({ context, directoryPath, directoryIdentity, fingerprint });
-      const fsApi = context.fsApi;
-      async function removeContents(directory) {
-        const names = fsApi.readdirSync(directory).sort((left, right) => left.localeCompare(right, 'en-US'));
-        for (const name of names) {
-          const candidate = path.join(directory, name);
-          const before = lstatIfPresent(fsApi, candidate);
-          if (!before || before.isSymbolicLink() || await context.reparseInspector.isReparsePoint(candidate) !== false) {
-            throw recoveryRequired();
-          }
-          if (before.isDirectory()) {
-            const identity = await identifyServerDirectory(candidate, {
-              fsApi,
-              reparseInspector: context.reparseInspector
-            });
-            await removeContents(candidate);
-            await assertServerDirectoryIdentity(candidate, identity, {
-              fsApi,
-              reparseInspector: context.reparseInspector
-            });
-            fsApi.rmdirSync(candidate);
-          } else if (before.isFile() && BigInt(before.nlink) === 1n) {
-            const after = lstatIfPresent(fsApi, candidate);
-            if (!after || after.dev !== before.dev || after.ino !== before.ino ||
-                after.birthtimeNs !== before.birthtimeNs || BigInt(after.nlink) !== 1n) throw recoveryRequired();
-            fsApi.unlinkSync(candidate);
-          } else {
-            throw recoveryRequired();
-          }
-          context.durableFs.flushDirectory(directory);
-        }
+    async removeOperationOwned({
+      context,
+      directoryPath,
+      directoryIdentity,
+      fingerprint,
+      ownershipMode = 'operation-marker'
+    }) {
+      if (ownershipMode === 'operation-marker') {
+        await this.verifyOperationOwned({ context, directoryPath, directoryIdentity, fingerprint });
+      } else if (ownershipMode === 'recorded-identity') {
+        await this.verifyOriginal({ context, directoryPath, directoryIdentity, fingerprint });
+      } else {
+        throw recoveryRequired();
       }
-      await removeContents(directoryPath);
-      await assertServerDirectoryIdentity(directoryPath, directoryIdentity, {
-        fsApi,
-        reparseInspector: context.reparseInspector
-      });
-      fsApi.rmdirSync(directoryPath);
-      context.durableFs.flushDirectory(path.dirname(directoryPath));
-      return { removed: true };
+      return removeDirectoryByIdentity({ context, directoryPath, directoryIdentity });
+    },
+
+    async removeAuthorizedIdentity({ context, directoryPath, directoryIdentity }) {
+      if (!directoryIdentity) throw recoveryRequired();
+      return removeDirectoryByIdentity({ context, directoryPath, directoryIdentity });
     },
 
     async inspectFresh({ context, directoryPath }) {
@@ -198,7 +269,9 @@ function defaultDirectoryAuthority() {
       });
       return {
         directoryIdentity: inspection.directoryIdentity,
-        fingerprint: inspection.fingerprint
+        fingerprint: inspection.fingerprint,
+        entryCount: inspection.entryCount,
+        totalBytes: inspection.totalBytes
       };
     }
   });
@@ -212,6 +285,7 @@ class ModpackRecoveryService {
     directoryAuthority = null,
     consumeReservedTargetFn = consumeReservedTarget,
     runtimePolicy,
+    runtimeWriterAuthority = null,
     restorePointResolver = null,
     restorePointService = null,
     transactionApi = transaction
@@ -219,6 +293,7 @@ class ModpackRecoveryService {
     requireMethod(coordinator, 'runRecoveryMutation');
     requireMethod(recoveryRegistry, 'load');
     requireMethod(recoveryRegistry, 'transition');
+    requireMethod(recoveryRegistry, 'clearRestoreCreationAfterCleanup');
     requireMethod(recoveryRegistry, 'finish');
     if (typeof contextFactory !== 'function') throw invalid();
     requireMethod(runtimePolicy, 'suspend');
@@ -226,15 +301,20 @@ class ModpackRecoveryService {
     requireMethod(runtimePolicy, 'adoptValidatedHandoff');
     requireMethod(runtimePolicy, 'restoreAutoRestart');
     for (const method of [
-      'publishNewCandidate', 'registerPublishedInstance', 'markCommittedHealthy', 'cleanupCommittedTransaction'
+      'publishNewCandidate', 'registerPublishedInstance', 'markCommittedHealthy', 'cleanupCommittedTransaction',
+      'prepareNewLiveValidation', 'completeNewLiveValidation', 'verifyCommittedCanonicalDirectory',
+      'verifyCommittedNewPublication', 'verifyMutableNewOperationOwnedDirectory',
+      'verifyMutableOperationOwnedDirectory'
     ]) requireMethod(transactionApi, method);
     const authority = directoryAuthority || defaultDirectoryAuthority();
     for (const method of [
-      'exists', 'verifyOperationOwned', 'verifyOriginal', 'renameExact', 'removeOperationOwned', 'inspectFresh'
+      'exists', 'verifyOperationOwned', 'verifyOriginal', 'renameExact', 'removeOperationOwned',
+      'removeAuthorizedIdentity', 'inspectFresh'
     ]) requireMethod(authority, method);
     if (restorePointResolver !== null && typeof restorePointResolver !== 'function') throw invalid();
     if (typeof consumeReservedTargetFn !== 'function') throw invalid();
     if (restorePointService !== null) {
+      requireMethod(restorePointService, 'cleanupInterruptedRestorePointCreation');
       requireMethod(restorePointService, 'verifyRestorePoint');
       requireMethod(restorePointService, 'restoreToFreshCandidate');
     }
@@ -244,6 +324,7 @@ class ModpackRecoveryService {
     this.consumeReservedTarget = consumeReservedTargetFn;
     this.directoryAuthority = authority;
     this.runtimePolicy = runtimePolicy;
+    this.runtimeWriterAuthority = runtimeWriterAuthority;
     this.restorePointResolver = restorePointResolver;
     this.restorePointService = restorePointService;
     this.transaction = transactionApi;
@@ -340,23 +421,23 @@ class ModpackRecoveryService {
   async #run(recordValue, work) {
     const initial = assertRecord(recordValue);
     const paths = normalizePaths(initial);
-    let hold;
     try {
-      hold = await this.runtimePolicy.suspend({
-        instanceId: initial.target.stableServerId,
-        jobId: initial.jobId,
-        operationId: initial.jobId,
-        serverPath: initial.target.path
-      });
-      if (!hold || hold.held !== true) throw recoveryRequired();
       return await this.coordinator.runRecoveryMutation({
         instanceId: initial.target.stableServerId,
         serverPath: initial.target.path
       }, { operationId: initial.jobId }, async mutationLease => {
-        const durableRecord = await this.registry.load(initial.jobId);
+        let durableRecord = await this.registry.load(initial.jobId);
         if (!durableRecord) return deepFreeze({ jobId: initial.jobId, resolved: true, action: 'already-finished' });
         assertRecord(durableRecord);
         normalizePaths(durableRecord);
+        durableRecord = await this.#assertRuntimeWriters(durableRecord, mutationLease);
+        const hold = await this.runtimePolicy.suspend({
+          instanceId: initial.target.stableServerId,
+          jobId: initial.jobId,
+          operationId: initial.jobId,
+          serverPath: initial.target.path
+        });
+        if (!hold || hold.held !== true) throw recoveryRequired();
         const context = await this.contextFactory({ record: durableRecord, mutationLease });
         if (!context || typeof context !== 'object') throw recoveryRequired();
         context.runtimePolicy = context.runtimePolicy || this.runtimePolicy;
@@ -375,12 +456,13 @@ class ModpackRecoveryService {
           mutationLease.instanceId !== initial.target.stableServerId ||
           !samePath(mutationLease.serverPath, initial.target.path) ||
           typeof mutationLease.markDirty !== 'function') throw invalid();
-      const durableRecord = await this.registry.load(initial.jobId);
+      let durableRecord = await this.registry.load(initial.jobId);
       if (!durableRecord) return deepFreeze({ jobId: initial.jobId, resolved: true, action: 'already-finished' });
       assertRecord(durableRecord);
       normalizePaths(durableRecord);
       if (durableRecord.target.stableServerId !== initial.target.stableServerId ||
           !samePath(durableRecord.target.path, initial.target.path)) throw recoveryRequired();
+      durableRecord = await this.#assertRuntimeWriters(durableRecord, mutationLease);
       const context = await this.contextFactory({ record: durableRecord, mutationLease });
       if (!context || typeof context !== 'object') throw recoveryRequired();
       context.runtimePolicy = context.runtimePolicy || this.runtimePolicy;
@@ -409,14 +491,110 @@ class ModpackRecoveryService {
     }).catch(error => { throw recoveryRequired(error); });
   }
 
+  async #assertRuntimeWriters(record, lease) {
+    if (typeof this.runtimeWriterAuthority?.assertRecoveryAllowed !== 'function') throw recoveryRequired();
+    return this.runtimeWriterAuthority.assertRecoveryAllowed(record, { lease });
+  }
+
+  async #verifyCandidateForCleanup(record, context, directoryPath) {
+    const identity = record.directoryIdentities?.candidate || null;
+    const fingerprint = record.outcome?.candidate?.fingerprint || null;
+    if (identity && typeof fingerprint === 'string') {
+      await this.#verifyOwned(context, directoryPath, identity, fingerprint);
+      return { directoryIdentity: identity, fingerprint, ownershipMode: 'operation-marker' };
+    }
+    if (fingerprint !== null) throw recoveryRequired();
+    let inspection;
+    try {
+      inspection = await this.directoryAuthority.inspectFresh({ context, directoryPath });
+    } catch (error) {
+      throw recoveryRequired(error);
+    }
+    if (!inspection || !inspection.directoryIdentity || typeof inspection.fingerprint !== 'string' ||
+        !Number.isSafeInteger(inspection.entryCount) || inspection.entryCount < 0 ||
+        typeof inspection.totalBytes !== 'string' || !/^\d+$/u.test(inspection.totalBytes)) {
+      throw recoveryRequired();
+    }
+    if (identity) {
+      if (!sameIdentity(inspection.directoryIdentity, identity)) throw recoveryRequired();
+    } else if (inspection.entryCount !== 0 || inspection.totalBytes !== '0') {
+      throw recoveryRequired();
+    }
+    return {
+      directoryIdentity: identity || inspection.directoryIdentity,
+      fingerprint: inspection.fingerprint,
+      ownershipMode: 'recorded-identity'
+    };
+  }
+
+  #candidateCleanupAuthorization(record, directoryPath, action) {
+    const authorization = record.outcome?.candidateCleanup;
+    if (authorization === undefined) return null;
+    const expectedPath = normalizePaths(record).candidatePath;
+    const recordedIdentity = record.directoryIdentities?.candidate || null;
+    const recordedFingerprint = record.outcome?.candidate?.fingerprint || null;
+    if (!authorization || authorization.deletionAuthorized !== true || authorization.slot !== 'candidate' ||
+        authorization.action !== action || !samePath(directoryPath, expectedPath) ||
+        !authorization.directoryIdentity || typeof authorization.fingerprint !== 'string' ||
+        !['operation-marker', 'recorded-identity'].includes(authorization.ownershipMode) ||
+        (recordedIdentity && !sameIdentity(authorization.directoryIdentity, recordedIdentity)) ||
+        (recordedFingerprint && authorization.fingerprint !== recordedFingerprint)) throw recoveryRequired();
+    return authorization;
+  }
+
+  async #authorizeCandidateCleanup(record, context, directoryPath, action) {
+    let current = await this.registry.load(record.jobId) || record;
+    let authorization = this.#candidateCleanupAuthorization(current, directoryPath, action);
+    if (authorization) return { authorization, record: current };
+    const evidence = await this.#verifyCandidateForCleanup(current, context, directoryPath);
+    authorization = {
+      deletionAuthorized: true,
+      slot: 'candidate',
+      action,
+      directoryIdentity: evidence.directoryIdentity,
+      fingerprint: evidence.fingerprint,
+      ownershipMode: evidence.ownershipMode
+    };
+    current = await this.registry.transition(current.jobId, {
+      expectedPhase: current.phase,
+      nextPhase: current.phase,
+      patch: { outcome: outcomeWith(current, { candidateCleanup: authorization }) }
+    });
+    return { authorization, record: current };
+  }
+
+  async #removeCandidateForCleanup(record, context, directoryPath, action) {
+    let current = await this.registry.load(record.jobId) || record;
+    const existingAuthorization = this.#candidateCleanupAuthorization(current, directoryPath, action);
+    if (!this.#exists(directoryPath, context)) return current;
+    const authorized = existingAuthorization
+      ? { authorization: existingAuthorization, record: current }
+      : await this.#authorizeCandidateCleanup(current, context, directoryPath, action);
+    try {
+      await this.directoryAuthority.removeAuthorizedIdentity({
+        context,
+        directoryPath,
+        directoryIdentity: authorized.authorization.directoryIdentity
+      });
+    } catch (error) {
+      throw recoveryRequired(error);
+    }
+    return authorized.record;
+  }
+
   async #syncOwnedJournal(evidence, nextPhase, swapStep, patch = {}) {
     if (!evidence?.journal || typeof evidence.journal.transition !== 'function' ||
         !evidence.journalRecord || typeof evidence.locations?.journalPath !== 'string') return null;
     if (evidence.journalRecord.phase === nextPhase && evidence.journalRecord.swapStep === swapStep) {
+      for (const key of ['targetIdentity', 'rollbackIdentity', 'failedIdentity']) {
+        if (Object.hasOwn(patch, key) && !sameNullableIdentity(evidence.journalRecord[key], patch[key])) {
+          throw recoveryRequired();
+        }
+      }
       return evidence.journalRecord;
     }
     try {
-      return evidence.journal.transition(evidence.locations.journalPath, {
+      return await evidence.journal.transition(evidence.locations.journalPath, {
         expectedPhase: evidence.journalRecord.phase,
         nextPhase,
         patch: { swapStep, ...patch }
@@ -436,6 +614,20 @@ class ModpackRecoveryService {
     }).catch(error => { throw recoveryRequired(error); });
   }
 
+  async #verifyIdentity(context, directoryPath, identity) {
+    if (!identity) throw recoveryRequired();
+    let inspection;
+    try {
+      inspection = await this.directoryAuthority.inspectFresh({ context, directoryPath });
+    } catch (error) {
+      throw recoveryRequired(error);
+    }
+    if (!inspection?.directoryIdentity || !sameIdentity(inspection.directoryIdentity, identity)) {
+      throw recoveryRequired();
+    }
+    return inspection;
+  }
+
   async #rename(context, fromPath, toPath, identity) {
     this.#assertAbsent(toPath, context);
     try {
@@ -450,25 +642,31 @@ class ModpackRecoveryService {
     }
   }
 
-  async #removeOwned(context, directoryPath, identity, fingerprint) {
-    try {
-      await this.directoryAuthority.removeOperationOwned({
-        context,
-        directoryPath,
-        directoryIdentity: identity,
-        fingerprint
-      });
-    } catch (error) {
-      throw recoveryRequired(error);
-    }
-  }
-
   async #finish(record, terminalPhase, action, detail = {}) {
     await this.registry.finish(record.jobId, {
       terminalPhase,
-      outcome: recoveryOutcome(record, action, detail)
+      outcome: record.phase === terminalPhase
+        ? record.outcome
+        : recoveryOutcome(record, action, detail)
     });
-    return deepFreeze({ jobId: record.jobId, resolved: true, action });
+    const failure = normalizeFailureDiagnostic(record.outcome?.failure);
+    return deepFreeze({
+      jobId: record.jobId,
+      resolved: true,
+      action,
+      ...(failure ? { failure } : {})
+    });
+  }
+
+  async #persistPublicationFailure(record, reason) {
+    const stored = normalizePublicationFailureDiagnostic(record.outcome?.failure);
+    if (stored) return record;
+    const failure = publicationFailureDiagnosticFromError(reason);
+    return this.registry.transition(record.jobId, {
+      expectedPhase: record.phase,
+      nextPhase: record.phase,
+      patch: { outcome: outcomeWith(record, { failure }) }
+    });
   }
 
   async #reconcileReleaseTracking(record, context) {
@@ -488,6 +686,7 @@ class ModpackRecoveryService {
   }
 
   async #recoverNew(record, context, paths) {
+    if (record.phase === 'failed') return this.#recoverTerminalNewFailure(record, context, paths);
     if (PRE_PUBLICATION_PHASES.has(record.phase) || (record.phase === 'committing' && record.swapStep === 'none')) {
       return this.#recoverNewBeforePublication(record, context, paths);
     }
@@ -503,12 +702,68 @@ class ModpackRecoveryService {
       return this.#failNewCanonical(record, context, paths, recoveryRequired());
     }
     if (record.phase === 'completed' && record.swapStep === 'candidate-published') {
-      await this.#verifyOwned(context, paths.targetPath, record.directoryIdentities.target,
-        record.outcome?.publication?.candidateFingerprint || record.outcome?.candidate?.fingerprint);
-      await this.#restoreCanonicalPolicy(record, context, 'target');
+      if (record.outcome?.liveMutationAuthorized === true) {
+        await this.transaction.verifyMutableNewOperationOwnedDirectory(
+          context,
+          paths.targetPath,
+          record.directoryIdentities.target
+        );
+      } else {
+        await this.transaction.verifyCommittedNewPublication(context);
+      }
+      const targetRunning = record.outcome?.runtimePolicy?.targetRunning ?? record.priorRuntime.running;
+      if (targetRunning) {
+        await this.#restoreCanonicalPolicy(record, context, 'target');
+      } else {
+        await this.#stopRuntime(record, context);
+        await this.#restoreAutoRestart(record, context, 'target');
+      }
       return this.#finish(record, 'completed', 'new-publication-completed');
     }
     throw recoveryRequired();
+  }
+
+  async #recoverTerminalNewFailure(record, context, paths) {
+    const action = record.outcome?.recovery?.action;
+    if (action === 'pre-publication-cleanup') {
+      this.#assertAbsent(paths.targetPath, context);
+      this.#assertAbsent(paths.failedPath, context);
+      let current = record;
+      if (this.#exists(paths.candidatePath, context)) {
+        if (!this.#candidateCleanupAuthorization(current, paths.candidatePath, action)) throw recoveryRequired();
+        current = await this.#removeCandidateForCleanup(current, context, paths.candidatePath, action);
+      }
+      this.#assertAbsent(paths.candidatePath, context);
+      return this.#finish(current, 'failed', action);
+    }
+    this.#assertAbsent(paths.candidatePath, context);
+    if (action !== 'new-health-failed' || record.swapStep !== 'failed-canonical-moved') {
+      throw recoveryRequired();
+    }
+    this.#assertAbsent(paths.targetPath, context);
+    if (!this.#exists(paths.failedPath, context)) throw recoveryRequired();
+    const fingerprint = record.outcome?.publication?.candidateFingerprint || record.outcome?.candidate?.fingerprint;
+    const failedEvidence = record.outcome?.liveMutationAuthorized === true
+      ? await this.transaction.verifyMutableNewOperationOwnedDirectory(
+          context,
+          paths.failedPath,
+          record.directoryIdentities.failed
+        )
+      : await this.#verifyOwned(
+          context,
+          paths.failedPath,
+          record.directoryIdentities.failed,
+          fingerprint
+        );
+    await this.#syncOwnedJournal(failedEvidence, 'failed', 'failed-canonical-moved', {
+      targetIdentity: null,
+      failedIdentity: record.directoryIdentities.failed
+    });
+    if (record.outcome?.registration?.complete === true) {
+      if (typeof context.unregisterPublishedInstance !== 'function') throw recoveryRequired();
+      await context.unregisterPublishedInstance(record);
+    }
+    return this.#finish(record, 'failed', action);
   }
 
   async #recoverNewBeforePublication(record, context, paths) {
@@ -525,15 +780,37 @@ class ModpackRecoveryService {
     }
     this.#assertAbsent(paths.targetPath, context);
     this.#assertAbsent(paths.failedPath, context);
-    const candidatePresent = this.#exists(paths.candidatePath, context);
-    if (candidatePresent) {
-      const fingerprint = record.outcome?.candidate?.fingerprint;
-      await this.#verifyOwned(context, paths.candidatePath, record.directoryIdentities.candidate, fingerprint);
-      await this.#stopRuntime(record, context);
-      await this.#verifyOwned(context, paths.candidatePath, record.directoryIdentities.candidate, fingerprint);
-      await this.#removeOwned(context, paths.candidatePath, record.directoryIdentities.candidate, fingerprint);
+    let current = await this.registry.load(record.jobId) || record;
+    if (this.#exists(paths.candidatePath, context)) {
+      if (!current.outcome?.candidateCleanup) {
+        await this.#verifyCandidateForCleanup(current, context, paths.candidatePath);
+      }
+      await this.#stopRuntime(current, context);
+      if (this.#exists(paths.candidatePath, context)) {
+        current = (await this.#authorizeCandidateCleanup(
+          current,
+          context,
+          paths.candidatePath,
+          'pre-publication-cleanup'
+        )).record;
+      }
     }
-    return this.#finish(record, 'failed', 'pre-publication-cleanup');
+    if (current.phase !== 'failed') {
+      current = await this.registry.transition(current.jobId, {
+        expectedPhase: current.phase,
+        nextPhase: 'failed',
+        patch: { outcome: recoveryOutcome(current, 'pre-publication-cleanup') }
+      });
+    }
+    if (this.#exists(paths.candidatePath, context)) {
+      current = await this.#removeCandidateForCleanup(
+        current,
+        context,
+        paths.candidatePath,
+        'pre-publication-cleanup'
+      );
+    }
+    return this.#finish(current, 'failed', 'pre-publication-cleanup');
   }
 
   async #recoverNewPublication(record, context, paths) {
@@ -558,23 +835,71 @@ class ModpackRecoveryService {
     this.#assertAbsent(paths.failedPath, context);
     if (!this.#exists(paths.targetPath, context)) throw recoveryRequired();
     const fingerprint = record.outcome?.publication?.candidateFingerprint || record.outcome?.candidate?.fingerprint;
-    await this.#verifyOwned(context, paths.targetPath, record.directoryIdentities.target, fingerprint);
+    const filesOnly = record.operationKind === 'import';
+    if (record.phase === 'committed-healthy' && record.outcome?.liveMutationAuthorized !== true) {
+      await this.transaction.verifyCommittedNewPublication(context);
+    } else if (record.outcome?.liveMutationAuthorized === true) {
+      await this.transaction.verifyMutableNewOperationOwnedDirectory(
+        context,
+        paths.targetPath,
+        record.directoryIdentities.target
+      );
+    } else {
+      await this.#verifyOwned(context, paths.targetPath, record.directoryIdentities.target, fingerprint);
+    }
+
+    if (record.outcome?.registration?.complete !== true) {
+      await this.transaction.registerPublishedInstance(context);
+    }
+    let registered = await this.registry.load(record.jobId);
+    if (!registered || registered.outcome?.registration?.complete !== true) throw recoveryRequired();
+
     let validation;
     try {
-      validation = record.operationKind === 'import'
-        ? await this.#validateInactiveNewCanonical(record, context)
-        : await this.#restoreCanonicalPolicy(record, context, 'target', { restoreAutoRestart: false });
-    } catch (error) {
-      if (!isHealthFailure(error.cause || error) && !isHealthFailure(error)) throw error;
-      if (record.phase === 'committed-healthy') throw recoveryRequired(error);
-      return this.#failNewCanonical(record, context, paths, error);
-    }
-    if (record.outcome?.registration?.complete !== true) await this.transaction.registerPublishedInstance(context);
-    let registered = await this.registry.load(record.jobId);
-    if (!registered || registered.phase !== 'registering' || registered.outcome?.registration?.complete !== true) {
-      if (!registered || registered.phase !== 'committed-healthy' || registered.outcome?.registration?.complete !== true) {
-        throw recoveryRequired();
+      if (registered.phase === 'committed-healthy') {
+        validation = registered.outcome?.health;
+        if (!validation || typeof validation !== 'object' || Array.isArray(validation)) throw recoveryRequired();
+        const targetRunning = registered.outcome?.runtimePolicy?.targetRunning ?? registered.priorRuntime.running;
+        if (targetRunning) {
+          await this.#restoreCanonicalPolicy(registered, context, 'target', { restoreAutoRestart: false });
+        } else {
+          await this.#stopRuntime(registered, context);
+        }
+      } else if (filesOnly) {
+        if (!['registering', 'validating-live'].includes(registered.phase)) throw recoveryRequired();
+        validation = await this.#validateInactiveNewCanonical(registered, context);
+      } else if (registered.outcome?.runtimePolicy?.targetRunning === false &&
+          registered.outcome?.candidate?.health && registered.outcome?.liveMutationAuthorized !== true &&
+          typeof this.transaction.verifyPublishedNewCandidate === 'function') {
+        validation = await this.transaction.verifyPublishedNewCandidate(context);
+        registered = await this.registry.load(record.jobId);
+        if (!registered || !['registering', 'committed-healthy'].includes(registered.phase)) throw recoveryRequired();
+      } else {
+        const authorization = await this.transaction.prepareNewLiveValidation(context);
+        registered = await this.registry.load(record.jobId);
+        if (!registered || !['validating-live', 'committed-healthy'].includes(registered.phase)) throw recoveryRequired();
+        validation = await this.#restoreCanonicalPolicy(registered, context, 'target', { restoreAutoRestart: false });
+        try {
+          await this.transaction.completeNewLiveValidation(context, authorization);
+        } catch (error) {
+          try {
+            await this.#stopRuntime(registered, context);
+          } catch (stopError) {
+            throw recoveryRequired(new AggregateError(
+              [error, stopError],
+              'Canonical completion failed and the adopted server could not be stopped'
+            ));
+          }
+          throw error;
+        }
+        registered = await this.registry.load(record.jobId);
+        if (!registered || !['validating-live', 'committed-healthy'].includes(registered.phase)) throw recoveryRequired();
       }
+    } catch (error) {
+      if (isUnprovenHealthProcessError(error)) throw recoveryRequired(error);
+      if (!isHealthFailure(error.cause || error) && !isHealthFailure(error)) throw error;
+      if (registered.phase === 'committed-healthy') throw recoveryRequired(error);
+      return this.#failNewCanonical(registered, context, paths, error);
     }
     registered = await this.#finalizeNewCommittedOutcome(registered, context, validation);
     await this.#restoreAutoRestart(registered, context);
@@ -612,7 +937,7 @@ class ModpackRecoveryService {
   }
 
   async #finalizeNewCommittedOutcome(record, context, validation) {
-    if (!record || !['registering', 'committed-healthy'].includes(record.phase) ||
+    if (!record || !['registering', 'validating-live', 'committed-healthy'].includes(record.phase) ||
         record.outcome?.registration?.complete !== true) throw recoveryRequired();
     const state = this.#readCanonicalNewState(record, context);
     const event = this.#newRevisionEvent(record, state);
@@ -633,10 +958,11 @@ class ModpackRecoveryService {
     }
 
     let current = record;
-    if (current.phase === 'registering') {
+    if (['registering', 'validating-live'].includes(current.phase)) {
+      const expectedPhase = current.phase;
       const targetRunning = current.outcome?.runtimePolicy?.targetRunning ?? current.priorRuntime.running;
       current = await this.registry.transition(current.jobId, {
-        expectedPhase: 'registering',
+        expectedPhase,
         nextPhase: 'committed-healthy',
         patch: {
           outcome: outcomeWith(current, {
@@ -705,7 +1031,36 @@ class ModpackRecoveryService {
   }
 
   async #failNewCanonical(record, context, paths, reason) {
+    if (isUnprovenHealthProcessError(reason)) throw recoveryRequired(reason);
     let current = await this.registry.load(record.jobId) || record;
+    const targetInitiallyPresent = this.#exists(paths.targetPath, context);
+    const candidateInitiallyPresent = this.#exists(paths.candidatePath, context);
+    const failedInitiallyPresent = this.#exists(paths.failedPath, context);
+    const normalPrePublication = PRE_PUBLICATION_PHASES.has(current.phase) ||
+      (current.phase === 'committing' && current.swapStep === 'none') ||
+      (current.phase === 'publishing' && current.swapStep === 'new-prepared');
+    const legacyMisclassifiedPrePublication = current.phase === 'rolling-back' &&
+      current.swapStep === 'candidate-published' && current.outcome?.recovery?.action === 'new-health-failed' &&
+      current.outcome?.publication?.state === 'publishing';
+    if (normalPrePublication || legacyMisclassifiedPrePublication) {
+      current = await this.#persistPublicationFailure(current, reason);
+    } else {
+      const failure = failureDiagnosticFromError(reason);
+      if (failure && !normalizeFailureDiagnostic(current.outcome?.failure)) {
+        current = await this.registry.transition(current.jobId, {
+          expectedPhase: current.phase,
+          nextPhase: current.phase,
+          patch: { outcome: outcomeWith(current, { failure }) }
+        });
+      }
+    }
+    if ((normalPrePublication || legacyMisclassifiedPrePublication) && !targetInitiallyPresent && !failedInitiallyPresent &&
+        current.directoryIdentities?.target === null && current.outcome?.registration?.complete !== true &&
+        current.outcome?.liveMutationAuthorized !== true) {
+      if (candidateInitiallyPresent || normalPrePublication) {
+        return this.#recoverNewBeforePublication(current, context, paths);
+      }
+    }
     if (current.outcome?.registration?.complete === true && typeof context.unregisterPublishedInstance !== 'function') {
       throw recoveryRequired(reason);
     }
@@ -717,6 +1072,10 @@ class ModpackRecoveryService {
       });
     }
     const fingerprint = current.outcome?.publication?.candidateFingerprint || current.outcome?.candidate?.fingerprint;
+    const verifyCandidateDirectory = (directoryPath, directoryIdentity) =>
+      current.outcome?.liveMutationAuthorized === true
+        ? this.transaction.verifyMutableNewOperationOwnedDirectory(context, directoryPath, directoryIdentity)
+        : this.#verifyOwned(context, directoryPath, directoryIdentity, fingerprint);
     const targetPresent = this.#exists(paths.targetPath, context);
     const failedPresent = this.#exists(paths.failedPath, context);
     this.#assertAbsent(paths.candidatePath, context);
@@ -725,7 +1084,7 @@ class ModpackRecoveryService {
       await this.#stopRuntime(current, context);
       let failedEvidence;
       if (targetPresent) {
-        const targetEvidence = await this.#verifyOwned(context, paths.targetPath, current.directoryIdentities.target, fingerprint);
+        const targetEvidence = await verifyCandidateDirectory(paths.targetPath, current.directoryIdentities.target);
         await this.#syncOwnedJournal(targetEvidence, 'rolling-back', 'candidate-published', {
           targetIdentity: current.directoryIdentities.target
         });
@@ -734,7 +1093,7 @@ class ModpackRecoveryService {
       } else if (!failedPresent) {
         throw recoveryRequired();
       }
-      failedEvidence = await this.#verifyOwned(context, paths.failedPath, current.directoryIdentities.target, fingerprint);
+      failedEvidence = await verifyCandidateDirectory(paths.failedPath, current.directoryIdentities.target);
       await this.#syncOwnedJournal(failedEvidence, 'rolling-back', 'failed-canonical-moved', {
         targetIdentity: null,
         failedIdentity: current.directoryIdentities.target
@@ -753,7 +1112,7 @@ class ModpackRecoveryService {
         }
       });
     }
-    const failedEvidence = await this.#verifyOwned(context, paths.failedPath, current.directoryIdentities.failed, fingerprint);
+    const failedEvidence = await verifyCandidateDirectory(paths.failedPath, current.directoryIdentities.failed);
     await this.#syncOwnedJournal(failedEvidence, 'failed', 'failed-canonical-moved', {
       targetIdentity: null,
       failedIdentity: current.directoryIdentities.failed
@@ -767,10 +1126,18 @@ class ModpackRecoveryService {
     if (record.phase === 'completed' && record.swapStep === 'cleanup-complete') {
       this.#assertAbsent(paths.candidatePath, context);
       this.#assertAbsent(paths.rollbackPath, context);
-      await this.#verifyOwned(context, paths.targetPath, record.directoryIdentities.target,
-        record.outcome?.candidate?.fingerprint);
+      try {
+        await this.transaction.verifyCommittedCanonicalDirectory(context);
+      } catch (error) {
+        throw recoveryRequired(error);
+      }
+      const cleanup = await this.transaction.cleanupCommittedTransaction(context);
+      if (cleanup?.phase !== 'completed' || cleanup.rollbackRemoved !== true) throw recoveryRequired();
       await this.#restoreCanonicalPolicy(record, context, 'target');
       return this.#finish(record, 'completed', 'committed-cleanup-completed');
+    }
+    if (['failed', 'rolled-back'].includes(record.phase)) {
+      return this.#recoverTerminalExisting(record, context, paths);
     }
     if (COMMITTED_PHASES.has(record.phase)) return this.#retryCommittedCleanup(record, context, paths);
     if (record.phase === 'rolling-back') return this.#rollbackExisting(record, context, paths, 'resume-rollback');
@@ -789,6 +1156,10 @@ class ModpackRecoveryService {
       const targetPresent = this.#exists(paths.targetPath, context);
       const candidatePresent = this.#exists(paths.candidatePath, context);
       if (!targetPresent && candidatePresent) return this.#restoreBeforePublication(record, context, paths);
+      if (targetPresent && candidatePresent &&
+          record.outcome?.candidateCleanup?.action === 'between-renames-restored') {
+        return this.#restoreBeforePublication(record, context, paths);
+      }
       if (targetPresent && !candidatePresent) return this.#rollbackExisting(record, context, paths, 'swap-interrupted');
       throw recoveryRequired();
     }
@@ -799,6 +1170,53 @@ class ModpackRecoveryService {
     throw recoveryRequired();
   }
 
+  async #recoverTerminalExisting(record, context, paths) {
+    const action = record.outcome?.recovery?.action;
+    this.#assertAbsent(paths.rollbackPath, context);
+    if (!this.#exists(paths.targetPath, context)) throw recoveryRequired();
+
+    if (record.phase === 'failed') {
+      if (!['pre-swap-restored', 'between-renames-restored'].includes(action)) throw recoveryRequired();
+      this.#assertAbsent(paths.failedPath, context);
+      await this.#verifyIdentity(context, paths.targetPath, record.directoryIdentities.target);
+      let current = record;
+      if (this.#exists(paths.candidatePath, context)) {
+        if (!this.#candidateCleanupAuthorization(current, paths.candidatePath, action)) throw recoveryRequired();
+        current = await this.#removeCandidateForCleanup(current, context, paths.candidatePath, action);
+      }
+      this.#assertAbsent(paths.candidatePath, context);
+      await this.#restoreCanonicalPolicy(current, context, 'source');
+      return this.#finish(current, 'failed', action);
+    }
+
+    this.#assertAbsent(paths.candidatePath, context);
+
+    if (record.swapStep !== 'rollback-restored' || action !== 'rollback-restored' ||
+        !this.#exists(paths.failedPath, context)) throw recoveryRequired();
+    await this.#verifyIdentity(context, paths.targetPath, record.directoryIdentities.target);
+    const mutableCandidate = record.outcome?.liveMutationAuthorized === true ||
+      record.outcome?.recovery?.reason === 'live-health-failed';
+    const failedEvidence = mutableCandidate
+      ? await this.transaction.verifyMutableOperationOwnedDirectory(
+          context,
+          paths.failedPath,
+          record.directoryIdentities.failed
+        )
+      : await this.#verifyOwned(
+          context,
+          paths.failedPath,
+          record.directoryIdentities.failed,
+          record.outcome?.candidate?.fingerprint
+        );
+    await this.#syncOwnedJournal(failedEvidence, 'rolled-back', 'rollback-restored', {
+      targetIdentity: record.directoryIdentities.target,
+      rollbackIdentity: record.directoryIdentities.target,
+      failedIdentity: record.directoryIdentities.failed
+    });
+    await this.#restoreCanonicalPolicy(record, context, 'source');
+    return this.#finish(record, 'rolled-back', action);
+  }
+
   async #recoverExistingBeforeSwap(record, context, paths) {
     this.#assertAbsent(paths.failedPath, context);
     const targetPresent = this.#exists(paths.targetPath, context);
@@ -806,11 +1224,33 @@ class ModpackRecoveryService {
     const candidatePresent = this.#exists(paths.candidatePath, context);
     if (targetPresent && rollbackPresent) throw recoveryRequired();
     if (!targetPresent && !rollbackPresent) throw recoveryRequired();
+    if (['preflight', 'snapshotting'].includes(record.phase) && record.restoreCreation != null) {
+      if (!this.restorePointService) throw recoveryRequired();
+      let cleanup;
+      try {
+        cleanup = await this.restorePointService.cleanupInterruptedRestorePointCreation({
+          serverPath: targetPresent ? paths.targetPath : paths.rollbackPath,
+          operationId: record.jobId,
+          creationIntent: record.restoreCreation
+        });
+      } catch (error) {
+        throw recoveryRequired(error);
+      }
+      if (!cleanup || !Number.isSafeInteger(cleanup.cleaned) || cleanup.cleaned < 0 ||
+          !Array.isArray(cleanup.diagnostics) || cleanup.diagnostics.length > 0) throw recoveryRequired();
+      try {
+        record = await this.registry.clearRestoreCreationAfterCleanup(record.jobId, {
+          expectedPhase: record.phase,
+          expectedCreation: record.restoreCreation
+        });
+      } catch (error) {
+        throw recoveryRequired(error);
+      }
+    }
     const originalIdentity = record.directoryIdentities.rollback || record.directoryIdentities.target;
     const originalFingerprint = record.outcome?.rollback?.fingerprint || record.outcome?.live?.fingerprint;
-    if (candidatePresent) {
-      await this.#verifyOwned(context, paths.candidatePath, record.directoryIdentities.candidate,
-        record.outcome?.candidate?.fingerprint);
+    if (candidatePresent && !record.outcome?.candidateCleanup) {
+      await this.#verifyCandidateForCleanup(record, context, paths.candidatePath);
     }
     if (targetPresent) {
       await this.#verifyOriginal(context, paths.targetPath, originalIdentity, originalFingerprint);
@@ -822,48 +1262,86 @@ class ModpackRecoveryService {
       await this.#rename(context, paths.rollbackPath, paths.targetPath, originalIdentity);
       await this.#verifyOriginal(context, paths.targetPath, originalIdentity, originalFingerprint);
     }
-    if (candidatePresent) {
-      await this.#verifyOwned(context, paths.candidatePath, record.directoryIdentities.candidate,
-        record.outcome?.candidate?.fingerprint);
-      await this.#removeOwned(context, paths.candidatePath, record.directoryIdentities.candidate,
-        record.outcome?.candidate?.fingerprint);
+    let current = await this.registry.load(record.jobId) || record;
+    if (candidatePresent && this.#exists(paths.candidatePath, context)) {
+      current = (await this.#authorizeCandidateCleanup(
+        current,
+        context,
+        paths.candidatePath,
+        'pre-swap-restored'
+      )).record;
     }
-    const canonical = {
-      ...record,
-      directoryIdentities: { ...record.directoryIdentities, target: originalIdentity, rollback: originalIdentity }
-    };
-    await this.#restoreCanonicalPolicy(canonical, context, 'source');
-    return this.#finish(canonical, 'failed', 'pre-swap-restored');
+    current = await this.registry.transition(current.jobId, {
+      expectedPhase: current.phase,
+      nextPhase: 'failed',
+      patch: {
+        directoryIdentities: { ...current.directoryIdentities, target: originalIdentity, rollback: originalIdentity },
+        outcome: recoveryOutcome(current, 'pre-swap-restored')
+      }
+    });
+    if (this.#exists(paths.candidatePath, context)) {
+      current = await this.#removeCandidateForCleanup(
+        current,
+        context,
+        paths.candidatePath,
+        'pre-swap-restored'
+      );
+    }
+    await this.#restoreCanonicalPolicy(current, context, 'source');
+    return this.#finish(current, 'failed', 'pre-swap-restored');
   }
 
   async #restoreBeforePublication(record, context, paths) {
-    this.#assertAbsent(paths.targetPath, context);
     this.#assertAbsent(paths.failedPath, context);
-    if (!this.#exists(paths.rollbackPath, context) || !this.#exists(paths.candidatePath, context)) throw recoveryRequired();
+    const targetPresent = this.#exists(paths.targetPath, context);
+    const rollbackPresent = this.#exists(paths.rollbackPath, context);
+    if (targetPresent === rollbackPresent || !this.#exists(paths.candidatePath, context)) throw recoveryRequired();
     const originalIdentity = record.directoryIdentities.rollback || record.directoryIdentities.target;
     const originalFingerprint = record.outcome?.rollback?.fingerprint || record.outcome?.live?.fingerprint;
-    await this.#verifyOriginal(context, paths.rollbackPath, originalIdentity, originalFingerprint);
-    await this.#verifyOwned(context, paths.candidatePath, record.directoryIdentities.candidate,
-      record.outcome?.candidate?.fingerprint);
+    if (rollbackPresent) await this.#verifyOriginal(context, paths.rollbackPath, originalIdentity, originalFingerprint);
+    else await this.#verifyOriginal(context, paths.targetPath, originalIdentity, originalFingerprint);
+    if (!record.outcome?.candidateCleanup) {
+      await this.#verifyOwned(context, paths.candidatePath, record.directoryIdentities.candidate,
+        record.outcome?.candidate?.fingerprint);
+    }
     await this.#stopRuntime(record, context);
-    await this.#rename(context, paths.rollbackPath, paths.targetPath, originalIdentity);
+    if (rollbackPresent) await this.#rename(context, paths.rollbackPath, paths.targetPath, originalIdentity);
     await this.#verifyOriginal(context, paths.targetPath, originalIdentity, originalFingerprint);
-    await this.#removeOwned(context, paths.candidatePath, record.directoryIdentities.candidate,
-      record.outcome?.candidate?.fingerprint);
-    const canonical = {
-      ...record,
-      directoryIdentities: { ...record.directoryIdentities, target: originalIdentity, rollback: originalIdentity }
-    };
-    await this.#restoreCanonicalPolicy(canonical, context, 'source');
-    return this.#finish(canonical, 'failed', 'between-renames-restored');
+    let current = await this.registry.load(record.jobId) || record;
+    current = (await this.#authorizeCandidateCleanup(
+      current,
+      context,
+      paths.candidatePath,
+      'between-renames-restored'
+    )).record;
+    current = await this.registry.transition(current.jobId, {
+      expectedPhase: current.phase,
+      nextPhase: 'failed',
+      patch: {
+        directoryIdentities: { ...current.directoryIdentities, target: originalIdentity, rollback: originalIdentity },
+        outcome: recoveryOutcome(current, 'between-renames-restored')
+      }
+    });
+    current = await this.#removeCandidateForCleanup(
+      current,
+      context,
+      paths.candidatePath,
+      'between-renames-restored'
+    );
+    await this.#restoreCanonicalPolicy(current, context, 'source');
+    return this.#finish(current, 'failed', 'between-renames-restored');
   }
 
   async #assertPublishedTopology(record, context, paths) {
     this.#assertAbsent(paths.candidatePath, context);
     this.#assertAbsent(paths.failedPath, context);
     if (!this.#exists(paths.targetPath, context) || !this.#exists(paths.rollbackPath, context)) throw recoveryRequired();
-    await this.#verifyOwned(context, paths.targetPath, record.directoryIdentities.target,
-      record.outcome?.candidate?.fingerprint);
+    if (record.phase === 'validating-live') {
+      await this.transaction.verifyCommittedCanonicalDirectory(context);
+    } else {
+      await this.#verifyOwned(context, paths.targetPath, record.directoryIdentities.target,
+        record.outcome?.candidate?.fingerprint);
+    }
     await this.#verifyOriginal(context, paths.rollbackPath, record.directoryIdentities.rollback,
       record.outcome?.rollback?.fingerprint || record.outcome?.live?.fingerprint);
   }
@@ -873,10 +1351,16 @@ class ModpackRecoveryService {
     if (COMMITTED_PHASES.has(current.phase) || current.phase === 'completed') throw recoveryRequired();
     this.#assertAbsent(paths.candidatePath, context);
     const candidateFingerprint = current.outcome?.candidate?.fingerprint;
+    let mutableCanonical = current.phase === 'validating-live' ||
+      current.outcome?.liveMutationAuthorized === true ||
+      current.outcome?.recovery?.reason === 'live-health-failed';
+    const verifyCandidateDirectory = (directoryPath, directoryIdentity) => mutableCanonical
+      ? this.transaction.verifyMutableOperationOwnedDirectory(context, directoryPath, directoryIdentity)
+      : this.#verifyOwned(context, directoryPath, directoryIdentity, candidateFingerprint);
     if (current.swapStep === 'live-moved') {
       if (!this.#exists(paths.targetPath, context) || !this.#exists(paths.rollbackPath, context) ||
           this.#exists(paths.failedPath, context)) throw recoveryRequired();
-      await this.#verifyOwned(context, paths.targetPath, current.directoryIdentities.candidate, candidateFingerprint);
+      await verifyCandidateDirectory(paths.targetPath, current.directoryIdentities.candidate);
       await this.#verifyOriginal(context, paths.rollbackPath,
         current.directoryIdentities.rollback || current.directoryIdentities.target,
         current.outcome?.rollback?.fingerprint || current.outcome?.live?.fingerprint);
@@ -901,22 +1385,36 @@ class ModpackRecoveryService {
       if (!targetPresent && !failedPresent) throw recoveryRequired();
       let ownedEvidence;
       if (targetPresent) {
-        ownedEvidence = await this.#verifyOwned(context, paths.targetPath, current.directoryIdentities.target, candidateFingerprint);
+        ownedEvidence = await verifyCandidateDirectory(paths.targetPath, current.directoryIdentities.target);
       } else {
-        ownedEvidence = await this.#verifyOwned(context, paths.failedPath,
-          current.directoryIdentities.failed || current.directoryIdentities.target, candidateFingerprint);
+        ownedEvidence = await verifyCandidateDirectory(
+          paths.failedPath,
+          current.directoryIdentities.failed || current.directoryIdentities.target
+        );
       }
       current = await this.#ensureRollbackSource(current, context, paths);
       if (current.phase !== 'rolling-back') {
+        if (current.phase === 'validating-live' && ownedEvidence?.journalRecord?.phase === 'starting') {
+          await this.#syncOwnedJournal(ownedEvidence, 'validating-live', 'candidate-published', {
+            targetIdentity: current.directoryIdentities.target,
+            rollbackIdentity: current.directoryIdentities.rollback,
+            failedIdentity: null
+          });
+        }
+        const recovery = recoveryOutcome(current, 'rollback-started', { reason });
         current = await this.registry.transition(current.jobId, {
           expectedPhase: current.phase,
           nextPhase: 'rolling-back',
-          patch: { swapStep: 'candidate-published', outcome: recoveryOutcome(current, 'rollback-started', { reason }) }
+          patch: {
+            swapStep: 'candidate-published',
+            outcome: mutableCanonical ? { ...recovery, liveMutationAuthorized: true } : recovery
+          }
         });
+        mutableCanonical ||= current.outcome?.liveMutationAuthorized === true;
       }
       await this.#stopRuntime(current, context);
       if (targetPresent) {
-        ownedEvidence = await this.#verifyOwned(context, paths.targetPath, current.directoryIdentities.target, candidateFingerprint);
+        ownedEvidence = await verifyCandidateDirectory(paths.targetPath, current.directoryIdentities.target);
         await this.#syncOwnedJournal(ownedEvidence, 'rolling-back', 'candidate-published', {
           targetIdentity: current.directoryIdentities.target,
           rollbackIdentity: current.directoryIdentities.rollback
@@ -926,8 +1424,10 @@ class ModpackRecoveryService {
         this.#assertAbsent(paths.failedPath, context);
         await this.#rename(context, paths.targetPath, paths.failedPath, current.directoryIdentities.target);
       }
-      ownedEvidence = await this.#verifyOwned(context, paths.failedPath,
-        current.directoryIdentities.failed || current.directoryIdentities.target, candidateFingerprint);
+      ownedEvidence = await verifyCandidateDirectory(
+        paths.failedPath,
+        current.directoryIdentities.failed || current.directoryIdentities.target
+      );
       await this.#syncOwnedJournal(ownedEvidence, 'rolling-back', 'failed-canonical-moved', {
         targetIdentity: null,
         rollbackIdentity: current.directoryIdentities.rollback,
@@ -948,7 +1448,7 @@ class ModpackRecoveryService {
       });
     }
     if (current.swapStep === 'failed-canonical-moved') {
-      const failedEvidence = await this.#verifyOwned(context, paths.failedPath, current.directoryIdentities.failed, candidateFingerprint);
+      const failedEvidence = await verifyCandidateDirectory(paths.failedPath, current.directoryIdentities.failed);
       const targetPresent = this.#exists(paths.targetPath, context);
       const rollbackPresent = this.#exists(paths.rollbackPath, context);
       if (targetPresent && rollbackPresent) throw recoveryRequired();
@@ -987,14 +1487,21 @@ class ModpackRecoveryService {
     await this.#verifyOriginal(context, paths.targetPath, current.directoryIdentities.target,
       current.outcome?.rollback?.fingerprint || current.outcome?.live?.fingerprint);
     if (!this.#exists(paths.failedPath, context)) throw recoveryRequired();
-    const failedEvidence = await this.#verifyOwned(context, paths.failedPath, current.directoryIdentities.failed, candidateFingerprint);
+    const failedEvidence = await verifyCandidateDirectory(paths.failedPath, current.directoryIdentities.failed);
     await this.#syncOwnedJournal(failedEvidence, 'rolled-back', 'rollback-restored', {
       targetIdentity: current.directoryIdentities.target,
       rollbackIdentity: current.directoryIdentities.target,
       failedIdentity: current.directoryIdentities.failed
     });
-    await this.#restoreCanonicalPolicy(current, context, 'source');
-    return this.#finish(current, 'rolled-back', 'rollback-restored', { reason });
+    if (current.phase === 'rolling-back') {
+      current = await this.registry.transition(current.jobId, {
+        expectedPhase: 'rolling-back',
+        nextPhase: 'rolled-back',
+        patch: { outcome: recoveryOutcome(current, 'rollback-restored', { reason }) }
+      });
+    }
+    if (current.phase !== 'rolled-back') throw recoveryRequired();
+    return this.#recoverTerminalExisting(current, context, paths);
   }
 
   async #ensureRollbackSource(record, context, paths) {
@@ -1044,18 +1551,23 @@ class ModpackRecoveryService {
     this.#assertAbsent(paths.candidatePath, context);
     this.#assertAbsent(paths.failedPath, context);
     if (!this.#exists(paths.targetPath, context)) throw recoveryRequired();
-    await this.#verifyOwned(context, paths.targetPath, record.directoryIdentities.target,
-      record.outcome?.candidate?.fingerprint);
+    try {
+      await this.transaction.verifyCommittedCanonicalDirectory(context);
+    } catch (error) {
+      throw recoveryRequired(error);
+    }
     const rollbackPresent = this.#exists(paths.rollbackPath, context);
-    if (!rollbackPresent && record.phase !== 'cleanup') throw recoveryRequired();
-    if (rollbackPresent) {
+    if (!rollbackPresent && !['cleanup', 'cleanup-pending'].includes(record.phase)) throw recoveryRequired();
+    if (rollbackPresent && record.outcome?.cleanup?.deletionAuthorized !== true) {
       await this.#verifyOriginal(context, paths.rollbackPath, record.directoryIdentities.rollback,
         record.outcome?.rollback?.fingerprint || record.outcome?.live?.fingerprint);
     }
-    try {
-      await this.transaction.markCommittedHealthy(context);
-    } catch (error) {
-      throw recoveryRequired(error);
+    if (record.phase === 'committed-healthy') {
+      try {
+        await this.transaction.markCommittedHealthy(context);
+      } catch (error) {
+        throw recoveryRequired(error);
+      }
     }
     let current = await this.registry.load(record.jobId) || record;
     current = await this.#reconcileReleaseTracking(current, context);
@@ -1089,7 +1601,14 @@ class ModpackRecoveryService {
   async #runtimeConfig(record, context, authority) {
     if (typeof context.resolveRecoveryRuntimeConfig === 'function') {
       const resolved = await context.resolveRecoveryRuntimeConfig({ authority, record });
-      if (resolved) return resolved;
+      if (resolved) {
+        return {
+          ...resolved,
+          networkAccess: Object.hasOwn(resolved, 'networkAccess')
+            ? resolved.networkAccess
+            : (isNetworkAccess(context.networkAccess) ? context.networkAccess : 'pack-default')
+        };
+      }
     }
     const runtimeOutcome = record.outcome?.runtime;
     const selected = runtimeOutcome?.[authority];
@@ -1098,12 +1617,18 @@ class ModpackRecoveryService {
       return {
         runtime: selected.runtime,
         maxRam: selected.maxRam,
+        networkAccess: isNetworkAccess(selected.networkAccess)
+          ? selected.networkAccess
+          : (isNetworkAccess(runtimeOutcome.networkAccess) ? runtimeOutcome.networkAccess : 'pack-default'),
         port: selected.port
       };
     }
     return {
       runtime: selected,
       maxRam: runtimeOutcome.maxRam ?? context.maxRam,
+      networkAccess: isNetworkAccess(runtimeOutcome.networkAccess)
+        ? runtimeOutcome.networkAccess
+        : (isNetworkAccess(context.networkAccess) ? context.networkAccess : 'pack-default'),
       port: runtimeOutcome.port ?? context.port
     };
   }
@@ -1117,19 +1642,36 @@ class ModpackRecoveryService {
       if (restoreAutoRestart) await this.#restoreAutoRestart(record, context, authority);
       return deepFreeze({ skipped: true, reason: 'inactive-target' });
     }
-    const config = await this.#runtimeConfig(record, context, authority);
-    if (!config?.runtime || typeof config.maxRam !== 'number' || !Number.isSafeInteger(config.port)) throw recoveryRequired();
+    const unknownUnmanagedSource = authority === 'source' &&
+      Object.hasOwn(record.outcome?.runtime || {}, 'source') && record.outcome.runtime.source === null;
+    let config = null;
+    if (unknownUnmanagedSource) {
+      try {
+        config = await this.#runtimeConfig(record, context, authority);
+      } catch (error) {
+        if (record.priorRuntime.running !== false || record.priorRuntime.autoRestart !== false) {
+          throw recoveryRequired(error);
+        }
+        if (restoreAutoRestart) await this.#restoreAutoRestart(record, context, authority);
+        return deepFreeze({ skipped: true, reason: 'unmanaged-source-runtime-unknown' });
+      }
+    }
+    config ||= await this.#runtimeConfig(record, context, authority);
+    if (!config?.runtime || typeof config.maxRam !== 'number' || !Number.isSafeInteger(config.port) ||
+        !isNetworkAccess(config.networkAccess)) throw recoveryRequired();
     const keepRunning = authority === 'target'
       ? record.outcome?.runtimePolicy?.targetRunning ?? record.priorRuntime.running
       : record.priorRuntime.running;
     let validation;
     try {
       validation = await requireMethod(context.healthValidator, 'validateLive').validateLive({
+        captureBootDiagnostic: true,
         instanceId: record.target.stableServerId,
         jobId: record.jobId,
         keepRunning,
         maxRam: config.maxRam,
         mutationLease: context.mutationLease,
+        networkAccess: config.networkAccess,
         port: config.port,
         runtime: config.runtime,
         serverPath: record.target.path,
@@ -1155,9 +1697,24 @@ class ModpackRecoveryService {
           serverPath: record.target.path
         });
       } catch (error) {
+        try {
+          await stopValidatedHandoff(validation.handoff);
+        } catch (cleanupError) {
+          throw recoveryRequired(new AggregateError(
+            [error, cleanupError],
+            'Validated server handoff cleanup failed during recovery'
+          ));
+        }
         throw recoveryRequired(error);
       }
-      if (!adopted || adopted.adopted !== true) throw recoveryRequired();
+      if (!adopted || adopted.adopted !== true) {
+        try {
+          await stopValidatedHandoff(validation.handoff);
+        } catch (cleanupError) {
+          throw recoveryRequired(cleanupError);
+        }
+        throw recoveryRequired();
+      }
     }
     if (restoreAutoRestart) await this.#restoreAutoRestart(record, context, authority);
     return validation;

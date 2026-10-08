@@ -1,12 +1,16 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
   import { modpackApi } from '../../utils/modpacks/modpackApi.js';
 
+  const MAX_RELEASE_PAGES = 100;
   const dispatch = createEventDispatcher();
   export let suggestedRepositoryUrl = '';
   export let suggestedModrinthProjectId = '';
   export let currentReleaseId = '';
   export let serverId = '';
+  export let requestedReleaseId = '';
+  export let requestedNavigationToken = 0;
+  export let allowCurrentReleaseReview = false;
   let repositoryUrl = suggestedRepositoryUrl;
   let includePrereleases = false;
   let linkedRepositoryApproved = !suggestedModrinthProjectId;
@@ -14,14 +18,70 @@
   let pagination = { nextCursor: null };
   let loading = false;
   let error = null;
+  let requestSequence = 0;
+  let handledRequestedNavigationToken = 0;
 
   $: usingSuggestedRepository = Boolean(suggestedRepositoryUrl && repositoryUrl === suggestedRepositoryUrl);
   $: usingLinkedRepository = Boolean(usingSuggestedRepository && suggestedModrinthProjectId);
   $: installedRelease = currentReleaseId ? releases.find(release => release.releaseId === currentReleaseId) : null;
+  $: rateLimited = error?.code === 'RATE_LIMITED';
   $: canLoad = /^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+(?:\/releases\/tag\/[^/?#]+)?\/?$/.test(repositoryUrl.trim()) && (!usingLinkedRepository || linkedRepositoryApproved);
+  $: if (requestedNavigationToken && requestedReleaseId &&
+      requestedNavigationToken !== handledRequestedNavigationToken) {
+    handledRequestedNavigationToken = requestedNavigationToken;
+    void loadRequestedRelease(requestedReleaseId, requestedNavigationToken);
+  }
+
+  function requestIsCurrent(sequence, navigationToken = 0) {
+    return sequence === requestSequence &&
+      (!navigationToken || navigationToken === handledRequestedNavigationToken);
+  }
+
+  function exactReleaseError(message, code = 'RELEASE_NOT_FOUND') {
+    const value = new Error(message);
+    value.code = code;
+    return value;
+  }
+
+  function classifyRelease(release, availableReleases, { allowCurrent = false } = {}) {
+    if (release.releaseId === currentReleaseId) {
+      if (allowCurrent) return 'update';
+      return null;
+    }
+    if (!currentReleaseId) return null;
+    const current = availableReleases.find(candidate => candidate.releaseId === currentReleaseId);
+    const selectedPublished = Date.parse(release.publishedAt || '');
+    const currentPublished = Date.parse(current?.publishedAt || '');
+    if (!current || !Number.isFinite(selectedPublished) || !Number.isFinite(currentPublished) || selectedPublished === currentPublished) {
+      throw exactReleaseError('Minecraft Core could not prove whether this exact release is newer or older. Load older releases until the installed release appears, or use Switch modpack without guessing.', 'PLAN_STALE');
+    }
+    return selectedPublished < currentPublished ? 'downgrade' : 'update';
+  }
+
+  async function loadAssetsForRelease(release, availableReleases, sequence, {
+    allowCurrent = false,
+    navigationToken = 0
+  } = {}) {
+    const operationKind = classifyRelease(release, availableReleases, { allowCurrent });
+    const assets = await modpackApi.listGithubAssets({
+      repositoryId: release.repositoryId,
+      releaseId: release.releaseId,
+      ...(serverId ? { serverId } : {})
+    });
+    if (!requestIsCurrent(sequence, navigationToken)) return false;
+    dispatch('assets', {
+      release,
+      assets,
+      repositoryUrl: repositoryUrl.trim(),
+      operationKind,
+      linkedModrinthProjectId: usingLinkedRepository && linkedRepositoryApproved ? suggestedModrinthProjectId : null
+    });
+    return true;
+  }
 
   async function loadReleases(cursor = null) {
     if (!canLoad) return;
+    const sequence = ++requestSequence;
     loading = true;
     error = null;
     try {
@@ -30,48 +90,88 @@
         includePrereleases,
         cursor
       });
+      if (!requestIsCurrent(sequence)) return;
       releases = cursor ? [...releases, ...(result?.releases || [])] : result?.releases || [];
       pagination = result?.pagination || { nextCursor: null };
     } catch (caught) {
-      error = caught;
+      if (requestIsCurrent(sequence)) error = caught;
     } finally {
-      loading = false;
+      if (requestIsCurrent(sequence)) loading = false;
     }
   }
 
   async function chooseRelease(release) {
     if (release.releaseId === currentReleaseId) return;
-    let operationKind = null;
-    if (currentReleaseId) {
-      const selectedPublished = Date.parse(release.publishedAt || '');
-      const currentPublished = Date.parse(installedRelease?.publishedAt || '');
-      if (!installedRelease || !Number.isFinite(selectedPublished) || !Number.isFinite(currentPublished) || selectedPublished === currentPublished) {
-        error = new Error('Minecraft Core could not prove whether this exact release is newer or older. Load older releases until the installed release appears, or use Switch modpack without guessing.');
-        return;
-      }
-      operationKind = selectedPublished < currentPublished ? 'downgrade' : 'update';
-    }
+    const sequence = ++requestSequence;
     loading = true;
     error = null;
     try {
-      const assets = await modpackApi.listGithubAssets({
-        repositoryId: release.repositoryId,
-        releaseId: release.releaseId,
-        ...(serverId ? { serverId } : {})
-      });
-      dispatch('assets', {
-        release,
-        assets,
-        repositoryUrl: repositoryUrl.trim(),
-        operationKind,
-        linkedModrinthProjectId: usingLinkedRepository && linkedRepositoryApproved ? suggestedModrinthProjectId : null
-      });
+      await loadAssetsForRelease(release, releases, sequence);
     } catch (caught) {
-      error = caught;
+      if (requestIsCurrent(sequence)) error = caught;
     } finally {
-      loading = false;
+      if (requestIsCurrent(sequence)) loading = false;
     }
   }
+
+  async function loadRequestedRelease(exactReleaseId, navigationToken) {
+    if (!canLoad || exactReleaseId !== requestedReleaseId) return;
+    const sequence = ++requestSequence;
+    includePrereleases = true;
+    releases = [];
+    pagination = { nextCursor: null };
+    loading = true;
+    error = null;
+    const seenCursors = new Set();
+    let cursor = null;
+    let collected = [];
+    try {
+      for (let page = 0; page < MAX_RELEASE_PAGES; page += 1) {
+        const result = await modpackApi.listGithubReleases({
+          repositoryUrl: repositoryUrl.trim(),
+          includePrereleases: true,
+          cursor
+        });
+        if (!requestIsCurrent(sequence, navigationToken)) return;
+        collected = [...collected, ...(result?.releases || [])];
+        releases = collected;
+        pagination = result?.pagination || { nextCursor: null };
+        const requested = collected.find(release => release.releaseId === requestedReleaseId);
+        const installed = currentReleaseId
+          ? collected.find(release => release.releaseId === currentReleaseId)
+          : null;
+        const canClassify = !currentReleaseId || Boolean(installed) ||
+          (allowCurrentReleaseReview && requested?.releaseId === currentReleaseId);
+        if (requested && canClassify) {
+          await loadAssetsForRelease(requested, collected, sequence, {
+            allowCurrent: allowCurrentReleaseReview,
+            navigationToken
+          });
+          return;
+        }
+        const nextCursor = pagination.nextCursor;
+        if (!nextCursor) break;
+        if (seenCursors.has(nextCursor)) {
+          throw exactReleaseError('GitHub release pagination repeated itself before the exact notified release could be resolved.', 'INVALID_RESPONSE');
+        }
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+      const requested = collected.find(release => release.releaseId === requestedReleaseId);
+      if (!requested) {
+        throw exactReleaseError('The exact GitHub release from this notification is no longer available. Minecraft Core did not substitute another release.');
+      }
+      throw exactReleaseError('Minecraft Core could not find the installed release in the exact GitHub history, so it did not guess whether the notified release is an update or downgrade.', 'PLAN_STALE');
+    } catch (caught) {
+      if (requestIsCurrent(sequence, navigationToken)) error = caught;
+    } finally {
+      if (requestIsCurrent(sequence, navigationToken)) loading = false;
+    }
+  }
+
+  onDestroy(() => {
+    requestSequence += 1;
+  });
 </script>
 
 <div class="modpack-surface mp-stack">
@@ -90,7 +190,7 @@
   </form>
 
   {#if error}
-    <section class="mp-state error" tabindex="-1" aria-live="assertive"><strong>Could not load GitHub releases</strong><p>{error.message}</p><div class="mp-actions"><button class="mp-button" type="button" on:click={() => loadReleases()}>Retry</button><button class="mp-button" type="button" on:click={() => dispatch('local')}>Import local archive</button><button class="mp-button" type="button" on:click={() => dispatch('custom')}>Empty/Custom Server</button></div></section>
+    <section class="mp-state error" tabindex="-1" aria-live="assertive"><strong>{rateLimited ? 'GitHub rate limit reached' : 'Could not load GitHub releases'}</strong><p>{error.message}{rateLimited ? ' Wait until GitHub allows more requests, then retry. Your repository and channel selection are preserved.' : ''}</p><div class="mp-actions"><button class="mp-button" type="button" on:click={() => loadReleases()}>Retry</button><button class="mp-button" type="button" on:click={() => dispatch('local')}>Import local archive</button><button class="mp-button" type="button" on:click={() => dispatch('custom')}>Empty/Custom Server</button></div></section>
   {/if}
 
   {#if releases.length > 0}

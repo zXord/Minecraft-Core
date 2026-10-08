@@ -2,8 +2,11 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { compactOperationIdFromRandomSource } = require('./operation-id.cjs');
+
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
+const { normalizeFailureDiagnostic } = require('./publication-failure-diagnostic.cjs');
 
 const JOB_TYPE = 'minecraft-core-modpack-job';
 const JOB_SCHEMA_VERSION = 1;
@@ -25,6 +28,7 @@ const CANCELLABLE_PHASES = new Set([
   'queued', 'resolving', 'downloading', 'verifying', 'inspecting', 'planning', 'awaiting-user', 'preflight',
   'snapshotting', 'staging', 'validating-candidate'
 ]);
+const NEW_SERVER_OPERATION_KINDS = new Set(['install-new', 'import-files-only-new']);
 const MUTATION_TRANSITIONS = Object.freeze({
   queued: ['resolving', 'preflight', 'cancelling', 'failed'],
   resolving: ['downloading', 'verifying', 'inspecting', 'planning', 'awaiting-user', 'cancelling', 'failed'],
@@ -33,10 +37,10 @@ const MUTATION_TRANSITIONS = Object.freeze({
   inspecting: ['planning', 'awaiting-user', 'cancelling', 'failed'],
   planning: ['awaiting-user', 'cancelling', 'failed'],
   'awaiting-user': ['preflight', 'cancelling', 'failed'],
-  preflight: ['snapshotting', 'staging', 'cancelling', 'failed'],
-  snapshotting: ['staging', 'cancelling', 'failed'],
-  staging: ['validating-candidate', 'committing', 'cancelling', 'failed'],
-  'validating-candidate': ['committing', 'cancelling', 'failed'],
+  preflight: ['snapshotting', 'staging', 'cancelling', 'failed', 'recovery-required'],
+  snapshotting: ['staging', 'cancelling', 'failed', 'recovery-required'],
+  staging: ['validating-candidate', 'committing', 'cancelling', 'failed', 'recovery-required'],
+  'validating-candidate': ['committing', 'cancelling', 'failed', 'recovery-required'],
   committing: ['publishing', 'starting', 'validating-live', 'rolling-back', 'recovery-required'],
   publishing: ['published', 'rolling-back', 'recovery-required'],
   published: ['registering', 'starting', 'validating-live', 'rolling-back', 'recovery-required'],
@@ -46,7 +50,7 @@ const MUTATION_TRANSITIONS = Object.freeze({
   'committed-healthy': ['cleanup', 'cleanup-pending'],
   cleanup: ['completed', 'cleanup-pending'],
   'cleanup-pending': ['cleanup', 'completed', 'recovery-required'],
-  cancelling: ['cancelled', 'failed'],
+  cancelling: ['cancelled', 'failed', 'recovery-required'],
   'rolling-back': ['rolled-back', 'recovery-required']
 });
 const RECORD_KEYS = Object.freeze([
@@ -171,6 +175,11 @@ function normalizeOutcome(value, terminalPhase) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
   const sanitized = sanitizePublicValue(value);
   if (sanitized.status !== terminalPhase) throw invalid();
+  if (Object.hasOwn(sanitized, 'failure')) {
+    const failure = normalizeFailureDiagnostic(sanitized.failure);
+    if (failure) sanitized.failure = failure;
+    else delete sanitized.failure;
+  }
   return sanitized;
 }
 
@@ -285,6 +294,7 @@ function normalizeRecord(value) {
 function isLegalJobTransition(from, to, { operationKind: kind = 'install-existing' } = {}) {
   if (!JOB_PHASE_SET.has(from) || !JOB_PHASE_SET.has(to) || typeof kind !== 'string') return false;
   if ((MUTATION_TRANSITIONS[from] || []).includes(to)) return true;
+  if (from === 'rolling-back' && to === 'failed' && NEW_SERVER_OPERATION_KINDS.has(kind)) return true;
   return kind === 'verify' && ((from === 'queued' && to === 'verifying') || (from === 'verifying' && to === 'completed'));
 }
 
@@ -314,6 +324,7 @@ class OperationStore {
   constructor({ userDataPath, fsApi = fs, durableFs, clock = () => new Date(), randomUUID = crypto.randomUUID, eventSink = () => {} } = {}) {
     if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath) || !fsApi || typeof fsApi !== 'object' ||
         !durableFs || typeof durableFs.readFileBounded !== 'function' || typeof durableFs.writeJsonAtomic !== 'function' ||
+        typeof durableFs.writeJsonAtomicAsync !== 'function' ||
         typeof durableFs.flushDirectory !== 'function' || typeof clock !== 'function' || typeof randomUUID !== 'function' ||
         typeof eventSink !== 'function') throw invalid();
     this.userDataPath = path.resolve(userDataPath);
@@ -334,6 +345,7 @@ class OperationStore {
     this.rootPath = path.join(this.userDataPath, 'modpack-lifecycle');
     this.operationsPath = path.join(this.rootPath, 'operations');
     this.pins = { userData: directoryIdentity(userDataStat), root: null, operations: null };
+    this.activePublications = new Map();
     this.initialized = false;
   }
 
@@ -384,7 +396,7 @@ class OperationStore {
     record.checksum = checksumFor(record);
     try {
       this.#revalidateDirectories();
-      this.durableFs.writeJsonAtomic(filePath, record, { expectedTargetSha256: null });
+      await this.durableFs.writeJsonAtomicAsync(filePath, record, { expectedTargetSha256: null });
       this.#revalidateDirectories();
     } catch (error) {
       throw commitFailure(error);
@@ -396,7 +408,20 @@ class OperationStore {
   async get(jobId) {
     this.#assertInitialized();
     identifier(jobId);
-    const loaded = this.#read(jobId, { allowMissing: true });
+    let loaded;
+    while (true) {
+      await this.#waitForActivePublications(jobId);
+      try {
+        loaded = this.#read(jobId, { allowMissing: true });
+        break;
+      } catch (error) {
+        // A native atomic replacement can complete while the guarded reader
+        // still holds the prior file identity. Retry only when this exact
+        // store has an authenticated publication in flight; unrelated read
+        // failures continue to fail closed as recovery-required.
+        if (!this.activePublications.has(jobId)) throw error;
+      }
+    }
     if (!loaded) {
       this.records.delete(jobId);
       return null;
@@ -438,6 +463,50 @@ class OperationStore {
       if (value !== null && (typeof value !== 'string' || !SWAP_STEP.test(value))) throw invalid();
       candidate.swapStep = value;
     }
+    return this.#write(jobId, loaded.sha256, candidate);
+  }
+
+  async reconcileRecovery(jobId, request) {
+    this.#assertInitialized();
+    identifier(jobId);
+    const descriptors = strictObject(request, ['nextPhase', 'patch']);
+    const nextPhase = descriptors.nextPhase.value;
+    if (!['completed', 'failed', 'rolled-back'].includes(nextPhase)) throw invalid();
+    const patchDescriptors = strictObject(descriptors.patch.value, ['progress', 'outcome']);
+    const progress = normalizeProgress(patchDescriptors.progress.value);
+    if (progress === null) throw invalid();
+    const loaded = this.#read(jobId, { allowMissing: false });
+    if (loaded.record.phase !== 'recovery-required') throw stale();
+    const now = this.#now();
+    const candidate = {
+      ...loaded.record,
+      sequence: loaded.record.sequence + 1,
+      phase: nextPhase,
+      progress,
+      updatedAt: now,
+      terminalAt: now,
+      outcome: normalizeOutcome(patchDescriptors.outcome.value, nextPhase)
+    };
+    return this.#write(jobId, loaded.sha256, candidate);
+  }
+
+  async updateProgress(jobId, request) {
+    this.#assertInitialized();
+    identifier(jobId);
+    const descriptors = strictObject(request, ['expectedPhase', 'progress']);
+    const expectedPhase = descriptors.expectedPhase.value;
+    if (!JOB_PHASE_SET.has(expectedPhase)) throw invalid();
+    const progress = normalizeProgress(descriptors.progress.value);
+    if (progress === null) throw invalid();
+    const loaded = this.#read(jobId, { allowMissing: false });
+    if (loaded.record.phase !== expectedPhase || TERMINAL_PHASES.has(loaded.record.phase) ||
+        (loaded.record.progress !== null && progress.percent < loaded.record.progress.percent)) throw stale();
+    const candidate = {
+      ...loaded.record,
+      sequence: loaded.record.sequence + 1,
+      progress,
+      updatedAt: this.#now()
+    };
     return this.#write(jobId, loaded.sha256, candidate);
   }
 
@@ -488,15 +557,46 @@ class OperationStore {
     let normalized;
     try { normalized = normalizeRecord(candidate); }
     catch (error) { throw error instanceof ModpackError ? error : invalid(error); }
+    const finishPublication = this.#beginPublication(jobId);
     try {
-      this.#revalidateDirectories();
-      this.durableFs.writeJsonAtomic(this.#recordPath(jobId), normalized, { expectedTargetSha256: expectedSha256 });
-      this.#revalidateDirectories();
-    } catch (error) {
-      throw commitFailure(error);
+      try {
+        this.#revalidateDirectories();
+        await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), normalized, { expectedTargetSha256: expectedSha256 });
+        this.#revalidateDirectories();
+      } catch (error) {
+        throw commitFailure(error);
+      }
+      this.records.set(jobId, normalized);
+      return dto(normalized);
+    } finally {
+      finishPublication();
     }
-    this.records.set(jobId, normalized);
-    return dto(normalized);
+  }
+
+  #beginPublication(jobId) {
+    let resolvePublication;
+    const publication = new Promise(resolve => { resolvePublication = resolve; });
+    let active = this.activePublications.get(jobId);
+    if (!active) {
+      active = new Set();
+      this.activePublications.set(jobId, active);
+    }
+    active.add(publication);
+    return () => {
+      active.delete(publication);
+      if (active.size === 0 && this.activePublications.get(jobId) === active) {
+        this.activePublications.delete(jobId);
+      }
+      resolvePublication();
+    };
+  }
+
+  async #waitForActivePublications(jobId) {
+    while (true) {
+      const active = this.activePublications.get(jobId);
+      if (!active || active.size === 0) return;
+      await Promise.all([...active]);
+    }
   }
 
   #read(jobId, { allowMissing }) {
@@ -520,7 +620,7 @@ class OperationStore {
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const value = this.randomUUID();
       if (typeof value !== 'string' || !/^[A-Za-z0-9-]{1,96}$/.test(value)) throw invalid();
-      const jobId = `job-${value}`;
+      const jobId = compactOperationIdFromRandomSource(value);
       if (!this.records.has(jobId) && !this.#entryExists(this.#recordPath(jobId))) return jobId;
     }
     throw targetExists();

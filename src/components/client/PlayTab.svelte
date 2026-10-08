@@ -6,6 +6,9 @@
   import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
   export let authStatus;
+  export let packState = null;
+  $: legacyContentAllowed = packState?.status === 'unmanaged';
+  $: managedReady = packState?.status === 'ready' && packState?.verified === true;
   export let authenticateWithMicrosoft;
   export let checkAuthentication;
   export let username;
@@ -77,8 +80,7 @@
   }
 
   $: canLaunchMinecraft =
-    clientSyncStatus === 'ready' &&
-    downloadStatus === 'ready' &&
+    (legacyContentAllowed ? clientSyncStatus === 'ready' && downloadStatus === 'ready' : managedReady) &&
     !stagedVersionHydrationPending &&
     $clientState.appVersionCompatible;
 
@@ -489,6 +491,7 @@
                 <h2 class="status-header {
                   !$clientState.appVersionCompatible && $clientState.appVersionMismatch ? 'needs-update' :
                   stagedVersionHydrationPending ? 'waiting' :
+                  !legacyContentAllowed ? (managedReady ? 'ready' : 'waiting') :
                   clientSyncStatus !== 'ready' ? 'needs-client' :
                   isCheckingMods || isDownloadingMods ? 'waiting' :
                   downloadStatus !== 'ready' ? 'needs-mods' : 'ready'
@@ -497,6 +500,8 @@
                     🔄 App Update Required
                   {:else if stagedVersionHydrationPending}
                     ⏳ Checking App Update...
+                  {:else if !legacyContentAllowed}
+                    {managedReady ? 'Ready to Play' : 'Matching Pack Review Required'}
                   {:else if clientSyncStatus !== 'ready'}
                     📥 Client Download Required
                   {:else if isCheckingMods}
@@ -544,6 +549,7 @@
                 </div>
               {/if}
               
+              {#if legacyContentAllowed}
               <!-- Compact Status Indicators -->
               <div class="status-row">
                 <!-- Client Status -->
@@ -557,7 +563,7 @@
                   </div>
                 {:else if clientSyncStatus === 'downloading'}
                   <div class="status-indicator downloading">
-                    📥 <span>Downloading Client ({Math.round((clientDownloadProgress.current / clientDownloadProgress.total) * 100) || 0}%)</span>
+                    📥 <span>Downloading Client…</span>
                   </div>
                 {:else if clientSyncStatus === 'ready'}
                   <div class="status-indicator ready">
@@ -576,7 +582,7 @@
                   </div>
                 {:else if downloadStatus === 'downloading'}
                   <div class="status-indicator downloading">
-                    📥 <span>Downloading Mods ({downloadProgress}%)</span>
+                    📥 <span>Downloading Mods…</span>
                   </div>
                 {:else if downloadStatus === 'ready'}
                   <div class="status-indicator ready">
@@ -620,6 +626,7 @@
                 <div class="detail-section">
                   <h3>Downloading Minecraft Client</h3>
                   <div class="progress-container">
+                    <progress aria-label="Client download in progress; total unknown"></progress>
                     <p>{clientDownloadProgress.type}: {clientDownloadProgress.task}</p>
                     {#if clientDownloadProgress.total > 0}
                       <div class="progress-bar">
@@ -819,10 +826,8 @@
                 <div class="detail-section">
                   <h3>Downloading Mods</h3>
                   <div class="progress-container">
-                    <div class="progress-bar">
-                      <div class="progress-fill" style="width: {downloadProgress}%"></div>
-                    </div>
-                    <p class="progress-text">Overall Progress: {downloadProgress}%</p>
+                    <progress aria-label="Mod download in progress; total unknown"></progress>
+                    <p class="progress-text">Downloading required mods; waiting for the result.</p>
                     {#if currentDownloadFile}
                       <div class="current-file-section">
                         <p class="current-file">Downloading: {currentDownloadFile}</p>
@@ -1012,6 +1017,7 @@
                 {/if}
               {/if}
               
+              {/if}
               <!-- Compact Memory Settings -->
               <div class="memory-settings-compact">
                 <span class="memory-label">🧠 Max RAM (GB):</span>
@@ -1026,7 +1032,9 @@
                   title="Amount of RAM to allocate to Minecraft"
                 />
                 <span class="memory-info">
-                  {#if requiredMods && requiredMods.length > 50}
+                  {#if !legacyContentAllowed}
+                    {maxMemory}GB allocated to the matching client pack
+                  {:else if requiredMods && requiredMods.length > 50}
                     {maxMemory}GB (Heavy modpack - 6-8GB recommended)
                   {:else if requiredMods && requiredMods.length > 20}
                     {maxMemory}GB (Medium modpack - 4-6GB recommended)
@@ -1065,6 +1073,8 @@
                         🔄 UPDATE REQUIRED
                       {:else if stagedVersionHydrationPending}
                         ⏳ CHECKING APP UPDATE...
+                      {:else if !legacyContentAllowed}
+                        MATCHING PACK REVIEW REQUIRED
                       {:else if clientSyncStatus !== 'ready'}
                         📥 DOWNLOAD CLIENT FIRST
                       {:else if isCheckingMods}
@@ -1169,6 +1179,8 @@
                       <div class="status-message">
                         Download the Minecraft client files before playing.
                       </div>
+                    {:else if !legacyContentAllowed}
+                      <div class="status-message">Refresh and review the matching client pack before launching.</div>
                     {:else if isCheckingMods}
                       <div class="status-message">
                         Checking mods and updates before launch.

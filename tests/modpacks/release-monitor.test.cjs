@@ -186,7 +186,12 @@ test('rate limits and failures persist capped backoff and produce one safe notif
   await state.trackingStore.upsert(githubTracking());
   const rateLimit = Object.assign(new Error('limited'), {
     code: 'RATE_LIMITED',
-    details: { retryAfterAt: '2026-08-01T03:00:00.000Z', token: 'must-not-persist' }
+    details: { retryAfterAt: '2026-08-01T06:00:00.000Z', token: 'must-not-persist' },
+    retryMetadata: {
+      retryAfterMs: 60_000,
+      backoffMs: 15 * 60 * 1000,
+      nextAttemptAfterMs: 2 * 60 * 60 * 1000
+    }
   });
   const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
   const monitor = new ReleaseMonitor({
@@ -209,6 +214,108 @@ test('rate limits and failures persist capped backoff and produce one safe notif
   nowMs = Date.parse('2026-08-01T02:00:00.000Z');
   await monitor.checkAll();
   assert.equal((await state.notificationStore.list()).length, 1);
+});
+
+test('a real GitHub primary limit reaches monitor status scheduling and rate-limit UI state', async (t) => {
+  const nowMs = Date.parse('2026-08-01T01:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await stores(t, clock);
+  await state.trackingStore.upsert(githubTracking());
+  const { GitHubReleasesSource } = require('../../electron/services/modpacks/providers/github-releases-source.cjs');
+  const github = new GitHubReleasesSource({
+    clock: { now: () => nowMs },
+    http: {
+      async request(requestPath) {
+        if (requestPath === '/repos/Owner/Pack') {
+          return {
+            statusCode: 200,
+            headers: {},
+            body: Buffer.from(JSON.stringify({
+              id: 12345,
+              owner: { login: 'Owner' },
+              name: 'Pack',
+              full_name: 'Owner/Pack',
+              private: false,
+              visibility: 'public',
+              archived: false,
+              disabled: false
+            }))
+          };
+        }
+        assert.equal(requestPath, '/repos/Owner/Pack/releases');
+        return {
+          statusCode: 403,
+          headers: {
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String((nowMs + (2 * 60 * 60 * 1000)) / 1000)
+          },
+          body: Buffer.from(JSON.stringify({ message: 'API rate limit exceeded for token=secret' }))
+        };
+      }
+    }
+  });
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github,
+      modrinth: { async checkLatest() { throw new Error('not called'); } }
+    }
+  });
+
+  const outcome = await monitor.checkOne('tracking-github-1', { force: true });
+
+  assert.deepEqual(outcome, {
+    checked: false,
+    errorCode: 'RATE_LIMITED',
+    nextDueAt: '2026-08-01T03:00:00.000Z',
+    trackingId: 'tracking-github-1'
+  });
+  const persisted = await state.trackingStore.get('tracking-github-1');
+  assert.deepEqual(persisted.lastFailure, {
+    code: 'RATE_LIMITED',
+    at: '2026-08-01T01:00:00.000Z',
+    attempt: 1,
+    retryAfterAt: '2026-08-01T03:00:00.000Z'
+  });
+  const notifications = await state.notificationStore.list();
+  assert.deepEqual(notifications.map(item => item.type), ['rate-limit']);
+  assert.doesNotMatch(JSON.stringify(notifications), /secret|integrity-warning/);
+});
+
+test('malformed rate-limit metadata is rejected and cannot control retry scheduling', async (t) => {
+  const nowMs = Date.parse('2026-08-01T01:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  for (const [name, retryMetadata] of [
+    ['missing delay', { retryAfterMs: 0, backoffMs: 1 }],
+    ['out of bounds', { retryAfterMs: 0, backoffMs: 1, nextAttemptAfterMs: 24 * 60 * 60 * 1000 + 1 }],
+    ['inconsistent', { retryAfterMs: 60_000, backoffMs: 1, nextAttemptAfterMs: 1 }],
+    ['unknown field', { retryAfterMs: 0, backoffMs: 1, nextAttemptAfterMs: 1, token: 'secret' }]
+  ]) {
+    await t.test(name, async (subtest) => {
+      const state = await stores(subtest, clock);
+      await state.trackingStore.upsert(githubTracking());
+      const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+      const monitor = new ReleaseMonitor({
+        clock,
+        notificationStore: state.notificationStore,
+        trackingStore: state.trackingStore,
+        providers: {
+          github: { async checkLatest() { throw Object.assign(new Error('limited'), { code: 'RATE_LIMITED', retryMetadata }); } },
+          modrinth: { async checkLatest() { throw new Error('not called'); } }
+        }
+      });
+
+      const outcome = await monitor.checkOne('tracking-github-1', { force: true });
+
+      assert.equal(outcome.errorCode, 'PROVIDER_UNAVAILABLE');
+      assert.equal(outcome.nextDueAt, '2026-08-01T01:15:00.000Z');
+      assert.equal((await state.notificationStore.list())[0].type, 'integrity-warning');
+      assert.doesNotMatch(JSON.stringify(await state.notificationStore.list()), /secret/);
+    });
+  }
 });
 
 test('clock rollback cannot postpone a due source indefinitely', async (t) => {
@@ -304,6 +411,143 @@ test('failure backoff is capped at twelve hours even after repeated failures', a
   assert.equal(Date.parse(failed.nextDueAt) - nowMs, BASE_INTERVAL_MS);
 });
 
+test('a fresh GitHub provider re-resolves persisted repository identity before its first update check', async (t) => {
+  const nowMs = Date.parse('2026-08-01T01:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await stores(t, clock);
+  await state.trackingStore.upsert(githubTracking());
+  const requests = [];
+  const responses = [
+    {
+      statusCode: 200,
+      headers: {},
+      body: Buffer.from(JSON.stringify({
+        id: 12345,
+        owner: { login: 'Owner' },
+        name: 'Pack',
+        full_name: 'Owner/Pack',
+        private: false,
+        visibility: 'public',
+        archived: false,
+        disabled: false
+      }))
+    },
+    {
+      statusCode: 200,
+      headers: { etag: '"fresh-release-etag"' },
+      body: Buffer.from(JSON.stringify([{
+        id: 101,
+        tag_name: 'v1.1.0',
+        name: 'v1.1.0',
+        draft: false,
+        prerelease: false,
+        immutable: true,
+        created_at: '2026-08-01T00:00:00Z',
+        updated_at: '2026-08-01T00:00:00Z',
+        published_at: '2026-08-01T00:00:00Z'
+      }]))
+    },
+    {
+      statusCode: 200,
+      headers: {},
+      body: Buffer.from(JSON.stringify([{
+        id: 201,
+        name: 'server.zip',
+        label: null,
+        content_type: 'application/zip',
+        state: 'uploaded',
+        size: 12,
+        digest: `sha256:${'b'.repeat(64)}`,
+        created_at: '2026-08-01T00:00:00Z',
+        updated_at: '2026-08-01T00:00:00Z'
+      }]))
+    }
+  ];
+  const { GitHubReleasesSource } = require('../../electron/services/modpacks/providers/github-releases-source.cjs');
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const github = new GitHubReleasesSource({
+    clock: { now: () => nowMs },
+    http: {
+      async request(requestPath, options) {
+        requests.push([requestPath, options]);
+        return responses.shift();
+      }
+    }
+  });
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github,
+      modrinth: { async listVersions() { throw new Error('not called'); } }
+    }
+  });
+
+  const outcome = await monitor.checkOne('tracking-github-1', { force: true });
+
+  assert.deepEqual(outcome, {
+    checked: true,
+    changed: true,
+    nextDueAt: new Date(nowMs + require('../../electron/services/modpacks/notifications/release-monitor.cjs').deterministicInterval('tracking-github-1')).toISOString(),
+    trackingId: 'tracking-github-1'
+  });
+  assert.deepEqual(requests.map(([requestPath]) => requestPath), [
+    '/repos/Owner/Pack',
+    '/repos/Owner/Pack/releases',
+    '/repos/Owner/Pack/releases/101/assets'
+  ]);
+  assert.equal((await state.trackingStore.get('tracking-github-1')).lastFailure, null);
+  assert.equal((await state.notificationStore.list()).some(item => item.type === 'update-available'), true);
+});
+
+test('a re-resolved GitHub name cannot replace the persisted immutable repository identity', async (t) => {
+  const nowMs = Date.parse('2026-08-01T01:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await stores(t, clock);
+  await state.trackingStore.upsert(githubTracking());
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github: {
+        async getRepositoryIdentity() {
+          return {
+            repositoryId: '54321',
+            owner: 'Owner',
+            repo: 'Pack',
+            fullName: 'Owner/Pack',
+            visibility: 'public',
+            archived: false,
+            disabled: false
+          };
+        },
+        async listReleases() {
+          return { notModified: true, etag: null, releases: [] };
+        },
+        async loadUploadedAssets() {
+          throw new Error('must not inspect assets for a replaced repository identity');
+        }
+      },
+      modrinth: { async listVersions() { throw new Error('not called'); } }
+    }
+  });
+
+  const outcome = await monitor.checkOne('tracking-github-1', { force: true });
+
+  assert.deepEqual(outcome, {
+    checked: false,
+    errorCode: 'REPOSITORY_NOT_FOUND',
+    nextDueAt: '2026-08-01T01:15:00.000Z',
+    trackingId: 'tracking-github-1'
+  });
+  const record = await state.trackingStore.get('tracking-github-1');
+  assert.equal(record.lastSuccessfulCheck, null);
+  assert.equal(record.lastFailure.code, 'REPOSITORY_NOT_FOUND');
+});
+
 test('default GitHub and Modrinth adapters use permanent IDs and provider-native listings', async (t) => {
   const nowMs = Date.parse('2026-08-01T01:00:00.000Z');
   const clock = () => new Date(nowMs);
@@ -349,6 +593,358 @@ test('default GitHub and Modrinth adapters use permanent IDs and provider-native
   assert.deepEqual(calls[2][1], { projectId: 'project-permanent', channels: ['release'] });
   const types = (await state.notificationStore.list()).map(item => item.type);
   assert.equal(types.filter(type => type === 'update-available').length, 2);
+});
+
+test('first GitHub success suppresses only same-release baseline normalization', async (t) => {
+  const nowMs = Date.parse('2026-08-01T01:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await stores(t, clock);
+  await state.trackingStore.upsert(githubTracking({
+    lastSnapshot: {
+      releaseId: '100', version: '1.7.6', prerelease: false,
+      publishedAt: '2026-07-01T00:00:00.000Z', assetFingerprint: 'a'.repeat(64), installable: true
+    }
+  }));
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock, notificationStore: state.notificationStore, trackingStore: state.trackingStore,
+    providers: {
+      github: {
+        async checkLatest() {
+          return { notModified: false, etag: '"next"', snapshot: {
+            releaseId: '100', version: '1.7.6', prerelease: false,
+            publishedAt: '2026-08-01T00:00:00.000Z', assetFingerprint: 'b'.repeat(64), installable: true
+          } };
+        }
+      },
+      modrinth: { async checkLatest() { throw new Error('not called'); } }
+    }
+  });
+  await monitor.checkOne('tracking-github-1', { force: true });
+  assert.deepEqual(await state.notificationStore.list(), []);
+  assert.equal((await state.trackingStore.get('tracking-github-1')).lastSnapshot.assetFingerprint, 'b'.repeat(64));
+});
+
+test('first GitHub success notifies when the latest release differs from the installed baseline', async (t) => {
+  const nowMs = Date.parse('2026-08-01T01:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await stores(t, clock);
+  await state.trackingStore.upsert(githubTracking({
+    lastSnapshot: {
+      releaseId: '100', version: '1.7.6', prerelease: false,
+      publishedAt: '2026-07-01T00:00:00.000Z', assetFingerprint: 'a'.repeat(64), installable: true
+    }
+  }));
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock, notificationStore: state.notificationStore, trackingStore: state.trackingStore,
+    providers: {
+      github: {
+        async checkLatest() {
+          return { notModified: false, etag: '"next"', snapshot: {
+            releaseId: '101', version: '1.7.7', prerelease: false,
+            publishedAt: '2026-08-01T00:00:00.000Z', assetFingerprint: 'b'.repeat(64), installable: true
+          } };
+        }
+      },
+      modrinth: { async checkLatest() { throw new Error('not called'); } }
+    }
+  });
+  await monitor.checkOne('tracking-github-1', { force: true });
+  const notifications = await state.notificationStore.list();
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, 'update-available');
+  assert.deepEqual(notifications[0].action.actionId, 'open-details');
+});
+
+test('an installed GitHub prerelease reports a newer prerelease and then a newer stable release', async (t) => {
+  const nowMs = Date.parse('2026-08-04T01:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await stores(t, clock);
+  await state.trackingStore.upsert(githubTracking({
+    includePrereleases: true,
+    lastSuccessfulCheck: '2026-08-01T00:00:00.000Z',
+    lastSnapshot: {
+      releaseId: '100', version: 'v2.0.0-beta.1', prerelease: true,
+      publishedAt: '2026-08-01T00:00:00.000Z', assetFingerprint: 'a'.repeat(64), installable: true
+    }
+  }));
+  const snapshots = [
+    {
+      releaseId: '101', version: 'v2.0.0-beta.2', prerelease: true,
+      publishedAt: '2026-08-02T00:00:00.000Z', assetFingerprint: 'b'.repeat(64), installable: true
+    },
+    {
+      releaseId: '102', version: 'v2.0.0', prerelease: false,
+      publishedAt: '2026-08-03T00:00:00.000Z', assetFingerprint: 'c'.repeat(64), installable: true
+    }
+  ];
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github: { async checkLatest() { return { notModified: false, etag: null, snapshot: snapshots.shift() }; } },
+      modrinth: { async listVersions() { throw new Error('not called'); } }
+    }
+  });
+
+  await monitor.checkOne('tracking-github-1', { force: true });
+  await monitor.checkOne('tracking-github-1', { force: true });
+
+  const notifications = await state.notificationStore.list();
+  assert.deepEqual(notifications.map(item => item.type).sort(), ['prerelease-available', 'update-available']);
+  assert.equal((await state.trackingStore.get('tracking-github-1')).lastSnapshot.releaseId, '102');
+});
+
+test('an older stable GitHub release cannot replace or notify over an installed newer prerelease', async (t) => {
+  const nowMs = Date.parse('2026-08-03T01:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await stores(t, clock);
+  const installed = {
+    releaseId: '200', version: 'v2.0.0-beta.1', prerelease: true,
+    publishedAt: '2026-08-02T00:00:00.000Z', assetFingerprint: 'b'.repeat(64), installable: true
+  };
+  await state.trackingStore.upsert(githubTracking({
+    includePrereleases: true,
+    lastSuccessfulCheck: '2026-08-02T01:00:00.000Z',
+    lastSnapshot: installed
+  }));
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github: {
+        async checkLatest() {
+          return { notModified: false, etag: '"older-stable"', snapshot: {
+            releaseId: '150', version: 'v1.9.0', prerelease: false,
+            publishedAt: '2026-08-01T00:00:00.000Z', assetFingerprint: 'a'.repeat(64), installable: true
+          } };
+        }
+      },
+      modrinth: { async listVersions() { throw new Error('not called'); } }
+    }
+  });
+
+  const outcome = await monitor.checkOne('tracking-github-1', { force: true });
+
+  assert.equal(outcome.checked, true);
+  assert.equal(outcome.changed, false);
+  assert.deepEqual((await state.trackingStore.get('tracking-github-1')).lastSnapshot, installed);
+  assert.deepEqual(await state.notificationStore.list(), []);
+});
+
+for (const candidate of [
+  { versionId: 'version-stable-old', version: '1.9.0', channel: 'release' },
+  { versionId: 'version-beta-old', version: '2.0.0-beta.1', channel: 'beta' }
+]) {
+  test(`an older ${candidate.channel} Modrinth release cannot replace or notify over an installed newer prerelease`, async (t) => {
+    const clock = () => new Date('2026-08-03T01:00:00.000Z');
+    const state = await stores(t, clock);
+    const installed = {
+      releaseId: 'version-beta-2', version: '2.0.0-beta.2', prerelease: true,
+      publishedAt: '2026-08-02T00:00:00.000Z', assetFingerprint: null, installable: true,
+      orderingKnown: true
+    };
+    await state.trackingStore.upsert(modrinthTracking({
+      includePrereleases: true,
+      lastSnapshot: installed
+    }));
+    const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+    const monitor = new ReleaseMonitor({
+      clock,
+      notificationStore: state.notificationStore,
+      trackingStore: state.trackingStore,
+      providers: {
+        github: { async checkLatest() { throw new Error('not called'); } },
+        modrinth: {
+          async listVersions(request) {
+            assert.deepEqual(request, { projectId: 'project-permanent', channels: [] });
+            return [{ ...candidate, publishedAt: '2026-08-01T00:00:00.000Z' }];
+          }
+        }
+      }
+    });
+
+    const outcome = await monitor.checkOne('tracking-modrinth-1', { force: true });
+
+    assert.equal(outcome.checked, true);
+    assert.equal(outcome.changed, false);
+    assert.deepEqual((await state.trackingStore.get('tracking-modrinth-1')).lastSnapshot, installed);
+    assert.deepEqual(await state.notificationStore.list(), []);
+  });
+}
+
+test('an installed Modrinth prerelease reports a newer prerelease', async (t) => {
+  const clock = () => new Date('2026-08-04T01:00:00.000Z');
+  const state = await stores(t, clock);
+  await state.trackingStore.upsert(modrinthTracking({
+    includePrereleases: true,
+    lastSnapshot: {
+      releaseId: 'version-beta-1', version: '2.0.0-beta.1', prerelease: true,
+      publishedAt: '2026-08-01T00:00:00.000Z', assetFingerprint: null, installable: true,
+      orderingKnown: true
+    }
+  }));
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github: { async checkLatest() { throw new Error('not called'); } },
+      modrinth: {
+        async listVersions(request) {
+          assert.deepEqual(request, { projectId: 'project-permanent', channels: [] });
+          return [{
+            versionId: 'version-beta-2', version: '2.0.0-beta.2', channel: 'beta',
+            publishedAt: '2026-08-02T00:00:00.000Z'
+          }];
+        }
+      }
+    }
+  });
+
+  await monitor.checkOne('tracking-modrinth-1', { force: true });
+
+  assert.deepEqual((await state.notificationStore.list()).map(item => item.type), ['prerelease-available']);
+});
+
+test('Modrinth microsecond timestamps produce an update notification through the real provider adapter', async (t) => {
+  const clock = () => new Date('2026-08-01T01:00:00.000Z');
+  const state = await stores(t, clock);
+  await state.trackingStore.upsert(modrinthTracking({
+    lastSnapshot: {
+      releaseId: 'version-1', version: '1.0.0', prerelease: false,
+      publishedAt: '2026-07-01T00:00:00.000Z', assetFingerprint: null, installable: true
+    }
+  }));
+  const { ModrinthModpackProvider } = require('../../electron/services/modpacks/providers/modrinth-modpack-provider.cjs');
+  const provider = new ModrinthModpackProvider({
+    http: {
+      async request(path) {
+        assert.equal(path, '/project/project-permanent/version');
+        return {
+          statusCode: 200,
+          body: Buffer.from(JSON.stringify([{
+            id: 'version-2', project_id: 'project-permanent', author_id: 'author-1', name: 'Server release',
+            version_number: '1.1.0', changelog: '', version_type: 'release', game_versions: ['1.21.1'],
+            loaders: ['fabric'], featured: true, status: 'listed', requested_status: null,
+            date_published: '2026-08-01T00:00:00.123456Z', downloads: 1, dependencies: [],
+            files: [{
+              hashes: { sha1: '1'.repeat(40), sha512: '5'.repeat(128) },
+              url: 'https://cdn.modrinth.com/data/project-permanent/versions/version-2/server.mrpack',
+              filename: 'server.mrpack', primary: true, size: 1, file_type: null
+            }]
+          }]), 'utf8')
+        };
+      }
+    }
+  });
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github: { async checkLatest() { throw new Error('not called'); } },
+      modrinth: provider
+    }
+  });
+
+  const [outcome] = await monitor.checkAll({ force: true });
+
+  assert.deepEqual(outcome, {
+    checked: true,
+    changed: true,
+    nextDueAt: outcome.nextDueAt,
+    trackingId: 'tracking-modrinth-1'
+  });
+  const notifications = await state.notificationStore.list({ unreadOnly: true, limit: 10 });
+  assert.deepEqual(notifications.map(item => ({ type: item.type, releaseId: item.release?.releaseId })), [
+    { type: 'update-available', releaseId: 'version-2' }
+  ]);
+  assert.equal((await state.trackingStore.get('tracking-modrinth-1')).lastFailure, null);
+});
+
+test('initial Modrinth tracking baseline reports a newer release than the installed source', async (t) => {
+  const clock = () => new Date('2026-08-01T01:00:00.000Z');
+  const state = await stores(t, clock);
+  const { createReleaseTrackingIntent } = require('../../electron/services/modpacks/notifications/release-tracking-reconciler.cjs');
+  const intent = createReleaseTrackingIntent({
+    serverId: 'server-2',
+    operationKind: 'install-new',
+    source: {
+      provider: 'modrinth', projectId: 'project-permanent', versionId: 'version-1', version: '1.0.0'
+    },
+    clock
+  });
+  await state.trackingStore.upsert(intent.record);
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github: { async checkLatest() { throw new Error('not called'); } },
+      modrinth: {
+        async listVersions(request) {
+          assert.deepEqual(request, { projectId: 'project-permanent', channels: ['release'] });
+          return [{
+            versionId: 'version-2', version: '1.1.0', channel: 'release',
+            publishedAt: '2026-08-01T00:00:00.000Z'
+          }];
+        }
+      }
+    }
+  });
+
+  await monitor.checkAll({ force: true });
+
+  assert.deepEqual((await state.notificationStore.list({ unreadOnly: true, limit: 10 })).map(item => ({
+    type: item.type,
+    releaseId: item.release?.releaseId,
+    serverId: item.serverId
+  })), [{ type: 'update-available', releaseId: 'version-2', serverId: 'server-2' }]);
+});
+
+test('initial Modrinth tracking baseline does not report its installed release as changed', async (t) => {
+  const clock = () => new Date('2026-08-01T01:00:00.000Z');
+  const state = await stores(t, clock);
+  const { createReleaseTrackingIntent } = require('../../electron/services/modpacks/notifications/release-tracking-reconciler.cjs');
+  const intent = createReleaseTrackingIntent({
+    serverId: 'server-2',
+    operationKind: 'install-new',
+    source: {
+      provider: 'modrinth', projectId: 'project-permanent', versionId: 'version-1', version: '1.0.0'
+    },
+    clock
+  });
+  await state.trackingStore.upsert(intent.record);
+  const { ReleaseMonitor } = require('../../electron/services/modpacks/notifications/release-monitor.cjs');
+  const monitor = new ReleaseMonitor({
+    clock,
+    notificationStore: state.notificationStore,
+    trackingStore: state.trackingStore,
+    providers: {
+      github: { async checkLatest() { throw new Error('not called'); } },
+      modrinth: {
+        async listVersions() {
+          return [{
+            versionId: 'version-1', version: '1.0.0', channel: 'release',
+            publishedAt: '2024-04-20T22:30:54.000Z'
+          }];
+        }
+      }
+    }
+  });
+
+  await monitor.checkAll({ force: true });
+
+  assert.deepEqual(await state.notificationStore.list({ unreadOnly: true, limit: 10 }), []);
 });
 
 test('remembered GitHub patterns distinguish one provisional future match from zero or multiple choices', async (t) => {

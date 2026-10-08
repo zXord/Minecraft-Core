@@ -1,5 +1,12 @@
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
+const {
+  failureDiagnosticFromError,
+  filesystemFailureDiagnosticFromError,
+  normalizeFailureDiagnostic,
+  publicationFailureDiagnosticFromError
+} = require('./publication-failure-diagnostic.cjs');
+const { runtimeDiagnosticFromError } = require('./server-runtime-writer-authority.cjs');
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SOURCE_AUTHORITY_KEY = /(?:path|directory|destination|command|argument|executable)/i;
@@ -18,8 +25,27 @@ const MUTATION_OPERATION_KINDS = new Set([
   'install-new', 'install-existing', 'update', 'downgrade', 'switch', 'repair', 'rollback-restore-point', 'detach',
   'import-files-only-new', 'uninstall-managed'
 ]);
+const EULA_REQUIRED_OPERATION_KINDS = new Set([
+  'install-new', 'install-existing', 'update', 'downgrade', 'switch', 'repair'
+]);
 const TERMINAL_JOB_PHASES = new Set(['completed', 'cancelled', 'rolled-back', 'failed', 'recovery-required']);
+const TERMINAL_RESOLUTION_KIND = 'terminal-resolution';
+const CANDIDATE_PROGRESS_PHASES = new Set(['staging', 'validating-candidate']);
 const MAX_OUTCOME_ACTIONS = 16;
+const MAX_PUBLIC_INSPECTION_ROOT_CANDIDATES = 4_096;
+const SAFE_FAILURE_STEPS = new Set([
+  'acquire-mutation', 'suspend-auto-restart', 'quiesce', 'revalidate-plan'
+]);
+const NEW_SERVER_OPERATION_KINDS = new Set(['install-new', 'import-files-only-new']);
+const INSPECTION_PROGRESS_PHASES = new Set(['resolving', 'downloading', 'verifying', 'materialize', 'list', 'validate', 'classify', 'complete']);
+const PREFLIGHT_PROGRESS_PHASES = new Set([
+  'validating-destination', 'preparing-candidate', 'scanning-server', 'verifying-restore-point', 'calculating-changes',
+  'checking-capacity', 'sealing-plan', 'complete'
+]);
+const PREFLIGHT_PROGRESS_ACTIVITIES = new Set([
+  'extracting', 'verifying-archive', 'downloading-pack-files', 'assembling-files', 'hashing-candidate-files'
+]);
+const MAX_INSPECTION_PROGRESS_BYTES = 16 * 1024 * 1024 * 1024;
 
 function invalid(cause) {
   if (cause instanceof ModpackError && cause.code === 'INVALID_REQUEST') return cause;
@@ -97,7 +123,7 @@ function validateClosedValue(value, options, field = 'request', depth = 0) {
   for (const [key, descriptor] of Object.entries(descriptors)) {
     if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value') || !/^[A-Za-z][A-Za-z0-9._-]{0,127}$/.test(key)) throw invalid();
     const qualified = `${field}.${key}`;
-    const keyAllowed = options.allowedAuthorityKeys?.has(qualified);
+    const keyAllowed = options.allowedAuthorityKeys?.has(qualified) || options.allowedMetadataKeys?.has(qualified);
     if (!keyAllowed && options.forbiddenKey.test(key)) throw invalid();
     result[key] = validateClosedValue(descriptor.value, options, qualified, depth + 1);
   }
@@ -119,7 +145,10 @@ function planningRequest(value) {
     allowRemoteUrl: false,
     allowInternalId: false,
     forbiddenKey: PLANNING_AUTHORITY_KEY,
-    allowedAuthorityKeys: new Set(['request.inspectionId'])
+    allowedAuthorityKeys: new Set([
+      'request.inspectionId',
+      'request.selections.conflictChoices.paths'
+    ])
   });
   assertIdentifier(normalized.inspectionId);
   return deepFreeze(normalized);
@@ -143,9 +172,169 @@ function publicView(value) {
     allowRemoteUrl: false,
     allowInternalId: false,
     forbiddenKey: PUBLIC_INTERNAL_KEY,
-    allowedAuthorityKeys: new Set(['public.inspectionId'])
+    allowedAuthorityKeys: new Set(['public.inspectionId']),
+    allowedMetadataKeys: new Set([
+      'public.limitEvidence.totals.directoryCount',
+      'public.limitEvidence.totals.maximumPathLength'
+    ])
   }, 'public');
   return deepFreeze(normalized);
+}
+
+function boundedPublicRootCandidates(value) {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
+      value.length <= MAX_PUBLIC_INSPECTION_ROOT_CANDIDATES) return value;
+  return value.slice(0, MAX_PUBLIC_INSPECTION_ROOT_CANDIDATES);
+}
+
+function publicInspectionProjection(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype ||
+      Object.getOwnPropertySymbols(value).length !== 0) throw invalid();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const projected = {};
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) throw invalid();
+    // Archive entries are persisted for planning/extraction, but are too large
+    // for the renderer-facing inspection result.
+    if (key === 'entries') continue;
+    projected[key] = key === 'rootCandidates'
+      ? boundedPublicRootCandidates(descriptor.value)
+      : descriptor.value;
+  }
+  return projected;
+}
+
+function defaultYieldControl() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+function createActiveOperation(controller) {
+  let resolveSettled;
+  let isSettled = false;
+  let isSettling = false;
+  const settled = new Promise(resolve => { resolveSettled = resolve; });
+  return Object.freeze({
+    abort() {
+      if (isSettling || isSettled) return false;
+      controller.abort();
+      return true;
+    },
+    beginSettlement() {
+      if (isSettled) return false;
+      isSettling = true;
+      return true;
+    },
+    isSettling() { return isSettling; },
+    settled,
+    settle() {
+      if (isSettled) return false;
+      isSettling = true;
+      isSettled = true;
+      resolveSettled();
+      return true;
+    }
+  });
+}
+
+function terminalResolution(jobId, request) {
+  return deepFreeze({ kind: TERMINAL_RESOLUTION_KIND, jobId, request });
+}
+
+function progressBytes(value) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_INSPECTION_PROGRESS_BYTES) return value;
+  if (typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    const parsed = Number(value);
+    if (Number.isSafeInteger(parsed) && parsed <= MAX_INSPECTION_PROGRESS_BYTES) return parsed;
+  }
+  return null;
+}
+
+function normalizeInspectionProgress(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !INSPECTION_PROGRESS_PHASES.has(value.phase)) return null;
+  const event = { phase: value.phase };
+  const transferredBytes = progressBytes(value.transferredBytes ?? value.setBytes ?? value.measuredBytes);
+  const totalBytes = progressBytes(value.totalBytes);
+  if (transferredBytes !== null) event.transferredBytes = transferredBytes;
+  if (totalBytes !== null) event.totalBytes = totalBytes;
+  if (transferredBytes !== null && totalBytes !== null && totalBytes > 0) {
+    event.percent = Math.min(100, Math.floor((transferredBytes * 100) / totalBytes));
+  }
+  return deepFreeze(event);
+}
+
+function inspectionProgressReporter(callback) {
+  if (callback === undefined) return () => {};
+  if (typeof callback !== 'function') throw invalid();
+  return value => {
+    const event = normalizeInspectionProgress(value);
+    if (!event) return;
+    try {
+      Promise.resolve(callback(event)).catch(() => {});
+    } catch { /* renderer progress is best effort */ }
+  };
+}
+
+function inspectionOptions(value) {
+  const descriptors = strictObject(value, ['onProgress', 'signal'], []);
+  const onProgress = descriptors.onProgress?.value;
+  const signal = descriptors.signal?.value;
+  if (onProgress !== undefined && typeof onProgress !== 'function') throw invalid();
+  if (signal !== undefined && (!signal || typeof signal.aborted !== 'boolean' ||
+      typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function')) throw invalid();
+  return { onProgress, signal };
+}
+
+function preflightOptions(value) {
+  const descriptors = strictObject(value, ['onProgress'], []);
+  const onProgress = descriptors.onProgress?.value;
+  if (onProgress !== undefined && typeof onProgress !== 'function') throw invalid();
+  return { onProgress };
+}
+
+function preflightProgressReporter(callback) {
+  if (callback === undefined) return () => {};
+  if (typeof callback !== 'function') throw invalid();
+  return value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        !PREFLIGHT_PROGRESS_PHASES.has(value.phase)) return;
+    const event = { phase: value.phase };
+    if (value.activity !== undefined) {
+      const validActivity = PREFLIGHT_PROGRESS_ACTIVITIES.has(value.activity) && (
+        value.phase === 'preparing-candidate' ||
+        (value.phase === 'verifying-restore-point' && value.activity === 'verifying-archive')
+      );
+      if (!validActivity) return;
+      event.activity = value.activity;
+    }
+    for (const [completed, total] of [
+      ['completedItems', 'totalItems'], ['processedBytes', 'totalBytes']
+    ]) {
+      const hasCompleted = value[completed] !== undefined;
+      const hasTotal = value[total] !== undefined;
+      if (hasCompleted !== hasTotal) return;
+      if (!hasCompleted) continue;
+      const completedValue = Number(value[completed]);
+      const totalValue = Number(value[total]);
+      if (!Number.isSafeInteger(completedValue) || completedValue < 0 ||
+          !Number.isSafeInteger(totalValue) || totalValue < 0 || completedValue > totalValue ||
+          !['preparing-candidate', 'verifying-restore-point'].includes(value.phase)) return;
+      event[completed] = completedValue;
+      event[total] = totalValue;
+    }
+    try {
+      Promise.resolve(callback(deepFreeze(event))).catch(() => {});
+    } catch { /* renderer progress is best effort */ }
+  };
+}
+
+function throwIfInspectionCancelled(signal) {
+  if (signal?.aborted) throw cancelled();
+}
+
+function inspectionFailure(error, signal) {
+  if (error instanceof ModpackError && error.code === 'CANCELLED') return error;
+  if (signal?.aborted || error?.code === 'ABORT_ERR') return cancelled(error);
+  return error;
 }
 
 function executionChoices(value) {
@@ -156,6 +345,146 @@ function executionChoices(value) {
   if (typeof acceptEula !== 'boolean' || typeof startAfterInstall !== 'boolean' ||
       (restorePointId !== null && (typeof restorePointId !== 'string' || !IDENTIFIER.test(restorePointId)))) throw invalid();
   return deepFreeze({ acceptEula, startAfterInstall, restorePointId });
+}
+
+function candidateProgress(value) {
+  const descriptors = strictObject(value, ['phase', 'percent', 'message', 'currentItem']);
+  const phase = descriptors.phase.value;
+  const percent = descriptors.percent.value;
+  const message = assertSafeString(descriptors.message.value);
+  if (!CANDIDATE_PROGRESS_PHASES.has(phase) || !Number.isSafeInteger(percent) || percent < 36 || percent > 63 ||
+      message.length < 1 || message.length > 512 || descriptors.currentItem.value !== null) throw invalid();
+  return deepFreeze({ phase, percent, message, currentItem: null });
+}
+
+function restorePointCreationProgress(value) {
+  const allowedKeys = ['phase', 'processedBytes', 'totalBytes', 'entriesProcessed', 'entriesTotal'];
+  const phaseDescriptor = strictObject(value, allowedKeys, ['phase']).phase;
+  const phase = phaseDescriptor.value;
+  if (phase === 'complete') {
+    return deepFreeze({
+      phase: 'snapshotting', rank: 4, percent: 34,
+      message: 'Verified recovery snapshot ready', currentItem: null
+    });
+  }
+
+  const descriptors = strictObject(value, allowedKeys, ['phase', 'processedBytes', 'totalBytes']);
+  const processedBytes = descriptors.processedBytes.value;
+  const totalBytes = descriptors.totalBytes.value;
+  if (!Number.isSafeInteger(processedBytes) || processedBytes < 0 ||
+      (totalBytes !== null && (!Number.isSafeInteger(totalBytes) || totalBytes < 0 || processedBytes > totalBytes))) {
+    throw invalid();
+  }
+  const hasEntriesProcessed = descriptors.entriesProcessed !== undefined;
+  const hasEntriesTotal = descriptors.entriesTotal !== undefined;
+  if (hasEntriesProcessed !== hasEntriesTotal || (hasEntriesProcessed && phase !== 'archive-write')) throw invalid();
+  const entriesProcessed = hasEntriesProcessed ? descriptors.entriesProcessed.value : 0;
+  const entriesTotal = hasEntriesTotal ? descriptors.entriesTotal.value : 0;
+  if (!Number.isSafeInteger(entriesProcessed) || entriesProcessed < 0 ||
+      !Number.isSafeInteger(entriesTotal) || entriesTotal < 0 || entriesProcessed > entriesTotal) throw invalid();
+
+  const ratioStep = (steps, processed = processedBytes, total = totalBytes) =>
+    total > 0 ? Math.floor((Math.min(processed, total) * steps) / total) : 0;
+  const details = [];
+  if (entriesTotal > 0) details.push(`${entriesProcessed} of ${entriesTotal} files`);
+  if (totalBytes > 0) details.push(`${processedBytes} of ${totalBytes} bytes`);
+  const withDetails = label => details.length > 0 ? `${label} (${details.join(', ')})` : label;
+
+  if (phase === 'scope' && totalBytes === null && !hasEntriesProcessed) {
+    return deepFreeze({
+      phase: 'snapshotting', rank: 0, percent: 16,
+      message: 'Scanning current server files for the recovery snapshot', currentItem: null
+    });
+  }
+  if (totalBytes === null) throw invalid();
+  if (phase === 'archive-write') {
+    const measured = totalBytes > 0 ? ratioStep(7) : ratioStep(7, entriesProcessed, entriesTotal);
+    return deepFreeze({
+      phase: 'snapshotting', rank: 1, percent: 17 + Math.min(7, measured),
+      message: withDetails('Saving the recovery snapshot'), currentItem: null
+    });
+  }
+  if (phase === 'archive-hash' && !hasEntriesProcessed) {
+    return deepFreeze({
+      phase: 'snapshotting', rank: 2, percent: 25 + Math.min(3, ratioStep(3)),
+      message: withDetails('Checking the recovery snapshot archive'), currentItem: null
+    });
+  }
+  if (phase === 'entry-verify' && !hasEntriesProcessed) {
+    return deepFreeze({
+      phase: 'snapshotting', rank: 3, percent: 29 + Math.min(4, ratioStep(4)),
+      message: withDetails('Verifying recovery snapshot files'), currentItem: null
+    });
+  }
+  throw invalid();
+}
+
+function createRestorePointCreationProgressQueue(onProgress) {
+  let active = false;
+  let activeRank = -1;
+  let lastAcceptedRank = -1;
+  let lastAcceptedPercent = -1;
+  let lastProgressKey = null;
+  let failure = null;
+  const pending = [];
+  const idleWaiters = [];
+  const workHighWatermarks = new Map();
+
+  const settleIdleWaiters = () => {
+    for (const resolve of idleWaiters.splice(0)) resolve();
+  };
+  const pump = async () => {
+    if (active || failure !== null) return;
+    active = true;
+    try {
+      while (pending.length > 0 && failure === null) {
+        const next = pending.shift();
+        activeRank = next.rank;
+        try {
+          await onProgress(next);
+        } catch (error) {
+          failure = error;
+          pending.splice(0);
+        }
+      }
+    } finally {
+      activeRank = -1;
+      active = false;
+      settleIdleWaiters();
+    }
+  };
+
+  return {
+    push(value) {
+      if (typeof onProgress !== 'function' || failure !== null) return;
+      const progress = restorePointCreationProgress(value);
+      if (progress.rank < lastAcceptedRank || progress.rank < activeRank ||
+          progress.percent < lastAcceptedPercent) return;
+      if (progress.rank < 4) {
+        const workKey = `${value.phase}:${String(value.totalBytes)}:${String(value.entriesTotal ?? '')}`;
+        const prior = workHighWatermarks.get(workKey);
+        const processedBytes = value.processedBytes;
+        const entriesProcessed = value.entriesProcessed ?? 0;
+        if (prior && (processedBytes < prior.processedBytes || entriesProcessed < prior.entriesProcessed)) return;
+        workHighWatermarks.set(workKey, { processedBytes, entriesProcessed });
+      }
+      lastAcceptedRank = Math.max(lastAcceptedRank, progress.rank);
+      lastAcceptedPercent = Math.max(lastAcceptedPercent, progress.percent);
+      const progressKey = `${progress.rank}:${progress.percent}:${progress.message}`;
+      if (progressKey === lastProgressKey) return;
+      lastProgressKey = progressKey;
+      const samePhase = pending.findIndex(item => item.rank === progress.rank);
+      if (samePhase === -1) pending.push(progress);
+      else pending[samePhase] = progress;
+      void pump();
+    },
+    async drain() {
+      while (active || pending.length > 0) {
+        await new Promise(resolve => idleWaiters.push(resolve));
+      }
+      if (failure !== null) throw failure;
+    }
+  };
 }
 
 function normalizeIssuedActions(value) {
@@ -214,15 +543,6 @@ function mutationOperationKind(plan) {
   return kind;
 }
 
-function compatibleDowngradeRestorePoint(plan, choices) {
-  if (!Array.isArray(plan.restorePoints) || plan.requirements?.downgradeWorldRiskAcknowledged !== true) return null;
-  const candidates = plan.restorePoints.filter(point => point && typeof point === 'object' &&
-    point.worldIncluded === true && point.sourceRevision === plan.operation.expectedContentRevision &&
-    typeof point.id === 'string' && IDENTIFIER.test(point.id));
-  if (choices.restorePointId !== null) return candidates.find(point => point.id === choices.restorePointId) || null;
-  return candidates.length === 1 ? candidates[0] : null;
-}
-
 function selectedPinnedRestorePoint(plan, choices) {
   if (!Array.isArray(plan.restorePoints) || choices.restorePointId === null) return null;
   return plan.restorePoints.find(point => point && typeof point === 'object' && point.id === choices.restorePointId) || null;
@@ -230,6 +550,53 @@ function selectedPinnedRestorePoint(plan, choices) {
 
 function safeErrorCode(error) {
   return typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'COMMIT_FAILED';
+}
+
+function safeFailureLogMessage(error) {
+  if (!(error instanceof ModpackError)) return 'The operation stopped before the server changed';
+  const descriptor = Object.getOwnPropertyDescriptor(error, 'safeMessage');
+  return descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'string'
+    ? descriptor.value
+    : 'The operation stopped before the server changed';
+}
+
+function safeFailureField(error) {
+  if (!(error instanceof ModpackError) || error.code !== 'PLAN_STALE') return null;
+  try {
+    const details = Object.getOwnPropertyDescriptor(error, 'details');
+    if (!details || !Object.hasOwn(details, 'value')) return null;
+    const value = details.value;
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return null;
+    const field = Object.getOwnPropertyDescriptor(value, 'field');
+    return field && Object.hasOwn(field, 'value') &&
+      typeof field.value === 'string' && /^[A-Za-z][A-Za-z0-9.]{0,127}$/.test(field.value)
+      ? field.value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function destinationRecoveryFailureReason(error, { operationKind, failureStep } = {}) {
+  if (!NEW_SERVER_OPERATION_KINDS.has(operationKind) || failureStep !== 'acquire-mutation' ||
+      !(error instanceof ModpackError)) return null;
+  try {
+    const code = Object.getOwnPropertyDescriptor(error, 'code');
+    const details = Object.getOwnPropertyDescriptor(error, 'details');
+    if (!code || !Object.hasOwn(code, 'value') || code.value !== 'RECOVERY_REQUIRED' ||
+        !details || !Object.hasOwn(details, 'value')) return null;
+    const value = details.value;
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return null;
+    const operationId = Object.getOwnPropertyDescriptor(value, 'operationId');
+    return operationId && Object.hasOwn(operationId, 'value') &&
+      typeof operationId.value === 'string' && IDENTIFIER.test(operationId.value)
+      ? 'destination-recovery'
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function publicSource(source) {
@@ -245,11 +612,25 @@ function publicSource(source) {
       repositoryId: source.repositoryId,
       releaseId: source.releaseId,
       githubOwner: source.githubOwner,
-      githubRepo: source.githubRepo
+      githubRepo: source.githubRepo,
+      ...(source.channel === undefined ? {} : {
+        channel: source.channel,
+        prerelease: source.prerelease,
+        publishedAt: source.publishedAt
+      })
     };
   }
   if (source.provider === 'modrinth') {
-    return { ...common, projectId: source.projectId, versionId: source.versionId };
+    return {
+      ...common,
+      projectId: source.projectId,
+      versionId: source.versionId,
+      ...(source.channel === undefined ? {} : {
+        channel: source.channel,
+        prerelease: source.prerelease,
+        publishedAt: source.publishedAt
+      })
+    };
   }
   if (source.provider === 'local') {
     return { ...common, importId: source.importId, artifactSha256: source.artifactSha256 };
@@ -298,7 +679,9 @@ class ModpackLifecycleService {
     instanceResolver = null,
     stateRepository = null,
     stateEventSink = null,
-    outcomeActionIssuer = null
+    outcomeActionIssuer = null,
+    workspaceRegistry = inspectionLoader?.workspaceRegistry ?? planRegistry?.workspaceRegistry ?? null,
+    yieldControl = defaultYieldControl
   } = {}) {
     if (!sourceResolver || typeof sourceResolver.resolveArtifactSetPlan !== 'function' ||
         !artifactDownloader || typeof artifactDownloader.downloadSet !== 'function' ||
@@ -309,7 +692,9 @@ class ModpackLifecycleService {
         typeof planRegistry.claim !== 'function' ||
         !operationStore || typeof operationStore.get !== 'function' || typeof operationStore.requestCancellation !== 'function' ||
         (stateEventSink !== null && typeof stateEventSink !== 'function') ||
-        (outcomeActionIssuer !== null && (!outcomeActionIssuer || typeof outcomeActionIssuer.issue !== 'function'))) {
+        (outcomeActionIssuer !== null && (!outcomeActionIssuer || typeof outcomeActionIssuer.issue !== 'function')) ||
+        (workspaceRegistry !== null && (!workspaceRegistry || typeof workspaceRegistry.releaseOwner !== 'function')) ||
+        typeof yieldControl !== 'function') {
       throw invalid();
     }
     this.sourceResolver = sourceResolver;
@@ -325,27 +710,92 @@ class ModpackLifecycleService {
     this.stateRepository = stateRepository;
     this.stateEventSink = stateEventSink;
     this.outcomeActionIssuer = outcomeActionIssuer;
+    this.workspaceRegistry = workspaceRegistry;
+    this.yieldControl = yieldControl;
     this.inspections = new Map();
     this.activeOperations = new Map();
     this.releasedClaims = new Set();
   }
 
-  async inspectSource(request) {
-    const normalizedRequest = sourceRequest(request);
-    const resolution = await this.sourceResolver.resolveArtifactSetPlan(normalizedRequest);
-    const descriptors = strictObject(resolution, ['artifactSetPlan', 'source']);
-    const source = clone(descriptors.source.value);
-    const verifiedArtifactSet = await this.artifactDownloader.downloadSet(descriptors.artifactSetPlan.value);
-    const inspected = await this.archiveInspector.inspectArchive({ verifiedArtifactSet });
-    const safeInspection = publicView(inspected);
-    const inspectionId = assertIdentifier(safeInspection.inspectionId);
-    if (this.inspections.has(inspectionId)) throw stale();
-    this.inspections.set(inspectionId, deepFreeze({ source, request: clone(normalizedRequest) }));
-    return safeInspection;
+  async dispose() {
+    const inspectionIds = [...this.inspections.keys()];
+    if (inspectionIds.length === 0) return 0;
+    if (!this.workspaceRegistry) throw invalid();
+    let firstFailure = null;
+    for (const inspectionId of inspectionIds) {
+      try {
+        await this.workspaceRegistry.releaseOwner(inspectionId);
+        this.inspections.delete(inspectionId);
+      }
+      catch (error) { firstFailure ??= error; }
+    }
+    if (firstFailure) throw firstFailure;
+    return inspectionIds.length;
   }
 
-  async createPlan(request) {
+  async inspectSource(request, options = {}) {
+    const normalizedRequest = sourceRequest(request);
+    const { onProgress, signal } = inspectionOptions(options);
+    const reportProgress = inspectionProgressReporter(onProgress);
+    let promotedInspectionId = null;
+    try {
+      throwIfInspectionCancelled(signal);
+      reportProgress({ phase: 'resolving' });
+      const resolution = await this.sourceResolver.resolveArtifactSetPlan(normalizedRequest, {
+        signal,
+        onProgress: progress => reportProgress({ ...progress, phase: 'downloading' })
+      });
+      throwIfInspectionCancelled(signal);
+      const descriptors = strictObject(resolution, ['artifactSetPlan', 'source']);
+      const source = clone(descriptors.source.value);
+      reportProgress({ phase: 'downloading' });
+      const verifiedArtifactSet = await this.artifactDownloader.downloadSet(descriptors.artifactSetPlan.value, {
+        signal,
+        onProgress: progress => reportProgress({ ...progress, phase: 'downloading' })
+      });
+      throwIfInspectionCancelled(signal);
+      reportProgress({ phase: 'verifying' });
+      const inspected = await this.archiveInspector.inspectArchive({
+        verifiedArtifactSet,
+        signal,
+        onProgress: reportProgress
+      });
+      promotedInspectionId = assertIdentifier(inspected?.inspectionId);
+      throwIfInspectionCancelled(signal);
+      const safeInspection = publicView(publicInspectionProjection(inspected));
+      const inspectionId = assertIdentifier(safeInspection.inspectionId);
+      if (inspectionId !== promotedInspectionId || this.inspections.has(inspectionId)) throw stale();
+      this.inspections.set(inspectionId, deepFreeze({ source, request: clone(normalizedRequest) }));
+      throwIfInspectionCancelled(signal);
+      return safeInspection;
+    } catch (error) {
+      if (promotedInspectionId) {
+        this.inspections.delete(promotedInspectionId);
+        try { await this.workspaceRegistry?.releaseOwner(promotedInspectionId); } catch { /* preserve primary failure */ }
+      }
+      throw inspectionFailure(error, signal);
+    }
+  }
+
+  async cancelInspection(inspectionId) {
+    const normalizedInspectionId = assertIdentifier(inspectionId);
+    const session = this.inspections.get(normalizedInspectionId);
+    if (!session) return false;
+    if (!this.workspaceRegistry) throw invalid();
+    this.inspections.delete(normalizedInspectionId);
+    try {
+      await this.workspaceRegistry.releaseOwner(normalizedInspectionId);
+      return true;
+    } catch (error) {
+      this.inspections.set(normalizedInspectionId, session);
+      throw error;
+    }
+  }
+
+  async createPlan(request, options = {}) {
     const normalizedRequest = planningRequest(request);
+    const { onProgress } = preflightOptions(options);
+    const reportProgress = preflightProgressReporter(onProgress);
     const inspectionId = normalizedRequest.inspectionId;
     const session = this.inspections.get(inspectionId);
     if (!session) throw stale();
@@ -356,12 +806,15 @@ class ModpackLifecycleService {
     const planned = await this.planningAdapter.createPlan({
       request: normalizedRequest,
       inspection,
-      source: deepFreeze(clone(session.source))
+      source: deepFreeze(clone(session.source)),
+      onProgress: reportProgress
     });
     if (planned?.requiresConflictReview === true) {
       const descriptors = strictObject(planned, ['requiresConflictReview', 'conflicts']);
       if (!Array.isArray(descriptors.conflicts.value) || descriptors.conflicts.value.length < 1) throw invalid();
-      return publicView(planned);
+      const review = publicView(planned);
+      reportProgress({ phase: 'complete' });
+      return review;
     }
     const descriptors = strictObject(planned, ['plan', 'sanitizedView']);
     const plan = descriptors.plan.value;
@@ -373,23 +826,32 @@ class ModpackLifecycleService {
       planningSessionId: inspectionId
     });
     this.inspections.delete(inspectionId);
-    return deepFreeze({
+    const result = deepFreeze({
       planId: created.planId,
       planFingerprint: created.fingerprint,
       planView: created.planView,
       expiresAt: created.expiresAt
     });
+    reportProgress({ phase: 'complete' });
+    return result;
   }
 
-  async createManagementPlan(requestValue) {
+  async createManagementPlan(requestValue, options = {}) {
     const request = managementPlanningRequest(requestValue);
+    const { onProgress } = preflightOptions(options);
+    const reportProgress = preflightProgressReporter(onProgress);
     if (typeof this.planningAdapter.createManagementPlan !== 'function' ||
         !this.stateRepository || typeof this.stateRepository.read !== 'function') throw invalid();
     const instance = await this.#resolveStateInstance(request.instanceId);
     const currentState = this.stateRepository.read(instance.serverPath);
     if (!currentState || (request.operationKind !== 'rollback-restore-point' &&
         (currentState.state.modpackManaged !== true || !currentState.manifest))) throw stale();
-    const planned = await this.planningAdapter.createManagementPlan({ request, currentState, instance });
+    const planned = await this.planningAdapter.createManagementPlan({
+      request,
+      currentState,
+      instance,
+      onProgress: reportProgress
+    });
     const descriptors = strictObject(planned, ['plan', 'sanitizedView', 'planningSessionId']);
     const plan = descriptors.plan.value;
     if (!plan || typeof plan !== 'object' || Array.isArray(plan) || typeof plan.fingerprint !== 'string' ||
@@ -399,7 +861,7 @@ class ModpackLifecycleService {
     ], ['kind', 'serverKind', 'instanceId', 'expectedContentRevision']);
     if (operationDescriptors.kind.value !== request.operationKind || operationDescriptors.serverKind.value !== 'existing' ||
         operationDescriptors.instanceId.value !== request.instanceId ||
-        operationDescriptors.expectedContentRevision.value !== currentState.state.contentRevision ||
+        operationDescriptors.expectedContentRevision.value < currentState.state.contentRevision ||
         (operationDescriptors.downgrade && operationDescriptors.downgrade.value !== false)) throw stale();
     if (request.operationKind === 'rollback-restore-point' &&
         (!Array.isArray(plan.restorePoints) || !plan.restorePoints.some(point =>
@@ -410,27 +872,42 @@ class ModpackLifecycleService {
       fingerprint: plan.fingerprint,
       planningSessionId: assertIdentifier(descriptors.planningSessionId.value)
     });
-    return deepFreeze({
+    const result = deepFreeze({
       planId: created.planId,
       planFingerprint: created.fingerprint,
       planView: created.planView,
       expiresAt: created.expiresAt
     });
+    reportProgress({ phase: 'complete' });
+    return result;
   }
 
   async getJob(jobId) {
     let normalized;
     try { normalized = assertIdentifier(jobId); }
     catch (error) { throw stale(error); }
-    const job = await this.operationStore.get(normalized);
+    let job = await this.operationStore.get(normalized);
     if (!job) throw stale();
+    const active = this.activeOperations.get(normalized);
+    if (active && TERMINAL_JOB_PHASES.has(job.phase)) {
+      await active.settled;
+      job = await this.operationStore.get(normalized);
+      if (!job) throw stale();
+    }
     return job;
   }
 
   async cancelJob(jobId) {
     const existing = await this.getJob(jobId);
+    const active = this.activeOperations.get(existing.jobId);
+    if (active?.isSettling()) {
+      await active.settled;
+      const settled = await this.operationStore.get(existing.jobId);
+      if (!settled) throw stale();
+      return settled;
+    }
     const cancelledJob = await this.operationStore.requestCancellation(existing.jobId);
-    this.activeOperations.get(existing.jobId)?.abort();
+    active?.abort();
     return cancelledJob;
   }
 
@@ -488,6 +965,12 @@ class ModpackLifecycleService {
     });
   }
 
+  async listRollbackOptions(instanceIdValue) {
+    const instanceId = assertIdentifier(instanceIdValue);
+    if (typeof this.planningAdapter.listRollbackOptions !== 'function') throw invalid();
+    return publicView(await this.planningAdapter.listRollbackOptions({ instanceId }));
+  }
+
   async verify(instanceIdValue) {
     const instanceId = assertIdentifier(instanceIdValue);
     this.#assertVerificationDependencies();
@@ -497,13 +980,16 @@ class ModpackLifecycleService {
       planFingerprint: null
     });
     const controller = new AbortController();
-    this.activeOperations.set(queued.jobId, controller);
+    const active = createActiveOperation(controller);
+    this.activeOperations.set(queued.jobId, active);
     Promise.resolve().then(() => this.#executeVerification({
       jobId: queued.jobId,
       instanceId,
-      signal: controller.signal
+      signal: controller.signal,
+      active
     })).catch(() => {}).finally(() => {
-      if (this.activeOperations.get(queued.jobId) === controller) this.activeOperations.delete(queued.jobId);
+      if (this.activeOperations.get(queued.jobId) === active) this.activeOperations.delete(queued.jobId);
+      active.settle();
     });
     return queued;
   }
@@ -518,18 +1004,20 @@ class ModpackLifecycleService {
 
     let claimed = null;
     try {
-      claimed = this.planRegistry.claim({ planId, fingerprint: planFingerprint });
+      claimed = await this.planRegistry.claim({ planId, fingerprint: planFingerprint });
       if (!claimed || claimed.planId !== planId || claimed.fingerprint !== planFingerprint ||
           typeof claimed.jobId !== 'string' || !IDENTIFIER.test(claimed.jobId)) throw stale();
       const operationKind = mutationOperationKind(claimed.plan);
-      const selectedRestorePoint = operationKind === 'downgrade'
-        ? compatibleDowngradeRestorePoint(claimed.plan, choices)
-        : operationKind === 'rollback-restore-point'
+      if (EULA_REQUIRED_OPERATION_KINDS.has(operationKind) && choices.acceptEula !== true) {
+        throw new ModpackError('INVALID_REQUEST', 'Minecraft EULA acceptance is required for this server operation');
+      }
+      if (operationKind === 'downgrade' &&
+          claimed.plan.requirements?.downgradeWorldRiskAcknowledged !== true) throw stale();
+      const selectedRestorePoint = operationKind === 'rollback-restore-point'
           ? selectedPinnedRestorePoint(claimed.plan, choices)
           : null;
-      if (operationKind === 'downgrade' && !selectedRestorePoint) throw stale();
       if (operationKind === 'rollback-restore-point' && !selectedRestorePoint) throw stale();
-      if (operationKind !== 'downgrade' && choices.restorePointId !== null && operationKind !== 'rollback-restore-point') throw invalid();
+      if (choices.restorePointId !== null && operationKind !== 'rollback-restore-point') throw invalid();
 
       const queued = await this.operationStore.create({
         jobId: claimed.jobId,
@@ -538,20 +1026,23 @@ class ModpackLifecycleService {
         planFingerprint
       });
       const controller = new AbortController();
-      this.activeOperations.set(claimed.jobId, controller);
+      const active = createActiveOperation(controller);
+      this.activeOperations.set(claimed.jobId, active);
       Promise.resolve().then(() => this.#executeOperation({
         claimed,
         choices,
         operationKind,
         selectedRestorePoint,
-        signal: controller.signal
+        signal: controller.signal,
+        active
       })).catch(() => {}).finally(() => {
-        if (this.activeOperations.get(claimed.jobId) === controller) this.activeOperations.delete(claimed.jobId);
+        if (this.activeOperations.get(claimed.jobId) === active) this.activeOperations.delete(claimed.jobId);
+        active.settle();
       });
       return queued;
     } catch (error) {
       if (claimed) {
-        try { this.#releaseClaim(claimed.jobId); }
+        try { await this.#releaseClaim(claimed.jobId); }
         catch (releaseError) { throw recoveryRequired(releaseError); }
       }
       throw error;
@@ -587,12 +1078,14 @@ class ModpackLifecycleService {
     }
   }
 
-  async #executeVerification({ jobId, instanceId, signal }) {
+  async #executeVerification({ jobId, instanceId, signal, active }) {
     try {
       await this.#transition(jobId, 'verifying', 10, 'Verifying managed files', signal);
       const resolved = assertResolvedInstance(await this.instanceResolver.resolveInstance(instanceId), instanceId);
       await this.#throwIfCancelled(jobId, signal);
-      const result = await this.stateRepository.verifyManagedFiles(resolved.serverPath);
+      const result = await this.stateRepository.verifyManagedFiles(resolved.serverPath, { signal });
+      await this.#throwIfCancelled(jobId, signal);
+      active.beginSettlement();
       const outcome = await this.#withIssuedActions({
         status: 'completed',
         message: result.healthy ? 'All managed files match the installed manifest' : 'Managed file differences were found',
@@ -611,19 +1104,43 @@ class ModpackLifecycleService {
       });
       await this.#transition(jobId, 'completed', 100, 'Managed files verified', signal, outcome);
     } catch (error) {
-      const job = await this.operationStore.get(jobId).catch(() => null);
-      if (!job || TERMINAL_JOB_PHASES.has(job.phase)) return;
-      const wasCancelled = job.phase === 'cancelling' || error?.code === 'CANCELLED';
-      let current = job;
+      active.beginSettlement();
+      await this.#finishVerificationFailure({ jobId, instanceId, error });
+    }
+  }
+
+  async #finishVerificationFailure({ jobId, instanceId, error }) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let current;
+      try {
+        current = await this.operationStore.get(jobId);
+      } catch (readError) {
+        if (attempt >= 2) throw readError;
+        await this.yieldControl();
+        continue;
+      }
+      if (!current) throw stale();
+      if (TERMINAL_JOB_PHASES.has(current.phase)) return current;
+      const wasCancelled = current.phase === 'cancelling' || error?.code === 'CANCELLED';
       if (wasCancelled && current.phase !== 'cancelling') {
-        current = await this.operationStore.requestCancellation(jobId);
+        try { current = await this.operationStore.requestCancellation(jobId); }
+        catch (cancellationError) {
+          if (attempt < 2) {
+            await this.yieldControl();
+            continue;
+          }
+          throw cancellationError;
+        }
       }
       const terminalPhase = wasCancelled ? 'cancelled' : 'failed';
       const errorCode = safeErrorCode(error);
+      const filesystemFailure = wasCancelled ? null : filesystemFailureDiagnosticFromError(error);
+      await this.#appendFailureEvent(jobId, error, null);
       const outcome = await this.#withIssuedActions({
         status: terminalPhase,
         message: wasCancelled ? 'Verification was cancelled' : 'Managed file verification failed',
-        errorCode
+        errorCode,
+        ...(filesystemFailure === null ? {} : { failure: filesystemFailure })
       }, {
         jobId,
         operationKind: 'verify',
@@ -635,28 +1152,45 @@ class ModpackLifecycleService {
         restorePointId: null,
         automaticRecovery: false
       });
-      await this.operationStore.transition(jobId, {
-        expectedPhase: current.phase,
-        nextPhase: terminalPhase,
-        patch: {
-          outcome
-        }
-      });
+      try {
+        return await this.operationStore.transition(jobId, {
+          expectedPhase: current.phase,
+          nextPhase: terminalPhase,
+          patch: { outcome }
+        });
+      } catch (transitionError) {
+        const latest = await this.operationStore.get(jobId).catch(() => null);
+        if (latest && TERMINAL_JOB_PHASES.has(latest.phase)) return latest;
+        if (attempt >= 2) throw transitionError;
+        await this.yieldControl();
+      }
     }
+    throw recoveryRequired();
   }
 
-  #releaseClaim(jobId) {
+  async #releaseClaim(jobId) {
     if (this.releasedClaims.has(jobId)) return true;
-    if (this.planRegistry.releaseClaim(jobId) !== true) throw recoveryRequired();
+    if (await this.planRegistry.releaseClaim(jobId) !== true) throw recoveryRequired();
     this.releasedClaims.add(jobId);
+    await this.yieldControl();
     return true;
   }
 
   async #executeOperation(context) {
-    const { claimed, choices, operationKind, signal } = context;
+    const { claimed, choices, operationKind, signal, active } = context;
     let resolved = null;
     let restartToken = null;
-    const state = { candidateBuilt: false, commitStarted: false, committedHealthy: false, restorePoint: null };
+    let deferredTerminal = null;
+    let callbackFailure = null;
+    const state = {
+      candidateBuilt: false,
+      commitStarted: false,
+      committedHealthy: false,
+      recoveryRecordPrepared: false,
+      restorePoint: null,
+      restorePointAttempted: false,
+      failureStep: null
+    };
     try {
       await this.#throwIfCancelled(claimed.jobId, signal);
       resolved = assertResolvedInstance(await this.mutationRuntime.resolveInstance({
@@ -667,18 +1201,27 @@ class ModpackLifecycleService {
       }), claimed.plan.operation.instanceId);
       await this.#transition(claimed.jobId, 'preflight', 5, 'Revalidating the reviewed plan', signal);
       const selector = { instanceId: resolved.instanceId, serverPath: resolved.serverPath };
-      await this.mutationCoordinator.runMutation(selector, {
+      state.failureStep = 'acquire-mutation';
+      const completedOutcome = await this.mutationCoordinator.runMutation(selector, {
         operation: operationKind,
         operationId: claimed.jobId,
-        revisionMode: 'lifecycle',
+        // A reserved new-server target has no live content revision until the
+        // publication transaction succeeds. Its reservation, transaction
+        // journal, and candidate identities are the authoritative guards.
+        // Requiring a live lifecycle revision here can overwrite the real
+        // pre-publication failure with PLAN_STALE after candidate I/O dirties
+        // the lease, even though no canonical server exists yet.
+        revisionMode: claimed.plan.operation.serverKind === 'new' ? 'none' : 'lifecycle',
         signal,
         quiesce: async quiesceContext => {
+          state.failureStep = 'suspend-auto-restart';
           restartToken = await this.mutationRuntime.suspendAutoRestart({
             ...quiesceContext,
             jobId: claimed.jobId,
             plan: claimed.plan,
             resolved
           });
+          state.failureStep = 'quiesce';
           await this.mutationRuntime.quiesce({
             ...quiesceContext,
             jobId: claimed.jobId,
@@ -689,17 +1232,121 @@ class ModpackLifecycleService {
         }
       }, async lease => {
         try {
-          await this.#executeUnderLease({ ...context, lease, resolved, restartToken, state });
+          state.failureStep = 'revalidate-plan';
+          return await this.#executeUnderLease({ ...context, lease, resolved, restartToken, state });
         } catch (error) {
-          await this.#handleFailure({ ...context, lease, resolved, restartToken, state, error });
+          active.beginSettlement();
+          callbackFailure = error;
+          deferredTerminal = await this.#handleFailure(
+            { ...context, lease, resolved, restartToken, state, error },
+            { deferTerminal: true }
+          );
           throw error;
         }
       });
+      await this.#transition(claimed.jobId, 'completed', 100, 'Modpack operation completed', null, completedOutcome);
     } catch (error) {
+      if (deferredTerminal?.kind === TERMINAL_RESOLUTION_KIND) {
+        const settlementContext = { ...context, state, resolved, restartToken };
+        if (error !== callbackFailure) {
+          await this.#publishRecoveryRequiredAfterRelease(settlementContext, error);
+          return;
+        }
+        await this.#publishDeferredTerminal(deferredTerminal, settlementContext, error);
+        return;
+      }
       const job = await this.operationStore.get(claimed.jobId).catch(() => null);
       if (job && (TERMINAL_JOB_PHASES.has(job.phase) || job.phase === 'cleanup-pending')) return;
-      await this.#handleFailure({ ...context, lease: null, resolved, restartToken, state, error }).catch(() => {});
+      // From this point cancellation must wait for the already-selected
+      // failure outcome. This also covers resolve/quiesce/coordinator errors
+      // that happen before the mutation callback gets a lease.
+      active.beginSettlement();
+      const settlementContext = { ...context, state, resolved, restartToken };
+      try {
+        const resolution = await this.#handleFailure(
+          { ...settlementContext, lease: null, error },
+          { deferTerminal: true }
+        );
+        if (resolution?.kind === TERMINAL_RESOLUTION_KIND) {
+          await this.#publishDeferredTerminal(resolution, settlementContext, error);
+        }
+      } catch (settlementError) {
+        await this.#publishRecoveryRequiredAfterRelease(settlementContext, settlementError);
+      }
     }
+  }
+
+  async #tryPublishTerminal(resolution) {
+    if (!resolution || resolution.kind !== TERMINAL_RESOLUTION_KIND) throw invalid();
+    let lastError = null;
+    let latest = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try { latest = await this.operationStore.get(resolution.jobId); }
+      catch (error) {
+        lastError = error;
+        if (attempt === 0) await this.yieldControl();
+        continue;
+      }
+      if (!latest) throw stale();
+      if (TERMINAL_JOB_PHASES.has(latest.phase)) return { job: latest, error: null };
+      if (latest.phase !== resolution.request.expectedPhase) {
+        return { job: null, error: lastError || stale() };
+      }
+      try {
+        const job = await this.operationStore.transition(resolution.jobId, resolution.request);
+        return { job, error: null };
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0) await this.yieldControl();
+      }
+    }
+    try {
+      latest = await this.operationStore.get(resolution.jobId);
+      if (latest && TERMINAL_JOB_PHASES.has(latest.phase)) return { job: latest, error: null };
+    } catch (error) {
+      lastError ||= error;
+    }
+    return { job: null, error: lastError || recoveryRequired() };
+  }
+
+  async #publishDeferredTerminal(resolution, context, primaryError) {
+    await this.#appendFailureEvent(resolution.jobId, primaryError, context.state);
+    const published = await this.#tryPublishTerminal(resolution);
+    if (published.job) return published.job;
+    return this.#publishRecoveryRequiredAfterRelease(context, published.error || primaryError);
+  }
+
+  async #publishRecoveryRequiredAfterRelease(context, error) {
+    const { claimed, operationKind, selectedRestorePoint, state } = context;
+    await this.#appendFailureEvent(claimed.jobId, error, state);
+    const job = await this.operationStore.get(claimed.jobId);
+    if (!job) throw stale();
+    if (TERMINAL_JOB_PHASES.has(job.phase)) return job;
+    const errorCode = safeErrorCode(error);
+    const outcome = await this.#withIssuedActions({
+      status: 'recovery-required',
+      message: 'The server needs recovery before it can be used',
+      errorCode,
+      automatic: false
+    }, {
+      jobId: claimed.jobId,
+      operationKind,
+      instanceId: claimed.plan.operation.instanceId,
+      phase: 'recovery-required',
+      status: 'recovery-required',
+      errorCode,
+      plan: claimed.plan,
+      restorePointId: state.restorePoint?.id || selectedRestorePoint?.id || null,
+      automaticRecovery: false
+    });
+    const resolution = terminalResolution(claimed.jobId, {
+      expectedPhase: job.phase,
+      nextPhase: 'recovery-required',
+      patch: { outcome }
+    });
+    const published = await this.#tryPublishTerminal(resolution);
+    if (published.job) return published.job;
+    throw recoveryRequired(published.error || error);
   }
 
   async #executeUnderLease(context) {
@@ -714,6 +1361,12 @@ class ModpackLifecycleService {
       lease,
       signal
     });
+    // Successful production revalidation has already created the operation's
+    // durable recovery record and retained runtime context. Mark that boundary
+    // before consulting the independently persisted job cancellation state or
+    // advancing its phase so either failure path performs idempotent recovery.
+    state.recoveryRecordPrepared = true;
+    state.failureStep = null;
     await this.#throwIfCancelled(claimed.jobId, signal);
 
     const existing = !['install-new', 'import-files-only-new'].includes(operationKind);
@@ -721,23 +1374,52 @@ class ModpackLifecycleService {
       !(operationKind === 'uninstall-managed' && claimed.plan.ownership.confirmation.possibleNonRunnable);
     const requiresCommitFinalizationWithoutHealth = operationKind === 'import-files-only-new' ||
       (operationKind === 'uninstall-managed' && claimed.plan.ownership.confirmation.possibleNonRunnable);
+    const shouldRun = requiresRuntimeValidation && (resolved.priorRunning || choices.startAfterInstall);
+    // Existing servers retain the pre-swap candidate boot. New managed servers
+    // are validated exactly once from their final canonical path so path-
+    // sensitive server packs behave the same whether they remain running or not.
+    const requiresCandidateValidation = requiresRuntimeValidation && existing;
     let restorePoint = selectedRestorePoint;
     if (existing) {
       await this.#transition(claimed.jobId, 'snapshotting', 15, 'Creating a verified restore point', signal);
-      restorePoint = await this.mutationRuntime.createRestorePoint({
-        jobId: claimed.jobId,
-        plan: claimed.plan,
-        choices,
-        selectedRestorePoint,
-        resolved,
-        lease,
-        signal
-      });
-      state.restorePoint = restorePoint;
+      const snapshotProgress = createRestorePointCreationProgressQueue(
+        progress => this.#updateSnapshotProgress(claimed.jobId, progress, signal)
+      );
+      // A production attempt may durably create or advance its recovery record
+      // before createRestorePoint returns (including immediately before it
+      // reports cancellation). From this boundary onward, pre-commit failure
+      // must ask the runtime to reconcile that record even without a returned
+      // restore-point reference; an absent record is handled idempotently.
+      state.restorePointAttempted = true;
+      try {
+        restorePoint = await this.mutationRuntime.createRestorePoint({
+          jobId: claimed.jobId,
+          plan: claimed.plan,
+          choices,
+          selectedRestorePoint,
+          resolved,
+          lease,
+          signal,
+          onProgress: value => snapshotProgress.push(value)
+        });
+        // The production runtime has already durably published both the
+        // restore point and its recovery-registry reference before returning.
+        // Record that fact before draining best-effort UI progress so a store
+        // failure or cancellation at this boundary still reconciles the
+        // pre-candidate recovery record.
+        state.restorePoint = restorePoint;
+        await snapshotProgress.drain();
+        snapshotProgress.push({ phase: 'complete' });
+        await snapshotProgress.drain();
+      } catch (error) {
+        try { await snapshotProgress.drain(); } catch { /* preserve the restore-point failure */ }
+        throw error;
+      }
       await this.#throwIfCancelled(claimed.jobId, signal);
     }
 
     await this.#transition(claimed.jobId, 'staging', 35, 'Building the server candidate', signal);
+    state.candidateBuilt = true;
     const candidate = await this.mutationRuntime.buildCandidate({
       jobId: claimed.jobId,
       operationKind,
@@ -746,12 +1428,18 @@ class ModpackLifecycleService {
       restorePoint,
       resolved,
       lease,
-      signal
+      signal,
+      onProgress: progress => this.#updateCandidateProgress(claimed.jobId, progress, signal)
     });
-    state.candidateBuilt = true;
     await this.#throwIfCancelled(claimed.jobId, signal);
-    if (requiresRuntimeValidation) {
-      await this.#transition(claimed.jobId, 'validating-candidate', 50, 'Validating the server candidate', signal);
+    if (requiresCandidateValidation) {
+      const current = await this.operationStore.get(claimed.jobId);
+      if (!current) throw stale();
+      if (current.phase === 'staging') {
+        await this.#transition(claimed.jobId, 'validating-candidate', 50, 'Validating the server candidate', signal);
+      } else if (current.phase !== 'validating-candidate') {
+        throw stale();
+      }
       await this.mutationRuntime.validateCandidate({
         jobId: claimed.jobId,
         operationKind,
@@ -792,7 +1480,6 @@ class ModpackLifecycleService {
       });
     }
 
-    const shouldRun = requiresRuntimeValidation && (resolved.priorRunning || choices.startAfterInstall);
     if (shouldRun) {
       await this.#transition(claimed.jobId, 'starting', 85, 'Starting the committed server', null);
       await this.mutationRuntime.startFinal({
@@ -859,7 +1546,7 @@ class ModpackLifecycleService {
     await this.mutationRuntime.cleanup({
       jobId: claimed.jobId, operationKind, plan: claimed.plan, committed, resolved, lease
     });
-    this.#releaseClaim(claimed.jobId);
+    await this.#releaseClaim(claimed.jobId);
     const completedOutcome = await this.#withIssuedActions({
       status: 'completed',
       message: 'The modpack operation completed successfully',
@@ -875,10 +1562,44 @@ class ModpackLifecycleService {
       restorePointId: restorePoint?.id || null,
       automaticRecovery: false
     });
-    await this.#transition(claimed.jobId, 'completed', 100, 'Modpack operation completed', null, completedOutcome);
+    return completedOutcome;
   }
 
-  async #handleFailure(context) {
+  async #appendFailureEvent(jobId, error, state) {
+    if (typeof this.operationStore.appendEvent !== 'function') return null;
+    try {
+      const current = await this.operationStore.get(jobId);
+      if (!current || TERMINAL_JOB_PHASES.has(current.phase)) return current;
+      const errorCode = error?.runtimeWritersUnproven === true && typeof error?.runtimeFailureCode === 'string'
+        ? safeErrorCode({ code: error.runtimeFailureCode }) : safeErrorCode(error);
+      const runtimeDiagnostic = runtimeDiagnosticFromError(error);
+      const step = SAFE_FAILURE_STEPS.has(state?.failureStep) ? state.failureStep : null;
+      const field = safeFailureField(error);
+      const duplicate = Array.isArray(current.events) && current.events.some(event =>
+        event?.channel === 'log' && event?.details?.errorCode === errorCode &&
+        (step === null || event?.details?.step === step) &&
+        (field === null || event?.details?.field === field)
+      );
+      if (duplicate) return current;
+      return await this.operationStore.appendEvent(jobId, {
+        channel: 'log',
+        message: runtimeDiagnostic
+          ? `${errorCode}: Runtime preparation stopped (${runtimeDiagnostic.stage}; ${runtimeDiagnostic.reason}${runtimeDiagnostic.osCode ? `; ${runtimeDiagnostic.osCode}` : ''}${runtimeDiagnostic.changedIdentityFields ? `; changed identity fields ${runtimeDiagnostic.changedIdentityFields}` : ''})`
+          : safeFailureLogMessage(error),
+        details: {
+          errorCode,
+          ...(runtimeDiagnostic ? { runtimeDiagnostic } : {}),
+          ...(step === null ? {} : { step }),
+          ...(field === null ? {} : { field })
+        }
+      });
+    } catch {
+      // Diagnostic publication is best-effort. The terminal outcome remains authoritative.
+      return null;
+    }
+  }
+
+  async #handleFailure(context, { deferTerminal = false } = {}) {
     const { claimed, operationKind, plan, choices, selectedRestorePoint, lease, resolved, restartToken, state, error } = {
       plan: context.claimed.plan,
       ...context
@@ -924,12 +1645,22 @@ class ModpackLifecycleService {
           expectedPhase: 'cleanup', nextPhase: 'cleanup-pending', patch: {}
         });
       }
-      return job;
+      return deferTerminal ? null : job;
     }
 
     if (!state.commitStarted) {
       let cleanupError = null;
-      if (state.candidateBuilt && resolved) {
+      if ((state.recoveryRecordPrepared || state.candidateBuilt || state.restorePointAttempted ||
+           state.restorePoint !== null) && resolved) {
+        if (error?.preserveWorkspace === true && typeof this.operationStore.appendEvent === 'function') {
+          try {
+            await this.operationStore.appendEvent(claimed.jobId, {
+              channel: 'log',
+              message: 'Waiting for runtime workers to stop before safely cleaning the candidate',
+              details: { step: 'wait-runtime-workers' }
+            });
+          } catch { /* progress reporting must not bypass the shutdown barrier */ }
+        }
         try {
           await this.mutationRuntime.abandonCandidate({
             jobId: claimed.jobId, operationKind, plan, choices, resolved, lease, error
@@ -938,7 +1669,9 @@ class ModpackLifecycleService {
           cleanupError = candidateError;
         }
       }
-      if (restartToken !== null && resolved) {
+      const runtimeUnproven = error?.runtimeWritersUnproven === true || cleanupError?.runtimeWritersUnproven === true;
+      if (runtimeUnproven) this.mutationCoordinator.quarantineMutation(lease);
+      if (!runtimeUnproven && restartToken !== null && resolved) {
         try {
           await this.mutationRuntime.restorePriorState({
             jobId: claimed.jobId, plan, resolved, restartToken, running: resolved.priorRunning, lease
@@ -947,20 +1680,35 @@ class ModpackLifecycleService {
           cleanupError ||= policyError;
         }
       }
-      try { this.#releaseClaim(claimed.jobId); }
-      catch (releaseError) { cleanupError ||= releaseError; }
+      if (!runtimeUnproven) {
+        try { await this.#releaseClaim(claimed.jobId); }
+        catch (releaseError) { cleanupError ||= releaseError; }
+      }
       job = await this.operationStore.get(claimed.jobId);
       const wasCancelled = job.phase === 'cancelling' || error?.code === 'CANCELLED';
       if (wasCancelled && job.phase !== 'cancelling') {
         job = await this.operationStore.requestCancellation(claimed.jobId);
       }
-      const terminalPhase = wasCancelled ? 'cancelled' : 'failed';
-      const errorCode = safeErrorCode(cleanupError || error);
+      const terminalPhase = runtimeUnproven ? 'recovery-required' : wasCancelled ? 'cancelled' : 'failed';
+      const errorCode = runtimeUnproven && typeof error?.runtimeFailureCode === 'string'
+        ? safeErrorCode({ code: error.runtimeFailureCode }) : safeErrorCode(error);
+      const failureDiagnostic = wasCancelled ? null : failureDiagnosticFromError(error);
+      const runtimeDiagnostic = runtimeDiagnosticFromError(error);
+      const failureReason = wasCancelled ? null : destinationRecoveryFailureReason(error, {
+        operationKind,
+        failureStep: state.failureStep
+      });
       const outcome = await this.#withIssuedActions({
         status: terminalPhase,
-        message: wasCancelled ? 'The operation was cancelled before the server changed' : 'The operation failed before the server changed',
+        message: runtimeUnproven
+          ? 'Runtime shutdown could not be confirmed. Candidate files are retained and this server is blocked pending recovery.'
+          : wasCancelled ? 'The operation was cancelled before the server changed' : 'The operation failed before the server changed',
         errorCode,
-        cleanupPending: cleanupError !== null,
+        cleanupPending: runtimeUnproven || cleanupError !== null,
+        ...(cleanupError === null ? {} : { cleanupErrorCode: safeErrorCode(cleanupError) }),
+        ...(failureReason === null ? {} : { failureReason }),
+        ...(failureDiagnostic === null ? {} : { failure: failureDiagnostic }),
+        ...(runtimeDiagnostic ? { runtimeDiagnostic } : {}),
         ...(hasVerifiedRetainedArtifact(plan) ? { retainedDownload: true } : {})
       }, {
         jobId: claimed.jobId,
@@ -973,15 +1721,24 @@ class ModpackLifecycleService {
         restorePointId: state.restorePoint?.id || selectedRestorePoint?.id || null,
         automaticRecovery: false
       });
-      return this.operationStore.transition(claimed.jobId, {
+      const request = {
         expectedPhase: job.phase,
         nextPhase: terminalPhase,
         patch: {
-          outcome
+          outcome,
+          ...(runtimeUnproven ? { progress: {
+            percent: job.progress?.percent ?? 0,
+            message: 'Runtime shutdown is unproven; files are retained for recovery',
+            currentItem: null
+          } } : {})
         }
-      });
+      };
+      return deferTerminal
+        ? terminalResolution(claimed.jobId, request)
+        : this.operationStore.transition(claimed.jobId, request);
     }
 
+    const failedPhase = job.phase;
     try {
       if (job.phase !== 'rolling-back') {
         job = await this.operationStore.transition(claimed.jobId, {
@@ -990,7 +1747,7 @@ class ModpackLifecycleService {
           patch: {}
         });
       }
-      await this.mutationRuntime.rollback({
+      const rollbackResult = await this.mutationRuntime.rollback({
         jobId: claimed.jobId,
         operationKind,
         plan,
@@ -1006,40 +1763,61 @@ class ModpackLifecycleService {
           jobId: claimed.jobId, plan, resolved, restartToken, running: resolved.priorRunning, lease
         });
       }
-      this.#releaseClaim(claimed.jobId);
+      await this.#releaseClaim(claimed.jobId);
       const errorCode = safeErrorCode(error);
+      const newServerFailed = plan.operation.serverKind === 'new';
+      const newServerFailure = newServerFailed
+        ? normalizeFailureDiagnostic(rollbackResult?.failure) ||
+          (rollbackResult?.action === 'pre-publication-cleanup'
+            ? publicationFailureDiagnosticFromError(error)
+            : failureDiagnosticFromError(error))
+        : null;
+      const terminalPhase = newServerFailed ? 'failed' : 'rolled-back';
+      const terminalMessage = newServerFailed
+        ? rollbackResult?.action === 'pre-publication-cleanup'
+          ? 'The new server was not published'
+          : 'The failed new server was quarantined safely'
+        : 'The original server was restored after the operation failed';
       const outcome = await this.#withIssuedActions({
-        status: 'rolled-back',
-        message: 'The original server was restored after the operation failed',
-        errorCode
+        status: terminalPhase,
+        message: terminalMessage,
+        errorCode,
+        ...(newServerFailure ? { failure: newServerFailure } : {})
       }, {
         jobId: claimed.jobId,
         operationKind,
         instanceId: claimed.plan.operation.instanceId,
-        phase: 'rolled-back',
-        status: 'rolled-back',
+        phase: terminalPhase,
+        status: terminalPhase,
         errorCode,
         plan,
         restorePointId: state.restorePoint?.id || selectedRestorePoint?.id || null,
         automaticRecovery: false
       });
-      return this.operationStore.transition(claimed.jobId, {
+      const request = {
         expectedPhase: 'rolling-back',
-        nextPhase: 'rolled-back',
+        nextPhase: terminalPhase,
         patch: {
           outcome
         }
-      });
+      };
+      return deferTerminal
+        ? terminalResolution(claimed.jobId, request)
+        : this.operationStore.transition(claimed.jobId, request);
     } catch (rollbackError) {
       const latest = await this.operationStore.get(claimed.jobId);
       if (!latest || TERMINAL_JOB_PHASES.has(latest.phase)) return latest;
       const phase = latest.phase === 'rolling-back' ? latest.phase : job.phase;
       const errorCode = safeErrorCode(rollbackError);
+      const publicationFailure = plan.operation.serverKind === 'new' && failedPhase === 'publishing'
+        ? publicationFailureDiagnosticFromError(error)
+        : null;
       const outcome = await this.#withIssuedActions({
         status: 'recovery-required',
         message: 'The server needs recovery before it can be used',
         errorCode,
-        automatic: false
+        automatic: false,
+        ...(publicationFailure ? { failure: publicationFailure } : {})
       }, {
         jobId: claimed.jobId,
         operationKind,
@@ -1051,13 +1829,16 @@ class ModpackLifecycleService {
         restorePointId: state.restorePoint?.id || selectedRestorePoint?.id || null,
         automaticRecovery: false
       });
-      return this.operationStore.transition(claimed.jobId, {
+      const request = {
         expectedPhase: phase,
         nextPhase: 'recovery-required',
         patch: {
           outcome
         }
-      });
+      };
+      return deferTerminal
+        ? terminalResolution(claimed.jobId, request)
+        : this.operationStore.transition(claimed.jobId, request);
     }
   }
 
@@ -1065,6 +1846,44 @@ class ModpackLifecycleService {
     if (signal?.aborted) throw cancelled();
     const job = await this.operationStore.get(jobId);
     if (!job || job.phase === 'cancelling' || job.cancellationRequested) throw cancelled();
+  }
+
+  async #updateCandidateProgress(jobId, value, signal) {
+    const progress = candidateProgress(value);
+    await this.#throwIfCancelled(jobId, signal);
+    const current = await this.operationStore.get(jobId);
+    if (!current) throw stale();
+    if (current.phase === 'cancelling' || current.cancellationRequested) throw cancelled();
+    if (current.progress !== null && progress.percent < current.progress.percent) throw stale();
+    if (current.phase === progress.phase) {
+      if (typeof this.operationStore.updateProgress !== 'function') return current;
+      return this.operationStore.updateProgress(jobId, {
+        expectedPhase: current.phase,
+        progress: { percent: progress.percent, message: progress.message, currentItem: null }
+      });
+    }
+    if (current.phase === 'staging' && progress.phase === 'validating-candidate') {
+      return this.#transition(jobId, 'validating-candidate', progress.percent, progress.message, signal);
+    }
+    throw stale();
+  }
+
+  async #updateSnapshotProgress(jobId, progress, signal) {
+    if (progress?.phase !== 'snapshotting' || !Number.isSafeInteger(progress.percent) ||
+        progress.percent < 16 || progress.percent > 34 || typeof progress.message !== 'string' ||
+        progress.message.length < 1 || progress.message.length > 512 || progress.currentItem !== null) throw invalid();
+    await this.#throwIfCancelled(jobId, signal);
+    const current = await this.operationStore.get(jobId);
+    if (!current) throw stale();
+    if (current.phase === 'cancelling' || current.cancellationRequested) throw cancelled();
+    if (current.phase !== 'snapshotting' || (current.progress !== null && progress.percent < current.progress.percent)) {
+      throw stale();
+    }
+    if (typeof this.operationStore.updateProgress !== 'function') return current;
+    return this.operationStore.updateProgress(jobId, {
+      expectedPhase: 'snapshotting',
+      progress: { percent: progress.percent, message: progress.message, currentItem: null }
+    });
   }
 
   async #withIssuedActions(outcome, context) {
@@ -1085,11 +1904,13 @@ class ModpackLifecycleService {
     const patch = outcome === null
       ? { progress: { percent, message, currentItem: null } }
       : { progress: { percent, message, currentItem: null }, outcome };
-    return this.operationStore.transition(jobId, {
+    const transitioned = await this.operationStore.transition(jobId, {
       expectedPhase: current.phase,
       nextPhase,
       patch
     });
+    await this.yieldControl();
+    return transitioned;
   }
 }
 

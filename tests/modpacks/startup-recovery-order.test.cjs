@@ -126,6 +126,46 @@ test('startup recovery installs every discoverable block before attempting a rec
   assert.equal(Object.isFrozen(result), true);
 });
 
+test('startup boundary exposes reviewed recovery without running expensive automatic cleanup', async () => {
+  const {
+    establishStartupRecoveryBoundary
+  } = require('../../electron/services/modpack-lifecycle/startup-recovery-bootstrap.cjs');
+  const order = [];
+  const record = {
+    jobId: 'job-alpha',
+    target: { stableServerId: 'alpha', path: 'C:\\Minecraft\\Alpha' }
+  };
+  const scan = {
+    records: [record],
+    corrupt: [],
+    blocks: [{
+      jobId: 'job-alpha',
+      stableServerId: 'alpha',
+      targetPathHash: recoveryPathHash(record.target.path),
+      targetLabel: 'Alpha'
+    }],
+    globalBlock: false
+  };
+  const coordinator = {
+    beginStartupRecovery() { order.push('begin'); },
+    installRecoveryBlocks(blocks) { order.push(`install:${blocks[0].operationId}`); },
+    completeStartupRecovery(outcomes, options) {
+      order.push(`complete:${outcomes[0].resolved}:${options.globalBlock}`);
+      return { resolved: 0, unresolved: 1, globalBlocked: false };
+    }
+  };
+
+  const result = await establishStartupRecoveryBoundary({
+    coordinator,
+    registry: { async initialize() { order.push('scan'); return scan; } },
+    runtimeVerifier: { async verifyBeforeRecovery() { order.push('runtime'); return { quiescent: true }; } }
+  });
+
+  assert.deepEqual(order, ['begin', 'runtime', 'scan', 'install:job-alpha', 'complete:false:false']);
+  assert.deepEqual(result, { recovered: [], unresolved: ['job-alpha'], globalBlock: false });
+  assert.equal(Object.isFrozen(result), true);
+});
+
 test('identifiable corruption stays scoped while unidentifiable corruption retains the global block', async () => {
   const { initializeStartupRecovery } = require('../../electron/services/modpack-lifecycle/startup-recovery-bootstrap.cjs');
   const record = {
@@ -201,7 +241,7 @@ test('fatal runtime verification or registry scan exposes no cleanup, window, IP
     });
 
     await assert.rejects(bootstrap.onReady(), new RegExp(`${failAt} failed`));
-    assert.deepEqual(order, ['recovery']);
+    assert.deepEqual(order, ['watchdog', 'recovery']);
   }
 });
 

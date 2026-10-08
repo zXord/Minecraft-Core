@@ -1,14 +1,19 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
-  import { modpackApi } from '../utils/modpacks/modpackApi.js';
+  import { isPlanStaleError, ModpackApiError, modpackApi } from '../utils/modpacks/modpackApi.js';
+  import { createServerRequestScope } from '../utils/modpacks/serverRequestScope.js';
   import ModpackOverview from '../components/modpacks/ModpackOverview.svelte';
+  import ClientCompanionPanel from '../components/modpacks/ClientCompanionPanel.svelte';
   import ModpackVersionPanel from '../components/modpacks/ModpackVersionPanel.svelte';
   import ModpackActionPanel from '../components/modpacks/ModpackActionPanel.svelte';
   import ModpackPlanReview from '../components/modpacks/ModpackPlanReview.svelte';
   import ModpackJobProgress from '../components/modpacks/ModpackJobProgress.svelte';
+  import ModpackInspectionProgress from '../components/modpacks/ModpackInspectionProgress.svelte';
+  import ModpackPlanningProgress from '../components/modpacks/ModpackPlanningProgress.svelte';
   import ModpackRecoveryPanel from '../components/modpacks/ModpackRecoveryPanel.svelte';
   import ModpackNotificationCenter from '../components/modpacks/ModpackNotificationCenter.svelte';
   import { filterRecoveryRecordsForServer } from '../stores/modpackNotificationStore.js';
+  import { compareVersions } from '../utils/versionUtils.js';
   import ModpackSourceChoice from '../components/setup/ModpackSourceChoice.svelte';
   import ModrinthPackBrowser from '../components/setup/ModrinthPackBrowser.svelte';
   import GitHubReleasePicker from '../components/setup/GitHubReleasePicker.svelte';
@@ -29,6 +34,7 @@
   let flow = 'dashboard';
   let operationKind = 'install-existing';
   let inspection = null;
+  let selectedRequest = null;
   let reviewedPlan = null;
   let githubRelease = null;
   let githubAssets = null;
@@ -36,24 +42,53 @@
   let linkedModrinthProjectId = '';
   let currentGithubReleaseId = '';
   let approvedLinkedModrinthProjectId = null;
+  let managedGithubChronologicalOperation = null;
+  let requestedModrinthVersionId = '';
+  let requestedModrinthNavigationToken = 0;
+  let requestedGithubReleaseId = '';
+  let requestedGithubNavigationToken = 0;
+  let allowCurrentGithubReleaseReview = false;
   let job = null;
   let verification = null;
   let busy = false;
+  let checkingForUpdates = false;
+  let updateCheckStatus = '';
   let cleanups = [];
   let selectedRestorePointId = null;
+  let rollbackOptions = [];
+  let rollbackOptionsLoading = false;
+  let rollbackOptionsError = null;
+  let rollbackOptionsRequestSequence = 0;
+  let rollbackOptionsServerId = '';
   let handledNavigationToken = null;
   let pageRoot;
   let errorRegion;
   let focusedFlow = null;
   let focusedError = null;
   let contextualNotificationSequence = 0;
+  let inspectionRequestSequence = 0;
+  let activeInspectionRequestSequence = null;
+  let inspectionProgress = null;
+  let preflightProgress = null;
+  let selectingDestination = false;
+  let refreshRequestSequence = 0;
+  let pageMounted = false;
+  let activeInspectionController = null;
+  const serverRequestScope = createServerRequestScope();
 
-  $: serverId = currentInstance?.id || '';
+  $: serverId = currentInstance?.type === 'server' ? currentInstance.id || '' : '';
+  $: if (serverId !== serverRequestScope.serverId) activateServer(serverId);
   $: isManaged = Boolean(state?.modpackManaged);
   $: recoveryItems = Array.isArray(recovery) ? recovery : recovery?.items || [];
   $: currentServerRecoveryItems = filterRecoveryRecordsForServer(recoveryItems, serverId);
-  $: restorePoints = history.filter(item => item.restorePointId);
-  $: if (navigationTarget?.token && navigationTarget.token !== handledNavigationToken) {
+  $: if (serverId !== rollbackOptionsServerId) {
+    rollbackOptionsServerId = serverId;
+    rollbackOptionsRequestSequence += 1;
+    rollbackOptions = [];
+    rollbackOptionsLoading = false;
+    rollbackOptionsError = null;
+  }
+  $: if (!loading && navigationTarget?.token && navigationTarget.token !== handledNavigationToken) {
     applyNavigationTarget(navigationTarget);
   }
   $: if (flow !== focusedFlow) {
@@ -82,13 +117,205 @@
     errorRegion?.focus?.();
   }
 
+  function activateServer(nextServerId) {
+    const activation = serverRequestScope.activate(nextServerId);
+    if (!activation.changed) return;
+    invalidateInspectionRequests();
+    refreshRequestSequence += 1;
+    rollbackOptionsRequestSequence += 1;
+    state = null;
+    history = [];
+    historyCursor = null;
+    recovery = [];
+    loading = Boolean(nextServerId);
+    error = null;
+    activeSection = 'overview';
+    flow = 'dashboard';
+    operationKind = 'install-existing';
+    const abandonedInspection = inspection;
+    inspection = null;
+    selectedRequest = null;
+    void discardInspectionSession(abandonedInspection).catch(() => {});
+    reviewedPlan = null;
+    githubRelease = null;
+    githubAssets = null;
+    suggestedRepositoryUrl = '';
+    linkedModrinthProjectId = '';
+    currentGithubReleaseId = '';
+    approvedLinkedModrinthProjectId = null;
+    managedGithubChronologicalOperation = null;
+    requestedModrinthVersionId = '';
+    requestedModrinthNavigationToken = 0;
+    requestedGithubReleaseId = '';
+    requestedGithubNavigationToken = 0;
+    allowCurrentGithubReleaseReview = false;
+    job = null;
+    verification = null;
+    busy = false;
+    checkingForUpdates = false;
+    updateCheckStatus = '';
+    preflightProgress = null;
+    selectingDestination = false;
+    selectedRestorePointId = null;
+    rollbackOptions = [];
+    rollbackOptionsLoading = false;
+    rollbackOptionsError = null;
+    rollbackOptionsServerId = nextServerId;
+    focusedFlow = null;
+    focusedError = null;
+    if (pageMounted && nextServerId) void refresh(nextServerId);
+  }
+
+  function currentServerRequest(token) {
+    return serverRequestScope.isCurrent(token, serverId);
+  }
+
+  function invalidateInspectionRequests() {
+    activeInspectionController?.abort();
+    activeInspectionController = null;
+    inspectionRequestSequence += 1;
+    if (activeInspectionRequestSequence !== null) {
+      activeInspectionRequestSequence = null;
+      busy = false;
+    }
+    inspectionProgress = null;
+  }
+
+  function discardInspectionSession(value = inspection) {
+    const inspectionId = value?.inspectionId;
+    if (value === inspection) inspection = null;
+    if (!inspectionId) return Promise.resolve(false);
+    return modpackApi.discardInspection(inspectionId);
+  }
+
+  function beginInspectionRequest() {
+    activeInspectionController?.abort();
+    const controller = new AbortController();
+    const requestSequence = ++inspectionRequestSequence;
+    activeInspectionRequestSequence = requestSequence;
+    activeInspectionController = controller;
+    busy = true;
+    error = null;
+    inspectionProgress = { phase: 'resolving' };
+    return { requestSequence, signal: controller.signal };
+  }
+
+  function finishInspectionRequest(request) {
+    const requestSequence = request.requestSequence;
+    if (requestSequence !== inspectionRequestSequence) return;
+    activeInspectionRequestSequence = null;
+    activeInspectionController = null;
+    busy = false;
+    inspectionProgress = null;
+  }
+
+  function navigateSelectionFlow(nextFlow) {
+    invalidateInspectionRequests();
+    flow = nextFlow;
+  }
+
+  function abandonInspection(nextFlow = 'source') {
+    invalidateInspectionRequests();
+    const abandonedInspection = inspection;
+    inspection = null;
+    selectedRequest = null;
+    reviewedPlan = null;
+    void discardInspectionSession(abandonedInspection).catch(() => {});
+    flow = nextFlow;
+  }
+
+  function selectDashboardSection(section) {
+    invalidateInspectionRequests();
+    activeSection = section;
+  }
+
+  function navigationFailure(message) {
+    const value = new Error(message);
+    value.code = 'PLAN_STALE';
+    return value;
+  }
+
+  function exactReleaseTarget(value) {
+    const keys = value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : [];
+    const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
+    if (keys.length !== 5 || !['serverId', 'provider', 'sourceId', 'releaseId', 'prerelease'].every(key => keys.includes(key)) ||
+        !['github', 'modrinth'].includes(value.provider) || typeof value.prerelease !== 'boolean' ||
+        !identifier.test(value.serverId) || !identifier.test(value.sourceId) || !identifier.test(value.releaseId)) {
+      throw navigationFailure('The exact release target from this notification is invalid. Refresh notification history before retrying.');
+    }
+    return value;
+  }
+
+  function clearRequestedReleaseTargets() {
+    requestedModrinthVersionId = '';
+    requestedGithubReleaseId = '';
+    allowCurrentGithubReleaseReview = false;
+  }
+
+  function applyExactReleaseTarget(target, destination) {
+    let releaseTarget;
+    try {
+      releaseTarget = exactReleaseTarget(destination.releaseTarget);
+    } catch (caught) {
+      error = caught;
+      return;
+    }
+    const source = state?.source;
+    const currentSourceId = source?.provider === 'github' ? source.repositoryId : source?.projectId;
+    if (!isManaged || releaseTarget.serverId !== serverId || source?.provider !== releaseTarget.provider ||
+        currentSourceId !== releaseTarget.sourceId) {
+      error = navigationFailure('This release notification no longer matches the server’s managed modpack source. Minecraft Core did not open or substitute another release.');
+      return;
+    }
+
+    invalidateInspectionRequests();
+    inspection = null;
+    selectedRequest = null;
+    reviewedPlan = null;
+    githubRelease = null;
+    githubAssets = null;
+    operationKind = 'update';
+    clearRequestedReleaseTargets();
+    if (releaseTarget.provider === 'modrinth') {
+      requestedModrinthVersionId = releaseTarget.releaseId;
+      requestedModrinthNavigationToken = target.token;
+      flow = 'dashboard';
+      activeSection = 'versions';
+      return;
+    }
+
+    const owner = source?.githubOwner;
+    const repo = source?.githubRepo;
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner || '') ||
+        !/^(?!\.)(?!.*\.git$)[A-Za-z0-9_.-]{1,100}$/i.test(repo || '') || !source?.releaseId) {
+      error = navigationFailure('Minecraft Core does not have the trusted GitHub identity required to open this exact release.');
+      return;
+    }
+    suggestedRepositoryUrl = `https://github.com/${owner}/${repo}`;
+    linkedModrinthProjectId = '';
+    currentGithubReleaseId = source.releaseId;
+    approvedLinkedModrinthProjectId = null;
+    managedGithubChronologicalOperation = null;
+    requestedGithubReleaseId = releaseTarget.releaseId;
+    requestedGithubNavigationToken = target.token;
+    allowCurrentGithubReleaseReview = target.notificationType === 'source-changed' &&
+      releaseTarget.releaseId === source.releaseId;
+    flow = 'github';
+  }
+
   function applyNavigationTarget(target) {
     handledNavigationToken = target.token;
     if (target.serverId && serverId && target.serverId !== serverId) return;
+    invalidateInspectionRequests();
     const type = target.notificationType;
-    const destinationKind = target.result?.destination?.kind || '';
+    const destination = target.result?.destination;
+    const destinationKind = destination?.kind || '';
     flow = 'dashboard';
     error = null;
+    if (destination?.releaseTarget) {
+      applyExactReleaseTarget(target, destination);
+      return;
+    }
     if (['update-available', 'prerelease-available', 'github-asset-selection-required', 'source-changed'].includes(type) ||
         ['selection', 'asset-selection'].includes(destinationKind)) {
       activeSection = 'versions';
@@ -111,172 +338,365 @@
     });
   }
 
-  async function refresh() {
-    if (!serverId) return;
+  async function refresh(requestedServerId = serverId) {
+    if (!requestedServerId || requestedServerId !== serverRequestScope.serverId) return;
+    const requestToken = serverRequestScope.begin();
+    const requestSequence = ++refreshRequestSequence;
     loading = true;
     error = null;
     try {
       const [nextState, historyPage, recoveryRecords] = await Promise.all([
-        modpackApi.getState(serverId),
-        modpackApi.listHistory(serverId, null, 50),
+        modpackApi.getState(requestedServerId),
+        modpackApi.listHistory(requestedServerId, null, 50),
         modpackApi.listRecovery()
       ]);
+      if (!currentServerRequest(requestToken) || requestSequence !== refreshRequestSequence) return;
       state = nextState;
       history = historyPage?.items || [];
       historyCursor = historyPage?.nextCursor || null;
       recovery = recoveryRecords || [];
     } catch (caught) {
+      if (!currentServerRequest(requestToken) || requestSequence !== refreshRequestSequence) return;
       error = caught;
     } finally {
-      loading = false;
+      if (currentServerRequest(requestToken) && requestSequence === refreshRequestSequence) loading = false;
     }
   }
 
   async function loadOlderHistory() {
     if (!historyCursor) return;
+    const requestToken = serverRequestScope.begin();
+    const requestedCursor = historyCursor;
     busy = true;
     try {
-      const page = await modpackApi.listHistory(serverId, historyCursor, 50);
+      const page = await modpackApi.listHistory(requestToken.serverId, requestedCursor, 50);
+      if (!currentServerRequest(requestToken)) return;
       history = [...history, ...(page?.items || [])];
       historyCursor = page?.nextCursor || null;
     } catch (caught) {
+      if (!currentServerRequest(requestToken)) return;
       error = caught;
     } finally {
-      busy = false;
+      if (currentServerRequest(requestToken)) busy = false;
     }
   }
 
   function beginSource(kind = isManaged ? 'switch' : 'install-existing') {
+    invalidateInspectionRequests();
     operationKind = kind;
+    const abandonedInspection = inspection;
     inspection = null;
+    selectedRequest = null;
+    void discardInspectionSession(abandonedInspection).catch(() => {});
     reviewedPlan = null;
     error = null;
     suggestedRepositoryUrl = '';
     linkedModrinthProjectId = '';
     currentGithubReleaseId = '';
     approvedLinkedModrinthProjectId = null;
+    managedGithubChronologicalOperation = null;
+    clearRequestedReleaseTargets();
     flow = 'source';
   }
 
+  async function checkForModpackUpdates() {
+    if (checkingForUpdates || !isManaged || !serverId || !['github', 'modrinth'].includes(state?.source?.provider)) return;
+    const requestToken = serverRequestScope.begin();
+    checkingForUpdates = true;
+    updateCheckStatus = '';
+    error = null;
+    try {
+      const results = await modpackApi.checkUpdates(null, true);
+      if (!currentServerRequest(requestToken)) return;
+      const checked = Array.isArray(results) ? results : [];
+      updateCheckStatus = checked.some(result => typeof result?.errorCode === 'string')
+        ? 'Release check finished with an error. Review notifications for the retry action.'
+        : checked.some(result => result?.changed === true)
+          ? 'Release check finished. A matching update is available in notifications.'
+          : 'Release check finished. No newer matching release was found.';
+    } catch (caught) {
+      if (!currentServerRequest(requestToken)) return;
+      error = caught;
+      updateCheckStatus = 'The release check could not be completed.';
+    } finally {
+      if (currentServerRequest(requestToken)) checkingForUpdates = false;
+    }
+  }
+
+  async function loadRollbackOptions() {
+    const requestedServerId = serverId;
+    const requestSequence = ++rollbackOptionsRequestSequence;
+    rollbackOptions = [];
+    rollbackOptionsLoading = true;
+    rollbackOptionsError = null;
+    try {
+      const result = await modpackApi.listRollbackOptions(requestedServerId);
+      if (requestSequence !== rollbackOptionsRequestSequence || serverId !== requestedServerId || flow !== 'restore-points') return;
+      rollbackOptions = Array.isArray(result?.items) ? result.items : [];
+    } catch (caught) {
+      if (requestSequence !== rollbackOptionsRequestSequence || serverId !== requestedServerId || flow !== 'restore-points') return;
+      rollbackOptionsError = caught;
+    } finally {
+      if (requestSequence === rollbackOptionsRequestSequence && serverId === requestedServerId) {
+        rollbackOptionsLoading = false;
+      }
+    }
+  }
+
   function reviewLinkedGithub(event) {
+    invalidateInspectionRequests();
     suggestedRepositoryUrl = event.detail.repositoryUrl;
     linkedModrinthProjectId = event.detail.modrinthProjectId;
     currentGithubReleaseId = '';
     approvedLinkedModrinthProjectId = null;
+    managedGithubChronologicalOperation = null;
+    clearRequestedReleaseTargets();
     flow = 'github';
   }
 
   function reviewManagedGithub(event) {
+    invalidateInspectionRequests();
     suggestedRepositoryUrl = event.detail.repositoryUrl;
     linkedModrinthProjectId = '';
     currentGithubReleaseId = event.detail.currentReleaseId;
     approvedLinkedModrinthProjectId = null;
+    managedGithubChronologicalOperation = null;
+    clearRequestedReleaseTargets();
     flow = 'github';
   }
 
   function handleGithubAssets(event) {
+    invalidateInspectionRequests();
     githubRelease = event.detail.release;
     githubAssets = event.detail.assets;
     approvedLinkedModrinthProjectId = event.detail.linkedModrinthProjectId || null;
+    managedGithubChronologicalOperation = event.detail.operationKind || null;
     if (event.detail.operationKind && operationKind !== 'repair') operationKind = event.detail.operationKind;
     flow = 'github-assets';
   }
 
   function inspectGithubSelection(event) {
+    const classifyManagedRuntime = Boolean(currentGithubReleaseId) && operationKind !== 'repair' &&
+      ['update', 'downgrade'].includes(managedGithubChronologicalOperation);
     return inspectSelection({
       ...event.detail.request,
       rememberAssetPattern: Boolean(event.detail.rememberPattern),
       ...(approvedLinkedModrinthProjectId ? { linkedModrinthProjectId: approvedLinkedModrinthProjectId } : {})
-    }, operationKind);
+    }, classifyManagedRuntime ? managedGithubChronologicalOperation : operationKind, classifyManagedRuntime);
   }
 
   async function selectLocalArchive() {
+    if (busy) return;
     const requestedOperationKind = operationKind;
-    busy = true;
-    error = null;
+    const inspectionRequest = beginInspectionRequest();
+    const { requestSequence } = inspectionRequest;
     try {
       const selection = await modpackApi.selectLocalArchive(true);
-      if (selection?.selectionId) await inspectSelection({ provider: 'local', selectionId: selection.selectionId }, requestedOperationKind);
+      if (requestSequence !== inspectionRequestSequence) return;
+      if (selection?.selectionId) await inspectSelection({ provider: 'local', selectionId: selection.selectionId }, requestedOperationKind, false, true);
     } catch (caught) {
+      if (requestSequence !== inspectionRequestSequence) return;
       error = caught;
     } finally {
-      busy = false;
+      finishInspectionRequest(inspectionRequest);
     }
   }
 
-  async function inspectSelection(request, forcedOperation = null) {
-    busy = true;
-    error = null;
-    if (forcedOperation) operationKind = forcedOperation;
+  function classifyExactManagedRuntime(chronologicalOperation, targetRuntime) {
+    if (chronologicalOperation === 'downgrade') return 'downgrade';
+    const currentRuntime = state?.runtime;
+    if (!targetRuntime?.minecraftVersion || !targetRuntime?.loaderFamily || !targetRuntime?.loaderVersion ||
+        !currentRuntime?.minecraftVersion || !currentRuntime?.loaderFamily || !currentRuntime?.loaderVersion) return 'downgrade';
+    const minecraftComparison = compareVersions(targetRuntime.minecraftVersion, currentRuntime.minecraftVersion);
+    if (minecraftComparison < 0) return 'downgrade';
+    if (minecraftComparison > 0 || targetRuntime.loaderFamily !== currentRuntime.loaderFamily) return 'switch';
+    return compareVersions(targetRuntime.loaderVersion, currentRuntime.loaderVersion) < 0 ? 'downgrade' : 'update';
+  }
+
+  async function inspectSelection(request, forcedOperation = null, classifyManagedRuntime = false, allowBusy = false) {
+    if (busy && !allowBusy) return;
+    const requestedSelection = {
+      ...request,
+      ...(Array.isArray(request?.assetIds) ? { assetIds: [...request.assetIds] } : {})
+    };
+    const inspectionRequest = beginInspectionRequest();
+    const { requestSequence } = inspectionRequest;
+    const requestedOperationKind = forcedOperation || operationKind;
     try {
-      inspection = await modpackApi.inspect(request);
+      const nextInspection = await modpackApi.inspect(requestedSelection, progress => {
+        if (requestSequence === inspectionRequestSequence) inspectionProgress = progress;
+      }, { signal: inspectionRequest.signal });
+      if (requestSequence !== inspectionRequestSequence) return;
+      if (inspection?.inspectionId && inspection.inspectionId !== nextInspection?.inspectionId) {
+        await discardInspectionSession(inspection);
+        if (requestSequence !== inspectionRequestSequence) return;
+      }
+      selectedRequest = requestedSelection;
+      inspection = nextInspection;
+      operationKind = classifyManagedRuntime
+        ? classifyExactManagedRuntime(requestedOperationKind, nextInspection?.classification?.runtime)
+        : requestedOperationKind;
       reviewedPlan = null;
       flow = 'inspection';
     } catch (caught) {
+      if (requestSequence !== inspectionRequestSequence) return;
       error = caught;
     } finally {
-      busy = false;
+      finishInspectionRequest(inspectionRequest);
     }
   }
 
   async function buildPreflight(event, kind = operationKind) {
+    const requestToken = serverRequestScope.begin();
+    const requestedInspectionId = inspection?.inspectionId;
+    if (!requestedInspectionId) return;
     busy = true;
     error = null;
+    selectingDestination = false;
+    preflightProgress = { phase: 'validating-destination', percent: 0 };
     try {
-      reviewedPlan = await modpackApi.preflight({
-        inspectionId: inspection.inspectionId,
-        instanceId: serverId,
+      const nextPlan = await modpackApi.preflight({
+        inspectionId: requestedInspectionId,
+        instanceId: requestToken.serverId,
         operationKind: kind,
         selections: event?.detail?.selections || {
           optionalFileIds: [], conflictChoices: {}, acknowledgeMissingProviderDigest: false,
-          acknowledgeDowngradeWorldRisk: false, selectedRoot: null, runtimeChoice: null
+          acknowledgeDowngradeWorldRisk: false, selectedRoot: null, runtimeChoice: null, maxRam: null
         }
+      }, progress => {
+        if (!currentServerRequest(requestToken)) return;
+        preflightProgress = progress;
       });
+      if (!currentServerRequest(requestToken)) return;
+      reviewedPlan = nextPlan;
       flow = reviewedPlan?.requiresConflictReview === true ? 'inspection' : 'review';
+      if (flow === 'review') inspection = null;
     } catch (caught) {
+      if (!currentServerRequest(requestToken)) return;
       error = caught;
     } finally {
-      busy = false;
+      if (currentServerRequest(requestToken)) {
+        selectingDestination = false;
+        preflightProgress = null;
+        busy = false;
+      }
     }
   }
 
   async function beginManagedOperation(kind) {
+    selectedRequest = null;
     operationKind = kind;
     error = null;
     if (kind === 'rollback-restore-point') {
       selectedRestorePointId = null;
       flow = 'restore-points';
+      await loadRollbackOptions();
       return;
     }
+    rollbackOptionsRequestSequence += 1;
     await buildManagementPlan(kind, null);
   }
 
   async function buildManagementPlan(kind, selectionRef) {
+    const requestToken = serverRequestScope.begin();
     busy = true;
     error = null;
+    selectedRestorePointId = kind === 'rollback-restore-point' ? selectionRef : null;
+    preflightProgress = { phase: 'scanning-server' };
     try {
-      reviewedPlan = await modpackApi.preflightManagement(serverId, kind, selectionRef);
+      const nextPlan = await modpackApi.preflightManagement(
+        requestToken.serverId,
+        kind,
+        selectionRef,
+        progress => {
+          if (!currentServerRequest(requestToken)) return;
+          preflightProgress = progress;
+        }
+      );
+      if (!currentServerRequest(requestToken)) return;
+      reviewedPlan = nextPlan;
       operationKind = kind;
-      selectedRestorePointId = kind === 'rollback-restore-point' ? selectionRef : null;
       flow = 'review';
     } catch (caught) {
-      error = caught;
+      if (!currentServerRequest(requestToken)) return;
+      error = isPlanStaleError(caught)
+        ? new ModpackApiError({
+          code: 'PLAN_STALE',
+          message: 'The server changed while this preflight was being built. Run the action again to generate and review a fresh plan. Nothing was changed on the server.',
+          details: caught.details,
+          retryable: caught.retryable
+        })
+        : caught;
     } finally {
-      busy = false;
+      if (currentServerRequest(requestToken)) {
+        preflightProgress = null;
+        busy = false;
+      }
     }
   }
 
+  async function refreshStaleReview() {
+    const requestedSelection = selectedRequest ? {
+      ...selectedRequest,
+      ...(Array.isArray(selectedRequest.assetIds) ? { assetIds: [...selectedRequest.assetIds] } : {})
+    } : null;
+    const requestedOperationKind = operationKind;
+    reviewedPlan = null;
+    error = null;
+
+    if (!requestedSelection) {
+      if (requestedOperationKind === 'rollback-restore-point') flow = 'restore-points';
+      else {
+        flow = 'dashboard';
+        activeSection = 'actions';
+      }
+      await buildManagementPlan(operationKind, selectedRestorePointId);
+      return;
+    }
+
+    const staleInspection = inspection;
+    inspection = null;
+    if (staleInspection?.inspectionId) {
+      busy = true;
+      try {
+        await discardInspectionSession(staleInspection);
+      } catch (caught) {
+        error = caught;
+        busy = false;
+        return;
+      }
+      busy = false;
+    }
+
+    if (requestedSelection?.provider === 'local') {
+      selectedRequest = null;
+      flow = 'source';
+      error = new ModpackApiError({
+        code: 'PLAN_STALE',
+        message: 'The reviewed plan expired. Select the local archive again and run a fresh preflight review. Nothing was changed on the server.'
+      });
+      return;
+    }
+
+    flow = 'source';
+    await inspectSelection(requestedSelection, requestedOperationKind);
+  }
+
   async function verifyModpack() {
+    const requestToken = serverRequestScope.begin();
     busy = true;
     error = null;
     try {
-      verification = await modpackApi.verify(serverId);
+      const nextVerification = await modpackApi.verify(requestToken.serverId);
+      if (!currentServerRequest(requestToken)) return;
+      verification = nextVerification;
       job = verification;
       flow = 'job';
     } catch (caught) {
+      if (!currentServerRequest(requestToken)) return;
       error = caught;
     } finally {
-      busy = false;
+      if (currentServerRequest(requestToken)) busy = false;
     }
   }
 
@@ -317,8 +737,10 @@
     }
 
     flow = 'dashboard';
+    invalidateInspectionRequests();
     reviewedPlan = null;
     inspection = null;
+    selectedRequest = null;
     job = null;
     if (destination.kind === 'details' || destination.kind === 'restore-point') activeSection = 'history';
     else if (destination.kind === 'recovery') activeSection = 'recovery';
@@ -328,20 +750,37 @@
   }
 
   function returnToDashboard() {
+    invalidateInspectionRequests();
+    rollbackOptionsRequestSequence += 1;
+    rollbackOptionsLoading = false;
+    rollbackOptionsError = null;
     flow = 'dashboard';
     reviewedPlan = null;
+    const abandonedInspection = inspection;
     inspection = null;
+    selectedRequest = null;
+    void discardInspectionSession(abandonedInspection).catch(() => {});
     job = null;
     refresh();
   }
 
   onMount(() => {
+    pageMounted = true;
     cleanups = [modpackApi.onStateChanged(event => {
       if (event?.instanceId === serverId || event?.serverId === serverId) refresh();
     })];
-    refresh();
+    if (serverId) refresh(serverId);
+    else loading = false;
   });
-  onDestroy(() => cleanups.forEach(cleanup => cleanup()));
+  onDestroy(() => {
+    pageMounted = false;
+    invalidateInspectionRequests();
+    const abandonedInspection = inspection;
+    inspection = null;
+    void discardInspectionSession(abandonedInspection).catch(() => {});
+    rollbackOptionsRequestSequence += 1;
+    cleanups.forEach(cleanup => cleanup());
+  });
 </script>
 
 <div class="modpack-surface modpack-page mp-stack" bind:this={pageRoot}>
@@ -350,6 +789,10 @@
     <div class="page-actions">
       {#if flow !== 'dashboard'}
         <button class="mp-button" type="button" on:click={returnToDashboard}>Back to Modpack overview</button>
+      {/if}
+      {#if isManaged && ['github', 'modrinth'].includes(state?.source?.provider)}
+        <button class="mp-button" type="button" disabled={checkingForUpdates} on:click={checkForModpackUpdates}>{checkingForUpdates ? 'Checking for updates…' : 'Check for updates'}</button>
+        <span class="mp-sr-only" role="status" aria-label="Release check status" aria-live="polite">{updateCheckStatus}</span>
       {/if}
       <ModpackNotificationCenter
         variant="contextual"
@@ -366,32 +809,40 @@
 
   {#if currentServerRecoveryItems.length > 0}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} on:recovered={refresh} />{/if}
 
+  {#if busy && preflightProgress && flow !== 'inspection'}
+    <ModpackPlanningProgress progress={preflightProgress} />
+  {/if}
+
   {#if flow === 'dashboard'}
     <nav class="section-tabs" aria-label="Modpack sections">
-      {#each ['overview', 'versions', 'actions', 'history', 'recovery'] as section (section)}<button type="button" class:active={activeSection === section} aria-current={activeSection === section ? 'page' : undefined} on:click={() => (activeSection = section)}>{section === 'overview' ? 'Overview' : section === 'versions' ? 'Versions' : section === 'actions' ? 'Actions' : section === 'history' ? 'History' : 'Recovery'}</button>{/each}
+      {#each ['overview', 'versions', 'actions', 'history', 'recovery'] as section (section)}<button type="button" class:active={activeSection === section} aria-current={activeSection === section ? 'page' : undefined} on:click={() => selectDashboardSection(section)}>{section === 'overview' ? 'Overview' : section === 'versions' ? 'Versions' : section === 'actions' ? 'Actions' : section === 'history' ? 'History' : 'Recovery'}</button>{/each}
     </nav>
     {#if activeSection === 'overview'}<ModpackOverview {state} {loading} on:install={() => beginSource('install-existing')} on:filesonly={() => beginSource('import-files-only-new')} />
-    {:else if activeSection === 'versions'}<ModpackVersionPanel {state} on:select={(event) => inspectSelection(event.detail.request, event.detail.operationKind)} on:github={reviewManagedGithub} on:switch={() => beginSource('switch')} />
+      {#if isManaged}{#key `${serverId}:${JSON.stringify(state?.source)}:${JSON.stringify(state?.runtime)}:${JSON.stringify(state?.selectedOptionalFiles)}`}<ClientCompanionPanel {serverId} managed={true} localArchive={state?.source?.provider === 'local'} />{/key}{/if}
+    {:else if activeSection === 'versions'}<ModpackVersionPanel {state} requestedVersionId={requestedModrinthVersionId} requestedNavigationToken={requestedModrinthNavigationToken} on:select={(event) => inspectSelection(event.detail.request, event.detail.chronologicalOperation, true)} on:github={reviewManagedGithub} on:switch={() => beginSource('switch')} />
     {:else if activeSection === 'actions'}<ModpackActionPanel {state} {busy} {verification} on:verify={verifyModpack} on:repair={() => beginSource('repair')} on:rollback={() => beginManagedOperation('rollback-restore-point')} on:detach={() => beginManagedOperation('detach')} on:uninstall={() => beginManagedOperation('uninstall')} />
     {:else if activeSection === 'history'}
       <section class="mp-panel mp-stack" aria-label="Modpack history"><div><p class="mp-kicker">Durable audit history</p><h2 class="mp-title">Lifecycle operations</h2><p class="mp-subtitle">Managed files and user additions remain distinguished in every recorded revision.</p></div>{#if history.length === 0}<div class="mp-state">No modpack history has been recorded for this server.</div>{:else}<ol class="history-list">{#each history as item (`${item.operationId}-${item.sequence}`)}<li><div><strong>{item.kind?.replaceAll('-', ' ') || 'operation'}</strong><span>{item.outcome || 'recorded'} · {new Date(item.timestamp).toLocaleString()}</span></div><span class="mp-badge">revision {item.sourceRevision ?? '—'} → {item.targetRevision ?? '—'}</span></li>{/each}</ol>{/if}{#if historyCursor}<button class="mp-button" type="button" on:click={loadOlderHistory} disabled={busy}>Load older history</button>{/if}</section>
     {:else}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} on:recovered={refresh} />{/if}
   {:else if flow === 'source'}
-    <ModpackSourceChoice on:select={(event) => event.detail.source === 'local' ? selectLocalArchive() : (flow = event.detail.source)} on:back={returnToDashboard} />
+    <ModpackSourceChoice {busy} on:select={(event) => event.detail.source === 'local' ? selectLocalArchive() : navigateSelectionFlow(event.detail.source)} on:back={returnToDashboard} />
   {:else if flow === 'modrinth'}
-    <ModrinthPackBrowser on:select={(event) => inspectSelection(event.detail.request, operationKind)} on:github={reviewLinkedGithub} on:back={() => (flow = 'source')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
+    <ModrinthPackBrowser currentRuntime={state?.runtime || null} {busy} on:select={(event) => inspectSelection(event.detail.request, operationKind)} on:inspectionreset={invalidateInspectionRequests} on:github={reviewLinkedGithub} on:back={() => navigateSelectionFlow('source')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
   {:else if flow === 'github'}
-    <GitHubReleasePicker {serverId} {suggestedRepositoryUrl} suggestedModrinthProjectId={linkedModrinthProjectId} currentReleaseId={currentGithubReleaseId} on:assets={handleGithubAssets} on:back={() => (flow = 'source')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
+    <GitHubReleasePicker {serverId} {suggestedRepositoryUrl} suggestedModrinthProjectId={linkedModrinthProjectId} currentReleaseId={currentGithubReleaseId} requestedReleaseId={requestedGithubReleaseId} requestedNavigationToken={requestedGithubNavigationToken} allowCurrentReleaseReview={allowCurrentGithubReleaseReview} on:assets={handleGithubAssets} on:back={() => navigateSelectionFlow('source')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
   {:else if flow === 'github-assets'}
-    <GitHubAssetReview release={githubRelease} assetResult={githubAssets} on:select={inspectGithubSelection} on:back={() => (flow = 'github')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
+    <GitHubAssetReview release={githubRelease} assetResult={githubAssets} {busy} {inspectionProgress} on:select={inspectGithubSelection} on:back={() => navigateSelectionFlow('github')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
   {:else if flow === 'inspection'}
-    <ArchiveGuidedReview {inspection} {reviewedPlan} {busy} {error} {operationKind} on:preflight={buildPreflight} on:filesonly={(event) => buildPreflight(event, 'import-files-only-new')} on:started={handleStarted} on:error={(event) => (error = event.detail.error)} on:back={() => (flow = 'source')} />
+    <ArchiveGuidedReview {inspection} {reviewedPlan} {busy} {error} {operationKind} {preflightProgress} {selectingDestination} on:preflight={buildPreflight} on:filesonly={(event) => buildPreflight(event, 'import-files-only-new')} on:started={handleStarted} on:stale={refreshStaleReview} on:error={(event) => (error = event.detail.error)} on:back={() => abandonInspection('source')} />
   {:else if flow === 'restore-points'}
-    <section class="mp-panel mp-stack" aria-label="Choose a restore point"><div><p class="mp-kicker">Exact rollback source</p><h2 class="mp-title">Choose a compatible restore point</h2><p class="mp-subtitle">Rollback reconstructs a fresh candidate from one pinned restore point. No binary-only world downgrade is offered.</p></div>{#if restorePoints.length === 0}<div class="mp-state warning"><strong>No compatible restore point is listed</strong><p>Create or retain a verified restore point before attempting rollback.</p></div>{:else}<ul class="mp-list">{#each restorePoints as item (item.restorePointId)}<li><button class="mp-row" type="button" disabled={busy} on:click={() => buildManagementPlan('rollback-restore-point', item.restorePointId)}><span><strong>{item.kind?.replaceAll('-', ' ')} restore point</strong><br /><span class="mp-muted">Created {new Date(item.timestamp).toLocaleString()} · source revision {item.sourceRevision}</span></span><span class="mp-badge good">Verified record</span></button></li>{/each}</ul>{/if}</section>
+    <section class="mp-panel mp-stack" aria-label="Choose a restore point"><div><p class="mp-kicker">Exact rollback source</p><h2 class="mp-title">Choose a compatible restore point</h2><p class="mp-subtitle">Rollback reconstructs a fresh candidate from one retained restore point. The archive is fully verified again before a plan can be reviewed. Version downgrade is a separate risk-acknowledged action that first saves the current server for recovery.</p></div>{#if rollbackOptionsLoading}<div class="mp-state" aria-live="polite">Checking retained restore-point archives…</div>{:else if rollbackOptionsError}<div class="mp-state error" role="alert"><strong>Restore points could not be checked</strong><p>{rollbackOptionsError.message}</p><button class="mp-button" type="button" on:click={loadRollbackOptions}>Retry</button></div>{:else if rollbackOptions.length === 0}<div class="mp-state warning"><strong>No retained restore point is available</strong><p>History can outlive a pruned or missing archive. Create or retain a verified restore point before attempting rollback.</p></div>{:else}<ul class="mp-list">{#each rollbackOptions as item (item.restorePointId)}<li><button class="mp-row" class:selected={selectedRestorePointId === item.restorePointId} aria-pressed={selectedRestorePointId === item.restorePointId} type="button" disabled={busy} on:click={() => buildManagementPlan('rollback-restore-point', item.restorePointId)}><span><strong>{item.operationKind?.replaceAll('-', ' ')} restore point</strong><br /><span class="mp-muted">Created {new Date(item.createdAt).toLocaleString()} · source revision {item.sourceRevision} · {item.runtime?.minecraftVersion} {item.runtime?.loaderFamily}</span></span><span class="mp-badge good">{selectedRestorePointId === item.restorePointId && busy ? 'Verifying selection…' : 'Available · verify on selection'}</span></button></li>{/each}</ul>{/if}</section>
   {:else if flow === 'review'}
-    <ModpackPlanReview {reviewedPlan} {operationKind} {busy} restorePointId={selectedRestorePointId} on:started={handleStarted} on:cancel={() => (flow = inspection ? 'inspection' : 'dashboard')} />
+    <ModpackPlanReview {reviewedPlan} {operationKind} {busy} restorePointId={selectedRestorePointId} on:started={handleStarted} on:stale={refreshStaleReview} on:cancel={() => { reviewedPlan = null; flow = 'source'; }} />
   {:else if flow === 'job'}
     <ModpackJobProgress {job} on:return={returnToDashboard} on:terminal={(event) => { if (event.detail.job.operationKind === 'verify') verification = event.detail.job; }} on:action={handleOutcomeAction} />
+  {/if}
+  {#if busy && inspectionProgress && flow !== 'github-assets' && !['inspection', 'review', 'job'].includes(flow)}
+    <ModpackInspectionProgress progress={inspectionProgress} />
   {/if}
 </div>
 
@@ -402,7 +853,7 @@
   .page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.55rem; min-height: 42px; }
   .section-tabs { display: flex; gap: 0.45rem; overflow-x: auto; padding: 0.4rem; border: 1px solid var(--mp-border); border-radius: 10px; background: rgba(0, 0, 0, 0.15); }
   .section-tabs button { flex: 1 0 auto; min-width: 110px; border: 1px solid transparent; border-radius: 7px; padding: 0.6rem 0.8rem; background: transparent; color: var(--mp-muted); }
-  .section-tabs button.active { color: white; background: rgba(124, 131, 255, 0.15); border-color: rgba(124, 131, 255, 0.35); }
+  .section-tabs button.active { color: white; background: rgba(255, 255, 255, 0.09); border-color: rgba(255, 255, 255, 0.28); }
   .history-list { display: grid; gap: 0.55rem; padding: 0; margin: 0; list-style: none; }
   .history-list li { display: flex; justify-content: space-between; align-items: center; gap: 0.7rem; padding: 0.75rem; border: 1px solid var(--mp-border); border-radius: 8px; background: var(--mp-panel-soft); }
   .history-list li div { display: grid; gap: 0.2rem; }

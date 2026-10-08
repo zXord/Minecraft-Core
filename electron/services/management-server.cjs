@@ -19,6 +19,12 @@ const { getManagementTlsConfig } = require('../utils/tls-utils.cjs');
 const { resolveServerLoader } = require('../utils/server-loader.cjs');
 const process = require('process');
 const os = require('os');
+const { clientPackManagementFields } = require('./client-modpacks/client-pack-management.cjs');
+let clientModpackResolver = null;
+function configureClientModpackResolver(resolver) {
+  if (typeof resolver !== 'function') throw new TypeError('Client modpack resolver is invalid');
+  clientModpackResolver = resolver;
+}
 
 // Reuse centralized in-app logger
 const logger = getLoggerHandlers();
@@ -668,9 +674,11 @@ class ManagementServer {
         const loaderInfo = resolveServerLoader(this.serverPath);
         const loaderType = loaderInfo.loader || 'vanilla';
         const loaderVersion = loaderInfo.loaderVersion || null;
+        const clientPackFields = await clientPackManagementFields(this.instanceId, clientModpackResolver);
         
         res.json({
           success: true,
+          ...clientPackFields,
           instanceId: this.instanceId,
           serverPath: this.serverPath,
           serverProperties: serverProps,
@@ -1979,6 +1987,7 @@ async function stopAndDisposeManagementServers(selector = {}) {
 }
 
 module.exports = {
+  configureClientModpackResolver,
   ManagementServer,
   getManagementServer,
   getAllManagementServerStatuses,

@@ -6,6 +6,36 @@ const path = require('path');
 
 const { JavaManager } = require('../electron/services/minecraft-launcher/java-manager.cjs');
 
+test('JavaManager construction does not create its scoped Java directory', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-java-construction-'));
+  const clientPath = path.join(tempRoot, 'client-not-created');
+
+  try {
+    const manager = new JavaManager(clientPath);
+
+    assert.equal(manager.javaBaseDir, path.join(clientPath, 'java'));
+    assert.equal(fs.existsSync(clientPath), false);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('JavaManager path selection does not create the selected Java directory', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-java-selection-'));
+  const firstClientPath = path.join(tempRoot, 'first-client');
+  const secondClientPath = path.join(tempRoot, 'second-client');
+
+  try {
+    const manager = new JavaManager(firstClientPath);
+    manager.setClientPath(secondClientPath);
+
+    assert.equal(manager.javaBaseDir, path.join(secondClientPath, 'java'));
+    assert.equal(fs.existsSync(secondClientPath), false);
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 function createFakeRuntime(javaBaseDir, version) {
   const binDir = path.join(javaBaseDir, `java-${version}`, 'bin');
   const javaBinary = process.platform === 'win32' ? 'java.exe' : 'java';
@@ -29,6 +59,30 @@ test('JavaManager cleanup keeps the active scoped runtime and removes stale loca
     assert.deepEqual(cleanup.keptVersions, ['21']);
     assert.ok(fs.existsSync(path.join(manager.javaBaseDir, 'java-21')), 'active runtime should remain');
     assert.ok(!fs.existsSync(path.join(manager.javaBaseDir, 'java-17')), 'stale runtime should be removed');
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('JavaManager cleanup never enumerates or terminates Java processes by directory substring', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-java-no-global-kill-'));
+  const manager = new JavaManager(tempRoot);
+
+  try {
+    createFakeRuntime(manager.javaBaseDir, '17');
+    const activeJavaPath = createFakeRuntime(manager.javaBaseDir, '21');
+    let broadKillCalls = 0;
+    manager.killClientJavaProcesses = async () => {
+      broadKillCalls += 1;
+      throw new Error('cleanup must not terminate processes it does not own');
+    };
+
+    const cleanup = await manager.cleanupUnusedJavaVersions(21, activeJavaPath);
+
+    assert.equal(broadKillCalls, 0);
+    assert.equal(cleanup.success, true);
+    assert.deepEqual(cleanup.cleanedVersions, ['17']);
+    assert.ok(fs.existsSync(path.join(manager.javaBaseDir, 'java-21')));
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }

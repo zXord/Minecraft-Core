@@ -3,7 +3,17 @@ const path = require('path');
 const { app, BrowserWindow, Menu, Tray, Notification, dialog, ipcMain, shell, session } = require('electron');
 const fs = require('fs');
 const { createRuntimeFlags } = require('./bootstrap/runtime-flags.cjs');
+const { createPackagedSmokeGuard } = require('./bootstrap/packaged-smoke-guard.cjs');
 const runtimeFlags = createRuntimeFlags({ isPackaged: Boolean(app.isPackaged) });
+const packagedSmokeGuard = runtimeFlags.packagedSmokeMode ? createPackagedSmokeGuard({ app }) : null;
+if (runtimeFlags.packagedSmokeMode) {
+  globalThis.__MINECRAFT_CORE_PACKAGED_SMOKE_EVIDENCE__ = () => Object.freeze({
+    updaterEnabled: runtimeFlags.updaterEnabled,
+    automaticReleaseChecksEnabled: runtimeFlags.automaticReleaseChecksEnabled,
+    publicManagementListenersEnabled: runtimeFlags.publicManagementListenersEnabled,
+    ...packagedSmokeGuard.evidence()
+  });
+}
 if (runtimeFlags.testMode) {
   process.env.MINECRAFT_CORE_USER_DATA_DIR = runtimeFlags.isolatedUserDataPath;
 }
@@ -13,14 +23,25 @@ const { loadTestIpcOverrides, loadTestModpackFactory, loadTestRecoveryFactory, r
 const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
 const { setMainWindow } = require('./utils/safe-send.cjs');
 const appStore = require('./utils/app-store.cjs');
-const { ensureConfigFile } = require('./utils/config-manager.cjs');
 const { shouldAllowNavigation } = require('./utils/navigation-policy.cjs');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
 const { getTlsFingerprint, normalizeFingerprint } = require('./utils/tls-utils.cjs');
 const { shouldUseDevServer } = require('./utils/runtime-mode.cjs');
+const { loadRendererContent } = require('./utils/renderer-loader.cjs');
+const { resolveWindowIconPath } = require('./utils/asset-resolver.cjs');
+const { createOrderlyQuitBarrier } = require('./utils/orderly-quit-barrier.cjs');
+const {
+  applyWindowsTaskbarDetails,
+  createStartupWindow,
+  createWindowReadyTracker,
+  startApplicationAfterReady
+} = require('./utils/startup-window.cjs');
+const { claimEarlyStartupWindow } = require('./startup-entry.cjs');
 const { getUpdateService } = require('./services/update-service.cjs');
 const { installServerMutationCoordinator } = require('./services/server-mutation-context.cjs');
 const devConfig = require('../config/dev-config.cjs');
+const startupStartedAt = Date.now();
+const mainWindowReadyTrackers = new WeakMap();
 
 // Initialize logger service early
 let logger = null;
@@ -94,6 +115,28 @@ function logStartupError(message, error) {
   } catch {
     // ignore logger failures while reporting startup failures
   }
+}
+
+function describeRendererTarget(targetUrl) {
+  try {
+    const parsed = new URL(targetUrl);
+    if (parsed.protocol === 'data:') return 'data-html';
+    return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}`;
+  } catch {
+    return 'unparseable';
+  }
+}
+
+function markStartupTiming(marker, details = {}) {
+  if (!logger) return;
+  logger.info('Startup timing marker', {
+    category: 'performance',
+    data: {
+      marker,
+      elapsedMs: Date.now() - startupStartedAt,
+      ...details
+    }
+  });
 }
 
 // Utility function to open folders directly using child_process
@@ -570,113 +613,37 @@ let tray = null;
 // Check if app should start minimized
 const shouldStartMinimized = process.argv.includes('--start-minimized');
 
-/**
- * Normalize filenames array.
- * @param {string[]} filenames
- * @returns {string[]}
- */
-function normalizeFilenames(filenames) {
-  const normalizedNames = [];
-  const seenNames = new Set();
-  for (const name of filenames) {
-    if (!name) continue;
-    const normalized = path.normalize(name);
-    if (seenNames.has(normalized)) continue;
-    seenNames.add(normalized);
-    normalizedNames.push(normalized);
+function resolveApplicationIconPath() {
+  let appPath = path.join(__dirname, '..');
+  try {
+    appPath = app.getAppPath?.() || appPath;
+  } catch {
+    // Keep the entry-point-relative path when Electron cannot report its app path.
   }
-  return normalizedNames;
+  let userDataPath = null;
+  try {
+    userDataPath = app.getPath?.('userData') || null;
+  } catch {
+    // Keep the repository/resource icon when the optional development cache is unavailable.
+  }
+  return resolveWindowIconPath({
+    platform: process.platform,
+    isPackaged: Boolean(app.isPackaged),
+    projectRoot: path.join(__dirname, '..'),
+    appPath,
+    resourcesPath: process.resourcesPath,
+    userDataPath
+  });
 }
 
-/**
- * Collect candidate directories for asset resolution.
- * @returns {Set<string>}
- */
-function collectCandidateDirs() {
-  const candidateDirs = new Set();
-
-  const addCandidateDir = (value) => {
-    if (!value) return;
-    try {
-      candidateDirs.add(path.resolve(value));
-    } catch {
-      // ignore invalid paths
-    }
-  };
-
-  // Core search locations (dev + packaged)
-  addCandidateDir(path.join(__dirname, '..'));
-  addCandidateDir(process.cwd());
-
-  if (typeof app?.getAppPath === 'function') {
-    try {
-      addCandidateDir(app.getAppPath());
-    } catch {
-      // ignore app path resolution errors
-    }
+function resolveApplicationPath() {
+  try {
+    const appPath = app.getAppPath?.();
+    if (typeof appPath === 'string' && appPath.trim()) return appPath;
+  } catch {
+    // Keep the entry-point-relative path as a development relaunch fallback.
   }
-
-  if (app.isPackaged) {
-    const resourcesRoot = process.resourcesPath || path.join(process.cwd(), 'resources');
-    addCandidateDir(resourcesRoot);
-    addCandidateDir(path.join(resourcesRoot, 'build'));
-    addCandidateDir(path.join(resourcesRoot, 'build-resources'));
-    addCandidateDir(path.join(resourcesRoot, 'app.asar.unpacked'));
-    addCandidateDir(path.join(resourcesRoot, 'app.asar.unpacked', 'build'));
-    addCandidateDir(path.join(resourcesRoot, 'app.asar.unpacked', 'build-resources'));
-  } else {
-    // Dev: include project root and build-resources explicitly
-    addCandidateDir(path.resolve('.'));
-    addCandidateDir(path.resolve('build'));
-    addCandidateDir(path.resolve('build-resources'));
-    addCandidateDir(path.join(__dirname));
-  }
-
-  return candidateDirs;
-}
-
-function findExistingFile(candidateDirs, normalizedNames) {
-  for (const baseDir of candidateDirs) {
-    for (const name of normalizedNames) {
-      const candidate = path.join(baseDir, name);
-      try {
-        if (fs.existsSync(candidate)) {
-          return candidate;
-        }
-      } catch {
-        // ignore fs probe errors
-      }
-    }
-  }
-  return null;
-}
-
-function findAbsoluteFallback(normalizedNames) {
-  for (const name of normalizedNames) {
-    const absolutePath = path.resolve(name);
-    try {
-      if (fs.existsSync(absolutePath)) {
-        return absolutePath;
-      }
-    } catch {
-      // ignore fs probe errors
-    }
-  }
-  return null;
-}
-
-/**
- * Resolve an asset path regardless of dev or packaged runtime.
- * Prefers build resources when packaged while allowing root fallbacks in dev.
- * @param {...string} filenames
- * @returns {string|null}
- */
-function resolveAssetPath(...filenames) {
-  const normalizedNames = normalizeFilenames(filenames);
-  const candidateDirs = collectCandidateDirs();
-  const found = findExistingFile(candidateDirs, normalizedNames);
-  if (found) return found;
-  return findAbsoluteFallback(normalizedNames);
+  return path.join(__dirname, '..');
 }
 
 
@@ -696,8 +663,7 @@ function createTray() {
   
   try {
     let trayIcon;
-    const trayAsset = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
-    const iconPath = resolveAssetPath(trayAsset, 'icon.ico', 'icon.png');
+    const iconPath = resolveApplicationIconPath();
 
     if (iconPath) {
       trayIcon = nativeImage.createFromPath(iconPath);
@@ -915,10 +881,7 @@ function createWindow() {
   const preloadPath = path.join(__dirname, 'preload.cjs');
 
   // Set up the window icon
-  const windowIconPath = resolveAssetPath(
-    process.platform === 'win32' ? 'icon.ico' : 'icon.png',
-    'icon.png'
-  );
+  const windowIconPath = resolveApplicationIconPath();
 
   if (!windowIconPath && logger) {
     logger.warn('Window icon not resolved, using default', {
@@ -931,6 +894,7 @@ function createWindow() {
     });
   }
 
+  markStartupTiming('main-window:browser-window:create:start');
   win = new BrowserWindow({
     width: windowWidth,
     height: windowHeight,
@@ -946,27 +910,42 @@ function createWindow() {
       sandbox: true
     },
     // Don't show initially if starting minimized
-    show: false
+    show: false,
+    backgroundColor: '#0f172a'
+  });
+  applyWindowsTaskbarDetails(win, {
+    platform: process.platform,
+    iconPath: windowIconPath,
+    isPackaged: Boolean(app.isPackaged),
+    executablePath: process.execPath,
+    applicationPath: resolveApplicationPath()
+  });
+  mainWindowReadyTrackers.set(win, createWindowReadyTracker(win));
+  markStartupTiming('main-window:browser-window:create:complete', { windowId: win.id });
+
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || !logger) return;
+    logger.warn('Renderer navigation failed', {
+      category: 'core',
+      data: {
+        errorCode,
+        errorDescription: String(errorDescription || '').slice(0, 160),
+        target: describeRendererTarget(validatedURL)
+      }
+    });
   });
 
-  // Explicitly set Windows taskbar overlay icon
-  if (process.platform === 'win32' && windowIconPath) {
-    const { nativeImage } = require('electron');
-    try {
-      const overlayIcon = nativeImage.createFromPath(windowIconPath);
-      if (!overlayIcon.isEmpty()) {
-        win.setOverlayIcon(overlayIcon, 'Minecraft Core');
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (!logger) return;
+    logger.error('Renderer process exited unexpectedly', {
+      category: 'core',
+      data: {
+        reason: typeof details?.reason === 'string' ? details.reason : 'unknown',
+        exitCode: Number.isInteger(details?.exitCode) ? details.exitCode : null
       }
-    } catch (error) {
-      if (logger) {
-        logger.warn('Failed to set overlay icon', {
-          category: 'core',
-          data: { error: error.message }
-        });
-      }
-    }
-  }
-  
+    });
+  });
+
   const windowCreationTime = Date.now() - startTime;
   if (logger) {
     logger.info('Main window created successfully', {
@@ -1044,6 +1023,7 @@ function createWindow() {
   
   // Show window after load unless starting minimized
   win.once('ready-to-show', () => {
+    markStartupTiming('main-window:ready-to-show', { windowId: win.id });
     const shouldShow = !shouldStartMinimized || !appSettings.startMinimized || !tray;
     
     if (logger) {
@@ -1214,140 +1194,36 @@ function createWindow() {
     });
   }
   
-  if (isDev) {
-    // Development mode: try dev servers
-    const tryLoadURL = (url) => {
-      if (logger) {
-        logger.debug(`Attempting to load dev server: ${url}`, {
-          category: 'core',
-          data: { url, mode: 'development' }
-        });
-      }
-      
-      win.loadURL(url).then(() => {
-        if (logger) {
-          logger.info(`Successfully loaded dev server: ${url}`, {
-            category: 'core',
-            data: { url, success: true }
-          });
-        }
-      }).catch((error) => {
-        if (logger) {
-          logger.warn(`Failed to load dev server ${url}: ${error.message}`, {
-            category: 'core',
-            data: {
-              url,
-              errorType: error.constructor.name,
-              fallbackAttempt: url.includes('5173')
-            }
-          });
-        }
-        
-        if (url.includes('5173')) {
-          // Try port 5174
-          const fallbackUrl = 'http://localhost:5174';
-          if (logger) {
-            logger.debug(`Trying fallback dev server: ${fallbackUrl}`, {
-              category: 'core',
-              data: { fallbackUrl }
-            });
-          }
-          
-          win.loadURL(fallbackUrl).then(() => {
-            if (logger) {
-              logger.info(`Successfully loaded fallback dev server: ${fallbackUrl}`, {
-                category: 'core',
-                data: { fallbackUrl, success: true }
-              });
-            }
-          }).catch((fallbackError) => {
-            if (logger) {
-              logger.error(`Both dev servers failed: ${fallbackError.message}`, {
-                category: 'core',
-                data: {
-                  primaryUrl: url,
-                  fallbackUrl,
-                  errorType: fallbackError.constructor.name
-                }
-              });
-            }
-            
-            // Both dev servers failed, fallback to production build
-            const distPath = path.join(__dirname, '..', 'dist', 'index.html');
-            if (fs.existsSync(distPath)) {
-              win.loadFile(distPath).then(() => {
-                if (logger) {
-                  logger.info('Loaded production build as fallback', {
-                    category: 'core',
-                    data: { distPath, fallbackFromDev: true }
-                  });
-                }
-              }).catch((distError) => {
-                if (logger) {
-                  logger.fatal(`Failed to load production build: ${distError.message}`, {
-                    category: 'core',
-                    data: {
-                      distPath,
-                      errorType: distError.constructor.name,
-                      allLoadMethodsFailed: true
-                    }
-                  });
-                }
-              });
-            } else {
-              if (logger) {
-                logger.fatal('No dev server and no production build found', {
-                  category: 'core',
-                  data: {
-                    distPath,
-                    distExists: false,
-                    devServersFailed: true
-                  }
-                });
-              }
-            }
-          });
+  const distPath = path.join(__dirname, '..', 'dist', 'index.html');
+  markStartupTiming('main-window:navigation:start', { isDevelopment: isDev });
+  void loadRendererContent({
+    isDevelopment: isDev,
+    window: win,
+    distPath,
+    ...(!app.isPackaged && process.env.MINECRAFT_CORE_DEV_SERVER_URL
+      ? { devServerUrl: process.env.MINECRAFT_CORE_DEV_SERVER_URL }
+      : {}),
+    onRendererReady: () => initializeLastServer(win)
+  }).then(outcome => {
+    markStartupTiming('main-window:navigation:complete', { status: outcome.status, mode: outcome.mode });
+    if (!logger) return;
+    logger.info('Renderer load completed', {
+      category: 'core',
+      data: outcome
+    });
+  }).catch(error => {
+    markStartupTiming('main-window:navigation:failed', { errorType: describeStartupError(error).errorType });
+    const details = describeStartupError(error);
+    if (logger) {
+      logger.error('Renderer load failed', {
+        category: 'core',
+        data: {
+          mode: isDev ? 'development' : 'production',
+          errorType: details.errorType
         }
       });
-    };
-    
-    tryLoadURL('http://localhost:5173');
-  } else {
-    // Production mode: load the built app directly
-    const distPath = path.join(__dirname, '..', 'dist', 'index.html');
-    if (fs.existsSync(distPath)) {
-      win.loadFile(distPath).then(() => {
-        if (logger) {
-          logger.info('Production build loaded successfully', {
-            category: 'core',
-            data: { distPath, mode: 'production' }
-          });
-        }
-      }).catch((error) => {
-        if (logger) {
-          logger.fatal(`Failed to load production build: ${error.message}`, {
-            category: 'core',
-            data: {
-              distPath,
-              errorType: error.constructor.name,
-              mode: 'production'
-            }
-          });
-        }
-      });
-    } else {
-      if (logger) {
-        logger.fatal('Production build not found', {
-          category: 'core',
-          data: {
-            distPath,
-            distExists: false,
-            mode: 'production'
-          }
-        });
-      }
     }
-  }
+  });
   
   // Save window size when resized (only if window is resizable)
   win.on('resize', () => {
@@ -1380,10 +1256,26 @@ function createWindow() {
 
 let serviceGraph = null;
 let mainBootstrap = null;
-let appWatchdogProcess = null;
-let watchdogListenersInstalled = false;
+let orderlyQuitBarrier = null;
+let appWatchdogSupervisor = null;
 let browserPanelInstance = null;
 let updateServiceInstance = null;
+
+function waitForMainWindowReady(mainWindow) {
+  try {
+    const tracker = mainWindowReadyTrackers.get(mainWindow);
+    if (!tracker) throw new TypeError('Main window readiness was not registered');
+    return tracker.wait();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
+
+function closeEarlyStartupWindow(startupWindow) {
+  markStartupTiming('startup-window:close');
+  if (!startupWindow || startupWindow.isDestroyed?.()) return;
+  startupWindow.close?.();
+}
 
 function handleWindowAllClosed() {
   // Always quit when X button is used to close the window
@@ -1400,8 +1292,8 @@ function destroyTray() {
   }
 }
 
-function handleBeforeQuit() {
-  void mainBootstrap?.dispose();
+function handleBeforeQuit(event) {
+  orderlyQuitBarrier?.handleBeforeQuit(event);
 }
 
 function handleActivate() {
@@ -1417,75 +1309,20 @@ function handleActivate() {
   }
 }
 
-function stopAppWatchdog() {
-  const { getRuntimePaths } = require('./utils/runtime-paths.cjs');
-  const runtimePaths = getRuntimePaths();
-  let pid = null;
-  if (fs.existsSync(runtimePaths.appWatchdogPid)) {
-    try {
-      pid = parseInt(fs.readFileSync(runtimePaths.appWatchdogPid, 'utf8'));
-    } catch {
-      pid = null;
-    }
-  }
-  if (pid) {
-    try {
-      const { execFileSync } = require('child_process');
-      execFileSync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true });
-      fs.unlinkSync(runtimePaths.appWatchdogPid);
-    } catch {
-      pid = null;
-    }
-  }
-  appWatchdogProcess = null;
-}
-
-function launchAppWatchdog() {
-  const appWatchdogPath = path.join(__dirname, 'watchdog', 'app-watchdog.cjs');
-  if (!fs.existsSync(appWatchdogPath) || appWatchdogProcess) return;
-  try {
-    const { spawn } = require('child_process');
-    appWatchdogProcess = spawn(process.execPath, [
-      appWatchdogPath,
-      process.pid.toString(),
-      'minecraft-core-app'
-    ], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      shell: false,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
-    });
-    appWatchdogProcess.on('error', (error) => {
-      console.warn(`Failed to start app watchdog: ${error.message}`);
-      appWatchdogProcess = null;
-    });
-    appWatchdogProcess.unref();
-  } catch (error) {
-    console.warn(`Failed to spawn app watchdog: ${error.message}`);
-    appWatchdogProcess = null;
-  }
-}
-
 function startAppWatchdogMonitoring() {
-  if (watchdogListenersInstalled) return false;
   const eventBus = require('./utils/event-bus.cjs');
-  eventBus.on('server-started', launchAppWatchdog);
-  eventBus.on('server-normal-exit', stopAppWatchdog);
-  eventBus.on('server-crashed', stopAppWatchdog);
-  watchdogListenersInstalled = true;
-  return true;
+  const { createAppWatchdogSupervisor } = require('./watchdog/app-watchdog-supervisor.cjs');
+  if (!appWatchdogSupervisor) {
+    appWatchdogSupervisor = createAppWatchdogSupervisor({
+      eventBus
+    });
+  }
+  return appWatchdogSupervisor.start();
 }
 
 function stopAppWatchdogMonitoring() {
-  if (watchdogListenersInstalled) {
-    const eventBus = require('./utils/event-bus.cjs');
-    eventBus.removeListener('server-started', launchAppWatchdog);
-    eventBus.removeListener('server-normal-exit', stopAppWatchdog);
-    eventBus.removeListener('server-crashed', stopAppWatchdog);
-    watchdogListenersInstalled = false;
-  }
-  stopAppWatchdog();
+  appWatchdogSupervisor?.dispose();
+  appWatchdogSupervisor = null;
 }
 
 async function startConfiguredPublicManagementListeners() {
@@ -1518,53 +1355,40 @@ async function stopConfiguredPublicManagementListeners() {
 }
 
 function initializeLastServer(mainWindow) {
-  // IMPORTANT: Wait for the web contents to be ready before sending data.
-  mainWindow.webContents.once('did-finish-load', () => {
-    try {
-      let lastServerPath = appStore.get('lastServerPath');
-      const instances = appStore.get('instances') || [];
-      const serverInstances = instances.filter(instance => instance && instance.type === 'server' && instance.path);
-      const matchingServerInstance = serverInstances.find(instance => instance.path === lastServerPath);
-      const firstExistingServerInstance = serverInstances.find(instance => fs.existsSync(instance.path));
+  try {
+    let lastServerPath = appStore.get('lastServerPath');
+    const instances = appStore.get('instances') || [];
+    const serverInstances = instances.filter(instance => instance && instance.type === 'server' && instance.path);
+    const matchingServerInstance = serverInstances.find(instance => instance.path === lastServerPath);
+    const firstExistingServerInstance = serverInstances.find(instance => fs.existsSync(instance.path));
 
-      if (matchingServerInstance && fs.existsSync(matchingServerInstance.path)) {
-        lastServerPath = matchingServerInstance.path;
-      } else if (firstExistingServerInstance) {
-        appStore.set('lastServerPath', firstExistingServerInstance.path);
-        lastServerPath = firstExistingServerInstance.path;
-      } else if (lastServerPath) {
-        appStore.set('lastServerPath', null);
-        lastServerPath = null;
-      }
-
-      if (!lastServerPath || !win?.webContents) return;
-      const serverSettings = appStore.get('serverSettings') || {
-        port: 25565,
-        maxRam: 4,
-        autoStartMinecraft: false,
-        autoStartManagement: false
-      };
-      const autoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
-      ensureConfigFile(lastServerPath, {
-        version: null,
-        port: serverSettings.port,
-        maxRam: serverSettings.maxRam,
-        autoRestart: {
-          enabled: autoRestart.enabled,
-          delay: autoRestart.delay,
-          maxCrashes: autoRestart.maxCrashes
-        }
-      });
-      setTimeout(() => {
-        win.webContents.send('update-server-path', lastServerPath);
-        win.webContents.send('restore-server-settings', serverSettings);
-      }, 500);
-      const { initFromServerConfig } = require('./services/auto-restart.cjs');
-      initFromServerConfig(lastServerPath);
-    } catch {
-      return;
+    if (matchingServerInstance && fs.existsSync(matchingServerInstance.path)) {
+      lastServerPath = matchingServerInstance.path;
+    } else if (firstExistingServerInstance) {
+      appStore.set('lastServerPath', firstExistingServerInstance.path);
+      lastServerPath = firstExistingServerInstance.path;
+    } else if (lastServerPath) {
+      appStore.set('lastServerPath', null);
+      lastServerPath = null;
     }
-  });
+
+    if (!lastServerPath || !mainWindow?.webContents || mainWindow.isDestroyed?.()) return;
+    const serverSettings = appStore.get('serverSettings') || {
+      port: 25565,
+      maxRam: 4,
+      autoStartMinecraft: false,
+      autoStartManagement: false
+    };
+    setTimeout(() => {
+      if (!mainWindow?.webContents || mainWindow.isDestroyed?.()) return;
+      mainWindow.webContents.send('update-server-path', lastServerPath);
+      mainWindow.webContents.send('restore-server-settings', serverSettings);
+    }, 500);
+    const { initFromServerConfig } = require('./services/auto-restart.cjs');
+    initFromServerConfig(lastServerPath);
+  } catch {
+    return;
+  }
 }
 
 const updaterController = {
@@ -1615,20 +1439,25 @@ serviceGraph = createModpackServiceGraph({
   getWindow: () => win,
   modpackFactory,
   recoveryFactory,
-  ipc: { nativeNotificationsEnabled: runtimeFlags.nativeNotificationsEnabled, ...(testIpcOverrides || {}) },
+  ipc: {
+    nativeNotificationsEnabled: runtimeFlags.nativeNotificationsEnabled,
+    updaterEnabled: runtimeFlags.updaterEnabled,
+    ...(testIpcOverrides || {})
+  },
   updater: updaterController,
   tray: trayController,
   watchdog: watchdogController,
   managementServer: managementServerController,
   startup: {
+    automaticReleaseChecksEnabled: runtimeFlags.automaticReleaseChecksEnabled,
     installSecurity: installApplicationHandlers,
     cleanupRuntime: cleanupRuntimeFiles,
+    markTiming: markStartupTiming,
     configureAfterReady() {
       setupCertificateVerification();
       Menu.setApplicationMenu(null);
     },
     afterWindowCreated(mainWindow) {
-      initializeLastServer(mainWindow);
       setupAppCleanup(app, mainWindow);
     },
     dispose: disposeApplicationStartup
@@ -1641,9 +1470,37 @@ mainBootstrap = createMainBootstrap({
   serviceGraph,
   runtimeFlags
 });
+orderlyQuitBarrier = createOrderlyQuitBarrier({
+  dispose: () => mainBootstrap?.dispose(),
+  quit: () => app.quit(),
+  onDisposeError: error => logStartupError('Application shutdown cleanup failed', error)
+});
 mainBootstrap.initializeBeforeReady();
 
-app.whenReady().then(() => mainBootstrap.onReady()).catch((error) => {
+app.whenReady().then(() => {
+  markStartupTiming('app:when-ready');
+  packagedSmokeGuard?.installSessionBlock(session);
+  if (runtimeFlags.testMode) return mainBootstrap.onReady();
+  const earlyStartupWindow = claimEarlyStartupWindow();
+  return startApplicationAfterReady({
+    createStartupWindow() {
+      const startupWindow = earlyStartupWindow && !earlyStartupWindow.isDestroyed?.()
+        ? earlyStartupWindow
+        : createStartupWindow({
+          BrowserWindow,
+          iconPath: resolveApplicationIconPath() || undefined,
+          isPackaged: Boolean(app.isPackaged),
+          executablePath: process.execPath,
+          applicationPath: resolveApplicationPath()
+        });
+      markStartupTiming('startup-window:create:complete', { windowId: startupWindow.id, early: startupWindow === earlyStartupWindow });
+      return startupWindow;
+    },
+    runMainStartup: () => mainBootstrap.onReady(),
+    waitForMainWindowReady,
+    closeStartupWindow: closeEarlyStartupWindow
+  });
+}).catch((error) => {
   logStartupError('Application startup failed before main window could load', error);
 });
 

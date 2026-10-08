@@ -253,12 +253,11 @@ async function performCheck() {
   const start = Date.now();
   let totalWatches = 0;
   for (const [serverPath, state] of serverWatchState.entries()) {
+    // An empty or not-yet-due watch set has no server mutation to publish.
+    // Rewriting its schedule would invalidate unrelated modpack preflights.
+    if (!state.watches?.length || (state.nextCheck && new Date(state.nextCheck).getTime() > start)) continue;
     await runAvailabilityMutation(serverPath, 'check-mod-availability', async () => {
-      if (!state.watches || state.watches.length === 0) {
-        scheduleNext(state);
-        await saveWatches(serverPath, state);
-        return;
-      }
+      if (!state.watches?.length) return;
       totalWatches += state.watches.length;
       state.lastCheck = new Date().toISOString();
       // Keep history publication and watch removal under one server reservation.
@@ -384,6 +383,7 @@ function startWatcher() {
   setInterval(() => {
     const now = Date.now();
     for (const [serverPath, state] of serverWatchState.entries()) {
+      if (!state.watches?.length) continue;
       if (!state.nextCheck) {
         scheduleNext(state);
         saveWatches(serverPath, state).catch((error) => {

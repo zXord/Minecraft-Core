@@ -11,6 +11,7 @@ namespace MinecraftCore.ArchiveWorker.Protocol;
 [JsonSerializable(typeof(WorkerFrame))]
 [JsonSerializable(typeof(ControlFrame))]
 [JsonSerializable(typeof(DurableRequest))]
+[JsonSerializable(typeof(DurableDirectoryRequest))]
 [JsonSerializable(typeof(DurableResponse))]
 [JsonSerializable(typeof(ContainmentEvidence))]
 [JsonSerializable(typeof(AclLeaseJournalFrame))]

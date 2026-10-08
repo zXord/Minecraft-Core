@@ -248,10 +248,11 @@ class OperationJournal {
     this.fs = dependencies.fsApi;
     this.clock = dependencies.clock;
     if (!this.durableFs || typeof this.durableFs.readFileBounded !== 'function' ||
-        typeof this.durableFs.writeJsonAtomic !== 'function' || !this.fs || typeof this.clock !== 'function') throw invalid();
+        typeof this.durableFs.readFileBoundedAsync !== 'function' ||
+        typeof this.durableFs.writeJsonAtomicAsync !== 'function' || !this.fs || typeof this.clock !== 'function') throw invalid();
   }
 
-  create(journalPath, value) {
+  async create(journalPath, value) {
     strictObject(value, CREATE_KEYS);
     if (!OPERATION_KINDS.has(value.operationKind)) throw invalid();
     const now = this.#now();
@@ -284,7 +285,7 @@ class OperationJournal {
     if (typeof record.markerSha256 !== 'string' || !SHA256_PATTERN.test(record.markerSha256)) throw invalid();
     record.checksum = checksumPayload(record);
     try {
-      this.durableFs.writeJsonAtomic(journalPath, record, { expectedTargetSha256: null });
+      await this.durableFs.writeJsonAtomicAsync(journalPath, record, { expectedTargetSha256: null });
       return deepFreeze(normalizeJournal(record));
     } catch (error) {
       throw commitFailure(error);
@@ -295,13 +296,13 @@ class OperationJournal {
     return deepFreeze(this.#load(journalPath).value);
   }
 
-  transition(journalPath, request) {
+  async transition(journalPath, request) {
     strictObject(request, TRANSITION_KEYS);
     if (!PHASES.has(request.expectedPhase) || !PHASES.has(request.nextPhase)) throw invalid();
     if (!request.patch || typeof request.patch !== 'object' || Array.isArray(request.patch) ||
         Object.getPrototypeOf(request.patch) !== Object.prototype || Object.getOwnPropertySymbols(request.patch).length !== 0 ||
         Object.keys(request.patch).some(key => !PATCH_KEYS.has(key))) throw invalid();
-    const loaded = this.#load(journalPath);
+    const loaded = await this.#loadAsync(journalPath);
     if (loaded.value.phase !== request.expectedPhase) throw stale();
     const patch = {};
     if (Object.hasOwn(request.patch, 'swapStep')) {
@@ -335,7 +336,7 @@ class OperationJournal {
     };
     candidate.checksum = checksumPayload(candidate);
     try {
-      this.durableFs.writeJsonAtomic(journalPath, candidate, { expectedTargetSha256: loaded.sha256 });
+      await this.durableFs.writeJsonAtomicAsync(journalPath, candidate, { expectedTargetSha256: loaded.sha256 });
       return deepFreeze(normalizeJournal(candidate));
     } catch (error) {
       throw commitFailure(error);
@@ -345,6 +346,24 @@ class OperationJournal {
   #load(journalPath) {
     try {
       const bytes = this.durableFs.readFileBounded(journalPath, { allowMissing: false, maxBytes: MAX_JOURNAL_BYTES });
+      const value = normalizeJournal(JSON.parse(bytes.toString('utf8')));
+      return {
+        value,
+        sha256: crypto.createHash('sha256').update(bytes).digest('hex')
+      };
+    } catch (error) {
+      if (error instanceof ModpackError && error.code === 'INVALID_REQUEST') throw recoveryRequired(error);
+      if (error instanceof ModpackError) throw error;
+      throw recoveryRequired(error);
+    }
+  }
+
+  async #loadAsync(journalPath) {
+    try {
+      const bytes = await this.durableFs.readFileBoundedAsync(
+        journalPath,
+        { allowMissing: false, maxBytes: MAX_JOURNAL_BYTES }
+      );
       const value = normalizeJournal(JSON.parse(bytes.toString('utf8')));
       return {
         value,

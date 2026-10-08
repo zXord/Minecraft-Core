@@ -38,13 +38,16 @@ function reference(actionId, targetKind, targetId, extra = {}) {
   return deepFreeze({ actionId, targetKind, targetId, ...extra });
 }
 
-function fixture(records, { removeResult = true, execute = null } = {}) {
+function fixture(records, { removeResult = true, removeRetainedResult = null, execute = null } = {}) {
   const referenceAuthority = authority(records);
   const calls = [];
   const service = new OutcomeActionService({
     referenceAuthority,
     artifactCache: {
-      async removeIfUnreferenced(sha256) { calls.push(['removeIfUnreferenced', sha256]); return removeResult; }
+      async removeIfUnreferenced(sha256) { calls.push(['removeIfUnreferenced', sha256]); return removeResult; },
+      ...(removeRetainedResult === null ? {} : {
+        async removeRetainedIfUnreferenced(value) { calls.push(['removeRetainedIfUnreferenced', value]); return removeRetainedResult; }
+      })
     },
     controlledFolderOpener: {
       async openCacheParent(...args) { calls.push(['openCacheParent', args]); }
@@ -133,6 +136,63 @@ test('review and navigation actions return only closed opaque destinations', asy
     assert.doesNotMatch(JSON.stringify(result), /(?:path|url|directory|cache|workspace|command|token|secret|password)/i);
   }
   assert.deepEqual(context.calls, []);
+});
+
+test('an expired retained-download outcome action fails without deleting an unrelated cache entry', async () => {
+  // This fails if a stale outcome reference is treated as permission to delete by digest alone.
+  const sha256 = 'd'.repeat(64);
+  const context = fixture({
+    'remove:expired': reference('remove-retained-download', 'retained-download', 'download-one', { cacheSha256: sha256 })
+  }, { removeRetainedResult: { status: 'expired', removed: false } });
+
+  await assert.rejects(
+    context.service.performSafeAction({ actionId: 'remove-retained-download', opaqueRef: 'remove:expired' }),
+    error => error.code === 'INVALID_REQUEST'
+  );
+
+  assert.deepEqual(context.calls, [['removeRetainedIfUnreferenced', { ownerId: 'download-one', sha256 }]]);
+  assert.deepEqual(context.referenceAuthority.calls.map(call => call[0]), ['claim', 'release']);
+});
+
+test('release review navigation propagates only a strict exact provider target', async () => {
+  const releaseTarget = {
+    serverId: 'server-one', provider: 'github', sourceId: '1001',
+    releaseId: '2002', prerelease: false
+  };
+  const context = fixture({
+    'release:review': reference('open-details', 'details', 'release:tracking-one:2002', { releaseTarget })
+  });
+
+  const result = await context.service.performSafeAction({ actionId: 'open-details', opaqueRef: 'release:review' });
+  assert.deepEqual(result, {
+    type: 'outcome-action-result', actionId: 'open-details', status: 'ready',
+    destination: { kind: 'details', targetId: 'release:tracking-one:2002', releaseTarget }
+  });
+  assert.doesNotMatch(JSON.stringify(result), /(?:path|url|directory|token|secret|password)/iu);
+  assert.equal(Object.isFrozen(result.destination.releaseTarget), true);
+});
+
+test('malformed or authority-bearing release review targets are rejected and released', async () => {
+  const valid = {
+    serverId: 'server-one', provider: 'modrinth', sourceId: 'project-one',
+    releaseId: 'version-two', prerelease: false
+  };
+  for (const [name, targetKind, releaseTarget] of [
+    ['url', 'details', { ...valid, repositoryUrl: 'https://github.com/owner/repo' }],
+    ['path', 'details', { ...valid, path: 'C:\\private' }],
+    ['provider', 'details', { ...valid, provider: 'local' }],
+    ['prerelease', 'details', { ...valid, prerelease: 'false' }],
+    ['wrong-kind', 'server', valid]
+  ]) {
+    const context = fixture({
+      [`release:${name}`]: reference('open-details', targetKind, 'release:tracking-one:version-two', { releaseTarget })
+    });
+    await assert.rejects(
+      context.service.performSafeAction({ actionId: 'open-details', opaqueRef: `release:${name}` }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+    assert.deepEqual(context.referenceAuthority.calls.map(call => call[0]), ['claim', 'release']);
+  }
 });
 
 test('retry and recovery actions execute only their reference-bound backend target', async () => {

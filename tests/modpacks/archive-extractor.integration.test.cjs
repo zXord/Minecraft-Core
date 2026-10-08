@@ -52,7 +52,7 @@ function inspectionResult(set, entries = [
   { entryName: 'server.jar', type: 'file', size: '3', packedSize: '3', canonicalName: 'server.jar', depth: 1 }
 ]) {
   const expandedBytes = entries.reduce((total, entry) => total + (entry.type === 'file' ? BigInt(entry.size) : 0n), 0n);
-  const packedBytes = entries.reduce((total, entry) => total + (entry.type === 'file' ? BigInt(entry.packedSize) : 0n), 0n);
+  const packedBytes = entries.reduce((total, entry) => total + BigInt(entry.packedSize), 0n);
   const roots = new Map();
   let rootFile = false;
   let nested = false;
@@ -197,6 +197,56 @@ test('extracts only through the forced family into the exact fresh opaque output
   assert.equal(fixture.calls[0].outputDirectoryId, fixture.destinationId);
   assert.deepEqual(progress.map(item => item.phase), ['preflight', 'extract', 'postwalk', 'complete']);
   assert.ok(progress.every(pathFree));
+});
+
+test('deferred archive integrity is enforced by quarantined extraction and failed output is removed', async t => {
+  const fixture = await extractionFixture({
+    workerAction: async () => {
+      const error = new Error('corrupt compressed stream');
+      error.code = 'EXTRACTOR_FAILED';
+      throw error;
+    }
+  });
+  t.after(fixture.cleanup);
+  const raw = fixture.registry.records.get(fixture.inspectionId);
+  raw.value.result.integrity = 'deferred-to-extraction';
+  raw.value.result.engineEvidence.tested = false;
+
+  await assert.rejects(fixture.service.extractArchive({
+    inspectionId: fixture.inspectionId,
+    destinationId: fixture.destinationId
+  }), hasCode('EXTRACTOR_FAILED'));
+
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0].operation, 'extract');
+  assert.equal(fs.existsSync(path.join(fixture.root, fixture.destinationId)), false);
+});
+
+test('extracts a ZIP whose zero-byte directory entries carry nonzero packed metadata', async t => {
+  const entries = [
+    { entryName: 'config', type: 'directory', size: '0', packedSize: '9', canonicalName: 'config', depth: 1 },
+    { entryName: 'config/server.properties', type: 'file', size: '1', packedSize: '1', canonicalName: 'config/server.properties', depth: 2 }
+  ];
+  const fixture = await extractionFixture({
+    entries,
+    workerAction: async ({ output }) => {
+      await fsp.mkdir(path.join(output, 'config'));
+      await fsp.writeFile(path.join(output, 'config', 'server.properties'), 'x');
+    }
+  });
+  t.after(fixture.cleanup);
+
+  const result = await fixture.service.extractArchive({
+    inspectionId: fixture.inspectionId,
+    destinationId: fixture.destinationId
+  });
+
+  assert.deepEqual(result.measured, {
+    entryCount: 2,
+    fileCount: 1,
+    directoryCount: 1,
+    expandedBytes: '1'
+  });
 });
 
 test('rejects stale, wrong-owner, tampered, and path-shaped inspection/output references', async t => {

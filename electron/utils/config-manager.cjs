@@ -13,7 +13,9 @@ const {
   withContentRevisionLock
 } = require('../services/server-content-revision.cjs');
 const { ModpackError } = require('../services/modpacks/errors.cjs');
+const { normalizeRuntimeTuple } = require('../services/modpacks/contracts.cjs');
 const { markCurrentServerMutationDirty } = require('../services/server-mutation-context.cjs');
+const { isNetworkAccess } = require('./server-network-properties.cjs');
 
 const SERVER_CONFIG_FILENAME = '.minecraft-core.json';
 const CLIENT_CONFIG_FILENAME = 'client-config.json';
@@ -104,6 +106,7 @@ function getDefaultServerConfig(defaultSettings = {}) {
     loader: defaultSettings.loader ?? null,
     loaderVersion: defaultSettings.loaderVersion ?? null,
     port: coerceNumber(defaultSettings.port, 25565),
+    networkAccess: isNetworkAccess(defaultSettings.networkAccess) ? defaultSettings.networkAccess : 'pack-default',
     maxRam: coerceNumber(defaultSettings.maxRam, 4),
     managementPort: coerceNumber(defaultSettings.managementPort, 8080),
     autoStartMinecraft: coerceBoolean(defaultSettings.autoStartMinecraft, false),
@@ -422,6 +425,17 @@ function isLikelyMinecraftVersion(value) {
 
 function enrichServerConfig(config, serverPath) {
   const enriched = { ...config };
+  if (enriched.modpackManaged === true) {
+    try {
+      const runtime = normalizeRuntimeTuple(enriched.runtime);
+      if (enriched.version === runtime.minecraftVersion && enriched.loader === runtime.loaderFamily &&
+          enriched.loaderVersion === runtime.loaderVersion && enriched.javaVersion === runtime.javaMajor) {
+        return enriched;
+      }
+    } catch {
+      // Malformed or stale summaries retain the legacy enrichment fallback.
+    }
+  }
   const runtimeMetadata = detectServerRuntimeMetadata(serverPath);
   const detectedVersion = runtimeMetadata?.version || detectMinecraftVersion(serverPath);
   const currentVersion = normalizeVersionCandidate(enriched.version);
@@ -492,6 +506,7 @@ function normalizeServerConfig(config = {}, defaultSettings = {}, serverPath = n
     ...source,
     contentRevision: normalizeContentRevision(source.contentRevision, defaults.contentRevision),
     port: coerceNumber(source.port, defaults.port),
+    networkAccess: isNetworkAccess(source.networkAccess) ? source.networkAccess : defaults.networkAccess,
     maxRam: coerceNumber(source.maxRam, defaults.maxRam),
     managementPort: coerceNumber(source.managementPort, defaults.managementPort),
     autoStartMinecraft: coerceBoolean(source.autoStartMinecraft, defaults.autoStartMinecraft),
@@ -892,7 +907,7 @@ function updateServerConfig(serverPath, updates, defaultSettings = {}, options =
  * @param {object} defaultSettings - Default settings to use if config doesn't exist
  * @returns {object} The current config (either existing or newly created)
  */
-function ensureConfigFile(serverPath, defaultSettings = {}) {
+function ensureConfigFileStrict(serverPath, defaultSettings = {}) {
   getLogger().debug('Ensuring config file exists', {
     category: 'settings',
     data: {
@@ -914,22 +929,26 @@ function ensureConfigFile(serverPath, defaultSettings = {}) {
     return null;
   }
 
-  try {
-    if (!fs.existsSync(serverPath)) {
-      getLogger().warn('Server directory does not exist', {
-        category: 'settings',
-        data: {
-          function: 'ensureConfigFile',
-          serverPath,
-          reason: 'directory_not_found'
-        }
-      });
-      return null;
-    }
+  if (!fs.existsSync(serverPath)) {
+    getLogger().warn('Server directory does not exist', {
+      category: 'settings',
+      data: {
+        function: 'ensureConfigFile',
+        serverPath,
+        reason: 'directory_not_found'
+      }
+    });
+    return null;
+  }
 
-    const config = readServerConfig(serverPath, defaultSettings)
-      || getDefaultServerConfig(defaultSettings);
-    return writeServerConfig(serverPath, config, defaultSettings);
+  const config = readServerConfig(serverPath, defaultSettings)
+    || getDefaultServerConfig(defaultSettings);
+  return writeServerConfig(serverPath, config, defaultSettings);
+}
+
+function ensureConfigFile(serverPath, defaultSettings = {}) {
+  try {
+    return ensureConfigFileStrict(serverPath, defaultSettings);
   } catch (error) {
     getLogger().error(`Config file management failed: ${error.message}`, {
       category: 'settings',
@@ -1085,6 +1104,7 @@ module.exports = {
   getServerConfigPath,
   getClientConfigPath,
   ensureConfigFile,
+  ensureConfigFileStrict,
   detectMinecraftVersion,
   readServerConfig,
   writeServerConfig,

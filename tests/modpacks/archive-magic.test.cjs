@@ -5,7 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
-  getBundledArchiveRuntime
+  getBundledArchiveRuntime,
+  resolveBundledArchiveRuntimePaths
 } = require('../../electron/services/modpacks/archive/archive-engine-paths.cjs');
 const { detectArchiveFamily: detectMagic } = require('../../electron/services/modpacks/archive/archive-magic.cjs');
 
@@ -162,6 +163,31 @@ test('packaged runtime resolution uses only resourcesPath/archive and never a ve
   ]);
   assert.ok(calls.slice(1).flat().every(value => typeof value !== 'string' || !value.includes(process.env.PATH || '\0')));
   assert.equal(Object.isFrozen(result), true);
+});
+
+test('path-only runtime resolution derives and freezes the closed packaged layout without verification', () => {
+  const resourcesPath = path.resolve('C:/Program Files/Minecraft Core/resources');
+  const runtime = resolveBundledArchiveRuntimePaths({
+    resourcesPath,
+    arch: 'x64',
+    isPackaged: true,
+    verifyRuntime: () => assert.fail('path-only resolution must not verify the runtime'),
+    verifyWorker: () => assert.fail('path-only resolution must not verify the worker')
+  });
+
+  const expectedRoot = path.join(resourcesPath, 'archive');
+  assert.deepEqual(runtime, {
+    resourcesRoot: expectedRoot,
+    runtimeLayout: 'packaged',
+    enginePath: path.join(expectedRoot, '7zip', '7z.exe'),
+    workerPath: path.join(expectedRoot, 'worker', 'ArchiveWorker.exe'),
+    workerManifestPath: path.join(expectedRoot, 'manifests', 'archive-worker-x64.json'),
+    architecture: 'x64'
+  });
+  assert.equal(Object.isFrozen(runtime), true);
+  assert.throws(() => resolveBundledArchiveRuntimePaths({
+    resourcesPath: 'relative', arch: 'x64', isPackaged: true
+  }), hasCode('EXTRACTOR_UNAVAILABLE'));
 });
 
 test('the real verifier accepts only the closed packaged archive layout', { timeout: 30000 }, async (t) => {

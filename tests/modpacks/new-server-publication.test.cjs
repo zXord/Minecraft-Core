@@ -25,8 +25,17 @@ const noReparse = Object.freeze({
 function nativeDurability() {
   return {
     moveWriteThrough(source, destination) { fs.renameSync(source, destination); },
+    async moveWriteThroughAsync(source, destination) {
+      await new Promise(resolve => setImmediate(resolve));
+      fs.renameSync(source, destination);
+    },
     replaceFileWriteThrough(source, destination) { fs.renameSync(source, destination); },
-    flushDirectory() {}
+    async replaceFileWriteThroughAsync(source, destination) {
+      await new Promise(resolve => setImmediate(resolve));
+      fs.renameSync(source, destination);
+    },
+    flushDirectory() {},
+    async flushDirectoryAsync() {}
   };
 }
 
@@ -114,7 +123,20 @@ async function transactionFixture(t, options = {}) {
       if (options.healthError) throw options.healthError;
       assert.equal(request.candidatePath, paths.candidatePath);
       assert.equal(request.mutationLease, mutationLease);
-      return Object.freeze({ ok: true, kind: 'candidate', durationMs: 1 });
+      return Object.freeze({
+        evidence: Object.freeze({
+          elapsedMs: 1,
+          handedOff: false,
+          kind: 'candidate',
+          listenerOwned: true,
+          live: true,
+          pongMatched: true,
+          properties: Object.freeze({ existed: false, sha256: null }),
+          readyMarker: 'Done (1.000s)!',
+          shutdown: Object.freeze({ clean: true, closed: true, exitCode: 0, forced: false, signal: null })
+        }),
+        handoff: null
+      });
     }
   };
   const context = {
@@ -142,7 +164,10 @@ async function transactionFixture(t, options = {}) {
       if (typeof options.afterMaterialize === 'function') options.afterMaterialize(candidatePath);
     },
     stateRepository: {
-      writeCandidate(candidatePath) {
+      writeCandidate() {
+        throw new Error('synchronous candidate state publication must not run');
+      },
+      async writeCandidateAsync(candidatePath) {
         calls.push('state');
         fs.writeFileSync(path.join(candidatePath, '.minecraft-core.json'), JSON.stringify({ contentRevision: 1 }));
         fs.writeFileSync(
@@ -166,6 +191,40 @@ async function transactionFixture(t, options = {}) {
     context.runtime = null;
   }
   return { calls, context, durableFs, paths, recoveryRegistry, root, serverParent, stableInstanceId, targetPath };
+}
+
+function traceCandidateFileTraversals(fixture, relativePath = 'server.jar') {
+  const baseFsPromises = fixture.context.fsPromises || fixture.context.fsApi.promises || fs.promises;
+  const tracedFsPromises = Object.create(baseFsPromises);
+  const targetKey = path.resolve(fixture.paths.candidatePath, relativePath).toLocaleLowerCase('en-US');
+  const traversals = [];
+  tracedFsPromises.open = async (candidate, flags, ...rest) => {
+    const handle = await baseFsPromises.open(candidate, flags, ...rest);
+    if (path.resolve(candidate).toLocaleLowerCase('en-US') !== targetKey) return handle;
+    const traversal = { bytesRead: 0, syncCalls: 0 };
+    traversals.push(traversal);
+    return new Proxy(handle, {
+      get(target, property) {
+        if (property === 'read') {
+          return async (...args) => {
+            const result = await target.read(...args);
+            traversal.bytesRead += result.bytesRead;
+            return result;
+          };
+        }
+        if (property === 'sync') {
+          return async () => {
+            traversal.syncCalls += 1;
+            return target.sync();
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+  };
+  fixture.context.fsPromises = tracedFsPromises;
+  return traversals;
 }
 
 test('new publication never adopts a pre-existing target', async (t) => {
@@ -285,7 +344,7 @@ test('operation journal is checksummed, compare-and-set, and contains no raw tar
     fsApi: fs,
     clock: () => new Date(now += 1000)
   });
-  const created = journal.create(journalPath, {
+  const created = await journal.create(journalPath, {
     jobId: 'job-0001',
     operationKind: 'install',
     stableInstanceId: 'server-0001',
@@ -303,7 +362,7 @@ test('operation journal is checksummed, compare-and-set, and contains no raw tar
   const absence = await createTargetAbsenceEvidence(path.join(root, 'server'), identity, {
     clock: () => new Date('2026-08-01T00:00:03.000Z')
   });
-  const publishing = journal.transition(journalPath, {
+  const publishing = await journal.transition(journalPath, {
     expectedPhase: 'staging',
     nextPhase: 'publishing',
     patch: {
@@ -314,15 +373,230 @@ test('operation journal is checksummed, compare-and-set, and contains no raw tar
   assert.equal(publishing.sequence, 1);
   assert.equal(publishing.targetAbsence.targetPathHash, created.targetPathHash);
   assert.deepEqual(journal.load(journalPath), publishing);
-  assert.throws(
-    () => journal.transition(journalPath, {
+  await assert.rejects(
+    journal.transition(journalPath, {
       expectedPhase: 'staging', nextPhase: 'published', patch: { swapStep: 'candidate-published' }
     }),
     code('PLAN_STALE')
   );
 });
 
-test('operation journal write failure preserves the last durable phase', (t) => {
+test('operation journal creation yields while durable publication is pending', async (t) => {
+  const { OperationJournal } = require('../../electron/services/modpack-lifecycle/operation-journal.cjs');
+  const { durableFs: base, root } = durableFixture(t);
+  const operationPath = path.join(root, 'candidate', '.minecraft-core-state', 'operations', 'job-async-create');
+  const journalPath = path.join(operationPath, 'journal.json');
+  fs.mkdirSync(operationPath, { recursive: true });
+  let releasePublication;
+  const publicationGate = new Promise(resolve => { releasePublication = resolve; });
+  let asyncPublicationStarted = false;
+  const durableFs = {
+    ...base,
+    writeJsonAtomic() {
+      throw new Error('synchronous journal publication must not run');
+    },
+    async writeJsonAtomicAsync(filePath, value, options) {
+      asyncPublicationStarted = true;
+      await publicationGate;
+      return base.writeJsonAtomicAsync(filePath, value, options);
+    }
+  };
+  const journal = new OperationJournal({
+    durableFs,
+    fsApi: fs,
+    clock: () => new Date('2026-08-01T00:00:00.000Z')
+  });
+
+  const pendingCreation = journal.create(journalPath, {
+    jobId: 'job-async-create', operationKind: 'install', stableInstanceId: 'server-async-create',
+    targetPath: path.join(root, 'server'), candidateIdentity: { volumeSerial: '1', fileId: '2' },
+    markerSha256: 'a'.repeat(64)
+  });
+  let eventLoopYielded = false;
+  await new Promise(resolve => setImmediate(() => {
+    eventLoopYielded = true;
+    resolve();
+  }));
+
+  assert.equal(asyncPublicationStarted, true);
+  assert.equal(eventLoopYielded, true);
+  assert.equal(fs.existsSync(journalPath), false);
+  releasePublication();
+  const created = await pendingCreation;
+  assert.equal(created.phase, 'staging');
+  assert.equal(journal.load(journalPath).sequence, 0);
+});
+
+test('operation journal transition yields while compare-and-set publication is pending', async (t) => {
+  const { OperationJournal } = require('../../electron/services/modpack-lifecycle/operation-journal.cjs');
+  const { durableFs: base, root } = durableFixture(t);
+  const operationPath = path.join(root, 'candidate', '.minecraft-core-state', 'operations', 'job-async-transition');
+  const journalPath = path.join(operationPath, 'journal.json');
+  fs.mkdirSync(operationPath, { recursive: true });
+  let releaseTransition;
+  const transitionGate = new Promise(resolve => { releaseTransition = resolve; });
+  let announceTransition;
+  const transitionStarted = new Promise(resolve => { announceTransition = resolve; });
+  let asyncWrites = 0;
+  let asyncReads = 0;
+  const durableFs = {
+    ...base,
+    readFileBounded() {
+      throw new Error('synchronous journal read must not run');
+    },
+    async readFileBoundedAsync(...args) {
+      asyncReads += 1;
+      return base.readFileBoundedAsync(...args);
+    },
+    writeJsonAtomic() {
+      throw new Error('synchronous journal publication must not run');
+    },
+    async writeJsonAtomicAsync(filePath, value, options) {
+      asyncWrites += 1;
+      if (asyncWrites === 2) {
+        announceTransition();
+        await transitionGate;
+      }
+      return base.writeJsonAtomicAsync(filePath, value, options);
+    }
+  };
+  let now = Date.parse('2026-08-01T00:00:00.000Z');
+  const journal = new OperationJournal({
+    durableFs,
+    fsApi: fs,
+    clock: () => new Date(now += 1000)
+  });
+  await journal.create(journalPath, {
+    jobId: 'job-async-transition', operationKind: 'install', stableInstanceId: 'server-async-transition',
+    targetPath: path.join(root, 'server'), candidateIdentity: { volumeSerial: '1', fileId: '2' },
+    markerSha256: 'a'.repeat(64)
+  });
+
+  const pendingTransition = journal.transition(journalPath, {
+    expectedPhase: 'staging', nextPhase: 'publishing', patch: { swapStep: 'new-prepared' }
+  });
+  await Promise.race([
+    transitionStarted,
+    pendingTransition.then(
+      () => { throw new Error('journal transition completed before the publication gate'); },
+      error => { throw error; }
+    )
+  ]);
+  let eventLoopYielded = false;
+  await new Promise(resolve => setImmediate(() => {
+    eventLoopYielded = true;
+    resolve();
+  }));
+
+  assert.equal(asyncWrites, 2);
+  assert.equal(asyncReads, 1);
+  assert.equal(eventLoopYielded, true);
+  assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).phase, 'staging');
+  releaseTransition();
+  const transitioned = await pendingTransition;
+  assert.equal(transitioned.phase, 'publishing');
+  assert.equal(transitioned.sequence, 1);
+});
+
+test('candidate marker publication yields while its durable write is pending', async (t) => {
+  const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, { validateCandidate: false });
+  const base = fixture.context.durableFs;
+  const markerPath = path.join(
+    fixture.paths.candidatePath,
+    '.minecraft-core-state',
+    'operations',
+    fixture.context.jobId,
+    'directory-marker.json'
+  );
+  let releaseMarker;
+  const markerGate = new Promise(resolve => { releaseMarker = resolve; });
+  let signalMarkerStarted;
+  const markerStarted = new Promise(resolve => { signalMarkerStarted = resolve; });
+  fixture.context.durableFs = {
+    ...base,
+    writeJsonAtomic(filePath, value, options) {
+      if (filePath === markerPath) throw new Error('synchronous marker publication must not run');
+      return base.writeJsonAtomic(filePath, value, options);
+    },
+    async writeJsonAtomicAsync(filePath, value, options) {
+      if (filePath === markerPath) {
+        signalMarkerStarted();
+        await markerGate;
+      }
+      return base.writeJsonAtomicAsync(filePath, value, options);
+    }
+  };
+
+  const pendingBuild = buildNewCandidate(fixture.context);
+  await Promise.race([
+    markerStarted,
+    pendingBuild.then(
+      () => { throw new Error('candidate build finished before marker publication'); },
+      error => { throw error; }
+    )
+  ]);
+  let eventLoopYielded = false;
+  await new Promise(resolve => setImmediate(() => {
+    eventLoopYielded = true;
+    resolve();
+  }));
+
+  assert.equal(eventLoopYielded, true);
+  assert.equal(fs.existsSync(markerPath), false);
+  releaseMarker();
+  await pendingBuild;
+  assert.equal(fs.existsSync(markerPath), true);
+});
+
+test('candidate marker parent flush yields while native durability is pending', async (t) => {
+  const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, { validateCandidate: false });
+  const base = fixture.context.durableFs;
+  const markerParent = path.join(
+    fixture.paths.candidatePath,
+    '.minecraft-core-state',
+    'operations',
+    fixture.context.jobId
+  );
+  let releaseFlush;
+  const flushGate = new Promise(resolve => { releaseFlush = resolve; });
+  let signalFlushStarted;
+  const flushStarted = new Promise(resolve => { signalFlushStarted = resolve; });
+  fixture.context.durableFs = {
+    ...base,
+    flushDirectory() {
+      throw new Error('synchronous directory flush must not run');
+    },
+    async flushDirectoryAsync(directoryPath) {
+      if (directoryPath === markerParent) {
+        signalFlushStarted();
+        await flushGate;
+      }
+      return base.flushDirectoryAsync(directoryPath);
+    }
+  };
+
+  const pendingBuild = buildNewCandidate(fixture.context);
+  await Promise.race([
+    flushStarted,
+    pendingBuild.then(
+      () => { throw new Error('candidate build finished before marker parent flush'); },
+      error => { throw error; }
+    )
+  ]);
+  let eventLoopYielded = false;
+  await new Promise(resolve => setImmediate(() => {
+    eventLoopYielded = true;
+    resolve();
+  }));
+
+  assert.equal(eventLoopYielded, true);
+  releaseFlush();
+  await pendingBuild;
+});
+
+test('operation journal write failure preserves the last durable phase', async (t) => {
   const { OperationJournal } = require('../../electron/services/modpack-lifecycle/operation-journal.cjs');
   const { durableFs: base, root } = durableFixture(t);
   const operationPath = path.join(root, 'candidate', '.minecraft-core-state', 'operations', 'job-0002');
@@ -331,9 +605,9 @@ test('operation journal write failure preserves the last durable phase', (t) => 
   let fail = false;
   const durableFs = {
     ...base,
-    writeJsonAtomic(filePath, value, options) {
+    async writeJsonAtomicAsync(filePath, value, options) {
       if (fail) throw Object.assign(new Error('injected'), { code: 'COMMIT_FAILED' });
-      return base.writeJsonAtomic(filePath, value, options);
+      return base.writeJsonAtomicAsync(filePath, value, options);
     }
   };
   const journal = new OperationJournal({
@@ -341,14 +615,14 @@ test('operation journal write failure preserves the last durable phase', (t) => 
     fsApi: fs,
     clock: () => new Date('2026-08-01T00:00:00.000Z')
   });
-  journal.create(journalPath, {
+  await journal.create(journalPath, {
     jobId: 'job-0002', operationKind: 'install', stableInstanceId: 'server-0002',
     targetPath: path.join(root, 'server'), candidateIdentity: { volumeSerial: '1', fileId: '2' },
     markerSha256: 'a'.repeat(64)
   });
   fail = true;
-  assert.throws(
-    () => journal.transition(journalPath, {
+  await assert.rejects(
+    journal.transition(journalPath, {
       expectedPhase: 'staging', nextPhase: 'publishing', patch: { swapStep: 'new-prepared' }
     }),
     code('COMMIT_FAILED')
@@ -570,6 +844,140 @@ test('build, publish, and register form one durable new-server transaction witho
   assert.equal(registeredRecord.outcome.reservation.kind, 'absent');
 });
 
+test('new live validation authorizes normal world writes but keeps server properties exact', async (t) => {
+  const {
+    buildNewCandidate,
+    completeNewLiveValidation,
+    prepareNewLiveValidation,
+    publishNewCandidate,
+    registerPublishedInstance,
+    verifyMutableNewOperationOwnedDirectory
+  } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-new-live-validation',
+    stableInstanceId: 'server-new-live-validation',
+    initialOutcome: { runtimePolicy: { targetRunning: false, targetAutoRestart: false } }
+  });
+  await buildNewCandidate(fixture.context);
+  await publishNewCandidate(fixture.context);
+  let instances = [];
+  await registerPublishedInstance({
+    ...fixture.context,
+    name: 'Live Validation',
+    appStore: {
+      get() { return structuredClone(instances); },
+      set(_key, value) { instances = structuredClone(value); }
+    },
+    instanceContext: { updateInstances() {} }
+  });
+
+  const authorization = await prepareNewLiveValidation(fixture.context);
+  const authorized = await fixture.recoveryRegistry.load(fixture.context.jobId);
+  assert.equal(authorized.phase, 'validating-live');
+  assert.equal(authorized.outcome.liveMutationAuthorized, true);
+  assert.equal(authorized.outcome.liveValidation.properties.existed, true);
+
+  fs.mkdirSync(path.join(fixture.targetPath, 'world'));
+  fs.mkdirSync(path.join(fixture.targetPath, 'logs'));
+  fs.writeFileSync(path.join(fixture.targetPath, 'world', 'level.dat'), 'generated world');
+  fs.writeFileSync(path.join(fixture.targetPath, 'logs', 'latest.log'), 'server started');
+  const lineage = await verifyMutableNewOperationOwnedDirectory(
+    fixture.context,
+    fixture.targetPath,
+    authorized.directoryIdentities.target
+  );
+  assert.deepEqual(lineage.identity, authorized.directoryIdentities.target);
+  assert.deepEqual(await completeNewLiveValidation(fixture.context, authorization), {
+    phase: 'validating-live',
+    verified: true
+  });
+
+  fs.writeFileSync(path.join(fixture.targetPath, 'server.properties'), 'motd=Changed\n');
+  await assert.rejects(
+    completeNewLiveValidation(fixture.context, authorization),
+    code('HEALTH_CHECK_FAILED')
+  );
+});
+
+test('new candidate identity is durable before operation layout and materialization begin', async (t) => {
+  const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const { identifyServerDirectory } = require(
+    '../../electron/services/modpack-lifecycle/server-directory-identity.cjs'
+  );
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-identity-durable-before-layout',
+    stableInstanceId: 'server-identity-durable-before-layout'
+  });
+  const originalRegistry = fixture.recoveryRegistry;
+  const failure = Object.assign(new Error('injected failure after candidate identity commit'), {
+    code: 'COMMIT_FAILED'
+  });
+  let identityTransitionIntercepted = false;
+  fixture.context.recoveryRegistry = {
+    load: jobId => originalRegistry.load(jobId),
+    async transition(jobId, request) {
+      const isCandidateIdentityTransition = request.expectedPhase === 'staging' &&
+        request.nextPhase === 'staging' &&
+        request.patch?.directoryIdentities?.candidate;
+      const result = await originalRegistry.transition(jobId, request);
+      if (isCandidateIdentityTransition) {
+        identityTransitionIntercepted = true;
+        throw failure;
+      }
+      return result;
+    }
+  };
+
+  await assert.rejects(buildNewCandidate(fixture.context), error => error === failure);
+
+  const record = await originalRegistry.load(fixture.context.jobId);
+  const actualIdentity = await identifyServerDirectory(fixture.paths.candidatePath, {
+    fsApi: fs,
+    reparseInspector: fixture.context.reparseInspector
+  });
+  assert.equal(identityTransitionIntercepted, true);
+  assert.equal(record.phase, 'staging');
+  assert.deepEqual(record.directoryIdentities.candidate, actualIdentity);
+  assert.equal(fixture.calls.includes('materialize'), false);
+  assert.deepEqual(fs.readdirSync(fixture.paths.candidatePath), []);
+});
+
+test('new candidate stays empty when candidate identity persistence fails before commit', async (t) => {
+  const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-identity-fails-before-commit',
+    stableInstanceId: 'server-identity-fails-before-commit'
+  });
+  const originalRegistry = fixture.recoveryRegistry;
+  const failure = Object.assign(new Error('injected failure before candidate identity commit'), {
+    code: 'COMMIT_FAILED'
+  });
+  let identityTransitionIntercepted = false;
+  fixture.context.recoveryRegistry = {
+    load: jobId => originalRegistry.load(jobId),
+    async transition(jobId, request) {
+      const isCandidateIdentityTransition = request.expectedPhase === 'staging' &&
+        request.nextPhase === 'staging' &&
+        request.patch?.directoryIdentities?.candidate;
+      if (isCandidateIdentityTransition) {
+        identityTransitionIntercepted = true;
+        throw failure;
+      }
+      return originalRegistry.transition(jobId, request);
+    }
+  };
+
+  await assert.rejects(buildNewCandidate(fixture.context), error => error === failure);
+
+  const record = await originalRegistry.load(fixture.context.jobId);
+  assert.equal(identityTransitionIntercepted, true);
+  assert.equal(record.phase, 'staging');
+  assert.equal(record.directoryIdentities.candidate, null);
+  assert.equal(fixture.calls.includes('materialize'), false);
+  assert.equal(fs.existsSync(fixture.paths.candidatePath), true);
+  assert.deepEqual(fs.readdirSync(fixture.paths.candidatePath), []);
+});
+
 test('candidate validation failure never publishes a target', async (t) => {
   const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
   const failure = Object.assign(new Error('candidate unhealthy'), { code: 'HEALTH_CHECK_FAILED' });
@@ -578,6 +986,36 @@ test('candidate validation failure never publishes a target', async (t) => {
   assert.equal(fs.existsSync(fixture.targetPath), false);
   assert.equal(fs.existsSync(fixture.paths.candidatePath), true);
   assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'validating-candidate');
+});
+
+test('managed candidates use one combined integrity and durability traversal before and after health validation', async (t) => {
+  const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-combined-managed-traversals',
+    stableInstanceId: 'server-combined-managed-traversals'
+  });
+  const traversals = traceCandidateFileTraversals(fixture);
+  const healthValidator = fixture.context.healthValidator;
+  const traversalsAtHealth = [];
+  fixture.context.healthValidator = {
+    async validateCandidate(request) {
+      traversalsAtHealth.push(traversals.length);
+      return healthValidator.validateCandidate(request);
+    }
+  };
+
+  await buildNewCandidate(fixture.context);
+
+  const expectedBytes = Buffer.byteLength('server bytes');
+  assert.deepEqual(traversalsAtHealth, [1]);
+  assert.equal(traversals.length, 2);
+  assert.deepEqual(
+    traversals.map(({ bytesRead, syncCalls }) => ({ bytesRead, syncCalls })),
+    [
+      { bytesRead: expectedBytes, syncCalls: 1 },
+      { bytesRead: expectedBytes, syncCalls: 1 }
+    ]
+  );
 });
 
 test('files-only publication persists inactive provenance without inventing or validating a runtime', async (t) => {
@@ -592,6 +1030,7 @@ test('files-only publication persists inactive provenance without inventing or v
       return { state: { contentRevision: 1 } };
     }
   });
+  const traversals = traceCandidateFileTraversals(fixture);
 
   const built = await buildNewCandidate(fixture.context);
 
@@ -601,6 +1040,63 @@ test('files-only publication persists inactive provenance without inventing or v
     JSON.parse(fs.readFileSync(path.join(fixture.paths.candidatePath, '.minecraft-core-state', 'modpack.json'))).lifecycleMode,
     'files-only'
   );
+  assert.deepEqual(traversals, [{ bytesRead: Buffer.byteLength('server bytes'), syncCalls: 1 }]);
+});
+
+test('combined pre-health traversal rejects same-size pathname substitution before boot', async (t) => {
+  const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-combined-substitution-race',
+    stableInstanceId: 'server-combined-substitution-race'
+  });
+  const baseFsPromises = fixture.context.fsApi.promises || fs.promises;
+  const racedFsPromises = Object.create(baseFsPromises);
+  const serverJar = path.resolve(fixture.paths.candidatePath, 'server.jar');
+  const serverJarKey = serverJar.toLocaleLowerCase('en-US');
+  assert.equal(Buffer.byteLength('tamper bytes'), Buffer.byteLength('server bytes'));
+  let substituted = false;
+  racedFsPromises.open = async (candidate, ...args) => {
+    if (!substituted && path.resolve(candidate).toLocaleLowerCase('en-US') === serverJarKey) {
+      substituted = true;
+      fs.renameSync(serverJar, `${serverJar}.original`);
+      fs.writeFileSync(serverJar, 'tamper bytes');
+    }
+    return baseFsPromises.open(candidate, ...args);
+  };
+  fixture.context.fsPromises = racedFsPromises;
+
+  await assert.rejects(buildNewCandidate(fixture.context), code('UNSAFE_ARCHIVE_ENTRY'));
+
+  assert.equal(substituted, true);
+  assert.equal(fixture.calls.includes('health'), false);
+  assert.equal(fs.existsSync(fixture.targetPath), false);
+});
+
+test('combined pre-health traversal rejects membership injection before boot', async (t) => {
+  const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-combined-membership-race',
+    stableInstanceId: 'server-combined-membership-race'
+  });
+  const baseFsPromises = fixture.context.fsApi.promises || fs.promises;
+  const racedFsPromises = Object.create(baseFsPromises);
+  const candidateKey = path.resolve(fixture.paths.candidatePath).toLocaleLowerCase('en-US');
+  let injected = false;
+  racedFsPromises.readdir = async (candidate, ...args) => {
+    const names = await baseFsPromises.readdir(candidate, ...args);
+    if (!injected && path.resolve(candidate).toLocaleLowerCase('en-US') === candidateKey) {
+      injected = true;
+      fs.writeFileSync(path.join(fixture.paths.candidatePath, 'injected.txt'), 'unexpected');
+    }
+    return names;
+  };
+  fixture.context.fsPromises = racedFsPromises;
+
+  await assert.rejects(buildNewCandidate(fixture.context), code('RECOVERY_REQUIRED'));
+
+  assert.equal(injected, true);
+  assert.equal(fixture.calls.includes('health'), false);
+  assert.equal(fs.existsSync(fixture.targetPath), false);
 });
 
 test('candidate links and post-validation content mutation fail closed before publication', async (t) => {
@@ -642,11 +1138,11 @@ test('a target race at the write-through boundary remains unrelated and blocked'
   let renameCalls = 0;
   fixture.context.durableFs = {
     ...fixture.durableFs,
-    renameDurable(source, destination, options) {
+    async renameDurableAsync(source, destination, options) {
       renameCalls += 1;
       fs.mkdirSync(destination);
       fs.writeFileSync(path.join(destination, 'unrelated.txt'), 'unrelated');
-      return fixture.durableFs.renameDurable(source, destination, options);
+      return fixture.durableFs.renameDurableAsync(source, destination, options);
     }
   };
   await assert.rejects(publishNewCandidate(fixture.context), code('TARGET_EXISTS'));
@@ -834,9 +1330,9 @@ test('target absence is the last application check before the write-through rena
   fixture.context.fsApi = tracedFs;
   fixture.context.durableFs = {
     ...fixture.durableFs,
-    renameDurable(source, destination, options) {
+    async renameDurableAsync(source, destination, options) {
       events.push('rename');
-      return fixture.durableFs.renameDurable(source, destination, options);
+      return fixture.durableFs.renameDurableAsync(source, destination, options);
     }
   };
   await publishNewCandidate(fixture.context);
@@ -858,12 +1354,12 @@ test('journal and registry publication boundary failures retry without a second 
   let failJournal = true;
   journalFailure.context.durableFs = {
     ...journalFailure.durableFs,
-    writeJsonAtomic(filePath, value, options) {
+    async writeJsonAtomicAsync(filePath, value, options) {
       if (failJournal && value?.phase === 'publishing' && filePath.endsWith('journal.json')) {
         failJournal = false;
         throw Object.assign(new Error('injected journal failure'), { code: 'COMMIT_FAILED' });
       }
-      return journalFailure.durableFs.writeJsonAtomic(filePath, value, options);
+      return journalFailure.durableFs.writeJsonAtomicAsync(filePath, value, options);
     }
   };
   await assert.rejects(publishNewCandidate(journalFailure.context), code('COMMIT_FAILED'));
@@ -905,9 +1401,9 @@ test('post-rename uncertainty is reconciled only by the exact marker and directo
   let renameCalls = 0;
   fixture.context.durableFs = {
     ...fixture.durableFs,
-    renameDurable(source, destination, options) {
+    async renameDurableAsync(source, destination, options) {
       renameCalls += 1;
-      fixture.durableFs.renameDurable(source, destination, options);
+      await fixture.durableFs.renameDurableAsync(source, destination, options);
       throw Object.assign(new Error('injected post-publication uncertainty'), {
         code: 'COMMIT_FAILED', commitPhase: 'post-publication-uncertain'
       });
@@ -920,6 +1416,219 @@ test('post-rename uncertainty is reconciled only by the exact marker and directo
   assert.equal(fs.existsSync(fixture.paths.candidatePath), false);
   assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'published');
 });
+
+test('pre-publication Windows rename contention is retried only while the exact candidate remains authoritative', async (t) => {
+  const {
+    buildNewCandidate,
+    publishNewCandidate
+  } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-rename-contention', stableInstanceId: 'server-rename-contention'
+  });
+  await buildNewCandidate(fixture.context);
+  let renameCalls = 0;
+  const retryDelays = [];
+  fixture.context.durableFs = {
+    ...fixture.durableFs,
+    async renameDurableAsync(source, destination, options) {
+      renameCalls += 1;
+      if (renameCalls === 1) {
+        throw Object.assign(new Error('injected sharing violation before publication'), {
+          code: 'COMMIT_FAILED', commitPhase: 'post-publication-uncertain'
+        });
+      }
+      return fixture.durableFs.renameDurableAsync(source, destination, options);
+    }
+  };
+  fixture.context.publicationRetryDelay = async delayMs => { retryDelays.push(delayMs); };
+
+  const result = await publishNewCandidate(fixture.context);
+
+  assert.equal(result.phase, 'published');
+  assert.equal(renameCalls, 2);
+  assert.deepEqual(retryDelays, [100]);
+  assert.equal(fs.existsSync(fixture.paths.candidatePath), false);
+  assert.equal(fs.existsSync(fixture.targetPath), true);
+});
+
+test('sustained native publication contention receives the short bounded Windows backoff', async (t) => {
+  const {
+    buildNewCandidate,
+    publishNewCandidate
+  } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-sustained-rename-contention', stableInstanceId: 'server-sustained-rename-contention'
+  });
+  await buildNewCandidate(fixture.context);
+  let renameCalls = 0;
+  const retryDelays = [];
+  fixture.context.durableFs = {
+    ...fixture.durableFs,
+    async renameDurableAsync(source, destination, options) {
+      renameCalls += 1;
+      if (renameCalls <= 6) {
+        throw Object.assign(new Error('injected sustained sharing violation before publication'), {
+          code: 'COMMIT_FAILED', commitPhase: 'post-publication-uncertain'
+        });
+      }
+      return fixture.durableFs.renameDurableAsync(source, destination, options);
+    }
+  };
+  fixture.context.publicationRetryDelay = async delayMs => { retryDelays.push(delayMs); };
+
+  const result = await publishNewCandidate(fixture.context);
+
+  assert.equal(result.phase, 'published');
+  assert.equal(renameCalls, 7);
+  assert.deepEqual(retryDelays, [100, 500, 1500, 3000, 5000, 7500]);
+  assert.equal(fs.existsSync(fixture.paths.candidatePath), false);
+  assert.equal(fs.existsSync(fixture.targetPath), true);
+});
+
+test('exhausted native publication contention remains candidate-only and fails with a bounded outcome', async (t) => {
+  const {
+    buildNewCandidate,
+    publishNewCandidate
+  } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-exhausted-rename-contention', stableInstanceId: 'server-exhausted-rename-contention'
+  });
+  await buildNewCandidate(fixture.context);
+  let renameCalls = 0;
+  const retryDelays = [];
+  fixture.context.durableFs = {
+    ...fixture.durableFs,
+    async renameDurableAsync() {
+      renameCalls += 1;
+      throw Object.assign(new Error('injected persistent sharing violation before publication'), {
+        code: 'COMMIT_FAILED', commitPhase: 'post-publication-uncertain'
+      });
+    }
+  };
+  fixture.context.publicationRetryDelay = async delayMs => { retryDelays.push(delayMs); };
+
+  await assert.rejects(publishNewCandidate(fixture.context), code('COMMIT_FAILED'));
+
+  assert.equal(renameCalls, 7);
+  assert.deepEqual(retryDelays, [100, 500, 1500, 3000, 5000, 7500]);
+  assert.equal(fs.existsSync(fixture.paths.candidatePath), true);
+  assert.equal(fs.existsSync(fixture.targetPath), false);
+  assert.equal(fs.existsSync(fixture.paths.failedPath), false);
+});
+
+test('transient final parent identity inspection is retried before the one publication rename', async (t) => {
+  const {
+    buildNewCandidate,
+    publishNewCandidate
+  } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await transactionFixture(t, {
+    jobId: 'job-parent-inspection-contention', stableInstanceId: 'server-parent-inspection-contention'
+  });
+  await buildNewCandidate(fixture.context);
+  const parentKey = path.resolve(fixture.serverParent).toLocaleLowerCase('en-US');
+  let parentInspections = 0;
+  let renameCalls = 0;
+  const retryDelays = [];
+  fixture.context.reparseInspector = {
+    async isReparsePoint(candidate) {
+      if (path.resolve(candidate).toLocaleLowerCase('en-US') === parentKey) {
+        parentInspections += 1;
+        if (parentInspections === 2) throw new Error('injected transient parent inspection timeout');
+      }
+      return false;
+    }
+  };
+  fixture.context.durableFs = {
+    ...fixture.durableFs,
+    async renameDurableAsync(source, destination, options) {
+      renameCalls += 1;
+      return fixture.durableFs.renameDurableAsync(source, destination, options);
+    }
+  };
+  fixture.context.publicationRetryDelay = async delayMs => { retryDelays.push(delayMs); };
+
+  const result = await publishNewCandidate(fixture.context);
+
+  assert.equal(result.phase, 'published');
+  assert.equal(renameCalls, 1);
+  assert.deepEqual(retryDelays, [100]);
+  assert.ok(parentInspections >= 3);
+  assert.equal(fs.existsSync(fixture.paths.candidatePath), false);
+  assert.equal(fs.existsSync(fixture.targetPath), true);
+});
+
+for (const mutation of ['substituted-identity', 'mutated-content']) {
+  test(`publication retry refuses a ${mutation} candidate without a second rename`, async (t) => {
+    const {
+      buildNewCandidate,
+      publishNewCandidate
+    } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+    const fixture = await transactionFixture(t, {
+      jobId: `job-retry-${mutation}`, stableInstanceId: `server-retry-${mutation}`
+    });
+    await buildNewCandidate(fixture.context);
+    let renameCalls = 0;
+    let delayCalls = 0;
+    let preservedOriginal = null;
+    fixture.context.durableFs = {
+      ...fixture.durableFs,
+      async renameDurableAsync(source, destination, options) {
+        renameCalls += 1;
+        if (renameCalls === 1) throw new Error('injected pre-publication contention');
+        return fixture.durableFs.renameDurableAsync(source, destination, options);
+      }
+    };
+    fixture.context.publicationRetryDelay = async () => {
+      delayCalls += 1;
+      if (delayCalls !== 1) return;
+      if (mutation === 'substituted-identity') {
+        preservedOriginal = `${fixture.paths.candidatePath}.preserved-original`;
+        fs.renameSync(fixture.paths.candidatePath, preservedOriginal);
+        fs.mkdirSync(fixture.paths.candidatePath);
+        fs.writeFileSync(path.join(fixture.paths.candidatePath, 'unrelated.txt'), 'unrelated replacement');
+      } else {
+        fs.appendFileSync(path.join(fixture.paths.candidatePath, 'server.jar'), 'mutated after seal');
+      }
+    };
+
+    await assert.rejects(publishNewCandidate(fixture.context), code('RECOVERY_REQUIRED'));
+
+    assert.equal(renameCalls, 1);
+    assert.equal(fs.existsSync(fixture.targetPath), false);
+    assert.equal(fs.existsSync(fixture.paths.candidatePath), true);
+    if (preservedOriginal) assert.equal(fs.existsSync(preservedOriginal), true);
+  });
+}
+
+for (const occupiedSlot of ['target', 'failed']) {
+  test(`publication retry stops when the ${occupiedSlot} slot appears`, async (t) => {
+    const {
+      buildNewCandidate,
+      publishNewCandidate
+    } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+    const fixture = await transactionFixture(t, {
+      jobId: `job-retry-occupied-${occupiedSlot}`, stableInstanceId: `server-retry-occupied-${occupiedSlot}`
+    });
+    await buildNewCandidate(fixture.context);
+    let renameCalls = 0;
+    fixture.context.durableFs = {
+      ...fixture.durableFs,
+      async renameDurableAsync() {
+        renameCalls += 1;
+        throw new Error('injected pre-publication contention');
+      }
+    };
+    fixture.context.publicationRetryDelay = async () => {
+      fs.mkdirSync(occupiedSlot === 'target' ? fixture.targetPath : fixture.paths.failedPath);
+    };
+
+    await assert.rejects(publishNewCandidate(fixture.context), code('TARGET_EXISTS'));
+
+    assert.equal(renameCalls, 1);
+    assert.equal(fs.existsSync(fixture.paths.candidatePath), true);
+    assert.equal(fs.existsSync(occupiedSlot === 'target' ? fixture.targetPath : fixture.paths.failedPath), true);
+  });
+}
 
 test('registration failure retains the published target and exact retry completes once', async (t) => {
   const {
@@ -965,9 +1674,9 @@ test('every Task 20 candidate journal write and directory flush boundary fails b
   let writeCount = 0;
   writeBaseline.context.durableFs = {
     ...writeBaseline.durableFs,
-    writeJsonAtomic(filePath, value, options) {
+    async writeJsonAtomicAsync(filePath, value, options) {
       writeCount += 1;
-      return writeBaseline.durableFs.writeJsonAtomic(filePath, value, options);
+      return writeBaseline.durableFs.writeJsonAtomicAsync(filePath, value, options);
     }
   };
   await buildNewCandidate(writeBaseline.context);
@@ -981,10 +1690,10 @@ test('every Task 20 candidate journal write and directory flush boundary fails b
       let current = 0;
       fixture.context.durableFs = {
         ...fixture.durableFs,
-        writeJsonAtomic(filePath, value, options) {
+        async writeJsonAtomicAsync(filePath, value, options) {
           current += 1;
           if (current === failureIndex) throw Object.assign(new Error('injected write failure'), { code: 'COMMIT_FAILED' });
-          return fixture.durableFs.writeJsonAtomic(filePath, value, options);
+          return fixture.durableFs.writeJsonAtomicAsync(filePath, value, options);
         }
       };
       await assert.rejects(buildNewCandidate(fixture.context), code('COMMIT_FAILED'));
@@ -1001,6 +1710,18 @@ test('every Task 20 candidate journal write and directory flush boundary fails b
     flushDirectory(directoryPath) {
       flushCount += 1;
       return flushBaseline.durableFs.flushDirectory(directoryPath);
+    },
+    flushDirectories(directoryPaths) {
+      flushCount += directoryPaths.length;
+      return flushBaseline.durableFs.flushDirectories(directoryPaths);
+    },
+    async flushDirectoryAsync(directoryPath) {
+      flushCount += 1;
+      return flushBaseline.durableFs.flushDirectoryAsync(directoryPath);
+    },
+    async flushDirectoriesAsync(directoryPaths) {
+      flushCount += directoryPaths.length;
+      return flushBaseline.durableFs.flushDirectoriesAsync(directoryPaths);
     }
   };
   await buildNewCandidate(flushBaseline.context);
@@ -1018,6 +1739,29 @@ test('every Task 20 candidate journal write and directory flush boundary fails b
           current += 1;
           if (current === failureIndex) throw Object.assign(new Error('injected flush failure'), { code: 'COMMIT_FAILED' });
           return fixture.durableFs.flushDirectory(directoryPath);
+        },
+        flushDirectories(directoryPaths) {
+          for (const directoryPath of directoryPaths) {
+            current += 1;
+            if (current === failureIndex) {
+              throw Object.assign(new Error('injected flush failure'), { code: 'COMMIT_FAILED' });
+            }
+            fixture.durableFs.flushDirectory(directoryPath);
+          }
+        },
+        async flushDirectoryAsync(directoryPath) {
+          current += 1;
+          if (current === failureIndex) throw Object.assign(new Error('injected flush failure'), { code: 'COMMIT_FAILED' });
+          return fixture.durableFs.flushDirectoryAsync(directoryPath);
+        },
+        async flushDirectoriesAsync(directoryPaths) {
+          for (const directoryPath of directoryPaths) {
+            current += 1;
+            if (current === failureIndex) {
+              throw Object.assign(new Error('injected flush failure'), { code: 'COMMIT_FAILED' });
+            }
+          }
+          return fixture.durableFs.flushDirectoriesAsync(directoryPaths);
         }
       };
       await assert.rejects(buildNewCandidate(fixture.context), code('COMMIT_FAILED'));
@@ -1028,17 +1772,38 @@ test('every Task 20 candidate journal write and directory flush boundary fails b
 
 test('every Task 20 candidate file flush boundary fails before publication', async (t) => {
   const { buildNewCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  function installFileFlushProbe(fixture, failAt = null) {
+    const baseFsPromises = fixture.context.fsPromises || fixture.context.fsApi.promises || fs.promises;
+    const wrappedFsPromises = Object.create(baseFsPromises);
+    let count = 0;
+    wrappedFsPromises.open = async (...args) => {
+      const handle = await baseFsPromises.open(...args);
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === 'sync') {
+            return async () => {
+              count += 1;
+              if (count === failAt) {
+                throw Object.assign(new Error('injected file flush failure'), { code: 'COMMIT_FAILED' });
+              }
+              return target.sync();
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+      });
+    };
+    fixture.context.fsPromises = wrappedFsPromises;
+    return () => count;
+  }
+
   const baseline = await transactionFixture(t, {
     jobId: 'job-fsync-baseline', stableInstanceId: 'server-fsync-baseline'
   });
-  let fsyncCount = 0;
-  const countingFs = Object.create(fs);
-  countingFs.fsyncSync = function fsyncSync(descriptor) {
-    fsyncCount += 1;
-    return fs.fsyncSync(descriptor);
-  };
-  baseline.context.fsApi = countingFs;
+  const countFileFlushes = installFileFlushProbe(baseline);
   await buildNewCandidate(baseline.context);
+  const fsyncCount = countFileFlushes();
   assert.ok(fsyncCount >= 8);
 
   for (let failureIndex = 1; failureIndex <= fsyncCount; failureIndex += 1) {
@@ -1046,14 +1811,7 @@ test('every Task 20 candidate file flush boundary fails before publication', asy
       const fixture = await transactionFixture(subtest, {
         jobId: `job-fsync-${failureIndex}`, stableInstanceId: `server-fsync-${failureIndex}`
       });
-      let current = 0;
-      const failingFs = Object.create(fs);
-      failingFs.fsyncSync = function fsyncSync(descriptor) {
-        current += 1;
-        if (current === failureIndex) throw Object.assign(new Error('injected fsync failure'), { code: 'COMMIT_FAILED' });
-        return fs.fsyncSync(descriptor);
-      };
-      fixture.context.fsApi = failingFs;
+      installFileFlushProbe(fixture, failureIndex);
       await assert.rejects(buildNewCandidate(fixture.context), code('COMMIT_FAILED'));
       assert.equal(fs.existsSync(fixture.targetPath), false);
     });
@@ -1073,9 +1831,9 @@ test('every post-build journal boundary resumes to one registered canonical serv
   let baselineInstances = [];
   baseline.context.durableFs = {
     ...baseline.durableFs,
-    writeJsonAtomic(filePath, value, options) {
+    async writeJsonAtomicAsync(filePath, value, options) {
       baselineWrites += 1;
-      return baseline.durableFs.writeJsonAtomic(filePath, value, options);
+      return baseline.durableFs.writeJsonAtomicAsync(filePath, value, options);
     }
   };
   await buildNewCandidate(baseline.context);
@@ -1106,10 +1864,10 @@ test('every post-build journal boundary resumes to one registered canonical serv
       const instanceContext = { updateInstances() {} };
       fixture.context.durableFs = {
         ...fixture.durableFs,
-        writeJsonAtomic(filePath, value, options) {
+        async writeJsonAtomicAsync(filePath, value, options) {
           current += 1;
           if (current === failureIndex) throw Object.assign(new Error('injected lifecycle journal failure'), { code: 'COMMIT_FAILED' });
-          return fixture.durableFs.writeJsonAtomic(filePath, value, options);
+          return fixture.durableFs.writeJsonAtomicAsync(filePath, value, options);
         }
       };
       await assert.rejects(async () => {

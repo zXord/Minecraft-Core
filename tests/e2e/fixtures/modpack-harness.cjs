@@ -3,11 +3,20 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 
+const {
+  closePackagedElectronApp,
+  createPackagedRendererErrorCollector,
+  inspectPackagedRenderer,
+  resolveExpectedPackagedRendererUrl,
+  waitForPackagedMainWindow
+} = require('./packaged-startup-probe.cjs');
+
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
 const FACTORY_MODULE = path.resolve(__filename);
 const FIXED_TIME = '2026-08-01T12:00:00.000Z';
 const FINGERPRINT = 'a'.repeat(64);
 const SERVER_ID = 'server-e2e';
+const SOURCE_ELECTRON_FIRST_WINDOW_TIMEOUT_MS = 120_000;
 const RUNTIME = Object.freeze({
   minecraftVersion: '1.21.1',
   loaderFamily: 'fabric',
@@ -134,22 +143,33 @@ function ensureServerTree(serverRoot, generation = 'managed-v1') {
     javaMajor: 21,
     port: 25565,
     maxRam: 4096,
+    managementInviteSecret: 'fixture-management-invite-secret',
     autoRestart: { enabled: false }
   }, null, 2));
 }
 
-function managedState() {
+function managedState({ github = false } = {}) {
   return {
     schemaVersion: 1,
     modpackManaged: true,
     lifecycleMode: 'managed',
-    source: {
-      provider: 'modrinth',
-      projectId: 'fixture-pack',
-      versionId: 'version-current',
-      version: '1.0.0',
-      title: 'Fixture Factory Pack'
-    },
+    source: github
+      ? {
+          provider: 'github',
+          repositoryId: '1001',
+          releaseId: '2001',
+          githubOwner: 'FixtureOrg',
+          githubRepo: 'FixturePack',
+          version: 'v2.0.0',
+          title: 'Fixture GitHub Server Pack'
+        }
+      : {
+          provider: 'modrinth',
+          projectId: 'fixture-pack',
+          versionId: 'version-current',
+          version: '1.0.0',
+          title: 'Fixture Factory Pack'
+        },
     runtime: clone(RUNTIME),
     installedAt: FIXED_TIME,
     contentRevision: 1,
@@ -179,8 +199,9 @@ function initialNotifications() {
     message: 'Fixture Factory Pack 2.0.0 is ready for reviewed installation.',
     timestamp: FIXED_TIME,
     read: false,
-    source: { provider: 'modrinth' },
-    release: { version: '2.0.0' },
+    type: 'update-available',
+    source: { provider: 'modrinth', sourceId: 'fixture-pack' },
+    release: { releaseId: 'version-upgrade', version: '2.0.0', prerelease: false },
     action: { actionId: 'open-details', opaqueRef: 'action-reference-1' }
   }];
 }
@@ -189,10 +210,23 @@ function makeScenario({
   profile,
   root,
   crashPoint = null,
+  holdFirstJobBeforeCommit = false,
+  retainedDownloadOnFirstJob = false,
+  destinationRecoveryOnFirstJob = false,
+  terminalEventWithDurableLogOnFirstJob = false,
+  managementPreflightDelayMs = 0,
+  modrinthFixture = {},
+  inspectionFixture = {},
+  managedGithub = false,
   userDataOverride = null,
   notificationRecords = null,
   additionalNotifications = [],
-  recoveryRecords = []
+  recoveryRecords = [],
+  recoveryFailureIds = [],
+  recoveryListFixture = {},
+  rollbackOptions = null,
+  secondaryServerState = null,
+  refreshFixture = {}
 }) {
   const userData = userDataOverride ? path.resolve(userDataOverride) : path.join(root, 'user-data');
   const serverRoot = path.join(root, 'servers', 'fixture-server');
@@ -207,13 +241,25 @@ function makeScenario({
     path: serverRoot,
     autoStart: false
   }] : [];
+  const secondaryServerId = 'server-e2e-secondary';
+  if (hasServer && secondaryServerState) {
+    const secondaryServerRoot = path.join(root, 'servers', 'fixture-server-secondary');
+    ensureServerTree(secondaryServerRoot);
+    instances.push({
+      id: secondaryServerId,
+      name: 'E2E Secondary Server',
+      type: 'server',
+      path: secondaryServerRoot,
+      autoStart: false
+    });
+  }
   writeJson(path.join(userData, 'config', 'minecraft-core-config.json'), {
     instances,
     ...(hasServer ? { lastServerPath: serverRoot } : {})
   });
 
   const managedProfile = ['managed', 'recovery', 'packaged-smoke'].includes(profile);
-  const state = managedProfile ? managedState() : {
+  const state = managedProfile ? managedState({ github: managedGithub }) : {
     schemaVersion: 1,
     modpackManaged: false,
     lifecycleMode: 'unmanaged',
@@ -231,12 +277,37 @@ function makeScenario({
     serverRoot,
     serverId: SERVER_ID,
     state,
+    statesByInstanceId: secondaryServerState
+      ? { [SERVER_ID]: clone(state), [secondaryServerId]: clone(secondaryServerState) }
+      : null,
+    refreshFixture: clone(refreshFixture),
     history: managedProfile ? initialHistory() : [],
     notifications: notificationRecords === null
       ? [...initialNotifications(), ...clone(additionalNotifications)]
       : clone(notificationRecords),
     recovery: clone(recoveryRecords),
+    recoveryFailureIds: clone(recoveryFailureIds),
+    recoveryListFixture: clone(recoveryListFixture),
+    rollbackOptions: rollbackOptions === null
+      ? [{
+          restorePointId: 'restore-point-v1',
+          operationKind: 'install-existing',
+          createdAt: FIXED_TIME,
+          sourceRevision: 0,
+          runtime: clone(RUNTIME),
+          totalBytes: '1024'
+        }]
+      : clone(rollbackOptions),
     crashPoint,
+    holdFirstJobBeforeCommit: holdFirstJobBeforeCommit === true,
+    retainedDownloadOnFirstJob: retainedDownloadOnFirstJob === true,
+    destinationRecoveryOnFirstJob: destinationRecoveryOnFirstJob === true,
+    terminalEventWithDurableLogOnFirstJob: terminalEventWithDurableLogOnFirstJob === true,
+    managementPreflightDelayMs: Number.isSafeInteger(managementPreflightDelayMs) && managementPreflightDelayMs >= 0
+      ? managementPreflightDelayMs
+      : 0,
+    modrinthFixture: clone(modrinthFixture),
+    inspectionFixture: clone(inspectionFixture),
     crashMarker: null,
     operationSequence: 1,
     providerCalls: [],
@@ -249,6 +320,9 @@ function makeScenario({
     assetPatternRemembered: false,
     startupBlockedObserved: false,
     recoveryRuns: 0,
+    recoveryCalls: [],
+    recoveryListCalls: 0,
+    recoveryListCompletedCalls: [],
     initializedCount: 0
   };
   writeJson(scenarioFile, scenario);
@@ -258,11 +332,24 @@ function makeScenario({
 function prepareProfile({
   profile = 'managed',
   crashPoint = null,
+  holdFirstJobBeforeCommit = false,
+  retainedDownloadOnFirstJob = false,
+  destinationRecoveryOnFirstJob = false,
+  terminalEventWithDurableLogOnFirstJob = false,
+  managementPreflightDelayMs = 0,
+  modrinthFixture = {},
+  inspectionFixture = {},
+  managedGithub = false,
   root = null,
   userDataPath = null,
   notificationRecords = null,
   additionalNotifications = [],
-  recoveryRecords = []
+  recoveryRecords = [],
+  recoveryFailureIds = [],
+  recoveryListFixture = {},
+  rollbackOptions = null,
+  secondaryServerState = null,
+  refreshFixture = {}
 } = {}) {
   const selectedRoot = root || fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-e2e-'));
   const scenarioFile = path.join(selectedRoot, 'scenario.json');
@@ -275,10 +362,23 @@ function prepareProfile({
       profile,
       root: selectedRoot,
       crashPoint,
+      holdFirstJobBeforeCommit,
+      retainedDownloadOnFirstJob,
+      destinationRecoveryOnFirstJob,
+      terminalEventWithDurableLogOnFirstJob,
+      managementPreflightDelayMs,
+      modrinthFixture,
+      inspectionFixture,
+      managedGithub,
       userDataOverride: userDataPath,
       notificationRecords,
       additionalNotifications,
-      recoveryRecords
+      recoveryRecords,
+      recoveryFailureIds,
+      recoveryListFixture,
+      rollbackOptions,
+      secondaryServerState,
+      refreshFixture
     });
 }
 
@@ -301,9 +401,10 @@ async function launchElectron(prepared, { executablePath = null, env = {} } = {}
       ELECTRON_DISABLE_SECURITY_WARNINGS: 'true'
     }
   });
-  const page = await electronApp.firstWindow();
+  const page = await waitForFirstElectronWindow(electronApp);
   await page.route(/^https?:\/\//u, route => route.abort('blockedbyclient'));
-  await electronApp.evaluate(({ BrowserWindow, dialog }, target) => {
+  await electronApp.evaluate(async ({ BrowserWindow, dialog }, target) => {
+    await new Promise(resolve => setImmediate(resolve));
     const window = BrowserWindow.getAllWindows()[0];
     window?.setSize(1440, 1000);
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] });
@@ -362,38 +463,56 @@ async function runPackagedModpackSmoke({ executablePath, userDataPath, env = {},
   const isolatedUserData = path.resolve(userDataPath);
   if (!fs.statSync(executable).isFile()) throw new TypeError('Packaged smoke executable does not exist');
   fs.mkdirSync(isolatedUserData, { recursive: true });
+  const smokeNonce = crypto.randomBytes(32).toString('hex');
+  fs.writeFileSync(path.join(isolatedUserData, '.minecraft-core-packaged-smoke'), smokeNonce, {
+    encoding: 'utf8',
+    flag: 'wx'
+  });
   const fixtureSnapshot = snapshotReadOnlyFixture(fixtureRoot);
   const exclusiveEnvironment = Object.freeze({
     ...createExclusivePackagedEnvironment(env),
     MINECRAFT_CORE_USER_DATA_DIR: isolatedUserData
   });
   const { _electron: electron } = require('@playwright/test');
+  const startupDeadlineMs = Date.now() + 45_000;
+  const expectedRendererUrl = resolveExpectedPackagedRendererUrl(executable);
+  const remainingStartupMs = () => {
+    const remaining = startupDeadlineMs - Date.now();
+    if (remaining <= 0) throw new Error('Packaged startup exceeded its 45 second deadline');
+    return remaining;
+  };
   let electronApp = null;
+  let rendererErrors = null;
   try {
     electronApp = await electron.launch({
       executablePath: executable,
       args: [
+        `--minecraft-core-packaged-smoke=${smokeNonce}`,
         `--user-data-dir=${isolatedUserData}`,
         '--disable-background-networking',
         '--no-proxy-server'
       ],
       cwd: path.dirname(executable),
-      env: exclusiveEnvironment
+      env: exclusiveEnvironment,
+      timeout: remainingStartupMs()
     });
-    const page = await electronApp.firstWindow();
-    const publicRequests = [];
-    await page.route(/^https?:\/\//u, route => {
-      publicRequests.push(route.request().url());
-      return route.abort('blockedbyclient');
+    rendererErrors = createPackagedRendererErrorCollector(electronApp);
+    const page = await waitForPackagedMainWindow(electronApp, { deadlineMs: startupDeadlineMs, expectedRendererUrl });
+    rendererErrors.observe(page);
+    await inspectPackagedRenderer(page, {
+      deadlineMs: startupDeadlineMs,
+      expectedRendererUrl,
+      getRendererErrors: () => rendererErrors.errors
     });
-    await page.waitForLoadState('domcontentloaded');
-    await page.locator('#app').waitFor({ state: 'attached' });
-    const rendererLoaded = await page.locator('#app').evaluate(node => Boolean(node && node.childElementCount > 0));
-    const observed = await electronApp.evaluate(({ app }) => ({
-      appIsPackaged: Boolean(app.isPackaged),
-      userDataPath: app.getPath('userData'),
-      environment: Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value]))
-    }));
+    const observed = await electronApp.evaluate(async ({ app }) => {
+      await new Promise(resolve => setImmediate(resolve));
+      return {
+        appIsPackaged: Boolean(app.isPackaged),
+        userDataPath: app.getPath('userData'),
+        environment: Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value])),
+        smokeEvidence: globalThis.__MINECRAFT_CORE_PACKAGED_SMOKE_EVIDENCE__?.() || null
+      };
+    });
     const fixtureFactoryEnabled = Boolean(
       observed.environment.MINECRAFT_CORE_TEST_MODPACK_FACTORY ||
       observed.environment.MINECRAFT_CORE_TEST_MODE === '1'
@@ -409,23 +528,40 @@ async function runPackagedModpackSmoke({ executablePath, userDataPath, env = {},
     const actualUserData = path.resolve(observed.userDataPath);
     const isIsolated = actualUserData.toLowerCase() === isolatedUserData.toLowerCase();
     if (!isIsolated) fallbacksUsed.push('non-isolated-user-data');
+    if (!observed.smokeEvidence) fallbacksUsed.push('missing-packaged-smoke-evidence');
+    if (observed.smokeEvidence?.webContentsErrors?.length) {
+      throw new Error(`Packaged main process observed renderer errors: ${observed.smokeEvidence.webContentsErrors.join('; ')}`);
+    }
     if (snapshotReadOnlyFixture(fixtureRoot) !== fixtureSnapshot) {
       throw new Error('Packaged smoke modified the reviewed read-only fixture directory');
     }
     return {
-      rendererLoaded,
+      rendererLoaded: true,
       environment: {
         appIsPackaged: observed.appIsPackaged,
         productionComposition: observed.appIsPackaged && !fixtureFactoryEnabled,
         fixtureFactoryEnabled,
         isolatedUserData: isIsolated,
         pathSanitized,
-        publicNetworkRequests: publicRequests.length
+        updaterEnabled: observed.smokeEvidence?.updaterEnabled,
+        automaticReleaseChecksEnabled: observed.smokeEvidence?.automaticReleaseChecksEnabled,
+        publicManagementListenersEnabled: observed.smokeEvidence?.publicManagementListenersEnabled,
+        rendererPublicNetworkRequests: observed.smokeEvidence?.rendererPublicNetworkRequests
       },
       fallbacksUsed
     };
   } finally {
-    await electronApp?.close().catch(() => {});
+    rendererErrors?.dispose();
+    if (electronApp) await closePackagedElectronApp(electronApp);
+  }
+}
+
+async function waitForFirstElectronWindow(electronApp) {
+  try {
+    return await electronApp.firstWindow({ timeout: SOURCE_ELECTRON_FIRST_WINDOW_TIMEOUT_MS });
+  } catch (error) {
+    await electronApp.close().catch(() => {});
+    throw error;
   }
 }
 
@@ -441,13 +577,15 @@ async function waitUntil(read, predicate, { timeoutMs = 10_000, intervalMs = 50 
 
 async function reviewAndStartArchivePlan(page, { downgrade = false } = {}) {
   if (downgrade) {
-    const acknowledgement = page.getByLabel('I understand a world downgrade requires a compatible verified restore point.');
+    const acknowledgement = page.getByLabel(/I understand a downgrade can make the current world incompatible/u);
     if (await acknowledgement.isVisible().catch(() => false)) await acknowledgement.check();
   }
-  await page.getByRole('button', { name: 'Run preflight review' }).click();
-  const conflictReview = page.getByRole('button', { name: 'Re-run preflight with conflict choices' });
+  await page.getByRole('button', {
+    name: /^(?:Review planned changes|Choose destination and review plan)$/u
+  }).click();
+  const conflictReview = page.getByRole('button', { name: 'Re-run review with conflict choices' });
   const terminalReviewAction = page.getByRole('button', {
-    name: /^(?:Re-run preflight with conflict choices|Install this exact reviewed plan|Start reviewed operation)$/u
+    name: /^(?:Re-run review with conflict choices|Install this exact reviewed plan|Start reviewed operation)$/u
   });
   await terminalReviewAction.first().waitFor({ state: 'visible' });
   if (await conflictReview.isVisible().catch(() => false)) {
@@ -461,12 +599,10 @@ async function reviewAndStartArchivePlan(page, { downgrade = false } = {}) {
     await terminalReviewAction.first().waitFor({ state: 'visible' });
   }
   const eula = page.getByLabel('I accept the Minecraft EULA');
-  if (await eula.isVisible().catch(() => false)) {
-    await eula.check();
-    await page.getByRole('button', { name: 'Install this exact reviewed plan' }).click();
-  } else {
-    await page.getByRole('button', { name: 'Start reviewed operation' }).click();
-  }
+  if (await eula.isVisible().catch(() => false)) await eula.check();
+  await page.getByRole('button', {
+    name: /^(?:Install this exact reviewed plan|Start reviewed operation)$/u
+  }).first().click();
   await page.locator('section.outcome').waitFor();
 }
 
@@ -477,7 +613,7 @@ async function returnFromCompletedOperation(page) {
 
 async function selectModrinthFromOverview(page, version) {
   await page.getByRole('button', { name: 'Install modpack' }).click();
-  await page.getByRole('radio', { name: /Modrinth/u }).click();
+  await page.getByRole('button', { name: /Browse Modrinth/u }).click();
   await page.getByRole('button', { name: /Fixture Factory Pack/u }).click();
   await page.getByRole('button', { name: new RegExp(`^${version.replaceAll('.', '\\.')}`, 'u') }).click();
 }
@@ -502,7 +638,7 @@ async function openGithubAssetFromOverview(page, assetName) {
   const back = page.getByRole('button', { name: 'Back to Modpack overview' });
   if (await back.isVisible().catch(() => false)) await back.click();
   await page.getByRole('button', { name: 'Install modpack' }).click();
-  await page.getByRole('radio', { name: /GitHub Releases/u }).click();
+  await page.getByRole('button', { name: /GitHub Releases/u }).click();
   await page.getByLabel('Public repository or release URL').fill('https://github.com/FixtureOrg/FixturePack');
   await page.getByRole('button', { name: 'Load releases' }).click();
   await page.getByRole('button', { name: /Fixture Release v2/u }).click();
@@ -531,7 +667,7 @@ async function runDeterministicModpackLifecycleEvidence({ fixtureRoot = null } =
 
     await fixture.page.getByRole('button', { name: 'Actions' }).click();
     await fixture.page.getByRole('button', { name: 'Repair', exact: true }).click();
-    await fixture.page.getByRole('radio', { name: /Modrinth/u }).click();
+    await fixture.page.getByRole('button', { name: /Browse Modrinth/u }).click();
     await fixture.page.getByRole('button', { name: /Fixture Factory Pack/u }).click();
     await fixture.page.getByRole('button', { name: /^2\.0\.0/u }).click();
     await reviewAndStartArchivePlan(fixture.page);
@@ -569,7 +705,7 @@ async function runDeterministicModpackLifecycleEvidence({ fixtureRoot = null } =
       },
       ownership: {
         verified: beforeRelaunch.history.some(item => item.kind === 'verify'),
-        detached: afterRelaunch.state.lifecycleMode === 'unmanaged' && afterRelaunch.state.modpackManaged === false,
+        detached: afterRelaunch.state.lifecycleMode === 'detached' && afterRelaunch.state.modpackManaged === false,
         unmanagedFilesPreserved: preserved
       }
     };
@@ -741,34 +877,70 @@ function createComposition({ input, scenarioFile }) {
     { versionId: 'version-current', version: '1.0.0', name: '1.0.0 installed', channel: 'release', publishedAt: '2026-06-01T10:00:00.000Z', minecraftVersions: ['1.21.1'], loaders: ['fabric'] },
     { versionId: 'version-downgrade-safe', version: '0.9.0', name: '0.9.0 safe downgrade', channel: 'release', publishedAt: '2026-05-01T10:00:00.000Z', minecraftVersions: ['1.21.1'], loaders: ['fabric'] },
     { versionId: 'version-downgrade-blocked', version: '0.8.0', name: '0.8.0 blocked downgrade', channel: 'release', publishedAt: '2026-04-01T10:00:00.000Z', minecraftVersions: ['1.21.1'], loaders: ['fabric'] },
-    { versionId: 'version-client-only', version: '3.0.0-client', name: 'Client-only fixture', channel: 'release', publishedAt: '2026-07-01T10:00:00.000Z', minecraftVersions: ['1.21.1'], loaders: ['fabric'] }
+    { versionId: 'version-client-only', version: '3.0.0-client', name: 'Client-only fixture', channel: 'release', publishedAt: '2026-07-01T10:00:00.000Z', minecraftVersions: ['1.21.1'], loaders: ['fabric'] },
+    { versionId: 'version-forge-beta', version: '1.20.1 Forge beta', name: '1.20.1 Forge beta', channel: 'beta', publishedAt: '2026-08-03T10:00:00.000Z', minecraftVersions: ['1.20.1'], loaders: ['forge'], changelog: 'Details: https://example.invalid/forge-beta' },
+    { versionId: 'version-quilt-alpha', version: '1.19.4 Quilt alpha', name: '1.19.4 Quilt alpha', channel: 'alpha', publishedAt: '2026-02-01T10:00:00.000Z', minecraftVersions: ['1.19.4'], loaders: ['quilt'], changelog: 'Details: https://example.invalid/quilt-alpha' },
+    { versionId: 'version-forward-neoforge', version: '1.22.0 NeoForge', name: '1.22.0 NeoForge forward runtime', channel: 'release', publishedAt: '2026-08-04T10:00:00.000Z', minecraftVersions: ['1.22.0'], loaders: ['neoforge'], changelog: 'Details: https://example.invalid/neoforge-forward' }
   ];
+  const alternateVersions = [
+    { versionId: 'alternate-forge-release', version: '4.0.0', name: '4.0.0 alternate release', channel: 'release', publishedAt: '2026-08-02T10:00:00.000Z', minecraftVersions: ['1.20.1'], loaders: ['forge'] }
+  ];
+
+  const includesFixtureProject = (key, projectId) => Array.isArray(scenario().modrinthFixture?.[key]) &&
+    scenario().modrinthFixture[key].includes(projectId);
+  const delayFixtureProject = async projectId => {
+    if (includesFixtureProject('delayedProjectIds', projectId)) await new Promise(resolve => setTimeout(resolve, 350));
+  };
 
   const providers = {
     modrinth: {
       async searchProjects(request) {
         record('providerCalls', { provider: 'modrinth', method: 'searchProjects', query: request.query || '' });
+        const items = [{
+          projectId: 'fixture-pack',
+          title: 'Fixture Factory Pack',
+          summary: 'A deterministic offline server pack used by Electron E2E.',
+          categories: ['technology'],
+          minecraftVersions: ['1.21.1'],
+          loaders: ['fabric'],
+          serverCompatibility: 'required',
+          updatedAt: FIXED_TIME,
+          downloads: 4242
+        }];
+        if (scenario().modrinthFixture?.includeAlternateProject === true) items.push({
+          projectId: 'alternate-forge-pack',
+          title: 'Alternate Forge Pack',
+          summary: 'A second deterministic project for request sequencing coverage.',
+          categories: ['technology'],
+          minecraftVersions: ['1.20.1'],
+          loaders: ['forge'],
+          serverCompatibility: 'required',
+          updatedAt: FIXED_TIME,
+          downloads: 17
+        });
         return {
-          items: [{
-            projectId: 'fixture-pack',
-            title: 'Fixture Factory Pack',
-            summary: 'A deterministic offline server pack used by Electron E2E.',
-            categories: ['technology'],
-            minecraftVersions: ['1.21.1'],
-            loaders: ['fabric'],
-            serverCompatibility: 'required',
-            updatedAt: FIXED_TIME,
-            downloads: 4242
-          }],
-          pagination: { offset: request.offset || 0, limit: request.limit || 20, total: 1 }
+          items,
+          pagination: { offset: request.offset || 0, limit: request.limit || 20, total: items.length }
         };
       },
       async getProject(projectId) {
         record('providerCalls', { provider: 'modrinth', method: 'getProject', projectId });
+        await delayFixtureProject(projectId);
+        if (includesFixtureProject('projectDetailFailures', projectId)) throw new ModpackError('INVALID_RELEASE_URL', 'Fixture project details failed.');
+        if (projectId === 'alternate-forge-pack') return {
+          projectId,
+          title: 'Alternate Forge Pack',
+          description: 'A deterministic alternate project.',
+          serverCompatibility: 'required',
+          runtimes: { minecraftVersions: ['1.20.1'], loaders: ['forge'] },
+          galleryCandidates: [],
+          upstreamLinkCandidates: []
+        };
         return {
           projectId,
           title: 'Fixture Factory Pack',
           description: 'Deterministic server pack with an explicitly linked public repository.',
+          body: 'Reference only: https://example.invalid/project-body',
           serverCompatibility: 'required',
           runtimes: { minecraftVersions: ['1.21.1'], loaders: ['fabric'] },
           galleryCandidates: [],
@@ -776,8 +948,10 @@ function createComposition({ input, scenarioFile }) {
         };
       },
       async listVersions(request) {
-        record('providerCalls', { provider: 'modrinth', method: 'listVersions', projectId: request.projectId });
-        return clone(versions);
+        record('providerCalls', { provider: 'modrinth', method: 'listVersions', request: clone(request) });
+        await delayFixtureProject(request.projectId);
+        if (includesFixtureProject('versionHistoryFailures', request.projectId)) throw new ModpackError('INVALID_RELEASE_URL', 'Fixture version history failed.');
+        return clone(request.projectId === 'alternate-forge-pack' ? alternateVersions : versions);
       }
     },
     github: {
@@ -789,6 +963,7 @@ function createComposition({ input, scenarioFile }) {
         record('providerCalls', { provider: 'github', method: 'listReleases', repositoryId: request.repositoryId });
         return {
           releases: [
+            { repositoryId: '1001', releaseId: '2003', name: 'Fixture Backport Release', tagName: 'v2.0.1-backport', prerelease: false, publishedAt: '2026-08-05T10:00:00.000Z' },
             { repositoryId: '1001', releaseId: '2001', name: 'Fixture Release v2', tagName: 'v2.0.0', prerelease: false, publishedAt: FIXED_TIME },
             { repositoryId: '1001', releaseId: '2002', name: 'Source-only Release', tagName: 'v2.0.1-source', prerelease: false, publishedAt: '2026-08-01T11:00:00.000Z' }
           ],
@@ -798,7 +973,9 @@ function createComposition({ input, scenarioFile }) {
       async loadUploadedAssets({ repositoryId, releaseId }) {
         record('providerCalls', { provider: 'github', method: 'loadUploadedAssets', repositoryId, releaseId });
         if (releaseId === '2002') return { status: 'NO_INSTALLABLE_ASSET', assets: [], choices: [] };
-        const definitions = [
+        const definitions = releaseId === '2003'
+          ? [['asset-github-backport', 'fixture-github-backport.zip', 'zip']]
+          : [
           ['asset-mrpack', 'fixture-server.mrpack', 'mrpack'],
           ['asset-zip', 'fixture-server.zip', 'zip'],
           ['asset-rar', 'fixture-server.rar', 'rar'],
@@ -808,8 +985,8 @@ function createComposition({ input, scenarioFile }) {
           ['asset-encrypted', 'fixture-encrypted.zip', 'zip'],
           ['asset-header-encrypted', 'fixture-header-encrypted.rar', 'rar'],
           ['asset-files-only', 'fixture-files-only.zip', 'zip'],
-          ['asset-changed', 'fixture-republished.zip', 'zip']
-        ];
+            ['asset-changed', 'fixture-republished.zip', 'zip']
+          ];
         const assets = definitions.map(([assetId, fileName]) => ({
           assetId,
           fileName,
@@ -904,22 +1081,68 @@ function createComposition({ input, scenarioFile }) {
   }
 
   const lifecycleService = {
-    async inspectSource(request) {
+    async inspectSource(request, { onProgress, signal } = {}) {
       assertNotBlocked();
       const kind = inspectKind(request);
-      record('lifecycleCalls', { method: 'inspectSource', provider: request.provider, kind });
-      if (kind === 'client-only') throw new ModpackError('CLIENT_ONLY_PACK', 'This archive is client-only and cannot create a server.');
-      if (kind === 'encrypted' || kind === 'encrypted-header') throw new ModpackError('ENCRYPTED_ARCHIVE', 'Encrypted archives are not supported for unattended server setup.');
-      if (kind === 'changed') throw new ModpackError('ASSET_CHANGED', 'The selected GitHub asset was republished with different bytes.');
+      const emitProgress = progress => {
+        try { onProgress?.(progress); } catch { /* renderer progress is observational */ }
+      };
+      emitProgress({ phase: 'resolving' });
+      record('lifecycleCalls', {
+        method: 'inspectSource', provider: request.provider, kind,
+        projectId: request.projectId, versionId: request.versionId,
+        repositoryId: request.repositoryId, releaseId: request.releaseId, assetIds: request.assetIds
+      });
+      const selectedAssetId = Array.isArray(request.assetIds) ? request.assetIds[0] : null;
+      const configuredDelay = Number(
+        scenario().inspectionFixture?.delayMsByAssetId?.[selectedAssetId] ||
+        scenario().modrinthFixture?.inspectionDelayMsByVersionId?.[request.versionId] ||
+        0
+      );
+      if (Number.isFinite(configuredDelay) && configuredDelay > 0) {
+        emitProgress({ phase: 'downloading', transferredBytes: 512, totalBytes: 1024, percent: 50 });
+        try {
+          await new Promise((resolve, reject) => {
+            const timer = setTimeout(resolve, configuredDelay);
+            const onAbort = () => {
+              clearTimeout(timer);
+              reject(new ModpackError('CANCELLED', 'Archive inspection was cancelled.'));
+            };
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+          });
+        } catch (error) {
+          record('lifecycleCalls', {
+            method: 'inspectSourceCancelled', provider: request.provider,
+            projectId: request.projectId, versionId: request.versionId
+          });
+          throw error;
+        }
+      }
+      emitProgress({ phase: 'verifying' });
+      const rejectInspection = (code, message) => {
+        record('lifecycleCalls', { method: 'inspectSourceRejected', provider: request.provider, versionId: request.versionId, code });
+        throw new ModpackError(code, message);
+      };
+      if (kind === 'client-only') rejectInspection('CLIENT_ONLY_PACK', 'This archive is client-only and cannot create a server.');
+      if (kind === 'encrypted' || kind === 'encrypted-header') rejectInspection('ENCRYPTED_ARCHIVE', 'Encrypted archives are not supported for unattended server setup.');
+      if (kind === 'changed') rejectInspection('ASSET_CHANGED', 'The selected GitHub asset was republished with different bytes.');
       if (request.linkedModrinthProjectId) update(value => { value.linkedRepositoryAccepted = true; });
       if (request.rememberAssetPattern) update(value => { value.assetPatternRemembered = true; });
       const inspectionId = `inspection-${++inspectionSequence}`;
       const ambiguous = kind === 'ambiguous';
       const filesOnly = kind === 'files-only';
       const archiveFamily = ['mrpack', 'rar5', 'multipart-rar'].includes(kind) || ['rar-rxx', 'numbered-volume'].includes(kind) ? (['rar-rxx', 'numbered-volume'].includes(kind) ? 'multipart-rar' : kind) : 'zip';
+      const runtime = request.releaseId === '2003'
+        ? { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.12', javaMajor: 17, os: 'win32', architecture: 'x64' }
+        : request.versionId === 'version-forge-beta'
+        ? { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.12', javaMajor: 17, os: 'win32', architecture: 'x64' }
+        : request.versionId === 'version-forward-neoforge'
+          ? { minecraftVersion: '1.22.0', loaderFamily: 'neoforge', loaderVersion: '22.0.1', javaMajor: 21, os: 'win32', architecture: 'x64' }
+          : clone(RUNTIME);
       const inspection = {
         inspectionId,
-        integrity: 'Verified',
+        integrity: 'deferred-to-extraction',
         archiveFamily,
         classification: {
           kind: ambiguous ? 'ambiguous-or-unknown' : filesOnly ? 'files-only' : archiveFamily === 'mrpack' ? 'mrpack-server' : 'prepared-server-pack',
@@ -930,7 +1153,7 @@ function createComposition({ input, scenarioFile }) {
                 { kind: 'nested-runtime-candidate', entryName: 'server-a/server.jar' },
                 { kind: 'nested-runtime-candidate', entryName: 'server-b/server.jar' }
               ] }
-            : { runtime: clone(RUNTIME) }),
+            : { runtime }),
           optionalFiles: archiveFamily === 'mrpack' ? [
             { id: 'optional-server-utilities', label: 'Server utilities', defaultSelected: true },
             { id: 'optional-example-config', label: 'Example configuration', defaultSelected: false }
@@ -941,8 +1164,21 @@ function createComposition({ input, scenarioFile }) {
         limitEvidence: { totals: { entryCount: 42, expandedBytes: '8192' } },
         warnings: kind === 'missing-digest' ? [{ code: 'MISSING_PROVIDER_DIGEST', message: 'GitHub did not publish a trustworthy digest.' }] : []
       };
+      for (const phase of ['materialize', 'list', 'validate', 'classify', 'complete']) {
+        emitProgress({ phase });
+      }
       inspections.set(inspectionId, { request: clone(request), kind, inspection: clone(inspection), source: sourceFor(request) });
+      record('lifecycleCalls', {
+        method: 'inspectSourceCompleted', provider: request.provider, inspectionId,
+        projectId: request.projectId, versionId: request.versionId
+      });
       return inspection;
+    },
+
+    async cancelInspection(inspectionId) {
+      const removed = inspections.delete(inspectionId);
+      record('lifecycleCalls', { method: 'cancelInspection', inspectionId, removed });
+      return removed;
     },
 
     async createPlan(request) {
@@ -976,7 +1212,7 @@ function createComposition({ input, scenarioFile }) {
       const operationKind = request.operationKind;
       const blockedDowngrade = inspected.request.versionId === 'version-downgrade-blocked';
       const warnings = inspected.kind === 'missing-digest' ? [{ code: 'MISSING_PROVIDER_DIGEST', message: 'Missing provider digest was explicitly acknowledged.' }] : [];
-      const blockers = blockedDowngrade ? [{ code: 'RECOVERY_REQUIRED', message: 'No compatible verified world restore point exists for this downgrade.' }] : [];
+      const blockers = blockedDowngrade ? [{ code: 'RECOVERY_REQUIRED', message: 'The selected downgrade archive cannot be prepared safely.' }] : [];
       const plan = {
         planId,
         planFingerprint: FINGERPRINT,
@@ -998,13 +1234,31 @@ function createComposition({ input, scenarioFile }) {
       plans.set(planId, plan);
       record('lifecycleCalls', {
         method: 'createPlan', operationKind, requestedOperationKind: request.operationKind, planId,
+        projectId: inspected.request.projectId, versionId: inspected.request.versionId,
         selections: clone(request.selections)
       });
       return { planId, planFingerprint: FINGERPRINT, planView: clone(plan.planView) };
     },
 
-    async createManagementPlan({ instanceId, operationKind, selectionRef = null }) {
+    async createManagementPlan({ instanceId, operationKind, selectionRef = null }, options = {}) {
       assertNotBlocked();
+      const pause = () => new Promise(resolve => setTimeout(resolve, scenario().managementPreflightDelayMs));
+      options.onProgress?.({ phase: 'scanning-server' });
+      if (scenario().managementPreflightDelayMs > 0) await pause();
+      if (operationKind === 'rollback-restore-point') {
+        options.onProgress?.({
+          phase: 'verifying-restore-point', activity: 'verifying-archive',
+          processedBytes: 25, totalBytes: 100
+        });
+        if (scenario().managementPreflightDelayMs > 0) await pause();
+        options.onProgress?.({
+          phase: 'verifying-restore-point', activity: 'verifying-archive',
+          processedBytes: 100, totalBytes: 100
+        });
+      }
+      options.onProgress?.({ phase: 'calculating-changes' });
+      options.onProgress?.({ phase: 'checking-capacity' });
+      options.onProgress?.({ phase: 'sealing-plan' });
       const planId = `plan-${++planSequence}`;
       const titles = {
         detach: 'Detach management and keep every file',
@@ -1042,6 +1296,8 @@ function createComposition({ input, scenarioFile }) {
       const jobId = `job-${++jobSequence}`;
       const crash = scenario().crashPoint && plan.operationKind === 'rollback-restore-point';
       const deferred = !crash && !['detach', 'uninstall', 'repair', 'rollback-restore-point'].includes(plan.operationKind);
+      const holdBeforeCommit = deferred && jobSequence === 1 && scenario().holdFirstJobBeforeCommit === true;
+      if (holdBeforeCommit) update(value => { value.holdFirstJobBeforeCommit = false; });
       const job = {
         jobId,
         operationKind: plan.operationKind,
@@ -1053,9 +1309,58 @@ function createComposition({ input, scenarioFile }) {
         cancellationRequested: false,
         outcome: crash || deferred ? null : completeOperation(plan)
       };
-      jobs.set(jobId, { job, plan, reads: 0 });
-      record('lifecycleCalls', { method: 'startOperation', operationKind: plan.operationKind, jobId });
+      jobs.set(jobId, { job, plan, reads: 0, holdBeforeCommit });
+      record('lifecycleCalls', {
+        method: 'startOperation', operationKind: plan.operationKind, jobId,
+        choices: clone(request.choices)
+      });
       if (crash) beginCrashBoundary(plan);
+      if (scenario().terminalEventWithDurableLogOnFirstJob === true && jobId === 'job-1') {
+        const stored = jobs.get(jobId);
+        setTimeout(() => {
+          const persistedEvent = {
+            sequence: 2,
+            jobId,
+            channel: 'log',
+            phase: 'downloading',
+            timestamp: FIXED_TIME,
+            message: 'The reviewed plan became stale before server changes',
+            progress: null,
+            currentItem: null,
+            details: { errorCode: 'PLAN_STALE', step: 'revalidate-plan', field: 'contentRevision' }
+          };
+          const outcome = {
+            status: 'failed',
+            kind: 'nothing-changed',
+            result: { serverUnchanged: true }
+          };
+          stored.job = {
+            ...stored.job,
+            sequence: 3,
+            phase: 'failed',
+            progress: { percent: 35, message: 'Stopped before server changes' },
+            terminalAt: FIXED_TIME,
+            outcome,
+            events: [persistedEvent]
+          };
+          record('lifecycleCalls', { method: 'publishTerminalProgressBeforePoll', jobId });
+          const window = input.getWindow();
+          if (window && !window.isDestroyed?.()) {
+            window.webContents?.send('modpacks:job-progress', {
+              channel: 'progress',
+              jobId,
+              operationKind: plan.operationKind,
+              serverId: plan.instanceId,
+              sequence: 3,
+              phase: 'failed',
+              progress: stored.job.progress,
+              cancellationRequested: false,
+              terminal: true,
+              outcome
+            });
+          }
+        }, 50);
+      }
       return clone(job);
     },
 
@@ -1067,6 +1372,7 @@ function createComposition({ input, scenarioFile }) {
       stored.job.cancellationRequested = true;
       stored.job.progress = { percent: stored.job.progress.percent, message: 'Cancelled before commit; nothing changed' };
       stored.job.outcome = { status: 'cancelled', kind: 'nothing-changed', result: { serverUnchanged: true } };
+      stored.holdBeforeCommit = false;
       record('lifecycleCalls', { method: 'cancelJob', jobId });
       return clone(stored.job);
     },
@@ -1074,23 +1380,56 @@ function createComposition({ input, scenarioFile }) {
     async getJob(jobId) {
       const stored = jobs.get(jobId);
       if (!stored) throw new ModpackError('PLAN_STALE', 'The operation record is unavailable.');
+      if (scenario().terminalEventWithDurableLogOnFirstJob === true) {
+        record('lifecycleCalls', { method: 'getJob', jobId, phase: stored.job.phase });
+      }
       stored.reads += 1;
-      if (stored.job.phase === 'downloading' && stored.reads >= 1) {
-        stored.job.phase = 'completed';
-        stored.job.progress = { percent: 100, message: 'Final server state validated' };
-        stored.job.outcome = completeOperation(stored.plan);
+      if (stored.job.phase === 'downloading' && stored.reads >= 1 && !stored.holdBeforeCommit) {
+        const destinationRecovery = scenario().destinationRecoveryOnFirstJob === true;
+        if ((scenario().retainedDownloadOnFirstJob === true || destinationRecovery) && stored.job.jobId === 'job-1') {
+          stored.job.phase = 'failed';
+          stored.job.progress = { percent: 35, message: 'Downloaded archive retained for manual use' };
+          stored.job.outcome = {
+            status: 'failed',
+            kind: 'retained-download',
+            ...(destinationRecovery
+              ? { errorCode: 'RECOVERY_REQUIRED', failureReason: 'destination-recovery' }
+              : {}),
+            retainedDownload: { sha256: 'a'.repeat(64) },
+            result: { serverUnchanged: true },
+            actions: destinationRecovery
+              ? [{ actionId: 'choose-another-asset', opaqueRef: 'retained-choose-job-1' }]
+              : [
+                  { actionId: 'open-retained-download-folder', opaqueRef: 'retained-open-job-1' },
+                  { actionId: 'remove-retained-download', opaqueRef: 'retained-remove-job-1' },
+                  { actionId: 'choose-another-asset', opaqueRef: 'retained-choose-job-1' }
+                ]
+          };
+        } else {
+          stored.job.phase = 'completed';
+          stored.job.progress = { percent: 100, message: 'Final server state validated' };
+          stored.job.outcome = completeOperation(stored.plan);
+        }
       }
       return clone(stored.job);
     },
 
     async getState(instanceId) {
       record('lifecycleCalls', { method: 'getState', instanceId });
-      return clone(scenario().state);
+      const delayMs = Number(scenario().refreshFixture?.stateDelayMsByInstanceId?.[instanceId] || 0);
+      if (Number.isFinite(delayMs) && delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+      const current = scenario();
+      return clone(current.statesByInstanceId?.[instanceId] || current.state);
     },
 
     async listHistory(instanceId, { cursor = null } = {}) {
       record('lifecycleCalls', { method: 'listHistory', instanceId, cursor });
       return { items: clone(scenario().history), nextCursor: null };
+    },
+
+    async listRollbackOptions(instanceId) {
+      record('lifecycleCalls', { method: 'listRollbackOptions', instanceId });
+      return { items: clone(scenario().rollbackOptions) };
     },
 
     async verify(instanceId) {
@@ -1137,7 +1476,7 @@ function createComposition({ input, scenarioFile }) {
       value.operationSequence += 1;
       if (plan.operationKind === 'detach') {
         value.state.modpackManaged = false;
-        value.state.lifecycleMode = 'unmanaged';
+        value.state.lifecycleMode = 'detached';
       } else if (plan.operationKind === 'uninstall') {
         fs.rmSync(path.join(value.serverRoot, 'mods', 'managed.jar'), { force: true });
         value.state.modpackManaged = false;
@@ -1239,28 +1578,83 @@ function createComposition({ input, scenarioFile }) {
   }
 
   const recoveryService = {
-    async listRecovery() { return clone(scenario().recovery); },
-    async recover({ recoveryId, actionId }) {
-      if (recoveryId !== 'recovery-directory-swap' || actionId !== 'recover-safely') {
-        throw new ModpackError('INVALID_REQUEST', 'The recovery action is not available.');
-      }
-      return update(value => {
-        const journalFile = path.join(value.root, 'crash-journal.json');
-        if (fs.existsSync(journalFile)) {
-          const journal = readJson(journalFile);
-          if (fs.existsSync(journal.rollback)) {
-            fs.rmSync(journal.canonical, { recursive: true, force: true });
-            fs.renameSync(journal.rollback, journal.canonical);
-          }
-          fs.rmSync(journal.candidate, { recursive: true, force: true });
-          fs.rmSync(journal.rollback, { recursive: true, force: true });
-          fs.rmSync(journalFile, { force: true });
-        }
-        value.recovery = [];
-        value.recoveryRuns += 1;
-        value.crashMarker = 'recovered';
-        return { status: 'recovered', canonicalCount: fs.existsSync(value.serverRoot) ? 1 : 0, idempotent: true };
+    async listRecovery() {
+      const invocation = update(value => {
+        value.recoveryListCalls += 1;
+        const call = value.recoveryListCalls;
+        return {
+          call,
+          snapshot: clone(value.recovery),
+          delayMs: Number(value.recoveryListFixture?.delayMsByCall?.[call] || 0),
+          fail: Array.isArray(value.recoveryListFixture?.failureCalls) &&
+            value.recoveryListFixture.failureCalls.includes(call)
+        };
       });
+      if (invocation.delayMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, invocation.delayMs));
+      }
+      update(value => value.recoveryListCompletedCalls.push(invocation.call));
+      if (invocation.fail) {
+        throw new ModpackError('COMMIT_FAILED', 'Recovery status refresh failed');
+      }
+      return invocation.snapshot;
+    },
+    async recover({ recoveryId, actionId }) {
+      if (recoveryId === 'recovery-directory-swap') {
+        if (actionId !== 'recover-safely') {
+          throw new ModpackError('INVALID_REQUEST', 'The recovery action is not available.');
+        }
+        return update(value => {
+          const journalFile = path.join(value.root, 'crash-journal.json');
+          if (fs.existsSync(journalFile)) {
+            const journal = readJson(journalFile);
+            if (fs.existsSync(journal.rollback)) {
+              fs.rmSync(journal.canonical, { recursive: true, force: true });
+              fs.renameSync(journal.rollback, journal.canonical);
+            }
+            fs.rmSync(journal.candidate, { recursive: true, force: true });
+            fs.rmSync(journal.rollback, { recursive: true, force: true });
+            fs.rmSync(journalFile, { force: true });
+          }
+          value.recovery = [];
+          value.recoveryRuns += 1;
+          value.crashMarker = 'recovered';
+          return { status: 'recovered', canonicalCount: fs.existsSync(value.serverRoot) ? 1 : 0, idempotent: true };
+        });
+      }
+
+      const result = update(value => {
+        const matching = value.recovery.filter(record => record?.recoveryId === recoveryId);
+        const record = matching.length === 1 ? matching[0] : null;
+        const actionIssued = record?.actions?.some(action =>
+          action?.actionId === actionId && typeof action.label === 'string');
+        if (value.profile !== 'empty' ||
+            !/^recovery-[a-f0-9]{32}$/u.test(recoveryId || '') ||
+            record?.visibilityScope !== 'pending-new-server' || !actionIssued) {
+          throw new ModpackError('INVALID_REQUEST', 'The recovery action is not available.');
+        }
+        value.recoveryCalls.push({ recoveryId, actionId });
+        const failureIndex = value.recoveryFailureIds.indexOf(recoveryId);
+        if (failureIndex >= 0) {
+          value.recoveryFailureIds.splice(failureIndex, 1);
+          return { fixtureFailure: true };
+        }
+        value.recovery = Array.isArray(value.recoveryListFixture?.recordsAfterResolution)
+          ? clone(value.recoveryListFixture.recordsAfterResolution)
+          : value.recovery.filter(item => item !== record);
+        value.recoveryRuns += 1;
+        return {
+          recoveryId,
+          serverId: record.serverId,
+          actionId,
+          resolved: true,
+          status: 'resolved'
+        };
+      });
+      if (result?.fixtureFailure === true) {
+        throw new ModpackError('COMMIT_FAILED', 'Setup recovery could not be completed');
+      }
+      return result;
     }
   };
 
@@ -1298,6 +1692,22 @@ function createComposition({ input, scenarioFile }) {
       record('safeActions', request);
       const matchingJob = [...jobs.values()].find(entry => entry.job?.outcome?.actions?.some(action =>
         action.actionId === request.actionId && action.opaqueRef === request.opaqueRef));
+      const matchingNotification = scenario().notifications.find(item =>
+        item.action?.actionId === request.actionId && item.action?.opaqueRef === request.opaqueRef);
+      const releaseTarget = matchingNotification &&
+          typeof matchingNotification.serverId === 'string' &&
+          ['github', 'modrinth'].includes(matchingNotification.source?.provider) &&
+          typeof matchingNotification.source?.sourceId === 'string' &&
+          typeof matchingNotification.release?.releaseId === 'string' &&
+          typeof matchingNotification.release?.prerelease === 'boolean'
+        ? {
+            serverId: matchingNotification.serverId,
+            provider: matchingNotification.source.provider,
+            sourceId: matchingNotification.source.sourceId,
+            releaseId: matchingNotification.release.releaseId,
+            prerelease: matchingNotification.release.prerelease
+          }
+        : null;
       const targetIds = {
         'change-selection': SERVER_ID,
         'open-details': matchingJob?.job?.jobId || SERVER_ID,
@@ -1320,7 +1730,13 @@ function createComposition({ input, scenarioFile }) {
           type: 'outcome-action-result',
           actionId: request.actionId,
           status: 'ready',
-          destination: { kind: destinationKinds[request.actionId], targetId: targetIds[request.actionId] }
+          destination: {
+            kind: destinationKinds[request.actionId],
+            targetId: targetIds[request.actionId],
+            ...(releaseTarget && ['details', 'asset-selection'].includes(destinationKinds[request.actionId])
+              ? { releaseTarget }
+              : {})
+          }
         };
       } else if (request.actionId === 'open-retained-download-folder') {
         result = {
@@ -1341,6 +1757,7 @@ function createComposition({ input, scenarioFile }) {
   };
   const destinationReservationService = {
     async reserveWithNativeDialog() {
+      record('lifecycleCalls', { method: 'reserveServerDestination' });
       const selection = await input.dialog.showOpenDialog({
         title: 'Choose an empty destination for the new modpack server',
         properties: ['openDirectory', 'createDirectory']
@@ -1350,6 +1767,11 @@ function createComposition({ input, scenarioFile }) {
       const displayName = path.basename(serverPath) || 'New modpack server';
       destinationReservations.set(SERVER_ID, { serverPath, displayName });
       return { instanceId: SERVER_ID, displayName };
+    },
+    release(instanceId) {
+      const released = destinationReservations.delete(instanceId);
+      record('lifecycleCalls', { method: 'releaseServerDestination', instanceId, released });
+      return released;
     }
   };
 
@@ -1379,5 +1801,6 @@ module.exports = {
   launchModpackApp,
   prepareProfile,
   runDeterministicModpackLifecycleEvidence,
-  runPackagedModpackSmoke
+  runPackagedModpackSmoke,
+  waitForFirstElectronWindow
 };

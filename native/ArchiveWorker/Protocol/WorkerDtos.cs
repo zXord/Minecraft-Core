@@ -91,12 +91,21 @@ internal sealed class DurableRequest
     public string? SourcePath { get; init; }
     public string? DestinationPath { get; init; }
     public string? DirectoryPath { get; init; }
+    public DurableDirectoryRequest[]? Directories { get; init; }
     public string[]? AllowedRoots { get; init; }
     public DurableObjectIdentity? SourceIdentity { get; init; }
+    public DurableObjectIdentity? SourceParentIdentity { get; init; }
     public DurableObjectIdentity? DestinationParentIdentity { get; init; }
     public DurableObjectIdentity? DestinationIdentity { get; init; }
     public DurableObjectIdentity? DirectoryIdentity { get; init; }
     public DurableRootIdentity[]? AllowedRootIdentities { get; init; }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+internal sealed class DurableDirectoryRequest
+{
+    public string? DirectoryPath { get; init; }
+    public DurableObjectIdentity? DirectoryIdentity { get; init; }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -123,6 +132,8 @@ internal sealed class DurableObjectIdentity
 internal sealed class DurableResponse
 {
     public bool Ok { get; init; }
+    public string? FailureKind { get; init; }
+    public string? FailureStage { get; init; }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -140,7 +151,7 @@ internal sealed class ContainmentEvidence
     public bool DescendantsDenied { get; init; }
     public bool UnrelatedEnvironmentAbsent { get; init; }
     public bool UnrelatedHandlesAbsent { get; init; }
-    public bool BundleExtractionIsolated { get; init; }
+    public bool BundleRuntimeInMemory { get; init; }
     public bool StandardInputClosed { get; init; }
     public bool CleanupKilledSurvivors { get; set; }
     public bool TemporaryAclRemoved { get; set; }

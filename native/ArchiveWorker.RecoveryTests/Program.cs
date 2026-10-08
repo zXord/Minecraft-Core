@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using MinecraftCore.ArchiveWorker.Protocol;
 using MinecraftCore.ArchiveWorker.RecoveryTests;
+using MinecraftCore.ArchiveWorker.Durability;
 using MinecraftCore.ArchiveWorker.Sandbox;
 using MinecraftCore.ArchiveWorker.Security;
 
@@ -24,6 +25,169 @@ try
     throw new InvalidOperationException("Reduced ACL baseline was accepted");
 }
 catch (InvalidDataException) { }
+
+string[] retryableDurabilityStages =
+[
+    "root-open",
+    "source-open",
+    "destination-parent-open",
+    "source-parent-open",
+    "ancestor-open",
+    "preflight-revalidation"
+];
+int[] expectedDurabilityDelays = [50, 150, 400, 800];
+foreach (string stage in retryableDurabilityStages)
+{
+    for (int retryIndex = 0; retryIndex < expectedDurabilityDelays.Length; retryIndex++)
+    {
+        Require(DurabilityRetryPolicy.TryGetDelayMilliseconds(
+            "sharing-violation", stage, retryIndex, out int delayMilliseconds));
+        Require(delayMilliseconds == expectedDurabilityDelays[retryIndex]);
+    }
+    Require(!DurabilityRetryPolicy.TryGetDelayMilliseconds(
+        "sharing-violation", stage, expectedDurabilityDelays.Length, out _));
+}
+Require(expectedDurabilityDelays.Sum() <= 1_500);
+foreach (string stage in new[]
+{
+    "handle-rename",
+    "completion-flush",
+    "published-identity",
+    "final-revalidation",
+    "request",
+    "unknown"
+})
+{
+    Require(!DurabilityRetryPolicy.TryGetDelayMilliseconds("sharing-violation", stage, 0, out _));
+}
+foreach (string failureKind in new[]
+{
+    "access-denied",
+    "timeout",
+    "integrity-failure",
+    "io-failure",
+    "worker-failure",
+    "unknown"
+})
+{
+    Require(!DurabilityRetryPolicy.TryGetDelayMilliseconds(
+        failureKind, "destination-parent-open", 0, out _));
+}
+
+var transientDurabilityFailure = new IOException("transient durability failure");
+int transientExecutions = 0;
+var transientDelays = new List<int>();
+await DurabilityRetryExecutor.ExecuteAsync(
+    () =>
+    {
+        transientExecutions++;
+        if (transientExecutions == 1) throw transientDurabilityFailure;
+    },
+    _ => "sharing-violation",
+    _ => "destination-parent-open",
+    delayMilliseconds =>
+    {
+        transientDelays.Add(delayMilliseconds);
+        return Task.CompletedTask;
+    });
+Require(transientExecutions == 2);
+Require(transientDelays.SequenceEqual([50]));
+
+int exhaustedExecutions = 0;
+var exhaustedDelays = new List<int>();
+try
+{
+    await DurabilityRetryExecutor.ExecuteAsync(
+        () =>
+        {
+            exhaustedExecutions++;
+            throw transientDurabilityFailure;
+        },
+        _ => "sharing-violation",
+        _ => "source-open",
+        delayMilliseconds =>
+        {
+            exhaustedDelays.Add(delayMilliseconds);
+            return Task.CompletedTask;
+        });
+    throw new InvalidOperationException("Exhausted durability retry unexpectedly succeeded");
+}
+catch (IOException exception) when (ReferenceEquals(exception, transientDurabilityFailure)) { }
+Require(exhaustedExecutions == expectedDurabilityDelays.Length + 1);
+Require(exhaustedDelays.SequenceEqual(expectedDurabilityDelays));
+
+int ambiguousExecutions = 0;
+try
+{
+    await DurabilityRetryExecutor.ExecuteAsync(
+        () =>
+        {
+            ambiguousExecutions++;
+            throw transientDurabilityFailure;
+        },
+        _ => "sharing-violation",
+        _ => "handle-rename",
+        _ => throw new InvalidOperationException("Ambiguous failure was delayed for retry"));
+    throw new InvalidOperationException("Ambiguous durability failure unexpectedly succeeded");
+}
+catch (IOException exception) when (ReferenceEquals(exception, transientDurabilityFailure)) { }
+Require(ambiguousExecutions == 1);
+
+string stableDigest = new string('a', 64);
+var expectedFileIdentity = new DurableExpectedIdentity(
+    "file", 77, 88, 4, 101, 202, 303, stableDigest);
+var ctimeDriftedFile = new DurableObjectSnapshot(
+    "file", 77, 88, 4, 101, 202, 404, 0, stableDigest);
+Require(ctimeDriftedFile.Matches(expectedFileIdentity));
+Require(!(ctimeDriftedFile with { FileIndex = 89 }).Matches(expectedFileIdentity));
+Require(!(ctimeDriftedFile with { Size = 5 }).Matches(expectedFileIdentity));
+Require(!(ctimeDriftedFile with { Mtime = 203 }).Matches(expectedFileIdentity));
+Require(!(ctimeDriftedFile with { Sha256 = new string('b', 64) }).Matches(expectedFileIdentity));
+var intentionalMetadataDrift = ctimeDriftedFile with { Birthtime = 102, Mtime = 203 };
+Require(intentionalMetadataDrift.Matches(expectedFileIdentity, allowMetadataChange: true));
+Require(!(intentionalMetadataDrift with { FileIndex = 89 }).Matches(expectedFileIdentity, allowMetadataChange: true));
+Require(!(intentionalMetadataDrift with { Size = 5 }).Matches(expectedFileIdentity, allowMetadataChange: true));
+Require(!(intentionalMetadataDrift with { Sha256 = new string('b', 64) }).Matches(expectedFileIdentity, allowMetadataChange: true));
+Require(!DurableObjectSnapshot.SamePublishedObject(
+    ctimeDriftedFile,
+    ctimeDriftedFile with { ReparseTag = 0xa000000c }));
+
+string durableIdentityRoot = Path.Combine(Path.GetTempPath(), $"minecraft-core-native-ctime-{Guid.NewGuid():N}");
+string durableIdentityFile = Path.Combine(durableIdentityRoot, "identity.bin");
+Directory.CreateDirectory(durableIdentityRoot);
+try
+{
+    File.WriteAllText(durableIdentityFile, "safe");
+    DurableObjectSnapshot captured;
+    using (DurablePinnedObject initial = DurablePinnedObject.OpenCurrent(
+        durableIdentityFile, "file", includeHash: true, writeAccess: false, pinRename: false))
+    {
+        captured = initial.Identity;
+    }
+    var ctimeDriftExpectation = new DurableExpectedIdentity(
+        captured.FileType, captured.Device, captured.FileIndex, captured.Size,
+        captured.Birthtime, captured.Mtime, captured.Ctime + 100, captured.Sha256);
+    using DurablePinnedObject ctimeDriftPin = DurablePinnedObject.Open(
+        durableIdentityFile, ctimeDriftExpectation, writeAccess: false, pinRename: false);
+    ctimeDriftPin.Revalidate(requirePath: true);
+
+    string movedIdentityFile = Path.Combine(durableIdentityRoot, "moved.bin");
+    File.Move(durableIdentityFile, movedIdentityFile);
+    try
+    {
+        ctimeDriftPin.Revalidate(requirePath: true);
+        throw new InvalidOperationException("Durable path substitution was accepted");
+    }
+    catch (InvalidDataException) { }
+}
+finally
+{
+    string resolvedIdentityRoot = Path.GetFullPath(durableIdentityRoot);
+    string resolvedTempRoot = Path.GetFullPath(Path.GetTempPath());
+    Require(resolvedIdentityRoot.StartsWith(resolvedTempRoot, StringComparison.OrdinalIgnoreCase));
+    Require(Path.GetFileName(resolvedIdentityRoot).StartsWith("minecraft-core-native-ctime-", StringComparison.Ordinal));
+    Directory.Delete(resolvedIdentityRoot, recursive: true);
+}
 
 Require(PathInputPolicy.HasTraversalAlias(@"C:\owned\.\source.zip"));
 Require(PathInputPolicy.HasTraversalAlias(@"C:\owned\..\source.zip"));

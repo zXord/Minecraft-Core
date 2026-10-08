@@ -55,12 +55,25 @@ function normalizeRequest(value) {
   return { actionId, opaqueRef: identifier(descriptors.opaqueRef.value) };
 }
 
+function normalizeReleaseTarget(value) {
+  const descriptors = strictObject(value, ['serverId', 'provider', 'sourceId', 'releaseId', 'prerelease']);
+  const provider = descriptors.provider.value;
+  if (!['github', 'modrinth'].includes(provider) || typeof descriptors.prerelease.value !== 'boolean') throw invalid();
+  return {
+    serverId: identifier(descriptors.serverId.value),
+    provider,
+    sourceId: identifier(descriptors.sourceId.value),
+    releaseId: identifier(descriptors.releaseId.value),
+    prerelease: descriptors.prerelease.value
+  };
+}
+
 function normalizeClaim(value, request) {
   const descriptors = strictObject(value, ['claimId', 'reference']);
   const claimId = identifier(descriptors.claimId.value);
   const referenceDescriptors = strictObject(
     descriptors.reference.value,
-    ['actionId', 'targetKind', 'targetId', 'cacheSha256'],
+    ['actionId', 'targetKind', 'targetId', 'cacheSha256', 'releaseTarget'],
     ['actionId', 'targetKind', 'targetId']
   );
   if (referenceDescriptors.actionId.value !== request.actionId) throw invalid();
@@ -74,7 +87,23 @@ function normalizeClaim(value, request) {
     if (typeof cacheSha256 !== 'string' || !SHA256.test(cacheSha256)) throw invalid();
     reference.cacheSha256 = cacheSha256;
   }
+  if (referenceDescriptors.releaseTarget) {
+    reference.releaseTarget = normalizeReleaseTarget(referenceDescriptors.releaseTarget.value);
+  }
   return { claimId, reference };
+}
+
+function releasableClaimId(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'claimId');
+    return descriptor?.enumerable && Object.hasOwn(descriptor, 'value') &&
+      typeof descriptor.value === 'string' && IDENTIFIER.test(descriptor.value)
+      ? descriptor.value
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeExecutionResult(value) {
@@ -100,12 +129,15 @@ class OutcomeActionService {
   async performSafeAction(requestValue) {
     const request = normalizeRequest(requestValue);
     let claim = null;
+    let issuedClaimId = null;
     let effectStarted = false;
     try {
-      claim = normalizeClaim(await this.referenceAuthority.claim(request), request);
+      const issuedClaim = await this.referenceAuthority.claim(request);
+      issuedClaimId = releasableClaimId(issuedClaim);
+      claim = normalizeClaim(issuedClaim, request);
       let result;
       if (request.actionId === 'open-retained-download-folder') {
-        if (claim.reference.targetKind !== 'retained-download' || !claim.reference.cacheSha256) throw invalid();
+        if (claim.reference.targetKind !== 'retained-download' || !claim.reference.cacheSha256 || claim.reference.releaseTarget) throw invalid();
         effectStarted = true;
         await this.controlledFolderOpener.openCacheParent();
         result = {
@@ -115,10 +147,22 @@ class OutcomeActionService {
           destination: { kind: 'controlled-cache-parent' }
         };
       } else if (request.actionId === 'remove-retained-download') {
-        if (claim.reference.targetKind !== 'retained-download' || !claim.reference.cacheSha256) throw invalid();
-        effectStarted = true;
-        const removed = await this.artifactCache.removeIfUnreferenced(claim.reference.cacheSha256);
+        if (claim.reference.targetKind !== 'retained-download' || !claim.reference.cacheSha256 || claim.reference.releaseTarget) throw invalid();
+        let removed;
+        if (typeof this.artifactCache.removeRetainedIfUnreferenced === 'function') {
+          const retention = await this.artifactCache.removeRetainedIfUnreferenced({
+            ownerId: claim.reference.targetId,
+            sha256: claim.reference.cacheSha256
+          });
+          if (!retention || typeof retention !== 'object' || typeof retention.removed !== 'boolean' ||
+              !['removed', 'retained', 'expired'].includes(retention.status)) throw recoveryRequired();
+          if (retention.status === 'expired') throw invalid();
+          removed = retention.removed;
+        } else {
+          removed = await this.artifactCache.removeIfUnreferenced(claim.reference.cacheSha256);
+        }
         if (typeof removed !== 'boolean') throw recoveryRequired();
+        effectStarted = true;
         result = {
           type: 'outcome-action-result',
           actionId: request.actionId,
@@ -128,15 +172,20 @@ class OutcomeActionService {
       } else if (NAVIGATION_TARGETS.has(request.actionId)) {
         const targetKind = NAVIGATION_TARGETS.get(request.actionId);
         if (claim.reference.targetKind !== targetKind || claim.reference.cacheSha256 !== undefined) throw invalid();
+        if (claim.reference.releaseTarget && !['details', 'asset-selection'].includes(targetKind)) throw invalid();
         result = {
           type: 'outcome-action-result',
           actionId: request.actionId,
           status: 'ready',
-          destination: { kind: targetKind, targetId: claim.reference.targetId }
+          destination: {
+            kind: targetKind,
+            targetId: claim.reference.targetId,
+            ...(claim.reference.releaseTarget ? { releaseTarget: claim.reference.releaseTarget } : {})
+          }
         };
       } else if (EXECUTION_TARGETS.has(request.actionId)) {
         const targetKind = EXECUTION_TARGETS.get(request.actionId);
-        if (claim.reference.targetKind !== targetKind || claim.reference.cacheSha256 !== undefined) throw invalid();
+        if (claim.reference.targetKind !== targetKind || claim.reference.cacheSha256 !== undefined || claim.reference.releaseTarget) throw invalid();
         effectStarted = true;
         const execution = normalizeExecutionResult(await this.actionExecutor.execute({
           actionId: request.actionId,
@@ -155,9 +204,10 @@ class OutcomeActionService {
       if (await this.referenceAuthority.complete(claim.claimId) !== true) throw recoveryRequired();
       return deepFreeze(result);
     } catch (error) {
-      if (claim && !effectStarted) {
+      const claimId = claim?.claimId || issuedClaimId;
+      if (claimId && !effectStarted) {
         try {
-          if (await this.referenceAuthority.release(claim.claimId) !== true) throw recoveryRequired();
+          if (await this.referenceAuthority.release(claimId) !== true) throw recoveryRequired();
         } catch (releaseError) {
           throw recoveryRequired(releaseError);
         }

@@ -30,6 +30,7 @@ function hashMismatch(algorithm, expected, actual) {
 }
 function cancelled() { return new ModpackError('CANCELLED', 'Artifact download was cancelled'); }
 function safeDownloadFailure() { return new ModpackError('INVALID_RELEASE_URL', 'Artifact download failed', { details: { reasonCode: 'host-not-allowed' } }); }
+function rateLimited() { return new ModpackError('RATE_LIMITED', 'GitHub request is rate limited', { retryable: true }); }
 function decimalBytes(value) { return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value); }
 function isInside(parent, child) { const relative = path.relative(parent, child); return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative)); }
 function validDigest(value, algorithm) { return typeof value === 'string' && new RegExp(`^[a-f0-9]{${DIGEST_LENGTHS[algorithm]}}$`).test(value); }
@@ -162,6 +163,11 @@ class ArtifactDownloader {
       response = await this.client.request(partPlan.downloadUrl, {
         signal, headers: partPlan.headers, allowedHosts: partPlan.allowedHosts, allowSubdomains: partPlan.allowSubdomains === true
       });
+      const githubRateLimited = provider === 'github' && response && (
+        response.statusCode === 429 ||
+        (response.statusCode === 403 && response.headers?.['x-ratelimit-remaining'] === '0')
+      );
+      if (githubRateLimited) { response.destroy?.(); throw rateLimited(); }
       if (!response || typeof response[Symbol.asyncIterator] !== 'function' || !Number.isSafeInteger(response.statusCode) || response.statusCode < 200 || response.statusCode >= 300) {
         response?.destroy?.(); throw safeDownloadFailure();
       }
@@ -259,8 +265,11 @@ class ArtifactDownloader {
         ...(reviewed.provider === 'github' ? { githubAuthority: GITHUB_DOWNLOAD_AUTHORITY } : {})
       }));
     }
-    const verifiedSet = finalizeVerifiedArtifactSet(reviewed, verifiedParts.map(({ partId, measuredSize, sha256, sha512 }) => ({ partId, measuredSize, sha256, sha512 })));
-    return deepFreeze({ ...verifiedSet, warnings });
+    return finalizeVerifiedArtifactSet(
+      reviewed,
+      verifiedParts.map(({ partId, measuredSize, sha256, sha512 }) => ({ partId, measuredSize, sha256, sha512 })),
+      warnings
+    );
   }
 }
 

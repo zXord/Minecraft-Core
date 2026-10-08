@@ -4,6 +4,7 @@ const { ensureServersDat } = require('../utils/servers-dat.cjs');
 const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs/promises');
+const crypto = require('node:crypto');
 const { rm } = require('fs/promises');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
 const instanceContext = require('../utils/instance-context.cjs');
@@ -29,12 +30,42 @@ const { markCurrentServerMutationDirty } = require('../services/server-mutation-
 
 const logger = getLoggerHandlers();
 
+async function writeClientConfigAtomic(configFile, value, {
+  fsApi = fsPromises,
+  tokenFactory = crypto.randomUUID
+} = {}) {
+  if (typeof configFile !== 'string' || !path.isAbsolute(configFile) ||
+      !fsApi || typeof fsApi.writeFile !== 'function' || typeof fsApi.rename !== 'function' ||
+      typeof fsApi.unlink !== 'function' || typeof tokenFactory !== 'function') {
+    throw new TypeError('Atomic client config dependencies are invalid');
+  }
+  const token = String(tokenFactory());
+  if (!/^[A-Za-z0-9._-]+$/u.test(token)) throw new TypeError('Atomic client config token is invalid');
+  const temporaryFile = path.join(
+    path.dirname(configFile),
+    `.${path.basename(configFile)}.${process.pid}.${token}.tmp`
+  );
+  try {
+    await fsApi.writeFile(temporaryFile, JSON.stringify(value, null, 2), {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600
+    });
+    await fsApi.rename(temporaryFile, configFile);
+  } finally {
+    try { await fsApi.unlink(temporaryFile); } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
 const DEFAULT_SERVER_SETTINGS = {
   port: 25565,
   maxRam: 4,
   managementPort: 8080,
   autoStartMinecraft: false,
-  autoStartManagement: false
+  autoStartManagement: false,
+  contentRevision: 0
 };
 
 function getServerConfigDefaults(serverPath = '') {
@@ -92,7 +123,8 @@ function getMergedServerSettings(serverPath) {
       maxRam: config.maxRam,
       managementPort: config.managementPort,
       autoStartMinecraft: !!config.autoStartMinecraft,
-      autoStartManagement: !!config.autoStartManagement
+      autoStartManagement: !!config.autoStartManagement,
+      contentRevision: config.contentRevision
     } : {})
   };
 }
@@ -1444,7 +1476,7 @@ function createSettingsHandlers() {
             clientName: newName
           };
 
-          await fsPromises.writeFile(clientConfigPath, JSON.stringify(nextClientConfig, null, 2));
+          await writeClientConfigAtomic(clientConfigPath, nextClientConfig);
         }
 
         appStore.set('instances', instances);
@@ -1728,7 +1760,18 @@ function createSettingsHandlers() {
     },
 
     // Save client configuration
-    'save-client-config': async (_e, { path: clientPath, serverIp, serverPort, clientId, clientName, sessionToken, serverProtocol, inviteSecret, managementCertFingerprint }) => {
+    'save-client-config': async (_e, {
+      path: clientPath,
+      serverIp,
+      serverPort,
+      clientId,
+      clientName,
+      sessionToken,
+      serverProtocol,
+      inviteSecret,
+      managementCertFingerprint,
+      initializeMultiplayer = true
+    }) => {
       const startTime = Date.now();
       
       logger.debug('IPC handler invoked', {
@@ -1778,6 +1821,10 @@ function createSettingsHandlers() {
             }
           });
           return { success: false, error: 'Invalid server IP address' };
+        }
+
+        if (typeof initializeMultiplayer !== 'boolean') {
+          return { success: false, error: 'Invalid multiplayer initialization option' };
         }
 
         const normalizedProtocol = typeof serverProtocol === 'string' ? serverProtocol.trim().toLowerCase() : '';
@@ -1903,7 +1950,7 @@ function createSettingsHandlers() {
           ...(config.inviteSecret ? { inviteSecret: packSecret(config.inviteSecret) } : {})
         };
         markCurrentServerMutationDirty(clientPath);
-        await fsPromises.writeFile(configFile, JSON.stringify(configForDisk, null, 2));
+        await writeClientConfigAtomic(configFile, configForDisk);
 
         logger.info('Client configuration file saved successfully', {
           category: 'settings',
@@ -1918,7 +1965,7 @@ function createSettingsHandlers() {
 
         // Create servers.dat so the server appears in multiplayer list (only if not already initialized)
         const serversInitializedFile = path.join(clientPath, '.servers-initialized');
-        if (!fs.existsSync(serversInitializedFile)) {
+        if (initializeMultiplayer && !fs.existsSync(serversInitializedFile)) {
           logger.debug('Initializing servers.dat file', {
             category: 'settings',
             data: {
@@ -1999,6 +2046,7 @@ function createSettingsHandlers() {
             serverPort: resolvedPort,
             serverProtocol: config.serverProtocol || instances[clientInstanceIndex].serverProtocol,
             clientId: config.clientId,
+            name: config.clientName,
             clientName: config.clientName,
             sessionToken: config.sessionToken || instances[clientInstanceIndex].sessionToken,
             inviteSecret: config.inviteSecret || instances[clientInstanceIndex].inviteSecret,
@@ -2092,4 +2140,4 @@ function createSettingsHandlers() {
   };
 }
 
-module.exports = { createSettingsHandlers };
+module.exports = { createSettingsHandlers, writeClientConfigAtomic };

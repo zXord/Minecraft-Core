@@ -5,6 +5,7 @@ const AdmZip = require('adm-zip');
 const FABRIC_INSTALLER_JAR = 'fabric-installer.jar';
 const FABRIC_LAUNCH_JAR = 'fabric-server-launch.jar';
 const FABRIC_LAUNCHER_CLASS = 'net/fabricmc/loader/impl/launch/server/FabricServerLauncher.class';
+const FABRIC_LEGACY_LAUNCHER_CLASS = 'net/fabricmc/loader/launch/server/FabricServerLauncher.class';
 
 function parseManifest(manifestText) {
   const entries = {};
@@ -99,7 +100,7 @@ function getFabricRuntimeStatus(targetPath) {
 
   try {
     const zip = new AdmZip(launchJarPath);
-    hasEmbeddedLauncherClass = !!zip.getEntry(FABRIC_LAUNCHER_CLASS);
+    hasEmbeddedLauncherClass = !!zip.getEntry(FABRIC_LAUNCHER_CLASS) || !!zip.getEntry(FABRIC_LEGACY_LAUNCHER_CLASS);
 
     const manifest = readJarManifest(zip);
     const manifestClassPath = typeof manifest['Class-Path'] === 'string'

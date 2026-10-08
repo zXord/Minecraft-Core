@@ -1,0 +1,326 @@
+import { test, expect } from '@playwright/test';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { build } from 'esbuild';
+import { compile } from 'svelte/compiler';
+
+let bundle;
+test.beforeAll(async () => {
+  const root = process.cwd();
+  const fixture = `<script>
+    import Client from './src/components/client/ClientModpackPanel.svelte';
+    import Companion from './src/components/modpacks/ClientCompanionPanel.svelte';
+    let kind = 'client'; let id = 'a'; let managed=true; let local=false; let clientPanel;
+    export function show(nextKind, nextId, options={}) { kind = nextKind; id = nextId; managed=options.managed??true; local=options.local??false; }
+    export function refreshClient(){return clientPanel.refresh();}
+  </script>
+  {#if kind === 'client'}<Client bind:this={clientPanel} clientId={id} destinationLabel="Existing client folder" on:state={event => window.classified = event.detail} />
+  {:else}<Companion serverId={id} {managed} localArchive={local} />{/if}`;
+  const result = await build({ absWorkingDir: root,
+    stdin: { resolveDir: root, contents: `import Fixture from 'client-fixture'; import { mount, flushSync } from 'svelte'; const fixture = mount(Fixture, {target: document.querySelector('#fixture')}); window.show = (kind,id,options) => flushSync(() => fixture.show(kind,id,options));window.refreshClient=()=>fixture.refreshClient();` },
+    bundle: true, write: false, platform: 'browser', format: 'iife', conditions: ['browser'],
+    plugins: [{ name: 'real-panels', setup(builder) {
+      builder.onResolve({ filter: /^client-fixture$/ }, () => ({path: 'ClientFixture.svelte', namespace: 'fixture'}));
+      builder.onLoad({filter: /./, namespace: 'fixture'}, () => ({ contents: compile(fixture, {filename: path.join(root,'ClientFixture.svelte'), generate: 'client', css: 'injected'}).js.code, resolveDir: root }));
+      builder.onLoad({filter: /\.svelte$/}, async ({path: filename}) => ({ contents: compile(await fs.readFile(filename,'utf8'), {filename, generate: 'client', css: 'injected'}).js.code, resolveDir: path.dirname(filename) }));
+    }}]
+  });
+  bundle = result.outputFiles[0].text;
+});
+
+async function start(page, status = 'install-required', kind = 'client') {
+  await page.route('**/*', route => route.abort());
+  await page.setContent('<style>body{background:#15151c;color:#eee;font:15px Arial;padding:20px}</style><div id="fixture"></div>');
+  await page.evaluate(({status}) => {
+    window.calls = []; window.listeners = new Set(); window.pending = {};
+    window.runtime = {minecraftVersion:'1.20.1',loaderFamily:'forge',loaderVersion:'47.3.12',javaMajor:17,architecture:'x64',os:'win32'};
+    window.descriptor = {schemaVersion:1,status:'ready',serverFingerprint:'f'.repeat(64),serverVersion:'0.13.4',source:{provider:'github',repositoryId:'1',githubOwner:'team',githubRepo:'pack',releaseId:'2',assetId:'3'},runtime:window.runtime,artifactSha256:'a'.repeat(64)};
+    window.currentStatus = status;
+    window.preview = {clientId:'a',planId:'plan-1',descriptor:window.descriptor,optionalFiles:[{id:'optional',label:'Optional client mod',defaultSelected:true}],optionalFileIds:['optional'],downloadBytes:'2048',additions:['mods/new.jar'],removals:['mods/old.jar'],replacements:['config/common.toml'],preserved:['options.txt','servers.dat'],conflicts:[{path:'config/user.toml',action:'replace',reason:'modified-owned',replaceAllowed:true},{path:'mods/personal.jar',action:'replace',reason:'unowned',replaceAllowed:false}]};
+    window.electron = {
+      on: (channel, fn) => window.listeners.add(fn), removeListener: (channel, fn) => window.listeners.delete(fn),
+      invoke: async (channel, input) => {
+        window.calls.push({channel,input});
+        if (window.pending[channel]) return new Promise(resolve => window.pending[channel].push({resolve,input}));
+        if (window.fail?.[channel]) return {ok:false,error:window.fail[channel]};
+        let value;
+        switch(channel) {
+          case 'client-packs:get-state': case 'client-packs:verify': value = {clientId:input.clientId,status:window.currentStatus,verified:window.currentStatus==='ready',descriptor:window.descriptor,...(window.recoveryReason?{recoveryReason:window.recoveryReason}:{})}; break;
+          case 'client-packs:preview': value = {...window.preview,optionalFileIds:input.optionalFileIds ?? ['optional']}; break;
+          case 'client-packs:install': window.currentStatus='ready'; value = {clientId:input.clientId,status:'ready',verified:true,...(window.installCleanup?{cleanup:window.installCleanup}:{})}; break;
+          case 'client-packs:recover': window.currentStatus='install-required'; value = {phase:'abandoned',operationId:'private-id'}; break;
+          case 'client-packs:get-companion': value = {...window.descriptor,status:'unpaired',source:null,runtime:null,artifactSha256:null}; break;
+          case 'client-packs:list-companion-assets': value = {serverFingerprint:'f'.repeat(64),serverVersion:'0.13.4',assets:[{assetId:'3',fileName:'pack-0.13.4.mrpack',size:'2048'}]}; break;
+          case 'client-packs:inspect-companion': value = {inspectionId:'inspection-1',...window.descriptor,name:'Pack',version:'0.13.4',optionalFiles:[],downloadBytes:'2048'}; break;
+          case 'client-packs:accept-companion': value = window.descriptor; break;
+          case 'client-packs:cancel': value={cancelled:true}; break;
+          default: throw new Error(`Unexpected IPC ${channel}`);
+        }
+        return {ok:true,value};
+      }
+    };
+  }, {status});
+  await page.addScriptTag({content:bundle});
+  if (kind !== 'client') await page.evaluate(kind => window.show(kind,'a'),kind);
+}
+
+test('pairing requires explicit same-release asset inspection and runtime review', async ({page}) => {
+  await start(page,'install-required','companion');
+  await expect(page.getByText('pack-0.13.4.mrpack')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Accept matching client pack'})).toHaveCount(0);
+  await page.getByLabel('pack-0.13.4.mrpack').check();
+  await page.getByRole('button',{name:'Inspect selected pack'}).click();
+  await expect(page.getByText(/Minecraft 1.20.1.*forge.*47.3.12/)).toBeVisible();
+  await page.getByRole('button',{name:'Accept matching client pack'}).click();
+  await expect(page.getByText('Paired for this server release')).toBeVisible();
+});
+test('preview preserves settings and requires every conflict choice before installation', async ({page}) => {
+  await start(page);
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await expect(page.getByText('Existing client folder')).toBeVisible();
+  await page.locator('summary',{hasText:'Preserved files (2)'}).click();
+  await expect(page.getByText('options.txt', {exact:true})).toBeVisible();
+  await expect(page.getByText('2,048 bytes')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Install reviewed pack'})).toBeDisabled();
+  await page.getByLabel('Replace config/user.toml').check();
+  await expect(page.getByLabel('Replace mods/personal.jar')).toBeDisabled();
+  await page.getByLabel('Preserve mods/personal.jar').check();
+  await page.getByRole('button',{name:'Install reviewed pack'}).click();
+  await expect(page.getByText('Matching pack ready')).toBeVisible();
+  const call = await page.evaluate(() => window.calls.find(x => x.channel==='client-packs:install'));
+  expect(call.input.conflictChoices).toEqual({'config/user.toml':'replace','mods/personal.jar':'preserve'});
+});
+test('optional file changes obtain a new reviewed plan', async ({page}) => {
+  await start(page);
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await page.getByLabel('Optional client mod').uncheck();
+  await expect.poll(() => page.evaluate(() => window.calls.filter(x=>x.channel==='client-packs:preview').at(-1).input.optionalFileIds)).toEqual([]);
+});
+test('large file plans keep install accessible with counted expandable bounded lists', async ({page}) => {
+  await start(page);
+  await page.evaluate(() => {window.preview={...window.preview,optionalFiles:[],optionalFileIds:[],conflicts:[],additions:Array.from({length:4000},(_,i)=>`mods/file-${i}.jar`),removals:[],replacements:[],preserved:[]};});
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  const files=page.locator('details').filter({has:page.locator('summary',{hasText:'Additions (4000)'})});
+  await expect(files).not.toHaveAttribute('open');
+  await expect(page.getByRole('button',{name:'Install reviewed pack'})).toBeInViewport();
+  expect(await page.evaluate(()=>document.documentElement.scrollHeight)).toBeLessThan(1100);
+  await files.locator('summary').click();
+  await expect(files.locator('li')).toHaveCount(4000);
+  expect(await files.getByRole('region').evaluate(element=>element.clientHeight)).toBeLessThanOrEqual(260);
+  await files.getByRole('region').evaluate(element=>element.scrollTop=element.scrollHeight);
+  await expect(page.getByText('mods/file-3999.jar',{exact:true})).toBeInViewport();
+  expect(await page.evaluate(()=>document.documentElement.scrollHeight)).toBeLessThan(1100);
+});
+test('client file-list markup compiles without accessibility warnings',async()=>{
+  const filename=path.join(process.cwd(),'src/components/client/ClientModpackPanel.svelte');
+  const result=compile(await fs.readFile(filename,'utf8'),{filename,generate:'client',css:'injected'});
+  expect(result.warnings.filter(warning=>warning.code.startsWith('a11y_'))).toEqual([]);
+});
+test('large file lists remain semantic and keyboard-scrollable in a labelled region',async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.preview={...window.preview,optionalFiles:[],optionalFileIds:[],conflicts:[],additions:Array.from({length:4000},(_,i)=>`mods/file-${i}.jar`),removals:[],replacements:[],preserved:[]};});
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  const summary=page.locator('summary',{hasText:'Additions (4000)'});
+  await summary.focus();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Tab');
+  const region=page.getByRole('region',{name:'Additions file list',exact:true});
+  await expect(region).toBeFocused();
+  await expect(region.getByRole('list')).toHaveCount(1);
+  await expect(region.getByRole('listitem')).toHaveCount(4000);
+  expect(await region.evaluate(element=>element.clientHeight)).toBeLessThanOrEqual(260);
+  await page.keyboard.press('End');
+  await expect.poll(()=>region.evaluate(element=>element.scrollTop)).toBeGreaterThan(0);
+  await expect(page.getByText('mods/file-3999.jar',{exact:true})).toBeInViewport();
+  expect(await page.evaluate(()=>document.documentElement.scrollHeight)).toBeLessThan(1100);
+});
+test('short file lists do not add an unnecessary tab stop',async({page})=>{
+  await start(page);
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await page.locator('summary',{hasText:'Additions (1)'}).focus();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Tab');
+  await expect(page.locator('summary',{hasText:'Removals (1)'})).toBeFocused();
+  await expect(page.getByRole('region',{name:'Additions file list',exact:true})).not.toBeFocused();
+});
+for(const status of ['complete','retained','pending'])test(`successful install reports ${status} cleanup without revoking readiness`,async({page})=>{
+  await start(page);
+  await page.evaluate(status=>{window.preview={...window.preview,conflicts:[]};window.installCleanup={status,completed:[],retained:status==='retained'?['private-cleanup-id']:[],pending:status==='pending'?['private-pending-id']:[],forgetPending:[]};},status);
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await page.getByRole('button',{name:'Install reviewed pack'}).click();
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+  const notice=page.getByRole('status',{name:'Installation cleanup'});
+  if(status==='complete'){await expect(notice).toHaveCount(0);return;}
+  await expect(notice).toContainText(status);
+  await expect(notice).toContainText(/ready.*launch/i);
+  await expect(notice).not.toContainText(/private-|seven|7.day/i);
+  await expect(notice.getByRole('button')).toHaveCount(0);
+  await page.getByRole('button',{name:'Refresh requirement'}).click();
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+  await expect(notice).toBeVisible();
+  expect(await page.evaluate(()=>window.classified.verified)).toBe(true);
+  await page.evaluate(()=>window.show('client','b'));
+  await expect(notice).toHaveCount(0);
+});
+test('pending ownership-forget cleanup is visible without exposing operation identifiers',async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.preview={...window.preview,conflicts:[]};window.installCleanup={status:'retained',completed:['private-completed-id'],retained:[],pending:[],forgetPending:['private-forget-id']};});
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await page.getByRole('button',{name:'Install reviewed pack'}).click();
+  await expect(page.getByRole('status',{name:'Installation cleanup'})).toContainText(/cleanup.*retained/i);
+  await expect(page.getByRole('status',{name:'Installation cleanup'})).not.toContainText('private-forget-id');
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+});
+test('measured progress is honest and rejects other request or instance events', async ({page}) => {
+  await start(page);
+  await page.evaluate(() => window.pending['client-packs:preview']=[]);
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await page.evaluate(() => {
+    const input=window.pending['client-packs:preview'][0].input;
+    for (const fn of window.listeners) {fn({...input,clientId:'b',phase:'wrong-instance'});fn({...input,requestId:'other',phase:'wrong-request'});fn({...input,phase:'downloading',completedBytes:'1024',totalBytes:'2048',completedItems:'1',totalItems:'2'});}
+  });
+  await expect(page.getByText('1,024 / 2,048 bytes')).toBeVisible();
+  await expect(page.getByText('1 / 2 files')).toBeVisible();
+  await expect(page.getByText('wrong-instance')).toHaveCount(0);
+  await page.getByRole('button',{name:'Cancel request'}).click();
+  await expect.poll(() => page.evaluate(() => window.calls.some(x=>x.channel==='client-packs:cancel'))).toBe(true);
+});
+test('stale requirements discard the reviewed plan and demand a new review', async ({page}) => {
+  await start(page);
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await page.getByLabel('Preserve config/user.toml').check();
+  await page.getByLabel('Preserve mods/personal.jar').check();
+  await page.evaluate(() => {window.descriptor={...window.descriptor,serverVersion:'0.13.5'};window.currentStatus='update-required';window.fail={'client-packs:install':{code:'PLAN_STALE',message:'Requirement changed'}};});
+  await page.getByRole('button',{name:'Install reviewed pack'}).click();
+  await expect(page.getByRole('alert')).toContainText('Review a fresh plan');
+  await expect(page.getByRole('button',{name:'Install reviewed pack'})).toHaveCount(0);
+  await expect(page.getByText('Matching pack ready')).toHaveCount(0);
+  await expect(page.getByText('Server release 0.13.5',{exact:true})).toBeVisible();
+});
+test('recovery remains explicit and never reports ready after recovery failure', async ({page}) => {
+  await start(page,'recovery-required');
+  await page.evaluate(() => window.fail={'client-packs:recover':{code:'RECOVERY_REQUIRED',message:'Writer still active'}});
+  await page.getByRole('button',{name:'Retry recovery'}).click();
+  await expect(page.getByRole('alert')).toContainText('Writer still active');
+  await expect(page.getByText('Matching pack ready')).toHaveCount(0);
+});
+test('instance switch ignores delayed classification from the previous instance', async ({page}) => {
+  await start(page);
+  await page.evaluate(() => window.pending['client-packs:get-state']=[]);
+  await page.evaluate(() => window.show('client','b'));
+  await page.evaluate(() => window.show('client','c'));
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:get-state'].length)).toBe(2);
+  await page.evaluate(() => {
+    const jobs=window.pending['client-packs:get-state'];
+    jobs[1].resolve({ok:true,value:{clientId:'c',status:'unpaired',descriptor:null}});
+    jobs[0].resolve({ok:true,value:{clientId:'b',status:'ready',verified:true,descriptor:window.descriptor}});
+  });
+  await expect(page.getByText('No matching client pack paired')).toBeVisible();
+  await expect(page.getByText('Matching pack ready')).toHaveCount(0);
+});
+test('unknown classification fails closed while unmanaged classification is explicit', async ({page}) => {
+  await start(page,'future-state');
+  await expect(page.getByText('Matching pack unavailable')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Review matching pack'})).toHaveCount(0);
+  await page.evaluate(() => {window.currentStatus='unmanaged';window.show('client','b');});
+  await expect.poll(() => page.evaluate(() => window.classified?.status)).toBe('unmanaged');
+});
+test('unpaired does not advertise installation or launch', async ({page}) => {
+  await start(page,'unpaired');
+  await expect(page.getByText('No matching client pack paired')).toBeVisible();
+  await expect(page.getByText(/Ask the server owner/)).toBeVisible();
+  await expect(page.getByRole('button',{name:/Install|Review matching pack|Launch/})).toHaveCount(0);
+});
+test('old instance progress and completion cannot paint the next instance', async ({page}) => {
+  await start(page);
+  await page.evaluate(() => window.pending['client-packs:preview']=[]);
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await page.evaluate(() => {window.currentStatus='unpaired';window.show('client','b');});
+  await expect(page.getByText('No matching client pack paired')).toBeVisible();
+  await page.evaluate(() => {
+    const old=window.pending['client-packs:preview'][0];
+    for(const fn of window.listeners)fn({...old.input,phase:'obsolete-download',completedBytes:'999'});
+    old.resolve({ok:true,value:window.preview});
+  });
+  await expect(page.getByText('obsolete-download')).toHaveCount(0);
+  await expect(page.getByText('Review installation')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.listeners.size)).toBe(0);
+  const cancellation=await page.evaluate(()=>window.calls.find(x=>x.channel==='client-packs:cancel'));
+  expect(Object.keys(cancellation.input)).toEqual(['requestId']);
+});
+test('partial counts keep unknown totals indeterminate', async ({page}) => {
+  await start(page);
+  await page.evaluate(() => window.pending['client-packs:preview']=[]);
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await page.evaluate(() => {const input=window.pending['client-packs:preview'][0].input;for(const fn of window.listeners)fn({...input,phase:'downloading',completedBytes:'128',totalBytes:'NaN',completedItems:'2'});});
+  await expect(page.getByText('128 bytes')).toBeVisible();
+  await expect(page.getByText('2 files')).toBeVisible();
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByText(/NaN|%|ETA/)).toHaveCount(0);
+});
+test('pairing acceptance explains stopped-server requirement without false success', async ({page}) => {
+  await start(page,'install-required','companion');
+  await page.getByLabel('pack-0.13.4.mrpack').check();
+  await page.getByRole('button',{name:'Inspect selected pack'}).click();
+  await page.evaluate(()=>window.fail={'client-packs:accept-companion':{code:'SERVER_RUNNING',message:'Running'}});
+  await page.getByRole('button',{name:'Accept matching client pack'}).click();
+  await expect(page.getByRole('alert')).toContainText('Stop the server');
+  await expect(page.getByText('Paired for this server release')).toHaveCount(0);
+});
+test('failed classification advertises unavailable not a perpetual loading state',async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.fail={'client-packs:get-state':{code:'CLIENT_PACK_UNAVAILABLE',message:'Management unavailable'}};window.show('client','b');});
+  await expect(page.getByText('Matching pack unavailable')).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Management unavailable');
+  await expect.poll(()=>page.evaluate(()=>window.classified?.status)).toBe('unavailable');
+});
+test('local imports explain companion limitation without invalidating server install',async({page})=>{
+  await start(page);
+  await page.evaluate(()=>window.show('companion','a',{local:true}));
+  await expect(page.getByText(/Local server archives remain supported/)).toBeVisible();
+  await expect(page.getByRole('button',{name:'Inspect selected pack'})).toHaveCount(0);
+});
+test('same server becomes managed after metadata arrives and loads pairing assets',async({page})=>{
+  await start(page);
+  await page.evaluate(()=>window.show('companion','a',{managed:false}));
+  await page.evaluate(()=>window.show('companion','a',{managed:true}));
+  await expect(page.getByLabel('pack-0.13.4.mrpack')).toBeVisible();
+});
+test('same instance refreshes block legacy immediately and reject older operation results',async({page})=>{
+  await start(page,'unmanaged');
+  await expect.poll(()=>page.evaluate(()=>window.classified?.status)).toBe('unmanaged');
+  await page.evaluate(()=>{window.pending['client-packs:get-state']=[];void window.refreshClient();void window.refreshClient();});
+  await expect.poll(()=>page.evaluate(()=>window.classified?.status)).toBe('loading');
+  await page.evaluate(()=>{const jobs=window.pending['client-packs:get-state'];jobs[1].resolve({ok:true,value:{clientId:'a',status:'unpaired',descriptor:null}});jobs[0].resolve({ok:true,value:{clientId:'a',status:'unmanaged',descriptor:null}});});
+  await expect(page.getByText('No matching client pack paired')).toBeVisible();
+  await expect.poll(()=>page.evaluate(()=>window.classified?.status)).toBe('unpaired');
+});
+test('recovery failure refreshes authoritative restart guidance without restarting Windows',async({page})=>{
+  await start(page,'recovery-required');
+  await page.evaluate(()=>{window.recoveryReason='restart-required';window.fail={'client-packs:recover':{code:'RECOVERY_REQUIRED',message:'Recovery blocked'}};});
+  await page.getByRole('button',{name:'Retry recovery'}).click();
+  await expect(page.getByText(/Save your work.*restart Windows.*reopen.*retry/i)).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Recovery blocked');
+  expect(await page.evaluate(()=>window.calls.some(x=>/restart|reboot|shutdown/.test(x.channel)))).toBe(false);
+});
+test('a preparation recovery error refreshes state and shows exact restart guidance',async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.currentStatus='recovery-required';window.recoveryReason='restart-required';window.fail={'client-packs:preview':{code:'RECOVERY_REQUIRED',message:'Runtime recovery required'}};});
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await expect(page.getByText('Matching pack recovery required',{exact:true})).toBeVisible();
+  await expect(page.getByText(/Save your work.*restart Windows/i)).toBeVisible();
+  await expect(page.getByRole('button',{name:'Retry recovery'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Review matching pack'})).toHaveCount(0);
+});
+test('a recovery follow-up cannot paint its old error into a newer same-client refresh',async({page})=>{
+  await start(page,'recovery-required');
+  await page.evaluate(()=>{window.pending['client-packs:get-state']=[];window.fail={'client-packs:recover':{code:'CLIENT_RUNNING',message:'Old recovery error'}};});
+  await page.getByRole('button',{name:'Retry recovery'}).click();
+  await expect.poll(()=>page.evaluate(()=>window.pending['client-packs:get-state'].length)).toBe(1);
+  await page.evaluate(()=>void window.refreshClient());
+  await expect.poll(()=>page.evaluate(()=>window.pending['client-packs:get-state'].length)).toBe(2);
+  await page.evaluate(()=>{const jobs=window.pending['client-packs:get-state'];jobs[1].resolve({ok:true,value:{clientId:'a',status:'unpaired',descriptor:null}});jobs[0].resolve({ok:true,value:{clientId:'a',status:'recovery-required',descriptor:null}});});
+  await expect(page.getByText('No matching client pack paired',{exact:true})).toBeVisible();
+  await expect(page.getByText('Old recovery error',{exact:true})).toHaveCount(0);
+});

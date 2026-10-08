@@ -6,6 +6,8 @@ const { normalizeTrackingRecord } = require('./release-tracking-store.cjs');
 const INTENT_SCHEMA_VERSION = 1;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const TRACKING_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
+const DECIMAL_ID = /^[1-9][0-9]*$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 
 function invalid(cause) {
   if (cause instanceof ModpackError && cause.code === 'INVALID_REQUEST') return cause;
@@ -52,8 +54,60 @@ function trackingIdFor(serverIdValue) {
   return `tracking-${digest.slice(0, 48)}`;
 }
 
+function githubReleaseMetadata(source, clock) {
+  const supplied = [source.channel, source.prerelease, source.publishedAt].filter(item => item !== undefined).length;
+  if (supplied === 0) return { prerelease: false, publishedAt: nowIso(clock) };
+  if (supplied !== 3 || !['release', 'prerelease'].includes(source.channel) || typeof source.prerelease !== 'boolean' ||
+      source.channel !== (source.prerelease ? 'prerelease' : 'release') || typeof source.publishedAt !== 'string') throw invalid();
+  let publishedAt;
+  try { publishedAt = new Date(source.publishedAt).toISOString(); } catch (error) { throw invalid(error); }
+  if (publishedAt !== source.publishedAt) throw invalid();
+  return { prerelease: source.prerelease, publishedAt };
+}
+
+function modrinthReleaseMetadata(source, clock) {
+  const supplied = [source.channel, source.prerelease, source.publishedAt].filter(item => item !== undefined).length;
+  if (supplied === 0) return { prerelease: false, publishedAt: nowIso(clock), orderingKnown: false };
+  if (supplied !== 3 || !['release', 'beta', 'alpha'].includes(source.channel) ||
+      typeof source.prerelease !== 'boolean' || source.prerelease !== (source.channel !== 'release') ||
+      typeof source.publishedAt !== 'string') throw invalid();
+  let publishedAt;
+  try { publishedAt = new Date(source.publishedAt).toISOString(); } catch (error) { throw invalid(error); }
+  if (publishedAt !== source.publishedAt) throw invalid();
+  return { prerelease: source.prerelease, publishedAt, orderingKnown: true };
+}
+
 function createTrackingRecord({ serverId, source, clock }) {
   const trackingId = trackingIdFor(serverId);
+  const modrinthMetadata = source.provider === 'modrinth' ? modrinthReleaseMetadata(source, clock) : null;
+  const modrinthBaseline = source.provider === 'modrinth' && typeof source.versionId === 'string' && ID.test(source.versionId) &&
+    typeof source.version === 'string' && source.version.length > 0 && source.version.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(source.version)
+    ? {
+        releaseId: source.versionId,
+        version: source.version,
+        prerelease: modrinthMetadata.prerelease,
+        publishedAt: modrinthMetadata.publishedAt,
+        assetFingerprint: null,
+        installable: true,
+        ...(modrinthMetadata.orderingKnown ? { orderingKnown: true } : {})
+      }
+    : null;
+  const githubMetadata = source.provider === 'github' ? githubReleaseMetadata(source, clock) : null;
+  const githubBaseline = source.provider === 'github' && typeof source.releaseId === 'string' && DECIMAL_ID.test(source.releaseId) &&
+    typeof source.version === 'string' && source.version.length > 0 && source.version.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(source.version)
+    ? {
+        releaseId: source.releaseId,
+        version: source.version,
+        prerelease: githubMetadata.prerelease,
+        publishedAt: githubMetadata.publishedAt,
+        assetFingerprint: typeof source.artifactSetDigest === 'string' && SHA256.test(source.artifactSetDigest)
+          ? source.artifactSetDigest
+          : null,
+        installable: true
+      }
+    : null;
   return normalizeTrackingRecord({
     trackingId,
     serverId,
@@ -62,14 +116,14 @@ function createTrackingRecord({ serverId, source, clock }) {
     repositoryId: source.provider === 'github' ? source.repositoryId : null,
     githubOwner: source.provider === 'github' ? source.githubOwner : null,
     githubRepo: source.provider === 'github' ? source.githubRepo : null,
-    includePrereleases: false,
+    includePrereleases: (modrinthBaseline || githubBaseline)?.prerelease === true,
     acceptedMapping: source.acceptedMapping || null,
     assetPattern: source.provider === 'github' ? source.assetPattern || null : null,
     etag: null,
     lastSuccessfulCheck: null,
     lastFailure: null,
     nextDueAt: nowIso(clock),
-    lastSnapshot: null
+    lastSnapshot: modrinthBaseline || githubBaseline
   });
 }
 

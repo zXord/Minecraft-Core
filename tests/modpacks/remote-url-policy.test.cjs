@@ -78,7 +78,7 @@ test('provider URL policy rejects IPv4, IPv6, bracketed, and scoped literal host
 test('resolution rejects all IPv4 non-public, reserved, documentation, and CGNAT ranges', async () => {
   const rejected = [
     '0.0.0.0', '10.1.2.3', '100.64.0.1', '127.0.0.1', '169.254.1.1',
-    '172.16.0.1', '192.0.0.1', '192.0.2.1', '192.168.1.1', '198.18.0.1',
+    '172.16.0.1', '192.0.0.1', '192.0.2.1', '192.168.1.1', '198.18.0.1', '198.19.255.255',
     '198.51.100.1', '203.0.113.1', '224.0.0.1', '240.0.0.1', '255.255.255.255'
   ];
   for (const address of rejected) {
@@ -93,8 +93,10 @@ test('resolution rejects all IPv4 non-public, reserved, documentation, and CGNAT
 test('resolution rejects all IPv6 non-public, reserved, documentation, and private mapped forms', async () => {
   const rejected = [
     '::', '::1', 'fe80::1', 'fc00::1', 'fd12::1', 'ff02::1', '2001:db8::1',
-    '100::1', '2001:2::1', '2001:10::1', '::ffff:127.0.0.1', '::ffff:192.168.1.1',
-    '::ffff:100.64.0.1', '::ffff:192.0.2.1'
+    '64:ff9b:1::1', '100::1', '100::ffff:ffff:ffff:ffff', '100:0:0:1::1',
+    '2001:2::1', '2001:5::1', '2001:10::1', '3fff::1', '5f00::1', '4000::1',
+    '::ffff:127.0.0.1', '::ffff:192.168.1.1', '::ffff:100.64.0.1',
+    '::ffff:192.0.2.1', '::ffff:198.18.0.1'
   ];
   for (const address of rejected) {
     await assert.rejects(

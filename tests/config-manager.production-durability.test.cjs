@@ -6,6 +6,7 @@ const test = require('node:test');
 
 const {
   ensureConfigFile,
+  ensureConfigFileStrict,
   updateServerConfig,
   writeServerConfig
 } = require('../electron/utils/config-manager.cjs');
@@ -87,6 +88,10 @@ test('direct config writes fail closed before production durability is configure
   );
   assert.throws(
     () => updateServerConfig(serverPath, current => ({ ...current, maxRam: 8 })),
+    error => error?.code === 'COMMIT_FAILED'
+  );
+  assert.throws(
+    () => ensureConfigFileStrict(serverPath, { maxRam: 8 }),
     error => error?.code === 'COMMIT_FAILED'
   );
   assert.equal(ensureConfigFile(serverPath, { maxRam: 8 }), null);

@@ -9,14 +9,17 @@ const {
 function fixture() {
   const tracking = {
     trackingId: 'tracking-one', serverId: 'server-one', provider: 'github',
+    projectId: null, repositoryId: '1001',
     lastSnapshot: { releaseId: 'release-200', version: 'v2', prerelease: false }
   };
   const notifications = [{
     notificationId: 'notification-one', serverId: 'server-one',
+    source: { provider: 'github', sourceId: '1001' },
     release: { releaseId: 'release-200', version: 'v2', prerelease: false },
     action: { actionId: 'open-details', opaqueRef: 'release-review:tracking-one:release-200' }
   }, {
-    notificationId: 'notification-two', serverId: 'server-one', release: null,
+    notificationId: 'notification-two', serverId: 'server-one',
+    source: { provider: 'github', sourceId: '1001' }, release: null,
     action: { actionId: 'retry', opaqueRef: 'release-check:tracking-one' }
   }];
   const trackingStore = {
@@ -45,7 +48,11 @@ test('claims only exact durable release notifications and returns closed authori
   assert.deepEqual(review.reference, {
     actionId: 'open-details',
     targetKind: 'details',
-    targetId: 'release:tracking-one:release-200'
+    targetId: 'release:tracking-one:release-200',
+    releaseTarget: {
+      serverId: 'server-one', provider: 'github', sourceId: '1001',
+      releaseId: 'release-200', prerelease: false
+    }
   });
   assert.doesNotMatch(JSON.stringify(review), /(?:path|url|directory|token|secret)/i);
   assert.equal(await context.authority.complete(review.claimId), true);
@@ -57,6 +64,62 @@ test('claims only exact durable release notifications and returns closed authori
   const retry = await context.authority.claim({ actionId: 'retry', opaqueRef: 'release-check:tracking-one' });
   assert.deepEqual(retry.reference, { actionId: 'retry', targetKind: 'retry', targetId: 'tracking-one' });
   assert.equal(await context.authority.release(retry.claimId), true);
+});
+
+test('returns the exact Modrinth version target without exposing provider authority', async () => {
+  const context = fixture();
+  context.tracking.provider = 'modrinth';
+  context.tracking.projectId = 'project-one';
+  context.tracking.repositoryId = null;
+  context.notifications[0].source = { provider: 'modrinth', sourceId: 'project-one' };
+
+  const review = await context.authority.claim({
+    actionId: 'open-details', opaqueRef: 'release-review:tracking-one:release-200'
+  });
+  assert.deepEqual(review.reference.releaseTarget, {
+    serverId: 'server-one', provider: 'modrinth', sourceId: 'project-one',
+    releaseId: 'release-200', prerelease: false
+  });
+  assert.doesNotMatch(JSON.stringify(review), /(?:path|url|directory|token|secret)/iu);
+});
+
+test('asset review carries the exact release target while a newer snapshot does not retarget an older notification', async () => {
+  const context = fixture();
+  context.notifications[0].action = {
+    actionId: 'choose-another-asset', opaqueRef: 'release-review:tracking-one:release-200'
+  };
+  context.tracking.lastSnapshot = { releaseId: 'release-300', version: 'v3', prerelease: false };
+
+  const review = await context.authority.claim({
+    actionId: 'choose-another-asset', opaqueRef: 'release-review:tracking-one:release-200'
+  });
+  assert.deepEqual(review.reference, {
+    actionId: 'choose-another-asset',
+    targetKind: 'asset-selection',
+    targetId: 'release:tracking-one:release-200',
+    releaseTarget: {
+      serverId: 'server-one', provider: 'github', sourceId: '1001',
+      releaseId: 'release-200', prerelease: false
+    }
+  });
+});
+
+test('rejects stale review and retry notifications after the server tracking source changes', async () => {
+  const context = fixture();
+  context.tracking.provider = 'modrinth';
+  context.tracking.projectId = 'replacement-project';
+  context.tracking.repositoryId = null;
+
+  await assert.rejects(
+    context.authority.claim({
+      actionId: 'open-details', opaqueRef: 'release-review:tracking-one:release-200'
+    }),
+    error => error.code === 'INVALID_REQUEST'
+  );
+  await assert.rejects(
+    context.authority.claim({ actionId: 'retry', opaqueRef: 'release-check:tracking-one' }),
+    error => error.code === 'INVALID_REQUEST'
+  );
 });
 
 test('rejects forged mismatched stale and concurrent references before any action can run', async () => {

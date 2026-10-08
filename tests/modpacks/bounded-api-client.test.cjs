@@ -4,6 +4,12 @@ const test = require('node:test');
 
 const { BoundedApiClient } = require('../../electron/services/modpacks/network/bounded-api-client.cjs');
 
+function timedOut(error) {
+  return error?.code === 'INVALID_RELEASE_URL' && error.retryable === true &&
+    error.safeMessage === 'Provider request timed out' &&
+    JSON.stringify(error.toPublicResult().error.details) === '{}';
+}
+
 function response(bytes, statusCode = 200, headers = {}) {
   const stream = Readable.from([bytes]);
   stream.statusCode = statusCode;
@@ -31,11 +37,87 @@ test('bounded provider client scopes relative paths, encodes sorted query values
   assert.equal(result.body.toString('utf8'), '{"ok":true}');
 });
 
+test('bounded provider client forwards one explicitly configured redirect while preserving its exact origin policy', async () => {
+  const calls = [];
+  const client = new BoundedApiClient({
+    client: {
+      async request(url, options) {
+        calls.push({ url, options });
+        return response(Buffer.from('ok'));
+      }
+    },
+    baseUrl: 'https://api.github.com/',
+    maxRedirects: 1
+  });
+  const result = await client.request('/repos/AllOfFabric/AOF-Normal');
+  assert.equal(result.body.toString('utf8'), 'ok');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.headers, undefined);
+  assert.equal(calls[0].options.signal.aborted, false);
+  assert.deepEqual(calls[0].options.allowedHosts, ['api.github.com']);
+  assert.deepEqual(calls[0].options.allowedOrigins, ['https://api.github.com']);
+  assert.equal(calls[0].options.allowSubdomains, false);
+  assert.equal(calls[0].options.maxRedirects, 1);
+});
+
+test('bounded provider deadline aborts a response that never finishes', { timeout: 500 }, async () => {
+  let stream;
+  let signal;
+  const client = new BoundedApiClient({
+    client: {
+      async request(_url, options) {
+        signal = options.signal;
+        stream = new Readable({ read() {} });
+        stream.statusCode = 200;
+        stream.headers = {};
+        return stream;
+      }
+    },
+    baseUrl: 'https://api.modrinth.com/v2/',
+    requestTimeoutMs: 25
+  });
+  await assert.rejects(client.request('/version/patch'), timedOut);
+  assert.equal(signal.aborted, true);
+  assert.equal(stream.destroyed, true);
+});
+
+test('bounded provider client preserves caller cancellation while aborting a pending response', async () => {
+  const controller = new AbortController();
+  let stream;
+  const client = new BoundedApiClient({
+    client: {
+      async request() {
+        stream = new Readable({ read() {} });
+        stream.statusCode = 200;
+        stream.headers = {};
+        return stream;
+      }
+    },
+    baseUrl: 'https://api.modrinth.com/v2/',
+    requestTimeoutMs: 500
+  });
+  const pending = client.request('/version/patch', { signal: controller.signal });
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort();
+  await assert.rejects(pending, error => error.code === 'CANCELLED');
+  assert.equal(stream.destroyed, true);
+});
+
+test('bounded provider client accepts only the supported redirect budget', () => {
+  const dependency = { request() {} };
+  for (const maxRedirects of [-1, 2, 1.5, '1']) {
+    assert.throws(
+      () => new BoundedApiClient({ client: dependency, baseUrl: 'https://api.github.com/', maxRedirects }),
+      /Bounded API client dependencies are invalid/
+    );
+  }
+});
+
 test('bounded provider client rejects authority changes, traversal, redirects by policy, and oversized bodies', async () => {
   const underlying = { async request() { return response(Buffer.alloc(5)); } };
   const client = new BoundedApiClient({ client: underlying, baseUrl: 'https://api.github.com/', maxResponseBytes: 4 });
   for (const candidate of ['https://evil.invalid/', '//evil.invalid/', '/../escape', '/%2e%2e/escape', '/a\\b']) {
-    await assert.rejects(client.request(candidate), error => error.code === 'INVALID_RELEASE_URL');
+    await assert.rejects(client.request(candidate), error => error.code === 'INVALID_RELEASE_URL' && error.retryable === false);
   }
   await assert.rejects(client.request('/repos'), error => error.code === 'ARCHIVE_LIMIT_EXCEEDED');
 });

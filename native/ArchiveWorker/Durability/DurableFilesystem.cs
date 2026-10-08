@@ -11,94 +11,154 @@ namespace MinecraftCore.ArchiveWorker.Durability;
 
 internal static class DurableFilesystem
 {
+    // This request also carries the allowed roots and nested object identities.
+    // 512 remains below FrameReader's strict 16,384-token limit at the maximum
+    // 16-root cardinality while retaining useful bulk-flush performance.
+    private const int MaxFlushDirectories = 512;
+
     internal static void Execute(DurableRequest request)
     {
-        using DurableRootPins roots = DurableRootPins.Open(request.AllowedRoots, request.AllowedRootIdentities);
-        switch (request.Operation)
+        using DurableRootPins roots = AtStage("root-open", () => DurableRootPins.Open(request.AllowedRoots, request.AllowedRootIdentities));
+        try
         {
-            case "move-write-through":
-                RequireShape(request, source: true, destination: true, existingDestination: false, directory: false);
-                Move(request, roots, replace: false);
-                break;
-            case "replace-file-write-through":
-                RequireShape(request, source: true, destination: true, existingDestination: true, directory: false);
-                Move(request, roots, replace: true);
-                break;
-            case "flush-directory":
-                RequireShape(request, source: false, destination: false, existingDestination: false, directory: true);
-                Flush(request, roots);
-                break;
-            default:
-                throw new InvalidDataException("Unknown durability operation");
+            switch (request.Operation)
+            {
+                case "move-write-through":
+                    RequireShape(request, source: true, destination: true, existingDestination: false, directory: false);
+                    Move(request, roots, replace: false);
+                    break;
+                case "reconcile-move-write-through":
+                    RequireReconcileMoveShape(request);
+                    ReconcileMove(request, roots);
+                    break;
+                case "replace-file-write-through":
+                    RequireShape(request, source: true, destination: true, existingDestination: true, directory: false);
+                    Move(request, roots, replace: true);
+                    break;
+                case "flush-directory":
+                    RequireShape(request, source: false, destination: false, existingDestination: false, directory: true);
+                    Flush(request, roots);
+                    break;
+                case "flush-directories":
+                    RequireFlushDirectoriesShape(request);
+                    FlushDirectories(request, roots);
+                    break;
+                default:
+                    throw new InvalidDataException("Unknown durability operation");
+            }
+        }
+        catch (DurabilityFailureException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new DurabilityFailureException("request", exception);
         }
     }
 
     private static void Move(DurableRequest request, DurableRootPins roots, bool replace)
     {
-        DurableExpectedIdentity sourceExpected = DurableExpectedIdentity.Parse(request.SourceIdentity!, requireFile: replace);
-        using DurablePinnedObject source = DurablePinnedObject.Open(request.SourcePath!, sourceExpected,
-            writeAccess: sourceExpected.FileType == "file", pinWrite: true, pinRename: true, deleteAccess: true, writeThrough: true);
-        string destination = replace ? CanonicalPaths.ExistingFile(request.DestinationPath!) : CanonicalPaths.AbsentDestination(request.DestinationPath!);
-        string destinationParentPath = CanonicalPaths.ExistingDirectory(Path.GetDirectoryName(destination) ?? throw new InvalidDataException("Destination parent missing"));
-        DurableExpectedIdentity parentExpected = DurableExpectedIdentity.Parse(request.DestinationParentIdentity!, requireDirectory: true);
-        using DurablePinnedObject destinationParent = DurablePinnedObject.Open(destinationParentPath, parentExpected,
-            writeAccess: true, pinRename: true, writeThrough: true);
+        DurableExpectedIdentity sourceExpected = AtStage("source-open", () =>
+            DurableExpectedIdentity.Parse(request.SourceIdentity!, requireFile: replace));
+        using DurablePinnedObject source = AtStage("source-open", () => DurablePinnedObject.Open(request.SourcePath!, sourceExpected,
+            writeAccess: sourceExpected.FileType == "file", pinWrite: true, pinRename: true, deleteAccess: true, writeThrough: true));
+        string destination = AtStage("destination-parent-open", () => replace
+            ? CanonicalPaths.ExistingFile(request.DestinationPath!)
+            : CanonicalPaths.AbsentDestination(request.DestinationPath!));
+        string destinationParentPath = AtStage("destination-parent-open", () => CanonicalPaths.ExistingDirectory(
+            Path.GetDirectoryName(destination) ?? throw new InvalidDataException("Destination parent missing")));
+        DurableExpectedIdentity parentExpected = AtStage("destination-parent-open", () =>
+            DurableExpectedIdentity.Parse(request.DestinationParentIdentity!, requireDirectory: true));
+        using DurablePinnedObject destinationParent = AtStage("destination-parent-open", () => DurablePinnedObject.Open(destinationParentPath, parentExpected,
+            writeAccess: true, pinRename: true, writeThrough: true));
         using DurablePinnedObject? existingDestination = replace
-            ? DurablePinnedObject.Open(destination, DurableExpectedIdentity.Parse(request.DestinationIdentity!, requireFile: true),
-                writeAccess: false, pinWrite: true, pinRename: false)
+            ? AtStage("destination-parent-open", () => DurablePinnedObject.Open(destination,
+                DurableExpectedIdentity.Parse(request.DestinationIdentity!, requireFile: true),
+                writeAccess: false, pinWrite: true, pinRename: false))
             : null;
-        string sourceParentPath = CanonicalPaths.ExistingDirectory(Path.GetDirectoryName(source.Path) ?? throw new InvalidDataException("Source parent missing"));
+        string sourceParentPath = AtStage("source-parent-open", () => CanonicalPaths.ExistingDirectory(
+            Path.GetDirectoryName(source.Path) ?? throw new InvalidDataException("Source parent missing")));
         using DurablePinnedObject? separateSourceParent = string.Equals(sourceParentPath, destinationParent.Path, StringComparison.OrdinalIgnoreCase)
             ? null
-            : DurablePinnedObject.OpenCurrent(sourceParentPath, "directory", includeHash: false,
-                writeAccess: true, pinRename: true, writeThrough: true);
+            : AtStage("source-parent-open", () => DurablePinnedObject.OpenCurrent(sourceParentPath, "directory", includeHash: false,
+                writeAccess: true, pinRename: true, writeThrough: true));
         DurablePinnedObject sourceParent = separateSourceParent ?? destinationParent;
-        using DurableAncestorPins ancestors = DurableAncestorPins.Open(roots, sourceParent.Path, destinationParent.Path);
+        using DurableAncestorPins ancestors = AtStage("ancestor-open", () =>
+            DurableAncestorPins.Open(roots, sourceParent.Path, destinationParent.Path));
 
-        if (!roots.Contains(source.Path) || !roots.Contains(destination) || string.Equals(source.Path, destination, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("Unowned path");
-        if (!string.Equals(Path.GetDirectoryName(destination), destinationParent.Path, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("Destination parent changed");
-        if (source.Identity.Device != destinationParent.Identity.Device || sourceParent.Identity.Device != destinationParent.Identity.Device ||
-            (existingDestination is not null && existingDestination.Identity.Device != destinationParent.Identity.Device))
-            throw new IOException("Cross-volume operation rejected");
-
-        roots.Revalidate();
-        ancestors.Revalidate();
-        sourceParent.Revalidate(requirePath: true);
-        destinationParent.Revalidate(requirePath: true);
-        source.Revalidate(requirePath: true);
-        existingDestination?.Revalidate(requirePath: true);
-        if (!replace && (File.Exists(destination) || Directory.Exists(destination))) throw new IOException("Destination exists");
-
-        if (source.Identity.FileType == "file")
+        AtStage("preflight-revalidation", () =>
         {
-            source.Flush();
-            source.Revalidate(requirePath: true, allowMetadataChange: true);
-        }
-        HandleBoundRename.Move(source.Handle, destinationParent.Handle, destination, replace);
-        Exception? completionFailure = null;
-        if (source.Identity.FileType == "file") TryCompletion(source.Flush, ref completionFailure);
-        if (existingDestination is not null)
+            if (!roots.Contains(source.Path) || !roots.Contains(destination) || string.Equals(source.Path, destination, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Unowned path");
+            if (!string.Equals(Path.GetDirectoryName(destination), destinationParent.Path, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Destination parent changed");
+            if (source.Identity.Device != destinationParent.Identity.Device || sourceParent.Identity.Device != destinationParent.Identity.Device ||
+                (existingDestination is not null && existingDestination.Identity.Device != destinationParent.Identity.Device))
+                throw new IOException("Cross-volume operation rejected");
+
+            roots.Revalidate();
+            ancestors.Revalidate();
+            sourceParent.Revalidate(requirePath: true);
+            destinationParent.Revalidate(requirePath: true);
+            source.Revalidate(requirePath: true);
+            existingDestination?.Revalidate(requirePath: true);
+            if (!replace && (File.Exists(destination) || Directory.Exists(destination))) throw new IOException("Destination exists");
+            if (source.Identity.FileType == "file")
+            {
+                source.Flush();
+                source.Revalidate(requirePath: true, allowMetadataChange: true);
+            }
+        });
+
+        AtStage("handle-rename", () => HandleBoundRename.Move(source.Handle, destinationParent.Handle, destination, replace));
+        AtStage("completion-flush", () =>
         {
-            TryCompletion(() => existingDestination.Revalidate(requirePath: false), ref completionFailure);
-            TryCompletion(existingDestination.Dispose, ref completionFailure);
-        }
-        TryCompletion(sourceParent.Flush, ref completionFailure);
-        if (!ReferenceEquals(sourceParent, destinationParent)) TryCompletion(destinationParent.Flush, ref completionFailure);
-        if (completionFailure is not null) throw new IOException("Durable publication completion failed", completionFailure);
+            Exception? completionFailure = null;
+            if (source.Identity.FileType == "file") TryCompletion(source.Flush, ref completionFailure);
+            if (existingDestination is not null)
+            {
+                TryCompletion(() => existingDestination.Revalidate(requirePath: false), ref completionFailure);
+                TryCompletion(existingDestination.Dispose, ref completionFailure);
+            }
+            TryCompletion(sourceParent.Flush, ref completionFailure);
+            if (!ReferenceEquals(sourceParent, destinationParent)) TryCompletion(destinationParent.Flush, ref completionFailure);
+            if (completionFailure is not null) throw new IOException("Durable publication completion failed", completionFailure);
+        });
 
         // NTFS name tunneling can apply the replaced name's cached creation time to the source object.
         // Compare the published name with the same still-open source handle after the rename, preserving
         // every identity field without treating this documented metadata change as substitution.
-        DurableObjectSnapshot committedSource = source.CaptureCurrent();
-        using DurablePinnedObject published = DurablePinnedObject.OpenCurrent(destination, source.Identity.FileType,
-            includeHash: source.Identity.FileType == "file", writeAccess: false, pinRename: false);
-        if (!DurableObjectSnapshot.SamePublishedObject(committedSource, published.Identity)) throw new IOException("Published object identity mismatch");
-        destinationParent.Revalidate(requirePath: true, allowMetadataChange: true);
-        sourceParent.Revalidate(requirePath: true, allowMetadataChange: true);
-        ancestors.Revalidate(allowMetadataChange: true);
-        roots.Revalidate(allowMetadataChange: true);
+        using DurablePinnedObject published = AtStage("published-identity", () =>
+        {
+            DurableObjectSnapshot committedSource = source.CaptureCurrent();
+            DurablePinnedObject candidate = DurablePinnedObject.OpenCurrent(destination, source.Identity.FileType,
+                includeHash: source.Identity.FileType == "file", writeAccess: false, pinRename: false);
+            if (DurableObjectSnapshot.SamePublishedObject(committedSource, candidate.Identity)) return candidate;
+            candidate.Dispose();
+            throw new IOException("Published object identity mismatch");
+        });
+        AtStage("final-revalidation", () =>
+        {
+            destinationParent.Revalidate(requirePath: true, allowMetadataChange: true);
+            sourceParent.Revalidate(requirePath: true, allowMetadataChange: true);
+            ancestors.Revalidate(allowMetadataChange: true);
+            roots.Revalidate(allowMetadataChange: true);
+        });
+    }
+
+    private static T AtStage<T>(string failureStage, Func<T> action)
+    {
+        try { return action(); }
+        catch (DurabilityFailureException) { throw; }
+        catch (Exception exception) { throw new DurabilityFailureException(failureStage, exception); }
+    }
+
+    private static void AtStage(string failureStage, Action action)
+    {
+        try { action(); }
+        catch (DurabilityFailureException) { throw; }
+        catch (Exception exception) { throw new DurabilityFailureException(failureStage, exception); }
     }
 
     private static void TryCompletion(Action action, ref Exception? failure)
@@ -121,13 +181,132 @@ internal static class DurableFilesystem
         directory.Revalidate(requirePath: true, allowMetadataChange: true);
     }
 
+    private static void ReconcileMove(DurableRequest request, DurableRootPins roots)
+    {
+        DurableExpectedIdentity publishedExpected = DurableExpectedIdentity.Parse(request.SourceIdentity!);
+        string source = CanonicalPaths.AbsentDestination(request.SourcePath!);
+        string destination = publishedExpected.FileType == "file"
+            ? CanonicalPaths.ExistingFile(request.DestinationPath!)
+            : CanonicalPaths.ExistingDirectory(request.DestinationPath!);
+        string sourceParentPath = CanonicalPaths.ExistingDirectory(Path.GetDirectoryName(source) ?? throw new InvalidDataException("Source parent missing"));
+        string destinationParentPath = CanonicalPaths.ExistingDirectory(Path.GetDirectoryName(destination) ?? throw new InvalidDataException("Destination parent missing"));
+        DurableExpectedIdentity sourceParentExpected = DurableExpectedIdentity.Parse(request.SourceParentIdentity!, requireDirectory: true);
+        DurableExpectedIdentity destinationParentExpected = DurableExpectedIdentity.Parse(request.DestinationParentIdentity!, requireDirectory: true);
+        using DurablePinnedObject sourceParent = DurablePinnedObject.Open(sourceParentPath, sourceParentExpected,
+            writeAccess: true, pinRename: true, writeThrough: true);
+        using DurablePinnedObject? separateDestinationParent = string.Equals(sourceParent.Path, destinationParentPath, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : DurablePinnedObject.Open(destinationParentPath, destinationParentExpected,
+                writeAccess: true, pinRename: true, writeThrough: true);
+        DurablePinnedObject destinationParent = separateDestinationParent ?? sourceParent;
+        if (separateDestinationParent is null && !sourceParent.Identity.Matches(destinationParentExpected))
+            throw new InvalidDataException("Reconciled parent identity changed");
+        using DurablePinnedObject published = DurablePinnedObject.OpenCurrent(destination, publishedExpected.FileType,
+            includeHash: publishedExpected.FileType == "file", writeAccess: false, pinWrite: true, pinRename: true);
+        using DurableAncestorPins ancestors = DurableAncestorPins.Open(roots, sourceParent.Path, destinationParent.Path);
+
+        if (!roots.Contains(source) || !roots.Contains(destination) || string.Equals(source, destination, StringComparison.OrdinalIgnoreCase) ||
+            published.Identity.Device != sourceParent.Identity.Device || sourceParent.Identity.Device != destinationParent.Identity.Device)
+            throw new InvalidDataException("Unowned reconciliation path");
+        if (!published.Identity.MatchesReconciledMove(publishedExpected)) throw new InvalidDataException("Published move identity changed");
+
+        roots.Revalidate();
+        ancestors.Revalidate();
+        sourceParent.Revalidate(requirePath: true);
+        destinationParent.Revalidate(requirePath: true);
+        published.Revalidate(requirePath: true);
+        _ = CanonicalPaths.AbsentDestination(source);
+
+        sourceParent.Flush();
+        if (!ReferenceEquals(sourceParent, destinationParent)) destinationParent.Flush();
+
+        sourceParent.Revalidate(requirePath: true, allowMetadataChange: true);
+        destinationParent.Revalidate(requirePath: true, allowMetadataChange: true);
+        published.Revalidate(requirePath: true);
+        if (!published.CaptureCurrent().MatchesReconciledMove(publishedExpected))
+            throw new InvalidDataException("Reconciled move changed during flush");
+        _ = CanonicalPaths.AbsentDestination(source);
+        ancestors.Revalidate(allowMetadataChange: true);
+        roots.Revalidate(allowMetadataChange: true);
+    }
+
+    private static void FlushDirectories(DurableRequest request, DurableRootPins roots)
+    {
+        var directories = new List<DurablePinnedObject>(request.Directories!.Length);
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        DurableAncestorPins? ancestors = null;
+        try
+        {
+            foreach (DurableDirectoryRequest entry in request.Directories)
+            {
+                if (entry is null || entry.DirectoryPath is null || entry.DirectoryIdentity is null)
+                    throw new InvalidDataException("Durable directory request invalid");
+                string directoryPath = CanonicalPaths.ExistingDirectory(entry.DirectoryPath);
+                if (!paths.Add(directoryPath)) throw new InvalidDataException("Duplicate durable directory");
+                DurableExpectedIdentity expected = DurableExpectedIdentity.Parse(entry.DirectoryIdentity, requireDirectory: true);
+                DurablePinnedObject directory = DurablePinnedObject.Open(directoryPath, expected,
+                    writeAccess: true, pinRename: true);
+                if (!roots.Contains(directory.Path))
+                {
+                    directory.Dispose();
+                    throw new InvalidDataException("Unowned directory");
+                }
+                directories.Add(directory);
+            }
+
+            ancestors = DurableAncestorPins.Open(roots, directories.Select(directory => directory.Path).ToArray());
+            roots.Revalidate();
+            ancestors.Revalidate();
+            foreach (DurablePinnedObject directory in directories) directory.Revalidate(requirePath: true);
+            foreach (DurablePinnedObject directory in directories) directory.Flush();
+            foreach (DurablePinnedObject directory in directories) directory.Revalidate(requirePath: true, allowMetadataChange: true);
+            ancestors.Revalidate(allowMetadataChange: true);
+            roots.Revalidate(allowMetadataChange: true);
+        }
+        finally
+        {
+            ancestors?.Dispose();
+            for (int index = directories.Count - 1; index >= 0; index--) directories[index].Dispose();
+        }
+    }
+
     private static void RequireShape(DurableRequest request, bool source, bool destination, bool existingDestination, bool directory)
     {
         if ((source != (request.SourcePath is not null && request.SourceIdentity is not null)) ||
             (destination != (request.DestinationPath is not null && request.DestinationParentIdentity is not null)) ||
             (existingDestination != (request.DestinationIdentity is not null)) ||
-            (directory != (request.DirectoryPath is not null && request.DirectoryIdentity is not null)))
+            (directory != (request.DirectoryPath is not null && request.DirectoryIdentity is not null)) || request.SourceParentIdentity is not null ||
+            request.Directories is not null)
             throw new InvalidDataException("Durability request shape invalid");
+    }
+
+    private static void RequireReconcileMoveShape(DurableRequest request)
+    {
+        if (request.SourcePath is null || request.SourceIdentity is null || request.SourceParentIdentity is null ||
+            request.DestinationPath is null || request.DestinationParentIdentity is null || request.DestinationIdentity is not null ||
+            request.DirectoryPath is not null || request.DirectoryIdentity is not null || request.Directories is not null)
+            throw new InvalidDataException("Durability request shape invalid");
+    }
+
+    private static void RequireFlushDirectoriesShape(DurableRequest request)
+    {
+        if (request.SourcePath is not null || request.SourceIdentity is not null ||
+            request.SourceParentIdentity is not null ||
+            request.DestinationPath is not null || request.DestinationParentIdentity is not null ||
+            request.DestinationIdentity is not null || request.DirectoryPath is not null || request.DirectoryIdentity is not null ||
+            request.Directories is not { Length: > 0 and <= MaxFlushDirectories })
+            throw new InvalidDataException("Durability request shape invalid");
+    }
+}
+
+internal sealed class DurabilityFailureException : Exception
+{
+    internal string FailureStage { get; }
+
+    internal DurabilityFailureException(string failureStage, Exception innerException)
+        : base("Durable filesystem operation failed", innerException)
+    {
+        FailureStage = failureStage;
     }
 }
 
@@ -143,7 +322,7 @@ internal static class HandleBoundRename
             !CanonicalPaths.IsSafeWindowsComponent(destinationName) ||
             !string.Equals(Path.GetDirectoryName(destinationPath), CanonicalPaths.ExistingDirectory(Path.GetDirectoryName(destinationPath)!), StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Durable rename target invalid");
-        byte[] name = Encoding.Unicode.GetBytes(destinationPath);
+        byte[] name = Encoding.Unicode.GetBytes(NativeFilePath.ForApi(destinationPath));
         int size = checked(MinimumRenameBufferBytes + name.Length);
         nint buffer = Marshal.AllocHGlobal(size);
         try
@@ -152,8 +331,8 @@ internal static class HandleBoundRename
             uint flags = replace ? NativeMethods.FileRenameReplaceIfExists | NativeMethods.FileRenamePosixSemantics : 0u;
             Marshal.WriteInt32(buffer, 0, unchecked((int)flags));
             // SetFileInformationByHandle returns ERROR_INVALID_PARAMETER for a non-null RootDirectory on the
-            // supported Windows host. The source remains handle-bound; the canonical absolute target cannot
-            // redirect because its destination parent and complete reparse-free ancestor chain stay pinned.
+            // supported Windows host. The source remains handle-bound; the canonical extended-length target
+            // cannot redirect because its destination parent and complete reparse-free ancestor chain stay pinned.
             Marshal.WriteIntPtr(buffer, 8, nint.Zero);
             Marshal.WriteInt32(buffer, 16, name.Length);
             Marshal.Copy(name, 0, nint.Add(buffer, FileNameOffset), name.Length);
@@ -304,13 +483,19 @@ internal sealed record DurableObjectSnapshot(string FileType, ulong Device, ulon
     uint ReparseTag, string? Sha256)
 {
     internal bool Matches(DurableExpectedIdentity expected, bool allowMetadataChange = false) => FileType == expected.FileType && Device == expected.Device &&
-        FileIndex == expected.FileIndex && Birthtime == expected.Birthtime &&
-        (FileType == "directory" || (Size == expected.Size && (allowMetadataChange || (Mtime == expected.Mtime && Ctime == expected.Ctime)) &&
-            Sha256 == expected.Sha256));
+        FileIndex == expected.FileIndex && (FileType == "directory"
+            ? Birthtime == expected.Birthtime
+            : Size == expected.Size && (allowMetadataChange || (Birthtime == expected.Birthtime && Mtime == expected.Mtime)) &&
+                Sha256 == expected.Sha256);
 
     internal static bool SamePublishedObject(DurableObjectSnapshot source, DurableObjectSnapshot published) => source.FileType == published.FileType &&
         source.Device == published.Device && source.FileIndex == published.FileIndex && source.Size == published.Size && source.Birthtime == published.Birthtime &&
         source.ReparseTag == published.ReparseTag && (source.FileType != "file" || (source.Mtime == published.Mtime && source.Sha256 == published.Sha256));
+
+    internal bool MatchesReconciledMove(DurableExpectedIdentity expected) => FileType == expected.FileType && Device == expected.Device &&
+        FileIndex == expected.FileIndex && (FileType == "directory"
+            ? Birthtime == expected.Birthtime
+            : Size == expected.Size && Mtime == expected.Mtime && Sha256 == expected.Sha256);
 }
 
 internal sealed class DurablePinnedObject : IDisposable

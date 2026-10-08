@@ -1,0 +1,45 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const Module = require('node:module');
+const { clientPackManagementFields } = require('../../electron/services/client-modpacks/client-pack-management.cjs');
+const unpaired = { schemaVersion: 1, status: 'unpaired', serverFingerprint: 'a'.repeat(64), serverVersion: '0.13.4', source: null, runtime: null, artifactSha256: null };
+test('management DTO is strict and null only for an authenticated unmanaged result', async () => {
+  assert.deepEqual(await clientPackManagementFields('server-a', async id => { assert.equal(id, 'server-a'); return unpaired; }), { clientModpack: unpaired });
+  assert.deepEqual(await clientPackManagementFields('server-a', async () => null), { clientModpack: null });
+});
+test('unavailable or malformed pairing emits a safe explicit failure while server information remains usable', async () => {
+  for (const resolver of [null, async () => { throw new Error('C:\\secret token=secret'); }, async () => ({ ...unpaired, path: '/private' })]) {
+    const value = await clientPackManagementFields('server-a', resolver);
+    assert.equal(value.clientModpack, null); assert.equal(value.clientModpackError.code, 'CLIENT_PACK_UNAVAILABLE');
+    assert.equal(JSON.stringify(value).includes('secret'), false); assert.equal(JSON.stringify(value).includes('/private'), false);
+  }
+});
+
+test('real management info route adds the strict descriptor and remains healthy on registry failure', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'client-pack-management-route-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'server.properties'), 'server-port=25575\nmotd=Disposable\n');
+  fs.writeFileSync(path.join(root, '.minecraft-core.json'), JSON.stringify({ version: '1.20.1', loader: 'vanilla' }));
+  const modulePath = require.resolve('../../electron/services/management-server.cjs'); const original = Module._load;
+  Module._load = function(request, parent, isMain) {
+    if (request === 'electron') return { app: { getVersion: () => 'test', getPath: () => root, setPath() {} }, safeStorage: { isEncryptionAvailable: () => false } };
+    if (request.includes('logger-handlers.cjs')) return { getLoggerHandlers: () => ({ debug() {}, info() {}, warn() {}, error() {} }) };
+    return original(request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try {
+    const { ManagementServer, configureClientModpackResolver } = require(modulePath);
+    const server = new ManagementServer('server-a'); server.serverPath = root;
+    server.getRequiredMods = async () => []; server.getAllClientMods = async () => []; server.checkMinecraftServerStatus = async () => false;
+    const route = server.app._router.stack.find(layer => layer.route?.path === '/api/server/info').route.stack[0].handle;
+    let value; let status = 200; const response = { status(code) { status = code; return this; }, json(body) { value = body; } };
+    configureClientModpackResolver(async id => { assert.equal(id, 'server-a'); return unpaired; });
+    await route({}, response); assert.equal(status, 200); assert.deepEqual(value.clientModpack, unpaired); assert.equal(value.minecraftPort, '25575');
+    configureClientModpackResolver(async () => { throw new Error('registry corrupted'); });
+    await route({}, response); assert.equal(status, 200); assert.equal(value.success, true);
+    assert.equal(value.clientModpackError.code, 'CLIENT_PACK_UNAVAILABLE'); assert.equal(value.minecraftVersion, '1.20.1');
+  } finally { Module._load = original; delete require.cache[modulePath]; }
+});

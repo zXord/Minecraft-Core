@@ -1,7 +1,7 @@
 const fs = require('fs');
 const {
   startMinecraftServer,
-  stopMinecraftServer,
+  shutdownMinecraftServer,
   killMinecraftServer,
   sendServerCommand,
   getServerState,
@@ -82,8 +82,15 @@ function createServerHandlers() {
     },
 
     'stop-server': async (_event, payload = {}) => {
-      const stopped = stopMinecraftServer({ instanceId: payload.instanceId || null, targetPath: payload.targetPath || null });
-      return { success: !!stopped };
+      const shutdown = await shutdownMinecraftServer(
+        { instanceId: payload.instanceId || null, targetPath: payload.targetPath || null },
+        { gracefulTimeoutMs: 60000, killTimeoutMs: 5000, forceKill: false }
+      );
+      return {
+        success: shutdown.success === true,
+        forced: shutdown.forced === true,
+        alreadyStopped: shutdown.alreadyStopped === true
+      };
     },
 
     'kill-server': async (_event, payload = {}) => {
@@ -109,6 +116,9 @@ function createServerHandlers() {
         : { instanceId: null, targetPath: null };
       const state = getServerState(selector);
       const settings = state.targetPath ? getServerDefaults(state.targetPath) : getDefaultServerConfig();
+      const reportedPort = state.isRunning
+        ? coerceNumber(state.port, coerceNumber(settings.port, 25565))
+        : coerceNumber(settings.port, 25565);
 
       return {
         instanceId: state.instanceId,
@@ -117,7 +127,7 @@ function createServerHandlers() {
         serverStartMs: state.serverStartMs || null,
         playersInfo: state.playersInfo || { count: 0, names: [] },
         serverSettings: {
-          port: coerceNumber(settings.port, 25565),
+          port: reportedPort,
           maxRam: coerceNumber(settings.maxRam, 4),
           managementPort: coerceNumber(settings.managementPort, 8080),
           autoStartMinecraft: !!settings.autoStartMinecraft,

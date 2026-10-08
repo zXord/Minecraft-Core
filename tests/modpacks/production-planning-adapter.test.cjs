@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -19,6 +20,7 @@ const {
 const SHA = 'a'.repeat(64);
 const SHA512 = 'b'.repeat(128);
 const reparseInspector = Object.freeze({ async isReparsePoint() { return false; } });
+const availablePortValidation = async () => ({ valid: true, errors: [] });
 
 function verifiedSet() {
   const plan = createArtifactSetPlan({
@@ -81,9 +83,10 @@ function adapterFor(serverPath, hooks = {}) {
     instanceResolver: {
       async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; }
     },
-    stateRepository: { read() { return null; } },
+    stateRepository: hooks.stateRepository || { read() { return null; } },
     reparseInspector,
     availableBytes: async () => '100000000000',
+    validateServerPorts: hooks.validateServerPorts || availablePortValidation,
     preparePlanInputs: async context => {
       hooks.prepared?.(context);
       return hooks.prepareResult || {
@@ -95,12 +98,465 @@ function adapterFor(serverPath, hooks = {}) {
         candidateBytes: '1', execution: { outputDirectoryId: 'output-one' }
       };
     },
+    listAvailableRestorePoints: hooks.listAvailableRestorePoints,
     snapshotServer: async ({ runtime, serverKind }) => ({
       liveSnapshot: { kind: serverKind, worldDirectories: ['world'], protectedPaths: [], entries: [] },
       pathPreconditions: [], sourceRuntime: runtime
     })
   });
 }
+
+test('rollback options are a lazy authority-free intersection supplied for the exact saved server', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-rollback-options-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'server');
+  fs.mkdirSync(serverPath);
+  const history = [{ operationId: 'operation-one', outcome: 'completed' }];
+  const requests = [];
+  const runtime = exactRuntime();
+  const adapter = adapterFor(serverPath, {
+    stateRepository: {
+      read(requestedPath) {
+        assert.equal(requestedPath, serverPath);
+        return { state: { modpackManaged: false, contentRevision: 4 }, manifest: null };
+      },
+      listHistory(requestedPath, options) {
+        assert.equal(requestedPath, serverPath);
+        assert.deepEqual(options, { cursor: null, limit: 200 });
+        return { items: history };
+      }
+    },
+    async listAvailableRestorePoints(request) {
+      requests.push(request);
+      return [{
+        restorePointId: 'restore-one',
+        operationKind: 'upgrade',
+        createdAt: '2026-08-01T01:02:03.004Z',
+        sourceRevision: 4,
+        runtime,
+        totalBytes: '1234'
+      }];
+    }
+  });
+
+  assert.deepEqual(await adapter.listRollbackOptions({ instanceId: 'server-one' }), {
+    items: [{
+      restorePointId: 'restore-one',
+      operationKind: 'upgrade',
+      createdAt: '2026-08-01T01:02:03.004Z',
+      sourceRevision: 4,
+      runtime,
+      totalBytes: '1234'
+    }]
+  });
+  assert.deepEqual(requests, [{ serverPath, history }]);
+});
+
+function exactRuntime({
+  minecraftVersion = '1.21.1',
+  loaderFamily = 'fabric',
+  loaderVersion = '0.16.10'
+} = {}) {
+  return { minecraftVersion, loaderFamily, loaderVersion, javaMajor: 21, os: 'win32', architecture: 'x64' };
+}
+
+function replacementIdentity(provider, targetRuntime, {
+  githubRepositoryId = '101',
+  githubReleaseId = '201',
+  githubOwner = 'Owner',
+  githubRepo = 'Pack'
+} = {}) {
+  const commonArtifact = {
+    kind: 'single', primaryPartId: 'runtime-part', groupingScheme: 'single',
+    providerImmutable: provider !== 'github', attestationStatus: 'verified',
+    parts: [{
+      partId: 'runtime-part', fileName: 'runtime-pack.mrpack', size: '1',
+      providerDigest: { algorithm: 'sha512', value: SHA512 }
+    }]
+  };
+  const plan = createArtifactSetPlan({
+    provider,
+    ...(provider === 'local' ? {} : {
+      project: provider === 'github'
+        ? { id: githubRepositoryId, slug: `${githubOwner}/${githubRepo}`, title: `${githubOwner}/${githubRepo}` }
+        : { id: 'project-one', slug: 'project-one', title: 'Project One' },
+      release: provider === 'github'
+        ? { id: githubReleaseId, version: 'v2.0.0', channel: 'release', publishedAt: '2026-08-01T00:00:00.000Z' }
+        : { id: 'version-two', version: '2.0.0', channel: 'release', publishedAt: '2026-08-01T00:00:00.000Z' }
+    }),
+    artifactSet: commonArtifact
+  });
+  const verifiedArtifactSet = finalizeVerifiedArtifactSet(plan, [{
+    partId: 'runtime-part', measuredSize: '1', sha256: SHA, sha512: SHA512
+  }]);
+  const source = provider === 'github'
+    ? {
+        provider, repositoryId: githubRepositoryId, releaseId: githubReleaseId, githubOwner, githubRepo,
+        version: 'v2.0.0', title: `${githubOwner}/${githubRepo}`
+      }
+    : provider === 'modrinth'
+      ? { provider, projectId: 'project-one', versionId: 'version-two', version: '2.0.0', title: 'Project One' }
+      : {
+          provider, importId: 'local-import-two', artifactSha256: verifiedArtifactSet.artifactSet.setDigest,
+          version: 'local-import-two', title: 'Local pack'
+        };
+  return {
+    source,
+    inspection: {
+      inspectionId: 'inspection-one',
+      verifiedArtifactSet,
+      result: {
+        type: 'archive-inspection', archiveFamily: 'mrpack', integrity: 'tested', selectedRoot: null,
+        artifactSet: { completeness: 'verified-complete-set', fingerprint: SHA },
+        classification: {
+          kind: 'mrpack-server', confidence: 'exact', blocked: false,
+          runtime: {
+            minecraftVersion: targetRuntime.minecraftVersion,
+            loaderFamily: targetRuntime.loaderFamily,
+            loaderVersion: targetRuntime.loaderVersion
+          }
+        },
+        limitEvidence: { totals: { entryCount: 1, expandedBytes: '1' } }
+      }
+    }
+  };
+}
+
+function managedReplacementFixture(t, {
+  coordinatorRevision = 7,
+  provider = 'modrinth',
+  currentRuntime = exactRuntime(),
+  targetRuntime = exactRuntime(),
+  restorePoints = [],
+  duringPrepare = null,
+  candidateProgress = null,
+  githubIdentity = {},
+  currentSource = null
+} = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-runtime-direction-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'Managed Server');
+  fs.mkdirSync(serverPath);
+  const identity = replacementIdentity(provider, targetRuntime, githubIdentity);
+  const currentState = {
+    state: {
+      modpackManaged: true, contentRevision: 7, runtime: currentRuntime,
+      selectedOptionalFiles: [],
+      source: currentSource ?? identity.source
+    },
+    manifest: { schemaVersion: 1, installationId: 'installed-one', entries: [] }
+  };
+  const adapter = new ProductionPlanningAdapter({
+    instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; } },
+    stateRepository: { read() { return currentState; } },
+    readContentRevision: () => typeof coordinatorRevision === 'function' ? coordinatorRevision() : coordinatorRevision,
+    reparseInspector,
+    availableBytes: async () => '100000000000',
+    validateServerPorts: availablePortValidation,
+    preparePlanInputs: async context => {
+      if (duringPrepare) await duringPrepare(context);
+      if (candidateProgress) context.onProgress(candidateProgress);
+      return {
+        runtime: targetRuntime,
+        incomingManifest: { schemaVersion: 1, installationId: 'incoming-two', entries: [] },
+        candidateBytes: '1', execution: { outputDirectoryId: 'output-two' }
+      };
+    },
+    snapshotServer: async () => ({
+      liveSnapshot: { kind: 'existing', worldDirectories: ['world'], protectedPaths: [], entries: [] },
+      pathPreconditions: [], sourceRuntime: currentRuntime, restorePoints,
+      candidateBytes: '0', restorePointBytes: '0', rollbackBytes: '0', journalBytes: '1', writeable: true
+    })
+  });
+  function request(operationKind, selections = {}) {
+    return {
+      inspectionId: 'inspection-one', instanceId: 'server-one', operationKind,
+      selections: {
+        optionalFileIds: [], conflictChoices: { paths: {}, categories: {} },
+        acknowledgeMissingProviderDigest: false, acknowledgeDowngradeWorldRisk: false,
+        selectedRoot: null, runtimeChoice: null,
+        ...selections
+      }
+    };
+  }
+  return { adapter, ...identity, currentRuntime, targetRuntime, request };
+}
+
+function installedGithubSource() {
+  return {
+    provider: 'github', repositoryId: '101', releaseId: '200', githubOwner: 'Owner', githubRepo: 'Pack',
+    version: 'v1.0.0', title: 'Owner/Pack', selectedAssetIds: ['300'], artifactSetDigest: '9'.repeat(64),
+    assetPattern: {
+      type: 'github-asset-pattern', version: 1,
+      filenameMatchers: [{ kind: 'single-wildcard', prefix: 'pack-v', suffix: '.mrpack' }],
+      reviewedRole: 'mrpack', archiveRootFingerprint: '8'.repeat(64),
+      runtimeEvidence: exactRuntime(),
+      multipartStructure: { kind: 'single', groupingScheme: 'single', partCount: 1, primaryIndex: 0 },
+      userOverrides: { selectedRoot: null, runtimeChoice: null }
+    },
+    acceptedMapping: {
+      type: 'provider-source-mapping', version: 1, modrinthProjectId: 'project-one',
+      githubRepositoryId: '101', githubOwner: 'Owner', githubRepo: 'Pack'
+    }
+  };
+}
+
+for (const operationKind of ['update', 'downgrade']) {
+  test(`same-repository GitHub ${operationKind} retains the installed asset pattern and accepted mapping`, async t => {
+    const currentSource = installedGithubSource();
+    const fixture = managedReplacementFixture(t, { provider: 'github', currentSource });
+
+    const reviewed = await fixture.adapter.createPlan({
+      request: fixture.request(operationKind, {
+        acknowledgeDowngradeWorldRisk: operationKind === 'downgrade'
+      }),
+      inspection: fixture.inspection,
+      source: fixture.source
+    });
+
+    const executionSource = fixture.adapter.getExecutionRecord(reviewed.plan).source;
+    assert.deepEqual(executionSource.assetPattern, currentSource.assetPattern);
+    assert.deepEqual(executionSource.acceptedMapping, currentSource.acceptedMapping);
+    assert.notStrictEqual(executionSource.assetPattern, currentSource.assetPattern);
+    assert.notStrictEqual(executionSource.acceptedMapping, currentSource.acceptedMapping);
+    assert.equal(executionSource.releaseId, '201');
+  });
+}
+
+test('GitHub update to a different repository does not inherit installed release metadata', async t => {
+  const fixture = managedReplacementFixture(t, {
+    provider: 'github',
+    currentSource: installedGithubSource(),
+    githubIdentity: {
+      githubRepositoryId: '102', githubReleaseId: '401', githubOwner: 'Other', githubRepo: 'DifferentPack'
+    }
+  });
+
+  const reviewed = await fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  });
+
+  const executionSource = fixture.adapter.getExecutionRecord(reviewed.plan).source;
+  assert.equal(Object.hasOwn(executionSource, 'assetPattern'), false);
+  assert.equal(Object.hasOwn(executionSource, 'acceptedMapping'), false);
+  assert.equal(executionSource.repositoryId, '102');
+});
+
+test('managed replacement reviews pin the current coordinator revision when config writes advanced past managed state', async t => {
+  const fixture = managedReplacementFixture(t, { coordinatorRevision: 8 });
+
+  const reviewed = await fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  });
+
+  assert.equal(reviewed.plan.operation.expectedContentRevision, 8);
+  assert.equal(reviewed.plan.preconditions.contentRevision, 8);
+  assert.equal(reviewed.sanitizedView.server.contentRevision, 8);
+});
+
+test('source planning reports truthful stage boundaries and forwards candidate activity', async t => {
+  const fixture = managedReplacementFixture(t, {
+    candidateProgress: {
+      activity: 'downloading-pack-files', processedBytes: 5, totalBytes: 10
+    }
+  });
+  const progress = [];
+
+  await fixture.adapter.createPlan({
+    request: fixture.request('update'),
+    inspection: fixture.inspection,
+    source: fixture.source,
+    onProgress: event => progress.push(event)
+  });
+
+  assert.deepEqual(progress, [
+    { phase: 'validating-destination' },
+    { phase: 'preparing-candidate' },
+    { phase: 'preparing-candidate', activity: 'downloading-pack-files', processedBytes: 5, totalBytes: 10 },
+    { phase: 'scanning-server' },
+    { phase: 'calculating-changes' },
+    { phase: 'checking-capacity' },
+    { phase: 'sealing-plan' }
+  ]);
+  assert.ok(progress.every(Object.isFrozen));
+});
+
+test('managed replacement never issues a plan whose server revision changed during asynchronous preparation', async t => {
+  let coordinatorRevision = 7;
+  const fixture = managedReplacementFixture(t, {
+    coordinatorRevision: () => coordinatorRevision,
+    duringPrepare() { coordinatorRevision = 8; }
+  });
+
+  await assert.rejects(fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  }), error => error?.code === 'PLAN_STALE');
+});
+
+for (const [provider, operationKind] of [
+  ['modrinth', 'update'],
+  ['github', 'switch'],
+  ['local', 'install-existing']
+]) {
+  test(`${provider} ${operationKind} cannot disguise an older Minecraft runtime as a non-downgrade replacement`, async t => {
+    const fixture = managedReplacementFixture(t, {
+      provider,
+      currentRuntime: exactRuntime({ minecraftVersion: '1.21.1' }),
+      targetRuntime: exactRuntime({ minecraftVersion: '1.20.1' })
+    });
+
+    await assert.rejects(fixture.adapter.createPlan({
+      request: fixture.request(operationKind), inspection: fixture.inspection, source: fixture.source
+    }), error => error?.code === 'DOWNGRADE_REQUIRED' && error?.retryable === true);
+  });
+}
+
+test('same Minecraft and loader family with an older exact loader version requires downgrade semantics', async t => {
+  const fixture = managedReplacementFixture(t, {
+    provider: 'github',
+    currentRuntime: exactRuntime({ loaderVersion: '0.16.10' }),
+    targetRuntime: exactRuntime({ loaderVersion: '0.15.11' })
+  });
+
+  await assert.rejects(fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  }), error => error?.code === 'DOWNGRADE_REQUIRED');
+});
+
+test('Forge loader ordering is preserved across prepared-pack and manifest version representations', async t => {
+  const fixture = managedReplacementFixture(t, {
+    provider: 'local',
+    currentRuntime: exactRuntime({
+      minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '1.20.1-47.3.0'
+    }),
+    targetRuntime: exactRuntime({
+      minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.2.0'
+    })
+  });
+
+  await assert.rejects(fixture.adapter.createPlan({
+    request: fixture.request('switch'), inspection: fixture.inspection, source: fixture.source
+  }), error => error?.code === 'DOWNGRADE_REQUIRED');
+});
+
+test('unequal loader versions outside documented exact formats fail closed', async t => {
+  const fixture = managedReplacementFixture(t, {
+    currentRuntime: exactRuntime({ loaderVersion: 'custom-current' }),
+    targetRuntime: exactRuntime({ loaderVersion: 'custom-target' })
+  });
+
+  await assert.rejects(fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  }), error => error?.code === 'DOWNGRADE_REQUIRED');
+});
+
+test('numeric prerelease identifiers sort below alphabetic prerelease identifiers', async t => {
+  const fixture = managedReplacementFixture(t, {
+    currentRuntime: exactRuntime({ loaderVersion: '1.0.0-alpha' }),
+    targetRuntime: exactRuntime({ loaderVersion: '1.0.0-1' })
+  });
+
+  await assert.rejects(fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  }), error => error?.code === 'DOWNGRADE_REQUIRED');
+});
+
+for (const operationKind of ['update', 'install-existing']) {
+  test(`${operationKind} cannot disguise a same-Minecraft loader-family change as a non-switch replacement`, async t => {
+    const fixture = managedReplacementFixture(t, {
+      provider: operationKind === 'update' ? 'github' : 'local',
+      currentRuntime: exactRuntime({ loaderFamily: 'forge', loaderVersion: '47.3.0' }),
+      targetRuntime: exactRuntime({ loaderFamily: 'fabric', loaderVersion: '0.16.10' })
+    });
+
+    await assert.rejects(fixture.adapter.createPlan({
+      request: fixture.request(operationKind), inspection: fixture.inspection, source: fixture.source
+    }), error => error?.code === 'SWITCH_REQUIRED' && error?.retryable === true);
+  });
+}
+
+test('a forward Minecraft update with a different loader family still requires switch semantics', async t => {
+  const fixture = managedReplacementFixture(t, {
+    currentRuntime: exactRuntime({ minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.0' }),
+    targetRuntime: exactRuntime({ minecraftVersion: '1.21.1', loaderFamily: 'fabric', loaderVersion: '0.16.10' })
+  });
+
+  await assert.rejects(fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  }), error => error?.code === 'SWITCH_REQUIRED');
+});
+
+test('an older Minecraft runtime takes downgrade precedence over a simultaneous loader-family change', async t => {
+  const fixture = managedReplacementFixture(t, {
+    currentRuntime: exactRuntime({ minecraftVersion: '1.21.1', loaderFamily: 'forge', loaderVersion: '47.3.0' }),
+    targetRuntime: exactRuntime({ minecraftVersion: '1.20.1', loaderFamily: 'fabric', loaderVersion: '0.16.10' })
+  });
+
+  await assert.rejects(fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  }), error => error?.code === 'DOWNGRADE_REQUIRED');
+});
+
+test('same-family loader advancement remains a valid update', async t => {
+  const fixture = managedReplacementFixture(t, {
+    currentRuntime: exactRuntime({ loaderVersion: '0.16.10' }),
+    targetRuntime: exactRuntime({ loaderVersion: '0.16.11' })
+  });
+
+  const result = await fixture.adapter.createPlan({
+    request: fixture.request('update'), inspection: fixture.inspection, source: fixture.source
+  });
+  assert.equal(result.plan.operation.kind, 'upgrade');
+  assert.equal(result.plan.operation.downgrade, false);
+});
+
+test('a forward Minecraft runtime remains permitted even when its loader version number is lower', async t => {
+  const fixture = managedReplacementFixture(t, {
+    provider: 'local',
+    currentRuntime: exactRuntime({ minecraftVersion: '1.20.1', loaderVersion: '47.3.12' }),
+    targetRuntime: exactRuntime({ minecraftVersion: '1.21.1', loaderVersion: '0.16.10' })
+  });
+
+  const result = await fixture.adapter.createPlan({
+    request: fixture.request('switch'), inspection: fixture.inspection, source: fixture.source
+  });
+  assert.equal(result.plan.operation.kind, 'switch');
+  assert.equal(result.plan.operation.downgrade, false);
+});
+
+test('a loader-family switch on the same Minecraft version is not treated as a downgrade', async t => {
+  const fixture = managedReplacementFixture(t, {
+    currentRuntime: exactRuntime({ loaderFamily: 'forge', loaderVersion: '47.3.12' }),
+    targetRuntime: exactRuntime({ loaderFamily: 'fabric', loaderVersion: '0.16.10' })
+  });
+
+  const result = await fixture.adapter.createPlan({
+    request: fixture.request('switch'), inspection: fixture.inspection, source: fixture.source
+  });
+  assert.equal(result.plan.operation.kind, 'switch');
+  assert.equal(result.plan.operation.downgrade, false);
+});
+
+test('an explicit chronological downgrade needs acknowledgement but no prior restore because execution creates one', async t => {
+  const currentRuntime = exactRuntime({ minecraftVersion: '1.20.1', loaderVersion: '0.15.11' });
+  const targetRuntime = exactRuntime({ minecraftVersion: '1.21.1', loaderVersion: '0.16.10' });
+  const fixture = managedReplacementFixture(t, {
+    provider: 'modrinth', currentRuntime, targetRuntime, restorePoints: []
+  });
+
+  await assert.rejects(fixture.adapter.createPlan({
+    request: fixture.request('downgrade'), inspection: fixture.inspection, source: fixture.source
+  }), error => error?.code === 'INVALID_REQUEST' && error?.details?.field === 'restorePoints');
+
+  const result = await fixture.adapter.createPlan({
+    request: fixture.request('downgrade', { acknowledgeDowngradeWorldRisk: true }),
+    inspection: fixture.inspection,
+    source: fixture.source
+  });
+  assert.equal(result.plan.operation.kind, 'downgrade');
+  assert.equal(result.plan.operation.downgrade, true);
+  assert.equal(result.plan.requirements.downgradeWorldRiskAcknowledged, true);
+});
 
 test('guided-review inspection and incoming manifest stay private and become the execution authority', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-'));
@@ -190,14 +646,340 @@ test('install-existing review of an exact empty setup reservation becomes instal
     expectedContentRevision: 0, downgrade: false
   });
   assert.equal(result.plan.requirements.verifiedRestorePointRequired, false);
+  assert.equal(result.plan.selections.maxRam, 4);
+  assert.equal(result.plan.selections.serverPort, 25565);
+  assert.equal(result.plan.selections.networkAccess, 'pack-default');
+  assert.deepEqual(result.sanitizedView.resources, {
+    maxRam: 4,
+    serverPort: 25565,
+    networkAccess: 'pack-default'
+  });
   assert.equal(result.sanitizedView.server.priorState, 'new');
   assert.equal(adapter.getExecutionRecord(result.plan).reservation.kind, 'empty-directory');
 });
 
-test('a nonempty unmanaged setup target is rejected before archive candidate preparation', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-'));
+test('install-new preserves explicit reviewed port and loopback access in its plan and review', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-network-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const serverPath = path.join(root, 'Reserved Server');
+  fs.mkdirSync(serverPath);
+  const adapter = adapterFor(serverPath);
+
+  const result = await adapter.createPlan({
+    request: {
+      inspectionId: 'inspection-one', instanceId: 'server-network', operationKind: 'install-new',
+      selections: {
+        optionalFileIds: [], conflictChoices: { paths: {}, categories: {} },
+        acknowledgeMissingProviderDigest: false, acknowledgeDowngradeWorldRisk: false,
+        maxRam: 7, serverPort: 25571, networkAccess: 'loopback'
+      }
+    },
+    inspection: inspection(),
+    source: {
+      provider: 'modrinth', projectId: 'project-one', versionId: 'version-one',
+      version: '1.0.0', title: 'Project One'
+    }
+  });
+
+  assert.deepEqual(result.sanitizedView.resources, {
+    maxRam: 7,
+    serverPort: 25571,
+    networkAccess: 'loopback'
+  });
+  assert.equal(result.plan.selections.serverPort, 25571);
+  assert.equal(result.plan.selections.networkAccess, 'loopback');
+});
+
+function newServerPlanInput(instanceId, serverPort, networkAccess = 'loopback') {
+  return {
+    request: {
+      inspectionId: 'inspection-one', instanceId, operationKind: 'install-new',
+      selections: {
+        optionalFileIds: [], conflictChoices: { paths: {}, categories: {} },
+        acknowledgeMissingProviderDigest: false, acknowledgeDowngradeWorldRisk: false,
+        maxRam: 6, serverPort, networkAccess
+      }
+    },
+    inspection: inspection(),
+    source: {
+      provider: 'modrinth', projectId: 'project-one', versionId: 'version-one',
+      version: '1.0.0', title: 'Project One'
+    }
+  };
+}
+
+async function assertSafeSelectedPortConflict(action, forbiddenText) {
+  await assert.rejects(action, error => {
+    assert.equal(error.code, 'INVALID_REQUEST');
+    assert.equal(error.safeMessage, 'The selected Minecraft server port is already in use. Choose another port and retry.');
+    assert.deepEqual(error.details, { field: 'selections.serverPort' });
+    const publicResult = error.toPublicResult();
+    assert.deepEqual(publicResult.error.details, { field: 'selections.serverPort' });
+    assert.doesNotMatch(JSON.stringify(publicResult), forbiddenText);
+    return true;
+  });
+}
+
+test('another saved stopped instance port blocks a new-server plan before candidate preparation', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-saved-port-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'Reserved Server');
+  const privateExistingPath = path.join(root, 'Existing Stopped Server');
+  fs.mkdirSync(serverPath);
+  let preparationCalls = 0;
+  const validationRequests = [];
+  const adapter = adapterFor(serverPath, {
+    prepared() { preparationCalls += 1; },
+    async validateServerPorts(request) {
+      validationRequests.push(request);
+      return {
+        valid: false,
+        errors: [{
+          type: 'minecraft', scope: 'internal', port: 25571,
+          conflictingInstance: { id: 'server-stopped', name: 'Stopped Server', path: privateExistingPath },
+          message: `Minecraft port 25571 is already used by ${privateExistingPath}.`
+        }]
+      };
+    }
+  });
+
+  await assertSafeSelectedPortConflict(
+    () => adapter.createPlan(newServerPlanInput('server-new', 25571)),
+    /Existing Stopped Server|Stopped Server|server-stopped/iu
+  );
+
+  assert.equal(preparationCalls, 0);
+  assert.deepEqual(validationRequests, [{
+    instanceId: 'server-new', serverPath, minecraftPort: 25571
+  }]);
+});
+
+test('an externally occupied port blocks a new-server plan before candidate preparation without exposing process details', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-listener-port-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'Reserved Server');
+  fs.mkdirSync(serverPath);
+  let preparationCalls = 0;
+  const adapter = adapterFor(serverPath, {
+    prepared() { preparationCalls += 1; },
+    async validateServerPorts() {
+      return {
+        valid: false,
+        errors: [{
+          type: 'minecraft', scope: 'external', port: 25572, code: 'EADDRINUSE',
+          process: { pid: 4242, processName: 'private-java.exe' },
+          message: 'Minecraft port 25572 is occupied by private-java.exe with PID 4242.'
+        }]
+      };
+    }
+  });
+
+  await assertSafeSelectedPortConflict(
+    () => adapter.createPlan(newServerPlanInput('server-new', 25572)),
+    /4242|private-java|PID/iu
+  );
+
+  assert.equal(preparationCalls, 0);
+});
+
+test('an available loopback-selected port is validated before candidate preparation and proceeds', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-available-port-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'Reserved Server');
+  fs.mkdirSync(serverPath);
+  const order = [];
+  const validationRequests = [];
+  const adapter = adapterFor(serverPath, {
+    prepared() { order.push('prepare'); },
+    async validateServerPorts(request) {
+      order.push('validate-port');
+      validationRequests.push(request);
+      return { valid: true, errors: [] };
+    }
+  });
+
+  const result = await adapter.createPlan(newServerPlanInput('server-new', 25573));
+
+  assert.deepEqual(order, ['validate-port', 'prepare']);
+  assert.deepEqual(validationRequests, [{
+    instanceId: 'server-new', serverPath, minecraftPort: 25573
+  }]);
+  assert.equal(result.plan.selections.serverPort, 25573);
+  assert.equal(result.plan.selections.networkAccess, 'loopback');
+});
+
+test('GitHub review exposes the immutable repository and release identity without exposing execution metadata', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-github-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'Reserved GitHub Server');
+  fs.mkdirSync(serverPath);
+  const adapter = adapterFor(serverPath);
+  const source = {
+    provider: 'github', repositoryId: '101', releaseId: '201',
+    githubOwner: 'Owner', githubRepo: 'Pack', version: 'v2.0.0', title: 'Owner/Pack',
+    channel: 'release', prerelease: false, publishedAt: '2026-08-01T00:00:00.000Z',
+    selectedAssetIds: ['301']
+  };
+
+  const result = await adapter.createPlan({
+    request: {
+      inspectionId: 'inspection-one', instanceId: 'server-github', operationKind: 'install-new',
+      selections: {
+        optionalFileIds: [], conflictChoices: { paths: {}, categories: {} },
+        acknowledgeMissingProviderDigest: true, acknowledgeDowngradeWorldRisk: false
+      }
+    },
+    inspection: githubInspection(),
+    source
+  });
+
+  assert.deepEqual(result.sanitizedView.source, {
+    provider: 'github', repositoryId: '101', releaseId: '201', version: 'v2.0.0'
+  });
+  assert.equal(result.plan.source.repositoryId, '101');
+  assert.equal(result.plan.source.releaseId, '201');
+  assert.equal(Object.hasOwn(result.sanitizedView.source, 'githubOwner'), false);
+  assert.equal(Object.hasOwn(result.sanitizedView.source, 'selectedAssetIds'), false);
+});
+
+test('install-existing reviews and adopts a registered nonempty unmanaged server without changing its files', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'Existing Server');
+  fs.mkdirSync(path.join(serverPath, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(serverPath, 'server.properties'), 'motd=existing\n');
+  fs.writeFileSync(path.join(serverPath, 'world', 'level.dat'), 'world-sentinel');
+  const hash = value => crypto.createHash('sha256').update(value).digest('hex');
+  const incomingProperties = 'motd=pack\n';
+  const incomingMod = 'reviewed-pack-mod';
+  const incomingManifest = {
+    schemaVersion: 1,
+    installationId: 'incoming-adoption',
+    entries: [
+      {
+        path: 'server.properties', pathKey: 'server.properties', origin: 'pack',
+        managementPolicy: 'preserve-after-seed', role: 'configuration',
+        installedHash: hash(incomingProperties), size: String(Buffer.byteLength(incomingProperties)), priorBaseline: null
+      },
+      {
+        path: 'mods/pack.jar', pathKey: 'mods/pack.jar', origin: 'pack',
+        managementPolicy: 'replaceable-managed', role: 'mod',
+        installedHash: hash(incomingMod), size: String(Buffer.byteLength(incomingMod)), priorBaseline: null
+      }
+    ]
+  };
+  const stateRepository = { read() { return null; } };
+  const snapshotServer = createProductionServerSnapshot({ fsApi: fs, reparseInspector, stateRepository });
+  const adapter = new ProductionPlanningAdapter({
+    instanceResolver: {
+      async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; }
+    },
+    stateRepository,
+    readContentRevision: () => 7,
+    reparseInspector,
+    availableBytes: async () => '100000000000',
+    validateServerPorts: availablePortValidation,
+    preparePlanInputs: async () => ({
+      runtime: exactRuntime(), incomingManifest, candidateBytes: '128',
+      execution: { outputDirectoryId: 'output-adoption' }
+    }),
+    snapshotServer
+  });
+
+  const request = conflictChoices => ({
+    inspectionId: 'inspection-one', instanceId: 'server-one', operationKind: 'install-existing',
+    selections: { optionalFileIds: [], conflictChoices }
+  });
+  const source = {
+    provider: 'modrinth', projectId: 'project-one', versionId: 'version-one',
+    version: '1.0.0', title: 'Project One'
+  };
+
+  const review = await adapter.createPlan({
+    request: request({ paths: {}, categories: {} }), inspection: inspection(), source
+  });
+  assert.equal(review.requiresConflictReview, true);
+  assert.equal(review.conflicts.length, 1);
+  assert.equal(review.conflicts[0].label, 'server.properties');
+  assert.deepEqual(review.conflicts[0].allowedChoices, ['keep-mine', 'use-pack', 'keep-both']);
+
+  const result = await adapter.createPlan({
+    request: request({
+      paths: { [review.conflicts[0].id]: { choice: 'keep-mine' } },
+      categories: {}
+    }),
+    inspection: inspection(),
+    source
+  });
+
+  assert.deepEqual(result.plan.operation, {
+    kind: 'install', serverKind: 'existing', instanceId: 'server-one',
+    expectedContentRevision: 7, downgrade: false
+  });
+  assert.equal(result.plan.requirements.verifiedRestorePointRequired, true);
+  assert.equal(result.sanitizedView.server.priorState, 'existing');
+  assert.equal(result.plan.ownership.actions.find(entry => entry.pathKey === 'server.properties').action, 'preserve-modified');
+  assert.equal(result.plan.ownership.actions.find(entry => entry.pathKey === 'world/level.dat').action, 'preserve-user-addon');
+  assert.equal(result.plan.ownership.actions.find(entry => entry.pathKey === 'mods/pack.jar').action, 'add');
+  assert.equal(adapter.getExecutionRecord(result.plan).adoption.kind, 'existing-unmanaged-directory');
+  assert.equal(fs.readFileSync(path.join(serverPath, 'server.properties'), 'utf8'), 'motd=existing\n');
+  assert.equal(fs.readFileSync(path.join(serverPath, 'world', 'level.dat'), 'utf8'), 'world-sentinel');
+
+  fs.mkdirSync(path.join(serverPath, 'mods'));
+  fs.writeFileSync(path.join(serverPath, 'mods', 'pack.jar'), 'detached-user-mod');
+  const detachedState = {
+    state: {
+      modpackManaged: false,
+      contentRevision: 7,
+      runtime: exactRuntime(),
+      installedAt: '2026-07-01T00:00:00.000Z'
+    },
+    manifest: {
+      schemaVersion: 1,
+      installationId: 'detached-old-pack',
+      entries: [
+        {
+          path: 'server.properties', pathKey: 'server.properties', origin: 'pack',
+          managementPolicy: 'replaceable-managed', role: 'configuration',
+          installedHash: hash('motd=existing\n'), size: String(Buffer.byteLength('motd=existing\n')), priorBaseline: null
+        },
+        {
+          path: 'mods/pack.jar', pathKey: 'mods/pack.jar', origin: 'pack',
+          managementPolicy: 'replaceable-managed', role: 'mod',
+          installedHash: hash('detached-user-mod'), size: String(Buffer.byteLength('detached-user-mod')), priorBaseline: null
+        }
+      ]
+    }
+  };
+  const detachedRepository = { read() { return detachedState; } };
+  const detachedAdapter = new ProductionPlanningAdapter({
+    instanceResolver: {
+      async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; }
+    },
+    stateRepository: detachedRepository,
+    readContentRevision: () => 7,
+    reparseInspector,
+    availableBytes: async () => '100000000000',
+    validateServerPorts: availablePortValidation,
+    preparePlanInputs: async () => ({
+      runtime: exactRuntime(), incomingManifest, candidateBytes: '128',
+      execution: { outputDirectoryId: 'output-detached-adoption' }
+    }),
+    snapshotServer: createProductionServerSnapshot({
+      fsApi: fs, reparseInspector, stateRepository: detachedRepository
+    })
+  });
+  const detachedReview = await detachedAdapter.createPlan({
+    request: request({ paths: {}, categories: {} }), inspection: inspection(), source
+  });
+  assert.equal(detachedReview.requiresConflictReview, true);
+  assert.deepEqual(detachedReview.conflicts.map(conflict => conflict.label).sort(), ['mods/pack.jar', 'server.properties']);
+});
+
+test('install-new still rejects a registered nonempty unmanaged target before archive candidate preparation', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-plan-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'Existing Server');
   fs.mkdirSync(serverPath);
   fs.writeFileSync(path.join(serverPath, 'server.properties'), 'motd=existing\n');
   let prepared = false;
@@ -205,7 +987,7 @@ test('a nonempty unmanaged setup target is rejected before archive candidate pre
 
   await assert.rejects(adapter.createPlan({
     request: {
-      inspectionId: 'inspection-one', instanceId: 'server-one', operationKind: 'install-existing',
+      inspectionId: 'inspection-one', instanceId: 'server-one', operationKind: 'install-new',
       selections: { optionalFileIds: [], conflictChoices: { paths: {}, categories: {} } }
     },
     inspection: inspection(),
@@ -288,6 +1070,7 @@ function conflictAdapter(serverPath, {
     },
     reparseInspector,
     availableBytes: async () => availableBytes,
+    validateServerPorts: availablePortValidation,
     preparePlanInputs: async () => ({
       runtime,
       incomingManifest: {
@@ -405,6 +1188,35 @@ test('existing-server disk review includes the full live sibling candidate as we
   }), error => error?.code === 'INSUFFICIENT_DISK');
 });
 
+test('source planning retains the reviewed server-only disk components for execution revalidation', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-disk-record-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'Managed Server');
+  fs.mkdirSync(serverPath);
+  const adapter = conflictAdapter(serverPath, {
+    snapshotCandidateBytes: '100',
+    availableBytes: '100000000000'
+  });
+  const conflictReview = await adapter.createPlan({
+    request: conflictRequest(), inspection: inspection(), source: conflictSource
+  });
+  const result = await adapter.createPlan({
+    request: conflictRequest({
+      paths: { [conflictReview.conflicts[0].id]: { choice: 'use-pack' } },
+      categories: {}
+    }),
+    inspection: inspection(),
+    source: conflictSource
+  });
+
+  assert.deepEqual(adapter.getExecutionRecord(result.plan).reviewedServerDisk, {
+    candidateBytes: '100',
+    restorePointBytes: '0',
+    rollbackBytes: '0',
+    journalBytes: '1048576'
+  });
+});
+
 test('opted-in GitHub asset review compiles and binds the versioned pattern into plan and execution state', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-pattern-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -441,7 +1253,15 @@ test('opted-in GitHub asset review compiles and binds the versioned pattern into
   assert.equal(Object.hasOwn(executionSource, 'assetPatternSeed'), false);
 });
 
-function managementFixture(t, { restoreTotalBytes = '3', restoreArchiveBytes = 3, availableBytes = null } = {}) {
+function managementFixture(t, {
+  restoreTotalBytes = '3',
+  restoreArchiveBytes = 3,
+  availableBytes = null,
+  readContentRevision = () => 0,
+  duringAvailableBytes = null,
+  duringResolveRestorePoint = null,
+  restoreProgress = []
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-management-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const serverPath = path.join(root, 'Managed Server');
@@ -519,7 +1339,9 @@ function managementFixture(t, { restoreTotalBytes = '3', restoreArchiveBytes = 3
   const adapter = new ProductionPlanningAdapter({
     instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; } },
     stateRepository: { read() { return currentState; } },
+    readContentRevision,
     reparseInspector,
+    validateServerPorts: availablePortValidation,
     preparePlanInputs: async () => { throw new Error('management planning must not prepare a source candidate'); },
     snapshotServer: async () => ({
       liveSnapshot: {
@@ -534,12 +1356,19 @@ function managementFixture(t, { restoreTotalBytes = '3', restoreArchiveBytes = 3
       pathPreconditions: [], sourceRuntime: runtime, candidateBytes: '4', restorePointBytes: '4',
       rollbackBytes: '4', journalBytes: '1', writeable: true, restorePoints: [publicRestorePoint]
     }),
-    ...(availableBytes === null ? {} : { availableBytes: async () => availableBytes }),
+    ...(availableBytes === null ? {} : {
+      availableBytes: async () => {
+        if (duringAvailableBytes) await duringAvailableBytes();
+        return availableBytes;
+      }
+    }),
     workspaceRegistry,
-    resolveRestorePoint: async ({ id, sha256, serverPath: requestedPath }) => {
+    resolveRestorePoint: async ({ id, sha256, serverPath: requestedPath }, options = {}) => {
       assert.equal(requestedPath, serverPath);
       assert.equal(id, publicRestorePoint.id);
       assert.equal(sha256, publicRestorePoint.sha256);
+      if (duringResolveRestorePoint) await duringResolveRestorePoint();
+      for (const progress of restoreProgress) options.onProgress?.(progress);
       return privateRestorePoint;
     }
   });
@@ -566,7 +1395,11 @@ test('detach planning is a zero-file state transition with a transferable privat
   assert.equal(result.plan.disk.rollbackBytes, '4');
   assert.equal(BigInt(result.plan.disk.requiredBytes) > 13n, true);
   assert.equal(result.plan.fingerprint.length, 64);
-  assert.equal(fixture.adapter.getExecutionRecord(result.plan).operationKind, 'detach');
+  const executionRecord = fixture.adapter.getExecutionRecord(result.plan);
+  assert.equal(executionRecord.operationKind, 'detach');
+  assert.deepEqual(executionRecord.reviewedServerDisk, {
+    candidateBytes: '4', restorePointBytes: '4', rollbackBytes: '4', journalBytes: '1'
+  });
 
   const replanned = await fixture.adapter.createManagementPlan({
     request: { instanceId: 'server-one', operationKind: 'detach', selectionRef: null },
@@ -575,6 +1408,24 @@ test('detach planning is a zero-file state transition with a transferable privat
   });
   assert.notEqual(replanned.plan.fingerprint, result.plan.fingerprint);
   assert.equal(fixture.adapter.getExecutionRecord(replanned.plan).operationKind, 'detach');
+});
+
+test('detach planning fails closed when the coordinator revision changes during asynchronous disk preflight', async t => {
+  let coordinatorRevision = 7;
+  const fixture = managementFixture(t, {
+    availableBytes: '100000000000',
+    readContentRevision: () => coordinatorRevision,
+    async duringAvailableBytes() {
+      await Promise.resolve();
+      coordinatorRevision = 8;
+    }
+  });
+
+  await assert.rejects(fixture.adapter.createManagementPlan({
+    request: { instanceId: 'server-one', operationKind: 'detach', selectionRef: null },
+    currentState: fixture.currentState,
+    instance: { instanceId: 'server-one', serverPath: fixture.serverPath }
+  }), error => error?.code === 'PLAN_STALE');
 });
 
 test('managed uninstall removes only unchanged managed files and preserves modified, user, and world content', async t => {
@@ -621,11 +1472,95 @@ test('rollback planning binds the exact selected public point to one private ver
   }), error => error?.code === 'PLAN_STALE');
 });
 
-test('rollback disk preflight budgets two expanded restore payloads instead of trusting a highly compressed archive size', async t => {
+test('management rollback planning reports ordered phases and one monotonic restore verification range', async t => {
+  const fixture = managementFixture(t, {
+    restoreTotalBytes: '3',
+    restoreArchiveBytes: 3,
+    restoreProgress: [
+      { phase: 'archive-hash', processedBytes: 1, totalBytes: 3 },
+      { phase: 'archive-hash', processedBytes: 3, totalBytes: 3 },
+      { phase: 'entry-verify', processedBytes: 1, totalBytes: 3 },
+      { phase: 'entry-verify', processedBytes: 3, totalBytes: 3 }
+    ]
+  });
+  const progress = [];
+
+  await fixture.adapter.createManagementPlan({
+    request: { instanceId: 'server-one', operationKind: 'rollback-restore-point', selectionRef: 'restore-selected' },
+    currentState: fixture.currentState,
+    instance: { instanceId: 'server-one', serverPath: fixture.serverPath },
+    onProgress: event => progress.push(event)
+  });
+
+  assert.deepEqual(progress.map(event => event.phase), [
+    'scanning-server',
+    'verifying-restore-point',
+    'verifying-restore-point',
+    'verifying-restore-point',
+    'verifying-restore-point',
+    'verifying-restore-point',
+    'calculating-changes',
+    'checking-capacity',
+    'sealing-plan'
+  ]);
+  assert.deepEqual(
+    progress.filter(event => Number.isSafeInteger(event.processedBytes))
+      .map(event => [event.processedBytes, event.totalBytes]),
+    [[1, 6], [3, 6], [4, 6], [6, 6]]
+  );
+});
+
+test('rollback planning fails closed when the coordinator revision changes during restore-point resolution', async t => {
+  let coordinatorRevision = 7;
+  const fixture = managementFixture(t, {
+    readContentRevision: () => coordinatorRevision,
+    async duringResolveRestorePoint() {
+      await Promise.resolve();
+      coordinatorRevision = 8;
+    }
+  });
+
+  await assert.rejects(fixture.adapter.createManagementPlan({
+    request: { instanceId: 'server-one', operationKind: 'rollback-restore-point', selectionRef: 'restore-selected' },
+    currentState: fixture.currentState,
+    instance: { instanceId: 'server-one', serverPath: fixture.serverPath }
+  }), error => error?.code === 'PLAN_STALE');
+});
+
+test('rollback disk preflight budgets one promoted restore tree plus candidate, safety restore, journal, and reserve bytes', async t => {
   const fixture = managementFixture(t, {
     restoreTotalBytes: '1000000000',
     restoreArchiveBytes: 3,
-    availableBytes: '3000000000'
+    availableBytes: '3147483661'
+  });
+
+  const result = await fixture.adapter.createManagementPlan({
+    request: { instanceId: 'server-one', operationKind: 'rollback-restore-point', selectionRef: 'restore-selected' },
+    currentState: fixture.currentState,
+    instance: { instanceId: 'server-one', serverPath: fixture.serverPath }
+  });
+
+  assert.deepEqual(result.plan.disk, {
+    candidateBytes: '4',
+    restorePointBytes: '4',
+    rollbackBytes: '4',
+    journalBytes: '1',
+    selectedArchiveBytes: '3',
+    selectedExpandedBytes: '1000000000',
+    selectedExtractionBytes: '1000000000',
+    selectedFinalPayloadBytes: '1000000000',
+    selectedBytes: '1000000000',
+    reserveBytes: '2147483648',
+    requiredBytes: '3147483661',
+    availableBytes: '3147483661'
+  });
+});
+
+test('rollback disk preflight still rejects capacity one byte below the complete single-tree budget', async t => {
+  const fixture = managementFixture(t, {
+    restoreTotalBytes: '1000000000',
+    restoreArchiveBytes: 3,
+    availableBytes: '3147483660'
   });
 
   await assert.rejects(fixture.adapter.createManagementPlan({
@@ -635,8 +1570,8 @@ test('rollback disk preflight budgets two expanded restore payloads instead of t
   }), error => {
     assert.equal(error?.code, 'INSUFFICIENT_DISK');
     assert.deepEqual(error.details, {
-      requiredBytes: '4147483661',
-      availableBytes: '3000000000'
+      requiredBytes: '3147483661',
+      availableBytes: '3147483660'
     });
     return true;
   });
@@ -729,6 +1664,7 @@ test('repair pre-scans the live server and plans only missing or corrupt managed
     stateRepository: { read() { return currentState; } },
     reparseInspector,
     availableBytes: async () => '100000000000',
+    validateServerPorts: availablePortValidation,
     preparePlanInputs: async context => {
       preparationContext = context;
       return {
@@ -856,6 +1792,7 @@ test('rollback snapshot remains available after uninstall has made modpack state
     instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; } },
     stateRepository: { read() { return inactive; } },
     reparseInspector,
+    validateServerPorts: availablePortValidation,
     preparePlanInputs: async () => { throw new Error('rollback must not prepare source input'); },
     snapshotServer,
     availableBytes: async () => '999999999999',

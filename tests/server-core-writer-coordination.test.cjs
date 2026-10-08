@@ -169,12 +169,29 @@ test('read-only handlers stay outside the mutation reservation', async () => {
   );
   runLease.markRunning({ pid: 102 });
   const handlers = policy.wrapHandlers({
-    'read-config': async () => ({ version: '1.21.1' })
+    'read-config': async () => ({ version: '1.21.1' }),
+    'get-management-invite-info': async () => ({ success: true, configured: false, inviteLink: '' }),
+    'update-management-server-path': async () => ({ success: true, changed: false })
   });
 
   try {
     assert.deepEqual(await handlers['read-config']({ sender: { id: 1 } }, serverPath), {
       version: '1.21.1'
+    });
+    assert.deepEqual(await handlers['get-management-invite-info']({ sender: { id: 1 } }, {
+      instanceId: 'server-alpha',
+      serverPath
+    }), {
+      success: true,
+      configured: false,
+      inviteLink: ''
+    });
+    assert.deepEqual(await handlers['update-management-server-path']({ sender: { id: 1 } }, {
+      instanceId: 'server-alpha',
+      serverPath
+    }), {
+      success: true,
+      changed: false
     });
   } finally {
     runLease.release();

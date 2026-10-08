@@ -86,18 +86,22 @@ function downloadResponses(archiveBytes, checksum) {
   return async () => {
     requestNumber += 1;
     if (requestNumber === 1) {
+      const metadata = Buffer.from(JSON.stringify([{
+        binary: {
+          package: {
+            checksum,
+            link: 'https://downloads.example.test/runtime.zip',
+            name: 'runtime.zip',
+            size: archiveBytes.length
+          }
+        }
+      }]), 'utf8');
       return {
         ok: true,
+        body: Readable.from([metadata]),
+        headers: { get: name => name === 'content-length' ? String(metadata.length) : null },
         async json() {
-          return [{
-            binary: {
-              package: {
-                checksum,
-                link: 'https://downloads.example.test/runtime.zip',
-                name: 'runtime.zip'
-              }
-            }
-          }];
+          return JSON.parse(metadata.toString('utf8'));
         }
       };
     }
@@ -128,7 +132,8 @@ test('an unchanged Java check is read-only and does not create or revise the ser
 
 test('creating a server Java runtime marks the start lease before extraction and revises once', async t => {
   const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-java-create-'));
-  const archivePath = path.join(serverPath, 'runtime.zip');
+  const archivePath = path.join(serverPath, 'java', 'temp', 'runtime.zip');
+  fs.mkdirSync(path.dirname(archivePath), { recursive: true });
   fs.writeFileSync(archivePath, makeRuntimeArchive());
   t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
   const fixture = revisionFixture(serverPath, 5);
@@ -142,7 +147,7 @@ test('creating a server Java runtime marks the start lease before extraction and
 
   assert.equal(fixture.getRevision(), 6);
   assert.equal(fixture.bumps.length, 1);
-  assert.ok(fs.existsSync(path.join(serverPath, 'java', 'java-17', 'bin')));
+  assert.ok(fs.existsSync(path.join(serverPath, 'java', 'java-17', 'jdk', 'bin')));
 });
 
 test('a completed server Java download revises exactly once despite multiple filesystem writes', async t => {
@@ -184,4 +189,45 @@ test('a failed Java download after writing bytes still commits the dirty revisio
 
   assert.equal(fixture.getRevision(), 20);
   assert.equal(fixture.bumps.length, 1);
+});
+
+test('server Java filesystem writes fail closed without an ambient coordinator lease', t => {
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-java-no-lease-'));
+  t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
+  const manager = new ServerJavaManager(serverPath);
+
+  assert.throws(
+    () => manager.beforeFilesystemMutation(path.join(serverPath, 'java', 'java-17')),
+    /active server mutation lease/iu
+  );
+});
+
+test('ensureJavaForMinecraft forwards the caller signal without changing callback position', async t => {
+  const utils = require('../electron/services/minecraft-launcher/utils.cjs');
+  const originalResolver = utils.resolveRequiredJavaVersion;
+  t.after(() => { utils.resolveRequiredJavaVersion = originalResolver; });
+  utils.resolveRequiredJavaVersion = async () => ({
+    requiredJavaVersion: 21,
+    source: 'test',
+    javaComponent: 'java-runtime-delta'
+  });
+  const manager = Object.create(ServerJavaManager.prototype);
+  const controller = new AbortController();
+  const callback = () => {};
+  let received;
+  manager.ensureJava = async (version, progressCallback, options) => {
+    received = { version, progressCallback, options };
+    return { success: true, javaPath: 'java' };
+  };
+
+  const result = await manager.ensureJavaForMinecraft(
+    '1.21.1',
+    callback,
+    { signal: controller.signal }
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(received.version, 21);
+  assert.equal(received.progressCallback, callback);
+  assert.equal(received.options.signal, controller.signal);
 });

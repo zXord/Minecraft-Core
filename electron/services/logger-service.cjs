@@ -1114,7 +1114,7 @@ class LoggerService extends EventEmitter {
     // Load the logger window HTML
     if (process.env.NODE_ENV === 'development') {
       // In development, load from the dev server
-      this.loggerWindow.loadURL('http://localhost:5173/logger-window.html');
+      this.loggerWindow.loadURL('http://127.0.0.1:5173/logger-window.html');
     } else {
       // In production, load from file
       const loggerHtmlPath = path.join(__dirname, '../logger-window.html');

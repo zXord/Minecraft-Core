@@ -117,8 +117,9 @@ test('packaged verifier proves exact runtime, worker, notices, manifests, and co
     runtime: { version: '26.02', handlers: { zip: true, rar: true } },
     worker: {
       runtimeIdentifier: 'win-x64',
-      size: 67744371,
-      sha256: '8a7653cfbfece23e2ad6dcd62584021309ce5df0c91e0a76212c3ae1e7d32489'
+      runtimeMode: 'in-memory-single-file',
+      size: 67756659,
+      sha256: '7ed28b3f9be9b9a34875b5f42aef2bda1c2017b1b55567aafcbfe10a7a914ea3'
     },
     containment: 'passed',
     fallbacksUsed: []
@@ -177,4 +178,18 @@ test('afterPack propagates archive verification failures', async (t) => {
     appOutDir,
     packager: { appInfo: { version: '26.6.1' } }
   }), error => error?.code === 'EXTRACTOR_UNAVAILABLE');
+});
+
+test('afterPack aborts a valid Windows package when its expected executable is missing', { timeout: 120000 }, async (t) => {
+  const appOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-after-pack-missing-exe-'));
+  t.after(() => fs.rmSync(appOutDir, { recursive: true, force: true }));
+  copyPackagedResources(path.join(appOutDir, 'resources'));
+  await createPackagedApplicationArchive(appOutDir);
+
+  await assert.rejects(afterPack.default({
+    electronPlatformName: 'win32',
+    arch: 1,
+    appOutDir,
+    packager: { appInfo: { version: '26.6.1' } }
+  }), error => error?.code === 'PACKAGED_EXECUTABLE_MISSING');
 });

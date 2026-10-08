@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO.Pipes;
@@ -30,6 +31,7 @@ internal static partial class Program
         try
         {
             if (args.Length == 1 && args[0] == "--durable-fs") return await RunDurabilityAsync().ConfigureAwait(false);
+            if (args.Length == 1 && args[0] == "--durable-fs-test-observe-retries") return await RunDurabilityAsync(observeRetries: true).ConfigureAwait(false);
             if (args.Length == 11 && args[0] == "--sandbox-probe-child") return RunProbe(args);
             if (args.Length == 1 && args[0] == "--probe-descendant") return 0;
             if (args.Length == 1 && args[0] == "--probe-hang") { Thread.Sleep(Timeout.Infinite); return 0; }
@@ -47,19 +49,87 @@ internal static partial class Program
         }
     }
 
-    private static async Task<int> RunDurabilityAsync()
+    private static async Task<int> RunDurabilityAsync(bool observeRetries = false)
     {
+        Stream output = Console.OpenStandardOutput();
         try
         {
             DurableRequest request = await FrameReader.ReadExactlyOneAsync(Console.OpenStandardInput(), WorkerJsonContext.Default.DurableRequest, CancellationToken.None).ConfigureAwait(false);
-            DurableFilesystem.Execute(request);
-            await FrameWriter.WriteAsync(Console.OpenStandardOutput(), new DurableResponse { Ok = true }, WorkerJsonContext.Default.DurableResponse).ConfigureAwait(false);
+            // Every attempt reopens and revalidates the identities from this one
+            // authenticated request. No changed filesystem object is adopted.
+            await DurabilityRetryExecutor.ExecuteAsync(
+                () => DurableFilesystem.Execute(request),
+                ClassifyDurabilityFailure,
+                ClassifyDurabilityFailureStage,
+                delayMilliseconds => Task.Delay(delayMilliseconds, CancellationToken.None),
+                observeRetries
+                    ? (attempt, delayMilliseconds) =>
+                    {
+                        Console.Error.WriteLine($"DURABILITY_RETRY attempt={attempt} delayMs={delayMilliseconds}");
+                        Console.Error.Flush();
+                    }
+                    : null).ConfigureAwait(false);
+            await FrameWriter.WriteAsync(output, new DurableResponse { Ok = true }, WorkerJsonContext.Default.DurableResponse).ConfigureAwait(false);
             return 0;
         }
-        catch
+        catch (Exception exception)
         {
-            return 1;
+            try
+            {
+                await FrameWriter.WriteAsync(output, new DurableResponse
+                {
+                    Ok = false,
+                    FailureKind = ClassifyDurabilityFailure(exception),
+                    FailureStage = ClassifyDurabilityFailureStage(exception)
+                }, WorkerJsonContext.Default.DurableResponse).ConfigureAwait(false);
+                return 0;
+            }
+            catch
+            {
+                return 1;
+            }
         }
+    }
+
+    private static string ClassifyDurabilityFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Win32Exception { NativeErrorCode: 32 or 33 }) return "sharing-violation";
+            if (current is Win32Exception { NativeErrorCode: 5 }) return "access-denied";
+        }
+        if (DurabilityExceptionChainContains<UnauthorizedAccessException>(exception)) return "access-denied";
+        if (DurabilityExceptionChainContains<TimeoutException>(exception)) return "timeout";
+        if (DurabilityExceptionChainContains<InvalidDataException>(exception)) return "integrity-failure";
+        if (DurabilityExceptionChainContains<IOException>(exception)) return "io-failure";
+        return "worker-failure";
+    }
+
+    private static string ClassifyDurabilityFailureStage(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is DurabilityFailureException staged)
+            {
+                return staged.FailureStage switch
+                {
+                    "root-open" or "source-open" or "destination-parent-open" or "source-parent-open" or
+                    "ancestor-open" or "preflight-revalidation" or "handle-rename" or "completion-flush" or
+                    "published-identity" or "final-revalidation" or "request" => staged.FailureStage,
+                    _ => "request"
+                };
+            }
+        }
+        return "request";
+    }
+
+    private static bool DurabilityExceptionChainContains<T>(Exception exception) where T : Exception
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is T) return true;
+        }
+        return false;
     }
 
     private static async Task<int> RunFramedWorkerAsync()
@@ -156,7 +226,7 @@ internal static partial class Program
             runtime.Revalidate();
             foreach (PinnedFile inputPin in workspace.StagedInputPins) inputPin.Revalidate();
             SevenZipCommand command = SevenZipCommandFactory.Create(runtime.Executable, request.Operation!, request.ArchiveFamily!, workspace.ArchivePath!, workspace.Scratch, sandboxOutput, request.EntryName);
-            var environment = MinimalEnvironment(workspace.Scratch, bundleDirectory: null);
+            var environment = MinimalEnvironment(workspace.Scratch, extractionBlocker: null);
             int deadlineMs = request.Operation == "extract" ? request.Limits!.MaxExtractionMs : request.Limits!.MaxListTestMs;
             long policyStdoutLimit = ParseDecimal(request.Limits!.MaxTechnicalStdoutBytes!, 64 * 1024 * 1024);
             long stdoutLimit = request.Operation == "read-entry" && request.MaxDataBytes is not null ?
@@ -248,7 +318,7 @@ internal static partial class Program
         string input = workspace.Input;
         string output = workspace.Output;
         string scratch = workspace.Scratch;
-        string bundle = workspace.Bundle;
+        string extractionBlocker = worker.Path;
         string nonce = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
         string inputFile = Path.Combine(input, "probe.txt");
         File.WriteAllText(inputFile, nonce, StrictUtf8);
@@ -276,7 +346,6 @@ internal static partial class Program
                 grants.GrantReadFile(inputPin.Path);
                 grants.GrantReadWriteDirectory(output);
                 grants.GrantReadWriteDirectory(scratch);
-                grants.GrantBundleDirectory(bundle);
                 runtime.Revalidate();
                 worker.Revalidate();
                 inputPin.Revalidate();
@@ -287,16 +356,14 @@ internal static partial class Program
                 string[] arguments =
                 {
                     "--sandbox-probe-child", inputFile, output, ambientRead, ambientWrite, userDataSentinel,
-                    port.ToString(CultureInfo.InvariantCulture), handleValue.ToString(CultureInfo.InvariantCulture), bundle, scratch, nonce
+                    port.ToString(CultureInfo.InvariantCulture), handleValue.ToString(CultureInfo.InvariantCulture), extractionBlocker, scratch, nonce
                 };
-                ProcessCapture capture = await SandboxedProcess.RunAsync(worker.Path, arguments, workspace.Probe, MinimalEnvironment(scratch, bundle), profile.Sid,
+                ProcessCapture capture = await SandboxedProcess.RunAsync(worker.Path, arguments, workspace.Probe, MinimalEnvironment(scratch, extractionBlocker), profile.Sid,
                     TimeSpan.FromMilliseconds(Math.Max(1, limits.MaxListTestMs - 5000)), JobMemoryLimit, 64 * 1024, 8 * 1024, cancellationToken,
                     grants.RegisterChild).ConfigureAwait(false);
                 if (capture.ExitCode != 0 || capture.StandardError.Length != 0 || capture.StandardOutput.Length is < 2 or > 64 * 1024)
                 {
-                    string bundleEntries = string.Join(',', Directory.EnumerateFileSystemEntries(bundle, "*", SearchOption.AllDirectories)
-                        .Select(value => Path.GetRelativePath(bundle, value)).Order(StringComparer.Ordinal));
-                    throw new InvalidDataException($"Containment probe failed (0x{capture.NativeExitCode:x8}, bundle entries {bundleEntries}): {StrictUtf8.GetString(capture.StandardError)}");
+                    throw new InvalidDataException($"Containment probe failed (0x{capture.NativeExitCode:x8}): {StrictUtf8.GetString(capture.StandardError)}");
                 }
                 FrameReader.ValidateStrictJson(capture.StandardOutput);
                 ContainmentEvidence evidence = JsonSerializer.Deserialize(capture.StandardOutput, WorkerJsonContext.Default.ContainmentEvidence) ?? throw new InvalidDataException("Containment evidence missing");
@@ -304,14 +371,14 @@ internal static partial class Program
                 AclProcessIdentity? killedIdentity = null;
                 try
                 {
-                    _ = await SandboxedProcess.RunAsync(worker.Path, ["--probe-hang"], workspace.Probe, MinimalEnvironment(scratch, bundle), profile.Sid,
+                    _ = await SandboxedProcess.RunAsync(worker.Path, ["--probe-hang"], workspace.Probe, MinimalEnvironment(scratch, extractionBlocker), profile.Sid,
                         TimeSpan.FromMilliseconds(250), JobMemoryLimit, 1024, 1024, CancellationToken.None,
                         (handle, processId) => { grants.RegisterChild(handle, processId); killedIdentity = ProcessIdentity.FromHandle(handle, processId); }).ConfigureAwait(false);
                     throw new InvalidDataException("Job survivor probe unexpectedly exited");
                 }
                 catch (TimeoutException) when (killedIdentity is not null) { }
                 evidence.CleanupKilledSurvivors = killedIdentity is not null && ProcessIdentity.State(killedIdentity) == ProcessIdentityState.Exited;
-                evidence.TemporaryAclRemoved = grants.Complete(output, bundle);
+                evidence.TemporaryAclRemoved = grants.Complete(output);
                 workspace.PublishOutput(published);
                 evidence.PublishedOutputAclClean = AclLeaseTreeVerification.HasNoAllowForSid(published, profile.Sid);
                 profile.VerifyStoreCleanAndClose();
@@ -349,7 +416,7 @@ internal static partial class Program
             string userData = args[5];
             int port = int.Parse(args[6], CultureInfo.InvariantCulture);
             nint brokerHandle = new(long.Parse(args[7], CultureInfo.InvariantCulture));
-            string expectedBundle = args[8];
+            string expectedExtractionBlocker = args[8];
             string expectedScratch = args[9];
             string nonce = args[10];
             bool appContainer = IsAppContainerToken();
@@ -368,9 +435,12 @@ internal static partial class Program
             bool environmentControlled = new[] { "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP" }
                 .All(name => ControlledEnvironmentPath(Environment.GetEnvironmentVariable(name), expectedScratch)) &&
                 Environment.GetEnvironmentVariable("PATH") is null && Environment.GetEnvironmentVariable("MINECRAFT_CORE_BROKER_SECRET") is null;
-            bool bundleObserved = Directory.Exists(expectedBundle) && Directory.EnumerateFiles(expectedBundle, "*", SearchOption.AllDirectories).Any();
-            bool bundleIsolated = string.Equals(Path.GetFullPath(actualBundle ?? string.Empty), Path.GetFullPath(expectedBundle), StringComparison.OrdinalIgnoreCase) &&
-                bundleObserved && TryWriteExact(Path.Combine(expectedBundle, "bundle-marker"), nonce);
+            string processPath = Path.GetFullPath(Environment.ProcessPath!);
+            string processDirectory = Path.GetDirectoryName(processPath)!;
+            bool bundleRuntimeInMemory = File.Exists(expectedExtractionBlocker) &&
+                string.Equals(Path.GetFullPath(actualBundle ?? string.Empty), Path.GetFullPath(expectedExtractionBlocker), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(Path.GetFullPath(expectedExtractionBlocker), processPath, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory)), processDirectory, StringComparison.OrdinalIgnoreCase);
             bool stdinClosed = Console.OpenStandardInput().ReadByte() == -1;
             var evidence = new ContainmentEvidence
             {
@@ -386,7 +456,7 @@ internal static partial class Program
                 DescendantsDenied = descendantsDenied,
                 UnrelatedEnvironmentAbsent = environmentControlled,
                 UnrelatedHandlesAbsent = handlesAbsent,
-                BundleExtractionIsolated = bundleIsolated && inJob,
+                BundleRuntimeInMemory = bundleRuntimeInMemory && inJob,
                 StandardInputClosed = stdinClosed
             };
             byte[] json = JsonSerializer.SerializeToUtf8Bytes(evidence, WorkerJsonContext.Default.ContainmentEvidence);
@@ -506,7 +576,7 @@ internal static partial class Program
     private static bool TryWriteExact(string file, string value) { try { File.WriteAllText(file, value, StrictUtf8); return File.ReadAllText(file, StrictUtf8) == value; } catch { return false; } }
     private static bool TryOpenWrite(string file) { try { using FileStream stream = File.Open(file, FileMode.Open, FileAccess.Write, FileShare.Read); return true; } catch { return false; } }
 
-    private static IReadOnlyDictionary<string, string> MinimalEnvironment(string scratch, string? bundleDirectory)
+    private static IReadOnlyDictionary<string, string> MinimalEnvironment(string scratch, string? extractionBlocker)
     {
         var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -521,7 +591,7 @@ internal static partial class Program
             ["DOTNET_EnableDiagnostics"] = "0",
             ["COMPlus_EnableDiagnostics"] = "0"
         };
-        if (bundleDirectory is not null) environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = bundleDirectory;
+        if (extractionBlocker is not null) environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = extractionBlocker;
         return environment;
     }
 
@@ -645,7 +715,7 @@ internal static partial class Program
         if (!evidence.DescendantsDenied) missing.Add(nameof(evidence.DescendantsDenied));
         if (!evidence.UnrelatedEnvironmentAbsent) missing.Add(nameof(evidence.UnrelatedEnvironmentAbsent));
         if (!evidence.UnrelatedHandlesAbsent) missing.Add(nameof(evidence.UnrelatedHandlesAbsent));
-        if (!evidence.BundleExtractionIsolated) missing.Add(nameof(evidence.BundleExtractionIsolated));
+        if (!evidence.BundleRuntimeInMemory) missing.Add(nameof(evidence.BundleRuntimeInMemory));
         if (!evidence.StandardInputClosed) missing.Add(nameof(evidence.StandardInputClosed));
         if (!evidence.CleanupKilledSurvivors) missing.Add(nameof(evidence.CleanupKilledSurvivors));
         if (!evidence.TemporaryAclRemoved) missing.Add(nameof(evidence.TemporaryAclRemoved));

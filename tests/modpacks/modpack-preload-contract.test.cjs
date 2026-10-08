@@ -4,15 +4,18 @@ const Module = require('node:module');
 const test = require('node:test');
 
 const INVOKES = [
+  'client-packs:get-companion', 'client-packs:list-companion-assets', 'client-packs:inspect-companion',
+  'client-packs:accept-companion', 'client-packs:get-state', 'client-packs:preview', 'client-packs:install',
+  'client-packs:cancel', 'client-packs:verify', 'client-packs:recover',
   'modpacks:search-catalog', 'modpacks:get-project', 'modpacks:list-versions', 'modpacks:list-github-releases',
   'modpacks:list-github-assets', 'modpacks:select-local-archive', 'modpacks:reserve-server-destination',
-  'modpacks:inspect', 'modpacks:preflight',
+  'modpacks:release-server-destination', 'modpacks:inspect', 'modpacks:cancel-inspection', 'modpacks:preflight',
   'modpacks:preflight-management', 'modpacks:start-operation', 'modpacks:cancel-job', 'modpacks:get-job', 'modpacks:get-state',
-  'modpacks:list-history', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
+  'modpacks:list-history', 'modpacks:list-rollback-options', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
   'modpacks:ack-notification', 'modpacks:check-updates', 'modpacks:update-tracking', 'modpacks:verify',
   'modpacks:perform-safe-action'
 ];
-const EVENTS = ['modpacks:job-progress', 'modpacks:job-log', 'modpacks:state-changed', 'modpacks:notification'];
+const EVENTS = ['client-packs:progress', 'modpacks:job-progress', 'modpacks:job-log', 'modpacks:state-changed', 'modpacks:notification', 'modpacks:inspection-progress'];
 
 function loadPreload() {
   const modulePath = path.resolve(__dirname, '../../electron/preload.cjs');

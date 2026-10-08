@@ -3,7 +3,9 @@
   
   import { SvelteSet } from 'svelte/reactivity';
   import { get } from 'svelte/store';
-  import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-svelte';
+  import ChevronDown from 'lucide-svelte/icons/chevron-down';
+  import ChevronRight from 'lucide-svelte/icons/chevron-right';
+  import ExternalLink from 'lucide-svelte/icons/external-link';
   import { serverState } from '../../stores/serverState.js';
   import { settingsStore, updateVersions } from '../../stores/settingsStore.js';
   import { safeInvoke } from '../../utils/ipcUtils.js';
@@ -805,7 +807,7 @@
 {#if modpackManaged}
   <div class="managed-version-route">
     <strong>This server version is managed by its Modpack.</strong>
-    <p>Use the Modpack tab to review exact pack versions, update or downgrade with a compatible world restore point, and switch packs safely.</p>
+    <p>Use the Modpack tab to review exact pack versions, update or downgrade with a fresh verified safety restore point, and switch packs through a reviewed transaction.</p>
     <button type="button" on:click={openModpackManagement}>Open Modpack version management</button>
   </div>
 {:else}

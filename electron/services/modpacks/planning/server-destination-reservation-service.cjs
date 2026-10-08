@@ -30,6 +30,13 @@ function samePath(left, right) {
     : a === b;
 }
 
+function pathKey(value) {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32'
+    ? resolved.toLocaleLowerCase('en-US')
+    : resolved;
+}
+
 function displayNameFor(targetPath) {
   const name = path.basename(targetPath).normalize('NFC').trim();
   if (!name || name.length > 128 || [...name].some(character => {
@@ -62,6 +69,9 @@ class ServerDestinationReservationService {
     this.captureReservation = captureReservation;
     this.isInstanceIdAvailable = isInstanceIdAvailable;
     this.records = new Map();
+    this.releasedByPath = new Map();
+    this.releasedIds = new Set();
+    this.pendingByPath = new Map();
   }
 
   async reserveWithNativeDialog(request = {}) {
@@ -83,25 +93,30 @@ class ServerDestinationReservationService {
     if (selected.filePaths.length !== 1 || typeof selected.filePaths[0] !== 'string' ||
         !path.isAbsolute(selected.filePaths[0])) throw invalid();
     const targetPath = path.resolve(selected.filePaths[0]);
-    if (targetPath === path.parse(targetPath).root || [...this.records.values()].some(record => samePath(record.targetPath, targetPath))) {
+    if (targetPath === path.parse(targetPath).root) {
       throw new ModpackError('TARGET_EXISTS', 'The selected server destination is already reserved');
     }
-    const reservation = await this.captureReservation({
-      targetPath,
-      reparseInspector: this.reparseInspector
+    return this.#finalizeForPath(targetPath, async () => {
+      if ([...this.records.values()].some(record => samePath(record.targetPath, targetPath))) {
+        throw new ModpackError('TARGET_EXISTS', 'The selected server destination is already reserved');
+      }
+      const reservation = await this.captureReservation({
+        targetPath,
+        reparseInspector: this.reparseInspector
+      });
+      const instanceId = this.#takeReleasedInstanceId(targetPath) || this.#newInstanceId();
+      const createdAt = nowMilliseconds(this.clock);
+      const record = deepFreeze({
+        instanceId,
+        displayName: displayNameFor(targetPath),
+        targetPath,
+        reservation,
+        createdAt,
+        expiresAt: createdAt + this.ttlMs
+      });
+      this.records.set(instanceId, record);
+      return deepFreeze({ instanceId: record.instanceId, displayName: record.displayName });
     });
-    const instanceId = this.#newInstanceId();
-    const createdAt = nowMilliseconds(this.clock);
-    const record = deepFreeze({
-      instanceId,
-      displayName: displayNameFor(targetPath),
-      targetPath,
-      reservation,
-      createdAt,
-      expiresAt: createdAt + this.ttlMs
-    });
-    this.records.set(instanceId, record);
-    return deepFreeze({ instanceId: record.instanceId, displayName: record.displayName });
   }
 
   resolve(instanceId) {
@@ -109,7 +124,7 @@ class ServerDestinationReservationService {
     const record = this.records.get(instanceId);
     if (!record) return null;
     if (nowMilliseconds(this.clock) >= record.expiresAt) {
-      this.records.delete(instanceId);
+      this.#releaseRecord(record);
       throw stale();
     }
     return record;
@@ -119,12 +134,16 @@ class ServerDestinationReservationService {
     const record = this.resolve(instanceId);
     if (!record || !samePath(record.targetPath, targetPath)) throw stale();
     this.records.delete(instanceId);
+    this.#forgetReleasedIdentity(record);
     return true;
   }
 
   release(instanceId) {
     if (typeof instanceId !== 'string' || !INSTANCE_ID.test(instanceId)) return false;
-    return this.records.delete(instanceId);
+    const record = this.records.get(instanceId);
+    if (!record) return false;
+    this.#releaseRecord(record);
+    return true;
   }
 
   sweepExpired(now = nowMilliseconds(this.clock)) {
@@ -132,10 +151,54 @@ class ServerDestinationReservationService {
     let removed = 0;
     for (const [instanceId, record] of this.records) {
       if (now < record.expiresAt) continue;
-      this.records.delete(instanceId);
+      this.#releaseRecord(record);
       removed += 1;
     }
     return removed;
+  }
+
+  #releaseRecord(record) {
+    this.records.delete(record.instanceId);
+    const key = pathKey(record.targetPath);
+    const previous = this.releasedByPath.get(key);
+    if (previous) this.releasedIds.delete(previous);
+    this.releasedByPath.set(key, record.instanceId);
+    this.releasedIds.add(record.instanceId);
+  }
+
+  #forgetReleasedIdentity(record) {
+    const key = pathKey(record.targetPath);
+    if (this.releasedByPath.get(key) !== record.instanceId) return false;
+    this.releasedByPath.delete(key);
+    this.releasedIds.delete(record.instanceId);
+    return true;
+  }
+
+  #takeReleasedInstanceId(targetPath) {
+    const key = pathKey(targetPath);
+    const instanceId = this.releasedByPath.get(key);
+    if (!instanceId) return null;
+    if (this.isInstanceIdAvailable(instanceId) !== true) {
+      throw new ModpackError('TARGET_EXISTS', 'The reserved server destination identifier is already in use');
+    }
+    this.releasedByPath.delete(key);
+    this.releasedIds.delete(instanceId);
+    return instanceId;
+  }
+
+  async #finalizeForPath(targetPath, work) {
+    const key = pathKey(targetPath);
+    const previous = this.pendingByPath.get(key) || Promise.resolve();
+    let release;
+    const current = new Promise(resolve => { release = resolve; });
+    this.pendingByPath.set(key, current);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.pendingByPath.get(key) === current) this.pendingByPath.delete(key);
+    }
   }
 
   #newInstanceId() {
@@ -143,7 +206,8 @@ class ServerDestinationReservationService {
       const token = this.randomUUID();
       const instanceId = `server-${String(token)}`;
       if (!INSTANCE_ID.test(instanceId)) throw invalid();
-      if (!this.records.has(instanceId) && this.isInstanceIdAvailable(instanceId) === true) return instanceId;
+      if (!this.records.has(instanceId) && !this.releasedIds.has(instanceId) &&
+          this.isInstanceIdAvailable(instanceId) === true) return instanceId;
     }
     throw new ModpackError('TARGET_EXISTS', 'A server destination identifier could not be reserved');
   }

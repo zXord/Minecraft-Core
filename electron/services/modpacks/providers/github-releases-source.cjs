@@ -14,10 +14,14 @@ const MAX_SECONDARY_LIMIT_BODY_BYTES = 16 * 1024;
 const SECONDARY_LIMIT_BACKOFF_MS = 60 * 1000;
 const SECONDARY_LIMIT_MESSAGE = 'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.';
 const SECONDARY_LIMIT_DOCUMENTATION_URL = 'https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api';
+const RETRY_AFTER_HTTP_DATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$/u;
 const MAX_ARTIFACT_SET_BYTES = BigInt(ARCHIVE_LIMITS.maxArtifactSetBytes);
 const DECIMAL_ID = /^[1-9][0-9]*$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const MIME = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/;
+const HTTP_TOKEN_SOURCE = "[!#$%&'*+\\-.^_`|~0-9A-Za-z]+";
+const HTTP_TOKEN = new RegExp(`^${HTTP_TOKEN_SOURCE}$`);
+const HTTP_TOKEN_CHARACTER = new RegExp(HTTP_TOKEN_SOURCE.slice(0, -1));
+const MEDIA_TYPE = new RegExp(`^(${HTTP_TOKEN_SOURCE})\\/(${HTTP_TOKEN_SOURCE})$`);
 
 const GITHUB_API_HEADERS = deepFreeze({
   Accept: 'application/vnd.github+json',
@@ -57,6 +61,10 @@ function invalidRequest(field) {
 
 function unavailable() {
   return new ModpackError('INVALID_RELEASE_URL', 'GitHub service is unavailable', { retryable: true });
+}
+
+function rateLimited() {
+  return new ModpackError('RATE_LIMITED', 'GitHub request is rate limited', { retryable: true });
 }
 
 function repositoryNotFound() {
@@ -107,13 +115,64 @@ function timestamp(value, { nullable = false } = {}) {
   const parsed = new Date(value);
   if (parsed.getUTCFullYear() !== Number(match[1]) || parsed.getUTCMonth() + 1 !== Number(match[2]) || parsed.getUTCDate() !== Number(match[3]) ||
     parsed.getUTCHours() !== Number(match[4]) || parsed.getUTCMinutes() !== Number(match[5]) || parsed.getUTCSeconds() !== Number(match[6])) throw invalidResponse();
-  return value;
+  return parsed.toISOString();
 }
 
 function fileName(value) {
   safeText(value, 255);
   if (!isSafeWindowsBasename(value)) throw invalidResponse();
   return value;
+}
+
+function mediaType(value) {
+  safeText(value, 128);
+  const firstParameter = value.indexOf(';');
+  const type = value.slice(0, firstParameter < 0 ? value.length : firstParameter).trim();
+  if (!MEDIA_TYPE.test(type)) throw invalidResponse();
+  const names = new Set();
+  let cursor = firstParameter < 0 ? value.length : firstParameter;
+  while (cursor < value.length) {
+    if (value[cursor] !== ';') throw invalidResponse();
+    cursor += 1;
+    while (value[cursor] === ' ') cursor += 1;
+    const nameStart = cursor;
+    while (cursor < value.length && HTTP_TOKEN_CHARACTER.test(value[cursor])) cursor += 1;
+    const rawName = value.slice(nameStart, cursor);
+    if (!HTTP_TOKEN.test(rawName)) throw invalidResponse();
+    while (value[cursor] === ' ') cursor += 1;
+    if (value[cursor] !== '=') throw invalidResponse();
+    cursor += 1;
+    while (value[cursor] === ' ') cursor += 1;
+    if (value[cursor] === '"') {
+      cursor += 1;
+      let closed = false;
+      while (cursor < value.length) {
+        const character = value[cursor];
+        if (character === '\\') {
+          cursor += 1;
+          if (cursor >= value.length || value.charCodeAt(cursor) < 32 || value.charCodeAt(cursor) > 126) throw invalidResponse();
+        } else if (character === '"') {
+          cursor += 1;
+          closed = true;
+          break;
+        } else if (character === '\\' || character.charCodeAt(0) < 32 || character.charCodeAt(0) > 126) {
+          throw invalidResponse();
+        }
+        cursor += 1;
+      }
+      if (!closed) throw invalidResponse();
+    } else {
+      const parameterStart = cursor;
+      while (cursor < value.length && HTTP_TOKEN_CHARACTER.test(value[cursor])) cursor += 1;
+      if (!HTTP_TOKEN.test(value.slice(parameterStart, cursor))) throw invalidResponse();
+    }
+    while (value[cursor] === ' ') cursor += 1;
+    if (cursor < value.length && value[cursor] !== ';') throw invalidResponse();
+    const name = rawName.toLocaleLowerCase('en-US');
+    if (names.has(name)) throw invalidResponse();
+    names.add(name);
+  }
+  return type.toLocaleLowerCase('en-US');
 }
 
 function isExactSecondaryLimitBody(body) {
@@ -145,11 +204,32 @@ function normalizeHeaders(value) {
     const key = wanted.get(name.toLocaleLowerCase('en-US'));
     if (!key) continue;
     if (typeof raw !== 'string' || raw.length > 8192 || hasControl(raw)) throw invalidResponse();
+    if (Object.hasOwn(result, key)) throw invalidResponse();
     result[key] = raw;
   }
   if (result.etag !== undefined && !/^(?:W\/)?"[A-Za-z0-9._:+/=-]{1,200}"$/.test(result.etag)) throw invalidResponse();
   if (result.rateLimitRemaining !== undefined && !/^(0|[1-9][0-9]*)$/.test(result.rateLimitRemaining)) throw invalidResponse();
+  if (result.rateLimitReset !== undefined && !/^[1-9][0-9]*$/.test(result.rateLimitReset)) throw invalidResponse();
   return result;
+}
+
+function retryAfterDelay(value, now) {
+  if (/^(0|[1-9][0-9]*)$/.test(value)) {
+    const milliseconds = BigInt(value) * 1000n;
+    return Number(milliseconds > BigInt(MAX_RETRY_MS) ? BigInt(MAX_RETRY_MS) : milliseconds);
+  }
+  if (!RETRY_AFTER_HTTP_DATE.test(value)) throw invalidResponse();
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toUTCString() !== value) throw invalidResponse();
+  return Math.min(MAX_RETRY_MS, Math.max(0, parsed - now));
+}
+
+function rateLimitReset(value, now) {
+  const resetMilliseconds = BigInt(value) * 1000n;
+  const nowValue = BigInt(now);
+  const rawDelay = resetMilliseconds > nowValue ? resetMilliseconds - nowValue : 0n;
+  const delay = Number(rawDelay > BigInt(MAX_RETRY_MS) ? BigInt(MAX_RETRY_MS) : rawDelay);
+  return { delay, at: new Date(now + delay).toISOString() };
 }
 
 function normalizedNow(clock) {
@@ -210,8 +290,7 @@ function visibleRelease(value) {
 
 function normalizeAsset(value, repositoryId, releaseId, etag) {
   if (!plain(value) || (value.state !== 'uploaded' && value.state !== 'new')) throw invalidResponse();
-  const contentType = safeText(value.content_type, 128);
-  if (!MIME.test(contentType)) throw invalidResponse();
+  const contentType = mediaType(value.content_type);
   const result = {
     repositoryId,
     releaseId,
@@ -289,22 +368,14 @@ class GitHubReleasesSource {
     const backoffMs = Number(exponentialBackoff > backoffLimit ? backoffLimit : exponentialBackoff);
     let retryAfterMs = 0;
     if (headers.retryAfter !== undefined) {
-      if (/^(0|[1-9][0-9]*)$/.test(headers.retryAfter)) retryAfterMs = Math.min(MAX_RETRY_MS, Number(headers.retryAfter) * 1000);
-      else {
-        const parsed = Date.parse(headers.retryAfter);
-        if (Number.isNaN(parsed)) throw invalidResponse();
-        retryAfterMs = Math.min(MAX_RETRY_MS, Math.max(0, parsed - now));
-      }
-      if (!Number.isSafeInteger(retryAfterMs)) throw invalidResponse();
+      retryAfterMs = retryAfterDelay(headers.retryAfter, now);
     }
     let resetDelay = 0;
     let rateLimitResetAt;
     if (headers.rateLimitReset !== undefined && headers.rateLimitRemaining === '0') {
-      if (!/^[1-9][0-9]*$/.test(headers.rateLimitReset)) throw invalidResponse();
-      const resetMs = Number(headers.rateLimitReset) * 1000;
-      if (!Number.isSafeInteger(resetMs)) throw invalidResponse();
-      resetDelay = Math.min(MAX_RETRY_MS, Math.max(0, resetMs - now));
-      rateLimitResetAt = new Date(now + resetDelay).toISOString();
+      const reset = rateLimitReset(headers.rateLimitReset, now);
+      resetDelay = reset.delay;
+      rateLimitResetAt = reset.at;
     }
     const retryMetadata = deepFreeze({
       retryAfterMs,
@@ -312,8 +383,13 @@ class GitHubReleasesSource {
       backoffMs,
       nextAttemptAfterMs: Math.max(retryAfterMs, resetDelay, backoffMs)
     });
-    const error = unavailable();
-    error.retryMetadata = retryMetadata;
+    const error = rateLimited();
+    Object.defineProperty(error, 'retryMetadata', {
+      value: retryMetadata,
+      enumerable: false,
+      writable: false,
+      configurable: false
+    });
     return error;
   }
 
@@ -403,10 +479,12 @@ class GitHubReleasesSource {
     }
     const key = `releases:${repository.repositoryId}:${page}`;
     if (etag !== undefined) {
-      if (cursor !== undefined || typeof etag !== 'string' || !/^(?:W\/)?"[A-Za-z0-9._:+/=-]{1,200}"$/.test(etag)) {
+      if (cursor !== undefined || (etag !== null &&
+          (typeof etag !== 'string' || !/^(?:W\/)?"[A-Za-z0-9._:+/=-]{1,200}"$/.test(etag)))) {
         throw invalidRequest('etag');
       }
-      this.etags.set(key, etag);
+      if (etag === null) this.etags.delete(key);
+      else this.etags.set(key, etag);
     }
     const response = await this.requestJson(`/repos/${repository.owner}/${repository.repo}/releases`, {
       headers: this.requestHeaders(key),

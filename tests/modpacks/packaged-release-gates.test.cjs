@@ -55,7 +55,10 @@ function driverEvidence() {
       fixtureFactoryEnabled: false,
       isolatedUserData: true,
       pathSanitized: true,
-      publicNetworkRequests: 0
+      updaterEnabled: false,
+      automaticReleaseChecksEnabled: false,
+      publicManagementListenersEnabled: false,
+      rendererPublicNetworkRequests: 0
     },
     fallbacksUsed: []
   };
@@ -118,7 +121,7 @@ function packagedEvidence() {
     version: 1,
     architecture: 'x64',
     runtime: { version: '26.02', handlers: { zip: true, rar: true } },
-    worker: { runtimeIdentifier: 'win-x64', size: 67_744_371, sha256: DIGESTS.worker },
+    worker: { runtimeIdentifier: 'win-x64', runtimeMode: 'in-memory-single-file', size: 67_744_371, sha256: DIGESTS.worker },
     containment: 'passed',
     fallbacksUsed: []
   };
@@ -189,7 +192,7 @@ test('packaged smoke strips PATH and executable injection variables from the app
   assert.equal(Object.isFrozen(result), true);
 });
 
-test('packaged archive probes keep the private .NET bundle extraction path below MAX_PATH', async () => {
+test('packaged archive probes resolve one exact private worker-state root', async () => {
   const { resolveArchiveWorkerProbeRoot } = await smokeModule;
   assert.equal(typeof resolveArchiveWorkerProbeRoot, 'function');
   const probeRoot = path.join(
@@ -199,17 +202,8 @@ test('packaged archive probes keep the private .NET bundle extraction path below
   );
 
   const workerRoot = resolveArchiveWorkerProbeRoot(probeRoot);
-  const longestBundledRuntimePath = path.join(
-    workerRoot,
-    'broker-bundles',
-    'bundle-XXXXXX',
-    'ArchiveWorker',
-    'fffff',
-    'System.Runtime.InteropServices.RuntimeInformation.dll'
-  );
-
   assert.equal(path.dirname(workerRoot), path.resolve(probeRoot));
-  assert.ok(longestBundledRuntimePath.length <= 259, `${longestBundledRuntimePath.length} exceeds MAX_PATH`);
+  assert.equal(path.basename(workerRoot), 'w');
 });
 
 test('packaged smoke requires closed containment, archive-layer, lifecycle, ownership, and recovery evidence', async () => {
@@ -229,6 +223,7 @@ test('packaged smoke requires closed containment, archive-layer, lifecycle, owne
     archiveWorker: {
       containment: 'passed',
       runtimeVersion: '26.02',
+      runtimeMode: 'in-memory-single-file',
       handlers: { zip: true, rar: true },
       workerSize: 67_744_371,
       workerSha256: DIGESTS.worker
@@ -244,6 +239,7 @@ test('packaged smoke requires closed containment, archive-layer, lifecycle, owne
 
   for (const mutate of [
     value => { value.archiveWorker.containment = 'unavailable'; },
+    value => { value.archiveWorker.runtimeMode = 'self-extracting'; },
     value => { value.fallbacksUsed.push('PATH'); },
     value => { value.archives.extracted = value.archives.extracted.filter(entry => entry.archiveId !== 'rar5-part-number'); },
     value => { value.archives.schemes.find(entry => entry.groupingScheme === 'rar-rxx').layer = 'packaged-worker-extraction'; },
@@ -254,6 +250,10 @@ test('packaged smoke requires closed containment, archive-layer, lifecycle, owne
     value => { value.lifecycle.recovery.canonicalServerCount = 2; },
     value => { value.environment.pathSanitized = false; },
     value => { value.environment.fixtureFactoryEnabled = true; },
+    value => { value.environment.updaterEnabled = true; },
+    value => { value.environment.automaticReleaseChecksEnabled = true; },
+    value => { value.environment.publicManagementListenersEnabled = true; },
+    value => { value.environment.rendererPublicNetworkRequests = 1; },
     value => { value.privatePath = 'C:\\secret'; }
   ]) {
     const changed = structuredClone(good);
@@ -293,8 +293,79 @@ test('packaged smoke combines real package verification with one isolated driver
   assert.equal(result.application.executableSize, 12);
   assert.equal(result.application.executableSha256, '7b5d2ffb87d6b7336aaea9bf55d2208f62e94588b57719ebd61188d204ba5e07');
   assert.equal(result.archiveWorker.containment, 'passed');
+  assert.equal(result.archiveWorker.runtimeMode, 'in-memory-single-file');
   assert.equal(result.fallbacksUsed.length, 0);
   assert.equal(fs.existsSync(observed.userDataPath), false, 'isolated userData must be removed after the smoke');
+});
+
+test('packaged smoke serializes heavyweight probes before launching the packaged application', async (t) => {
+  const { runPackagedSmoke } = await smokeModule;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-packaged-smoke-serial-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const appOutDir = path.join(root, 'win-unpacked');
+  fs.mkdirSync(appOutDir);
+  fs.writeFileSync(path.join(appOutDir, 'Minecraft Core.exe'), 'packaged-exe');
+  const order = [];
+  let archiveCompleted = false;
+
+  await runPackagedSmoke({
+    repositoryRoot,
+    appOutDir,
+    temporaryBase: root,
+    verifyPackage: async () => packagedEvidence(),
+    archiveProbe: async () => {
+      order.push('archive-start');
+      await new Promise(resolve => setTimeout(resolve, 25));
+      archiveCompleted = true;
+      order.push('archive-end');
+      return archiveProbeEvidence();
+    },
+    deterministicProbe: async () => {
+      assert.equal(archiveCompleted, true, 'native extraction and Electron lifecycle probes must not compete for memory');
+      order.push('lifecycle');
+      return deterministicEvidence();
+    },
+    driver: async () => {
+      order.push('packaged-app');
+      return driverEvidence();
+    }
+  });
+
+  assert.deepEqual(order, ['archive-start', 'archive-end', 'lifecycle', 'packaged-app']);
+});
+
+test('packaged smoke preserves its isolated root when Electron process-tree exit cannot be proven', async (t) => {
+  const { runPackagedSmoke } = await smokeModule;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-packaged-smoke-preservation-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const appOutDir = path.join(root, 'win-unpacked');
+  fs.mkdirSync(appOutDir);
+  fs.writeFileSync(path.join(appOutDir, 'Minecraft Core.exe'), 'packaged-exe');
+  let isolatedRoot = null;
+
+  await assert.rejects(runPackagedSmoke({
+    repositoryRoot,
+    appOutDir,
+    temporaryBase: root,
+    verifyPackage: async () => packagedEvidence(),
+    archiveProbe: async () => archiveProbeEvidence(),
+    deterministicProbe: async () => deterministicEvidence(),
+    driver: async ({ userDataPath }) => {
+      isolatedRoot = path.dirname(userDataPath);
+      fs.writeFileSync(path.join(userDataPath, 'cleanup-evidence.txt'), 'preserve me');
+      const error = new Error('injected unproven process-tree exit');
+      error.code = 'PACKAGED_STARTUP_FAILED';
+      error.preservePackagedSmokeRoot = true;
+      throw error;
+    }
+  }), /Packaged modpack smoke evidence is incomplete/u);
+
+  assert.ok(isolatedRoot);
+  assert.equal(fs.existsSync(isolatedRoot), true, 'the isolated smoke root must remain for diagnosis');
+  assert.equal(
+    fs.readFileSync(path.join(isolatedRoot, 'user-data', 'cleanup-evidence.txt'), 'utf8'),
+    'preserve me'
+  );
 });
 
 test('packaged smoke waits for every shared-root probe before failure cleanup', async (t) => {

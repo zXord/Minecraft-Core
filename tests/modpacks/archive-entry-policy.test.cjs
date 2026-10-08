@@ -169,13 +169,32 @@ test('rejects unknown, signed, padded, overflowing, and inconsistent safety size
     file('a', { size: '01' }),
     file('a', { size: '18446744073709551616' }),
     file('a', { size: '1', packedSize: '0' }),
-    directory('a', { size: '1' }),
-    directory('a', { packedSize: '1' })
+    directory('a', { size: '1' })
   ];
   for (const entry of invalid) {
     assert.throws(() => validateArchiveEntries([entry], ARCHIVE_LIMITS), error =>
       error?.code === 'UNSAFE_ARCHIVE_ENTRY' || error?.code === 'ARCHIVE_LIMIT_EXCEEDED');
   }
+});
+
+test('accepts zero-byte directory entries with packed ZIP metadata while retaining those packed bytes in totals', () => {
+  const result = validateArchiveEntries([
+    directory('defaultconfigs', { packedSize: '2' }),
+    file('defaultconfigs/server.toml', { size: '5', packedSize: '3' })
+  ], ARCHIVE_LIMITS);
+
+  assert.deepEqual(result.entries.map(entry => ({ path: entry.path, type: entry.type, size: entry.size, packedSize: entry.packedSize })), [
+    { path: 'defaultconfigs', type: 'directory', size: '0', packedSize: '2' },
+    { path: 'defaultconfigs/server.toml', type: 'file', size: '5', packedSize: '3' }
+  ]);
+  assert.equal(result.totals.packedBytes, '5');
+});
+
+test('continues rejecting directories whose uncompressed size is nonzero even when packed metadata is present', () => {
+  assert.throws(
+    () => validateArchiveEntries([directory('defaultconfigs', { size: '1', packedSize: '2' })], ARCHIVE_LIMITS),
+    hasCode('UNSAFE_ARCHIVE_ENTRY')
+  );
 });
 
 test('enforces exact entry, per-file, and aggregate expansion limits with safe decimals', () => {
@@ -215,6 +234,22 @@ test('enforces exact per-entry ratio at 64 MiB and aggregate ratio at 256 MiB', 
   }));
   assert.throws(() => validateArchiveEntries(entries, ARCHIVE_LIMITS), error =>
     error?.code === 'ARCHIVE_LIMIT_EXCEEDED' && error?.details?.limit === 'maxAggregateCompressionRatio');
+});
+
+test('does not let directory packed metadata mask an aggregate regular-file compression bomb', () => {
+  const fileExpanded = 53687092n;
+  const filePacked = 53687n;
+  const files = Array.from({ length: 5 }, (_, index) => file(`bomb-${index}`, {
+    size: fileExpanded.toString(), packedSize: filePacked.toString()
+  }));
+
+  assert.throws(
+    () => validateArchiveEntries([
+      ...files,
+      directory('defaultconfigs', { packedSize: (fileExpanded * 5n).toString() })
+    ], ARCHIVE_LIMITS),
+    error => error?.code === 'ARCHIVE_LIMIT_EXCEEDED' && error?.details?.limit === 'maxAggregateCompressionRatio'
+  );
 });
 
 test('custom limits must retain the exact closed versioned policy shape', () => {

@@ -5,7 +5,7 @@ const path = require('node:path');
 const Module = require('node:module');
 
 const { createMainBootstrap } = require('../electron/bootstrap/create-main-bootstrap.cjs');
-const { createRuntimeFlags } = require('../electron/bootstrap/runtime-flags.cjs');
+const { PACKAGED_SMOKE_ARGUMENT, createRuntimeFlags } = require('../electron/bootstrap/runtime-flags.cjs');
 
 function recorder(order, name, result) {
   return async (...args) => {
@@ -14,11 +14,12 @@ function recorder(order, name, result) {
   };
 }
 
-function bootstrapFixture({ testMode }) {
+function bootstrapFixture({ testMode, packagedSmokeMode = false }) {
   const order = [];
   const userDataPath = path.join(os.tmpdir(), `minecraft-core-main-bootstrap-${testMode ? 'test' : 'production'}`);
   const appCalls = [];
   const app = {
+    isPackaged: packagedSmokeMode,
     setName(value) { appCalls.push(['setName', value]); },
     setAppUserModelId(value) { appCalls.push(['setAppUserModelId', value]); },
     setPath(name, value) { appCalls.push(['setPath', name, value]); }
@@ -36,6 +37,7 @@ function bootstrapFixture({ testMode }) {
     startup: {
       installSecurity: recorder(order, 'security:install'),
       initializeRecovery: recorder(order, 'recovery:initialize'),
+      initializeServerConfig: recorder(order, 'server-config:initialize'),
       cleanupRuntime: recorder(order, 'runtime:cleanup'),
       configureAfterReady: recorder(order, 'security:configure'),
       afterWindowCreated: recorder(order, 'window:after'),
@@ -48,7 +50,12 @@ function bootstrapFixture({ testMode }) {
     env: testMode
       ? { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1', MINECRAFT_CORE_USER_DATA_DIR: userDataPath }
       : { NODE_ENV: 'production', MINECRAFT_CORE_TEST_MODE: '1' },
-    platform: 'win32'
+    argv: packagedSmokeMode
+      ? ['Minecraft Core.exe', `${PACKAGED_SMOKE_ARGUMENT}=${'c'.repeat(64)}`, `--user-data-dir=${userDataPath}`]
+      : ['Minecraft Core.exe'],
+    platform: 'win32',
+    isPackaged: packagedSmokeMode,
+    fsApi: { readFileSync() { return 'c'.repeat(64); }, unlinkSync() {} }
   });
   const bootstrap = createMainBootstrap({ electronApi: { app }, serviceGraph, runtimeFlags });
   return { appCalls, bootstrap, order, runtimeFlags, serviceGraph, userDataPath, window };
@@ -67,9 +74,12 @@ test('test mode is honored only under NODE_ENV=test and carries an isolated user
 
   assert.deepEqual(testFlags, {
     testMode: true,
+    packagedSmokeMode: false,
+    packagedSmokeUserDataPath: null,
     platform: 'win32',
     isolatedUserDataPath: path.resolve(isolated),
     updaterEnabled: false,
+    automaticReleaseChecksEnabled: false,
     trayEnabled: false,
     watchdogEnabled: false,
     nativeNotificationsEnabled: false,
@@ -80,6 +90,56 @@ test('test mode is honored only under NODE_ENV=test and carries an isolated user
   assert.equal(productionFlags.updaterEnabled, true);
   assert.equal(productionFlags.publicManagementListenersEnabled, true);
   assert.equal(Object.isFrozen(testFlags), true);
+});
+
+test('an authenticated isolated real-E2E launch keeps production services but suppresses native notifications', () => {
+  const root = path.join(os.tmpdir(), 'minecraft-core-real-notification-isolation-e2e-fixture');
+  const userDataPath = path.join(root, 'user-data');
+  const flags = createRuntimeFlags({
+    env: {
+      NODE_ENV: 'development',
+      MINECRAFT_CORE_USER_DATA_DIR: userDataPath,
+      MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: '1'
+    },
+    argv: ['electron.exe', '.', `--minecraft-core-real-e2e-root=${root}`],
+    platform: 'win32',
+    isPackaged: false
+  });
+
+  assert.equal(flags.testMode, false);
+  assert.equal(flags.nativeNotificationsEnabled, false);
+  assert.equal(flags.automaticReleaseChecksEnabled, true);
+  assert.equal(flags.watchdogEnabled, true);
+  assert.equal(flags.publicManagementListenersEnabled, true);
+});
+
+test('a mismatched or packaged real-E2E argument cannot suppress production notifications', () => {
+  const root = path.join(os.tmpdir(), 'minecraft-core-real-notification-isolation-e2e-fixture');
+  const unrelatedUserData = path.join(os.tmpdir(), 'minecraft-core-unrelated-user-data');
+  const argv = ['Minecraft Core.exe', `--minecraft-core-real-e2e-root=${root}`];
+
+  assert.equal(createRuntimeFlags({
+    env: { NODE_ENV: 'development', MINECRAFT_CORE_USER_DATA_DIR: unrelatedUserData },
+    argv,
+    platform: 'win32',
+    isPackaged: false
+  }).nativeNotificationsEnabled, true);
+  assert.equal(createRuntimeFlags({
+    env: { NODE_ENV: 'development', MINECRAFT_CORE_USER_DATA_DIR: path.join(root, 'user-data') },
+    argv,
+    platform: 'win32',
+    isPackaged: false
+  }).nativeNotificationsEnabled, true);
+  assert.equal(createRuntimeFlags({
+    env: {
+      NODE_ENV: 'development',
+      MINECRAFT_CORE_USER_DATA_DIR: path.join(root, 'user-data'),
+      MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: '1'
+    },
+    argv,
+    platform: 'win32',
+    isPackaged: true
+  }).nativeNotificationsEnabled, true);
 });
 
 test('packaged binaries ignore test-mode environment flags', () => {
@@ -96,6 +156,44 @@ test('packaged binaries ignore test-mode environment flags', () => {
   assert.equal(flags.publicManagementListenersEnabled, true);
 });
 
+test('an exact packaged smoke argument disables automatic network services without enabling test composition', () => {
+  assert.equal(PACKAGED_SMOKE_ARGUMENT, '--minecraft-core-packaged-smoke');
+  const smokeUserData = path.resolve(os.tmpdir(), 'minecraft-core-authorized-smoke');
+  const nonce = 'a'.repeat(64);
+  const flags = createRuntimeFlags({
+    env: { NODE_ENV: 'production', MINECRAFT_CORE_TEST_MODE: '1' },
+    argv: ['Minecraft Core.exe', `${PACKAGED_SMOKE_ARGUMENT}=${nonce}`, `--user-data-dir=${smokeUserData}`],
+    platform: 'win32',
+    isPackaged: true,
+    fsApi: { readFileSync(filePath) {
+      assert.equal(filePath, path.join(smokeUserData, '.minecraft-core-packaged-smoke'));
+      return nonce;
+    }, unlinkSync(filePath) {
+      assert.equal(filePath, path.join(smokeUserData, '.minecraft-core-packaged-smoke'));
+    } }
+  });
+
+  assert.equal(flags.testMode, false);
+  assert.equal(flags.packagedSmokeMode, true);
+  assert.equal(flags.packagedSmokeUserDataPath, smokeUserData);
+  assert.equal(flags.updaterEnabled, false);
+  assert.equal(flags.automaticReleaseChecksEnabled, false);
+  assert.equal(flags.publicManagementListenersEnabled, false);
+});
+
+test('a packaged smoke argument without its exact userData nonce marker cannot alter production services', () => {
+  const smokeUserData = path.resolve(os.tmpdir(), 'minecraft-core-unauthorized-smoke');
+  const flags = createRuntimeFlags({
+    argv: ['Minecraft Core.exe', `${PACKAGED_SMOKE_ARGUMENT}=${'b'.repeat(64)}`, `--user-data-dir=${smokeUserData}`],
+    isPackaged: true,
+    fsApi: { readFileSync() { throw new Error('missing'); }, unlinkSync() {} }
+  });
+  assert.equal(flags.packagedSmokeMode, false);
+  assert.equal(flags.updaterEnabled, true);
+  assert.equal(flags.automaticReleaseChecksEnabled, true);
+  assert.equal(flags.publicManagementListenersEnabled, true);
+});
+
 test('test mode cannot accidentally start updater or public services', async () => {
   const { appCalls, bootstrap, order, userDataPath, window } = bootstrapFixture({ testMode: true });
 
@@ -106,11 +204,12 @@ test('test mode cannot accidentally start updater or public services', async () 
   assert.deepEqual(appCalls, [
     ['setPath', 'userData', userDataPath],
     ['setName', 'Minecraft Core'],
-    ['setAppUserModelId', 'com.minecraft-core.app']
+    ['setAppUserModelId', 'com.minecraft-core.app.dev']
   ]);
   assert.deepEqual(order, [
     'security:install',
     'recovery:initialize',
+    'server-config:initialize',
     'runtime:cleanup',
     'security:configure',
     'window:create',
@@ -123,7 +222,7 @@ test('test mode cannot accidentally start updater or public services', async () 
   assert.equal(order.includes('notifications:start'), false);
 });
 
-test('production startup completes recovery before launches and dispose is reverse-order idempotent', async () => {
+test('production starts supervision before recovery and disposes services in reverse order idempotently', async () => {
   const { bootstrap, order } = bootstrapFixture({ testMode: false });
 
   bootstrap.initializeBeforeReady();
@@ -133,26 +232,27 @@ test('production startup completes recovery before launches and dispose is rever
 
   assert.deepEqual(order, [
     'security:install',
+    'watchdog:start',
     'recovery:initialize',
+    'server-config:initialize',
     'runtime:cleanup',
     'security:configure',
     'tray:start',
     'window:create',
     'window:after',
     'updater:start',
-    'watchdog:start',
     'notifications:start',
     'management:listen',
     'management:dispose',
     'notifications:dispose',
-    'watchdog:dispose',
     'updater:dispose',
     'tray:dispose',
+    'watchdog:dispose',
     'startup:dispose'
   ]);
 });
 
-test('after-window setup runs immediately after window publication and before background services', async () => {
+test('after-window setup runs immediately after window publication and before updater startup', async () => {
   const { bootstrap, order } = bootstrapFixture({ testMode: false });
 
   await bootstrap.onReady();
@@ -163,6 +263,65 @@ test('after-window setup runs immediately after window publication and before ba
     'window:create',
     'window:after',
     'updater:start'
+  ]);
+});
+
+test('production watchdog supervision is active before recovery can launch app-owned processes', async () => {
+  const { bootstrap, order } = bootstrapFixture({ testMode: false });
+
+  await bootstrap.onReady();
+
+  assert.ok(order.indexOf('watchdog:start') < order.indexOf('recovery:initialize'));
+});
+
+test('packaged smoke retains production local services but cannot start automatic network services', async () => {
+  const { bootstrap, order, runtimeFlags } = bootstrapFixture({ testMode: false, packagedSmokeMode: true });
+
+  await bootstrap.onReady();
+
+  assert.equal(runtimeFlags.testMode, false);
+  assert.equal(runtimeFlags.packagedSmokeMode, true);
+  assert.equal(order.includes('updater:start'), false);
+  assert.equal(order.includes('management:listen'), false);
+  assert.equal(order.includes('tray:start'), true);
+  assert.equal(order.includes('watchdog:start'), true);
+  assert.equal(order.includes('notifications:start'), true);
+});
+
+test('startup emits structured phase markers while keeping main window creation behind recovery', async () => {
+  const phases = [];
+  const userDataPath = path.join(os.tmpdir(), 'minecraft-core-startup-timing');
+  const runtimeFlags = createRuntimeFlags({ env: { NODE_ENV: 'production' }, platform: 'win32' });
+  const bootstrap = createMainBootstrap({
+    electronApi: { app: { setName() {}, setAppUserModelId() {} } },
+    serviceGraph: {
+      paths: { userData: userDataPath },
+      startup: {
+        markTiming(phase) { phases.push(phase); },
+        async initializeRecovery() { phases.push('recovery:work'); },
+        async initializeServerConfig() { phases.push('server-config:work'); },
+        async cleanupRuntime() { phases.push('cleanup:work'); }
+      },
+      window: { create() { phases.push('window:work'); return { id: 99 }; } }
+    },
+    runtimeFlags
+  });
+
+  await bootstrap.onReady();
+
+  assert.deepEqual(phases, [
+    'recovery:start',
+    'recovery:work',
+    'recovery:complete',
+    'server-config:start',
+    'server-config:work',
+    'server-config:complete',
+    'cleanup:start',
+    'cleanup:work',
+    'cleanup:complete',
+    'main-window:create:start',
+    'window:work',
+    'main-window:create:complete'
   ]);
 });
 
@@ -284,17 +443,20 @@ test('startup rejects a factory that neither returns nor publishes a window', as
   assert.equal(afterWindowCalls, 0);
 });
 
-test('production main entry delegates lifecycle ownership to the injected bootstrap', () => {
+test('production main entry delegates lifecycle ownership and holds quit until bootstrap disposal settles', async () => {
   const mainPath = path.resolve(__dirname, '../electron/main.cjs');
   const originalLoad = Module._load;
   const calls = [];
+  const appHandlers = new Map();
   const pendingReady = new Promise(() => {});
+  let finishDisposal;
+  const disposal = new Promise(resolve => { finishDisposal = resolve; });
   const app = {
     isPackaged: false,
     getVersion: () => 'test',
     getPath: () => path.join(os.tmpdir(), 'minecraft-core-main-entry'),
-    on: () => {},
-    quit: () => {},
+    on(name, handler) { appHandlers.set(name, handler); },
+    quit() { calls.push('app:quit'); },
     setName: () => {},
     setAppUserModelId: () => {},
     setPath: () => {},
@@ -311,11 +473,14 @@ test('production main entry delegates lifecycle ownership to the injected bootst
   };
   const store = { get: () => null, set: () => {} };
   const runtimeFlags = { testMode: false };
-  const graph = { id: 'graph' };
+  const graph = { id: 'graph', installSecurity: null };
   const bootstrap = {
-    initializeBeforeReady() { calls.push('bootstrap:initialize'); },
+    initializeBeforeReady() {
+      calls.push('bootstrap:initialize');
+      graph.installSecurity();
+    },
     onReady() { calls.push('bootstrap:ready'); },
-    dispose() { calls.push('bootstrap:dispose'); }
+    dispose() { calls.push('bootstrap:dispose'); return disposal; }
   };
 
   Module._load = function loadMainFixture(request, parent, isMain) {
@@ -347,6 +512,7 @@ test('production main entry delegates lifecycle ownership to the injected bootst
           calls.push('graph:create');
           assert.equal(dependencies.app, app);
           assert.equal(dependencies.store, store);
+          graph.installSecurity = dependencies.startup.installSecurity;
           return graph;
         }
       };
@@ -377,6 +543,20 @@ test('production main entry delegates lifecycle ownership to the injected bootst
       'bootstrap:initialize',
       'app:when-ready'
     ]);
+    const firstQuit = { prevented: 0, preventDefault() { this.prevented += 1; } };
+    appHandlers.get('before-quit')(firstQuit);
+    assert.equal(firstQuit.prevented, 1);
+    assert.equal(calls.filter(value => value === 'bootstrap:dispose').length, 1);
+    assert.equal(calls.includes('app:quit'), false);
+
+    finishDisposal();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls.filter(value => value === 'app:quit').length, 1);
+
+    const reentry = { prevented: 0, preventDefault() { this.prevented += 1; } };
+    appHandlers.get('before-quit')(reentry);
+    assert.equal(reentry.prevented, 0);
+    assert.equal(calls.filter(value => value === 'bootstrap:dispose').length, 1);
   } finally {
     delete require.cache[mainPath];
     Module._load = originalLoad;

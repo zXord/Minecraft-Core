@@ -191,6 +191,11 @@ test('composites route opaque namespaces and execution targets without probing e
   assert.deepEqual(await executor.execute({ actionId: 'retry', targetKind: 'retry', targetId: 'job-one' }), {
     status: 'started', referenceId: 'l:job-one'
   });
+  assert.deepEqual(await executor.execute({
+    actionId: 'retry', targetKind: 'retry', targetId: `op2-${'a'.repeat(32)}`
+  }), {
+    status: 'started', referenceId: `l:op2-${'a'.repeat(32)}`
+  });
   assert.deepEqual(await executor.execute({ actionId: 'retry', targetKind: 'retry', targetId: 'tracking-one' }), {
     status: 'completed', referenceId: 'r:tracking-one'
   });

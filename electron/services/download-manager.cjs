@@ -2,14 +2,29 @@
 const fs = require('fs');
 const path = require('path');
 const progress = require('progress-stream');
+const { pipeline } = require('node:stream/promises');
+const { retainRuntimeWorkerQuiescence } = require('./runtime-worker-quiescence.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
-const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
 const { fetch } = require('../utils/fetch.cjs');
 const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
 
-// Initialize logger
-const logger = getLoggerHandlers();
+function createWorkerSafeLogger() {
+  const workerContext = process.type !== 'browser' || process.env.ELECTRON_RUN_AS_NODE === '1';
+  if (workerContext) {
+    // Runtime workers must never load Electron IPC modules merely to discard their side effects.
+    return Object.freeze({ debug() {}, info() {}, warn() {}, error() {} });
+  }
+  const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
+  const candidate = getLoggerHandlers();
+  if (!['debug', 'info', 'warn', 'error'].every((method) => typeof candidate?.[method] === 'function')) {
+    throw new TypeError('Electron logger handlers are invalid');
+  }
+  return candidate;
+}
+
+// Initialize logger when Electron IPC is available, otherwise use the worker-safe no-op logger.
+const logger = createWorkerSafeLogger();
 
 // Performance tracking
 let performanceMetrics = {
@@ -21,6 +36,71 @@ let performanceMetrics = {
   fabricInstalls: 0,
   minecraftServerDownloads: 0
 };
+
+const FABRIC_INSTALLER_DIAGNOSTIC_LIMIT_BYTES = 16 * 1024;
+
+function fabricCancellation() {
+  const error = new Error('Runtime preparation was cancelled.');
+  error.code = 'CANCELLED';
+  return error;
+}
+
+function observeFabricChild(child, options, reject) {
+  let terminationError = null;
+  let closed = false;
+  let escalationTimer;
+  let settlementTimer;
+  let recordClosure;
+  const closure = new Promise(resolve => { recordClosure = resolve; });
+  const grace = Number.isSafeInteger(options.terminationGraceMs) && options.terminationGraceMs > 0
+    ? Math.min(options.terminationGraceMs, 60_000) : 5000;
+  const terminate = error => {
+    if (closed || terminationError) return;
+    terminationError = error;
+    try { child.kill(); } catch { /* Exact close remains the cleanup authority. */ }
+    if (closed) return;
+    escalationTimer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* Preserve until actual close. */ }
+    }, Math.max(1, Math.floor(grace / 2)));
+    settlementTimer = setTimeout(() => {
+      reject(retainRuntimeWorkerQuiescence(error, closure));
+    }, grace);
+    escalationTimer.unref?.();
+    settlementTimer.unref?.();
+  };
+  const onAbort = () => terminate(fabricCancellation());
+  const timeout = Number.isSafeInteger(options.timeoutMs) && options.timeoutMs > 0
+    ? Math.min(options.timeoutMs, 60 * 60 * 1000) : 15 * 60 * 1000;
+  const deadline = setTimeout(() => terminate(new Error('Fabric installer exceeded its deadline.')), timeout);
+  deadline.unref?.();
+  child.once('close', () => {
+    closed = true;
+    recordClosure(true);
+    clearTimeout(deadline);
+    clearTimeout(escalationTimer);
+    clearTimeout(settlementTimer);
+    options.signal?.removeEventListener('abort', onAbort);
+    if (terminationError) reject(terminationError);
+  });
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  if (options.signal?.aborted) onAbort();
+  return { failure: () => terminationError, terminate };
+}
+
+function appendBoundedInstallerOutput(capture, chunk, limitBytes = FABRIC_INSTALLER_DIAGNOSTIC_LIMIT_BYTES) {
+  const next = Buffer.concat([capture.bytes, Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')]);
+  if (next.length <= limitBytes) {
+    return { bytes: next, truncated: capture.truncated };
+  }
+  return { bytes: next.subarray(next.length - limitBytes), truncated: true };
+}
+
+function installerDiagnosticText(capture, limitBytes = FABRIC_INSTALLER_DIAGNOSTIC_LIMIT_BYTES) {
+  const output = capture.bytes.toString('utf8');
+  return capture.truncated
+    ? `[truncated; retained last ${limitBytes} bytes]\n${output}`
+    : output;
+}
 
 // Log service initialization
 logger.info('Download manager service initialized', {
@@ -40,7 +120,7 @@ logger.info('Download manager service initialized', {
  * @param {string} channel - IPC channel to report download progress on
  * @returns {Promise<void>} - Promise that resolves when download is complete
  */
-async function downloadWithProgress(url, destPath, channel) {
+async function downloadWithProgress(url, destPath, channel, { skipMutationMark = false, signal } = {}) {
   const downloadStartTime = Date.now();
   performanceMetrics.downloadsStarted++;
   
@@ -57,7 +137,8 @@ async function downloadWithProgress(url, destPath, channel) {
   });
   
   try {
-    const res = await fetch(url);
+    signal?.throwIfAborted();
+    const res = await fetch(url, signal ? { signal } : undefined);
     
     if (!res.ok) {
       performanceMetrics.downloadsFailed++;
@@ -174,7 +255,7 @@ async function downloadWithProgress(url, destPath, channel) {
   
     await new Promise((resolve, reject) => {
       const destDir = path.dirname(destPath);
-      markCurrentServerMutationDirty(destPath);
+      if (!skipMutationMark) markCurrentServerMutationDirty(destPath);
       
       // Ensure destination directory exists
       if (!fs.existsSync(destDir)) {
@@ -205,12 +286,9 @@ async function downloadWithProgress(url, destPath, channel) {
             totalDownloadsFailed: performanceMetrics.downloadsFailed
           }
         });
-        reject(new Error(`File write error: ${err.message}`));
       });
       
-      res.body
-        .pipe(prog)
-        .pipe(fileStream)
+      fileStream
         .on('finish', () => {
           const downloadDuration = Date.now() - downloadStartTime;
           performanceMetrics.downloadsCompleted++;
@@ -269,7 +347,6 @@ async function downloadWithProgress(url, destPath, channel) {
             safeSend('fabric-install-progress', { percent: 100, speed: '0.00 MB/s' });
           }
           
-          resolve();
         })
         .on('error', err => {
           const downloadDuration = Date.now() - downloadStartTime;
@@ -289,8 +366,9 @@ async function downloadWithProgress(url, destPath, channel) {
             }
           });
           
-          reject(new Error(`Download stream error: ${err.message}`));
         });
+      // pipeline rejects only after the destination closes, including aborts.
+      pipeline(res.body, prog, fileStream, { signal }).then(resolve, reject);
     });
   } catch (err) {
     const downloadDuration = Date.now() - downloadStartTime;
@@ -309,6 +387,7 @@ async function downloadWithProgress(url, destPath, channel) {
       }
     });
     
+    if (signal?.aborted) throw fabricCancellation();
     throw new Error(`Download failed: ${err.message}`);
   }
 }
@@ -324,6 +403,7 @@ async function downloadWithProgress(url, destPath, channel) {
  * @returns {Promise<void>} - Promise that resolves when installation is complete
  */
 async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = 'install-log', progressChannel = 'fabric-install-progress', options = {}) {
+  if (options.signal?.aborted) throw fabricCancellation();
   const installStartTime = Date.now();
   performanceMetrics.fabricInstalls++;
   
@@ -374,7 +454,9 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
   safeSend(logChannel, '🔍 Checking Java installation...');
   
   await new Promise((resolve, reject) => {
-    execFile(javaCommand, ['-version'], (error, stdout, stderr) => {
+    let ownership;
+    const child = execFile(javaCommand, ['-version'], (error, stdout, stderr) => {
+      if (ownership?.failure()) return;
       if (error) {
         logger.error('Java not found for Fabric installation', {
           category: 'mods',
@@ -411,7 +493,10 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
       safeSend(logChannel, '✓ Java found: ' + javaVersion);
       resolve();
     });
+    ownership = observeFabricChild(child, { ...options, timeoutMs: 30_000 }, reject);
   });
+
+  if (options.signal?.aborted) throw fabricCancellation();
 
   logger.info('Downloading Fabric installer', {
     category: 'network',
@@ -425,7 +510,10 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
   });
   
   safeSend(logChannel, '📥 Downloading Fabric installer...');
-  await downloadWithProgress(installerUrl, installerJar, progressChannel);
+  await downloadWithProgress(installerUrl, installerJar, progressChannel, {
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.skipMutationMark === true ? { skipMutationMark: true } : {})
+  });
   
   logger.info('Fabric installer downloaded successfully', {
     category: 'network',
@@ -440,6 +528,7 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
   safeSend(logChannel, '✔ Fabric installer downloaded');
 
   await new Promise((resolve, reject) => {
+    if (options.signal?.aborted) { reject(fabricCancellation()); return; }
     const installArgs = [
       '-jar', installerJar,
       'server',
@@ -467,6 +556,8 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
     
     const proc = spawn(javaCommand, installArgs, { cwd: targetPath });
     let settled = false;
+    let stdoutCapture = { bytes: Buffer.alloc(0), truncated: false };
+    let stderrCapture = { bytes: Buffer.alloc(0), truncated: false };
 
     const rejectOnce = (error) => {
       if (settled) {
@@ -486,7 +577,10 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
       resolve();
     };
 
+    const ownership = observeFabricChild(proc, options, rejectOnce);
+
     proc.stdout.on('data', data => {
+      stdoutCapture = appendBoundedInstallerOutput(stdoutCapture, data);
       const message = data.toString();
       logger.debug('Fabric installer stdout', {
         category: 'mods',
@@ -501,6 +595,7 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
     });
     
     proc.stderr.on('data', data => {
+      stderrCapture = appendBoundedInstallerOutput(stderrCapture, data);
       const message = data.toString();
       logger.debug('Fabric installer stderr', {
         category: 'mods',
@@ -527,10 +622,11 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
         }
       });
 
-      rejectOnce(new Error(`Failed to launch Fabric installer: ${error.message}`));
+      ownership.terminate(new Error(`Failed to launch Fabric installer: ${error.message}`));
     });
     
     proc.on('close', code => {
+      if (ownership.failure()) return;
       const installDuration = Date.now() - installStartTime;
       
       if (code === 0) {
@@ -589,7 +685,9 @@ async function installFabric(targetPath, mcVersion, fabricLoader, logChannel = '
             mcVersion,
             fabricLoader,
             targetPath,
-            javaCommand
+            javaCommand,
+            installerStdout: installerDiagnosticText(stdoutCapture),
+            installerStderr: installerDiagnosticText(stderrCapture)
           }
         });
         
@@ -835,5 +933,10 @@ async function downloadMinecraftServer(mcVersion, targetPath, progressChannel = 
 module.exports = {
   downloadWithProgress,
   installFabric,
-  downloadMinecraftServer
+  downloadMinecraftServer,
+  __testUtils: {
+    appendBoundedInstallerOutput,
+    installerDiagnosticText,
+    FABRIC_INSTALLER_DIAGNOSTIC_LIMIT_BYTES
+  }
 };

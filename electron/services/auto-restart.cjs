@@ -91,7 +91,9 @@ function restoreRecoveryAutoRestart({ serverPath, operationId, enabled } = {}) {
     delay: typeof current.delay === 'number' ? current.delay : 10,
     maxCrashes: typeof current.maxCrashes === 'number' ? current.maxCrashes : 3
   };
-  updateServerConfig(serverPath, { autoRestart: preserved }, defaults);
+  if (current.enabled !== enabled) {
+    updateServerConfig(serverPath, { autoRestart: preserved }, defaults);
+  }
   applyAutoRestartState(preserved);
   recoveryHolds.delete(key);
   return Object.freeze({ restored: true, enabled, serverPath });
@@ -369,6 +371,7 @@ function createRecoveryRuntimePolicy({ runtimeController } = {}) {
     throw new TypeError('Recovery runtime controller is invalid');
   }
   const adopted = new Map();
+  const restored = new Map();
   function normalizeAdoption(request) {
     if (!request || typeof request !== 'object' || Array.isArray(request) ||
         typeof request.eventId !== 'string' || typeof request.jobId !== 'string' ||
@@ -387,12 +390,19 @@ function createRecoveryRuntimePolicy({ runtimeController } = {}) {
   }
   return Object.freeze({
     suspend(request) {
-      return beginRecoveryHold({ serverPath: request.serverPath, operationId: request.operationId });
+      const hold = beginRecoveryHold({ serverPath: request.serverPath, operationId: request.operationId });
+      restored.delete(serverPathKey(request.serverPath));
+      return hold;
     },
     async ensureStopped(request) {
       const result = await runtimeController.ensureStopped(request);
       if (!result || (result.stopped !== true && result.success !== true && result.alreadyStopped !== true)) {
         throw new Error('Server runtime could not be proven stopped');
+      }
+      const requestedPathKey = serverPathKey(request?.serverPath);
+      for (const [eventId, prior] of adopted) {
+        if (prior.jobId === request?.jobId && prior.instanceId === request?.instanceId &&
+            prior.serverPathKey === requestedPathKey) adopted.delete(eventId);
       }
       return result;
     },
@@ -421,11 +431,30 @@ function createRecoveryRuntimePolicy({ runtimeController } = {}) {
       return frozen;
     },
     restoreAutoRestart(request) {
-      return restoreRecoveryAutoRestart({
+      const key = serverPathKey(request?.serverPath);
+      if (!key || typeof request?.operationId !== 'string' ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(request.operationId) ||
+          typeof request?.enabled !== 'boolean') {
+        throw new TypeError('Recovery restoration is invalid');
+      }
+      const prior = restored.get(key);
+      if (prior) {
+        if (prior.operationId !== request.operationId || prior.enabled !== request.enabled) {
+          throw new TypeError('Recovery restoration does not match');
+        }
+        return prior.result;
+      }
+      const result = restoreRecoveryAutoRestart({
         serverPath: request.serverPath,
         operationId: request.operationId,
         enabled: request.enabled
       });
+      restored.set(key, Object.freeze({
+        operationId: request.operationId,
+        enabled: request.enabled,
+        result
+      }));
+      return result;
     }
   });
 }

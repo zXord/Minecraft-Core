@@ -11,9 +11,10 @@ const utils = require('./minecraft-launcher/utils.cjs');
  * Uses server-specific Java directory (serverPath/java/) for each server
  */
 class ServerJavaManager extends JavaManager {
-  constructor(serverPath = null, { onMutation = markCurrentServerMutationDirty } = {}) {
+  constructor(serverPath = null, options = {}) {
+    const { onMutation = markCurrentServerMutationDirty } = options;
     // Initialize with no client path to use global directory as fallback
-    super(null);
+    super(null, options);
 
     this.onMutation = typeof onMutation === 'function' ? onMutation : markCurrentServerMutationDirty;
 
@@ -23,7 +24,13 @@ class ServerJavaManager extends JavaManager {
 
   beforeFilesystemMutation(targetPath) {
     if (!this.serverPath || typeof this.onMutation !== 'function') return false;
-    return this.onMutation(this.serverPath, targetPath);
+    const marked = this.onMutation(this.serverPath, targetPath);
+    if (marked !== true) {
+      const error = new Error('Server Java filesystem mutation requires an active server mutation lease');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+    return true;
   }
   
   /**
@@ -73,12 +80,12 @@ class ServerJavaManager extends JavaManager {
    * @param {Function} progressCallback - Progress callback function
    * @returns {Promise<{success: boolean, javaPath?: string, error?: string}>}
    */
-  async ensureJavaForMinecraft(minecraftVersion, progressCallback) {
+  async ensureJavaForMinecraft(minecraftVersion, progressCallback, options = {}) {
     const javaRequirement = await utils.resolveRequiredJavaVersion(minecraftVersion);
     const requiredJavaVersion = javaRequirement.requiredJavaVersion;
     
     try {
-      const result = await this.ensureJava(requiredJavaVersion, progressCallback);
+      const result = await this.ensureJava(requiredJavaVersion, progressCallback, options);
       return {
         ...result,
         requiredJavaVersion,

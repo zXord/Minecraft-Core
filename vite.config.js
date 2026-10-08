@@ -1,10 +1,58 @@
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
+import { createHash } from 'node:crypto'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const repositoryRoot = path.resolve(fileURLToPath(new URL('.', import.meta.url)))
+const checkoutCacheKey = createHash('sha256')
+  .update(process.platform === 'win32' ? repositoryRoot.toLowerCase() : repositoryRoot)
+  .digest('hex')
+  .slice(0, 16)
+const viteCacheBase = process.env.MINECRAFT_CORE_VITE_CACHE_ROOT || process.env.LOCALAPPDATA || os.tmpdir()
+const viteCacheDir = path.join(viteCacheBase, 'Minecraft Core', 'vite-cache', checkoutCacheKey)
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [svelte()],
   base: './', // Important for Electron
+  // Keep Vite's dependency optimizer away from cloud/sync filter drivers. The
+  // checkout hash preserves isolation when multiple worktrees are open.
+  cacheDir: viteCacheDir,
+  server: {
+    host: '127.0.0.1',
+    port: 5173,
+    strictPort: true,
+    watch: {
+      ignored: [
+        '**/.archive-worker-diagnostic-*/**',
+        '**/.codex/**',
+        '**/.superpowers/**',
+        '**/.tmp/**',
+        '**/.tools/**',
+        '**/build/**',
+        '**/build-resources/**',
+        '**/coverage/**',
+        '**/dist/**',
+        '**/dist-ssr/**',
+        '**/docs/**',
+        '**/electron/**',
+        '**/logs/**',
+        '**/native/**/bin/**',
+        '**/native/**/obj/**',
+        '**/playwright-report/**',
+        '**/scripts/**',
+        '**/test-results/**',
+        '**/tests/**',
+        '**/third-party/**',
+        '**/vendor/**'
+      ]
+    },
+    warmup: {
+      clientFiles: ['./src/main.js', './src/App.svelte']
+    }
+  },
   build: {
     outDir: 'dist',
     assetsDir: 'assets',

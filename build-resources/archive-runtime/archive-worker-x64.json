@@ -1,13 +1,14 @@
 {
-    "schemaVersion":  1,
-    "architecture":  "x64",
-    "runtimeIdentifier":  "win-x64",
-    "targetFramework":  "net8.0-windows",
-    "sdkVersion":  "10.0.204",
-    "files":  {
-                  "ArchiveWorker.exe":  {
-                                            "size":  67744371,
-                                            "sha256":  "8a7653cfbfece23e2ad6dcd62584021309ce5df0c91e0a76212c3ae1e7d32489"
-                                        }
-              }
+  "schemaVersion": 2,
+  "architecture": "x64",
+  "runtimeIdentifier": "win-x64",
+  "targetFramework": "net8.0-windows",
+  "sdkVersion": "10.0.204",
+  "runtimeMode": "in-memory-single-file",
+  "files": {
+    "ArchiveWorker.exe": {
+      "size": 67756659,
+      "sha256": "7ed28b3f9be9b9a34875b5f42aef2bda1c2017b1b55567aafcbfe10a7a914ea3"
+    }
+  }
 }

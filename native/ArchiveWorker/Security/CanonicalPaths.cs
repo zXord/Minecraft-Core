@@ -41,9 +41,20 @@ internal static partial class CanonicalPaths
     internal static string AbsentDestination(string value)
     {
         string path = LocalAbsolute(value, allowRoot: false);
-        if (File.Exists(path) || Directory.Exists(path)) throw new IOException("Destination exists");
         string parent = Path.GetDirectoryName(path) ?? throw new InvalidDataException("Destination parent missing");
         ExistingDirectory(parent);
+        nint handle = NativeMethods.CreateFile(NativeFilePath.ForApi(path), NativeMethods.FileReadAttributes,
+            NativeMethods.FileShareRead | NativeMethods.FileShareWrite | NativeMethods.FileShareDelete,
+            nint.Zero, NativeMethods.OpenExisting,
+            NativeMethods.FileFlagOpenReparsePoint | NativeMethods.FileFlagBackupSemantics, nint.Zero);
+        if (handle != NativeMethods.InvalidHandleValue)
+        {
+            _ = NativeMethods.CloseHandle(handle);
+            throw new IOException("Destination exists");
+        }
+        int error = Marshal.GetLastWin32Error();
+        if (error is not (NativeMethods.ErrorFileNotFound or NativeMethods.ErrorPathNotFound))
+            throw new IOException("Destination absence unavailable", new System.ComponentModel.Win32Exception(error));
         return path;
     }
 

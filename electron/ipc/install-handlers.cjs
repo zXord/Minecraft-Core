@@ -15,6 +15,7 @@ const {
   getLoaderVersions,
   normalizeLoader: normalizeLoaderName,
   getForgeRuntimeHealthIssues,
+  inspectPreparedRuntime,
   validatePreparedRuntime
 } = require('../services/loader-install-service.cjs');
 
@@ -141,26 +142,30 @@ async function getLoaderHealthIssues(targetPath, loader, loaderVersion = null, m
 }
 
 async function buildHealthReport(targetPath) {
+  const preparedRuntime = inspectPreparedRuntime(targetPath);
   const config = readServerConfig(targetPath, getDefaultServerConfig()) || {};
-  const loader = resolveEffectiveLoader(targetPath, config);
-  const loaderVersion = resolveEffectiveLoaderVersion(targetPath, loader, config);
+  const loader = preparedRuntime?.runtime.loaderFamily || resolveEffectiveLoader(targetPath, config);
+  const loaderVersion = preparedRuntime?.runtime.loaderVersion || resolveEffectiveLoaderVersion(targetPath, loader, config);
+  const minecraftVersion = preparedRuntime?.runtime.minecraftVersion || config.version || null;
   const missing = [];
 
-  if (!fs.existsSync(path.join(targetPath, 'server.jar'))) {
+  if (!preparedRuntime && !fs.existsSync(path.join(targetPath, 'server.jar'))) {
     missing.push('server.jar');
   }
 
-  missing.push(...await getLoaderHealthIssues(targetPath, loader, loaderVersion, config.version));
+  if (!preparedRuntime) {
+    missing.push(...await getLoaderHealthIssues(targetPath, loader, loaderVersion, minecraftVersion));
+  }
 
-  if (config.version) {
+  if (minecraftVersion) {
     try {
       const serverJavaManager = new ServerJavaManager(targetPath);
-      const javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(config.version);
+      const javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(minecraftVersion);
       if (javaRequirements.needsDownload) {
         missing.push(
           javaRequirements.installationState === 'broken'
-            ? `Java ${javaRequirements.requiredJavaVersion} runtime is broken (for Minecraft ${config.version})`
-            : `Java ${javaRequirements.requiredJavaVersion} (for Minecraft ${config.version})`
+            ? `Java ${javaRequirements.requiredJavaVersion} runtime is broken (for Minecraft ${minecraftVersion})`
+            : `Java ${javaRequirements.requiredJavaVersion} (for Minecraft ${minecraftVersion})`
         );
       }
     } catch {
@@ -171,6 +176,8 @@ async function buildHealthReport(targetPath) {
   return {
     loader,
     loaderVersion,
+    managedRuntime: Boolean(preparedRuntime),
+    minecraftVersion,
     missing
   };
 }
@@ -578,19 +585,26 @@ function createInstallHandlers(win) {
           throw new Error('Invalid Minecraft version');
         }
 
-        const effectiveLoader = resolveEffectiveLoader(targetPath, payload);
-        const effectiveLoaderVersion = resolveEffectiveLoaderVersion(targetPath, effectiveLoader, {
-          loader,
-          loaderVersion,
-          fabricVersion
-        });
         const repairedItems = [];
         const report = await buildHealthReport(targetPath);
-        const loaderIssues = await getLoaderHealthIssues(targetPath, effectiveLoader, effectiveLoaderVersion, mcVersion);
+        const effectiveLoader = report.managedRuntime
+          ? report.loader
+          : resolveEffectiveLoader(targetPath, payload);
+        const effectiveLoaderVersion = report.managedRuntime
+          ? report.loaderVersion
+          : resolveEffectiveLoaderVersion(targetPath, effectiveLoader, {
+              loader,
+              loaderVersion,
+              fabricVersion
+            });
+        const effectiveMinecraftVersion = report.managedRuntime ? report.minecraftVersion : mcVersion;
+        const loaderIssues = report.managedRuntime
+          ? []
+          : await getLoaderHealthIssues(targetPath, effectiveLoader, effectiveLoaderVersion, effectiveMinecraftVersion);
         const needsServerJar = report.missing.includes('server.jar');
 
         const serverJavaManager = new ServerJavaManager(targetPath);
-        let javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
+        let javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(effectiveMinecraftVersion);
         const needsJava = javaRequirements.needsDownload;
 
         if (!needsJava && !needsServerJar && loaderIssues.length === 0) {
@@ -605,7 +619,7 @@ function createInstallHandlers(win) {
             win.webContents.send('repair-log', `🔧 Installing Java ${javaRequirements.requiredJavaVersion}...`);
           }
 
-          const javaReady = await ensureServerJavaReady(win, targetPath, mcVersion);
+          const javaReady = await ensureServerJavaReady(win, targetPath, effectiveMinecraftVersion);
           javaRequirements = javaReady.javaRequirements;
           repairedItems.push(`Java ${javaRequirements.requiredJavaVersion}`);
 
@@ -618,7 +632,7 @@ function createInstallHandlers(win) {
           if (win && win.webContents) {
             win.webContents.send('repair-log', '🔧 Repairing server.jar...');
           }
-          await downloadMinecraftServer(mcVersion, targetPath, 'repair-progress');
+          await downloadMinecraftServer(effectiveMinecraftVersion, targetPath, 'repair-progress');
           repairedItems.push('server.jar');
 
           if (win && win.webContents) {
@@ -635,10 +649,10 @@ function createInstallHandlers(win) {
             win.webContents.send('repair-log', `🔧 Repairing ${effectiveLoader} runtime...`);
           }
 
-          const javaReady = await ensureServerJavaReady(win, targetPath, mcVersion);
+          const javaReady = await ensureServerJavaReady(win, targetPath, effectiveMinecraftVersion);
           await installServerLoader({
             targetPath,
-            minecraftVersion: mcVersion,
+            minecraftVersion: effectiveMinecraftVersion,
             loader: effectiveLoader,
             loaderVersion: effectiveLoaderVersion,
             javaPath: javaReady.javaPath,

@@ -19,6 +19,13 @@ function targetExists() {
   );
 }
 
+function targetEmpty() {
+  return new ModpackError(
+    'PLAN_STALE',
+    'The selected existing server destination is empty'
+  );
+}
+
 function normalizeTarget(value) {
   if (typeof value !== 'string' || !path.isAbsolute(value) || value.includes('\0')) throw invalid();
   const resolved = path.resolve(value);
@@ -87,6 +94,51 @@ async function captureReservedTarget({ targetPath: targetValue, fsApi: suppliedF
   return deepFreeze({ kind: 'empty-directory', identity: identity(final) });
 }
 
+async function captureExistingUnmanagedTarget({
+  targetPath: targetValue,
+  fsApi: suppliedFs,
+  reparseInspector,
+  signal
+} = {}) {
+  const targetPath = normalizeTarget(targetValue);
+  const { fsApi } = dependencies({ fsApi: suppliedFs, reparseInspector });
+  const initial = await assertPlainDirectory({ fsApi, reparseInspector, targetPath, signal });
+  const initialIdentity = identity(initial);
+  const names = fsApi.readdirSync(targetPath);
+  if (!Array.isArray(names) || names.length === 0) throw targetEmpty();
+  const final = await assertPlainDirectory({
+    fsApi,
+    reparseInspector,
+    targetPath,
+    expectedIdentity: initialIdentity,
+    signal
+  });
+  if (fsApi.readdirSync(targetPath).length === 0) throw stale();
+  return deepFreeze({ kind: 'existing-unmanaged-directory', identity: identity(final) });
+}
+
+async function assertExistingUnmanagedTarget({
+  targetPath: targetValue,
+  adoption,
+  fsApi: suppliedFs,
+  reparseInspector,
+  signal
+} = {}) {
+  const targetPath = normalizeTarget(targetValue);
+  const { fsApi } = dependencies({ fsApi: suppliedFs, reparseInspector });
+  if (!adoption || adoption.kind !== 'existing-unmanaged-directory' ||
+      !adoption.identity || typeof adoption.identity !== 'object') throw invalid();
+  await assertPlainDirectory({
+    fsApi,
+    reparseInspector,
+    targetPath,
+    expectedIdentity: adoption.identity,
+    signal
+  });
+  if (fsApi.readdirSync(targetPath).length === 0) throw stale();
+  return deepFreeze({ verified: true });
+}
+
 async function consumeReservedTarget({
   targetPath: targetValue,
   reservation,
@@ -127,4 +179,9 @@ async function consumeReservedTarget({
   return deepFreeze({ consumed: true, removedEmptyReservation: true });
 }
 
-module.exports = { captureReservedTarget, consumeReservedTarget };
+module.exports = {
+  assertExistingUnmanagedTarget,
+  captureExistingUnmanagedTarget,
+  captureReservedTarget,
+  consumeReservedTarget
+};

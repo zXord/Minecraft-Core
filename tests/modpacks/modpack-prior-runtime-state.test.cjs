@@ -82,6 +82,12 @@ function serviceFixture(options = {}) {
       };
       return clone(current);
     },
+    async clearRestoreCreationAfterCleanup(_jobId, request) {
+      assert.equal(current.phase, request.expectedPhase);
+      assert.deepEqual(current.restoreCreation, request.expectedCreation);
+      current = { ...current, restoreCreation: null, restorePoint: null, sequence: current.sequence + 1 };
+      return clone(current);
+    },
     async finish(_jobId, request) {
       calls.push(`finish:${request.terminalPhase}`);
       current = null;
@@ -138,9 +144,29 @@ function serviceFixture(options = {}) {
     },
     async renameExact() { throw new Error('unexpected rename'); },
     async removeOperationOwned() { throw new Error('unexpected remove'); },
-    async inspectFresh() { throw new Error('unexpected restore'); }
+    async removeAuthorizedIdentity() { throw new Error('unexpected authorized remove'); },
+    async inspectFresh({ directoryPath }) {
+      calls.push(`inspect-identity:${directoryPath}`);
+      return { directoryIdentity: ORIGINAL_ID, fingerprint: ORIGINAL_FP, entryCount: 1, totalBytes: '1' };
+    }
   };
   const transactionApi = {
+    async prepareNewLiveValidation() { throw new Error('unexpected new validation'); },
+    async completeNewLiveValidation() { throw new Error('unexpected new validation completion'); },
+    async verifyCommittedCanonicalDirectory() {
+      calls.push('verify-committed-canonical');
+      return { phase: current.phase, verified: true };
+    },
+    async verifyMutableOperationOwnedDirectory() {
+      calls.push('verify-mutable-operation-owned');
+      return { identity: CANDIDATE_ID, fingerprint: CANDIDATE_FP };
+    },
+    async verifyMutableNewOperationOwnedDirectory() {
+      throw new Error('unexpected mutable new verification');
+    },
+    async verifyCommittedNewPublication() {
+      throw new Error('unexpected committed new verification');
+    },
     async markCommittedHealthy() { calls.push('publish-once'); return { phase: 'committed-healthy' }; },
     async cleanupCommittedTransaction() {
       calls.push('cleanup');
@@ -185,6 +211,7 @@ function serviceFixture(options = {}) {
     service: new ModpackRecoveryService({
       coordinator,
       recoveryRegistry: registry,
+      runtimeWriterAuthority: { async assertRecoveryAllowed(record) { return record; } },
       contextFactory,
       directoryAuthority: authority,
       runtimePolicy,
@@ -261,6 +288,7 @@ test('auto-restart recovery holds are per-server, suppress pending crash starts,
   const configs = new Map([[TARGET, {
     autoRestart: { enabled: true, delay: 37, maxCrashes: 7 }
   }]]);
+  let configWriteCalls = 0;
   const appLevel = { enabled: false, delay: 10, maxCrashes: 3 };
   Module._load = function loadFixture(request, parent, isMain) {
     if (request.endsWith('utils/event-bus.cjs')) return eventBus;
@@ -273,6 +301,7 @@ test('auto-restart recovery holds are per-server, suppress pending crash starts,
         getDefaultServerConfig() { return { autoRestart: { enabled: false, delay: 10, maxCrashes: 3 } }; },
         readServerConfig(serverPath) { return clone(configs.get(serverPath)); },
         updateServerConfig(serverPath, patch) {
+          configWriteCalls += 1;
           configs.set(serverPath, {
             ...configs.get(serverPath),
             autoRestart: clone(patch.autoRestart)
@@ -298,10 +327,21 @@ test('auto-restart recovery holds are per-server, suppress pending crash starts,
     autoRestart.restoreRecoveryAutoRestart({
       serverPath: TARGET,
       operationId: 'job-runtime',
+      enabled: true
+    });
+    assert.equal(autoRestart.isRecoveryHeld(TARGET), false);
+    assert.equal(configWriteCalls, 0, 'releasing an in-memory hold must not rewrite an unchanged server config');
+
+    autoRestart.beginRecoveryHold({ serverPath: TARGET, operationId: 'job-runtime-change' });
+
+    autoRestart.restoreRecoveryAutoRestart({
+      serverPath: TARGET,
+      operationId: 'job-runtime-change',
       enabled: false
     });
     assert.equal(autoRestart.isRecoveryHeld(TARGET), false);
     assert.deepEqual(configs.get(TARGET).autoRestart, { enabled: false, delay: 37, maxCrashes: 7 });
+    assert.equal(configWriteCalls, 1);
 
     const adoptions = [];
     const runtimePolicy = autoRestart.createRecoveryRuntimePolicy({
@@ -313,6 +353,36 @@ test('auto-restart recovery holds are per-server, suppress pending crash starts,
         }
       }
     });
+    const restoreRequest = {
+      serverPath: TARGET,
+      operationId: 'job-policy-restore',
+      enabled: false
+    };
+    runtimePolicy.suspend(restoreRequest);
+    const firstRestore = await runtimePolicy.restoreAutoRestart(restoreRequest);
+    const replayedRestore = await runtimePolicy.restoreAutoRestart(restoreRequest);
+    assert.deepEqual(replayedRestore, firstRestore, 'the lifecycle may replay an already-completed exact restoration');
+    assert.equal(autoRestart.isRecoveryHeld(TARGET), false);
+    await assert.rejects(
+      async () => runtimePolicy.restoreAutoRestart({ ...restoreRequest, enabled: true }),
+      /hold|restoration/i,
+      'a replay cannot change the restored auto-restart policy'
+    );
+
+    const nextRestoreRequest = {
+      serverPath: TARGET,
+      operationId: 'job-policy-next',
+      enabled: true
+    };
+    runtimePolicy.suspend(nextRestoreRequest);
+    await assert.rejects(
+      async () => runtimePolicy.restoreAutoRestart(restoreRequest),
+      /hold|restoration/i,
+      'a prior operation cannot reuse its replay after a new hold starts'
+    );
+    await runtimePolicy.restoreAutoRestart(nextRestoreRequest);
+    assert.equal(autoRestart.isRecoveryHeld(TARGET), false);
+
     const handoff = { processHandle: { pid: 41 }, startLease: { serverPath: TARGET } };
     const adoptionRequest = {
       eventId: 'modpack-runtime-handoff:job-runtime',
@@ -328,6 +398,14 @@ test('auto-restart recovery holds are per-server, suppress pending crash starts,
       ...adoptionRequest,
       instanceId: 'different-server'
     }), /handoff/i);
+    await runtimePolicy.ensureStopped({
+      instanceId: 'runtime-server',
+      jobId: 'job-runtime',
+      serverPath: TARGET
+    });
+    const replacementHandoff = { processHandle: { pid: 42 }, startLease: { serverPath: TARGET } };
+    await runtimePolicy.adoptValidatedHandoff({ ...adoptionRequest, handoff: replacementHandoff });
+    assert.equal(adoptions.length, 2, 'a proven stop permits a fresh retry handoff for the same durable event');
   } finally {
     delete require.cache[modulePath];
     Module._load = originalLoad;

@@ -137,7 +137,33 @@ async function initializeStartupRecovery({ coordinator, registry, recoveryServic
   return deepFreeze({ recovered, unresolved, globalBlock });
 }
 
+async function establishStartupRecoveryBoundary({ coordinator, registry, runtimeVerifier } = {}) {
+  requireMethod(coordinator, 'beginStartupRecovery');
+  requireMethod(coordinator, 'installRecoveryBlocks');
+  requireMethod(coordinator, 'completeStartupRecovery');
+  requireMethod(registry, 'initialize');
+  if (!runtimeVerifier) throw invalid();
+
+  coordinator.beginStartupRecovery();
+  await verifyRuntime(runtimeVerifier);
+  const scan = await registry.initialize();
+  const mapping = mapScanBlocks(scan);
+  if (mapping.blocks.length > 0) coordinator.installRecoveryBlocks(mapping.blocks);
+  coordinator.completeStartupRecovery(mapping.blocks.map(item => Object.freeze({
+    selector: item.selector,
+    resolved: false
+  })), { globalBlock: mapping.requiresGlobalBlock });
+
+  const unresolved = [...new Set([
+    ...scan.records.map(record => record?.jobId),
+    ...scan.blocks.map(block => block?.jobId),
+    ...scan.corrupt.map(item => item?.jobId)
+  ].filter(value => typeof value === 'string'))].sort((left, right) => left.localeCompare(right, 'en-US'));
+  return deepFreeze({ recovered: [], unresolved, globalBlock: mapping.requiresGlobalBlock });
+}
+
 module.exports = {
+  establishStartupRecoveryBoundary,
   initializeStartupRecovery,
   mapScanBlocks
 };

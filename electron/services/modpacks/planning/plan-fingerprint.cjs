@@ -3,6 +3,12 @@ const crypto = require('node:crypto');
 const { strictJsonClone } = require('../../../utils/durable-fs.cjs');
 const { ModpackError } = require('../errors.cjs');
 
+const PREFLIGHT_PLAN_JSON_LIMITS = Object.freeze({
+  maxDepth: 64,
+  maxCollection: 1_000_000,
+  maxStringBytes: 4 * 1024 * 1024
+});
+
 function invalid() {
   throw new ModpackError('INVALID_REQUEST', 'The preflight plan is invalid');
 }
@@ -16,11 +22,11 @@ function canonicalize(value) {
 
 function computePreflightPlanFingerprint(value) {
   let clone;
-  try { clone = strictJsonClone(value); }
+  try { clone = strictJsonClone(value, PREFLIGHT_PLAN_JSON_LIMITS); }
   catch { invalid(); }
   if (!clone || typeof clone !== 'object' || Array.isArray(clone)) invalid();
   delete clone.fingerprint;
   return crypto.createHash('sha256').update(JSON.stringify(canonicalize(clone)), 'utf8').digest('hex');
 }
 
-module.exports = { computePreflightPlanFingerprint };
+module.exports = { PREFLIGHT_PLAN_JSON_LIMITS, computePreflightPlanFingerprint };

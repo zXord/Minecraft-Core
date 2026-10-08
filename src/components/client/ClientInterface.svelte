@@ -7,10 +7,18 @@
   import ClientHeader from './ClientHeader.svelte';
   import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
   import PlayTab from './PlayTab.svelte';
+  import ClientModpackPanel from './ClientModpackPanel.svelte';
+  import { allowsLegacyClient } from '../../utils/clientPacks/clientPackApi.js';
   import ModsTab from './ModsTab.svelte';
   import SettingsTab from './SettingsTab.svelte';
   import logger from '../../utils/logger.js';
-  import { buildAuthHeaders, ensureSessionToken, getManagementBaseUrl, resolveManagementUrl } from '../../utils/managementAuth.js';
+  import {
+    buildAuthHeaders,
+    ensureSessionToken,
+    getManagementBaseUrl,
+    requestWithSessionRecovery,
+    resolveManagementUrl
+  } from '../../utils/managementAuth.js';
 import {
   errorMessage,
   successMessage,
@@ -23,7 +31,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // App settings handler
   export let onOpenAppSettings = () => {};
-  export let onModpackNotificationNavigate = () => {};
   
   // Minecraft version compatibility checker
   function checkMinecraftVersionCompatibility(modVersion, targetVersion) {
@@ -168,10 +175,83 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     sessionToken: ''
   }; // Client instance with serverIp, serverPort, path  // Component references
   let clientModManagerComponent;
+  let matchingPackPanel;
+  let packState = null;
+  let interfaceMounted = false;
+  let activeClientKey = '';
+  let legacyHydrationKey = '';
+  let ownedLaunchScope = null;
+  let launchRequestSequence = 0;
+  let launcherStatusRequestSequence = 0;
+  let launcherListenerRemovers = [];
+  $: instanceKey = `${instance?.id || ''}:${instance?.path || ''}`;
+  $: if (interfaceMounted && instanceKey !== activeClientKey) activateClientInstance();
+  function legacyContentAllowed() {
+    return activeClientKey === `${instance?.id || ''}:${instance?.path || ''}`
+      && packState?.clientId === instance?.id && allowsLegacyClient(packState);
+  }
+  function scopedLegacyContentInvoker() {
+    const scope = getAsyncScope();
+    return async (channel, ...args) => {
+      if (!legacyContentAllowed() || !isCurrentAsyncScope(scope)) throw new Error('Use Matching client pack to review managed content.');
+      const result = await window.electron.invoke(channel, ...args);
+      if (!legacyContentAllowed() || !isCurrentAsyncScope(scope)) throw new Error('The client instance or requirement changed.');
+      return result;
+    };
+  }
+  function listenLauncher(channel, callback) {
+    const handler = data => callback(data);
+    window.electron.on(channel, handler);
+    launcherListenerRemovers.push(() => window.electron.removeListener(channel, handler));
+  }
+  async function refreshLauncherStatus() {
+    const scope = ownedLaunchScope, launchRequest = launchRequestSequence;
+    if (scope === null || !isCurrentAsyncScope(scope) || launchStatus !== 'running') return;
+    const clientPath = instance.path, request = ++launcherStatusRequestSequence;
+    try {
+      const status = await window.electron.invoke('minecraft-get-status');
+      if (!isCurrentAsyncScope(scope) || ownedLaunchScope !== scope || launchRequest !== launchRequestSequence
+        || request !== launcherStatusRequestSequence || launchStatus !== 'running') return;
+      const pathKey = value => typeof value === 'string' ? value.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase() : null;
+      if (!pathKey(clientPath) || pathKey(status?.clientPath) !== pathKey(clientPath)) return;
+      if (status.isRunning === false && status.isLaunching === false) {
+        launchStatus = 'ready'; isLaunching = false; ownedLaunchScope = null;
+      }
+    } catch { /* An inconclusive status read cannot settle an owned launch. */ }
+  }
+  function handlePackState(event) {
+    if (event.detail?.clientId !== instance?.id) return;
+    packState = event.detail;
+    if (!legacyContentAllowed()) {
+      clearPlayTabSyncSchedule(); clearAutoCompatibilitySchedule(); clearPostDownloadVerificationSchedule();
+      pendingDownloadSourceSwitch = null; showCompatibilityDialog = false;
+      modSyncStatus = null;
+    } else {
+      if (legacyHydrationKey !== activeClientKey) {
+        legacyHydrationKey = activeClientKey;
+        void loadAcknowledgedDependencies(true);
+      }
+      requestPlayTabSync({silentRefresh:true,delayMs:48});
+    }
+  }
+  function activateClientInstance() {
+    activeClientKey = `${instance?.id || ''}:${instance?.path || ''}`;
+    invalidateAsyncScope();
+    clearPlayTabSyncSchedule(); clearAutoCompatibilitySchedule(); clearPostDownloadVerificationSchedule();
+    packState = null; serverInfo = null; requiredMods = []; modSyncStatus = null;
+    legacyHydrationKey = ''; authStatus = 'unknown'; username = ''; authData = null;
+    ownedLaunchScope=null; launchRequestSequence+=1; launcherStatusRequestSequence+=1;
+    launchStatus='ready'; isLaunching=false; launchProgress={type:'',task:'',total:0};
+    pendingDownloadSourceSwitch = null; showCompatibilityDialog = false;
+    downloadStatus = 'ready'; clientSyncStatus = 'ready'; clientSyncInfo = null;
+    assetsWork = {shaders:{missingItems:[],updates:[],removable:[],serverItems:[],localItems:[]},resourcepacks:{missingItems:[],updates:[],removable:[],serverItems:[],localItems:[]}};
+    setConnectionStatus('disconnected'); clearAppVersions();
+    void connectToServer();
+  }
   
   // Create event dispatcher
   const dispatch = createEventDispatcher();
-  $: if ($clientState.versionChangeDetected && $clientState.activeTab === 'mods') {
+  $: if (packState?.status === 'unmanaged' && $clientState.versionChangeDetected && $clientState.activeTab === 'mods') {
     scheduleAutoCompatibilityCheck(120);
     clearVersionChangeDetected();
   }
@@ -248,6 +328,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let lastQuickStatusCheck = 0;
   let connectionFailureCount = 0;
   let asyncScopeVersion = 0;
+  let serverInfoRequestSequence = 0;
+  let authRequestSequence = 0;
   let activeFetchControllers = new Set();
   let playTabSyncTimer = null;
   let playTabSyncRunning = false;
@@ -320,14 +402,20 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
   // Function to load acknowledged dependencies from persistent storage
   async function loadAcknowledgedDependencies(force = false) {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path) return;
     const now = Date.now();
     if (!force && now - lastAckDepsLoad < ACK_DEPS_RELOAD_INTERVAL) return;
     
     try {
-      const result = await window.electron.invoke('load-expected-mod-state', {
+      const result = await invokeLegacyContent('load-expected-mod-state', {
         clientPath: instance.path
       });
+      if (result.success) {
+        const persisted = [...(result.requiredMods || []), ...(result.optionalMods || []), ...(result.expectedMods || [])];
+        serverManagedFiles.set(new SvelteSet(persisted.map(file => file.toLowerCase())));
+      }
       
       if (result.success && result.acknowledgedDeps && Array.isArray(result.acknowledgedDeps)) {
         // Set acknowledged deps from persistent storage
@@ -349,7 +437,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   // Connect to the Management Server (port 8080)
-  async function connectToServer({ backgroundRetry = false } = {}) {
+  async function connectToServer({ backgroundRetry = false, forceRegistration = false } = {}) {
     const scope = getAsyncScope();
     logger.info('Connecting to management server', {
       category: 'ui',
@@ -405,10 +493,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         markConnectionHealthy();
         setConnectionStatus('connected');
         
-        // Register with the server and check app version compatibility
-        await registerWithServer(scope);
-        if (!isCurrentAsyncScope(scope)) return;
-        await checkAppVersionCompatibility(scope);
+        // The first protected request validates the mounted session and only
+        // registers again after an authorization rejection or explicit reconnect.
+        await checkAppVersionCompatibility(scope, { forceRegistration });
         if (!isCurrentAsyncScope(scope)) return;
         
         await checkAuthentication(scope);
@@ -436,16 +523,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
   
-  // Register with the management server
-  async function registerWithServer(scope = getAsyncScope()) {
-    try {
-      if (!isCurrentAsyncScope(scope)) return;
-      await ensureSessionToken(instance, true);
-    } catch (err) {
-    }  }
-
   // Check app version compatibility between client and server
-  async function checkAppVersionCompatibility(scope = getAsyncScope()) {
+  async function checkAppVersionCompatibility(scope = getAsyncScope(), { forceRegistration = false } = {}) {
     try {
       if (!isCurrentAsyncScope(scope)) return;
       // Get client app version
@@ -455,10 +534,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
       // Get server app version
       const appVersionUrl = resolveManagementUrl(instance, '/api/app/version');
-      const response = await fetchWithScope(appVersionUrl, {
+      const response = await requestWithSessionRecovery(instance, headers => fetchWithScope(appVersionUrl, {
         method: 'GET',
-        headers: buildAuthHeaders(instance)
-      }, 5000, scope);
+        headers
+      }, 5000, scope), { forceRegistration });
       if (!isCurrentAsyncScope(scope)) return;
 
       if (response.ok) {
@@ -541,21 +620,26 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
     // Get server information including Minecraft version and required mods
   async function getServerInfo(silentRefresh = false, scope = getAsyncScope()) {
+    const request = ++serverInfoRequestSequence;
+    const current = () => isCurrentAsyncScope(scope) && request === serverInfoRequestSequence;
     try {
-      if (!isCurrentAsyncScope(scope)) return;
+      if (!current()) return;
       await ensureSessionToken(instance);
-      if (!isCurrentAsyncScope(scope)) return;
+      if (!current()) return;
       const serverInfoUrl = resolveManagementUrl(instance, '/api/server/info');
       const response = await fetchWithScope(serverInfoUrl, {
         method: 'GET',
         headers: buildAuthHeaders(instance)
       }, 5000, scope);
       
-      if (response.ok) {        serverInfo = await response.json();
-        if (!isCurrentAsyncScope(scope)) return;
+      if (response.ok) {        const nextServerInfo = await response.json();
+        if (!current()) return;
+        serverInfo = nextServerInfo;
         if (serverInfo.success) {
           markConnectionHealthy();
           setMinecraftServerStatus(serverInfo.minecraftServerStatus || 'unknown');
+          await matchingPackPanel?.checkRequirement();
+          if (!current() || !legacyContentAllowed()) return;
           requiredMods = serverInfo.requiredMods || [];
           
           // Track Minecraft version changes for client mod compatibility
@@ -568,9 +652,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
               method: 'GET',
               headers: buildAuthHeaders(instance)
             }, 5000, scope);
-              if (!isCurrentAsyncScope(scope)) return;
+              if (!current()) return;
               if (modsResponse.ok) {
-              const modsData = await modsResponse.json();              if (!isCurrentAsyncScope(scope)) return; if (modsData.success) {                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
+              const modsData = await modsResponse.json();              if (!current()) return; if (modsData.success) {                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
                 // (ClientModManager sets it with required property, we don't want to overwrite that)
                 if (!serverInfo.allClientMods || serverInfo.allClientMods.length === 0 || 
                     !serverInfo.allClientMods.some(mod => mod.hasOwnProperty('required'))) {
@@ -633,7 +717,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         }
       }
     } catch (err) {
-      if (err?.stale || !isCurrentAsyncScope(scope)) {
+      if (err?.stale || !current()) {
         return;
       }
       setMinecraftServerStatus('unknown');
@@ -641,6 +725,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   // Asset synchronization checks (shaders/resource packs)
   async function checkAssetSynchronization() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path || !$clientState.connectionStatus || $clientState.connectionStatus !== 'connected') return;
     try {
       await ensureSessionToken(instance);
@@ -670,8 +756,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
       // Fetch local items
       const [localShaders, localRps] = await Promise.all([
-        window.electron.invoke('list-client-assets', { clientPath: instance.path, type: 'shaderpacks' }).catch(() => ({})),
-        window.electron.invoke('list-client-assets', { clientPath: instance.path, type: 'resourcepacks' }).catch(() => ({}))
+        invokeLegacyContent('list-client-assets', { clientPath: instance.path, type: 'shaderpacks' }).catch(() => ({})),
+        invokeLegacyContent('list-client-assets', { clientPath: instance.path, type: 'resourcepacks' }).catch(() => ({}))
       ]);
   const shaderAssets = localShaders?.success ? (localShaders.items || []) : [];
   const resourcePackAssets = localRps?.success ? (localRps.items || []) : [];
@@ -732,12 +818,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   async function downloadMissingShaders() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path) return;
     const items = assetsWork.shaders.missingItems || [];
     if (!items.length) return;
     try {
       isDownloadingAssets = true;
-      await window.electron.invoke('minecraft-download-assets', {
+      await invokeLegacyContent('minecraft-download-assets', {
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
@@ -755,12 +843,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   async function updateOutdatedShaders() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path) return;
     const items = assetsWork.shaders.updates || [];
     if (!items.length) return;
     try {
       isDownloadingAssets = true;
-      await window.electron.invoke('minecraft-download-assets', {
+      await invokeLegacyContent('minecraft-download-assets', {
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
@@ -779,12 +869,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   async function downloadMissingResourcePacks() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path) return;
     const items = assetsWork.resourcepacks.missingItems || [];
     if (!items.length) return;
     try {
       isDownloadingAssets = true;
-      await window.electron.invoke('minecraft-download-assets', {
+      await invokeLegacyContent('minecraft-download-assets', {
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
@@ -802,12 +894,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   async function updateOutdatedResourcePacks() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path) return;
     const items = assetsWork.resourcepacks.updates || [];
     if (!items.length) return;
     try {
       isDownloadingAssets = true;
-      await window.electron.invoke('minecraft-download-assets', {
+      await invokeLegacyContent('minecraft-download-assets', {
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
@@ -825,13 +919,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
   async function removeRemovableShaders() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path) return;
     const items = assetsWork.shaders.removable || [];
     if (!items.length) return;
     try {
       isDownloadingAssets = true;
       for (const it of items) {
-        await window.electron.invoke('delete-client-asset', { clientPath: instance.path, type: 'shaderpacks', fileName: it.fileName });
+        await invokeLegacyContent('delete-client-asset', { clientPath: instance.path, type: 'shaderpacks', fileName: it.fileName });
       }
   await checkAssetSynchronization();
       successMessage.set(`Removed ${items.length} shader${items.length > 1 ? 's' : ''}`);
@@ -845,13 +941,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   async function removeRemovableResourcePacks() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path) return;
     const items = assetsWork.resourcepacks.removable || [];
     if (!items.length) return;
     try {
       isDownloadingAssets = true;
       for (const it of items) {
-        await window.electron.invoke('delete-client-asset', { clientPath: instance.path, type: 'resourcepacks', fileName: it.fileName });
+        await invokeLegacyContent('delete-client-asset', { clientPath: instance.path, type: 'resourcepacks', fileName: it.fileName });
       }
   await checkAssetSynchronization();
       successMessage.set(`Removed ${items.length} resource pack${items.length > 1 ? 's' : ''}`);
@@ -865,6 +963,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   // Check client downloaded mods for compatibility with new Minecraft version
   async function checkClientModVersionCompatibility(skipThrottle = false) {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance.path || !serverInfo?.minecraftVersion) {
       return;
     }
@@ -893,7 +993,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         modVersionsCache.clear();
         cacheTimestamp = now;
       }
-      const result = await window.electron.invoke('get-client-installed-mod-info', instance.path);
+      const result = await invokeLegacyContent('get-client-installed-mod-info', instance.path);
         if (!result || result.length === 0) {
         // No client mods installed
         setClientModVersionUpdates(null);
@@ -950,7 +1050,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           if (modVersionsCache.has(mod.projectId)) {
             versions = modVersionsCache.get(mod.projectId);
           } else {
-            versions = await window.electron.invoke('get-mod-versions', {
+            versions = await invokeLegacyContent('get-mod-versions', {
               modId: mod.projectId,
               source: 'modrinth'
             });
@@ -1246,6 +1346,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
       // Check if client mods are synchronized with server
   async function checkModSynchronization(silentRefresh = false) {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (isDownloadingMods || isDownloadingClient) {
       return;
     }
@@ -1273,7 +1375,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       // Don't filter acknowledged deps from allClientMods - they should remain visible
       // for potential re-acknowledgment when removed from server requirements
         const filteredAll = serverInfo?.allClientMods || [];
-          const result = await window.electron.invoke('minecraft-check-mods', {
+          const result = await invokeLegacyContent('minecraft-check-mods', {
         clientPath: instance.path,
         requiredMods: filteredRequired,
         allClientMods: filteredAll,
@@ -1378,6 +1480,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
     // Check if Minecraft client files are synchronized
   async function checkClientSynchronization(silentRefresh = false) {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     const syncLogContext = {
       silentRefresh,
       instancePath: instance?.path || null,
@@ -1419,7 +1523,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
     
     try {
-      const result = await window.electron.invoke('minecraft-check-client', {
+      const result = await invokeLegacyContent('minecraft-check-client', {
         clientPath: instance.path,
         minecraftVersion: serverInfo.minecraftVersion,
         requiredMods: requiredMods || [],
@@ -1666,7 +1770,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   function isPlayTabSyncReady() {
-    return Boolean(instance?.path)
+    return legacyContentAllowed() && Boolean(instance?.path)
       && get(clientState).connectionStatus === 'connected'
       && authStatus === 'authenticated';
   }
@@ -1677,6 +1781,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     delayMs = 32,
     scope = getAsyncScope()
   } = {}) {
+    if (!legacyContentAllowed() || !isCurrentAsyncScope(scope)) return false;
     if (!isPlayTabSyncReady()) {
       mergePendingPlayTabSync({ silentRefresh, includeCompatibilityScan, scope });
       playTabSyncDeferredUntilAuth = true;
@@ -1708,10 +1813,12 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     delayMs = 1800,
     scope = getAsyncScope()
   } = {}) {
+    if (!legacyContentAllowed() || !isCurrentAsyncScope(scope)) return;
     clearPostDownloadVerificationSchedule();
 
     postDownloadVerificationTimer = setTimeout(() => {
       postDownloadVerificationTimer = null;
+      if (!legacyContentAllowed() || !isCurrentAsyncScope(scope)) return;
       setClientModVersionUpdates(null);
 
       if (typeof window !== 'undefined' && window.localStorage) {
@@ -1744,6 +1851,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     delayMs = 32,
     scope = getAsyncScope()
   } = {}) {
+    if (!legacyContentAllowed() || !isCurrentAsyncScope(scope)) return;
     mergePendingPlayTabSync({ silentRefresh, includeCompatibilityScan, scope });
 
     if (playTabSyncRunning) {
@@ -1768,19 +1876,19 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       try {
         await waitForUiPaint();
 
-        if (!isCurrentAsyncScope(runOptions.scope)) {
+        if (!legacyContentAllowed() || !isCurrentAsyncScope(runOptions.scope)) {
           return;
         }
 
         await checkModSynchronization(runOptions.silentRefresh);
 
-        if (!isCurrentAsyncScope(runOptions.scope)) {
+        if (!legacyContentAllowed() || !isCurrentAsyncScope(runOptions.scope)) {
           return;
         }
 
         await checkClientSynchronization(runOptions.silentRefresh);
 
-        if (!isCurrentAsyncScope(runOptions.scope)) {
+        if (!legacyContentAllowed() || !isCurrentAsyncScope(runOptions.scope)) {
           return;
         }
 
@@ -1812,11 +1920,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
   function scheduleAutoCompatibilityCheck(delayMs = 150) {
     clearAutoCompatibilitySchedule();
+    if (!legacyContentAllowed()) return;
+    const scope = getAsyncScope();
 
     autoCompatibilityTimer = setTimeout(async () => {
       autoCompatibilityTimer = null;
 
-      if ($clientState.activeTab !== 'mods' || !instance?.path || !serverInfo?.minecraftVersion) {
+      if (!legacyContentAllowed() || !isCurrentAsyncScope(scope) || $clientState.activeTab !== 'mods' || !instance?.path || !serverInfo?.minecraftVersion) {
         return;
       }
 
@@ -1826,8 +1936,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   
   // Check authentication status
-  async function checkAuthentication(scope = getAsyncScope()) {
-    if (!isCurrentAsyncScope(scope)) return;
+  async function checkAuthentication(scope = getAsyncScope(), request = ++authRequestSequence) {
+    const currentAuth = () => isCurrentAsyncScope(scope) && request === authRequestSequence;
+    if (!currentAuth()) return;
     
     if (!instance.path) {
       authStatus = 'needs-auth';
@@ -1844,7 +1955,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       
       // Add timeout to prevent getting stuck in checking state
       const authTimeout = setTimeout(() => {
-        if (authStatus === 'checking') {
+        if (currentAuth() && authStatus === 'checking') {
           authStatus = 'needs-auth';
         }
       }, 5000);
@@ -1852,9 +1963,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const result = await window.electron.invoke('minecraft-load-auth', {
         clientPath: instance.path
       });
-      if (!isCurrentAsyncScope(scope)) return;
-      
       clearTimeout(authTimeout);
+      if (!currentAuth()) return;
       
       if (result.success) {
         authStatus = 'authenticated';
@@ -1865,7 +1975,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           await refreshAuthToken();
         }
 
-        if (authStatus === 'authenticated' && isCurrentAsyncScope(scope)) {
+        if (authStatus === 'authenticated' && currentAuth()) {
           flushDeferredPlayTabSync({ delayMs: 320, scope });
         }
         
@@ -1878,7 +1988,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         }
       }
     } catch (err) {
-      if (err?.stale || !isCurrentAsyncScope(scope)) {
+      if (err?.stale || !currentAuth()) {
         return;
       }
       // Only set to needs-auth if we're not currently authenticating
@@ -1892,6 +2002,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Authenticate with Microsoft
   async function authenticateWithMicrosoft(forceAuth = false) {
+    const scope = getAsyncScope();
+    const clientPath = instance.path;
+    const request = ++authRequestSequence;
+    const currentAuth = () => isCurrentAsyncScope(scope) && request === authRequestSequence;
+    forceAuth = forceAuth === true;
     logger.info('Starting Microsoft authentication', {
       category: 'ui',
       data: {
@@ -1925,8 +2040,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     const authTimeout = setTimeout(async () => {
       
       // Only check if we're still in authenticating state
-      if (authStatus === 'authenticating') {
-        await checkAuthentication();
+      if (currentAuth() && authStatus === 'authenticating') {
+        await checkAuthentication(scope, request);
+        if (!currentAuth()) return;
         
         // If we have username/authData after checking, the auth actually worked
         if (username && authData) {
@@ -1944,12 +2060,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     try {
           const result = await window.electron.invoke('minecraft-auth', {
-      clientPath: instance.path,
+      clientPath,
       forceAuth: forceAuth
     });
       
       // Clear the timeout since we got a response
       clearTimeout(authTimeout);
+      if (!currentAuth()) return;
       
       if (result.success) {
         
@@ -1960,12 +2077,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         
         // Save authentication data
         await window.electron.invoke('minecraft-save-auth', {
-          clientPath: instance.path
+          clientPath
         });
+        if (!currentAuth()) return;
         
         // Trigger a single server status refresh now that we're authenticated
         // checkServerStatus will handle server info and sync checks
-        await checkServerStatus();
+        await checkServerStatus(false, scope);
+        if (!currentAuth()) return;
         
         successMessage.set(`Successfully authenticated as ${result.username}`);
         setTimeout(() => successMessage.set(''), 3000);
@@ -1977,10 +2096,12 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       }
   } catch (err) {      // Clear the timeout since we got an error
       clearTimeout(authTimeout);
+      if (!currentAuth()) return;
       
       
       // Check if auth actually succeeded despite the error
-      await checkAuthentication();
+      await checkAuthentication(scope, request);
+      if (!currentAuth()) return;
       if (username && authData && authStatus === 'authenticated') {
         successMessage.set(`Authentication completed for ${username}`);
         setTimeout(() => successMessage.set(''), 3000);
@@ -1994,6 +2115,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
   // Refresh authentication token if possible
   async function refreshAuthToken() {
+    const scope = getAsyncScope();
+    const request = authRequestSequence;
+    const currentAuth = () => isCurrentAsyncScope(scope) && request === authRequestSequence;
     if (authStatus !== 'authenticated' || !instance.path) {
       return;
     }
@@ -2002,6 +2126,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const result = await window.electron.invoke('minecraft-check-refresh-auth', {
         clientPath: instance.path
       });
+      if (!currentAuth()) return;
 
       if (result.success && result.refreshed) {
         successMessage.set('Authentication refreshed');
@@ -2015,6 +2140,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   // Download required mods
   async function onDownloadModsClick(options = {}) {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     const { applyRemovals = false, downloadSourceOverride = null } = options || {};
     logger.info('Starting mod download process', {
       category: 'ui',
@@ -2054,6 +2181,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }  // Download required mods
   async function downloadMods(options = {}) {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     const {
       applyRemovals = false,
       downloadSourceOverride = null
@@ -2077,7 +2206,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     const shouldApplyRemovals = applyRemovals || (!hasDownloads && hasRemovals);
 
     const performRemovals = async () => {
-      return window.electron.invoke('minecraft-remove-server-managed-mods', {
+      return invokeLegacyContent('minecraft-remove-server-managed-mods', {
         clientPath: instance.path,
         modsToRemove: modsToRemove.map(m => m.fileName)
       });
@@ -2276,7 +2405,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         // Combine the filtered allClientMods with the mods to download
         allClientModsParam = [...serverMods, ...serverOptionalMods, ...allClientModsParam];
 
-        const serverResult = await window.electron.invoke('minecraft-download-mods', {
+        const serverResult = await invokeLegacyContent('minecraft-download-mods', {
           clientPath: instance.path,
           requiredMods: serverMods,
           optionalMods: serverOptionalMods,
@@ -2357,7 +2486,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         const validClientUpdates = clientUpdatesWithUrls.filter(update => update && update.downloadUrl);
         
         if (validClientUpdates.length > 0) {
-          const clientResult = await window.electron.invoke('download-client-mod-version-updates', {
+          const clientResult = await invokeLegacyContent('download-client-mod-version-updates', {
             clientPath: instance.path,
             updates: validClientUpdates,
             minecraftVersion: serverInfo.minecraftVersion
@@ -2369,15 +2498,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
             localStorage.removeItem('clientModVersionUpdates');            // Force clear mod metadata cache for updated mods
             for (const update of validClientUpdates) {
               try {
-                await window.electron.invoke('clear-client-mod-cache', {
+                await invokeLegacyContent('clear-client-mod-cache', {
                   clientPath: instance.path,
                   fileName: update.fileName
                 });
 
-                await window.electron.invoke('get-client-installed-mod-info', instance.path);
+                await invokeLegacyContent('get-client-installed-mod-info', instance.path);
                 setTimeout(async () => {
                   try {
-                    await window.electron.invoke('get-client-installed-mod-info', instance.path);
+                    await invokeLegacyContent('get-client-installed-mod-info', instance.path);
                   } catch (error) {
                   }
                 }, 500);
@@ -2400,7 +2529,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       if (clientDisables.length > 0) {
         for (const modToDisable of clientDisables) {
           try {
-            const disableResult = await window.electron.invoke('toggle-client-mod', {
+            const disableResult = await invokeLegacyContent('toggle-client-mod', {
               clientPath: instance.path,
               modFileName: modToDisable.fileName,
               enabled: false // Disable the mod
@@ -2542,6 +2671,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Download Minecraft client files
   async function downloadClient() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!serverInfo?.minecraftVersion) {
       errorMessage.set('No Minecraft version specified by server');
       setTimeout(() => errorMessage.set(''), 5000);
@@ -2553,7 +2684,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           clientDownloadProgress = { type: 'Preparing', task: 'Starting download...', total: 0, current: 0 };
     
     try {
-        const result = await window.electron.invoke('minecraft-download-client', {
+        const result = await invokeLegacyContent('minecraft-download-client', {
           clientPath: instance.path,
           minecraftVersion: serverInfo.minecraftVersion,
           requiredMods: requiredMods || [],
@@ -2611,6 +2742,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Clear and re-download client files (smart repair)
   async function redownloadClient() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!serverInfo?.minecraftVersion) {
       errorMessage.set('No Minecraft version specified by server');
       setTimeout(() => errorMessage.set(''), 5000);
@@ -2620,7 +2753,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     try {
       
       // Clear existing client files first (smart repair - preserves libraries/assets)
-      const clearResult = await window.electron.invoke('minecraft-clear-client', {
+      const clearResult = await invokeLegacyContent('minecraft-clear-client', {
         clientPath: instance.path,
         minecraftVersion: serverInfo.minecraftVersion
       });
@@ -2647,6 +2780,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
   // Full clear and re-download (everything including libraries and assets)
   async function redownloadClientFull() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!serverInfo?.minecraftVersion) {
       errorMessage.set('No Minecraft version specified by server');
       setTimeout(() => errorMessage.set(''), 5000);
@@ -2656,7 +2791,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     try {
       
       // Clear ALL client files (full clear)
-      const clearResult = await window.electron.invoke('minecraft-clear-client-full', {
+      const clearResult = await invokeLegacyContent('minecraft-clear-client-full', {
         clientPath: instance.path,
         minecraftVersion: serverInfo.minecraftVersion
       });
@@ -2682,6 +2817,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
     // Launch Minecraft client
   async function launchMinecraft(showDebugTerminal = false, maxMemoryGB = 2) {
+    const launchScope = getAsyncScope();
+    const launchInstance = instance;
+    const request = ++launchRequestSequence;
+    const currentLaunch = () => isCurrentAsyncScope(launchScope) && request === launchRequestSequence;
+    if (!legacyContentAllowed() && !(packState?.clientId === instance?.id && packState?.status === 'ready' && packState?.verified === true)) {
+      errorMessage.set('Review and verify the matching client pack before launching.');
+      return;
+    }
     const normalizedMaxMemoryGB = Math.min(Math.max(Number(maxMemoryGB) || 2, 0.5), 64);
 
     logger.info('Launching Minecraft client', {
@@ -2711,19 +2854,20 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       return;
     }
     
-    if (clientSyncStatus === 'needed') {
+    if (legacyContentAllowed() && clientSyncStatus === 'needed') {
       errorMessage.set('Minecraft client files need to be downloaded first');
       setTimeout(() => errorMessage.set(''), 5000);
       return;
     }
     
-    if (downloadStatus === 'needed') {
+    if (legacyContentAllowed() && downloadStatus === 'needed') {
       errorMessage.set('Required mods need to be downloaded first');
       setTimeout(() => errorMessage.set(''), 5000);
       return;
     }
     
     isLaunching = true;
+    ownedLaunchScope=launchScope;
     launchStatus = 'launching';
     launchProgress = { type: 'Preparing', task: 'Refreshing authentication...', total: 0 };
     
@@ -2733,8 +2877,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 
       
       const refreshResult = await window.electron.invoke('minecraft-check-refresh-auth', {
-        clientPath: instance.path
+        clientPath: launchInstance.path
       });
+      if (!currentLaunch()) return;
+      if (!legacyContentAllowed() && !(packState?.status === 'ready' && packState?.verified === true)) throw new Error('The matching pack requirement changed. Refresh and review it before launching.');
       
       if (!refreshResult.success) {
         // Authentication refresh failed - require re-authentication
@@ -2768,8 +2914,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const minecraftPort = serverInfo?.minecraftPort || '25565';
       const memoryInMB = Math.round(normalizedMaxMemoryGB * 1024);
       
-      const result = await window.electron.invoke('minecraft-launch', {
-        clientPath: instance.path,
+      const launchRequest = legacyContentAllowed() ? {
+        clientPath: launchInstance.path,
         minecraftVersion: serverInfo?.minecraftVersion || '1.20.1',
         serverIp: instance.serverIp,
         serverPort: minecraftPort, // This is the Minecraft game server port, not management port
@@ -2779,7 +2925,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         serverInfo,
         maxMemory: memoryInMB, // Convert GB to MB for launcher
         showDebugTerminal // Add debug terminal setting
-      });
+      } : {clientPath:launchInstance.path,maxMemory:memoryInMB,showDebugTerminal};
+      const result = await window.electron.invoke('minecraft-launch', launchRequest);
+      if (!currentLaunch()) return;
       
       if (result.success) {
         launchStatus = 'running';
@@ -2811,6 +2959,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         setTimeout(() => errorMessage.set(''), 8000); // Longer timeout for detailed error messages
       }
     } catch (err) {
+      if (!currentLaunch()) return;
       launchStatus = 'error';
       isLaunching = false;
       
@@ -2833,15 +2982,19 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Stop Minecraft if running
   async function stopMinecraft() {
+    const scope = getAsyncScope(), request = ++launchRequestSequence;
+    ownedLaunchScope = null;
     try {
       isLaunching = false;
       launchStatus = 'ready';
       
       const result = await window.electron.invoke('minecraft-stop');
+      if (!isCurrentAsyncScope(scope) || request !== launchRequestSequence) return;
       
       successMessage.set(result.message || 'Minecraft stopped successfully');
       setTimeout(() => successMessage.set(''), 3000);
     } catch (err) {
+      if (!isCurrentAsyncScope(scope) || request !== launchRequestSequence) return;
       launchStatus = 'ready'; // Reset status anyway
       errorMessage.set('Error stopping Minecraft: ' + err.message);
       setTimeout(() => errorMessage.set(''), 5000);
@@ -2857,7 +3010,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // Electron safeSend or panel-shim poll) keeps $clientState.minecraftServerStatus in sync.
     try {
       if (window.electron && typeof window.electron.on === 'function') {
-        window.electron.on('server-status', (rawStatus) => {
+        listenLauncher('server-status', (rawStatus) => {
           const expectedServerInstanceId = serverInfo?.instanceId || null;
 
           if (!rawStatus || typeof rawStatus !== 'object') {
@@ -2895,140 +3048,14 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       }
     } catch { /* ignore listener setup errors */ }
 
-    window.electron.on('launcher-download-start', () => {
-      downloadStatus = 'downloading';
-      downloadProgress = 0;
-    });
-    
-    window.electron.on('launcher-download-progress', (data) => {
-      downloadProgress = Math.round((data.downloaded / data.total) * 100);
-      currentDownloadFile = data.current || '';
-        // Handle file-level progress if available
-      if (data.fileProgress !== undefined) {
-        fileProgress = Math.round(data.fileProgress);
-      }
-      
-      if (data.downloadedBytes && data.totalSize) {
-        // Calculate download speed (rough estimate)
-        const mbps = (data.downloadedBytes / (1024 * 1024)).toFixed(1);
-        downloadSpeed = `${mbps} MB downloaded`;
-      }
-      
-      // Update status based on progress data
-      if (data.status) {
-        if (data.status === 'downloading') {
-          downloadStatus = 'downloading';
-        } else if (data.status === 'completed') {
-          downloadStatus = data.downloaded === data.total ? 'ready' : 'downloading';
-        } else if (data.status === 'failed') {
-          downloadStatus = 'needed'; // Allow retry
-        }
-      }
-      
-    });
-    
-    window.electron.on('launcher-download-complete', (data) => {
-      downloadStatus = data.success ? 'ready' : 'needed';
-      downloadProgress = 100;
-      currentDownloadFile = '';
-    });
-    
-    // Launch events
-    window.electron.on('launcher-launch-start', () => {
-      isLaunching = true;
-      launchStatus = 'launching';
-      launchProgress = { type: 'Starting', task: 'Preparing to launch...', total: 0 };
-    });    window.electron.on('launcher-launch-progress', (data) => {
-      launchProgress = data;
-    });
-    
-    window.electron.on('launcher-launch-success', () => {
-      launchStatus = 'running';
-      isLaunching = false;
-    });
-    
-    window.electron.on('launcher-launch-error', (error) => {
-      launchStatus = 'error';
-      isLaunching = false;
-      errorMessage.set(`Launch failed: ${getReadableErrorMessage(error)}`);
-      setTimeout(() => errorMessage.set(''), 5000);
-    });
-    
-    window.electron.on('launcher-minecraft-closed', () => {
-      launchStatus = 'ready';
-    });
-    
-    // Auth events
-    window.electron.on('launcher-auth-success', (data) => {
-      
-      // Only update if we have valid data and we're not already authenticated with this user
-      if (data && data.username && (!username || username !== data.username)) {
-        authStatus = 'authenticated';
-        username = data.username;
-        authData = data;
-        
-        // Trigger a single server status refresh after authentication
-        setTimeout(async () => {
-          flushDeferredPlayTabSync({ delayMs: 320 });
-          await checkServerStatus();
-        }, 100);
-      }
-    });
-    
-    window.electron.on('launcher-auth-error', (error) => {
-      authStatus = 'needs-auth';
-      errorMessage.set(`Authentication failed: ${getReadableErrorMessage(error)}`);
-      setTimeout(() => errorMessage.set(''), 5000);
-    });
-    
-    // Client download events
-    window.electron.on('launcher-client-download-start', (data) => {
-      clientSyncStatus = 'downloading';
-      clientDownloadProgress = { type: 'Starting', task: `Downloading Minecraft ${data.version}...`, total: 0, current: 0 };
-    });
-    
-    window.electron.on('launcher-client-download-progress', (data) => {
-      clientDownloadProgress = data;
-    });
-    
-    window.electron.on('launcher-client-download-complete', (data) => {
-      isDownloadingClient = false;
-      clientDownloadProgress = { type: 'Complete', task: 'Client download finished', total: 100, current: 100 };
-      clientSyncStatus = 'ready';
-      
-      if (data.success) {
-        successMessage.set(`Client download complete: ${data.message || 'Minecraft client files downloaded successfully'}`);
-        setTimeout(() => successMessage.set(''), 5000);
-        
-        // After client download completes, refresh mod sync status
-        // This ensures the mods section updates properly
-        setTimeout(async () => {
-          try {
-            requestPlayTabSync({
-              silentRefresh: true,
-              includeCompatibilityScan: true,
-              delayMs: 24
-            });
-          } catch (e) {
-            console.error('Error refreshing mod sync after client download:', e);
-          }
-        }, 1000);
-      } else {
-        errorMessage.set(`Client download failed: ${data.error || 'Unknown error'}`);
-        setTimeout(() => errorMessage.set(''), 5000);
-      }
-      
-    });
-      window.electron.on('launcher-client-download-error', (data) => {
-      clientSyncStatus = 'needed';
-      errorMessage.set('Client download failed: ' + data.error);
-      setTimeout(() => errorMessage.set(''), 5000);
-    });
-      // Client mod compatibility events
-    window.electron.on('client-mod-compatibility-report', handleCompatibilityReportEvent);
+    // Global launch/download/report payloads lack client + operation provenance.
+    // Apply scoped invoke outcomes instead of attributing these events to a local request.
+    // Close signals are hints only: an authoritative matching status must confirm exit.
+    listenLauncher('launcher-minecraft-closed', () => {void refreshLauncherStatus();});
+    listenLauncher('launcher-minecraft-stopped', () => {void refreshLauncherStatus();});
     
     // Listen for server version changes to re-check app compatibility
-    window.electron.on('server-version-changed', (data) => {
+    listenLauncher('server-version-changed', (data) => {
       const expectedServerInstanceId = serverInfo?.instanceId || null;
       if (
         data &&
@@ -3047,31 +3074,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Clean up event listeners
   function cleanupLauncherEvents() {
-    const events = [
-      'server-status',
-      'launcher-download-start',
-      'launcher-download-progress', 
-      'launcher-download-complete',
-      'launcher-launch-start',
-      'launcher-launch-progress',
-      'launcher-launch-success',
-      'launcher-launch-error',
-      'launcher-minecraft-closed',
-      'launcher-auth-success',
-      'launcher-auth-error',
-      'launcher-client-download-start',
-      'launcher-client-download-progress',
-      'launcher-client-download-complete',
-      'launcher-client-download-error',
-      'client-mod-compatibility-report',
-      'server-version-changed'
-    ];
-    
-    events.forEach(event => {
-      window.electron.removeAllListeners(event);
-    });
+    launcherListenerRemovers.forEach(remove => remove());
+    launcherListenerRemovers=[];
   }
-    // Set up periodic checks
   function setupChecks() {
     // Check connection immediately
     connectToServer();
@@ -3112,18 +3117,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     // This matches the behavior of other Minecraft launchers like ATLauncher
     
     // Set up periodic launcher status check - ONLY when Minecraft is running
-    const launcherStatusInterval = setInterval(async () => {
-      if (launchStatus === 'running') {
-        try {
-          const status = await window.electron.invoke('minecraft-get-status');
-          if (status && !status.isRunning && !status.isLaunching) {
-            launchStatus = 'ready';
-          }
-        } catch (err) {
-          // Silent error handling for periodic checks
-        }
-      }
-    }, 15000); // Every 15 seconds when running
+    const launcherStatusInterval = setInterval(() => {void refreshLauncherStatus();}, 15000);
     // Return cleanup function
     return () => {
       if (connectionCheckInterval) clearInterval(connectionCheckInterval);
@@ -3232,7 +3226,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   $: if (
-    $clientState.activeTab === 'mods' &&
+    packState?.status === 'unmanaged' && $clientState.activeTab === 'mods' &&
     instance?.path &&
     serverInfo?.minecraftVersion
   ) {
@@ -3243,6 +3237,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   
   onMount(() => {
+    interfaceMounted = true;
+    activeClientKey = `${instance?.id || ''}:${instance?.path || ''}`;
     logger.info('ClientInterface component mounted', {
       category: 'ui',
       data: {
@@ -3267,30 +3263,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     // Load any persisted mod state so the Play tab reflects accurate
     // synchronization status before visiting the Mods tab
-    (async () => {
-      try {
-        // Load acknowledged dependencies FIRST
-        await loadAcknowledgedDependencies(true);
-        
-        const state = await window.electron.invoke('load-expected-mod-state', {
-          clientPath: instance.path
-        });
-        if (state.success) {
-          // Merge required + optional mods from persisted state; keep legacy support
-          const persistedMods = [
-            ...(Array.isArray(state.requiredMods) ? state.requiredMods : []),
-            ...(Array.isArray(state.optionalMods) ? state.optionalMods : []),
-            ...(Array.isArray(state.expectedMods) ? state.expectedMods : []) // legacy schema
-          ];
-
-          // Always update, even if empty, so removals clear the set
-          serverManagedFiles.set(
-            new SvelteSet(persistedMods.map((m) => m.toLowerCase()))
-          );
-        }
-      } catch (err) {
-      }
-    })();
+    // Legacy persisted mod hydration starts only after main classifies unmanaged.
 
     const cleanupChecks = setupChecks();
     
@@ -3304,6 +3277,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     
     // Return cleanup function
     return () => {
+      interfaceMounted = false;
       if (cleanupChecks) cleanupChecks();
       clearPlayTabSyncSchedule();
       clearAutoCompatibilitySchedule();
@@ -3358,7 +3332,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     });
     invalidateAsyncScope();
     setConnectionStatus('disconnected');
-    connectToServer();
+    connectToServer({ forceRegistration: true });
   }
   
   async function confirmDelete() {
@@ -3406,6 +3380,8 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   // Prevent sync check when downloads are in progress
   async function checkSyncStatus() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (isDownloadingClient || isDownloadingMods || isCheckingSync) {
       return;
     }
@@ -3463,13 +3439,15 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
   // Handle acknowledging all dependencies at once
   async function onAcknowledgeAllDependencies() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!modSyncStatus?.acknowledgments) return;
 
     try {
       const acknowledgedFiles = [];
       
       for (const ack of modSyncStatus.acknowledgments) {
-        await window.electron.invoke('minecraft-acknowledge-dependency', {
+        await invokeLegacyContent('minecraft-acknowledge-dependency', {
           clientPath: instance.path,
           modFileName: ack.fileName
         });
@@ -3507,11 +3485,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   async function handleCompatibilityDialogUpdateMods() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!compatibilityReport?.needsUpdate) return;
     
     try {
       for (const mod of compatibilityReport.needsUpdate) {
-        await window.electron.invoke('install-client-mod', {
+        await invokeLegacyContent('install-client-mod', {
           id: mod.projectId,
           name: mod.name,
           selectedVersionId: mod.versionId,
@@ -3529,11 +3509,13 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   }
 
   async function handleCompatibilityDialogDisableIncompatible() {
+    if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!compatibilityReport?.incompatible) return;
     
     try {
       for (const mod of compatibilityReport.incompatible) {
-        await window.electron.invoke('disable-client-mod', {
+        await invokeLegacyContent('disable-client-mod', {
           clientPath: instance.path,
           fileName: mod.fileName
         });
@@ -3579,6 +3561,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   .client-content {
     /* Match server's content-panel exactly */
     width: var(--content-area-width) !important; /* 800px like content-panel */
+    max-width: 100%;
     margin: 0 auto;
     box-sizing: border-box !important;
     padding: 0 !important; /* Let child components handle their own padding */
@@ -3665,7 +3648,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
 </style>
 
 <div class="client-wrapper">
-  <ClientHeader {tabs} {onOpenAppSettings} {onModpackNotificationNavigate} />
+  <ClientHeader {tabs} {onOpenAppSettings} />
   <div class="client-interface">
   {#if pendingDownloadSourceSwitch}
     <div class="download-source-banner">
@@ -3705,8 +3688,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     </div>
   {/if}
   <div class="client-content">
+    <ClientModpackPanel bind:this={matchingPackPanel} clientId={instance?.id || ''} destinationLabel={`${instance?.name || 'Client'} — ${instance?.path || ''}`} on:state={handlePackState} />
     {#if $clientState.activeTab === 'play'}
       <PlayTab
+        {packState}
         {authStatus}
         {authenticateWithMicrosoft}
         {checkAuthentication}
@@ -3747,6 +3732,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {isChecking}
       />
     {:else if $clientState.activeTab === 'mods'}
+      {#if legacyContentAllowed()}
       <ModsTab
         {instance}
         bind:clientModManagerComponent
@@ -3757,8 +3743,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {filteredAcknowledgments}
         clientModVersionUpdates={$clientState.clientModVersionUpdates}
       />
+      {:else}<p role="status">Managed pack content is reviewed in Matching client pack.</p>{/if}
     {:else if $clientState.activeTab === 'settings'}
       <SettingsTab
+        {packState}
         {instance}
         {authStatus}
         {authData}

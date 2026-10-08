@@ -41,6 +41,36 @@ function parseReference(actionId, opaqueRef) {
   throw invalid();
 }
 
+function trackedSource(value) {
+  const provider = value?.provider;
+  const serverId = identifier(value?.serverId);
+  if (provider === 'github') {
+    return { serverId, provider, sourceId: identifier(value.repositoryId) };
+  }
+  if (provider === 'modrinth') {
+    return { serverId, provider, sourceId: identifier(value.projectId) };
+  }
+  throw invalid();
+}
+
+function bindIssuedSource(notification, tracking) {
+  const source = strictObject(notification?.source, ['provider', 'sourceId']);
+  const expected = trackedSource(tracking);
+  if (source.provider !== expected.provider || identifier(source.sourceId) !== expected.sourceId) throw invalid();
+  return expected;
+}
+
+function exactReleaseTarget(notification, tracking, releaseId) {
+  const source = bindIssuedSource(notification, tracking);
+  const release = strictObject(notification?.release, ['releaseId', 'version', 'prerelease']);
+  if (identifier(release.releaseId) !== releaseId || typeof release.prerelease !== 'boolean') throw invalid();
+  return {
+    ...source,
+    releaseId,
+    prerelease: release.prerelease
+  };
+}
+
 class ReleaseNotificationReferenceAuthority {
   constructor({ notificationStore, trackingStore, randomUUID = crypto.randomUUID } = {}) {
     if (!notificationStore || typeof notificationStore.list !== 'function' ||
@@ -68,9 +98,11 @@ class ReleaseNotificationReferenceAuthority {
     const issued = notifications.filter(item => item?.action?.actionId === actionId &&
       item.action.opaqueRef === opaqueRef && item.serverId === tracking.serverId);
     if (issued.length !== 1) throw invalid();
+    bindIssuedSource(issued[0], tracking);
 
     let targetKind;
     let targetId;
+    let releaseTarget;
     if (parsed.kind === 'check') {
       if (issued[0].release !== null) throw invalid();
       targetKind = 'retry';
@@ -79,13 +111,14 @@ class ReleaseNotificationReferenceAuthority {
       if (issued[0].release?.releaseId !== parsed.releaseId) throw invalid();
       targetKind = REVIEW_ACTIONS.get(actionId);
       targetId = identifier(`release:${parsed.trackingId}:${parsed.releaseId}`);
+      releaseTarget = exactReleaseTarget(issued[0], tracking, parsed.releaseId);
     }
     const generated = identifier(String(this.randomUUID()));
     const claimId = identifier(`claim:${generated}`);
     if (this.claims.has(claimId)) throw invalid();
     const claim = deepFreeze({
       claimId,
-      reference: { actionId, targetKind, targetId }
+      reference: { actionId, targetKind, targetId, ...(releaseTarget ? { releaseTarget } : {}) }
     });
     this.activeByReference.set(opaqueRef, claimId);
     this.claims.set(claimId, { actionId, opaqueRef });

@@ -1,7 +1,7 @@
 <!-- @ts-ignore -->
 <script>
   /// <reference path="../../electron.d.ts" />
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher } from 'svelte';
   
   // Event dispatcher to communicate with parent component
   const dispatch = createEventDispatcher();
@@ -15,8 +15,6 @@
   let inviteSecret = '';
   let managementCertFingerprint = '';
   let installing = false;
-  let installProgress = 0;
-  let installSpeed = '0 MB/s';
   let installLogs = [];
   let sessionToken = '';
   let clientId = '';
@@ -241,11 +239,6 @@
     try {
       installing = true;
       installLogs = [];
-      installProgress = 0;
-      installSpeed = 'Starting...';
-    
-      // Register event handlers for installation progress
-      setupInstallationListeners();
       
       // Add initial log message
       installLogs = [...installLogs, 'Starting client setup...'];
@@ -304,14 +297,8 @@
         managementCertFingerprint
       });
       
-      // For now, we're just setting up the connection
-      // In future updates, we'll implement:
-      // 1. Download Minecraft client
-      // 2. Download the matching loader runtime
-      // 3. Download required mods from server
-      
       // Complete setup
-      installLogs = [...installLogs, 'Client setup completed successfully!'];
+      installLogs = [...installLogs, 'Connection saved. The matching client pack will be checked after this instance is registered. Review installation from Matching client pack.'];
       installing = false;
       lastConnected = new Date().toISOString();
       dispatchSetupComplete();
@@ -321,41 +308,6 @@
     }
   }
   
-  function setupInstallationListeners() {
-    // Remove any existing listeners first to prevent duplicates
-    window.electron.removeAllListeners('minecraft-client-progress');
-    window.electron.removeAllListeners('fabric-install-progress');
-    window.electron.removeAllListeners('loader-install-progress');
-    window.electron.removeAllListeners('install-log');
-    
-    // Add new listeners
-    window.electron.on('minecraft-client-progress', (data) => {
-      if (data && typeof data === 'object') {
-        installProgress = data.percent || 0;
-        installSpeed = data.speed || '0 MB/s';
-      }
-    });
-    
-    window.electron.on('fabric-install-progress', (data) => {
-      if (data && typeof data === 'object') {
-        installProgress = data.percent || 0;
-        installSpeed = data.speed || '0 MB/s';
-      }
-    });
-
-    window.electron.on('loader-install-progress', (data) => {
-      if (data && typeof data === 'object') {
-        installProgress = data.percent || 0;
-        installSpeed = data.speed || '0 MB/s';
-      }
-    });
-    
-    window.electron.on('install-log', (line) => {
-      if (line && typeof line === 'string') {
-        installLogs = [...installLogs, line];
-      }
-    });
-  }
   
   function dispatchSetupComplete() {
     // Make sure path is not empty
@@ -380,18 +332,6 @@
     }, 0);
   }
   
-  onMount(() => {
-    // Setup listeners on mount to catch any delayed events
-    setupInstallationListeners();
-    
-    // Clean up event listeners when component is unmounted
-    return () => {
-      window.electron.removeAllListeners('minecraft-client-progress');
-      window.electron.removeAllListeners('fabric-install-progress');
-      window.electron.removeAllListeners('loader-install-progress');
-      window.electron.removeAllListeners('install-log');
-    };
-  });
 </script>
 
 <div class="setup-wizard">
@@ -445,10 +385,7 @@
       
       {#if installing}
         <div class="installation-progress">
-          <div class="progress-bar">
-            <div class="progress-fill" style="width: {installProgress}%"></div>
-          </div>
-          <p class="progress-text">Progress: {installProgress}% ({installSpeed})</p>
+          <p class="progress-text" role="status" aria-live="polite">Saving the client connection…</p>
             <div class="install-logs">
             <h3>Setup Logs</h3>
             <div class="logs-container">

@@ -1,3 +1,5 @@
+const { resolveWindowsAppUserModelId } = require('../utils/app-identity.cjs');
+
 function requireFunction(value, name) {
   if (typeof value !== 'function') throw new TypeError(`${name} must be a function`);
   return value;
@@ -34,7 +36,9 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
   const getWindow = optionalFunction(serviceGraph.window?.get, 'window.get');
   const initializeRecovery = optionalFunction(startup.initializeRecovery, 'startup.initializeRecovery') ||
     (() => { throw new TypeError('Startup recovery boundary is required'); });
+  const initializeServerConfig = optionalFunction(startup.initializeServerConfig, 'startup.initializeServerConfig');
   const cleanupRuntime = optionalFunction(startup.cleanupRuntime, 'startup.cleanupRuntime');
+  const markTiming = optionalFunction(startup.markTiming, 'startup.markTiming');
   const installSecurity = optionalFunction(startup.installSecurity, 'startup.installSecurity');
   const configureAfterReady = optionalFunction(startup.configureAfterReady, 'startup.configureAfterReady');
   const afterWindowCreated = optionalFunction(startup.afterWindowCreated, 'startup.afterWindowCreated');
@@ -60,7 +64,8 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
     }
     optionalFunction(app.setName, 'app.setName')?.call(app, 'Minecraft Core');
     if (runtimeFlags.platform === 'win32') {
-      optionalFunction(app.setAppUserModelId, 'app.setAppUserModelId')?.call(app, 'com.minecraft-core.app');
+      optionalFunction(app.setAppUserModelId, 'app.setAppUserModelId')?.call(app,
+        resolveWindowsAppUserModelId({ isPackaged: Boolean(app.isPackaged) }));
     }
     installSecurity?.(serviceGraph);
     beforeReadyInitialized = true;
@@ -84,18 +89,28 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
     return publishedWindow;
   }
 
+  async function runStartupStage(name, operation) {
+    markTiming?.(`${name}:start`);
+    try {
+      return await operation();
+    } finally {
+      markTiming?.(`${name}:complete`);
+    }
+  }
+
   async function startReady() {
     initializeBeforeReady();
     if (disposed) throw new Error('Main bootstrap is disposed');
 
-    await initializeRecovery(serviceGraph);
-    await cleanupRuntime?.();
+    await startService(serviceGraph.watchdog, 'start', runtimeFlags.watchdogEnabled, 'watchdog');
+    await runStartupStage('recovery', () => initializeRecovery(serviceGraph));
+    await runStartupStage('server-config', () => initializeServerConfig?.(serviceGraph));
+    await runStartupStage('cleanup', () => cleanupRuntime?.());
     await configureAfterReady?.(serviceGraph);
     await startService(serviceGraph.tray, 'start', runtimeFlags.trayEnabled, 'tray');
-    const window = await createAndResolveWindow();
+    const window = await runStartupStage('main-window:create', createAndResolveWindow);
     await afterWindowCreated?.(window, serviceGraph);
     await startService(serviceGraph.updater, 'start', runtimeFlags.updaterEnabled, 'updater');
-    await startService(serviceGraph.watchdog, 'start', runtimeFlags.watchdogEnabled, 'watchdog');
     await startService(serviceGraph.nativeNotifications, 'start', runtimeFlags.nativeNotificationsEnabled, 'nativeNotifications');
     await startService(serviceGraph.managementServer, 'listen', runtimeFlags.publicManagementListenersEnabled, 'managementServer');
     return window;

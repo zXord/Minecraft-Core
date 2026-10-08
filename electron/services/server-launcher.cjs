@@ -3,9 +3,16 @@ const path = require('path');
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 const { FABRIC_LAUNCH_JAR, getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
 const { validatePreparedRuntime } = require('./loader-install-service.cjs');
+const { normalizeRuntimeTuple } = require('./modpacks/contracts.cjs');
+const { ModpackError } = require('./modpacks/errors.cjs');
 const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
+const {
+  overlayServerProperties,
+  serverNetworkProperties
+} = require('../utils/server-network-properties.cjs');
 
 const SUPPORTED_LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+const WINDOWS_RESPONSE_FILE_PATH_LIMIT = 260;
 const READY_MARKERS = Object.freeze([
   'Done (',
   'For help, type "help"'
@@ -22,6 +29,21 @@ function codedLaunchError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function assertWindowsResponseFilePath(argsFilePath) {
+  if (process.platform !== 'win32' || path.resolve(argsFilePath).length < WINDOWS_RESPONSE_FILE_PATH_LIMIT) {
+    return;
+  }
+
+  throw new ModpackError(
+    'SERVER_PATH_TOO_LONG',
+    'This server location is too deeply nested for the selected loader on Windows. Choose a shorter folder.',
+    {
+      details: { field: 'serverPath' },
+      retryable: true
+    }
+  );
 }
 
 function commonPlan({ type, loader, jar, args, cwd, runtime, assets }) {
@@ -70,39 +92,19 @@ function readServerProperties(serverPath) {
 }
 
 function writeServerProperties(serverPath, properties) {
-  const current = readServerProperties(serverPath);
-  const nextLines = [...current.lines];
-  const seenKeys = new Set();
-
-  Object.entries(properties).forEach(([key, value]) => {
-    const serialized = `${key}=${value}`;
-    const existingIndex = nextLines.findIndex((line) => line && !line.startsWith('#') && line.startsWith(`${key}=`));
-
-    if (existingIndex >= 0) {
-      nextLines[existingIndex] = serialized;
-    } else {
-      nextLines.push(serialized);
-    }
-
-    seenKeys.add(key);
-  });
-
-  if (nextLines.length === 0) {
-    nextLines.push('');
-  }
-
+  const filePath = path.join(serverPath, 'server.properties');
+  const current = fs.existsSync(filePath) ? fs.readFileSync(filePath) : null;
+  const next = overlayServerProperties(current, properties);
   markCurrentServerMutationDirty(serverPath);
-  fs.writeFileSync(current.filePath, nextLines.join('\n'), 'utf8');
+  fs.writeFileSync(filePath, next);
 }
 
-function syncServerPort(serverPath, port) {
+function syncServerPort(serverPath, port, networkAccess = 'pack-default') {
   if (!serverPath || !port) {
     return;
   }
 
-  writeServerProperties(serverPath, {
-    'server-port': String(port)
-  });
+  writeServerProperties(serverPath, serverNetworkProperties({ port, networkAccess }));
 }
 
 function findFirstJar(serverPath, predicate) {
@@ -314,6 +316,8 @@ function resolveForgeLaunchPlan(serverPath, maxRam, expected = {}, runtime = nul
     throw error;
   }
 
+  if (assets.userJvmArgs) assertWindowsResponseFilePath(assets.userJvmArgs);
+  assertWindowsResponseFilePath(assets.forgeArgs);
   ensureForgeRootShim(serverPath, assets.forgeArgs);
   const userJvmArgFile = assets.userJvmArgs
     ? `@${path.relative(serverPath, assets.userJvmArgs) || path.basename(assets.userJvmArgs)}`
@@ -335,6 +339,174 @@ function resolveForgeLaunchPlan(serverPath, maxRam, expected = {}, runtime = nul
     runtime,
     assets
   });
+}
+
+function resolveRecordedForgeLaunchPlan(serverPath, maxRam, validation) {
+  const loader = validation?.loader;
+  if (loader && typeof loader.argsFile === 'string') {
+    const forgeArgs = path.join(serverPath, ...loader.argsFile.split('/'));
+    assertWindowsResponseFilePath(forgeArgs);
+    const recordedPaths = new Set(validation.artifacts.map(artifact => artifact.relativePath));
+    const recordedUserJvmArgs = recordedPaths.has('user_jvm_args.txt')
+      ? path.join(serverPath, 'user_jvm_args.txt')
+      : null;
+    if (recordedUserJvmArgs) assertWindowsResponseFilePath(recordedUserJvmArgs);
+    const args = [];
+    if (recordedUserJvmArgs) args.push(`@${path.relative(serverPath, recordedUserJvmArgs)}`);
+    args.push(`-Xmx${maxRam}G`, '-Xms1G', `@${path.relative(serverPath, forgeArgs)}`, 'nogui');
+    return commonPlan({
+      type: 'forge',
+      loader: 'forge',
+      jar: null,
+      args,
+      cwd: serverPath,
+      runtime: validation.runtime,
+      assets: { userJvmArgs: recordedUserJvmArgs, forgeArgs, runScript: null }
+    });
+  }
+  if (loader && typeof loader.launchJar === 'string') {
+    const launchJar = path.join(serverPath, ...loader.launchJar.split('/'));
+    return commonPlan({
+      type: 'jar',
+      loader: 'forge',
+      jar: launchJar,
+      args: [`-Xmx${maxRam}G`, '-Xms1G', '-jar', launchJar, 'nogui'],
+      cwd: serverPath,
+      runtime: validation.runtime
+    });
+  }
+  throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared Forge runtime is incomplete.');
+}
+
+function sameRuntime(left, right) {
+  return ['minecraftVersion', 'loaderFamily', 'loaderVersion', 'javaMajor', 'os', 'architecture']
+    .every(key => left?.[key] === right?.[key]);
+}
+
+function canonicalLaunchIdentity(value) {
+  const normalized = path.normalize(path.resolve(value));
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function resolvePrevalidatedFile(serverPath, relativePath, recordedPaths) {
+  if (typeof relativePath !== 'string' || !recordedPaths.has(relativePath) || relativePath.includes('\\') ||
+      relativePath.includes(':') || relativePath.startsWith('/') ||
+      relativePath.split('/').some(segment => !segment || segment === '.' || segment === '..')) {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared runtime launch evidence is invalid.');
+  }
+  const filePath = path.resolve(serverPath, ...relativePath.split('/'));
+  const relative = path.relative(path.resolve(serverPath), filePath);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared runtime launch evidence is invalid.');
+  }
+  let stat;
+  let rootRealPath;
+  let fileRealPath;
+  try {
+    const rootStat = fs.lstatSync(serverPath);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('invalid root');
+    rootRealPath = fs.realpathSync.native(serverPath);
+    fileRealPath = fs.realpathSync.native(filePath);
+    stat = fs.lstatSync(filePath);
+  } catch {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared runtime launch file is missing.');
+  }
+  const realRelative = path.relative(rootRealPath, fileRealPath);
+  if (canonicalLaunchIdentity(rootRealPath) !== canonicalLaunchIdentity(serverPath) ||
+      !realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative) ||
+      !stat.isFile() || stat.isSymbolicLink() || !Number.isSafeInteger(stat.nlink) || stat.nlink !== 1) {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared runtime launch file is invalid.');
+  }
+  return filePath;
+}
+
+function resolvePrevalidatedLaunchPlan(serverPath, options = {}, validation) {
+  let runtime;
+  try {
+    if (!validation || typeof validation !== 'object' || Array.isArray(validation) || validation.valid !== true ||
+        !validation.loader || typeof validation.loader !== 'object' || Array.isArray(validation.loader) ||
+        !Array.isArray(validation.artifacts) || validation.artifacts.length < 1) throw new Error('invalid validation');
+    runtime = normalizeRuntimeTuple(validation.runtime);
+  } catch {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared runtime launch evidence is invalid.');
+  }
+  const expectedRuntime = {
+    minecraftVersion: options.minecraftVersion,
+    loaderFamily: normalizeLoaderName(options.loader),
+    loaderVersion: options.loaderVersion,
+    javaMajor: options.javaMajor,
+    os: runtime.os,
+    architecture: runtime.architecture
+  };
+  if (!sameRuntime(runtime, expectedRuntime) || validation.loader.family !== runtime.loaderFamily ||
+      !SUPPORTED_LOADERS.has(runtime.loaderFamily)) {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared runtime does not match the launch request.');
+  }
+  const recordedPaths = new Set();
+  for (const artifact of validation.artifacts) {
+    if (!artifact || typeof artifact !== 'object' || typeof artifact.relativePath !== 'string' ||
+        recordedPaths.has(artifact.relativePath)) {
+      throw codedLaunchError('RUNTIME_INCOMPLETE', 'The prepared runtime launch evidence is invalid.');
+    }
+    recordedPaths.add(artifact.relativePath);
+  }
+  const maxRam = Number.isFinite(Number(options.maxRam)) ? Number(options.maxRam) : 4;
+  const loader = validation.loader;
+
+  if (runtime.loaderFamily === 'vanilla') {
+    const serverJar = resolvePrevalidatedFile(serverPath, loader.serverJar, recordedPaths);
+    return commonPlan({
+      type: 'jar',
+      loader: 'vanilla',
+      jar: serverJar,
+      args: [`-Xmx${maxRam}G`, '-Xms1G', '-jar', serverJar, 'nogui'],
+      cwd: serverPath,
+      runtime
+    });
+  }
+  if (runtime.loaderFamily === 'fabric') {
+    const launcherJar = resolvePrevalidatedFile(serverPath, loader.launcherJar, recordedPaths);
+    return commonPlan({
+      type: 'jar',
+      loader: 'fabric',
+      jar: launcherJar,
+      args: [`-Xmx${maxRam}G`, '-Xms1G', '-jar', launcherJar, 'nogui'],
+      cwd: serverPath,
+      runtime
+    });
+  }
+  if (runtime.loaderFamily === 'forge') {
+    const launchPath = typeof loader.argsFile === 'string' ? loader.argsFile : loader.launchJar;
+    resolvePrevalidatedFile(serverPath, launchPath, recordedPaths);
+    if (recordedPaths.has('user_jvm_args.txt')) {
+      resolvePrevalidatedFile(serverPath, 'user_jvm_args.txt', recordedPaths);
+    }
+    return resolveRecordedForgeLaunchPlan(serverPath, maxRam, { ...validation, runtime });
+  }
+  if (runtime.loaderFamily === 'neoforge') {
+    const argsFile = resolvePrevalidatedFile(serverPath, loader.argsFile, recordedPaths);
+    assertWindowsResponseFilePath(argsFile);
+    return commonPlan({
+      type: 'neoforge',
+      loader: 'neoforge',
+      jar: null,
+      args: [`-Xmx${maxRam}G`, '-Xms1G', `@${path.relative(serverPath, argsFile)}`, 'nogui'],
+      cwd: serverPath,
+      runtime
+    });
+  }
+  if (runtime.loaderFamily === 'quilt') {
+    const launcherJar = resolvePrevalidatedFile(serverPath, loader.launcherJar, recordedPaths);
+    return commonPlan({
+      type: 'jar',
+      loader: 'quilt',
+      jar: launcherJar,
+      args: [`-Xmx${maxRam}G`, '-Xms1G', '-jar', launcherJar, 'nogui'],
+      cwd: serverPath,
+      runtime
+    });
+  }
+  throw codedLaunchError('UNSUPPORTED_LOADER', `Unsupported loader: ${runtime.loaderFamily}`);
 }
 
 function resolveLaunchPlan(serverPath, options = {}, { runtimeTuple = null } = {}) {
@@ -380,6 +552,13 @@ function resolveLaunchPlan(serverPath, options = {}, { runtimeTuple = null } = {
   }
 
   if (resolvedLoader === 'forge') {
+    if (runtimeTuple) {
+      return resolveRecordedForgeLaunchPlan(
+        serverPath,
+        maxRam,
+        validatePreparedRuntime(serverPath, runtimeTuple)
+      );
+    }
     return resolveForgeLaunchPlan(serverPath, maxRam, {
       minecraftVersion,
       loaderVersion
@@ -390,6 +569,7 @@ function resolveLaunchPlan(serverPath, options = {}, { runtimeTuple = null } = {
     if (!runtimeTuple) throw codedLaunchError('RUNTIME_INCOMPLETE', 'NeoForge runtime identity is missing.');
     const validation = validatePreparedRuntime(serverPath, runtimeTuple);
     const argsFile = path.join(serverPath, ...validation.loader.argsFile.split('/'));
+    assertWindowsResponseFilePath(argsFile);
     return commonPlan({
       type: 'neoforge',
       loader: 'neoforge',
@@ -436,5 +616,6 @@ module.exports = {
   writeServerProperties,
   syncServerPort,
   findForgeLaunchAssets,
+  resolvePrevalidatedLaunchPlan,
   resolveLaunchPlan
 };

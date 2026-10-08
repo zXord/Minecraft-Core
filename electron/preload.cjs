@@ -3,16 +3,21 @@ const { contextBridge, ipcRenderer } = require('electron');
 let ipcChannelsLogged = false;
 const listenerMap = new Map();
 const MODPACK_INVOKE_CHANNELS = Object.freeze([
+  'client-packs:get-companion', 'client-packs:list-companion-assets', 'client-packs:inspect-companion',
+  'client-packs:accept-companion', 'client-packs:get-state', 'client-packs:preview', 'client-packs:install',
+  'client-packs:cancel', 'client-packs:verify', 'client-packs:recover',
   'modpacks:search-catalog', 'modpacks:get-project', 'modpacks:list-versions', 'modpacks:list-github-releases',
   'modpacks:list-github-assets', 'modpacks:select-local-archive', 'modpacks:reserve-server-destination',
-  'modpacks:inspect', 'modpacks:preflight',
+  'modpacks:release-server-destination', 'modpacks:inspect', 'modpacks:cancel-inspection', 'modpacks:preflight',
   'modpacks:preflight-management', 'modpacks:start-operation', 'modpacks:cancel-job', 'modpacks:get-job', 'modpacks:get-state',
-  'modpacks:list-history', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
+  'modpacks:list-history', 'modpacks:list-rollback-options', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
   'modpacks:ack-notification', 'modpacks:check-updates', 'modpacks:update-tracking', 'modpacks:verify',
   'modpacks:perform-safe-action'
 ]);
 const MODPACK_EVENT_CHANNELS = Object.freeze([
-  'modpacks:job-progress', 'modpacks:job-log', 'modpacks:state-changed', 'modpacks:notification'
+  'client-packs:progress',
+  'modpacks:job-progress', 'modpacks:job-log', 'modpacks:state-changed', 'modpacks:notification',
+  'modpacks:inspection-progress', 'modpacks:preflight-progress'
 ]);
 
 // Expose protected methods that allow the renderer process to use

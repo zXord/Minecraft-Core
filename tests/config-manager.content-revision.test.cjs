@@ -51,6 +51,18 @@ test('missing legacy contentRevision normalizes to zero', (t) => {
   assert.equal(readContentRevision(serverPath), 0);
 });
 
+test('server config persists only the supported network-access policy', (t) => {
+  const { serverPath, configPath } = fixture(t);
+  assert.equal(getDefaultServerConfig().networkAccess, 'pack-default');
+  assert.equal(getDefaultServerConfig({ networkAccess: 'loopback' }).networkAccess, 'loopback');
+
+  fs.writeFileSync(configPath, JSON.stringify({ networkAccess: 'loopback' }));
+  assert.equal(readServerConfig(serverPath).networkAccess, 'loopback');
+
+  fs.writeFileSync(configPath, JSON.stringify({ networkAccess: 'public' }));
+  assert.equal(readServerConfig(serverPath).networkAccess, 'pack-default');
+});
+
 test('ordinary config writes preserve the current revision and unknown keys', (t) => {
   const { serverPath, configPath, durableFs } = fixture(t);
   fs.writeFileSync(configPath, JSON.stringify({ contentRevision: 4, custom: { keep: true }, maxRam: 4 }));

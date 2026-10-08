@@ -11,6 +11,8 @@ const {
 const {
   ServerMutationCoordinator
 } = require('../electron/services/server-mutation-coordinator.cjs');
+const { readContentRevision } = require('../electron/services/server-content-revision.cjs');
+const { updateServerConfig } = require('../electron/utils/config-manager.cjs');
 const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
 
 function createCoordinator() {
@@ -245,6 +247,48 @@ test('reading an existing management invite does not advance server content revi
   await handler({ sender: { id: 1 } }, { instanceId: 'server-alpha', serverPath });
 
   assert.equal(revisions.get(path.resolve(serverPath).toLocaleLowerCase('en-US')) || 0, 0);
+});
+
+test('explicitly generating management invite metadata uses the coordinated mutation boundary', async (t) => {
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-task-14-missing-invite-'));
+  t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
+  const configPath = path.join(serverPath, '.minecraft-core.json');
+  fs.writeFileSync(configPath, JSON.stringify({ contentRevision: 3, maxRam: 4 }));
+
+  let sequence = 0;
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient: {
+      flushDirectory() {},
+      moveWriteThrough(sourcePath, destinationPath) {
+        fs.renameSync(sourcePath, destinationPath);
+      },
+      replaceFileWriteThrough(sourcePath, destinationPath) {
+        fs.renameSync(sourcePath, destinationPath);
+      }
+    },
+    allowedRoots: [serverPath],
+    tempNameFactory: () => `invite-revision-${++sequence}`
+  });
+  const coordinator = new ServerMutationCoordinator({ durableFs });
+  coordinator.completeStartupRecovery([]);
+  const policy = createServerMutationPolicy({
+    coordinator,
+    getInstances: () => [{ id: 'server-alpha', type: 'server', path: serverPath }],
+    createOperationId: channel => `content-${channel}`
+  });
+  const handler = policy.wrapHandler('regenerate-management-invite-secret', async () => {
+    updateServerConfig(serverPath, { managementInviteSecret: 'generated-secret' }, {}, {
+      durableFs,
+      operationId: 'persist-generated-invite'
+    });
+    return { success: true, secret: 'generated-secret' };
+  });
+
+  await handler({ sender: { id: 1 } }, { instanceId: 'server-alpha', serverPath });
+
+  assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).managementInviteSecret, 'generated-secret');
+  assert.equal(readContentRevision(serverPath), 4);
 });
 
 test('browser writer delegates use the same mutation policy as desktop IPC', async () => {

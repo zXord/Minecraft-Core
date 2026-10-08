@@ -22,13 +22,23 @@ const {
 
 const SERVER_PATH = 'C:\\Minecraft\\StartGate';
 const INSTANCE_ID = 'start-gate-server';
+const MANAGED_RUNTIME = Object.freeze({
+  minecraftVersion: '1.20.1',
+  loaderFamily: 'fabric',
+  loaderVersion: '0.15.11',
+  javaMajor: 17,
+  os: 'win32',
+  architecture: 'x64'
+});
 
 function deferred() {
   let resolve;
-  const promise = new Promise(resolvePromise => {
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function code(expected) {
@@ -43,13 +53,14 @@ class FakeChild extends EventEmitter {
     this.signalCode = null;
     this.killed = false;
     this.closedForTest = false;
-    this.stdin = {
-      writes: [],
-      write: value => {
-        this.stdin.writes.push(value);
-        if (this.onStdinWrite) this.onStdinWrite(value);
-        return true;
-      }
+    this.stdin = new EventEmitter();
+    this.stdin.writes = [];
+    this.stdin.writable = true;
+    this.stdin.destroyed = false;
+    this.stdin.write = value => {
+      this.stdin.writes.push(value);
+      if (this.onStdinWrite) this.onStdinWrite(value);
+      return true;
     };
     this.stdout = new PassThrough();
     this.stderr = new PassThrough();
@@ -170,10 +181,25 @@ async function withServerManager(options, work) {
     }
     if (request.endsWith('server-process-runner.cjs') && options.processHandle) {
       return {
-        launchServerProcess() {
+        launchServerProcess(launchRequest) {
           calls.push('spawn');
+          if (options.onLaunchRequest) options.onLaunchRequest(launchRequest);
           children.push(options.processHandle.child);
           return options.processHandle;
+        }
+      };
+    }
+    if (request.endsWith('managed-runtime-worker-client.cjs')) {
+      const issuedValidation = options.runtimeValidation || Object.freeze({ valid: true, runtime: MANAGED_RUNTIME });
+      return {
+        isAppIssuedManagedRuntimeValidation(value) {
+          return value === issuedValidation;
+        },
+        async runManagedRuntimeVerificationWorker(verificationRequest) {
+          calls.push('verify-runtime');
+          if (options.onVerifyRuntime) options.onVerifyRuntime(verificationRequest);
+          if (options.verificationError) throw options.verificationError;
+          return issuedValidation;
         }
       };
     }
@@ -209,7 +235,7 @@ async function withServerManager(options, work) {
         readServerConfig() {
           calls.push('read-config');
           if (options.configError) throw options.configError;
-          return {
+          return options.config || {
             version: '1.20.1',
             loader: 'vanilla',
             loaderVersion: null,
@@ -247,10 +273,11 @@ async function withServerManager(options, work) {
     }
     if (request.endsWith('server-launcher.cjs')) {
       return {
-        syncServerPort(serverPath, port) {
+        syncServerPort(serverPath, port, networkAccess) {
           calls.push('sync-port');
           assert.equal(serverPath, SERVER_PATH);
           assert.equal(port, 25565);
+          assert.equal(networkAccess, options.config?.networkAccess || 'pack-default');
           const lease = context.getCurrentLease();
           assert.ok(lease, 'port synchronization must run inside the acquired start lease');
           lease.assertOwnedPath(serverPath);
@@ -267,6 +294,20 @@ async function withServerManager(options, work) {
             readyMarkers: ['Done ('],
             fatalMarkers: ['fatal'],
             runtime: null
+          };
+        },
+        resolvePrevalidatedLaunchPlan(serverPath, planOptions, validation) {
+          calls.push('resolve-prevalidated');
+          if (options.onResolvePrevalidated) options.onResolvePrevalidated({ planOptions, serverPath, validation });
+          return {
+            type: 'jar',
+            loader: planOptions.loader,
+            jar: 'C:\\Minecraft\\StartGate\\fabric-server-launch.jar',
+            args: ['-Xmx4G', '-jar', 'fabric-server-launch.jar', 'nogui'],
+            cwd: SERVER_PATH,
+            readyMarkers: ['Done ('],
+            fatalMarkers: ['fatal'],
+            runtime: validation.runtime
           };
         }
       };
@@ -354,6 +395,8 @@ test('start acquires the shared gate before every server read, write, Java step,
         'sync-port', 'java-requirements', 'resolve-launch', 'spawn', 'bump-revision'
       ]
     );
+    assert.equal(calls.includes('verify-runtime'), false);
+    assert.equal(calls.includes('resolve-prevalidated'), false);
     assert.deepEqual(acquired().selector, { instanceId: INSTANCE_ID, serverPath: SERVER_PATH });
     assert.equal(acquired().options.operation, 'server-start');
     assert.match(acquired().options.operationId, /^server-start-[A-Za-z0-9_-]{1,120}$/);
@@ -374,16 +417,160 @@ test('start acquires the shared gate before every server read, write, Java step,
     children[0].stdout.write('Done (1.23s)! For help, type "help"\n');
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(startedEvent?.instanceId, INSTANCE_ID);
+    assert.equal(startedEvent?.pid, 4242);
+  });
+});
+
+test('forced stop terminates only the retained server ChildProcess handle', async () => {
+  const child = new FakeChild(4242);
+  const killSignals = [];
+  child.onKill = signal => killSignals.push(signal);
+
+  await withServerManager({ child }, async ({ serverManager }) => {
+    const started = await serverManager.startMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH,
+      port: 25565,
+      maxRam: 4
+    });
+    assert.equal(started.success, true);
+
+    assert.equal(serverManager.killMinecraftServer({ instanceId: INSTANCE_ID }), true);
+    assert.deepEqual(killSignals, ['SIGKILL']);
+  });
+});
+
+test('server-started publication waits for supervision and is suppressed when arming fails', async () => {
+  const supervision = deferred();
+  const child = new FakeChild(4243);
+  await withServerManager({ child }, async ({ eventBus, serverManager }) => {
+    let published = 0;
+    eventBus.on('server-process-owned', request => request.acknowledge({
+      instanceId: request.instanceId,
+      operationId: request.operationId,
+      pid: request.pid,
+      ready: supervision.promise
+    }));
+    eventBus.on('server-started', () => { published += 1; });
+    const started = await serverManager.startMinecraftServer({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH });
+    assert.equal(started.success, true);
+    child.stdout.write('Done (1.0s)\n');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(published, 0);
+    supervision.reject(new Error('watchdog arm failed'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(published, 0);
+    assert.deepEqual(child.killed, true);
+  });
+});
+
+test('all five managed loader families verify asynchronously and bypass synchronous runtime discovery', async () => {
+  const loaderVersions = {
+    vanilla: '1.20.1',
+    fabric: '0.15.11',
+    forge: '47.3.12',
+    neoforge: '20.1.137',
+    quilt: '0.28.1'
+  };
+
+  for (const [loaderFamily, loaderVersion] of Object.entries(loaderVersions)) {
+    const runtime = Object.freeze({ ...MANAGED_RUNTIME, loaderFamily, loaderVersion });
+    const validation = Object.freeze({ valid: true, runtime });
+    const calls = [];
+    let verificationRequest = null;
+    let prevalidatedRequest = null;
+    await withServerManager({
+      calls,
+      config: {
+        modpackManaged: true,
+        runtime,
+        version: runtime.minecraftVersion,
+        loader: runtime.loaderFamily,
+        loaderVersion: runtime.loaderVersion,
+        port: 25565,
+        maxRam: 4
+      },
+      runtimeValidation: validation,
+      onVerifyRuntime(request) {
+        verificationRequest = request;
+      },
+      onResolvePrevalidated(request) {
+        prevalidatedRequest = request;
+      }
+    }, async ({ serverManager }) => {
+      const result = await serverManager.startMinecraftServer({
+        instanceId: INSTANCE_ID,
+        targetPath: SERVER_PATH
+      });
+
+      assert.equal(result.success, true, loaderFamily);
+      assert.equal(result.loader, loaderFamily);
+      assert.deepEqual(verificationRequest, { targetPath: SERVER_PATH, runtime });
+      assert.equal(prevalidatedRequest.validation, validation);
+      assert.deepEqual(prevalidatedRequest.planOptions, {
+        javaMajor: runtime.javaMajor,
+        loader: runtime.loaderFamily,
+        loaderVersion: runtime.loaderVersion,
+        maxRam: 4,
+        minecraftVersion: runtime.minecraftVersion
+      });
+      assert.equal(calls.includes('resolve-loader'), false);
+      assert.equal(calls.includes('detect-version'), false);
+      assert.equal(calls.includes('resolve-launch'), false);
+      assert.ok(calls.indexOf('verify-runtime') < calls.indexOf('resolve-prevalidated'));
+      assert.ok(calls.indexOf('resolve-prevalidated') < calls.indexOf('spawn'));
+    });
+  }
+});
+
+test('managed verification failure releases the start gate and never enters launch resolution', async () => {
+  const calls = [];
+  const verificationError = new Error('managed runtime verification failed');
+  verificationError.code = 'RUNTIME_INCOMPLETE';
+  await withServerManager({
+    calls,
+    config: {
+      modpackManaged: true,
+      runtime: MANAGED_RUNTIME,
+      version: MANAGED_RUNTIME.minecraftVersion,
+      loader: MANAGED_RUNTIME.loaderFamily,
+      loaderVersion: MANAGED_RUNTIME.loaderVersion,
+      port: 25565,
+      maxRam: 4
+    },
+    verificationError
+  }, async ({ coordinator, serverManager }) => {
+    const result = await serverManager.startMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.code, 'RUNTIME_INCOMPLETE');
+    assert.equal(calls.includes('resolve-loader'), false);
+    assert.equal(calls.includes('resolve-prevalidated'), false);
+    assert.equal(calls.includes('resolve-launch'), false);
+    assert.equal(calls.includes('spawn'), false);
+    const next = await coordinator.acquireStart(
+      { instanceId: INSTANCE_ID, serverPath: SERVER_PATH },
+      { operation: 'test-start', operationId: 'after-managed-verification-failure', parentMutationLease: null }
+    );
+    next.release();
   });
 });
 
 test('validated lifecycle handoff is identity-bound, idempotent, and becomes the normal managed process', async () => {
   const child = new FakeChild(8181);
+  const closeGate = deferred();
+  const supervisionGate = deferred();
+  child.once('close', (exitCode, signal) => closeGate.resolve({ exitCode, signal }));
   const processHandle = Object.freeze({
     child,
+    closed: closeGate.promise,
     pid: child.pid,
     operationId: 'health-live-job-runtime',
     publishEvents: false,
+    supervisionReady: supervisionGate.promise,
     launchPlan: Object.freeze({
       type: 'jar',
       loader: 'vanilla',
@@ -423,13 +610,23 @@ test('validated lifecycle handoff is identity-bound, idempotent, and becomes the
   };
 
   await withServerManager({ calls: [] }, async ({ eventBus, serverManager }) => {
-    let started = 0;
-    eventBus.on('server-started', () => { started += 1; });
+    const lifecycleEvents = [];
+    let normalExitEvent = null;
+    eventBus.on('server-process-owned', value => lifecycleEvents.push(['owned', value]));
+    eventBus.on('server-started', value => lifecycleEvents.push(['started', value]));
+    eventBus.once('server-normal-exit', value => { normalExitEvent = value; });
     const first = serverManager.adoptValidatedLifecycleProcess(request);
     const second = serverManager.adoptValidatedLifecycleProcess(request);
     assert.equal(first, second);
     assert.deepEqual(first, { adopted: true, instanceId: INSTANCE_ID, pid: 8181 });
-    assert.equal(started, 1);
+    assert.deepEqual(lifecycleEvents.map(([name]) => name), ['owned']);
+    assert.equal(lifecycleEvents[0][1].instanceId, INSTANCE_ID);
+    assert.equal(lifecycleEvents[0][1].operationId, processHandle.operationId);
+    assert.equal(lifecycleEvents[0][1].pid, 8181);
+    supervisionGate.resolve({ instanceId: INSTANCE_ID, operationId: processHandle.operationId, pid: 8181 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(lifecycleEvents.map(([name]) => name), ['owned', 'started']);
+    assert.equal(lifecycleEvents[1][1].pid, 8181);
     const state = serverManager.getServerState({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH });
     assert.equal(state.serverProcess, child);
     assert.equal(state.status, 'running');
@@ -450,7 +647,76 @@ test('validated lifecycle handoff is identity-bound, idempotent, and becomes the
       /handoff|server/i
     );
     child.exit(0, null);
+    await new Promise(resolve => setImmediate(resolve));
+    const closePending = serverManager.getServerState({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH });
+    assert.equal(closePending.isRunning, true);
+    assert.equal(closePending.status, 'stopping');
+    assert.equal(closePending.serverProcess, child);
     child.close();
+    await new Promise(resolve => setImmediate(resolve));
+    const stopped = serverManager.getServerState({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH });
+    assert.equal(stopped.isRunning, false);
+    assert.equal(stopped.status, 'stopped');
+    assert.equal(stopped.serverProcess, null);
+    assert.deepEqual(normalExitEvent, {
+      instanceId: INSTANCE_ID,
+      operationId: processHandle.operationId,
+      pid: 8181
+    });
+  });
+});
+
+test('validated lifecycle adoption rejects a process handle without a thenable close barrier', async () => {
+  const child = new FakeChild(8282);
+  const processHandle = Object.freeze({
+    child,
+    pid: child.pid,
+    operationId: 'health-live-job-no-close-barrier',
+    publishEvents: false,
+    launchPlan: Object.freeze({
+      type: 'jar',
+      loader: 'vanilla',
+      jar: 'C:\\Minecraft\\StartGate\\server.jar',
+      cwd: SERVER_PATH,
+      readyMarkers: Object.freeze(['Done (']),
+      fatalMarkers: Object.freeze(['fatal']),
+      runtime: Object.freeze({
+        minecraftVersion: '1.20.1',
+        loaderFamily: 'vanilla',
+        loaderVersion: '1.20.1',
+        javaMajor: 17
+      })
+    }),
+    isLive() { return true; }
+  });
+  const startLease = Object.freeze({
+    kind: 'start',
+    operation: 'server-health-live',
+    operationId: processHandle.operationId,
+    instanceId: INSTANCE_ID,
+    serverPath: SERVER_PATH,
+    assertOwnedPath(value) { assert.equal(value, SERVER_PATH); return value; },
+    release() { assert.fail('an unprovable adoption must retain its start lease'); }
+  });
+
+  await withServerManager({ calls: [] }, async ({ serverManager }) => {
+    assert.throws(
+      () => serverManager.adoptValidatedLifecycleProcess({
+        eventId: 'modpack-runtime-handoff:job-no-close-barrier',
+        handoff: { processHandle, startLease },
+        instanceId: INSTANCE_ID,
+        jobId: 'job-no-close-barrier',
+        maxRam: 4,
+        port: 25565,
+        runtime: processHandle.launchPlan.runtime,
+        serverPath: SERVER_PATH
+      }),
+      /cannot be proven/i
+    );
+    assert.equal(
+      serverManager.getServerState({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH }).isRunning,
+      false
+    );
   });
 });
 
@@ -594,6 +860,22 @@ test('invalid resolved close evidence cannot release a failed-start reservation'
       ),
       code('OPERATION_IN_PROGRESS')
     );
+
+    const shutdown = await serverManager.shutdownMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH
+    }, {
+      gracefulTimeoutMs: 10,
+      killTimeoutMs: 10,
+      forceKill: false,
+      disposeStateAfterStop: true
+    });
+    assert.equal(shutdown.success, false);
+    assert.equal(
+      serverManager.getServerState({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH }).targetPath,
+      SERVER_PATH,
+      'fail-closed process evidence must retain the state that owns its close barrier'
+    );
   });
 });
 
@@ -615,7 +897,9 @@ test('pre-spawn read failure releases the start reservation', async () => {
 
 test('a post-running child error keeps the run block until confirmed process close', async () => {
   const calls = [];
-  await withServerManager({ calls }, async ({ children, coordinator, serverManager }) => {
+  await withServerManager({ calls }, async ({ children, coordinator, eventBus, serverManager }) => {
+    let crashedEvent = null;
+    eventBus.once('server-crashed', value => { crashedEvent = value; });
     const result = await serverManager.startMinecraftServer({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH });
     assert.equal(result.success, true);
 
@@ -637,10 +921,20 @@ test('a post-running child error keeps the run block until confirmed process clo
     children[0].emit('error', new Error('non-terminal child error'));
     await assertRunBlocked('blocked-after-error');
 
-    children[0].exit(0, null);
+    children[0].exit(1, null);
+    const closePending = serverManager.getServerState({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH });
+    assert.equal(closePending.isRunning, true);
+    assert.equal(closePending.status, 'stopping');
+    assert.equal(closePending.serverProcess, children[0]);
     await assertRunBlocked('blocked-after-exit-before-close');
-    children[0].close(0, null);
+    children[0].close(1, null);
     await new Promise(resolve => setImmediate(resolve));
+    const stopped = serverManager.getServerState({ instanceId: INSTANCE_ID, targetPath: SERVER_PATH });
+    assert.equal(stopped.isRunning, false);
+    assert.equal(stopped.status, 'stopped');
+    assert.equal(stopped.serverProcess, null);
+    assert.equal(crashedEvent?.instanceId, INSTANCE_ID);
+    assert.equal(crashedEvent?.pid, 4242);
     await coordinator.runMutation(
       { instanceId: INSTANCE_ID, serverPath: SERVER_PATH },
       {
@@ -651,6 +945,112 @@ test('a post-running child error keeps the run block until confirmed process clo
       },
       async () => {}
     );
+  });
+});
+
+test('shutdown does not report a stopped server until process close releases its active start lease', async () => {
+  const calls = [];
+  await withServerManager({ calls }, async ({ children, fixture, serverManager }) => {
+    const started = await serverManager.startMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH,
+      port: 25565,
+      maxRam: 4
+    });
+    assert.equal(started.success, true);
+    assert.equal(fixture.getRevision(), 4, 'start-side writes are revisioned before the process is published');
+
+    let shutdownSettled = false;
+    const shutdown = serverManager.shutdownMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH
+    }, {
+      gracefulTimeoutMs: 1000,
+      killTimeoutMs: 1000,
+      forceKill: false
+    }).then(result => {
+      shutdownSettled = true;
+      return result;
+    });
+
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(children[0].stdin.writes, ['stop\n']);
+    children[0].exit(0, null);
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(shutdownSettled, false, 'child exit is not durable process-close evidence');
+    assert.equal(fixture.getRevision(), 4);
+
+    children[0].close(0, null);
+    const result = await shutdown;
+    assert.equal(result.success, true);
+    assert.equal(result.results[0].stopped, true);
+    assert.equal(fixture.getRevision(), 4);
+  });
+});
+
+test('graceful shutdown cancels delayed player-list writes before server stdin closes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = new FakeChild(4747);
+
+  await withServerManager({ child }, async ({ serverManager }) => {
+    const started = await serverManager.startMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH,
+      port: 25565,
+      maxRam: 4
+    });
+    assert.equal(started.success, true);
+
+    child.stdout.write('E2EJoiner left the game\n');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(child.stdin.writes, ['list\n']);
+
+    const shutdown = serverManager.shutdownMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH
+    }, {
+      gracefulTimeoutMs: 10_000,
+      killTimeoutMs: 10_000,
+      forceKill: false
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(child.stdin.writes, ['list\n', 'stop\n']);
+
+    t.mock.timers.tick(5_000);
+    assert.deepEqual(
+      child.stdin.writes,
+      ['list\n', 'stop\n'],
+      'shutdown must cancel the delayed list writes that can race a closed Java stdin pipe'
+    );
+
+    child.exit(0, null);
+    child.close(0, null);
+    const result = await shutdown;
+    assert.equal(result.success, true);
+    assert.equal(result.results[0].stopped, true);
+  });
+});
+
+test('server stdin EPIPE errors are handled and disable later command writes', async () => {
+  const child = new FakeChild(4848);
+
+  await withServerManager({ child }, async ({ serverManager }) => {
+    const started = await serverManager.startMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH,
+      port: 25565,
+      maxRam: 4
+    });
+    assert.equal(started.success, true);
+
+    const pipeError = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    assert.doesNotThrow(() => child.stdin.emit('error', pipeError));
+    assert.equal(
+      serverManager.sendServerCommand({ instanceId: INSTANCE_ID }, 'say should-not-write'),
+      false
+    );
+    assert.deepEqual(child.stdin.writes, []);
   });
 });
 
@@ -687,6 +1087,39 @@ test('launcher port synchronization marks the active start lease dirty and bumps
   assert.equal(revision, 10);
   assert.equal(bumps.length, 1);
   assert.equal(bumps[0].operationId, 'port-sync-start');
+});
+
+test('launcher network synchronization persists loopback binding with the selected port', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-start-gate-loopback-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, 'server.properties'),
+    [
+      '# preserve this comment',
+      'server-ip:192.0.2.10',
+      'server\\u002dip 192.0.2.11',
+      'server-port 25565',
+      'server\\u002dport:25566',
+      'motd=Test'
+    ].join('\r\n') + '\r\n',
+    'utf8'
+  );
+  const lease = {
+    kind: 'mutation', instanceId: 'loopback-server', serverPath: root,
+    markDirty() {}, assertOwnedPath() {}
+  };
+
+  await runWithServerMutationLease(lease, async () => {
+    syncServerPort(root, 25571, 'loopback');
+  });
+
+  const properties = fs.readFileSync(path.join(root, 'server.properties'), 'utf8');
+  assert.equal(properties, [
+    '# preserve this comment',
+    'motd=Test',
+    'server-port=25571',
+    'server-ip=127.0.0.1'
+  ].join('\r\n') + '\r\n');
 });
 
 test('launcher marks dirty before a failed property write so partial bytes remain revision-audited', async t => {
@@ -837,6 +1270,19 @@ test('main installs the coordinator then runs registry recovery before cleanup',
   let readyCallback = null;
   let coordinatorInstance = null;
 
+  class FakeBrowserWindow {
+    static getAllWindows() { return []; }
+
+    constructor() {
+      calls.push('create-startup-window');
+      this.id = 1;
+    }
+
+    loadURL() {
+      return Promise.resolve();
+    }
+  }
+
   const app = {
     getVersion: () => 'test',
     isPackaged: false,
@@ -858,7 +1304,7 @@ test('main installs the coordinator then runs registry recovery before cleanup',
     if (request === 'electron') {
       return {
         app,
-        BrowserWindow: { getAllWindows: () => [] },
+        BrowserWindow: FakeBrowserWindow,
         ipcMain: {},
         Menu: { setApplicationMenu() {} },
         session: {},
@@ -938,6 +1384,7 @@ test('main installs the coordinator then runs registry recovery before cleanup',
     assert.deepEqual(calls, [
       'construct-coordinator',
       'install-coordinator',
+      'create-startup-window',
       'initialize-registry-recovery',
       'cleanup-runtime'
     ]);

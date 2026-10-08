@@ -9,6 +9,11 @@ const {
   createCompositeInstanceResolver
 } = require('../../electron/services/modpacks/planning/server-destination-reservation-service.cjs');
 const { createModpackHandlers } = require('../../electron/ipc/modpack-handlers.cjs');
+const {
+  assertExistingUnmanagedTarget,
+  captureExistingUnmanagedTarget,
+  captureReservedTarget
+} = require('../../electron/services/modpack-lifecycle/reserved-target-authority.cjs');
 
 const reparseInspector = Object.freeze({ async isReparsePoint() { return false; } });
 
@@ -22,8 +27,8 @@ function handlerDependencies(destinationReservationService) {
     localArtifactSource: { selectWithNativeDialog: noop },
     destinationReservationService,
     lifecycleService: {
-      inspectSource: noop, createPlan: noop, createManagementPlan: noop, startOperation: noop,
-      cancelJob: noop, getJob: noop, getState: noop, listHistory: noop, verify: noop
+      inspectSource: noop, cancelInspection: noop, createPlan: noop, createManagementPlan: noop, startOperation: noop,
+      cancelJob: noop, getJob: noop, getState: noop, listHistory: noop, listRollbackOptions: noop, verify: noop
     },
     recoveryService: { listRecovery: noop, recover: noop },
     notificationStore: { list: noop, acknowledge: noop },
@@ -87,4 +92,273 @@ test('cancelled selection returns null and composite resolution keeps paths main
   });
   assert.equal(service.consume(reserved.instanceId, targetPath), true);
   assert.equal(service.resolve(reserved.instanceId), null);
+});
+
+test('renderer abandonment releases only the validated opaque destination reservation', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const targetPath = path.join(root, 'Abandoned');
+  fs.mkdirSync(targetPath);
+  const service = new ServerDestinationReservationService({
+    dialog: { async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; } },
+    reparseInspector,
+    randomUUID: () => '00000000-0000-4000-8000-000000000003'
+  });
+  const handlers = createModpackHandlers(handlerDependencies(service));
+  const reserved = await handlers['modpacks:reserve-server-destination']({}, {});
+  const instanceId = reserved.value.instanceId;
+  assert.notEqual(service.resolve(instanceId), null);
+
+  const released = await handlers['modpacks:release-server-destination']({}, { instanceId });
+  assert.deepEqual(released, { ok: true, value: true });
+  assert.equal(service.resolve(instanceId), null);
+  assert.deepEqual(
+    await handlers['modpacks:release-server-destination']({}, { instanceId }),
+    { ok: true, value: false }
+  );
+});
+
+test('released reservation identity is reused only for the same destination until publication consumes it', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-retry-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const targetPath = path.join(root, 'Retry Server');
+  fs.mkdirSync(targetPath);
+  const ids = [
+    '00000000-0000-4000-8000-000000000011',
+    '00000000-0000-4000-8000-000000000012'
+  ];
+  const service = new ServerDestinationReservationService({
+    dialog: { async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; } },
+    reparseInspector,
+    randomUUID: () => ids.shift()
+  });
+
+  const first = await service.reserveWithNativeDialog({});
+  assert.equal(first.instanceId, 'server-00000000-0000-4000-8000-000000000011');
+  assert.equal(service.release(first.instanceId), true);
+
+  const retry = await service.reserveWithNativeDialog({});
+  assert.equal(retry.instanceId, first.instanceId);
+  assert.equal(service.consume(retry.instanceId, targetPath), true);
+
+  const afterPublication = await service.reserveWithNativeDialog({});
+  assert.equal(afterPublication.instanceId, 'server-00000000-0000-4000-8000-000000000012');
+});
+
+test('a released destination identity cannot be issued to a different path', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-identity-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const firstPath = path.join(root, 'First Server');
+  const secondPath = path.join(root, 'Second Server');
+  fs.mkdirSync(firstPath);
+  fs.mkdirSync(secondPath);
+  let selectedPath = firstPath;
+  const ids = [
+    '00000000-0000-4000-8000-000000000021',
+    '00000000-0000-4000-8000-000000000021',
+    '00000000-0000-4000-8000-000000000022'
+  ];
+  const service = new ServerDestinationReservationService({
+    dialog: { async showOpenDialog() { return { canceled: false, filePaths: [selectedPath] }; } },
+    reparseInspector,
+    randomUUID: () => ids.shift()
+  });
+
+  const first = await service.reserveWithNativeDialog({});
+  assert.equal(service.release(first.instanceId), true);
+  selectedPath = secondPath;
+
+  const second = await service.reserveWithNativeDialog({});
+  assert.equal(second.instanceId, 'server-00000000-0000-4000-8000-000000000022');
+  selectedPath = firstPath;
+  const retriedFirst = await service.reserveWithNativeDialog({});
+  assert.equal(retriedFirst.instanceId, first.instanceId);
+});
+
+test('an unavailable released identity fails closed without escaping its original destination', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-unavailable-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const firstPath = path.join(root, 'Original Server');
+  const secondPath = path.join(root, 'Other Server');
+  fs.mkdirSync(firstPath);
+  fs.mkdirSync(secondPath);
+  const originalId = 'server-00000000-0000-4000-8000-000000000041';
+  let selectedPath = firstPath;
+  let originalIdAvailable = true;
+  const ids = [
+    '00000000-0000-4000-8000-000000000041',
+    '00000000-0000-4000-8000-000000000041',
+    '00000000-0000-4000-8000-000000000042'
+  ];
+  const service = new ServerDestinationReservationService({
+    dialog: { async showOpenDialog() { return { canceled: false, filePaths: [selectedPath] }; } },
+    reparseInspector,
+    randomUUID: () => ids.shift(),
+    isInstanceIdAvailable: instanceId => instanceId !== originalId || originalIdAvailable
+  });
+
+  const first = await service.reserveWithNativeDialog({});
+  assert.equal(first.instanceId, originalId);
+  assert.equal(service.release(first.instanceId), true);
+
+  originalIdAvailable = false;
+  await assert.rejects(
+    service.reserveWithNativeDialog({}),
+    error => error?.code === 'TARGET_EXISTS'
+  );
+
+  originalIdAvailable = true;
+  selectedPath = secondPath;
+  const second = await service.reserveWithNativeDialog({});
+  assert.equal(second.instanceId, 'server-00000000-0000-4000-8000-000000000042');
+
+  selectedPath = firstPath;
+  const retriedFirst = await service.reserveWithNativeDialog({});
+  assert.equal(retriedFirst.instanceId, originalId);
+});
+
+test('concurrent reservations for the same destination produce exactly one reservation', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-concurrent-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const targetPath = path.join(root, 'Concurrent Server');
+  fs.mkdirSync(targetPath);
+  let captureCalls = 0;
+  let randomCalls = 0;
+  let releaseFirstCapture;
+  let markFirstCaptureEntered;
+  const firstCaptureEntered = new Promise(resolve => { markFirstCaptureEntered = resolve; });
+  const firstCaptureGate = new Promise(resolve => { releaseFirstCapture = resolve; });
+  const service = new ServerDestinationReservationService({
+    dialog: { async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; } },
+    reparseInspector,
+    randomUUID() {
+      randomCalls += 1;
+      return `00000000-0000-4000-8000-${String(randomCalls).padStart(12, '0')}`;
+    },
+    async captureReservation() {
+      captureCalls += 1;
+      if (captureCalls === 1) {
+        markFirstCaptureEntered();
+        await firstCaptureGate;
+      }
+      return Object.freeze({ kind: 'empty-directory' });
+    }
+  });
+
+  const firstAttempt = service.reserveWithNativeDialog({});
+  await firstCaptureEntered;
+  const secondAttempt = service.reserveWithNativeDialog({});
+  await new Promise(resolve => setImmediate(resolve));
+  releaseFirstCapture();
+
+  const results = await Promise.allSettled([firstAttempt, secondAttempt]);
+  const fulfilled = results.filter(result => result.status === 'fulfilled');
+  const rejected = results.filter(result => result.status === 'rejected');
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].reason?.code, 'TARGET_EXISTS');
+  assert.equal(captureCalls, 1);
+  assert.equal(randomCalls, 1);
+  assert.notEqual(service.resolve(fulfilled[0].value.instanceId), null);
+});
+
+test('reservation finalization for different destinations remains independent', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-parallel-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const firstPath = path.join(root, 'First Parallel Server');
+  const secondPath = path.join(root, 'Second Parallel Server');
+  fs.mkdirSync(firstPath);
+  fs.mkdirSync(secondPath);
+  const selections = [firstPath, secondPath];
+  let captureCalls = 0;
+  let releaseFirstCapture;
+  let markFirstCaptureEntered;
+  let markSecondCaptureEntered;
+  const firstCaptureEntered = new Promise(resolve => { markFirstCaptureEntered = resolve; });
+  const secondCaptureEntered = new Promise(resolve => { markSecondCaptureEntered = resolve; });
+  const firstCaptureGate = new Promise(resolve => { releaseFirstCapture = resolve; });
+  const ids = [
+    '00000000-0000-4000-8000-000000000051',
+    '00000000-0000-4000-8000-000000000052'
+  ];
+  const service = new ServerDestinationReservationService({
+    dialog: { async showOpenDialog() { return { canceled: false, filePaths: [selections.shift()] }; } },
+    reparseInspector,
+    randomUUID: () => ids.shift(),
+    async captureReservation({ targetPath }) {
+      captureCalls += 1;
+      if (targetPath === firstPath) {
+        markFirstCaptureEntered();
+        await firstCaptureGate;
+      } else {
+        markSecondCaptureEntered();
+      }
+      return Object.freeze({ kind: 'empty-directory' });
+    }
+  });
+
+  const firstAttempt = service.reserveWithNativeDialog({});
+  await firstCaptureEntered;
+  const secondAttempt = service.reserveWithNativeDialog({});
+  await secondCaptureEntered;
+  const second = await secondAttempt;
+  assert.equal(second.instanceId, 'server-00000000-0000-4000-8000-000000000051');
+
+  releaseFirstCapture();
+  const first = await firstAttempt;
+  assert.equal(first.instanceId, 'server-00000000-0000-4000-8000-000000000052');
+  assert.equal(captureCalls, 2);
+});
+
+test('an expired reservation keeps its destination identity available for a safe retry', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-expiry-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const targetPath = path.join(root, 'Expired Server');
+  fs.mkdirSync(targetPath);
+  let now = 1;
+  const ids = [
+    '00000000-0000-4000-8000-000000000031',
+    '00000000-0000-4000-8000-000000000032'
+  ];
+  const service = new ServerDestinationReservationService({
+    dialog: { async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; } },
+    reparseInspector,
+    randomUUID: () => ids.shift(),
+    clock: () => now,
+    ttlMs: 10
+  });
+
+  const first = await service.reserveWithNativeDialog({});
+  now = 11;
+  assert.throws(() => service.resolve(first.instanceId), error => error?.code === 'PLAN_STALE');
+
+  const retry = await service.reserveWithNativeDialog({});
+  assert.equal(retry.instanceId, first.instanceId);
+});
+
+test('unmanaged adoption authority rejects a replacement directory while new-target reservation remains empty-only', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-existing-authority-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const targetPath = path.join(root, 'Registered Existing Server');
+  const originalPath = path.join(root, 'Original Moved Aside');
+  fs.mkdirSync(targetPath);
+  fs.writeFileSync(path.join(targetPath, 'server.properties'), 'motd=existing\n');
+
+  await assert.rejects(
+    captureReservedTarget({ targetPath, fsApi: fs, reparseInspector }),
+    error => error?.code === 'TARGET_EXISTS'
+  );
+  const adoption = await captureExistingUnmanagedTarget({ targetPath, fsApi: fs, reparseInspector });
+  assert.equal(adoption.kind, 'existing-unmanaged-directory');
+
+  fs.renameSync(targetPath, originalPath);
+  fs.mkdirSync(targetPath);
+  fs.writeFileSync(path.join(targetPath, 'server.properties'), 'motd=existing\n');
+
+  await assert.rejects(
+    assertExistingUnmanagedTarget({ targetPath, adoption, fsApi: fs, reparseInspector }),
+    error => error?.code === 'PLAN_STALE'
+  );
+  assert.equal(fs.readFileSync(path.join(originalPath, 'server.properties'), 'utf8'), 'motd=existing\n');
+  assert.equal(fs.readFileSync(path.join(targetPath, 'server.properties'), 'utf8'), 'motd=existing\n');
 });

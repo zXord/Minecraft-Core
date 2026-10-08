@@ -1,10 +1,16 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 
 const { createArtifactSetPlan, finalizeVerifiedArtifactSet } = require('../../electron/services/modpacks/contracts.cjs');
 const { buildPreflightPlan, assertPlanStillValid } = require('../../electron/services/modpacks/planning/preflight-planner.cjs');
 const { planOwnership } = require('../../electron/services/modpacks/planning/ownership-planner.cjs');
 const { computePreflightPlanFingerprint } = require('../../electron/services/modpacks/planning/plan-fingerprint.cjs');
+const { computePlanFingerprint } = require('../../electron/services/modpacks/artifacts/artifact-fingerprint.cjs');
+const { ArtifactWorkspaceRegistry } = require('../../electron/services/modpacks/artifacts/artifact-workspace-registry.cjs');
+const { ArchiveInputMaterializer } = require('../../electron/services/modpacks/archive/archive-input-materializer.cjs');
 
 const sha256 = character => character.repeat(64);
 const sha512 = character => character.repeat(128);
@@ -61,7 +67,8 @@ function input(overrides = {}) {
     operation: { kind: 'upgrade', serverKind: 'existing', instanceId: 'instance-1', expectedContentRevision: 7, downgrade: false },
     source: {
       provider: 'github', repositoryId: '123', releaseId: '456',
-      githubOwner: 'Fixture-Owner', githubRepo: 'fixture.pack', version: 'v2'
+      githubOwner: 'Fixture-Owner', githubRepo: 'fixture.pack', version: 'v2',
+      channel: 'release', prerelease: false, publishedAt: '2026-08-01T00:00:00.000Z'
     },
     artifactSet: artifact(),
     runtime: runtime(),
@@ -103,6 +110,30 @@ function currentSnapshot(plan) {
   };
 }
 
+test('a loaded archive inspection retains artifact authority for preflight', t => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-preflight-authority-'));
+  t.after(() => fs.rmSync(workspaceRoot, { recursive: true, force: true }));
+
+  let id = 0;
+  const registry = new ArtifactWorkspaceRegistry({
+    root: workspaceRoot,
+    idFactory: () => `preflight-${++id}`
+  });
+  const materializer = new ArchiveInputMaterializer({ workspaceRegistry: registry, workspaceRoot });
+  const verifiedArtifactSet = artifact();
+  const ownerId = registry.createPlanningSession();
+  const artifactSetId = registry.registerVerifiedSet({ ownerId, verifiedSet: verifiedArtifactSet });
+  const inspectionId = registry.createInspection({
+    ownerId,
+    artifactSetId,
+    result: { artifactSet: { fingerprint: computePlanFingerprint(verifiedArtifactSet) } }
+  });
+  registry.transferOwnership({ fromOwnerId: ownerId, toOwnerId: inspectionId });
+
+  const loaded = materializer.loadInspection(inspectionId);
+  assert.doesNotThrow(() => buildPreflightPlan(input({ artifactSet: loaded.verifiedArtifactSet })));
+});
+
 test('preflight is deterministic, URL/path-free, and uses exact BigInt footprint plus reserve', () => {
   const first = buildPreflightPlan(input());
   const second = buildPreflightPlan(input());
@@ -114,6 +145,44 @@ test('preflight is deterministic, URL/path-free, and uses exact BigInt footprint
   const serialized = JSON.stringify(first);
   assert.doesNotMatch(serialized, /https?:|cachePath|archivePath|serverPath/i);
   assert.equal(Object.isFrozen(first), true);
+});
+
+test('existing-server preflight accepts a realistic snapshot beyond the generic JSON clone budget', () => {
+  const fileCount = 600;
+  const incomingEntries = Array.from({ length: fileCount }, (_, index) => ({
+    path: `mods/example-${index}.jar`,
+    pathKey: `mods/example-${index}.jar`,
+    origin: 'pack',
+    managementPolicy: 'replaceable-managed',
+    role: 'mod',
+    installedHash: sha256(index % 10 === 0 ? '1' : '2'),
+    size: '1',
+    priorBaseline: null
+  }));
+  const largeOwnership = planOwnership({
+    oldManifest: null,
+    liveSnapshot: { kind: 'existing', worldDirectories: ['world'], entries: [] },
+    incomingManifest: { schemaVersion: 1, installationId: 'large-incoming', entries: incomingEntries },
+    conflictChoices: {}
+  });
+  const large = input({ ownershipPlan: largeOwnership });
+  large.inspection.entryCount = fileCount;
+  large.serverSnapshot.pathPreconditions = incomingEntries.map(entry => ({
+    path: entry.path,
+    pathKey: entry.pathKey,
+    exists: false,
+    type: null,
+    size: null,
+    sha256: null,
+    dev: null,
+    ino: null,
+    birthtime: null
+  }));
+
+  const plan = buildPreflightPlan(large);
+  assert.equal(plan.ownership.actions.length, fileCount);
+  assert.equal(plan.preconditions.paths.length, fileCount);
+  assert.equal(plan.fingerprint, computePreflightPlanFingerprint(plan));
 });
 
 test('guided root and runtime choices are fingerprinted while safe files-only plans require no runtime', () => {
@@ -149,6 +218,72 @@ test('guided root and runtime choices are fingerprinted while safe files-only pl
   assert.equal(filesOnly.runtime, null);
   assert.equal(filesOnly.requirements.filesOnlySafetyConfirmed, true);
   assert.equal(assertPlanStillValid(filesOnly, currentSnapshot(filesOnly)), filesOnly);
+});
+
+test('new managed servers bind reviewed RAM and network choices into the immutable plan', () => {
+  const newServerInput = input({
+    operation: {
+      kind: 'install', serverKind: 'new', instanceId: 'instance-new',
+      expectedContentRevision: 0, downgrade: false
+    },
+    serverSnapshot: {
+      contentRevision: 0,
+      availableBytes: String(4n * 1024n * 1024n * 1024n),
+      candidateBytes: '8192', restorePointBytes: '0', rollbackBytes: '0', journalBytes: '4096',
+      writeable: true, pathPreconditions: [], sourceRuntime: runtime()
+    },
+    restorePoints: [],
+    selections: {
+      optionalFileIds: [], conflictChoices: {}, acknowledgeMissingProviderDigest: false,
+      acknowledgeDowngradeWorldRisk: false, selectedRoot: null, runtimeChoice: null, maxRam: 6,
+      serverPort: 25571, networkAccess: 'loopback'
+    }
+  });
+
+  const sixGiB = buildPreflightPlan(newServerInput);
+  const eightGiB = buildPreflightPlan({
+    ...newServerInput,
+    selections: { ...newServerInput.selections, maxRam: 8 }
+  });
+
+  assert.equal(sixGiB.selections.maxRam, 6);
+  assert.equal(sixGiB.selections.serverPort, 25571);
+  assert.equal(sixGiB.selections.networkAccess, 'loopback');
+  assert.equal(eightGiB.selections.maxRam, 8);
+  assert.notEqual(sixGiB.fingerprint, eightGiB.fingerprint);
+  const packDefault = buildPreflightPlan({
+    ...newServerInput,
+    selections: { ...newServerInput.selections, networkAccess: 'pack-default' }
+  });
+  const differentPort = buildPreflightPlan({
+    ...newServerInput,
+    selections: { ...newServerInput.selections, serverPort: 25572 }
+  });
+  assert.notEqual(sixGiB.fingerprint, packDefault.fingerprint);
+  assert.notEqual(sixGiB.fingerprint, differentPort.fingerprint);
+  assert.throws(
+    () => buildPreflightPlan({ ...newServerInput, selections: { ...newServerInput.selections, maxRam: null } }),
+    error => error.code === 'INVALID_REQUEST'
+  );
+  assert.throws(
+    () => buildPreflightPlan({ ...newServerInput, selections: { ...newServerInput.selections, maxRam: 65 } }),
+    error => error.code === 'INVALID_REQUEST'
+  );
+  for (const change of [
+    { serverPort: null },
+    { serverPort: 1024 },
+    { serverPort: 65536 },
+    { networkAccess: null },
+    { networkAccess: 'public' }
+  ]) {
+    assert.throws(
+      () => buildPreflightPlan({
+        ...newServerInput,
+        selections: { ...newServerInput.selections, ...change }
+      }),
+      error => error.code === 'INVALID_REQUEST'
+    );
+  }
 });
 
 test('preflight rejects insufficient disk, unwritable targets, and missing exact provider acknowledgement', () => {
@@ -202,7 +337,8 @@ test('preflight binds the trusted GitHub owner and repository needed after resta
   const plan = buildPreflightPlan(input());
   assert.deepEqual(plan.source, {
     provider: 'github', repositoryId: '123', releaseId: '456',
-    githubOwner: 'Fixture-Owner', githubRepo: 'fixture.pack', version: 'v2'
+    githubOwner: 'Fixture-Owner', githubRepo: 'fixture.pack', version: 'v2',
+    channel: 'release', prerelease: false, publishedAt: '2026-08-01T00:00:00.000Z'
   });
   for (const field of ['githubOwner', 'githubRepo']) {
     const missing = input();
@@ -278,7 +414,7 @@ test('preflight conflict decisions must exactly match the app-issued ownership p
   assert.throws(() => buildPreflightPlan(changedDecision), error => error.code === 'INVALID_REQUEST');
 });
 
-test('downgrades require explicit world acknowledgement and a compatible verified restore point', () => {
+test('downgrades require explicit world acknowledgement and schedule their own verified safety restore point', () => {
   const downgrade = input();
   downgrade.operation.downgrade = true;
   downgrade.selections.acknowledgeDowngradeWorldRisk = true;
@@ -291,7 +427,56 @@ test('downgrades require explicit world acknowledgement and a compatible verifie
   withoutRestore.operation.downgrade = true;
   withoutRestore.selections.acknowledgeDowngradeWorldRisk = true;
   withoutRestore.restorePoints = [];
-  assert.throws(() => buildPreflightPlan(withoutRestore), error => error.code === 'INVALID_REQUEST');
+  const withoutPriorRestore = buildPreflightPlan(withoutRestore);
+  assert.equal(withoutPriorRestore.requirements.downgradeWorldRiskAcknowledged, true);
+  assert.equal(withoutPriorRestore.requirements.verifiedRestorePointRequired, true);
+});
+
+test('preflight preserves exact Modrinth release ordering metadata', () => {
+  const modrinthArtifactPlan = createArtifactSetPlan({
+    provider: 'modrinth',
+    project: { id: 'project-one', slug: 'project-one', title: 'Pack' },
+    release: {
+      id: 'version-beta-2', version: '2.0.0-beta.2', channel: 'beta',
+      publishedAt: '2026-08-01T12:00:00.000Z'
+    },
+    artifactSet: {
+      kind: 'single', primaryPartId: 'part-one', groupingScheme: 'single',
+      parts: [{
+        partId: 'part-one', fileName: 'pack.mrpack', size: '1024',
+        providerDigest: { algorithm: 'sha512', value: sha512('a') }
+      }],
+      providerImmutable: true,
+      attestationStatus: 'verified'
+    }
+  });
+  const modrinthArtifact = finalizeVerifiedArtifactSet(modrinthArtifactPlan, [{
+    partId: 'part-one', measuredSize: '1024', sha256: sha256('b'), sha512: sha512('a')
+  }]);
+  const plan = buildPreflightPlan(input({
+    source: {
+      provider: 'modrinth', projectId: 'project-one', versionId: 'version-beta-2',
+      version: '2.0.0-beta.2', channel: 'beta', prerelease: true,
+      publishedAt: '2026-08-01T12:00:00.000Z'
+    },
+    artifactSet: modrinthArtifact
+  }));
+
+  assert.deepEqual(plan.source, {
+    provider: 'modrinth', projectId: 'project-one', versionId: 'version-beta-2',
+    version: '2.0.0-beta.2', channel: 'beta', prerelease: true,
+    publishedAt: '2026-08-01T12:00:00.000Z'
+  });
+});
+
+test('preflight preserves the durable restore-point byte count emitted by production snapshots', () => {
+  const request = input();
+  request.restorePoints[0].totalBytes = '123456789';
+
+  const plan = buildPreflightPlan(request);
+
+  assert.equal(plan.restorePoints[0].totalBytes, '123456789');
+  assert.match(plan.preconditions.restorePointsFingerprint, /^[a-f0-9]{64}$/u);
 });
 
 test('existing-server file mutations require a verified restore point before commit', () => {
@@ -307,6 +492,9 @@ test('existing-server file mutations require a verified restore point before com
     kind: 'install', serverKind: 'new', instanceId: 'instance-new', expectedContentRevision: 0, downgrade: false
   };
   fresh.serverSnapshot.contentRevision = 0;
+  fresh.selections.maxRam = 6;
+  fresh.selections.serverPort = 25565;
+  fresh.selections.networkAccess = 'pack-default';
   assert.equal(buildPreflightPlan(fresh).requirements.verifiedRestorePointRequired, false);
 });
 
@@ -340,6 +528,44 @@ test('every execution precondition mutation makes the reviewed plan stale', () =
     mutate(changed);
     assert.throws(() => assertPlanStillValid(plan, changed), error => error.code === 'PLAN_STALE');
   }
+});
+
+test('stale execution diagnostics identify the mismatched reviewed precondition', () => {
+  const plan = buildPreflightPlan(input());
+  const contentChanged = structuredClone(currentSnapshot(plan));
+  contentChanged.contentRevision += 1;
+  assert.throws(
+    () => assertPlanStillValid(plan, contentChanged),
+    error => error.code === 'PLAN_STALE' && error.details?.field === 'contentRevision'
+  );
+
+  const pathsChanged = structuredClone(currentSnapshot(plan));
+  pathsChanged.pathPreconditions[0] = {
+    ...pathsChanged.pathPreconditions[0],
+    sha256: '0'.repeat(64)
+  };
+  assert.throws(
+    () => assertPlanStillValid(plan, pathsChanged),
+    error => error.code === 'PLAN_STALE' && error.details?.field === 'paths'
+  );
+
+  const capacityChanged = structuredClone(currentSnapshot(plan));
+  capacityChanged.availableBytes = '1';
+  assert.throws(
+    () => assertPlanStillValid(plan, capacityChanged),
+    error => error.code === 'PLAN_STALE' && error.details?.field === 'availableBytes'
+  );
+  assert.equal(
+    assertPlanStillValid(plan, capacityChanged, { skipAvailableCapacity: true }),
+    plan
+  );
+
+  const contentAndCapacityChanged = structuredClone(capacityChanged);
+  contentAndCapacityChanged.contentRevision += 1;
+  assert.throws(
+    () => assertPlanStillValid(plan, contentAndCapacityChanged, { skipAvailableCapacity: true }),
+    error => error.code === 'PLAN_STALE' && error.details?.field === 'contentRevision'
+  );
 });
 
 test('a cloned or self-refingerprinted plan cannot claim app-issued trust', () => {

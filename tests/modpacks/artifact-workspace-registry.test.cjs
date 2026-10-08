@@ -27,6 +27,132 @@ test('workspace IDs are owner-bound and never substitute paths', (t) => {
   );
 });
 
+test('owner release awaits asynchronous tree cleanup without blocking the event loop', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-workspace-async-release-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let announceRemoval;
+  let allowRemoval;
+  const removalStarted = new Promise((resolve) => { announceRemoval = resolve; });
+  const removalGate = new Promise((resolve) => { allowRemoval = resolve; });
+  let nextId = 0;
+  const registry = new ArtifactWorkspaceRegistry({
+    root,
+    idFactory: () => `id-${++nextId}`,
+    async removeTree(request) {
+      announceRemoval(request.path);
+      await removalGate;
+      await fs.promises.rm(request.path, { recursive: true, force: true });
+    }
+  });
+  const outputId = registry.createStagingOutput({ ownerId: 'plan-a' });
+  const otherId = registry.createStagingOutput({ ownerId: 'plan-b' });
+  fs.writeFileSync(path.join(root, outputId, 'payload.bin'), 'payload');
+  fs.writeFileSync(path.join(root, otherId, 'payload.bin'), 'other');
+
+  const release = registry.releaseOwner('plan-a');
+  assert.equal(registry.releaseOwner('plan-a'), release);
+  let settled = false;
+  const order = [];
+  release.then(() => { settled = true; order.push('release-settled'); }, () => { settled = true; });
+  const quarantinePath = await removalStarted;
+  order.push('cleanup-started');
+  assert.match(path.basename(quarantinePath), /^\.reclaim-[^.]+\.output-id-1$/);
+  await new Promise((resolve, reject) => setImmediate(() => {
+    try {
+      assert.equal(settled, false);
+      assert.throws(
+        () => registry.resolveOwnedId({ ownerId: 'plan-a', id: outputId, kind: 'output' }),
+        error => error.code === 'PLAN_STALE'
+      );
+      assert.equal(registry.resolveOwnedId({ ownerId: 'plan-b', id: otherId, kind: 'output' }).id, otherId);
+      assert.equal(fs.existsSync(path.join(root, otherId, 'payload.bin')), true);
+      order.push('parent-turn');
+      allowRemoval();
+      resolve();
+    } catch (error) { reject(error); }
+  }));
+
+  assert.equal(await release, 1);
+  assert.equal(fs.existsSync(path.join(root, outputId)), false);
+  assert.deepEqual(order, ['cleanup-started', 'parent-turn', 'release-settled']);
+  assert.equal(await registry.releaseOwner('plan-a'), 0);
+  assert.equal(fs.existsSync(path.join(root, otherId)), true);
+});
+
+test('failed cleanup keeps the entire owner blocked and retries the exact quarantined transaction', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-workspace-release-retry-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let failCleanup = true;
+  const cacheCalls = [];
+  let nextId = 0;
+  const registry = new ArtifactWorkspaceRegistry({
+    root,
+    idFactory: () => `id-${++nextId}`,
+    artifactCache: {
+      retain: digest => cacheCalls.push(`+${digest}`),
+      release: digest => cacheCalls.push(`-${digest}`)
+    },
+    async removeTree(request) {
+      if (failCleanup) {
+        const error = new Error('sharing violation');
+        error.code = 'EBUSY';
+        throw error;
+      }
+      await fs.promises.rm(request.path, { recursive: true, force: true });
+    }
+  });
+  const digest = 'c'.repeat(64);
+  const artifactId = registry.registerVerifiedSet({
+    ownerId: 'plan-a',
+    verifiedSet: {
+      type: 'verified-artifact-set',
+      artifactSet: {
+        primaryPartId: 'part',
+        setDigest: 'd'.repeat(64),
+        parts: [{ partId: 'part', measuredSize: '1', calculatedDigests: { sha256: digest, sha512: 'e'.repeat(128) } }]
+      }
+    }
+  });
+  const outputId = registry.createStagingOutput({ ownerId: 'plan-a' });
+  fs.writeFileSync(path.join(root, outputId, 'payload.bin'), 'payload');
+
+  await assert.rejects(registry.releaseOwner('plan-a'), error => error.code === 'EBUSY');
+  assert.deepEqual(cacheCalls, [`+${digest}`]);
+  assert.throws(
+    () => registry.resolveOwnedId({ ownerId: 'plan-a', id: artifactId, kind: 'artifact-set' }),
+    error => error.code === 'PLAN_STALE'
+  );
+  assert.throws(() => registry.createStagingOutput({ ownerId: 'plan-a' }), error => error.code === 'PLAN_STALE');
+  assert.equal(fs.readdirSync(root).some(name => /^\.reclaim-.*\.output-id-2$/.test(name)), true);
+
+  failCleanup = false;
+  assert.equal(await registry.releaseOwner('plan-a'), 2);
+  assert.deepEqual(cacheCalls, [`+${digest}`, `-${digest}`]);
+  assert.equal(await registry.releaseOwner('plan-a'), 0);
+  assert.deepEqual(fs.readdirSync(root), []);
+});
+
+test('cleanup that physically succeeds before reporting an error is reconciled as success', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-workspace-release-uncertain-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const registry = new ArtifactWorkspaceRegistry({
+    root,
+    idFactory: () => 'id-1',
+    async removeTree(request) {
+      await fs.promises.rm(request.path, { recursive: true, force: true });
+      const error = new Error('completion acknowledgement was lost');
+      error.code = 'EIO';
+      throw error;
+    }
+  });
+  const outputId = registry.createStagingOutput({ ownerId: 'plan-a' });
+  fs.writeFileSync(path.join(root, outputId, 'payload.bin'), 'payload');
+
+  assert.equal(await registry.releaseOwner('plan-a'), 1);
+  assert.equal(await registry.releaseOwner('plan-a'), 0);
+  assert.deepEqual(fs.readdirSync(root), []);
+});
+
 test('trusted composition resolves only an owner-bound materialized workspace', (t) => {
   const f = registryFixture(); t.after(f.cleanup);
   const id = f.registry.createStagingOutput({ ownerId: 'plan-a' });
@@ -54,15 +180,15 @@ test('planning sessions and workspace IDs stay unique when the random source col
   assert.notEqual(outputA, outputB);
 });
 
-test('opaque IDs expire, cannot replay after release, and reject cross-kind substitution', (t) => {
+test('opaque IDs expire, cannot replay after release, and reject cross-kind substitution', async (t) => {
   const f = registryFixture(); t.after(f.cleanup);
   const id = f.registry.createStagingOutput({ ownerId: 'plan-a' });
   assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'plan-a', id, kind: 'input' }), error => error.code === 'PLAN_STALE');
   f.advance(30 * 60 * 1000);
-  assert.equal(f.registry.sweepExpired(30 * 60 * 1000), 1);
+  assert.equal(await f.registry.sweepExpired(30 * 60 * 1000), 1);
   assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'plan-a', id, kind: 'output' }), error => error.code === 'PLAN_STALE');
   const replacement = f.registry.createStagingOutput({ ownerId: 'plan-a' });
-  f.registry.releaseOwner('plan-a');
+  await f.registry.releaseOwner('plan-a');
   assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'plan-a', id: replacement, kind: 'output' }), error => error.code === 'PLAN_STALE');
 });
 
@@ -120,12 +246,12 @@ test('transfers every owner record atomically so old IDs cannot be replayed', (t
   }
 });
 
-test('claimed transfers survive expiry, allow plan-to-job handoff once, and reject replay transfers', (t) => {
+test('claimed transfers survive expiry, allow plan-to-job handoff once, and reject replay transfers', async (t) => {
   const f = registryFixture(); t.after(f.cleanup);
   const id = f.registry.createStagingOutput({ ownerId: 'planning-1' });
   assert.equal(f.registry.transferOwnership({ fromOwnerId: 'planning-1', toOwnerId: 'plan-1' }), 1);
   f.advance(31 * 60 * 1000);
-  assert.equal(f.registry.sweepExpired(), 0);
+  assert.equal(await f.registry.sweepExpired(), 0);
   assert.equal(f.registry.resolveOwnedId({ ownerId: 'plan-1', id, kind: 'output' }).id, id);
   assert.equal(f.registry.transferOwnership({ fromOwnerId: 'plan-1', toOwnerId: 'job-1' }), 1);
   assert.throws(() => f.registry.transferOwnership({ fromOwnerId: 'plan-1', toOwnerId: 'job-1' }), error => error.code === 'PLAN_STALE');
@@ -185,13 +311,13 @@ test('materialization reserves owner state so transfer, release, and expiry cann
   assert.throws(() => f.registry.transferOwnership({ fromOwnerId: 'plan-a', toOwnerId: 'job-a' }), error => error.code === 'PLAN_STALE');
   assert.throws(() => f.registry.releaseOwner('plan-a'), error => error.code === 'PLAN_STALE');
   f.advance(31 * 60 * 1000);
-  assert.equal(f.registry.sweepExpired(), 0);
+  assert.equal(await f.registry.sweepExpired(), 0);
   finish();
   const inputId = await pending;
   assert.equal(f.registry.resolveOwnedId({ ownerId: 'plan-a', id: inputId, kind: 'input' }).id, inputId);
 });
 
-test('failed ownership transfer leaves every record with its original owner', (t) => {
+test('failed ownership transfer leaves every record with its original owner', async (t) => {
   const f = registryFixture(); t.after(f.cleanup);
   const staleId = f.registry.createStagingOutput({ ownerId: 'planning-1' });
   const freshId = f.registry.createStagingOutput({ ownerId: 'planning-1' });
@@ -201,11 +327,11 @@ test('failed ownership transfer leaves every record with its original owner', (t
   assert.throws(() => f.registry.transferOwnership({ fromOwnerId: 'planning-1', toOwnerId: 'plan-1' }), error => error.code === 'PLAN_STALE');
   assert.equal(f.registry.resolveOwnedId({ ownerId: 'planning-1', id: freshId, kind: 'output' }).id, freshId);
   assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'plan-1', id: freshId, kind: 'output' }), error => error.code === 'PLAN_STALE');
-  assert.equal(f.registry.sweepExpired(30 * 60 * 1000), 1);
+  assert.equal(await f.registry.sweepExpired(30 * 60 * 1000), 1);
   assert.throws(() => f.registry.resolveOwnedId({ ownerId: 'planning-1', id: staleId, kind: 'output' }), error => error.code === 'PLAN_STALE');
 });
 
-test('registry reference ownership keeps shared cached digests until the final owner releases', (t) => {
+test('registry reference ownership keeps shared cached digests until the final owner releases', async (t) => {
   const f = registryFixture(); t.after(f.cleanup);
   const calls = [];
   f.registry.artifactCache = { retain: (digest) => calls.push(`+${digest}`), release: (digest) => calls.push(`-${digest}`) };
@@ -213,8 +339,8 @@ test('registry reference ownership keeps shared cached digests until the final o
   const shared = { type: 'verified-artifact-set', artifactSet: { primaryPartId: 'p', parts: [{ partId: 'p', fileName: 'server.zip', measuredSize: '1', calculatedDigests: { sha256: digest, sha512: 'b'.repeat(128) } }] } };
   f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet: shared });
   f.registry.registerVerifiedSet({ ownerId: 'plan-b', verifiedSet: shared });
-  f.registry.releaseOwner('plan-a');
-  f.registry.releaseOwner('plan-b');
+  await f.registry.releaseOwner('plan-a');
+  await f.registry.releaseOwner('plan-b');
   assert.deepEqual(calls, [`+${digest}`, `+${digest}`, `-${digest}`, `-${digest}`]);
 });
 
@@ -230,12 +356,12 @@ test('failed verified-set registration rolls back only references it acquired', 
   assert.deepEqual(calls, [`+${first}`, `+${second}`, `-${first}`]);
 });
 
-test('expiry releases verified-set cache references', (t) => {
+test('expiry releases verified-set cache references', async (t) => {
   const f = registryFixture(); t.after(f.cleanup);
   const digest = 'a'.repeat(64); const calls = [];
   f.registry.artifactCache = { retain: (value) => calls.push(`+${value}`), release: (value) => calls.push(`-${value}`) };
   f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet: { type: 'verified-artifact-set', artifactSet: { primaryPartId: 'p', parts: [{ partId: 'p', fileName: 'server.zip', measuredSize: '1', calculatedDigests: { sha256: digest, sha512: 'b'.repeat(128) } }] } } });
   f.advance(30 * 60 * 1000);
-  assert.equal(f.registry.sweepExpired(), 1);
+  assert.equal(await f.registry.sweepExpired(), 1);
   assert.deepEqual(calls, [`+${digest}`, `-${digest}`]);
 });

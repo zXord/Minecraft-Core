@@ -107,9 +107,12 @@ function expectedRootEvidence(entries) {
 }
 
 function validateInspection(result) {
-  if (!result || result.type !== 'archive-inspection' || result.integrity !== 'tested' ||
+  const integrityEvidence = result?.integrity === 'tested'
+    ? result?.engineEvidence?.tested === true
+    : result?.integrity === 'deferred-to-extraction' && result?.engineEvidence?.tested === false;
+  if (!result || result.type !== 'archive-inspection' || !integrityEvidence ||
       result.artifactSet?.completeness !== 'verified-complete-set' ||
-      result.engineEvidence?.tested !== true || result.engineEvidence?.version !== '26.02' ||
+      result.engineEvidence?.version !== '26.02' ||
       !Array.isArray(result.entries) || !result.limitEvidence || !result.limitEvidence.totals) throw stale();
   const expected = new Map();
   const policyInput = [];
@@ -121,7 +124,7 @@ function validateInspection(result) {
     if (canonical !== entry.canonicalName || expected.has(canonical)) throw stale();
     const size = parseBytes(entry.size);
     const packedSize = parseBytes(entry.packedSize);
-    if (entry.type === 'directory' && (size !== 0n || packedSize !== 0n)) throw stale();
+    if (entry.type === 'directory' && size !== 0n) throw stale();
     expected.set(canonical, { ...entry, sizeValue: size });
     policyInput.push({
       path: entry.entryName,

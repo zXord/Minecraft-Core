@@ -7,9 +7,51 @@ const { validateRemoteUrl, resolvePublicAddresses, normalizeAddress } = require(
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const FORBIDDEN_HEADERS = new Set(['host', 'content-length', 'transfer-encoding', 'connection', 'upgrade']);
 const CROSS_ORIGIN_SECRETS = new Set(['authorization', 'proxy-authorization', 'cookie']);
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const MAX_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 function invalidUrl() { return new ModpackError('INVALID_RELEASE_URL', 'Remote release address is not allowed', { details: { reasonCode: 'host-not-allowed' } }); }
+function deadlineExceeded() { return new ModpackError('INVALID_RELEASE_URL', 'Remote release request timed out', { retryable: true }); }
 function cancelled() { return new ModpackError('CANCELLED', 'Artifact download was cancelled'); }
+
+function requestTimeout(value) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_REQUEST_TIMEOUT_MS) throw new TypeError('Pinned HTTPS dependencies are invalid');
+  return value;
+}
+
+function deadlineSignal(signal, timeoutMs) {
+  if (signal?.aborted) throw cancelled();
+  const controller = new AbortController();
+  let timedOut = false;
+  let callerCancelled = false;
+  const onAbort = () => {
+    callerCancelled = true;
+    controller.abort();
+  };
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  let rejectDeadline;
+  const deadline = new Promise((resolve, reject) => {
+    rejectDeadline = reject;
+  });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+    rejectDeadline(deadlineExceeded());
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    deadline,
+    callerCancelled: () => callerCancelled,
+    timedOut: () => timedOut,
+    clearDeadline() {
+      clearTimeout(timer);
+    },
+    release() {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    }
+  };
+}
 
 async function withAbort(promise, signal) {
   if (!signal) return promise;
@@ -34,12 +76,33 @@ function safeHeaders(value) {
 }
 
 class PinnedHttpsClient {
-  constructor({ lookup = dns.promises.lookup, request = https.request } = {}) {
+  constructor({ lookup = dns.promises.lookup, request = https.request, requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}) {
     if (typeof lookup !== 'function' || typeof request !== 'function') throw new TypeError('Pinned HTTPS dependencies are invalid');
-    this.lookup = lookup; this.requestImpl = request;
+    this.lookup = lookup; this.requestImpl = request; this.requestTimeoutMs = requestTimeout(requestTimeoutMs);
   }
 
-  async request(value, { headers, signal, allowedHosts, allowedOrigins, allowSubdomains = false, maxRedirects = 5 } = {}) {
+  async request(value, options = {}) {
+    const { signal } = options;
+    const bounded = deadlineSignal(signal, this.requestTimeoutMs);
+    let response;
+    try {
+      response = await Promise.race([
+        this.#request(value, { ...options, signal: bounded.signal }),
+        bounded.deadline
+      ]);
+      bounded.clearDeadline();
+      response.once('close', () => bounded.release());
+      return response;
+    } catch (error) {
+      if (bounded.callerCancelled()) throw cancelled();
+      if (bounded.timedOut()) throw deadlineExceeded();
+      throw error;
+    } finally {
+      if (!response) bounded.release();
+    }
+  }
+
+  async #request(value, { headers, signal, allowedHosts, allowedOrigins, allowSubdomains = false, maxRedirects = 5 } = {}) {
     if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 20) throw invalidUrl();
     let current = validateRemoteUrl(value, { allowedHosts, allowedOrigins, allowSubdomains });
     let requestHeaders = safeHeaders(headers);

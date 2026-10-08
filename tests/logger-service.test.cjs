@@ -59,3 +59,33 @@ test('logger skips rotation filesystem checks when log file path is unavailable'
 
   assert.deepEqual(invalidExistsSyncArgs, []);
 });
+
+test('development logger window uses the fixed IPv4 Vite URL', () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const loadedUrls = [];
+  process.env.NODE_ENV = 'development';
+
+  class FakeBrowserWindow {
+    constructor() {
+      this.webContents = { openDevTools() {} };
+    }
+
+    isDestroyed() { return false; }
+    loadURL(url) { loadedUrls.push(url); return Promise.resolve(); }
+    once() {}
+    on() {}
+    show() {}
+  }
+
+  try {
+    loadLoggerServiceWithElectronMock(
+      { app: { on() {} }, BrowserWindow: FakeBrowserWindow },
+      ({ LoggerService }) => new LoggerService().openLoggerWindow()
+    );
+  } finally {
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
+  }
+
+  assert.deepEqual(loadedUrls, ['http://127.0.0.1:5173/logger-window.html']);
+});

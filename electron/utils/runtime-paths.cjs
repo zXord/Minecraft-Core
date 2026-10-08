@@ -43,9 +43,6 @@ function getRuntimePaths() {
   
   return {
     runtimeDir,
-    watchdogPid: path.join(runtimeDir, 'watchdog.pid'),
-    currentWatchdogPid: path.join(runtimeDir, 'current-watchdog.pid'),
-    appWatchdogPid: path.join(runtimeDir, 'app-watchdog.pid'),
     serverRunningFlag: path.join(runtimeDir, 'server-running.flag'),
     serverPauseFlag: path.join(runtimeDir, 'server-pause.flag'),
     blockRestartFlag: path.join(runtimeDir, 'block-restart.flag'),
@@ -61,9 +58,6 @@ function cleanupRuntimeFiles() {
   try {
     const paths = getRuntimePaths();
     const filesToClean = [
-      paths.watchdogPid,
-      paths.currentWatchdogPid,
-      paths.appWatchdogPid,
       paths.serverRunningFlag,
       paths.serverPauseFlag,
       paths.blockRestartFlag,

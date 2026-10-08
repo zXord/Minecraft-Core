@@ -408,6 +408,9 @@ function planOwnership({ oldManifest, liveSnapshot, incomingManifest, conflictCh
       }
     } else if (!incomingEntry) {
       if (!liveEntry) action = { action: 'absent', reason: 'already-removed' };
+      else if (oldEntry.origin === 'user') {
+        action = { action: 'preserve-orphan', reason: 'user-owned-content-preserved' };
+      }
       else if (protectedPath) action = { action: 'conflict', reason: 'protected-incoming-removed' };
       else if (liveEntry.type === 'file' && liveEntry.sha256 === oldEntry.installedHash) action = { action: 'remove', reason: 'incoming-removed' };
       else action = { action: 'preserve-orphan', reason: 'modified-managed-removed-upstream' };

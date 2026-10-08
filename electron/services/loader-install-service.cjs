@@ -1,8 +1,8 @@
+const { annotateRuntimeError, runtimeDiagnosticFor, runRuntimeStage, runRuntimeStageSync, changedIdentityFields } = require('./runtime-diagnostic.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
 const {
   installFabric: installFabricXmcl,
   getLoaderArtifactListFor,
-  installForge,
   getForgeVersionList,
   installVersion,
   installLibraries,
@@ -11,6 +11,11 @@ const {
   installByProfileTask,
   isForgeInstallerEntries
 } = require('@xmcl/installer');
+const { runForgeInstallerWorker } = require('./forge-installer-worker-client.cjs');
+const { runForgeRuntimeFinalizerWorker } = require('./forge-runtime-finalizer-worker-client.cjs');
+const { runManagedRuntimeWorker } = require('./managed-runtime-worker-client.cjs');
+const { retainRuntimeWorkerQuiescence, waitForRuntimeWorkerQuiescence } = require('./runtime-worker-quiescence.cjs');
+const { MANAGED_RUNTIME_PREPARE_OPERATION } = require('./managed-runtime-worker-protocol.cjs');
 const { Version, MinecraftFolder } = require('@xmcl/core');
 const { open: openZip, readEntry } = require('@xmcl/unzip');
 const fs = require('fs');
@@ -121,7 +126,15 @@ function normalizeRuntimeInstallError(error) {
   } else {
     normalized = runtimeIncomplete();
   }
-  if (error?.preserveWorkspace === true) normalized.preserveWorkspace = true;
+  try {
+    if (Object.hasOwn(error || {}, 'runtimeDiagnostic')) {
+      normalized.runtimeDiagnostic = runtimeDiagnosticFor(error, 'unknown');
+    }
+  } catch { /* diagnostic metadata must not replace the failure or its close proof */ }
+  if (error?.preserveWorkspace === true) {
+    retainRuntimeWorkerQuiescence(normalized,
+      waitForRuntimeWorkerQuiescence(error).then(() => true, () => false));
+  }
   return normalized;
 }
 
@@ -391,6 +404,8 @@ function runBoundedProcess({
     let escalationTimer = null;
     let forcedSettlementTimer = null;
     let processError = null;
+    let recordClosure;
+    const closed = new Promise(resolve => { recordClosure = resolve; });
     const cleanup = () => {
       clearTimeout(timer);
       clearTimeout(escalationTimer);
@@ -401,7 +416,10 @@ function runBoundedProcess({
       if (settled) return;
       settled = true;
       cleanup();
-      if (error) reject(error); else resolve(value);
+      if (error) {
+        if (error.preserveWorkspace === true) retainRuntimeWorkerQuiescence(error, closed);
+        reject(error);
+      } else resolve(value);
     };
     const terminateAndWait = error => {
       if (settled || terminationError) return;
@@ -460,6 +478,7 @@ function runBoundedProcess({
       // Deliberately wait for close: Node emits close only after child stdio is quiescent.
     });
     child.once('close', (code) => {
+      recordClosure(true);
       if (terminationError) {
         finish(terminationError);
         return;
@@ -596,12 +615,18 @@ function cleanupRuntimeWorkspace(targetRoot, workspace) {
   } catch { /* best effort */ }
 }
 
-function listRegularFiles(root, { maxFiles = 100000, maxBytes = DEFAULT_RUNTIME_BYTES } = {}) {
+function listRegularFiles(root, {
+  maxFiles = 100000,
+  maxBytes = DEFAULT_RUNTIME_BYTES,
+  includeRootEntry = null
+} = {}) {
+  if (includeRootEntry !== null && typeof includeRootEntry !== 'function') throw runtimeIncomplete();
   const files = [];
   const identities = new Set();
   let measured = 0;
-  const walk = directory => {
+  const walk = (directory, rootDirectory = false) => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (rootDirectory && includeRootEntry && !includeRootEntry(entry.name)) continue;
       const fullPath = path.join(directory, entry.name);
       const relativePath = portableRelative(root, fullPath);
       const identity = relativePath.normalize('NFC').toLowerCase();
@@ -610,7 +635,7 @@ function listRegularFiles(root, { maxFiles = 100000, maxBytes = DEFAULT_RUNTIME_
       const stat = fs.lstatSync(fullPath);
       if (stat.isSymbolicLink()) throw runtimeIncomplete();
       if (stat.isDirectory()) {
-        walk(fullPath);
+        walk(fullPath, false);
       } else if (stat.isFile()) {
         measured += stat.size;
         if (files.length >= maxFiles || measured > maxBytes) throw runtimeIncomplete();
@@ -620,12 +645,41 @@ function listRegularFiles(root, { maxFiles = 100000, maxBytes = DEFAULT_RUNTIME_
       }
     }
   };
-  walk(root);
+  walk(root, true);
   return files.sort((left, right) => {
     const leftMetadata = left.relativePath === '.minecraft-core-state/runtime.json';
     const rightMetadata = right.relativePath === '.minecraft-core-state/runtime.json';
     if (leftMetadata !== rightMetadata) return leftMetadata ? 1 : -1;
     return left.relativePath.localeCompare(right.relativePath, 'en');
+  });
+}
+
+function listRuntimeArtifactFiles(root, {
+  maxFiles = 100000,
+  maxBytes = DEFAULT_RUNTIME_BYTES
+} = {}) {
+  const runtimeDirectories = new Set(['libraries', 'versions']);
+  const runtimeRootFiles = new Set([
+    'fabric-installer.jar',
+    'fabric-server-launch.jar',
+    'fabric-server-launcher.properties',
+    'quilt-server-launch.jar',
+    'quilt-server-launcher.properties',
+    'server.jar',
+    'user_jvm_args.txt'
+  ]);
+  const isRuntimeRootJar = identity => /^(?:forge|neoforge)-.*\.jar$/u.test(identity) ||
+    /^minecraft_server\.[a-z0-9._+-]+\.jar$/u.test(identity);
+  const isRuntimeRootEntry = name => {
+    const identity = name.normalize('NFC').toLocaleLowerCase('en-US');
+    return runtimeDirectories.has(identity) || runtimeRootFiles.has(identity) ||
+      isRuntimeRootJar(identity);
+  };
+  return listRegularFiles(root, { maxFiles, maxBytes, includeRootEntry: isRuntimeRootEntry }).filter(file => {
+    const identity = file.relativePath.normalize('NFC').toLocaleLowerCase('en-US');
+    const segments = identity.split('/');
+    if (segments.length > 1) return runtimeDirectories.has(segments[0]);
+    return runtimeRootFiles.has(identity) || isRuntimeRootJar(identity);
   });
 }
 
@@ -744,40 +798,107 @@ function digestBuffer(buffer, algorithm) {
   return crypto.createHash(algorithm).update(buffer).digest('hex');
 }
 
-function digestFile(filePath, algorithm) {
-  const hash = crypto.createHash(algorithm);
-  const buffer = Buffer.allocUnsafe(1024 * 1024);
-  const descriptor = fs.openSync(filePath, 'r');
+function sameFileIdentity(left, right) {
+  return left.nlink === 1 && right.nlink === 1 && left.dev === right.dev && left.ino === right.ino &&
+    left.mode === right.mode && left.size === right.size && left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs && left.birthtimeMs === right.birthtimeMs;
+}
+
+function artifactIdentityFailure(left, right, stage) {
+  const error = runtimeIncomplete();
+  const mask = changedIdentityFields(left, right);
+  if (mask) error.runtimeDiagnostic = {
+    stage, reason: 'identity-changed', changedIdentityFields: mask
+  };
+  return error;
+}
+
+function digestStableArtifact(root, filePath, options = {}) {
+  const fsApi = options.fsApi || fs;
+  const diagnosticStage = options.diagnosticStage || 'artifact-digest';
+  const resolved = path.resolve(filePath);
+  let descriptor = null;
   try {
-    let bytesRead;
-    do {
-      bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
-      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
-    } while (bytesRead > 0);
+    if (!inside(root, resolved)) throw runtimeIncomplete();
+    const rootRealPath = fsApi.realpathSync.native(root);
+    const pathStatBefore = fsApi.lstatSync(resolved);
+    if (!pathStatBefore.isFile() || pathStatBefore.isSymbolicLink()) throw runtimeIncomplete();
+    const realPathBefore = fsApi.realpathSync.native(resolved);
+    if (!inside(rootRealPath, realPathBefore)) throw runtimeIncomplete();
+    const noFollow = Number.isInteger(fsApi.constants?.O_NOFOLLOW) ? fsApi.constants.O_NOFOLLOW : 0;
+    descriptor = fsApi.openSync(resolved, fsApi.constants.O_RDONLY | noFollow);
+    const descriptorStatBefore = fsApi.fstatSync(descriptor);
+    if (!descriptorStatBefore.isFile() || !sameFileIdentity(pathStatBefore, descriptorStatBefore)) {
+      throw artifactIdentityFailure(pathStatBefore, descriptorStatBefore, diagnosticStage);
+    }
+
+    const sha256 = crypto.createHash('sha256');
+    const sha512 = crypto.createHash('sha512');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let offset = 0;
+    while (offset < descriptorStatBefore.size) {
+      const length = Math.min(buffer.length, descriptorStatBefore.size - offset);
+      const bytesRead = fsApi.readSync(descriptor, buffer, 0, length, offset);
+      if (bytesRead !== length) throw runtimeIncomplete();
+      const chunk = buffer.subarray(0, bytesRead);
+      sha256.update(chunk);
+      sha512.update(chunk);
+      offset += bytesRead;
+    }
+
+    const descriptorStatAfter = fsApi.fstatSync(descriptor);
+    const pathStatAfter = fsApi.lstatSync(resolved);
+    const realPathAfter = fsApi.realpathSync.native(resolved);
+    if (!pathStatAfter.isFile() || pathStatAfter.isSymbolicLink() ||
+        realPathAfter !== realPathBefore || !inside(rootRealPath, realPathAfter) ||
+        !sameFileIdentity(descriptorStatBefore, descriptorStatAfter) ||
+        !sameFileIdentity(descriptorStatAfter, pathStatAfter)) {
+      const failure = artifactIdentityFailure(descriptorStatBefore, descriptorStatAfter, diagnosticStage);
+      if (!failure.runtimeDiagnostic) throw artifactIdentityFailure(descriptorStatAfter, pathStatAfter, diagnosticStage);
+      throw failure;
+    }
+    return {
+      path: resolved,
+      realPath: realPathAfter,
+      stat: descriptorStatAfter,
+      size: descriptorStatAfter.size,
+      sha256: sha256.digest('hex'),
+      sha512: sha512.digest('hex')
+    };
+  } catch (error) {
+    if (error?.code === 'RUNTIME_INCOMPLETE') throw annotateRuntimeError(error, diagnosticStage);
+    const failure = runtimeIncomplete();
+    failure.runtimeDiagnostic = runtimeDiagnosticFor(error, diagnosticStage);
+    throw failure;
   } finally {
-    fs.closeSync(descriptor);
+    if (descriptor !== null) {
+      try { fsApi.closeSync(descriptor); } catch { /* the integrity check already fails closed above */ }
+    }
   }
-  return hash.digest('hex');
 }
 
 function buildArtifactRecord(root, filePath) {
-  const inspected = assertRegularContainedFile(root, filePath);
+  const inspected = digestStableArtifact(root, filePath);
   return {
     relativePath: portableRelative(root, inspected.path),
-    size: inspected.stat.size,
-    sha256: digestFile(inspected.path, 'sha256'),
-    sha512: digestFile(inspected.path, 'sha512')
+    size: inspected.size,
+    sha256: inspected.sha256,
+    sha512: inspected.sha512
   };
 }
 
-function validateArtifactRecord(root, record) {
+function artifactRecordPath(root, record) {
   if (!hasExactKeys(record, ['relativePath', 'size', 'sha256', 'sha512']) ||
     !Number.isSafeInteger(record.size) || record.size < 0 ||
     !/^[a-f0-9]{64}$/.test(record.sha256) || !/^[a-f0-9]{128}$/.test(record.sha512)) throw runtimeIncomplete();
-  const filePath = resolveControlledPath(root, record.relativePath);
-  const inspected = assertRegularContainedFile(root, filePath);
-  if (inspected.stat.size !== record.size || digestFile(filePath, 'sha256') !== record.sha256 ||
-    digestFile(filePath, 'sha512') !== record.sha512) throw runtimeIncomplete();
+  return resolveControlledPath(root, record.relativePath);
+}
+
+function validateArtifactRecord(root, record) {
+  const filePath = artifactRecordPath(root, record);
+  const inspected = digestStableArtifact(root, filePath);
+  if (inspected.size !== record.size || inspected.sha256 !== record.sha256 ||
+    inspected.sha512 !== record.sha512) throw runtimeIncomplete();
   return filePath;
 }
 
@@ -809,6 +930,179 @@ function requireJar(root, filePath) {
   if (!(prefix[0] === 0x50 && prefix[1] === 0x4b && [0x03, 0x05, 0x07].includes(prefix[2]))) throw runtimeIncomplete();
   try { new AdmZip(resolved).getEntries(); } catch { throw runtimeIncomplete(); }
   return resolved;
+}
+
+function readJarMainAttributes(root, filePath) {
+  const resolved = requireJar(root, filePath);
+  let archive;
+  try { archive = new AdmZip(resolved); } catch { throw runtimeIncomplete(); }
+  const manifestEntries = archive.getEntries().filter(entry =>
+    entry.entryName.replaceAll('\\', '/').toLocaleUpperCase('en-US') === 'META-INF/MANIFEST.MF'
+  );
+  if (manifestEntries.length !== 1 || manifestEntries[0].isDirectory ||
+      manifestEntries[0].header.size < 1 || manifestEntries[0].header.size > DEFAULT_METADATA_BYTES) throw runtimeIncomplete();
+  let text;
+  try { text = fatalUtf8(manifestEntries[0].getData()); } catch { throw runtimeIncomplete(); }
+  if (text.includes('\0')) throw runtimeIncomplete();
+  const logicalLines = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    if (rawLine === '') break;
+    if (rawLine.startsWith(' ')) {
+      if (logicalLines.length === 0) throw runtimeIncomplete();
+      logicalLines[logicalLines.length - 1] += rawLine.slice(1);
+      continue;
+    }
+    logicalLines.push(rawLine);
+  }
+  const attributes = new Map();
+  for (const line of logicalLines) {
+    const separator = line.indexOf(': ');
+    if (separator < 1) throw runtimeIncomplete();
+    const name = line.slice(0, separator).toLocaleLowerCase('en-US');
+    const value = line.slice(separator + 2);
+    if (!/^[a-z0-9][a-z0-9-]{0,69}$/u.test(name) || attributes.has(name) || !value) throw runtimeIncomplete();
+    attributes.set(name, value);
+  }
+  return attributes;
+}
+
+function filesByteForByteEqual(leftPath, rightPath) {
+  const leftStat = fs.statSync(leftPath);
+  const rightStat = fs.statSync(rightPath);
+  if (leftStat.size !== rightStat.size) return false;
+  let leftDescriptor = null;
+  let rightDescriptor = null;
+  const leftBuffer = Buffer.allocUnsafe(1024 * 1024);
+  const rightBuffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    leftDescriptor = fs.openSync(leftPath, 'r');
+    rightDescriptor = fs.openSync(rightPath, 'r');
+    let offset = 0;
+    while (offset < leftStat.size) {
+      const length = Math.min(leftBuffer.length, leftStat.size - offset);
+      const leftRead = fs.readSync(leftDescriptor, leftBuffer, 0, length, offset);
+      const rightRead = fs.readSync(rightDescriptor, rightBuffer, 0, length, offset);
+      if (leftRead !== length || rightRead !== length ||
+          !leftBuffer.subarray(0, length).equals(rightBuffer.subarray(0, length))) return false;
+      offset += length;
+    }
+    return true;
+  } finally {
+    if (leftDescriptor !== null) fs.closeSync(leftDescriptor);
+    if (rightDescriptor !== null) fs.closeSync(rightDescriptor);
+  }
+}
+
+function requireIdenticalJars(root, leftPath, rightPath) {
+  try {
+    const left = requireJar(root, leftPath);
+    const right = requireJar(root, rightPath);
+    if (!filesByteForByteEqual(left, right)) throw runtimeIncomplete();
+    return { left, right };
+  } catch (error) {
+    if (error?.code === 'RUNTIME_INCOMPLETE') throw error;
+    throw runtimeIncomplete();
+  }
+}
+
+function materializeExactLegacyForgeJar(root, sourcePath, destinationPath) {
+  const source = requireJar(root, sourcePath);
+  if (fs.existsSync(destinationPath)) {
+    requireIdenticalJars(root, source, destinationPath);
+    return requireJar(root, destinationPath);
+  }
+  let copied = false;
+  try {
+    fs.copyFileSync(source, destinationPath, fs.constants.COPYFILE_EXCL);
+    copied = true;
+    requireIdenticalJars(root, source, destinationPath);
+    return requireJar(root, destinationPath);
+  } catch {
+    if (copied) {
+      try { fs.rmSync(destinationPath, { force: true }); } catch { /* candidate validation remains fail-closed */ }
+    }
+    throw runtimeIncomplete();
+  }
+}
+
+function materializeLegacyForgeLayout(root, runtime) {
+  const artifactVersion = `${runtime.minecraftVersion}-${runtime.loaderVersion}`;
+  const installedLaunchJar = resolveControlledPath(
+    root,
+    `libraries/net/minecraftforge/forge/${artifactVersion}/forge-${artifactVersion}.jar`
+  );
+  const installedServerJar = resolveControlledPath(root, 'server.jar');
+  const bundledServerJar = resolveControlledPath(
+    root,
+    `libraries/net/minecraft/server/${runtime.minecraftVersion}/server-${runtime.minecraftVersion}-bundled.jar`
+  );
+  requireIdenticalJars(root, installedServerJar, bundledServerJar);
+  materializeExactLegacyForgeJar(
+    root,
+    installedLaunchJar,
+    resolveControlledPath(root, `forge-${artifactVersion}.jar`)
+  );
+  materializeExactLegacyForgeJar(
+    root,
+    installedServerJar,
+    resolveControlledPath(root, `minecraft_server.${runtime.minecraftVersion}.jar`)
+  );
+  return legacyForgeLayout(root, runtime);
+}
+
+function legacyForgeLayout(root, runtime) {
+  const launchJarRelative = `forge-${runtime.minecraftVersion}-${runtime.loaderVersion}.jar`;
+  const serverJarRelative = `minecraft_server.${runtime.minecraftVersion}.jar`;
+  const launchJar = resolveControlledPath(root, launchJarRelative);
+  const serverJar = resolveControlledPath(root, serverJarRelative);
+  requireJar(root, launchJar);
+  requireJar(root, serverJar);
+  const attributes = readJarMainAttributes(root, launchJar);
+  const mainClass = attributes.get('main-class');
+  const classPath = attributes.get('class-path');
+  if (!mainClass || !/^(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*$/u.test(mainClass) ||
+      typeof classPath !== 'string' || !classPath.trim()) throw runtimeIncomplete();
+  const entries = classPath.trim().split(/[ \t]+/u);
+  if (entries.length < 2 || entries.length > 10000) throw runtimeIncomplete();
+  const identities = new Set();
+  const libraries = [];
+  let serverReferences = 0;
+  for (const entry of entries) {
+    if (!entry || entry.includes('\\') || entry.includes('%') || entry.includes('?') || entry.includes('#')) {
+      throw runtimeIncomplete();
+    }
+    const safe = safeRelativePath(entry);
+    if (!safe || safe.split(path.sep).join('/') !== entry) throw runtimeIncomplete();
+    const identity = entry.normalize('NFC').toLocaleLowerCase('en-US');
+    if (identities.has(identity)) throw runtimeIncomplete();
+    identities.add(identity);
+    if (entry === serverJarRelative) {
+      serverReferences += 1;
+    } else {
+      if (!entry.startsWith('libraries/') || !entry.toLocaleLowerCase('en-US').endsWith('.jar')) {
+        throw runtimeIncomplete();
+      }
+      libraries.push(entry);
+    }
+    requireJar(root, resolveControlledPath(root, entry));
+  }
+  if (serverReferences !== 1 || libraries.length === 0) throw runtimeIncomplete();
+  return {
+    family: 'forge',
+    launchJar: launchJarRelative,
+    serverJar: serverJarRelative,
+    libraries
+  };
+}
+
+function resolveForgeRuntimeLoader(root, runtime) {
+  const argsFile = `libraries/net/minecraftforge/forge/${runtime.minecraftVersion}-${runtime.loaderVersion}/win_args.txt`;
+  const argsPath = resolveControlledPath(root, argsFile);
+  if (fs.existsSync(argsPath)) {
+    assertRegularContainedFile(root, argsPath);
+    return { family: 'forge', argsFile };
+  }
+  return legacyForgeLayout(root, runtime);
 }
 
 function parsePropertiesExact(filePath) {
@@ -1799,7 +2093,7 @@ async function ensureForgeServerLibraries(targetPath, minecraftVersion, loaderVe
 
   const resolvedForgeVersion = await Version.parse(targetPath, forgeVersionId);
   await installLibraries(resolvedForgeVersion);
-  ensureForgeRootShim(targetPath, minecraftVersion, loaderVersion);
+  runRuntimeStageSync('forge-shim', () => ensureForgeRootShim(targetPath, minecraftVersion, loaderVersion));
 
   emitProgress(progressChannel, { percent: 95, speed: 'Forge libraries ready' }, 'forge');
   return forgeVersionId;
@@ -1866,15 +2160,17 @@ async function getForgeRuntimeHealthIssues(targetPath, minecraftVersion, loaderV
   return [...new Set(issues)];
 }
 
-function validateRuntimeRecord(root, expectedRuntime, record) {
+function validateRuntimeRecord(root, expectedRuntime, record, options = {}) {
   if (!hasExactKeys(record, ['formatVersion', 'runtime', 'loader', 'artifacts']) || record.formatVersion !== 1 ||
     !Array.isArray(record.artifacts) || record.artifacts.length === 0 || record.artifacts.length > 10000) throw runtimeIncomplete();
   const runtime = normalizeRuntime(record.runtime);
   if (!runtimeTupleEquals(runtime, expectedRuntime)) throw runtimeIncomplete();
   if (!isPlainObject(record.loader) || record.loader.family !== runtime.loaderFamily) throw runtimeIncomplete();
   const artifactPaths = new Set();
+  const artifactValidator = options.artifactValidator || validateArtifactRecord;
+  if (typeof artifactValidator !== 'function') throw runtimeIncomplete();
   for (const artifact of record.artifacts) {
-    const filePath = validateArtifactRecord(root, artifact);
+    const filePath = artifactValidator(root, artifact);
     const identity = portableRelative(root, filePath).normalize('NFC').toLowerCase();
     if (artifactPaths.has(identity)) throw runtimeIncomplete();
     artifactPaths.add(identity);
@@ -1898,9 +2194,27 @@ function validateRuntimeRecord(root, expectedRuntime, record) {
     requireJar(root, path.join(root, record.loader.launcherJar));
     requireJar(root, path.join(root, 'server.jar'));
   } else if (runtime.loaderFamily === 'forge') {
-    if (!hasExactKeys(record.loader, ['family', 'argsFile']) || typeof record.loader.argsFile !== 'string') throw runtimeIncomplete();
-    const argsFile = resolveControlledPath(root, record.loader.argsFile);
-    assertRegularContainedFile(root, argsFile);
+    const expectedArgsFile = `libraries/net/minecraftforge/forge/${runtime.minecraftVersion}-${runtime.loaderVersion}/win_args.txt`;
+    if (hasExactKeys(record.loader, ['family', 'argsFile'])) {
+      if (record.loader.argsFile !== expectedArgsFile) throw runtimeIncomplete();
+      const argsFile = resolveControlledPath(root, record.loader.argsFile);
+      assertRegularContainedFile(root, argsFile);
+      requireRecorded(argsFile);
+    } else if (hasExactKeys(record.loader, ['family', 'launchJar', 'serverJar', 'libraries'])) {
+      if (!Array.isArray(record.loader.libraries) || record.loader.libraries.length === 0 ||
+          record.loader.libraries.some(relativePath => typeof relativePath !== 'string')) throw runtimeIncomplete();
+      const layout = legacyForgeLayout(root, runtime);
+      if (record.loader.launchJar !== layout.launchJar || record.loader.serverJar !== layout.serverJar ||
+          record.loader.libraries.length !== layout.libraries.length ||
+          record.loader.libraries.some((relativePath, index) => relativePath !== layout.libraries[index])) {
+        throw runtimeIncomplete();
+      }
+      [layout.launchJar, layout.serverJar, ...layout.libraries]
+        .map(relativePath => resolveControlledPath(root, relativePath))
+        .forEach(requireRecorded);
+    } else {
+      throw runtimeIncomplete();
+    }
   } else if (runtime.loaderFamily === 'vanilla') {
     if (!hasExactKeys(record.loader, ['family', 'serverJar']) || record.loader.serverJar !== 'server.jar') throw runtimeIncomplete();
     requireJar(root, path.join(root, 'server.jar'));
@@ -1910,21 +2224,27 @@ function validateRuntimeRecord(root, expectedRuntime, record) {
   return { valid: true, runtime, loader: record.loader, artifacts: record.artifacts };
 }
 
-function validatePreparedRuntime(serverPath, runtimeTuple) {
+function inspectPreparedRuntime(serverPath) {
   let root;
-  let expectedRuntime;
   try {
     root = assertCanonicalDirectory(serverPath);
-    expectedRuntime = normalizeRuntime(runtimeTuple);
     const metadataPath = path.join(root, RUNTIME_METADATA_RELATIVE);
+    if (!fs.existsSync(metadataPath)) return null;
     const inspected = assertRegularContainedFile(root, metadataPath);
     if (inspected.stat.size < 2 || inspected.stat.size > DEFAULT_METADATA_BYTES) throw runtimeIncomplete();
     const record = parseBoundedJson(fs.readFileSync(metadataPath));
-    return validateRuntimeRecord(root, expectedRuntime, record);
+    return validateRuntimeRecord(root, normalizeRuntime(record?.runtime), record);
   } catch (error) {
     if (error?.code === 'UNSUPPORTED_LOADER') throw error;
     throw runtimeIncomplete();
   }
+}
+
+function validatePreparedRuntime(serverPath, runtimeTuple) {
+  const expectedRuntime = normalizeRuntime(runtimeTuple);
+  const validation = inspectPreparedRuntime(serverPath);
+  if (!validation || !runtimeTupleEquals(validation.runtime, expectedRuntime)) throw runtimeIncomplete();
+  return validation;
 }
 
 function publishRuntimeMetadata(root, runtime, loader, files) {
@@ -1935,6 +2255,131 @@ function publishRuntimeMetadata(root, runtime, loader, files) {
   validateRuntimeRecord(root, runtime, record);
   atomicWriteRuntimeMetadata(root, record);
   return validatePreparedRuntime(root, runtime);
+}
+
+function publishForgeRuntimeMetadata(root, runtime) {
+  const artifactVersion = `${runtime.minecraftVersion}-${runtime.loaderVersion}`;
+  const argsFile = resolveControlledPath(
+    root,
+    `libraries/net/minecraftforge/forge/${artifactVersion}/win_args.txt`
+  );
+  const installedLaunchJar = resolveControlledPath(
+    root,
+    `libraries/net/minecraftforge/forge/${artifactVersion}/forge-${artifactVersion}.jar`
+  );
+  const rootLaunchJar = resolveControlledPath(root, `forge-${artifactVersion}.jar`);
+  const rootServerJar = resolveControlledPath(root, `minecraft_server.${runtime.minecraftVersion}.jar`);
+  if (!fs.existsSync(argsFile) && (fs.existsSync(installedLaunchJar) ||
+      !fs.existsSync(rootLaunchJar) || !fs.existsSync(rootServerJar))) {
+    materializeLegacyForgeLayout(root, runtime);
+  }
+  const loader = resolveForgeRuntimeLoader(root, runtime);
+  return publishRuntimeMetadata(
+    root,
+    runtime,
+    loader,
+    listRuntimeArtifactFiles(root).map(file => file.source)
+  );
+}
+
+function assertStableArtifactEvidence(root, evidence, fsApi = fs, diagnosticStage = 'finalizer-artifact-digest') {
+  try {
+    const pathStat = fsApi.lstatSync(evidence.path);
+    const realPath = fsApi.realpathSync.native(evidence.path);
+    const rootRealPath = fsApi.realpathSync.native(root);
+    if (!pathStat.isFile() || pathStat.isSymbolicLink() || realPath !== evidence.realPath ||
+        !inside(rootRealPath, realPath) || !sameFileIdentity(evidence.stat, pathStat)) {
+      const error = runtimeIncomplete();
+      const mask = changedIdentityFields(evidence.stat, pathStat);
+      if (mask) error.runtimeDiagnostic = {
+        stage: diagnosticStage, reason: 'identity-changed', changedIdentityFields: mask
+      };
+      throw error;
+    }
+  } catch (error) {
+    if (error?.code === 'RUNTIME_INCOMPLETE') throw error;
+    const failure = runtimeIncomplete();
+    failure.runtimeDiagnostic = runtimeDiagnosticFor(error, diagnosticStage);
+    throw failure;
+  }
+}
+
+function finalizeForgeRuntimeMetadata(root, runtimeTuple, options = {}) {
+  const fsApi = options.fsApi || fs;
+  let diagnosticStage = 'finalizer-layout';
+  try {
+    root = assertCanonicalDirectory(root);
+    const runtime = normalizeRuntime(runtimeTuple);
+    if (runtime.loaderFamily !== 'forge') throw runtimeIncomplete();
+    const artifactVersion = `${runtime.minecraftVersion}-${runtime.loaderVersion}`;
+    const argsFile = resolveControlledPath(
+      root,
+      `libraries/net/minecraftforge/forge/${artifactVersion}/win_args.txt`
+    );
+    const installedLaunchJar = resolveControlledPath(
+      root,
+      `libraries/net/minecraftforge/forge/${artifactVersion}/forge-${artifactVersion}.jar`
+    );
+    const rootLaunchJar = resolveControlledPath(root, `forge-${artifactVersion}.jar`);
+    const rootServerJar = resolveControlledPath(root, `minecraft_server.${runtime.minecraftVersion}.jar`);
+    if (!fs.existsSync(argsFile) && (fs.existsSync(installedLaunchJar) ||
+        !fs.existsSync(rootLaunchJar) || !fs.existsSync(rootServerJar))) {
+      materializeLegacyForgeLayout(root, runtime);
+    }
+    const loader = resolveForgeRuntimeLoader(root, runtime);
+    diagnosticStage = 'finalizer-artifact-collection';
+    const preparedArtifacts = listRuntimeArtifactFiles(root, { maxFiles: 10000 })
+      .map(file => {
+        const inspected = runRuntimeStageSync('finalizer-artifact-digest', () => digestStableArtifact(root, file.source, {
+          fsApi, diagnosticStage: 'finalizer-artifact-digest'
+        }));
+        return {
+          evidence: inspected,
+          record: {
+            relativePath: portableRelative(root, inspected.path),
+            size: inspected.size,
+            sha256: inspected.sha256,
+            sha512: inspected.sha512
+          }
+        };
+      })
+      .sort((left, right) => left.record.relativePath.localeCompare(right.record.relativePath, 'en'));
+    const artifactsByIdentity = new Map(preparedArtifacts.map(({ record }) => [
+      record.relativePath.normalize('NFC').toLowerCase(),
+      record
+    ]));
+    const validateFreshArtifact = (recordRoot, artifact) => {
+      const filePath = artifactRecordPath(recordRoot, artifact);
+      const expected = artifactsByIdentity.get(artifact.relativePath.normalize('NFC').toLowerCase());
+      if (!expected || expected.relativePath !== artifact.relativePath || expected.size !== artifact.size ||
+          expected.sha256 !== artifact.sha256 || expected.sha512 !== artifact.sha512) throw runtimeIncomplete();
+      return filePath;
+    };
+    const record = {
+      formatVersion: 1,
+      runtime,
+      loader,
+      artifacts: preparedArtifacts.map(({ record: artifact }) => artifact)
+    };
+    diagnosticStage = 'finalizer-fresh-record';
+    validateRuntimeRecord(root, runtime, record, { artifactValidator: validateFreshArtifact });
+    diagnosticStage = 'finalizer-stability-before-publish';
+    preparedArtifacts.forEach(({ evidence }) => assertStableArtifactEvidence(root, evidence, fsApi, diagnosticStage));
+    diagnosticStage = 'finalizer-publish';
+    atomicWriteRuntimeMetadata(root, record);
+    diagnosticStage = 'finalizer-readback';
+    const metadataPath = path.join(root, RUNTIME_METADATA_RELATIVE);
+    const inspectedMetadata = assertRegularContainedFile(root, metadataPath);
+    if (inspectedMetadata.stat.size < 2 || inspectedMetadata.stat.size > DEFAULT_METADATA_BYTES) throw runtimeIncomplete();
+    const published = parseBoundedJson(fs.readFileSync(metadataPath));
+    if (JSON.stringify(published) !== JSON.stringify(record)) throw runtimeIncomplete();
+    diagnosticStage = 'finalizer-stability-after-publish';
+    preparedArtifacts.forEach(({ evidence }) => assertStableArtifactEvidence(root, evidence, fsApi, diagnosticStage));
+    diagnosticStage = 'finalizer-fresh-record';
+    return validateRuntimeRecord(root, runtime, published, { artifactValidator: validateFreshArtifact });
+  } catch (error) {
+    throw annotateRuntimeError(error, diagnosticStage);
+  }
 }
 
 async function prepareRuntimeIdentity(options, loaderFamily) {
@@ -2005,7 +2450,7 @@ async function installNeoForgeServer(options) {
       argsFile: portableRelative(serverRoot, layout.argsFile),
       universalJar: portableRelative(serverRoot, layout.universalJar)
     };
-    publishRuntimeMetadata(serverRoot, runtime, loader, listRegularFiles(serverRoot).map(file => file.source));
+    publishRuntimeMetadata(serverRoot, runtime, loader, listRuntimeArtifactFiles(serverRoot).map(file => file.source));
     publishStagedRuntime(serverRoot, root, workspace, () => validatePreparedRuntime(root, runtime), {
       loaderFamily: 'neoforge'
     });
@@ -2135,6 +2580,21 @@ async function defaultEnsureQuiltBaseRuntime({
   }
 }
 
+async function ensureFabricBaseRuntime(root, runtime, options = {}, ensureBaseRuntime = defaultEnsureQuiltBaseRuntime) {
+  const serverJar = path.join(root, 'server.jar');
+  if (fs.existsSync(serverJar)) {
+    requireJar(root, serverJar);
+    return { downloaded: false, serverJar };
+  }
+  const request = { targetPath: root, minecraftVersion: runtime.minecraftVersion };
+  for (const key of ['logChannel', 'progressChannel', 'transport', 'timeoutMs', 'maxMetadataBytes', 'maxRuntimeBytes', 'signal']) {
+    if (options[key] !== undefined) request[key] = options[key];
+  }
+  await ensureBaseRuntime(request);
+  requireJar(root, serverJar);
+  return { downloaded: true, serverJar };
+}
+
 async function installQuiltServer(options) {
   const { root, runtime } = await prepareRuntimeIdentity(options, 'quilt');
   const { pair, libraries } = await resolveQuiltPairAndProfile(options);
@@ -2169,7 +2629,7 @@ async function installQuiltServer(options) {
       properties: portableRelative(serverRoot, propertiesPath),
       libraries: downloadedLibraries
     };
-    publishRuntimeMetadata(serverRoot, runtime, loader, listRegularFiles(serverRoot).map(file => file.source));
+    publishRuntimeMetadata(serverRoot, runtime, loader, listRuntimeArtifactFiles(serverRoot).map(file => file.source));
     publishStagedRuntime(serverRoot, root, workspace, () => validatePreparedRuntime(root, runtime), {
       loaderFamily: 'quilt'
     });
@@ -2216,6 +2676,7 @@ async function installFabricServer(options) {
     minecraftVersion,
     loaderVersion,
     javaPath,
+    skipMutationMark,
     logChannel = 'install-log',
     progressChannel = 'loader-install-progress'
   } = options;
@@ -2228,7 +2689,11 @@ async function installFabricServer(options) {
     loaderVersion,
     logChannel,
     progressChannel,
-    { javaPath }
+    {
+      javaPath,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(skipMutationMark === true ? { skipMutationMark: true } : {})
+    }
   );
 
   return {
@@ -2244,7 +2709,6 @@ async function installForgeServer(options) {
     targetPath,
     minecraftVersion,
     loaderVersion,
-    javaPath,
     logChannel = 'install-log',
     progressChannel = 'loader-install-progress'
   } = options;
@@ -2263,29 +2727,19 @@ async function installForgeServer(options) {
     }
   });
 
-  await ensureBaseMinecraftServerLayout(targetPath, minecraftVersion, logChannel, progressChannel);
+  await runRuntimeStage('base-preparation', () => ensureBaseMinecraftServerLayout(targetPath, minecraftVersion, logChannel, progressChannel));
   emitProgress(progressChannel, { percent: 55, speed: 'Running Forge installer...' }, 'forge');
 
-  await installForge(
-    {
-      version: loaderVersion,
-      mcversion: minecraftVersion
-    },
-    targetPath,
-    {
-      side: 'server',
-      java: javaPath
-    }
-  );
+  await runRuntimeStage('forge-installer', () => runForgeInstallerWorkerBoundary(options));
 
-  const forgeVersionId = await ensureForgeServerLibraries(
+  const forgeVersionId = await runRuntimeStage('forge-library-completion', () => ensureForgeServerLibraries(
     targetPath,
     minecraftVersion,
     loaderVersion,
     logChannel,
     progressChannel
-  );
-  ensureForgeRootShim(targetPath, minecraftVersion, loaderVersion);
+  ));
+  runRuntimeStageSync('forge-shim', () => ensureForgeRootShim(targetPath, minecraftVersion, loaderVersion));
 
   emitProgress(progressChannel, { percent: 100, speed: 'Completed' }, 'forge');
   emitLog(logChannel, '✔ Forge installation completed');
@@ -2308,6 +2762,26 @@ async function installForgeServer(options) {
     loader: 'forge',
     loaderVersion
   };
+}
+
+function runForgeInstallerWorkerBoundary(options) {
+  return runForgeInstallerWorker({
+    targetPath: options.targetPath,
+    minecraftVersion: options.minecraftVersion,
+    loaderVersion: options.loaderVersion,
+    javaPath: options.javaPath,
+    signal: options.signal,
+    timeoutMs: options.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS
+  });
+}
+
+function runForgeRuntimeFinalizerWorkerBoundary(options) {
+  return runForgeRuntimeFinalizerWorker({
+    targetPath: options.targetPath,
+    runtime: options.runtime,
+    signal: options.signal,
+    timeoutMs: options.finalizationTimeoutMs ?? options.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS
+  });
 }
 
 function normalizeServerInstallOptions(options, loader, minecraftVersion, loaderVersion, extraOptions) {
@@ -2389,20 +2863,23 @@ async function installServerLoader(options = {}, loader, minecraftVersion, loade
   throw unsupportedLoader(normalizedLoader);
 }
 
-async function prepareManagedServerRuntime(options = {}) {
+async function prepareManagedServerRuntimeInProcess(options = {}) {
   if (!isPlainObject(options) || typeof options.targetPath !== 'string' || !path.isAbsolute(options.targetPath) ||
       !isPlainObject(options.runtime) || typeof options.javaPath !== 'string' || !path.isAbsolute(options.javaPath)) {
     throw runtimeIncomplete();
   }
   const root = assertCanonicalDirectory(options.targetPath);
   const runtime = normalizeRuntime(options.runtime);
-  const validatedMajor = await (options.validateJava || validateManagedJava)({
-    javaPath: options.javaPath,
-    expectedMajor: runtime.javaMajor,
-    processRunner: options.processRunner || runBoundedProcess,
-    signal: options.signal
+  await runRuntimeStage('java-validation', async () => {
+    const major = await (options.validateJava || validateManagedJava)({
+      javaPath: options.javaPath,
+      expectedMajor: runtime.javaMajor,
+      processRunner: options.processRunner || runBoundedProcess,
+      signal: options.signal
+    });
+    if (major !== runtime.javaMajor) throw runtimeIncomplete('The selected Java runtime has the wrong major version.');
+    return major;
   });
-  if (validatedMajor !== runtime.javaMajor) throw runtimeIncomplete('The selected Java runtime has the wrong major version.');
 
   if (runtime.loaderFamily === 'vanilla') {
     await defaultEnsureQuiltBaseRuntime({
@@ -2415,11 +2892,17 @@ async function prepareManagedServerRuntime(options = {}) {
       signal: options.signal
     });
     publishRuntimeMetadata(root, runtime, { family: 'vanilla', serverJar: 'server.jar' },
-      listRegularFiles(root).map(file => file.source));
+      listRuntimeArtifactFiles(root).map(file => file.source));
     return validatePreparedRuntime(root, runtime);
   }
 
-  await installServerLoader({
+  if (runtime.loaderFamily === 'fabric') {
+    await ensureFabricBaseRuntime(root, runtime, options);
+  }
+
+  const installServerRuntime = options.installServerLoaderImpl || installServerLoader;
+  if (typeof installServerRuntime !== 'function') throw runtimeIncomplete();
+  await installServerRuntime({
     ...options,
     targetPath: root,
     loader: runtime.loaderFamily,
@@ -2432,19 +2915,46 @@ async function prepareManagedServerRuntime(options = {}) {
 
   if (runtime.loaderFamily === 'fabric') {
     publishRuntimeMetadata(root, runtime, { family: 'fabric', launcherJar: 'fabric-server-launch.jar' },
-      listRegularFiles(root).map(file => file.source));
+      listRuntimeArtifactFiles(root).map(file => file.source));
   } else if (runtime.loaderFamily === 'forge') {
-    const expectedSuffix = `libraries/net/minecraftforge/forge/${runtime.minecraftVersion}-${runtime.loaderVersion}/win_args.txt`
-      .toLocaleLowerCase('en-US');
-    const candidates = listRegularFiles(root)
-      .filter(file => portableRelative(root, file.source).toLocaleLowerCase('en-US') === expectedSuffix);
-    if (candidates.length !== 1) throw runtimeIncomplete();
-    publishRuntimeMetadata(root, runtime, {
-      family: 'forge',
-      argsFile: portableRelative(root, candidates[0].source)
-    }, listRegularFiles(root).map(file => file.source));
+    return runRuntimeStage('forge-finalizer', () => runForgeRuntimeFinalizerWorkerBoundary({
+      ...options,
+      targetPath: root,
+      runtime
+    }));
   }
   return validatePreparedRuntime(root, runtime);
+}
+
+function usesProductionManagedRuntimeBoundary(options) {
+  if (!isPlainObject(options)) return false;
+  const allowed = new Set([
+    'targetPath',
+    'runtime',
+    'javaPath',
+    'skipMutationMark',
+    'signal',
+    'timeoutMs',
+    'terminationGraceMs'
+  ]);
+  return Object.keys(options).every(key => allowed.has(key)) &&
+    (options.skipMutationMark === undefined || options.skipMutationMark === true);
+}
+
+async function prepareManagedServerRuntime(options = {}) {
+  if (!usesProductionManagedRuntimeBoundary(options)) {
+    return prepareManagedServerRuntimeInProcess(options);
+  }
+  const request = {
+    operation: MANAGED_RUNTIME_PREPARE_OPERATION,
+    targetPath: options.targetPath,
+    runtime: options.runtime,
+    javaPath: options.javaPath
+  };
+  for (const key of ['signal', 'timeoutMs', 'terminationGraceMs']) {
+    if (options[key] !== undefined) request[key] = options[key];
+  }
+  return runManagedRuntimeWorker(request);
 }
 
 async function installClientLoader(options = {}) {
@@ -2532,6 +3042,7 @@ module.exports = {
   prepareManagedServerRuntime,
   installClientLoader,
   getForgeRuntimeHealthIssues,
+  inspectPreparedRuntime,
   validatePreparedRuntime,
   __testUtils: {
     getForgeArtifactVersion,
@@ -2544,6 +3055,14 @@ module.exports = {
     mavenCoordinateToPath,
     safeRelativePath,
     validateQuiltRepository,
-    normalizeQuiltLibraries
+    normalizeQuiltLibraries,
+    ensureFabricBaseRuntime,
+    listRuntimeArtifactFiles,
+    publishForgeRuntimeMetadata,
+    digestStableArtifact,
+    finalizeForgeRuntimeMetadata,
+    prepareManagedServerRuntimeInProcess,
+    runForgeInstallerWorkerBoundary,
+    runForgeRuntimeFinalizerWorkerBoundary
   }
 };

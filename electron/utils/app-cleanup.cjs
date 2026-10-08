@@ -2,98 +2,7 @@
 const { ipcMain } = require('electron');
 const { safeSend } = require('./safe-send.cjs');
 const process = require('process');
-const { exec } = require('child_process');
 let isQuitting = false;
-
-/**
- * Kill Vite dev server and any other development processes
- */
-function killDevelopmentProcesses() {
-  return new Promise((resolve) => {
-    
-    if (process.platform === 'win32') {
-      // Windows - kill processes on ports 5173 and 5174
-      const killCommands = [
-        'netstat -ano | findstr :5173',
-        'netstat -ano | findstr :5174'
-      ];
-      
-      let commandsCompleted = 0;
-      
-      killCommands.forEach((findCmd) => {
-        exec(findCmd, (error, stdout) => {
-          commandsCompleted++;
-          
-          if (!error && stdout.trim()) {
-            const lines = stdout.trim().split('\n');
-            lines.forEach(line => {
-              const match = line.match(/\s+(\d+)$/);
-              if (match) {
-                const pid = match[1];
-                exec(`taskkill /PID ${pid} /F`, (killError) => {
-                  if (!killError) {
-                    // Process killed successfully
-                  }
-                });
-              }
-            });
-          }
-          
-          if (commandsCompleted === killCommands.length) {
-            setTimeout(() => {
-              resolve();
-            }, 1000);
-          }
-        });
-      });
-      
-      // Also try to kill by process name
-      exec('taskkill /IM node.exe /F /FI "WINDOWTITLE eq Administrator:  npm run dev:vite*"', () => {});
-      exec('taskkill /IM node.exe /F /FI "COMMANDLINE eq *vite*dev*"', () => {});
-      
-      if (commandsCompleted === 0) {
-        setTimeout(resolve, 1000);
-      }
-    } else {
-      // Linux/Mac - kill processes on ports 5173 and 5174
-      const killCommands = [
-        'lsof -ti:5173',
-        'lsof -ti:5174'
-      ];
-      
-      let commandsCompleted = 0;
-      
-      killCommands.forEach(cmd => {
-        exec(cmd, (error, stdout) => {
-          commandsCompleted++;
-          
-          if (!error && stdout.trim()) {
-            const pids = stdout.trim().split('\n');
-            pids.forEach(pid => {
-              if (pid) {
-                exec(`kill -9 ${pid}`, (killError) => {
-                  if (!killError) {
-                    // Process killed successfully
-                  }
-                });
-              }
-            });
-          }
-          
-          if (commandsCompleted === killCommands.length) {
-            setTimeout(() => {
-              resolve();
-            }, 1000);
-          }
-        });
-      });
-      
-      if (commandsCompleted === 0) {
-        setTimeout(resolve, 1000);
-      }
-    }
-  });
-}
 
 /**
  * Clear all application intervals and timers
@@ -139,10 +48,6 @@ async function performCompleteCleanup() {
     if (serverProcess) {
       killMinecraftServer();
     }
-    
-    // 4. Kill development processes (Vite, etc.)
-    await killDevelopmentProcesses();
-    
     
   } catch {
     // Cleanup failed - non-critical
@@ -223,4 +128,4 @@ function setupAppCleanup(app, win) {
   });
 }
 
-module.exports = { setupAppCleanup, performCompleteCleanup, clearAllIntervals, killDevelopmentProcesses };
+module.exports = { setupAppCleanup, performCompleteCleanup, clearAllIntervals };

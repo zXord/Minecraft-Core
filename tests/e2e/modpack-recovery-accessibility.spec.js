@@ -12,7 +12,7 @@ for (const crashPoint of ['before-live-rename', 'between-renames', 'after-candid
       await page.getByRole('button', { name: 'Choose restore point' }).click();
       await page.getByRole('button', { name: /install existing restore point/u }).click();
       await page.getByRole('button', { name: 'Start reviewed operation' }).click();
-      await expect(page.getByRole('progressbar', { name: 'Committing directory swap' })).toHaveAttribute('aria-valuenow', '82');
+      await expect(page.getByRole('progressbar', { name: 'Committing directory swap' })).not.toHaveAttribute('aria-valuenow');
       await expect.poll(() => fixture.readState().crashMarker).toBe(crashPoint);
 
       await fixture.kill();
@@ -68,9 +68,9 @@ test('keyboard-only setup moves focus through stages, announces progress, and fo
     await expect(page.getByText('CurseForge browsing is unavailable in this build.', { exact: true })).toBeVisible();
     await expect(page.getByText(/Coming Soon|coming soon/u)).toHaveCount(0);
     await expect(page.getByText('Unavailable', { exact: true })).toBeVisible();
-    await expect(page.getByText('Not selected', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Available', { exact: true })).toHaveCount(3);
 
-    const modrinth = page.getByRole('radio', { name: /Modrinth/u });
+    const modrinth = page.getByRole('button', { name: /Browse Modrinth/u });
     await modrinth.focus();
     await page.keyboard.press('Space');
     const browseHeading = page.getByRole('heading', { name: 'Browse server modpacks' });
@@ -87,7 +87,7 @@ test('keyboard-only setup moves focus through stages, announces progress, and fo
 
     await page.getByRole('button', { name: 'Back to Modpack overview' }).click();
     await page.getByRole('button', { name: 'Install modpack' }).click();
-    await page.getByRole('radio', { name: /GitHub Releases/u }).click();
+    await page.getByRole('button', { name: /GitHub Releases/u }).click();
     await page.getByLabel('Public repository or release URL').fill('https://github.com/FixtureOrg/FixturePack');
     await page.getByRole('button', { name: 'Load releases' }).click();
     await page.getByRole('button', { name: /Fixture Release v2/u }).click();
@@ -100,11 +100,18 @@ test('keyboard-only setup moves focus through stages, announces progress, and fo
 
     await page.getByRole('button', { name: 'Back to Modpack overview' }).click();
     await page.getByRole('button', { name: 'Install modpack' }).click();
-    await page.getByRole('radio', { name: /Local archive/u }).focus();
+    await page.getByRole('button', { name: /Local archive/u }).focus();
     await page.keyboard.press('Enter');
-    await page.getByRole('button', { name: 'Run preflight review' }).click();
-    await page.getByRole('button', { name: 'Start reviewed operation' }).click();
-    await expect(page.getByRole('progressbar', { name: 'Downloading' })).toHaveAttribute('aria-valuenow', '35');
+    await page.getByRole('button', { name: 'Review planned changes' }).click();
+    const eulaConsent = page.getByLabel('I accept the Minecraft EULA');
+    await eulaConsent.focus();
+    await page.keyboard.press('Space');
+    await expect(eulaConsent).toBeChecked();
+    const startReviewedOperation = page.getByRole('button', { name: 'Start reviewed operation' });
+    await expect(startReviewedOperation).toBeEnabled();
+    await startReviewedOperation.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('progressbar', { name: 'Downloading' })).not.toHaveAttribute('aria-valuenow');
     await expect(page.getByText('Verifying exact offline fixture bytes', { exact: true })).toHaveAttribute('aria-live', 'polite');
     const outcome = page.locator('section.outcome');
     await expect(outcome).toBeVisible();

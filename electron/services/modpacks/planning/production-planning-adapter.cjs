@@ -2,9 +2,14 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { getDefaultServerConfig } = require('../../../utils/config-manager.cjs');
 const { normalizeRuntimeTuple } = require('../contracts.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
-const { captureReservedTarget } = require('../../modpack-lifecycle/reserved-target-authority.cjs');
+const {
+  captureExistingUnmanagedTarget,
+  captureReservedTarget
+} = require('../../modpack-lifecycle/reserved-target-authority.cjs');
+const { readContentRevision: defaultReadContentRevision } = require('../../server-content-revision.cjs');
 const { computePreflightReserve } = require('../limits.cjs');
 const { compileAssetPatternForInspection } = require('../providers/github-asset-pattern.cjs');
 const { canonicalPath, planOwnership } = require('./ownership-planner.cjs');
@@ -25,7 +30,20 @@ const OPERATION_MAP = Object.freeze({
   'files-only': 'files-only',
   'import-files-only-new': 'files-only'
 });
+const NON_DOWNGRADE_MANAGED_REPLACEMENTS = new Set(['install', 'upgrade', 'switch']);
+const GITHUB_METADATA_RETAINING_REPLACEMENTS = new Set(['upgrade', 'downgrade']);
 const PUBLIC_CONFLICT_CHOICES = new Set(['keep-mine', 'use-pack', 'keep-both', 'disable-addon', 'remove-addon']);
+const PREFLIGHT_PROGRESS_PHASES = new Set([
+  'validating-destination', 'preparing-candidate', 'scanning-server', 'verifying-restore-point', 'calculating-changes',
+  'checking-capacity', 'sealing-plan'
+]);
+const CANDIDATE_PROGRESS_ACTIVITIES = new Set([
+  'extracting', 'verifying-archive', 'downloading-pack-files', 'assembling-files', 'hashing-candidate-files'
+]);
+const DEFAULT_NEW_SERVER_CONFIG = getDefaultServerConfig();
+const DEFAULT_NEW_SERVER_MAX_RAM = DEFAULT_NEW_SERVER_CONFIG.maxRam;
+const DEFAULT_NEW_SERVER_PORT = DEFAULT_NEW_SERVER_CONFIG.port;
+const DEFAULT_NEW_SERVER_NETWORK_ACCESS = DEFAULT_NEW_SERVER_CONFIG.networkAccess;
 
 function invalid(cause) {
   if (cause instanceof ModpackError) return cause;
@@ -40,6 +58,38 @@ function runtimeIncomplete() {
   return new ModpackError(
     'RUNTIME_INCOMPLETE',
     'The archive does not provide one exact Minecraft and loader runtime. Choose a Modrinth server pack or a GitHub asset with exact runtime evidence.'
+  );
+}
+
+function downgradeRequired() {
+  return new ModpackError(
+    'DOWNGRADE_REQUIRED',
+    'The selected runtime is older than the managed server runtime. Retry this operation as a downgrade.',
+    { retryable: true }
+  );
+}
+
+function switchRequired() {
+  return new ModpackError(
+    'SWITCH_REQUIRED',
+    'The selected runtime uses a different loader family. Retry this operation as a switch.',
+    { retryable: true }
+  );
+}
+
+function selectedPortUnavailable(cause) {
+  return new ModpackError(
+    'INVALID_REQUEST',
+    'The selected Minecraft server port is already in use. Choose another port and retry.',
+    { cause, details: { field: 'selections.serverPort' }, retryable: true }
+  );
+}
+
+function selectedPortCheckFailed(cause) {
+  return new ModpackError(
+    'INVALID_REQUEST',
+    'The selected Minecraft server port could not be checked. Retry the review.',
+    { cause, details: { field: 'selections.serverPort' }, retryable: true }
   );
 }
 
@@ -75,6 +125,11 @@ function sourceForPlan(source) {
     return {
       provider: 'modrinth', projectId: source.projectId, versionId: source.versionId,
       version: source.version,
+      ...(source.channel === undefined ? {} : {
+        channel: source.channel,
+        prerelease: source.prerelease,
+        publishedAt: source.publishedAt
+      }),
       ...(source.acceptedMapping === undefined ? {} : { acceptedMapping: source.acceptedMapping })
     };
   }
@@ -82,6 +137,11 @@ function sourceForPlan(source) {
     return {
       provider: 'github', repositoryId: source.repositoryId, releaseId: source.releaseId,
       githubOwner: source.githubOwner, githubRepo: source.githubRepo, version: source.version,
+      ...(source.channel === undefined ? {} : {
+        channel: source.channel,
+        prerelease: source.prerelease,
+        publishedAt: source.publishedAt
+      }),
       ...(source.assetPattern === undefined ? {} : { assetPattern: source.assetPattern }),
       ...(source.acceptedMapping === undefined ? {} : { acceptedMapping: source.acceptedMapping })
     };
@@ -95,6 +155,55 @@ function sourceForPlan(source) {
   throw invalid();
 }
 
+function createProgressReporter(onProgress) {
+  if (onProgress === undefined) return () => {};
+  if (typeof onProgress !== 'function') throw invalid();
+  return value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        !PREFLIGHT_PROGRESS_PHASES.has(value.phase)) return;
+    const event = { phase: value.phase };
+    if (value.activity !== undefined) {
+      const validActivity = CANDIDATE_PROGRESS_ACTIVITIES.has(value.activity) && (
+        value.phase === 'preparing-candidate' ||
+        (value.phase === 'verifying-restore-point' && value.activity === 'verifying-archive')
+      );
+      if (!validActivity) return;
+      event.activity = value.activity;
+    }
+    for (const [completed, total] of [
+      ['completedItems', 'totalItems'], ['processedBytes', 'totalBytes']
+    ]) {
+      const hasCompleted = value[completed] !== undefined;
+      const hasTotal = value[total] !== undefined;
+      if (hasCompleted !== hasTotal) return;
+      if (!hasCompleted) continue;
+      const completedValue = Number(value[completed]);
+      const totalValue = Number(value[total]);
+      if (!Number.isSafeInteger(completedValue) || completedValue < 0 ||
+          !Number.isSafeInteger(totalValue) || totalValue < 0 || completedValue > totalValue ||
+          !['preparing-candidate', 'verifying-restore-point'].includes(value.phase)) return;
+      event[completed] = completedValue;
+      event[total] = totalValue;
+    }
+    try {
+      Promise.resolve(onProgress(deepFreeze(event))).catch(() => {});
+    } catch { /* preflight progress cannot change the reviewed plan */ }
+  };
+}
+
+function sourceForReview(source) {
+  if (source === null) return null;
+  const reviewed = { provider: source.provider, version: source.version };
+  if (source.provider === 'github') {
+    return {
+      ...reviewed,
+      repositoryId: source.repositoryId,
+      releaseId: source.releaseId
+    };
+  }
+  return reviewed;
+}
+
 function normalizeSelections(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
   return {
@@ -105,7 +214,10 @@ function normalizeSelections(value = {}) {
     acknowledgeMissingProviderDigest: value.acknowledgeMissingProviderDigest === true,
     acknowledgeDowngradeWorldRisk: value.acknowledgeDowngradeWorldRisk === true,
     selectedRoot: value.selectedRoot ?? null,
-    runtimeChoice: value.runtimeChoice ?? null
+    runtimeChoice: value.runtimeChoice ?? null,
+    maxRam: value.maxRam ?? null,
+    serverPort: value.serverPort ?? null,
+    networkAccess: value.networkAccess ?? null
   };
 }
 
@@ -278,8 +390,86 @@ function sameRuntime(left, right) {
   }
 }
 
+function versionTokens(value) {
+  const normalized = String(value).trim().replace(/^v(?=\d)/i, '');
+  if (!/^\d+(?:\.\d+)*(?:-[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?$/.test(normalized)) return null;
+  const precedence = normalized.split('+', 1)[0];
+  const separator = precedence.indexOf('-');
+  const main = separator === -1 ? precedence : precedence.slice(0, separator);
+  const prerelease = separator === -1 ? null : precedence.slice(separator + 1);
+  const tokenize = part => part.match(/\d+|[A-Za-z]+/g)?.map(token => (
+    /^\d+$/.test(token) ? BigInt(token) : token.toLocaleLowerCase('en-US')
+  )) || [];
+  return {
+    main: tokenize(main),
+    prerelease: prerelease === null ? null : tokenize(prerelease)
+  };
+}
+
+function compareTokenLists(left, right, { missingNumbersAreZero, numericBeforeText = false }) {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftToken = left[index];
+    const rightToken = right[index];
+    if (leftToken === undefined || rightToken === undefined) {
+      if (leftToken === undefined && rightToken === undefined) return 0;
+      const remaining = leftToken === undefined ? right.slice(index) : left.slice(index);
+      const equivalentToMissing = missingNumbersAreZero && remaining.every(token => typeof token === 'bigint' && token === 0n);
+      if (equivalentToMissing) return 0;
+      return leftToken === undefined ? -1 : 1;
+    }
+    if (typeof leftToken === typeof rightToken) {
+      if (leftToken === rightToken) continue;
+      return leftToken > rightToken ? 1 : -1;
+    }
+    if (numericBeforeText) return typeof leftToken === 'bigint' ? -1 : 1;
+    return typeof leftToken === 'bigint' ? 1 : -1;
+  }
+  return 0;
+}
+
+function compareExactVersions(left, right) {
+  if (left === right) return 0;
+  const leftVersion = versionTokens(left);
+  const rightVersion = versionTokens(right);
+  if (leftVersion === null || rightVersion === null) return null;
+  const main = compareTokenLists(leftVersion.main, rightVersion.main, { missingNumbersAreZero: true });
+  if (main !== 0) return main;
+  if (leftVersion.prerelease === null && rightVersion.prerelease !== null) return 1;
+  if (leftVersion.prerelease !== null && rightVersion.prerelease === null) return -1;
+  if (leftVersion.prerelease === null) return 0;
+  return compareTokenLists(leftVersion.prerelease, rightVersion.prerelease, {
+    missingNumbersAreZero: false,
+    numericBeforeText: true
+  });
+}
+
+function canonicalLoaderVersion(runtime) {
+  if (runtime.loaderFamily !== 'forge') return runtime.loaderVersion;
+  const minecraftPrefix = `${runtime.minecraftVersion}-`;
+  return runtime.loaderVersion.startsWith(minecraftPrefix)
+    ? runtime.loaderVersion.slice(minecraftPrefix.length)
+    : runtime.loaderVersion;
+}
+
+function runtimeDirection(sourceRuntime, targetRuntime) {
+  const minecraftDirection = compareExactVersions(targetRuntime.minecraftVersion, sourceRuntime.minecraftVersion);
+  if (minecraftDirection === null || minecraftDirection < 0) return 'downgrade';
+  if (targetRuntime.loaderFamily !== sourceRuntime.loaderFamily) return 'switch';
+  if (minecraftDirection > 0) return 'forward';
+  const targetLoaderVersion = canonicalLoaderVersion(targetRuntime);
+  const sourceLoaderVersion = canonicalLoaderVersion(sourceRuntime);
+  const loaderDirection = compareExactVersions(targetLoaderVersion, sourceLoaderVersion);
+  return loaderDirection === null || loaderDirection < 0 ? 'downgrade' : 'forward';
+}
+
 function sameJson(left, right) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function sameGithubRepository(left, right) {
+  return left?.provider === 'github' && right?.provider === 'github' &&
+    left.repositoryId === right.repositoryId;
 }
 
 function sameAssetIds(left, right) {
@@ -319,6 +509,8 @@ function sameRepairSource(installed, reviewed, reviewedArtifactSetDigest = null)
   if (installed.provider === 'github') {
     return installed.repositoryId === reviewed.repositoryId && installed.releaseId === reviewed.releaseId &&
       installed.githubOwner === reviewed.githubOwner && installed.githubRepo === reviewed.githubRepo &&
+      (installed.channel === undefined || (installed.channel === reviewed.channel &&
+        installed.prerelease === reviewed.prerelease && installed.publishedAt === reviewed.publishedAt)) &&
       Array.isArray(installed.selectedAssetIds) && installed.selectedAssetIds.length > 0 &&
       sameAssetIds(installed.selectedAssetIds, reviewed.selectedAssetIds) &&
       installed.artifactSetDigest === reviewedArtifactSetDigest;
@@ -351,9 +543,10 @@ function managementDisk(snapshot, selectedRestorePoint, operationKind, available
     ? BigInt(String(selectedRestorePoint?.totalBytes ?? '0'))
     : 0n;
   if (operationKind === 'rollback-restore-point' && selectedRestorePoint?.totalBytes === undefined) throw stale();
-  // The verified archive is already present, but rollback can temporarily hold
-  // both secure extraction staging and the reconstructed final payload.
-  const selectedBytes = selectedExpandedBytes * 2n;
+  // The verified archive is already present. Its extracted tree is promoted
+  // into the owned candidate with same-volume renames, so it occupies one
+  // expanded-payload allocation rather than separate staging and final trees.
+  const selectedBytes = selectedExpandedBytes;
   const baseBytes = candidateBytes + restorePointBytes + rollbackBytes + journalBytes + selectedBytes;
   const reserveBytes = BigInt(computePreflightReserve(baseBytes.toString()));
   const requiredBytes = baseBytes + reserveBytes;
@@ -373,6 +566,15 @@ function managementDisk(snapshot, selectedRestorePoint, operationKind, available
   };
 }
 
+function reviewedServerDisk(snapshot) {
+  return {
+    candidateBytes: String(snapshot.candidateBytes ?? '0'),
+    restorePointBytes: String(snapshot.restorePointBytes ?? '0'),
+    rollbackBytes: String(snapshot.rollbackBytes ?? '0'),
+    journalBytes: String(snapshot.journalBytes ?? '1048576')
+  };
+}
+
 class ProductionPlanningAdapter {
   constructor({
     instanceResolver,
@@ -382,10 +584,13 @@ class ProductionPlanningAdapter {
     snapshotServer,
     fsApi = fs,
     availableBytes = null,
+    validateServerPorts,
     planOwnershipFn = planOwnership,
     buildPreflightPlanFn = buildPreflightPlan,
     workspaceRegistry = null,
     resolveRestorePoint = null,
+    listAvailableRestorePoints = null,
+    readContentRevision = defaultReadContentRevision,
     conflictAuthoritySecret = crypto.randomBytes(32)
   } = {}) {
     if (!instanceResolver || typeof instanceResolver.resolveInstance !== 'function' ||
@@ -393,11 +598,14 @@ class ProductionPlanningAdapter {
         !reparseInspector || typeof reparseInspector.isReparsePoint !== 'function' ||
         typeof preparePlanInputs !== 'function' || typeof snapshotServer !== 'function' ||
         !fsApi || typeof fsApi.lstatSync !== 'function' || typeof fsApi.statfsSync !== 'function' ||
+        typeof validateServerPorts !== 'function' ||
         typeof planOwnershipFn !== 'function' || typeof buildPreflightPlanFn !== 'function' ||
+        typeof readContentRevision !== 'function' ||
         !Buffer.isBuffer(conflictAuthoritySecret) || conflictAuthoritySecret.length < 32 ||
         (workspaceRegistry !== null && (!workspaceRegistry || typeof workspaceRegistry.createPlanningSession !== 'function' ||
           typeof workspaceRegistry.createStagingOutput !== 'function' || typeof workspaceRegistry.releaseOwner !== 'function')) ||
         (resolveRestorePoint !== null && typeof resolveRestorePoint !== 'function') ||
+        (listAvailableRestorePoints !== null && typeof listAvailableRestorePoints !== 'function') ||
         (availableBytes !== null && typeof availableBytes !== 'function')) throw invalid();
     this.instanceResolver = instanceResolver;
     this.stateRepository = stateRepository;
@@ -406,17 +614,59 @@ class ProductionPlanningAdapter {
     this.snapshotServer = snapshotServer;
     this.fs = fsApi;
     this.availableBytes = availableBytes || (serverPath => defaultAvailableBytes(this.fs, serverPath));
+    this.validateServerPorts = validateServerPorts;
     this.planOwnership = planOwnershipFn;
     this.buildPreflightPlan = buildPreflightPlanFn;
     this.workspaceRegistry = workspaceRegistry;
     this.resolveRestorePoint = resolveRestorePoint;
+    this.listAvailableRestorePoints = listAvailableRestorePoints;
+    this.readContentRevision = readContentRevision;
     this.conflictAuthoritySecret = Buffer.from(conflictAuthoritySecret);
     this.executionRecords = new Map();
   }
 
-  async createPlan({ request, inspection, source } = {}) {
+  async listRollbackOptions({ instanceId } = {}) {
+    if (typeof instanceId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(instanceId) ||
+        typeof this.stateRepository.listHistory !== 'function' ||
+        typeof this.listAvailableRestorePoints !== 'function') throw invalid();
+    const resolved = await this.instanceResolver.resolveInstance(instanceId);
+    if (!resolved || resolved.instanceId !== instanceId || typeof resolved.serverPath !== 'string') throw stale();
+    const serverPath = path.resolve(resolved.serverPath);
+    if (!targetExists(this.fs, serverPath)) throw stale();
+    const currentState = this.stateRepository.read(serverPath);
+    if (!currentState?.state) throw stale();
+    const historyPage = this.stateRepository.listHistory(serverPath, { cursor: null, limit: 200 });
+    if (!historyPage || !Array.isArray(historyPage.items)) throw stale();
+    const listed = await this.listAvailableRestorePoints({ serverPath, history: historyPage.items });
+    if (!Array.isArray(listed) || listed.length > 200) throw stale();
+    const seen = new Set();
+    const items = listed.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item) ||
+          Object.keys(item).sort().join(',') !== 'createdAt,operationKind,restorePointId,runtime,sourceRevision,totalBytes' ||
+          typeof item.restorePointId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(item.restorePointId) ||
+          seen.has(item.restorePointId) || typeof item.operationKind !== 'string' ||
+          !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(item.operationKind) ||
+          typeof item.createdAt !== 'string' || Number.isNaN(Date.parse(item.createdAt)) ||
+          !Number.isSafeInteger(item.sourceRevision) || item.sourceRevision < 0 ||
+          typeof item.totalBytes !== 'string' || !/^(0|[1-9][0-9]*)$/u.test(item.totalBytes)) throw stale();
+      seen.add(item.restorePointId);
+      return Object.freeze({
+        restorePointId: item.restorePointId,
+        operationKind: item.operationKind,
+        createdAt: item.createdAt,
+        sourceRevision: item.sourceRevision,
+        runtime: normalizeRuntimeTuple(item.runtime),
+        totalBytes: item.totalBytes
+      });
+    });
+    return deepFreeze({ items });
+  }
+
+  async createPlan({ request, inspection, source, onProgress } = {}) {
     if (!request || !inspection || !source || request.inspectionId !== inspection.inspectionId ||
         typeof request.instanceId !== 'string') throw invalid();
+    const reportProgress = createProgressReporter(onProgress);
+    reportProgress({ phase: 'validating-destination' });
     const resolved = await this.instanceResolver.resolveInstance(request.instanceId);
     if (!resolved || resolved.instanceId !== request.instanceId || typeof resolved.serverPath !== 'string') throw stale();
     const serverPath = path.resolve(resolved.serverPath);
@@ -426,19 +676,56 @@ class ProductionPlanningAdapter {
       try { currentState = this.stateRepository.read(serverPath); }
       catch (error) { throw stale(error); }
     }
+    const operationKind = OPERATION_MAP[request.operationKind];
+    if (!operationKind) throw invalid();
     const managed = currentState?.state?.modpackManaged === true && currentState?.manifest;
-    const reservation = managed
+    const adoptingUnmanaged = !managed && request.operationKind === 'install-existing' &&
+      operationKind === 'install' && exists && this.fs.readdirSync(serverPath).length > 0;
+    const adoption = adoptingUnmanaged
+      ? await captureExistingUnmanagedTarget({
+          targetPath: serverPath,
+          fsApi: this.fs,
+          reparseInspector: this.reparseInspector
+        })
+      : null;
+    const reservation = managed || adoptingUnmanaged
       ? null
       : await captureReservedTarget({
           targetPath: serverPath,
           fsApi: this.fs,
           reparseInspector: this.reparseInspector
         });
-    const serverKind = managed ? 'existing' : 'new';
-    const operationKind = OPERATION_MAP[request.operationKind];
-    if (!operationKind || (serverKind === 'new' && !['install', 'files-only'].includes(operationKind))) throw invalid();
-    const expectedContentRevision = serverKind === 'existing' ? currentState.state.contentRevision : 0;
+    const serverKind = managed || adoptingUnmanaged ? 'existing' : 'new';
+    if (serverKind === 'new' && !['install', 'files-only'].includes(operationKind)) throw invalid();
+    const expectedContentRevision = serverKind === 'existing'
+      ? Math.max(currentState?.state?.contentRevision ?? 0, this.readContentRevision(serverPath))
+      : 0;
     const selections = normalizeSelections(request.selections);
+    if (serverKind === 'new' && operationKind !== 'files-only' && selections.maxRam === null) {
+      // New modpack servers have no prior server configuration to inherit.
+      // Bind the application's server default into the reviewed plan when an
+      // older renderer does not yet send an explicit resource choice.
+      selections.maxRam = DEFAULT_NEW_SERVER_MAX_RAM;
+    }
+    if (serverKind === 'new' && operationKind !== 'files-only') {
+      if (selections.serverPort === null) selections.serverPort = DEFAULT_NEW_SERVER_PORT;
+      if (selections.networkAccess === null) selections.networkAccess = DEFAULT_NEW_SERVER_NETWORK_ACCESS;
+      let portValidation;
+      try {
+        portValidation = await this.validateServerPorts({
+          instanceId: resolved.instanceId,
+          serverPath,
+          minecraftPort: selections.serverPort
+        });
+      } catch (error) {
+        throw selectedPortCheckFailed(error);
+      }
+      if (!portValidation || typeof portValidation !== 'object' || Array.isArray(portValidation) ||
+          typeof portValidation.valid !== 'boolean' || !Array.isArray(portValidation.errors)) {
+        throw selectedPortCheckFailed();
+      }
+      if (!portValidation.valid) throw selectedPortUnavailable();
+    }
     let snapshot = null;
     if (operationKind === 'repair' && managed) {
       snapshot = await this.snapshotServer({
@@ -447,10 +734,12 @@ class ProductionPlanningAdapter {
         operationKind,
         runtime: currentState.state.runtime,
         serverKind,
-        serverPath
+        serverPath,
+        unmanagedAdoption: adoptingUnmanaged
       });
       if (!snapshot || !snapshot.liveSnapshot || !Array.isArray(snapshot.pathPreconditions)) throw invalid();
     }
+    reportProgress({ phase: 'preparing-candidate' });
     const prepared = await this.preparePlanInputs({
       inspection,
       operationKind,
@@ -458,9 +747,14 @@ class ProductionPlanningAdapter {
       serverKind,
       serverPath,
       source,
+      onProgress: progress => reportProgress({ ...progress, phase: 'preparing-candidate' }),
       ...(snapshot ? { currentState, liveSnapshot: snapshot.liveSnapshot } : {})
     });
     if (!prepared || typeof prepared !== 'object' || !prepared.incomingManifest) throw invalid();
+    if (selections.runtimeChoice !== null && prepared.runtimeChoice !== undefined) {
+      if (!prepared.runtimeChoice || typeof prepared.runtimeChoice !== 'object' || Array.isArray(prepared.runtimeChoice)) throw invalid();
+      selections.runtimeChoice = prepared.runtimeChoice;
+    }
     const planInspection = inspectionForPlan(prepared.inspectionResult || inspection.result);
     if ((operationKind === 'files-only') !== (planInspection.kind === 'files-only')) throw invalid();
     let runtime = null;
@@ -470,13 +764,26 @@ class ProductionPlanningAdapter {
     } else if (prepared.runtime !== null) {
       throw invalid();
     }
+    if (managed && NON_DOWNGRADE_MANAGED_REPLACEMENTS.has(operationKind)) {
+      let sourceRuntime;
+      try { sourceRuntime = normalizeRuntimeTuple(currentState.state.runtime); }
+      catch (error) { throw stale(error); }
+      const direction = runtimeDirection(sourceRuntime, runtime);
+      if (direction === 'downgrade') throw downgradeRequired();
+      if (direction === 'switch' && operationKind !== 'switch') throw switchRequired();
+    }
     let effectiveSource = effectiveReviewedSource(
       source,
       prepared.inspectionResult || inspection.result,
       runtime,
       selections
     );
-    if (operationKind === 'repair' && managed) {
+    const retainInstalledSourceMetadata = managed && (
+      operationKind === 'repair' ||
+      (GITHUB_METADATA_RETAINING_REPLACEMENTS.has(operationKind) &&
+        sameGithubRepository(currentState.state.source, effectiveSource))
+    );
+    if (retainInstalledSourceMetadata) {
       effectiveSource = {
         ...effectiveSource,
         ...(effectiveSource.assetPattern === undefined && currentState.state.source.assetPattern !== undefined
@@ -494,17 +801,20 @@ class ProductionPlanningAdapter {
     ) ||
         !sameRuntime(currentState.state.runtime, runtime) ||
         !sameStringSet(currentState.state.selectedOptionalFiles, selections.optionalFileIds))) throw stale();
+    reportProgress({ phase: 'scanning-server' });
     snapshot ||= await this.snapshotServer({
       currentState,
       expectedContentRevision,
       operationKind,
       runtime,
       serverKind,
-      serverPath
+      serverPath,
+      unmanagedAdoption: adoptingUnmanaged
     });
     if (!snapshot || !snapshot.liveSnapshot || !Array.isArray(snapshot.pathPreconditions)) throw invalid();
+    reportProgress({ phase: 'calculating-changes' });
     const ownershipInput = {
-      oldManifest: currentState?.manifest || null,
+      oldManifest: managed ? currentState.manifest : null,
       liveSnapshot: snapshot.liveSnapshot,
       incomingManifest: prepared.incomingManifest,
       ...(operationKind === 'repair' ? { operationKind: 'repair' } : {})
@@ -539,6 +849,21 @@ class ProductionPlanningAdapter {
     const completeCandidateBytes = serverKind === 'existing'
       ? addByteCounts(snapshot.candidateBytes ?? '0', incomingCandidateBytes, runtimeStagingBytes)
       : addByteCounts(incomingCandidateBytes);
+    reportProgress({ phase: 'checking-capacity' });
+    const availableBytes = await this.availableBytes(serverPath);
+    if (serverKind === 'existing') {
+      let currentContentRevision;
+      try {
+        currentContentRevision = Math.max(
+          currentState?.state?.contentRevision ?? 0,
+          this.readContentRevision(serverPath)
+        );
+      } catch (error) {
+        throw stale(error);
+      }
+      if (currentContentRevision !== expectedContentRevision) throw stale();
+    }
+    reportProgress({ phase: 'sealing-plan' });
     const plan = this.buildPreflightPlan({
       operation: {
         kind: operationKind,
@@ -553,7 +878,7 @@ class ProductionPlanningAdapter {
       inspection: planInspection,
       serverSnapshot: {
         contentRevision: expectedContentRevision,
-        availableBytes: await this.availableBytes(serverPath),
+        availableBytes,
         // Existing mutations first clone the complete live tree, then overlay
         // the reviewed pack. Targeted runtime repair also builds the trusted
         // runtime in a private workspace before moving back only mismatches.
@@ -563,7 +888,7 @@ class ProductionPlanningAdapter {
         journalBytes: String(snapshot.journalBytes ?? '1048576'),
         writeable: snapshot.writeable !== false,
         pathPreconditions: snapshot.pathPreconditions,
-        sourceRuntime: snapshot.sourceRuntime ?? runtime
+        sourceRuntime: Object.hasOwn(snapshot, 'sourceRuntime') ? snapshot.sourceRuntime : runtime
       },
       ownershipPlan,
       restorePoints: snapshot.restorePoints || [],
@@ -574,7 +899,9 @@ class ProductionPlanningAdapter {
       execution: prepared.execution || {},
       incomingManifest: prepared.incomingManifest,
       inspectionResult: prepared.inspectionResult || inspection.result,
+      adoption,
       reservation,
+      reviewedServerDisk: reviewedServerDisk(snapshot),
       serverKind,
       source: { ...effectiveSource },
       serverPath
@@ -583,13 +910,20 @@ class ProductionPlanningAdapter {
       plan,
       sanitizedView: {
         title: effectiveSource.title || 'Modpack installation',
-        source: { provider: effectiveSource.provider, version: effectiveSource.version },
+        source: sourceForReview(plan.source),
         runtime: runtime ? {
           minecraft: runtime.minecraftVersion,
           loader: runtime.loaderFamily,
           loaderVersion: runtime.loaderVersion,
           java: runtime.javaMajor
         } : null,
+        resources: serverKind === 'new' && runtime
+          ? {
+              maxRam: plan.selections.maxRam,
+              serverPort: plan.selections.serverPort,
+              networkAccess: plan.selections.networkAccess
+            }
+          : null,
         server: { contentRevision: expectedContentRevision, priorState: serverKind },
         changes: {
           added: count(ownershipPlan, 'added'),
@@ -605,7 +939,7 @@ class ProductionPlanningAdapter {
     });
   }
 
-  async createManagementPlan({ request, currentState, instance } = {}) {
+  async createManagementPlan({ request, currentState, instance, onProgress } = {}) {
     if (!request || !currentState?.state || !instance || !this.workspaceRegistry ||
         request.instanceId !== instance.instanceId || typeof instance.serverPath !== 'string' ||
         !Number.isSafeInteger(currentState.state.contentRevision) || currentState.state.contentRevision < 0) throw invalid();
@@ -618,13 +952,19 @@ class ProductionPlanningAdapter {
     if (!['detach', 'uninstall', 'rollback-restore-point'].includes(request.operationKind)) throw invalid();
     if (['detach', 'uninstall'].includes(request.operationKind) &&
         (currentState.state.modpackManaged !== true || !currentState.manifest)) throw stale();
+    const reportProgress = createProgressReporter(onProgress);
     const serverPath = path.resolve(instance.serverPath);
+    const expectedContentRevision = Math.max(
+      currentState.state.contentRevision,
+      this.readContentRevision(serverPath)
+    );
     const runtime = request.operationKind === 'rollback-restore-point'
       ? currentState.state.runtime ?? null
       : currentState.state.runtime;
+    reportProgress({ phase: 'scanning-server' });
     const snapshot = await this.snapshotServer({
       currentState,
-      expectedContentRevision: currentState.state.contentRevision,
+      expectedContentRevision,
       operationKind: request.operationKind,
       runtime,
       serverKind: 'existing',
@@ -638,10 +978,37 @@ class ProductionPlanningAdapter {
     if (request.operationKind === 'rollback-restore-point') {
       selectedPublicRestorePoint = snapshot.restorePoints.find(point => point?.id === request.selectionRef) || null;
       if (!selectedPublicRestorePoint || typeof this.resolveRestorePoint !== 'function') throw stale();
+      reportProgress({ phase: 'verifying-restore-point', activity: 'verifying-archive' });
+      const expandedBytes = Number(selectedPublicRestorePoint.totalBytes);
+      let archiveBytes = 0;
+      let lastProcessedBytes = 0;
+      const reportRestoreVerification = value => {
+        if (!value || typeof value !== 'object') return;
+        const processed = Number(value.processedBytes);
+        const total = Number(value.totalBytes);
+        if (!Number.isSafeInteger(processed) || processed < 0 ||
+            !Number.isSafeInteger(total) || total < 0 || processed > total ||
+            !Number.isSafeInteger(expandedBytes) || expandedBytes < 0) return;
+        if (value.phase === 'archive-hash') archiveBytes = total;
+        if (!['archive-hash', 'entry-verify'].includes(value.phase) || !Number.isSafeInteger(archiveBytes)) return;
+        const combinedTotal = archiveBytes + expandedBytes;
+        const combinedProcessed = value.phase === 'archive-hash' ? processed : archiveBytes + processed;
+        if (!Number.isSafeInteger(combinedTotal) || !Number.isSafeInteger(combinedProcessed) ||
+            combinedProcessed < lastProcessedBytes || combinedProcessed > combinedTotal) return;
+        lastProcessedBytes = combinedProcessed;
+        reportProgress({
+          phase: 'verifying-restore-point',
+          activity: 'verifying-archive',
+          processedBytes: combinedProcessed,
+          totalBytes: combinedTotal
+        });
+      };
       selectedRestorePoint = await this.resolveRestorePoint({
         serverPath,
         id: selectedPublicRestorePoint.id,
         sha256: selectedPublicRestorePoint.sha256
+      }, {
+        onProgress: reportRestoreVerification
       });
       if (!selectedRestorePoint || selectedRestorePoint.id !== selectedPublicRestorePoint.id ||
           selectedRestorePoint.sha256 !== selectedPublicRestorePoint.sha256 ||
@@ -656,6 +1023,7 @@ class ProductionPlanningAdapter {
       };
     }
 
+    reportProgress({ phase: 'calculating-changes' });
     let ownershipPlan;
     if (request.operationKind === 'uninstall') {
       const ownershipInput = {
@@ -671,6 +1039,7 @@ class ProductionPlanningAdapter {
       ownershipPlan = emptyManagementOwnership(snapshot.liveSnapshot.entries.length);
     }
 
+    reportProgress({ phase: 'checking-capacity' });
     const disk = managementDisk(
       snapshot,
       selectedRestorePoint,
@@ -687,11 +1056,11 @@ class ProductionPlanningAdapter {
       kind: request.operationKind,
       serverKind: 'existing',
       instanceId: request.instanceId,
-      expectedContentRevision: currentState.state.contentRevision,
+      expectedContentRevision,
       downgrade: false
     };
     const preconditions = {
-      contentRevision: currentState.state.contentRevision,
+      contentRevision: expectedContentRevision,
       stateFingerprint: sha256(currentState),
       pathPreconditions: snapshot.pathPreconditions,
       pathPreconditionsFingerprint: sha256(snapshot.pathPreconditions),
@@ -704,6 +1073,7 @@ class ProductionPlanningAdapter {
       // independently claimable without weakening any live-state precondition.
       reviewNonce: crypto.randomBytes(16).toString('hex')
     };
+    reportProgress({ phase: 'sealing-plan' });
     const planWithoutFingerprint = {
       type: 'modpack-management-plan', schemaVersion: 1,
       operation,
@@ -729,10 +1099,21 @@ class ProductionPlanningAdapter {
     try {
       planningSessionId = this.workspaceRegistry.createPlanningSession();
       const managementOutputId = this.workspaceRegistry.createStagingOutput({ ownerId: planningSessionId });
+      let currentContentRevision;
+      try {
+        currentContentRevision = Math.max(
+          currentState.state.contentRevision,
+          this.readContentRevision(serverPath)
+        );
+      } catch (error) {
+        throw stale(error);
+      }
+      if (currentContentRevision !== expectedContentRevision) throw stale();
       if (this.executionRecords.has(plan.fingerprint)) throw stale();
       this.executionRecords.set(plan.fingerprint, deepFreeze({
         execution: { managementOutputId },
         operationKind: request.operationKind,
+        reviewedServerDisk: reviewedServerDisk(snapshot),
         selectedRestorePoint,
         serverKind: 'existing',
         serverPath,
@@ -754,16 +1135,14 @@ class ProductionPlanningAdapter {
               ? 'Uninstall managed modpack files'
               : 'Restore an exact modpack point',
           operation: request.operationKind,
-          source: currentState.state.source
-            ? { provider: currentState.state.source.provider, version: currentState.state.source.version }
-            : null,
+          source: sourceForReview(plan.source),
           runtime: {
             minecraft: targetRuntime.minecraftVersion,
             loader: targetRuntime.loaderFamily,
             loaderVersion: targetRuntime.loaderVersion,
             java: targetRuntime.javaMajor
           },
-          server: { contentRevision: currentState.state.contentRevision, priorState: 'existing' },
+          server: { contentRevision: expectedContentRevision, priorState: 'existing' },
           changes,
           ...(request.operationKind === 'uninstall' ? { confirmation: ownershipPlan.confirmation } : {}),
           ...(selectedPublicRestorePoint ? {
@@ -781,7 +1160,7 @@ class ProductionPlanningAdapter {
       });
     } catch (error) {
       if (planningSessionId !== null) {
-        try { this.workspaceRegistry.releaseOwner(planningSessionId); } catch { /* retain the planning failure */ }
+        try { await this.workspaceRegistry.releaseOwner(planningSessionId); } catch { /* retain the planning failure */ }
       }
       throw error;
     }

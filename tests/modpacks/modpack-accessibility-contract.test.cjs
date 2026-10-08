@@ -15,22 +15,28 @@ test('destructive modpack confirmation defaults focus to Cancel and traps focus'
   assert.match(confirmation, /previousFocus/);
 });
 
-test('wizard and cards expose keyboard step focus and non-color states', () => {
+test('wizard and cards preserve focus and use native button semantics for immediate actions', () => {
   const wizard = source('src/components/setup/ServerSetupWizard.svelte');
   const choice = source('src/components/setup/ModpackSourceChoice.svelte');
   const browser = source('src/components/setup/ModrinthPackBrowser.svelte');
   assert.match(wizard, /aria-current=\{activeStep\s*===\s*stepName\s*\?\s*['"]step['"]/);
   assert.match(wizard, /tabindex=["']-1["']/);
-  assert.match(choice + browser, /on:keydown/);
-  assert.match(choice + browser, /role=["'](?:button|radio)["']/);
-  assert.match(choice + browser, /Available|Unavailable|Selected|Not selected/i);
+  assert.doesNotMatch(wizard + choice + browser, /on:keydown/);
+  assert.match(choice + browser, /type=["']button["']/);
+  assert.doesNotMatch(choice, /role=["']radio["']|aria-checked|Selected|Not selected/u);
+  assert.match(choice + browser, /Available|Unavailable/i);
 });
 
-test('progress separates polite stages from non-live raw logs and labels diffs', () => {
+test('lifecycle progress exposes honest indeterminate activity instead of synthetic percentages', () => {
   const progress = source('src/components/modpacks/ModpackJobProgress.svelte');
+  const sharedStyles = source('src/components/modpacks/modpack-ui.css');
   const review = source('src/components/modpacks/ModpackPlanReview.svelte');
   assert.match(progress, /role=["']progressbar["']/);
-  assert.match(progress, /aria-valuenow/);
+  assert.doesNotMatch(progress, /aria-valuenow/);
+  assert.match(progress, /aria-valuetext/);
+  assert.match(sharedStyles, /prefers-reduced-motion/);
+  assert.match(progress, /current operation finishes/);
+  assert.doesNotMatch(progress, /current filesystem or runtime check/);
   assert.match(progress, /aria-live=["']polite["']/);
   assert.match(progress, /aria-live=["']off["']/);
   assert.match(progress, /tabindex=["']-1["']/);

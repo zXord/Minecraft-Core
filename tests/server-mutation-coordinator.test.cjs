@@ -10,11 +10,24 @@ const {
 const {
   createServerMutationContext
 } = require('../electron/services/server-mutation-context.cjs');
+const { ModpackError } = require('../electron/services/modpacks/errors.cjs');
 const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
 
 const ALPHA_PATH = 'C:\\Minecraft\\Alpha';
 const BETA_PATH = 'C:\\Minecraft\\Beta';
 const GAMMA_PATH = 'C:\\Minecraft\\Gamma';
+
+test('runtime uncertainty installs a persistent exact recovery block before mutation release', async () => {
+  const coordinator = new ServerMutationCoordinator({ readContentRevision: () => 0, bumpContentRevision: () => 1 });
+  coordinator.completeStartupRecovery([]); let held;
+  await coordinator.runMutation({ instanceId: 'alpha', serverPath: ALPHA_PATH }, {
+    operation: 'runtime-prepare', operationId: 'runtime-job', revisionMode: 'none', quiesce: null
+  }, async lease => { held = lease; assert.equal(coordinator.quarantineMutation(lease), true); });
+  assert.throws(() => coordinator.quarantineMutation(held), { code: 'INVALID_REQUEST' });
+  await assert.rejects(coordinator.runMutation({ instanceId: 'alpha', serverPath: ALPHA_PATH }, {
+    operation: 'other-write', operationId: 'other-job', revisionMode: 'none', quiesce: null
+  }, async () => assert.fail('writer admitted')), { code: 'RECOVERY_REQUIRED' });
+});
 
 function deferred() {
   let resolve;
@@ -270,6 +283,83 @@ test('auto revision mode bumps exactly once after dirty success and dirty failur
   );
 });
 
+test('uncertain publication failures quarantine without publishing a replacement revision', async t => {
+  const recoveryCases = [
+    ['PLAN_STALE', 'post-publication'],
+    ['PLAN_STALE', 'post-publication-uncertain'],
+    ['COMMIT_FAILED', 'post-publication'],
+    ['COMMIT_FAILED', 'post-publication-uncertain']
+  ];
+
+  for (const [failureCode, commitPhase] of recoveryCases) {
+    await t.test(`${failureCode} ${commitPhase}`, async () => {
+      const { calls, coordinator, revisions } = fixture({ [ALPHA_PATH]: 7 });
+      completeEmptyRecovery(coordinator);
+      const failure = new ModpackError(failureCode, 'Publication outcome requires recovery');
+      Object.defineProperty(failure, 'commitPhase', {
+        configurable: false,
+        enumerable: false,
+        value: commitPhase,
+        writable: false
+      });
+
+      await assert.rejects(
+        coordinator.runMutation(
+          selector('alpha', ALPHA_PATH),
+          mutationOptions(`uncertain-${failureCode.toLowerCase()}-${commitPhase}`, { revisionMode: 'auto' }),
+          async lease => {
+            lease.markDirty();
+            throw failure;
+          }
+        ),
+        error => error === failure
+      );
+
+      assert.equal(revisions.get(windowsKey(ALPHA_PATH)), 7);
+      assert.equal(calls.filter(call => call.kind === 'bump').length, 0);
+      await assert.rejects(
+        coordinator.acquireStart(
+          selector('alpha', ALPHA_PATH),
+          startOptions(`blocked-${failureCode.toLowerCase()}-${commitPhase}`)
+        ),
+        code('RECOVERY_REQUIRED')
+      );
+    });
+  }
+
+  await t.test('pre-publication failure keeps ordinary dirty revision behavior', async () => {
+    const { calls, coordinator, revisions } = fixture({ [ALPHA_PATH]: 7 });
+    completeEmptyRecovery(coordinator);
+    const failure = new ModpackError('COMMIT_FAILED', 'Publication failed before becoming live');
+    Object.defineProperty(failure, 'commitPhase', {
+      configurable: false,
+      enumerable: false,
+      value: 'pre-publication',
+      writable: false
+    });
+
+    await assert.rejects(
+      coordinator.runMutation(
+        selector('alpha', ALPHA_PATH),
+        mutationOptions('pre-publication-failure', { revisionMode: 'auto' }),
+        async lease => {
+          lease.markDirty();
+          throw failure;
+        }
+      ),
+      error => error === failure
+    );
+
+    assert.equal(revisions.get(windowsKey(ALPHA_PATH)), 8);
+    assert.equal(calls.filter(call => call.kind === 'bump').length, 1);
+    const lease = await coordinator.acquireStart(
+      selector('alpha', ALPHA_PATH),
+      startOptions('allowed-after-pre-publication')
+    );
+    lease.release();
+  });
+});
+
 test('lifecycle validates exact base plus one without bumping and none never changes revision', async () => {
   const { calls, coordinator, revisions } = fixture({ [ALPHA_PATH]: 10, [BETA_PATH]: 3 });
   completeEmptyRecovery(coordinator);
@@ -306,6 +396,86 @@ test('lifecycle validates exact base plus one without bumping and none never cha
     mismatch.coordinator.acquireStart(selector('gamma', GAMMA_PATH), startOptions('blocked-after-mismatch')),
     code('RECOVERY_REQUIRED')
   );
+});
+
+test('dirty lifecycle cleanup preserves a pre-publication failure when no revision was published', async () => {
+  const { coordinator, revisions } = fixture({ [ALPHA_PATH]: 20 });
+  completeEmptyRecovery(coordinator);
+  const failure = new ModpackError('PLAN_STALE', 'The reviewed plan changed before publication');
+
+  await assert.rejects(
+    coordinator.runMutation(
+      selector('alpha', ALPHA_PATH),
+      mutationOptions('lifecycle-pre-publication-cleanup', { revisionMode: 'lifecycle' }),
+      async lease => {
+        // Candidate cleanup and policy restoration can perform app-owned I/O
+        // after the primary failure without publishing a content revision.
+        lease.markDirty();
+        throw failure;
+      }
+    ),
+    error => error === failure
+  );
+
+  assert.equal(revisions.get(windowsKey(ALPHA_PATH)), 20);
+  const start = await coordinator.acquireStart(
+    selector('alpha', ALPHA_PATH),
+    startOptions('allowed-after-lifecycle-pre-publication-cleanup')
+  );
+  start.release();
+});
+
+test('lifecycle failure handling still quarantines publication uncertainty and impossible revisions', async t => {
+  await t.test('explicit post-publication uncertainty remains recovery-required', async () => {
+    const { coordinator } = fixture({ [ALPHA_PATH]: 20 });
+    completeEmptyRecovery(coordinator);
+    const failure = new ModpackError('COMMIT_FAILED', 'Publication outcome is uncertain');
+    Object.defineProperty(failure, 'commitPhase', {
+      configurable: false,
+      enumerable: false,
+      value: 'post-publication-uncertain',
+      writable: false
+    });
+
+    await assert.rejects(
+      coordinator.runMutation(
+        selector('alpha', ALPHA_PATH),
+        mutationOptions('lifecycle-post-publication-uncertain', { revisionMode: 'lifecycle' }),
+        async lease => {
+          lease.markDirty();
+          throw failure;
+        }
+      ),
+      error => error === failure
+    );
+    await assert.rejects(
+      coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('blocked-after-uncertain-publication')),
+      code('RECOVERY_REQUIRED')
+    );
+  });
+
+  await t.test('an unexpected revision still overrides the primary failure and quarantines', async () => {
+    const { coordinator, revisions } = fixture({ [BETA_PATH]: 8 });
+    completeEmptyRecovery(coordinator);
+    const failure = new Error('candidate cleanup failed');
+
+    await assert.rejects(
+      coordinator.runMutation(
+        selector('beta', BETA_PATH),
+        mutationOptions('lifecycle-impossible-revision', { revisionMode: 'lifecycle' }),
+        async lease => {
+          lease.markDirty();
+          revisions.set(windowsKey(BETA_PATH), 10);
+          throw failure;
+        }
+      ),
+      error => error !== failure && error?.code === 'PLAN_STALE'
+    );
+    await assert.rejects(
+      coordinator.acquireStart(selector('beta', BETA_PATH), startOptions('blocked-after-impossible-revision')),
+      code('RECOVERY_REQUIRED')
+    );
+  });
 });
 
 test('revision write failure fails closed while releasing the mutation reservation', async () => {
@@ -698,6 +868,30 @@ test('recovery completion clears resolved blocks and retains exact unresolved al
   );
 });
 
+test('a fresh reservation for an unresolved recovery path reports recovery instead of an invalid request', async () => {
+  const { coordinator } = fixture();
+  let workCalled = false;
+  coordinator.installRecoveryBlocks([{
+    selector: selector('previous-reservation', ALPHA_PATH),
+    operationId: 'unfinished-new-server'
+  }]);
+  coordinator.completeStartupRecovery([{
+    selector: selector('previous-reservation', ALPHA_PATH),
+    resolved: false
+  }]);
+
+  await assert.rejects(
+    coordinator.runMutation(
+      selector('replacement-reservation', ALPHA_PATH),
+      mutationOptions('replacement-install'),
+      async () => { workCalled = true; }
+    ),
+    error => error?.code === 'RECOVERY_REQUIRED' &&
+      error.details?.operationId === 'unfinished-new-server'
+  );
+  assert.equal(workCalled, false);
+});
+
 test('privileged exact-record recovery runs while every ordinary start and writer stays fail-closed', async () => {
   const { calls, coordinator, revisions } = fixture({ [ALPHA_PATH]: 11 });
   coordinator.installRecoveryBlocks([{
@@ -869,6 +1063,155 @@ test('opening the global gate leaves only unresolved exact selectors blocked', a
     coordinator.acquireStart(selector('beta', BETA_PATH), startOptions('unresolved-beta-start')),
     error => error.code === 'RECOVERY_REQUIRED' && error.details?.operationId === 'recovery-beta'
   );
+});
+
+test('reviewed exact-record recovery remains available after startup and clears only a verified resolution', async () => {
+  const { coordinator } = fixture({ [ALPHA_PATH]: 1, [BETA_PATH]: 1 });
+  coordinator.installRecoveryBlocks([{
+    selector: selector('beta', BETA_PATH),
+    operationId: 'recovery-beta'
+  }]);
+  coordinator.completeStartupRecovery([{
+    selector: selector('beta', BETA_PATH),
+    resolved: false
+  }], { globalBlock: false });
+
+  const unrelated = await coordinator.acquireStart(
+    selector('alpha', ALPHA_PATH),
+    startOptions('unrelated-before-reviewed-recovery')
+  );
+  unrelated.release();
+  await assert.rejects(
+    coordinator.runMutation(
+      selector('beta', BETA_PATH),
+      mutationOptions('ordinary-write-before-reviewed-recovery'),
+      async () => {}
+    ),
+    error => error.code === 'RECOVERY_REQUIRED' && error.details?.operationId === 'recovery-beta'
+  );
+
+  await assert.rejects(
+    coordinator.runRecoveryMutation(
+      selector('beta', BETA_PATH),
+      { operationId: 'wrong-recovery' },
+      async () => ({ resolved: true })
+    ),
+    code('RECOVERY_REQUIRED')
+  );
+  const pending = await coordinator.runRecoveryMutation(
+    selector('beta', BETA_PATH),
+    { operationId: 'recovery-beta' },
+    async () => ({ resolved: false })
+  );
+  assert.deepEqual(pending, { resolved: false });
+  await assert.rejects(
+    coordinator.acquireStart(selector('beta', BETA_PATH), startOptions('still-blocked-after-pending-recovery')),
+    error => error.code === 'RECOVERY_REQUIRED' && error.details?.operationId === 'recovery-beta'
+  );
+
+  const result = await coordinator.runRecoveryMutation(
+    selector('beta', BETA_PATH),
+    { operationId: 'recovery-beta' },
+    async mutationLease => {
+      const validation = await coordinator.acquireStart(
+        selector('beta', BETA_PATH),
+        startOptions('reviewed-recovery-health', { parentMutationLease: mutationLease })
+      );
+      validation.release();
+      return { resolved: true };
+    }
+  );
+  assert.deepEqual(result, { resolved: true });
+
+  const recovered = await coordinator.acquireStart(
+    selector('beta', BETA_PATH),
+    startOptions('recovered-without-relaunch')
+  );
+  recovered.release();
+});
+
+test('reviewed recovery clears a same-operation revision quarantine created by failed startup recovery', async () => {
+  const { coordinator } = fixture({ [BETA_PATH]: 1 });
+  coordinator.installRecoveryBlocks([{
+    selector: selector('beta', BETA_PATH),
+    operationId: 'recovery-beta'
+  }]);
+  const publicationFailure = new ModpackError('COMMIT_FAILED', 'Recovery publication outcome is uncertain');
+  Object.defineProperty(publicationFailure, 'commitPhase', {
+    configurable: false,
+    enumerable: false,
+    value: 'post-publication-uncertain',
+    writable: false
+  });
+  await assert.rejects(
+    coordinator.runRecoveryMutation(
+      selector('beta', BETA_PATH),
+      { operationId: 'recovery-beta' },
+      async mutationLease => {
+        mutationLease.markDirty();
+        throw publicationFailure;
+      }
+    ),
+    error => error === publicationFailure
+  );
+  coordinator.completeStartupRecovery([{
+    selector: selector('beta', BETA_PATH),
+    resolved: false
+  }], { globalBlock: false });
+
+  await coordinator.runRecoveryMutation(
+    selector('beta', BETA_PATH),
+    { operationId: 'recovery-beta' },
+    async () => ({ resolved: true })
+  );
+
+  const recovered = await coordinator.acquireStart(
+    selector('beta', BETA_PATH),
+    startOptions('recovered-from-revision-quarantine')
+  );
+  recovered.release();
+});
+
+test('recovery rejects a conflicting revision quarantine before privileged work begins', async () => {
+  const { coordinator } = fixture({ [BETA_PATH]: 1 });
+  completeEmptyRecovery(coordinator);
+  const publicationFailure = new ModpackError('COMMIT_FAILED', 'An earlier publication remains uncertain');
+  Object.defineProperty(publicationFailure, 'commitPhase', {
+    configurable: false,
+    enumerable: false,
+    value: 'post-publication-uncertain',
+    writable: false
+  });
+  await assert.rejects(
+    coordinator.runMutation(
+      selector('beta', BETA_PATH),
+      mutationOptions('earlier-quarantine'),
+      async lease => {
+        lease.markDirty();
+        throw publicationFailure;
+      }
+    ),
+    error => error === publicationFailure
+  );
+  coordinator.beginStartupRecovery();
+  coordinator.installRecoveryBlocks([{
+    selector: selector('beta', BETA_PATH),
+    operationId: 'recovery-beta'
+  }]);
+  let workCalled = false;
+
+  await assert.rejects(
+    coordinator.runRecoveryMutation(
+      selector('beta', BETA_PATH),
+      { operationId: 'recovery-beta' },
+      async () => {
+        workCalled = true;
+        return { resolved: true };
+      }
+    ),
+    error => error.code === 'RECOVERY_REQUIRED' && error.details?.operationId === 'earlier-quarantine'
+  );
+  assert.equal(workCalled, false);
 });
 
 test('leases expose immutable identity, owned-path checks, safe PIDs, and idempotent release', async () => {

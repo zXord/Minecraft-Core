@@ -2,7 +2,6 @@ const crypto = require('node:crypto');
 const fs = require('fs');
 const os = require('os');
 const process = require('process');
-const { spawn } = require('child_process');
 const pidusage = require('pidusage');
 const { safeSend } = require('../utils/safe-send.cjs');
 const eventBus = require('../utils/event-bus.cjs');
@@ -10,8 +9,12 @@ const appStore = require('../utils/app-store.cjs');
 const { ServerJavaManager } = require('./server-java-manager.cjs');
 const { readServerConfig, getDefaultServerConfig, detectMinecraftVersion } = require('../utils/config-manager.cjs');
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
+const { normalizeRuntimeTuple } = require('./modpacks/contracts.cjs');
 const { syncServerPort } = require('./server-launcher.cjs');
 const { launchServerProcess } = require('./server-process-runner.cjs');
+const { runManagedRuntimeVerificationWorker } = require('./managed-runtime-worker-client.cjs');
+const { requestServerProcessSupervision } = require('../watchdog/server-process-supervision.cjs');
+const { isServerProcessSupervisionRequired } = require('../watchdog/server-process-supervision-policy.cjs');
 const {
   getCurrentServerMutationLease,
   getServerMutationCoordinator,
@@ -26,6 +29,8 @@ const lifecycleAdoptions = new Map();
 const METRICS_INTERVAL_MS = 2000;
 const LIST_COMMAND_THROTTLE = 30000;
 const FAILED_START_STOP_TIMEOUT_MS = 5000;
+const monitoredServerInputStreams = new WeakSet();
+const failedServerInputStreams = new WeakSet();
 
 function createDefaultState(instanceId, targetPath = null) {
   return {
@@ -54,7 +59,8 @@ function createDefaultState(instanceId, targetPath = null) {
     readyMarkers: [],
     fatalMarkers: [],
     runtime: null,
-    startupOutcome: null
+    startupOutcome: null,
+    processCloseBarrier: null
   };
 }
 
@@ -241,6 +247,63 @@ function clearStateTimers(state) {
   clearIntensiveChecking(state);
 }
 
+function markServerInputFailed(state, child, stdin, error) {
+  const alreadyFailed = failedServerInputStreams.has(stdin);
+  failedServerInputStreams.add(stdin);
+  if (state.process !== child) return;
+
+  state.expectingListResponse = false;
+  clearResponseTimeout(state);
+  if (!alreadyFailed && !state.shutdownRequest) {
+    emitServerLog(state, `[ERROR] Server command input closed: ${error?.message || 'unknown stream error'}`);
+  }
+}
+
+function monitorServerInput(state, child) {
+  const stdin = child?.stdin;
+  if (!stdin || typeof stdin.on !== 'function' || monitoredServerInputStreams.has(stdin)) return;
+
+  monitoredServerInputStreams.add(stdin);
+  stdin.on('error', (error) => {
+    markServerInputFailed(state, child, stdin, error);
+  });
+}
+
+function canWriteServerInput(state, { allowDuringShutdown = false } = {}) {
+  const child = state.process;
+  const stdin = child?.stdin;
+  if (!child || child.killed || child.exitCode !== null || child.signalCode !== null) return false;
+  if (!allowDuringShutdown && state.shutdownRequest) return false;
+  if (!stdin || typeof stdin.write !== 'function' || failedServerInputStreams.has(stdin)) return false;
+  if (
+    stdin.destroyed === true
+    || stdin.closed === true
+    || stdin.writable === false
+    || stdin.writableEnded === true
+    || stdin.writableFinished === true
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function writeServerInput(state, value, options = {}) {
+  if (!canWriteServerInput(state, options)) return false;
+
+  const child = state.process;
+  const stdin = child.stdin;
+  monitorServerInput(state, child);
+  try {
+    stdin.write(value, (error) => {
+      if (error) markServerInputFailed(state, child, stdin, error);
+    });
+    return true;
+  } catch (error) {
+    markServerInputFailed(state, child, stdin, error);
+    return false;
+  }
+}
+
 function sendMetricsUpdate(metrics, selector = {}) {
   const state = getState(selector) || getOrCreateState(selector);
   state.lastMetricsUpdateAt = Date.now();
@@ -318,7 +381,8 @@ function maybeSendCloudSyncWarning(state, text) {
 }
 
 function sendListCommand(state) {
-  if (!state.process || state.process.killed) {
+  if (!canWriteServerInput(state)) {
+    state.expectingListResponse = false;
     return;
   }
 
@@ -327,17 +391,16 @@ function sendListCommand(state) {
     return;
   }
 
-  try {
-    state.expectingListResponse = true;
-    state.process.stdin.write('list\n');
-    state.lastListCommandTime = now;
-    clearResponseTimeout(state);
-    state.responseTimeout = setTimeout(() => {
-      state.expectingListResponse = false;
-    }, 2000);
-  } catch {
+  state.expectingListResponse = true;
+  if (!writeServerInput(state, 'list\n')) {
     state.expectingListResponse = false;
+    return;
   }
+  state.lastListCommandTime = now;
+  clearResponseTimeout(state);
+  state.responseTimeout = setTimeout(() => {
+    state.expectingListResponse = false;
+  }, 2000);
 }
 
 function enableIntensiveChecking(state) {
@@ -418,18 +481,43 @@ function handleLogLine(state, text) {
       state.status = 'error';
       emitServerStatus(state);
     } else if (state.readyMarkers.some(marker => trimmed.includes(marker))) {
-      state.startupOutcome = 'ready';
-      state.status = 'running';
-      emitServerStatus(state);
-      startMetricsReporting(state);
-      eventBus.emit('server-started', {
-        instanceId: state.instanceId,
-        targetPath: state.targetPath,
-        port: state.port,
-        maxRam: state.maxRam,
-        loader: state.loader,
-        runtime: state.runtime
-      });
+      const child = state.process;
+      const supervisionReady = child?.serverProcessHandle?.supervisionReady;
+      state.startupOutcome = 'ready-pending-supervision';
+      if (!supervisionReady || typeof supervisionReady.then !== 'function') {
+        state.startupOutcome = 'fatal';
+        state.status = 'error';
+        emitServerStatus(state);
+        try { child?.kill?.('SIGKILL'); } catch { /* exact child only */ }
+      } else {
+        Promise.resolve(supervisionReady).then(() => {
+          if (state.process !== child || state.startupOutcome !== 'ready-pending-supervision') return;
+          if (typeof child.serverProcessHandle?.isLive !== 'function' || !child.serverProcessHandle.isLive()) {
+            state.startupOutcome = 'fatal';
+            state.status = 'error';
+            emitServerStatus(state);
+            return;
+          }
+          state.startupOutcome = 'ready';
+          state.status = 'running';
+          emitServerStatus(state);
+          startMetricsReporting(state);
+          eventBus.emit('server-started', {
+            instanceId: state.instanceId,
+            pid: child.pid,
+            targetPath: state.targetPath,
+            port: state.port,
+            maxRam: state.maxRam,
+            loader: state.loader,
+            runtime: state.runtime
+          });
+        }, () => {
+          if (state.process !== child || state.startupOutcome !== 'ready-pending-supervision') return;
+          state.startupOutcome = 'fatal';
+          state.status = 'error';
+          emitServerStatus(state);
+        });
+      }
     }
   }
   const isListResponse = /There are \d+ of a max of \d+ players online/.test(trimmed);
@@ -462,6 +550,35 @@ function normalizeStartArguments(targetPathOrOptions, port, maxRam) {
     port: toNumber(port, 25565),
     maxRam: toNumber(maxRam, 4)
   };
+}
+
+function emitServerProcessOwnership(state, child, operationId) {
+  if (!state || typeof state.instanceId !== 'string' || !state.instanceId ||
+      !child || !Number.isSafeInteger(child.pid) || child.pid <= 0 ||
+      typeof operationId !== 'string' || !operationId) {
+    throw new Error('Managed server process ownership is invalid');
+  }
+  return requestServerProcessSupervision({
+    eventBus,
+    identity: { instanceId: state.instanceId, operationId, pid: child.pid },
+    onFailure() {
+      try { child.kill('SIGKILL'); } catch {
+        // Exact-child termination is best effort; the active start lease remains fail-closed.
+      }
+    },
+    required: isServerProcessSupervisionRequired()
+  });
+}
+
+function managedRuntimeFromConfig(config) {
+  if (config?.modpackManaged !== true) return null;
+  try {
+    return normalizeRuntimeTuple(config.runtime);
+  } catch (cause) {
+    const error = new Error('The managed server runtime is incomplete.', { cause });
+    error.code = 'RUNTIME_INCOMPLETE';
+    throw error;
+  }
 }
 
 function buildConfigDefaultsFromStore() {
@@ -529,7 +646,7 @@ function releaseStartLease(state, startLease, operation) {
 }
 
 function releaseStartLeaseAfterClose(state, startLease, processHandle) {
-  Promise.resolve(processHandle.closed).then(
+  return Promise.resolve(processHandle.closed).then(
     (closeEvidence) => {
       const validExitCode = closeEvidence?.exitCode === null || Number.isSafeInteger(closeEvidence?.exitCode);
       const validSignal = closeEvidence?.signal === null ||
@@ -548,9 +665,9 @@ function releaseStartLeaseAfterClose(state, startLease, processHandle) {
             operation: 'serverProcess.close.validate'
           }
         });
-        return;
+        return false;
       }
-      releaseStartLease(state, startLease, 'serverProcess.close.releaseLease');
+      return releaseStartLease(state, startLease, 'serverProcess.close.releaseLease') === null;
     },
     (error) => {
       logger.error('Server process close evidence failed; retaining the start lease', {
@@ -563,8 +680,42 @@ function releaseStartLeaseAfterClose(state, startLease, processHandle) {
           code: error?.code || null
         }
       });
+      return false;
     }
   );
+}
+
+function trackProcessCloseBarrier(state, barrier) {
+  state.processCloseBarrier = barrier;
+  return barrier;
+}
+
+function attachProcessExitBarrier(state, child, closeBarrier, onFullyClosed) {
+  let exitHandled = false;
+  child.on('exit', (code, signal) => {
+    if (exitHandled || state.process !== child) return;
+    exitHandled = true;
+    const wasManualShutdown = state.shutdownRequest === 'stop' || state.shutdownRequest === 'kill';
+    const isNormalExit = wasManualShutdown || code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
+
+    clearStateTimers(state);
+    state.status = 'stopping';
+    emitServerStatus(state);
+
+    Promise.resolve(closeBarrier).then((released) => {
+      if (released !== true || state.process !== child) return;
+      state.process = null;
+      state.status = 'stopped';
+      state.startMs = null;
+      state.shutdownRequest = null;
+      state.playersInfo = { count: 0, names: [] };
+      if (state.processCloseBarrier === closeBarrier) state.processCloseBarrier = null;
+      emitServerStatus(state);
+      onFullyClosed({ code, isNormalExit, signal });
+    }, () => {
+      // A rejected or invalid close barrier retains the stopping state fail-closed.
+    });
+  });
 }
 
 function reportStartFailure(state, startLease, targetPath, error, { releaseLease = true } = {}) {
@@ -614,6 +765,10 @@ function adoptValidatedLifecycleProcess(request) {
       typeof request.handoff !== 'object') {
     throw new Error('Validated lifecycle handoff is invalid');
   }
+  const { processHandle, startLease } = request.handoff;
+  if (!processHandle || !processHandle.closed || typeof processHandle.closed.then !== 'function') {
+    throw new Error('Validated lifecycle handoff cannot be proven');
+  }
   const existingAdoption = lifecycleAdoptions.get(request.eventId);
   if (existingAdoption) {
     if (existingAdoption.instanceId !== request.instanceId || existingAdoption.serverPath !== request.serverPath ||
@@ -621,10 +776,10 @@ function adoptValidatedLifecycleProcess(request) {
     return existingAdoption.result;
   }
 
-  const { processHandle, startLease } = request.handoff;
   const child = processHandle?.child;
   if (!processHandle || typeof processHandle.isLive !== 'function' || processHandle.isLive() !== true ||
       processHandle.publishEvents !== false || !Number.isSafeInteger(processHandle.pid) || processHandle.pid <= 0 ||
+      !processHandle.supervisionReady || typeof processHandle.supervisionReady.then !== 'function' ||
       !child || child.pid !== processHandle.pid || !child.stdout || !child.stderr || !child.stdin ||
       typeof child.on !== 'function' || !startLease || startLease.kind !== 'start' ||
       startLease.operation !== 'server-health-live' || startLease.operationId !== processHandle.operationId ||
@@ -667,8 +822,13 @@ function adoptValidatedLifecycleProcess(request) {
   state.runtime = runtime;
   state.startupOutcome = 'ready';
   state.process = child;
+  monitorServerInput(state, child);
 
   child.serverProcessHandle = processHandle;
+  const processCloseBarrier = trackProcessCloseBarrier(
+    state,
+    releaseStartLeaseAfterClose(state, startLease, processHandle)
+  );
   child.serverInfo = {
     id: processHandle.operationId,
     instanceId: state.instanceId,
@@ -687,6 +847,26 @@ function adoptValidatedLifecycleProcess(request) {
     fatalMarkers: [...launchPlan.fatalMarkers]
   };
 
+  attachProcessExitBarrier(state, child, processCloseBarrier, ({ code, isNormalExit, signal }) => {
+    lifecycleAdoptions.delete(request.eventId);
+    if (isNormalExit) eventBus.emit('server-normal-exit', {
+      instanceId: state.instanceId,
+      operationId: processHandle.operationId,
+      pid: child.pid
+    });
+    else {
+      eventBus.emit('server-crashed', {
+        instanceId: state.instanceId,
+        operationId: processHandle.operationId,
+        pid: child.pid,
+        serverInfo: { targetPath: state.targetPath, port: state.port, maxRam: state.maxRam, loader: state.loader },
+        exitCode: code,
+        signal
+      });
+    }
+  });
+  const adoptionSupervision = emitServerProcessOwnership(state, child, processHandle.operationId);
+
   child.stdout.on('data', chunk => {
     state.stdoutBuffer += chunk.toString();
     const lines = state.stdoutBuffer.split(/\r?\n/);
@@ -699,41 +879,25 @@ function adoptValidatedLifecycleProcess(request) {
   });
   child.stderr.on('data', chunk => emitServerLog(state, `[STDERR] ${chunk.toString().trimEnd()}`));
   child.on('error', error => emitServerLog(state, `[ERROR] Server process error: ${error.message}`));
-  child.on('exit', (code, signal) => {
-    const wasManualShutdown = state.shutdownRequest === 'stop' || state.shutdownRequest === 'kill';
-    const isNormalExit = wasManualShutdown || code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
-    clearStateTimers(state);
-    state.process = null;
-    state.status = 'stopped';
-    state.startMs = null;
-    state.shutdownRequest = null;
-    state.playersInfo = { count: 0, names: [] };
-    lifecycleAdoptions.delete(request.eventId);
-    emitServerStatus(state);
-    if (isNormalExit) eventBus.emit('server-normal-exit', { instanceId: state.instanceId });
-    else {
-      eventBus.emit('server-crashed', {
-        instanceId: state.instanceId,
-        serverInfo: { targetPath: state.targetPath, port: state.port, maxRam: state.maxRam, loader: state.loader },
-        exitCode: code,
-        signal
-      });
-    }
-  });
-
   clearListInterval(state);
   state.listInterval = setInterval(() => {
     if (state.process && !state.process.killed && !state.intensivePlayerCheckMode) sendListCommand(state);
   }, 120000);
   startMetricsReporting(state);
   emitServerStatus(state);
-  eventBus.emit('server-started', {
-    instanceId: state.instanceId,
-    targetPath: state.targetPath,
-    port: state.port,
-    maxRam: state.maxRam,
-    loader: state.loader,
-    runtime: state.runtime
+  Promise.all([processHandle.supervisionReady, adoptionSupervision.ready]).then(() => {
+    if (state.process !== child || !processHandle.isLive()) return;
+    eventBus.emit('server-started', {
+      instanceId: state.instanceId,
+      pid: child.pid,
+      targetPath: state.targetPath,
+      port: state.port,
+      maxRam: state.maxRam,
+      loader: state.loader,
+      runtime: state.runtime
+    });
+  }, () => {
+    try { child.kill('SIGKILL'); } catch { /* exact adopted child only */ }
   });
   const result = Object.freeze({ adopted: true, instanceId: state.instanceId, pid: child.pid });
   lifecycleAdoptions.set(request.eventId, {
@@ -813,10 +977,14 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
 
     const defaults = buildConfigDefaultsFromStore();
     const config = readServerConfig(targetPath, defaults) || defaults;
-    const minecraftVersion = config.version || detectMinecraftVersion(targetPath) || '1.20.1';
-    const loaderInfo = resolveServerLoader(targetPath);
-    const loader = normalizeLoaderName(config.loader || loaderInfo.loader || 'vanilla');
-    const loaderVersion = config.loaderVersion || config.fabric || loaderInfo.loaderVersion || null;
+    const managedRuntime = managedRuntimeFromConfig(config);
+    const minecraftVersion = managedRuntime?.minecraftVersion || config.version ||
+      detectMinecraftVersion(targetPath) || '1.20.1';
+    const loaderInfo = managedRuntime ? null : resolveServerLoader(targetPath);
+    const loader = managedRuntime?.loaderFamily ||
+      normalizeLoaderName(config.loader || loaderInfo.loader || 'vanilla');
+    const loaderVersion = managedRuntime?.loaderVersion ||
+      config.loaderVersion || config.fabric || loaderInfo.loaderVersion || null;
 
     state.targetPath = targetPath;
     state.port = args.port || toNumber(config.port, 25565);
@@ -840,11 +1008,16 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
     let child = null;
     let processHandle = null;
     try {
-      syncServerPort(targetPath, state.port);
+      syncServerPort(targetPath, state.port, config.networkAccess || 'pack-default');
 
       const javaRequirements = await ensureJavaReadyForServer(targetPath, minecraftVersion);
       const javaPath = javaRequirements.javaPath;
-      const runtimeTuple = {
+      if (managedRuntime && javaRequirements.requiredJavaVersion !== managedRuntime.javaMajor) {
+        const error = new Error('The managed server Java runtime does not match the prepared runtime.');
+        error.code = 'RUNTIME_INCOMPLETE';
+        throw error;
+      }
+      const runtimeTuple = managedRuntime || {
         minecraftVersion,
         loaderFamily: loader,
         loaderVersion: loaderVersion || minecraftVersion,
@@ -852,6 +1025,9 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
         os: 'win32',
         architecture: 'x64'
       };
+      const runtimeValidation = managedRuntime
+        ? await runManagedRuntimeVerificationWorker({ targetPath, runtime: runtimeTuple })
+        : null;
       const serverIdentifier = `server-${crypto.randomUUID()}`;
       try {
         processHandle = launchServerProcess({
@@ -862,7 +1038,8 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
           maxRam: state.maxRam,
           operationId: serverIdentifier,
           publishEvents: true,
-          onLine() {}
+          onLine() {},
+          ...(runtimeValidation ? { runtimeValidation } : {})
         });
       } catch (error) {
         if (error?.code === 'HEALTH_CHECK_FAILED') {
@@ -871,7 +1048,10 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
         throw error;
       }
       child = processHandle.child;
-      releaseStartLeaseAfterClose(state, startLease, processHandle);
+      const processCloseBarrier = trackProcessCloseBarrier(
+        state,
+        releaseStartLeaseAfterClose(state, startLease, processHandle)
+      );
       const launchPlan = processHandle.launchPlan;
       const spawnArgs = [`-Dminecraft.core.server.id=${serverIdentifier}`, ...launchPlan.args];
 
@@ -895,6 +1075,7 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
       emitServerLog(state, `[INFO] Starting server with Java: ${javaPath}`);
 
       state.process = child;
+      monitorServerInput(state, child);
       state.startMs = Date.now();
       state.loader = launchPlan.loader;
       state.readyMarkers = [...launchPlan.readyMarkers];
@@ -919,6 +1100,39 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
       };
       child.serverProcessHandle = processHandle;
 
+      attachProcessExitBarrier(state, child, processCloseBarrier, ({ code, isNormalExit, signal }) => {
+        sendMetricsUpdate({
+          cpuPct: 0,
+          memUsedMB: 0,
+          systemTotalRamMB: Number((os.totalmem() / 1024 / 1024).toFixed(1)),
+          maxRamMB: state.maxRam * 1024,
+          uptime: '0h 0m 0s',
+          players: 0,
+          names: []
+        }, { instanceId: state.instanceId });
+
+        if (!isNormalExit) {
+          eventBus.emit('server-crashed', {
+            instanceId: state.instanceId,
+            operationId: serverIdentifier,
+            pid: child.pid,
+            serverInfo: {
+              targetPath,
+              port: state.port,
+              maxRam: state.maxRam,
+              loader
+            },
+            exitCode: code,
+            signal
+          });
+        } else {
+          eventBus.emit('server-normal-exit', {
+            instanceId: state.instanceId,
+            operationId: serverIdentifier,
+            pid: child.pid
+          });
+        }
+      });
       child.stdout.on('data', (chunk) => {
         state.stdoutBuffer += chunk.toString();
         const lines = state.stdoutBuffer.split(/\r?\n/);
@@ -962,44 +1176,6 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
           }
         });
         emitServerLog(state, `[ERROR] Server process error: ${error.message}`);
-      });
-
-      child.on('exit', (code, signal) => {
-        const wasManualShutdown = state.shutdownRequest === 'stop' || state.shutdownRequest === 'kill';
-        const isNormalExit = wasManualShutdown || code === 0 || signal === 'SIGTERM' || signal === 'SIGINT';
-
-        clearStateTimers(state);
-        state.process = null;
-        state.status = 'stopped';
-        state.startMs = null;
-        state.shutdownRequest = null;
-        state.playersInfo = { count: 0, names: [] };
-        emitServerStatus(state);
-        sendMetricsUpdate({
-          cpuPct: 0,
-          memUsedMB: 0,
-          systemTotalRamMB: Number((os.totalmem() / 1024 / 1024).toFixed(1)),
-          maxRamMB: state.maxRam * 1024,
-          uptime: '0h 0m 0s',
-          players: 0,
-          names: []
-        }, { instanceId: state.instanceId });
-
-        if (!isNormalExit) {
-          eventBus.emit('server-crashed', {
-            instanceId: state.instanceId,
-            serverInfo: {
-              targetPath,
-              port: state.port,
-              maxRam: state.maxRam,
-              loader
-            },
-            exitCode: code,
-            signal
-          });
-        } else {
-          eventBus.emit('server-normal-exit', { instanceId: state.instanceId });
-        }
       });
 
       startLease.markRunning({ pid: child.pid });
@@ -1059,14 +1235,10 @@ function stopMinecraftServer(selector = {}) {
 
   state.shutdownRequest = 'stop';
   state.status = 'stopping';
+  clearStateTimers(state);
   emitServerStatus(state);
 
-  try {
-    state.process.stdin.write('stop\n');
-    return true;
-  } catch {
-    return false;
-  }
+  return writeServerInput(state, 'stop\n', { allowDuringShutdown: true });
 }
 
 function killMinecraftServer(selector = {}) {
@@ -1078,19 +1250,11 @@ function killMinecraftServer(selector = {}) {
   const child = state.process;
   state.shutdownRequest = 'kill';
   state.status = 'stopping';
+  clearStateTimers(state);
   emitServerStatus(state);
 
   try {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/PID', String(child.pid), '/F', '/T']);
-    } else {
-      try {
-        process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        process.kill(child.pid, 'SIGKILL');
-      }
-    }
-    return true;
+    return child.kill('SIGKILL') !== false;
   } catch {
     return false;
   }
@@ -1111,16 +1275,14 @@ function sendServerCommand(selectorOrCommand, commandMaybe) {
     return false;
   }
 
-  try {
-    state.process.stdin.write(`${command}\n`);
-    safeSend('command-response', {
-      instanceId: state.instanceId,
-      command
-    });
-    return true;
-  } catch {
+  if (!writeServerInput(state, `${command}\n`)) {
     return false;
   }
+  safeSend('command-response', {
+    instanceId: state.instanceId,
+    command
+  });
+  return true;
 }
 
 function getServerState(selector = {}) {
@@ -1293,6 +1455,21 @@ function waitForChildExit(child, timeoutMs) {
   });
 }
 
+function waitForProcessCloseBarrier(barrier, timeoutMs) {
+  if (!barrier || typeof barrier.then !== 'function') return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result === true);
+    };
+    const timeout = setTimeout(() => finish(false), timeoutMs);
+    Promise.resolve(barrier).then(finish, () => finish(false));
+  });
+}
+
 async function shutdownMinecraftServer(selector = {}, options = {}) {
   const {
     gracefulTimeoutMs = 8000,
@@ -1313,6 +1490,7 @@ async function shutdownMinecraftServer(selector = {}, options = {}) {
   const results = [];
 
   for (const state of matches) {
+    const processCloseBarrier = state.processCloseBarrier;
     const result = {
       instanceId: state.instanceId,
       targetPath: state.targetPath,
@@ -1322,10 +1500,13 @@ async function shutdownMinecraftServer(selector = {}, options = {}) {
     };
 
     if (!state.process) {
-      if (disposeStateAfterStop) {
+      const fullyClosed = processCloseBarrier
+        ? await waitForProcessCloseBarrier(processCloseBarrier, killTimeoutMs)
+        : true;
+      if (disposeStateAfterStop && fullyClosed) {
         disposeServerState({ instanceId: state.instanceId, targetPath: state.targetPath });
       }
-      result.stopped = true;
+      result.stopped = fullyClosed;
       results.push(result);
       continue;
     }
@@ -1346,11 +1527,15 @@ async function shutdownMinecraftServer(selector = {}, options = {}) {
       }
     }
 
-    if (disposeStateAfterStop && !state.process) {
+    const fullyClosed = (stopped || !state.process)
+      ? await waitForProcessCloseBarrier(processCloseBarrier, killTimeoutMs)
+      : false;
+
+    if (disposeStateAfterStop && fullyClosed && !state.process) {
       disposeServerState({ instanceId: state.instanceId, targetPath: state.targetPath });
     }
 
-    result.stopped = stopped || !state.process;
+    result.stopped = fullyClosed;
     results.push(result);
   }
 

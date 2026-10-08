@@ -2,7 +2,11 @@ const crypto = require('node:crypto');
 
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
-const { computePreflightPlanFingerprint } = require('../modpacks/planning/plan-fingerprint.cjs');
+const { compactOperationIdFromRandomSource } = require('./operation-id.cjs');
+const {
+  PREFLIGHT_PLAN_JSON_LIMITS,
+  computePreflightPlanFingerprint
+} = require('../modpacks/planning/plan-fingerprint.cjs');
 
 const PLAN_TTL_MS = 2 * 60 * 60 * 1000;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -33,7 +37,7 @@ function strictObject(value, allowedKeys, requiredKeys = allowedKeys) {
 }
 
 function clone(value) {
-  try { return strictJsonClone(value); }
+  try { return strictJsonClone(value, PREFLIGHT_PLAN_JSON_LIMITS); }
   catch (error) { throw invalid(error); }
 }
 
@@ -173,13 +177,13 @@ class PlanRegistry {
     return publicCreated(record);
   }
 
-  get(request) {
-    const record = this.#resolveCredential(request);
+  async get(request) {
+    const record = await this.#resolveCredential(request);
     return internalRecord(record);
   }
 
-  claim(request) {
-    const record = this.#resolveCredential(request);
+  async claim(request) {
+    const record = await this.#resolveCredential(request);
     const jobId = this.#newId('job');
     this.workspaceRegistry.transferOwnership({ fromOwnerId: record.planId, toOwnerId: jobId });
     this.claimedJobIds.add(jobId);
@@ -191,23 +195,37 @@ class PlanRegistry {
     });
   }
 
-  releaseClaim(jobId) {
+  async releaseClaim(jobId) {
     if (!isIdentifier(jobId) || !this.claimedJobIds.has(jobId)) return false;
-    this.workspaceRegistry.releaseOwner(jobId);
+    await this.workspaceRegistry.releaseOwner(jobId);
     this.claimedJobIds.delete(jobId);
     return true;
   }
 
-  invalidate(planId) {
+  async invalidate(planId) {
     if (!isIdentifier(planId)) return false;
     const record = this.plans.get(planId);
     if (!record) return false;
-    this.workspaceRegistry.releaseOwner(planId);
+    await this.workspaceRegistry.releaseOwner(planId);
     this.plans.delete(planId);
     return true;
   }
 
-  #resolveCredential(request) {
+  async dispose() {
+    const planIds = [...this.plans.keys()];
+    let firstFailure = null;
+    for (const planId of planIds) {
+      try {
+        await this.workspaceRegistry.releaseOwner(planId);
+        this.plans.delete(planId);
+      }
+      catch (error) { firstFailure ??= error; }
+    }
+    if (firstFailure) throw firstFailure;
+    return planIds.length;
+  }
+
+  async #resolveCredential(request) {
     let descriptors;
     try { descriptors = strictObject(request, ['planId', 'fingerprint']); }
     catch (error) {
@@ -220,7 +238,7 @@ class PlanRegistry {
     const record = this.plans.get(planId);
     if (!record || record.fingerprint !== receivedFingerprint) throw stale();
     if (nowMilliseconds(this.clock) >= record.expiresAtMs) {
-      try { this.workspaceRegistry.releaseOwner(planId); }
+      try { await this.workspaceRegistry.releaseOwner(planId); }
       catch (error) { throw stale(error); }
       this.plans.delete(planId);
       throw stale();
@@ -232,7 +250,9 @@ class PlanRegistry {
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const value = this.randomUUID();
       if (typeof value !== 'string' || !RANDOM_ID.test(value)) throw invalid();
-      const id = `${prefix}-${value}`;
+      // Mutation IDs version the compact same-parent transaction namespace.
+      // Plan IDs remain unchanged because they never become server-path leaves.
+      const id = prefix === 'job' ? compactOperationIdFromRandomSource(value) : `${prefix}-${value}`;
       if (!this.allocatedIds.has(id) && !this.plans.has(id)) {
         this.allocatedIds.add(id);
         return id;

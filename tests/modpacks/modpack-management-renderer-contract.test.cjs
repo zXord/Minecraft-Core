@@ -37,15 +37,45 @@ test('repair keeps its operation kind while the user reselects and reviews the i
   assert.match(page, /if \(event\.detail\.operationKind && operationKind !== ['"]repair['"]\)/);
   assert.match(page, /on:select=\{\(event\) => inspectSelection\(event\.detail\.request, operationKind\)\}/);
   assert.match(page, /const requestedOperationKind = operationKind/);
-  assert.match(page, /inspectSelection\(\{ provider: ['"]local['"], selectionId: selection\.selectionId \}, requestedOperationKind\)/);
-  assert.match(page, /return inspectSelection\(\{[\s\S]*rememberAssetPattern[\s\S]*\}, operationKind\);/);
+  assert.match(page, /inspectSelection\(\{ provider: ['"]local['"], selectionId: selection\.selectionId \}, requestedOperationKind, false, true\)/);
+  assert.match(page, /const classifyManagedRuntime = Boolean\(currentGithubReleaseId\) && operationKind !== ['"]repair['"]/);
+  assert.match(page, /classifyManagedRuntime \? managedGithubChronologicalOperation : operationKind, classifyManagedRuntime\);/);
   assert.match(source('src/components/setup/ArchiveGuidedReview.svelte'), /canFilesOnly\s*=\s*operationKind\s*!==\s*['"]repair['"]/);
+});
+
+test('managed archive preflight streams its correlated planning progress into the guided review', () => {
+  const page = source('src/routes/ModpackPage.svelte');
+
+  assert.match(page, /let preflightProgress = null;/);
+  assert.match(page, /let selectingDestination = false;/);
+  assert.match(page, /preflightProgress = \{ phase: ['"]validating-destination['"], percent: 0 \};/);
+  assert.match(page, /modpackApi\.preflight\([\s\S]*?\},\s*progress => \{[\s\S]*?if \(!currentServerRequest\(requestToken\)\) return;[\s\S]*?preflightProgress = progress;[\s\S]*?\}\);/);
+  assert.match(page, /<ArchiveGuidedReview\s+[\s\S]*?\{preflightProgress\}[\s\S]*?\{selectingDestination\}/);
+});
+
+test('management preflight shows correlated semantic progress before a durable job exists', () => {
+  const page = source('src/routes/ModpackPage.svelte');
+  const progress = source('src/components/modpacks/ModpackPlanningProgress.svelte');
+
+  assert.match(page, /preflightProgress = \{ phase: ['"]scanning-server['"] \};/);
+  assert.match(page, /modpackApi\.preflightManagement\([\s\S]*?progress => \{[\s\S]*?if \(!currentServerRequest\(requestToken\)\) return;[\s\S]*?preflightProgress = progress;/);
+  assert.match(page, /busy && preflightProgress && flow !== ['"]inspection['"]/);
+  assert.match(page, /<ModpackPlanningProgress progress=\{preflightProgress\}/);
+  assert.match(page, /class:selected=\{selectedRestorePointId === item\.restorePointId\}/);
+  assert.match(page, /Verifying selection/);
+  assert.match(progress, /role="status"/);
+  assert.match(progress, /aria-label="Modpack preflight progress"/);
+  assert.match(progress, /Scanning current server files/);
+  assert.match(progress, /Verifying the selected restore point/);
+  assert.match(progress, /processedBytes/);
+  assert.match(progress, /totalBytes/);
+  assert.match(progress, /Large servers can take a few minutes/);
 });
 
 test('version management supports exact updates downgrades switches and rollback', () => {
   const panel = source('src/components/modpacks/ModpackVersionPanel.svelte');
   for (const contract of [
-    /Update/, /exact version/i, /Downgrade/, /Switch/, /restore point/i, /prerelease/i
+    /Update/, /exact version/i, /Downgrade/i, /Switch/, /restore point/i, /prerelease/i
   ]) assert.match(panel, contract);
   assert.match(panel, /state\?\.source\?\.versionId/);
   assert.match(panel, /version\.versionId\s*===\s*currentVersionId/);
@@ -85,10 +115,10 @@ test('outcome actions are opaque and render all required durable outcomes', () =
   const progress = source('src/components/modpacks/ModpackJobProgress.svelte');
   for (const copy of [
     'Nothing changed', 'Downloaded file retained for manual use',
-    'Update failed; server restored successfully', 'Automatic recovery required on next launch',
+    'Update failed; server restored successfully', 'Verified recovery is ready',
     'Manual recovery required', 'Retry', 'Change selection', 'Open details', 'Open folder',
     'Remove download', 'Choose another asset', 'Return to server', 'Review restore point',
-    'Restart and recover', 'Review recovery', 'Restore from restore point'
+    'Recover now', 'Review recovery', 'Restore from restore point'
   ]) assert.match(progress, new RegExp(copy, 'i'));
   assert.match(progress, /opaqueRef/);
   assert.match(progress, /hasAction/);
@@ -143,4 +173,72 @@ test('persistent notification actions route the exact server to the matching rev
   assert.match(page, /github-asset-selection-required/);
   assert.match(page, /recovery-required/);
   assert.doesNotMatch(center, /install(?:Pack|Version|Modpack)\s*\(/);
+});
+
+test('managed modpack page exposes a rendered manual release check with visible progress', () => {
+  const page = source('src/routes/ModpackPage.svelte');
+  assert.match(page, /async function checkForModpackUpdates\(\)/u);
+  assert.match(page, /modpackApi\.checkUpdates\(null,\s*true\)/u);
+  assert.match(page, /checkingForUpdates/u);
+  assert.match(page, /Check for updates/u);
+  assert.match(page, /role=["']status["'][^>]*aria-label=["']Release check status["']/u);
+  assert.match(page, /Checking for updates/u);
+  assert.match(page, /aria-live=["']polite["']/u);
+});
+
+test('release notifications preserve the exact provider target through navigation and never substitute latest', () => {
+  const center = source('src/components/modpacks/ModpackNotificationCenter.svelte');
+  const page = source('src/routes/ModpackPage.svelte');
+  const versions = source('src/components/modpacks/ModpackVersionPanel.svelte');
+  const github = source('src/components/setup/GitHubReleasePicker.svelte');
+
+  assert.match(center, /destination\?\.releaseTarget\?\.serverId/);
+  assert.match(page, /destination\.releaseTarget/);
+  assert.match(page, /releaseTarget\.sourceId/);
+  assert.match(page, /requestedModrinthVersionId/);
+  assert.match(page, /requestedGithubReleaseId/);
+  assert.match(page, /source\.repositoryId/);
+  assert.match(page, /source\?\.projectId/);
+  assert.match(versions, /requestedVersionId/);
+  assert.match(versions, /data-notification-target/);
+  assert.doesNotMatch(versions, /aria-current=\{notificationTarget/);
+  const notificationTargetRule = versions.match(/\.notification-target\s*\{([^}]*)\}/)?.[1] || '';
+  assert.doesNotMatch(notificationTargetRule, /124\s*,\s*131\s*,\s*255|#7c83ff/i);
+  assert.match(github, /requestedReleaseId/);
+  assert.match(github, /loadRequestedRelease/);
+  assert.match(github, /release\.releaseId\s*===\s*requestedReleaseId/);
+  assert.match(github, /loadUploadedAssets|listGithubAssets/);
+  assert.doesNotMatch(page + versions + github, /requested(?:Release|Version)Id\s*=\s*['"]latest['"]/iu);
+});
+
+test('modpack notification controls stay out of global server and client headers', () => {
+  const app = source('src/App.svelte');
+  const clientHeader = source('src/components/client/ClientHeader.svelte');
+  const clientInterface = source('src/components/client/ClientInterface.svelte');
+  const page = source('src/routes/ModpackPage.svelte');
+
+  assert.doesNotMatch(app, /import\s+ModpackNotificationCenter/);
+  assert.doesNotMatch(clientHeader, /ModpackNotificationCenter|Modpack notifications/);
+  assert.doesNotMatch(clientInterface, /onModpackNotificationNavigate/);
+  assert.match(page, /<ModpackNotificationCenter[\s\S]*variant=["']contextual["']/);
+});
+
+test('an expired management plan cannot execute again and preserves its exact action for re-preflight', () => {
+  const review = source('src/components/modpacks/ModpackPlanReview.svelte');
+  const page = source('src/routes/ModpackPage.svelte');
+
+  assert.match(review, /isPlanStaleError/);
+  assert.match(review, /!planStale/);
+  assert.match(review, /Run a fresh preflight review/i);
+  assert.match(review, /dispatch\(['"]stale['"]\)/);
+  assert.match(review, /hasReviewedPlan/);
+  assert.match(page, /async function refreshStaleReview/);
+  assert.match(page, /isPlanStaleError/);
+  assert.match(page, /Run the action again to generate and review a fresh plan/i);
+  assert.match(page, /buildManagementPlan\(operationKind, selectedRestorePointId\)/);
+  assert.match(page, /activeSection\s*=\s*['"]actions['"]/);
+  assert.match(page, /flow\s*=\s*['"]source['"];[\s\S]*inspectSelection\(requestedSelection, requestedOperationKind/);
+  assert.match(page, /requestedSelection\?\.provider\s*===\s*['"]local['"]/);
+  assert.match(page, /inspectSelection\(requestedSelection, requestedOperationKind/);
+  assert.match(page, /on:stale=\{refreshStaleReview\}/);
 });

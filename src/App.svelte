@@ -12,6 +12,12 @@
   let ModsPage;
   let ModpackPage;
   let SettingsPage;
+  let ServerSetupWizard;
+  let ClientSetupWizard;
+  let PlayerList;
+  let Backups;
+  let ClientInterface;
+  let AppSettingsModal;
   let modpackNavigationTarget = null;
   let modpackNavigationSequence = 0;
 
@@ -42,27 +48,57 @@
           SettingsPage = module.default;
         }
         return SettingsPage;
+      case 'server-setup':
+        if (!ServerSetupWizard) {
+          const module = await import('./components/setup/ServerSetupWizard.svelte');
+          ServerSetupWizard = module.default;
+        }
+        return ServerSetupWizard;
+      case 'client-setup':
+        if (!ClientSetupWizard) {
+          const module = await import('./components/client/ClientSetupWizard.svelte');
+          ClientSetupWizard = module.default;
+        }
+        return ClientSetupWizard;
+      case 'players':
+        if (!PlayerList) {
+          const module = await import('./components/players/PlayerList.svelte');
+          PlayerList = module.default;
+        }
+        return PlayerList;
+      case 'backups':
+        if (!Backups) {
+          const module = await import('./components/Backups.svelte');
+          Backups = module.default;
+        }
+        return Backups;
+      case 'client-interface':
+        if (!ClientInterface) {
+          const module = await import('./components/client/ClientInterface.svelte');
+          ClientInterface = module.default;
+        }
+        return ClientInterface;
+      case 'app-settings':
+        if (!AppSettingsModal) {
+          const module = await import('./components/common/AppSettingsModal.svelte');
+          AppSettingsModal = module.default;
+        }
+        return AppSettingsModal;
     }
   }
   import { saveInstances } from "./modules/instanceUtils.js";
   import logger from "./utils/logger.js";
 
   // Components
-  import ServerSetupWizard from "./components/setup/ServerSetupWizard.svelte";
-  import PlayerList from "./components/players/PlayerList.svelte";
-  import Backups from "./components/Backups.svelte";
-  import ClientInterface from "./components/client/ClientInterface.svelte";
-  import ClientSetupWizard from "./components/client/ClientSetupWizard.svelte";
   import StatusManager from "./components/common/StatusManager.svelte";
   import ConfirmationDialog from "./components/common/ConfirmationDialog.svelte";
-  import AppSettingsModal from "./components/common/AppSettingsModal.svelte";
   import UpdateNotification from "./components/common/UpdateNotification.svelte";
   import { Toaster } from "svelte-sonner";
   import { showExitConfirmation } from "./stores/exitStore.js";
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
-  import ModpackNotificationCenter from "./components/modpacks/ModpackNotificationCenter.svelte";
   import { deriveModpackNotificationPresentation, modpackNotificationStore } from "./stores/modpackNotificationStore.js";
-  import { getUpdateCount, autoUpdateChecksEnabled } from "./stores/modStore.js";
+  import { modpackApi } from "./utils/modpacks/modpackApi.js";
+  import { getUpdateCount, autoUpdateChecksEnabled, waitForIgnoredUpdatesPersistence } from "./stores/modStore.js";
   const updateCountStore = getUpdateCount();
   import { checkForUpdates, loadServerConfig, loadMods, loadContent, setActiveModServerPath } from "./utils/mods/modAPI.js";
   let updateIntervalId = null;
@@ -90,16 +126,55 @@
   // App settings modal state
   let showAppSettings = false;
   let lastServerModContextPath = "";
+  let modpackStateTrackingReady = false;
+  let trackedModpackServerId = "";
+  let modpackStateRequestSequence = 0;
+  let currentServerModpackManaged = false;
+  let currentServerModpackStateKnown = false;
+  let currentServerModpackStateGeneration = 0;
 
   // Error boundary state
   let hasError = false;
   let errorInfo = null; // Used for storing error details for potential debugging display
   $: activeServerPath =
     currentInstance?.type === "server" ? currentInstance.path || "" : "";
+  $: activeServerId =
+    currentInstance?.type === "server" ? currentInstance.id || "" : "";
+  $: if (modpackStateTrackingReady && activeServerId !== trackedModpackServerId) {
+    trackedModpackServerId = activeServerId;
+    currentServerModpackManaged = false;
+    currentServerModpackStateKnown = false;
+    void refreshCurrentServerModpackState(activeServerId);
+  }
   $: currentServerNotificationPresentation = deriveModpackNotificationPresentation({
     items: $modpackNotificationStore.items,
-    serverId: currentInstance?.type === "server" ? currentInstance.id : ''
+    serverId: activeServerId,
+    managed: currentServerModpackManaged
   });
+
+  async function refreshCurrentServerModpackState(serverId) {
+    const requestSequence = ++modpackStateRequestSequence;
+    if (!serverId) return;
+    try {
+      const state = await modpackApi.getState(serverId);
+      if (requestSequence !== modpackStateRequestSequence || activeServerId !== serverId) return;
+      currentServerModpackManaged = state?.modpackManaged === true;
+      currentServerModpackStateKnown = typeof state?.modpackManaged === 'boolean';
+      if (currentServerModpackStateKnown) currentServerModpackStateGeneration += 1;
+    } catch (error) {
+      if (requestSequence !== modpackStateRequestSequence || activeServerId !== serverId) return;
+      currentServerModpackManaged = false;
+      currentServerModpackStateKnown = false;
+      logger.debug("Modpack navigation state is unavailable", {
+        category: "ui",
+        data: {
+          component: "App",
+          instanceId: serverId,
+          errorType: error?.constructor?.name || "Error"
+        }
+      });
+    }
+  }
 
   // Session tracking
   const sessionId = Date.now().toString();
@@ -433,6 +508,7 @@
     if (!Array.isArray(instancesList) || instancesList.length === 0) return;
     for (const serverInstance of instancesList.filter((inst) => inst && inst.type === "server" && inst.path)) {
       try {
+        await waitForIgnoredUpdatesPersistence(serverInstance.path);
         const settingsResult = await window.electron.invoke("get-settings", {
           instanceId: serverInstance.id,
           serverPath: serverInstance.path,
@@ -483,6 +559,15 @@
   onMount(() => {
     modpackNotificationStore.connect();
     modpackNotificationStore.listNotifications().catch(() => {});
+    const unsubscribeModpackState = modpackApi.onStateChanged(state => {
+      const stateServerId = state?.instanceId || state?.serverId || "";
+      if (!stateServerId || stateServerId !== activeServerId) return;
+      modpackStateRequestSequence += 1;
+      currentServerModpackManaged = state?.modpackManaged === true;
+      currentServerModpackStateKnown = typeof state?.modpackManaged === 'boolean';
+      if (currentServerModpackStateKnown) currentServerModpackStateGeneration += 1;
+    });
+    modpackStateTrackingReady = true;
 
     // Enhanced component lifecycle logging
     logger.debug("App component mounted", {
@@ -503,6 +588,12 @@
     // Initialize logger instance detection
     logger.refreshInstanceDetection();
     window.appStartupCompleted = true;
+    window.appStartupQuiescent = false;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      // The updater's deferred startup request runs at 2s. Holding the smoke
+      // readiness barrier beyond it proves that deferred mount work is quiet.
+      setTimeout(() => { window.appStartupQuiescent = true; }, 2500);
+    }));
 
     // Enhanced user session logging
     logger.info("User session started", {
@@ -792,7 +883,7 @@
             }
           }
           // Ensure management server auto-starts even if user lands on client first
-          autoStartInstancesIfNeeded(instances);
+          await autoStartInstancesIfNeeded(instances);
           refreshServerStatuses();
         } else {
           logger.info("No valid instances found during setup check", {
@@ -840,6 +931,9 @@
 
     // Cleanup on component destroy
     return () => {
+      modpackStateTrackingReady = false;
+      modpackStateRequestSequence += 1;
+      unsubscribeModpackState();
       modpackNotificationStore.destroy();
       logger.debug("App component cleanup", {
         category: "ui",
@@ -1668,17 +1762,33 @@
       {#if step === "chooseFolder"}
         <div class="setup-container">
           {#if instanceType === "server"}
-            <ServerSetupWizard
-              on:setup-complete={(event) => {
-                handleSetupComplete(event);
-              }}
-            />
+            {#await loadRoute('server-setup')}
+              <div class="route-loading"><div class="loading-spinner"></div><p>Loading server setup...</p></div>
+            {:then Component}
+              <svelte:component
+                this={Component}
+                defaultMaxRam={$serverState.maxRam}
+                defaultServerPort={25565}
+                on:setup-complete={(event) => {
+                  handleSetupComplete(event);
+                }}
+              />
+            {:catch error}
+              <div class="route-error"><p>Failed to load server setup. Please restart the app.</p></div>
+            {/await}
           {:else if instanceType === "client"}
-            <ClientSetupWizard
-              on:setup-complete={(event) => {
-                handleClientSetupComplete(event);
-              }}
-            />
+            {#await loadRoute('client-setup')}
+              <div class="route-loading"><div class="loading-spinner"></div><p>Loading client setup...</p></div>
+            {:then Component}
+              <svelte:component
+                this={Component}
+                on:setup-complete={(event) => {
+                  handleClientSetupComplete(event);
+                }}
+              />
+            {:catch error}
+              <div class="route-error"><p>Failed to load client setup. Please restart the app.</p></div>
+            {/await}
           {/if}
         </div>
       {:else if isLoading}
@@ -1711,11 +1821,6 @@
             <div class="header-title-row">
               <h1>Minecraft Core</h1>
               <div class="header-actions">
-                <ModpackNotificationCenter
-                  connectStore={false}
-                  excludeServerId={$route === "/modpack" ? currentInstance?.id || "" : ""}
-                  on:navigate={handleModpackNotificationNavigation}
-                />
                 <button
                   class="app-settings-button"
                   on:click={() => {
@@ -1787,7 +1892,10 @@
                     <p>Loading Dashboard...</p>
                   </div>
                 {:then Component}
-                  <svelte:component this={Component} serverPath={activeServerPath} {currentInstance} />
+                  <svelte:component this={Component} serverPath={activeServerPath} {currentInstance}
+                    modpackStateGeneration={currentServerModpackStateGeneration}
+                    modpackManaged={trackedModpackServerId === activeServerId && currentServerModpackStateKnown
+                      ? currentServerModpackManaged : null} />
                 {:catch error}
                   <div class="route-error">
                     <p>Failed to load Dashboard. Please try again.</p>
@@ -1803,7 +1911,13 @@
               </div>
             {:else if $route === "/players"}
               <div class="content-panel">
-                <PlayerList serverPath={activeServerPath} />
+                {#await loadRoute('players')}
+                  <div class="route-loading"><div class="loading-spinner"></div><p>Loading Players...</p></div>
+                {:then Component}
+                  <svelte:component this={Component} serverPath={activeServerPath} />
+                {:catch error}
+                  <div class="route-error"><p>Failed to load Players. Please try again.</p></div>
+                {/await}
               </div>
             {:else if $route === "/mods"}
               <div class="content-panel">
@@ -1851,7 +1965,13 @@
               </div>
             {:else if $route === "/backups"}
               <div class="content-panel">
-                <Backups serverPath={activeServerPath} />
+                {#await loadRoute('backups')}
+                  <div class="route-loading"><div class="loading-spinner"></div><p>Loading Backups...</p></div>
+                {:then Component}
+                  <svelte:component this={Component} serverPath={activeServerPath} />
+                {:catch error}
+                  <div class="route-error"><p>Failed to load Backups. Please try again.</p></div>
+                {/await}
               </div>
             {:else if $route === "/settings"}
               <div class="content-panel">
@@ -1932,10 +2052,13 @@
         {:else if instanceType === "client"}
           {#if currentInstance && currentInstance.path && currentInstance.serverIp}
             {#key currentInstance.id}
-              <ClientInterface
+              {#await loadRoute('client-interface')}
+                <div class="route-loading"><div class="loading-spinner"></div><p>Loading Client...</p></div>
+              {:then Component}
+              <svelte:component
+                this={Component}
                 instance={currentInstance}
                 onOpenAppSettings={() => (showAppSettings = true)}
-                onModpackNotificationNavigate={handleModpackNotificationNavigation}
                 on:instance-updated={handleClientInstanceUpdated}
                 on:deleted={(e) => {
                   logger.info("Client instance deleted", {
@@ -1986,15 +2109,25 @@
                   }
                 }}
               />
+              {:catch error}
+                <div class="route-error"><p>Failed to load the client interface. Please try again.</p></div>
+              {/await}
             {/key}
           {:else}
             <!-- Client instance exists but is not configured - show setup wizard -->
             <div class="setup-container">
-              <ClientSetupWizard
-                on:setup-complete={(event) => {
-                  handleClientSetupComplete(event);
-                }}
-              />
+              {#await loadRoute('client-setup')}
+                <div class="route-loading"><div class="loading-spinner"></div><p>Loading client setup...</p></div>
+              {:then Component}
+                <svelte:component
+                  this={Component}
+                  on:setup-complete={(event) => {
+                    handleClientSetupComplete(event);
+                  }}
+                />
+              {:catch error}
+                <div class="route-error"><p>Failed to load client setup. Please restart the app.</p></div>
+              {/await}
             </div>
           {/if}
         {/if}
@@ -2031,10 +2164,19 @@
         showExitConfirmation.set(false);
       }}
     />
-    <AppSettingsModal
-      bind:visible={showAppSettings}
-      on:close={() => (showAppSettings = false)}
-    />
+    {#if showAppSettings}
+      {#await loadRoute('app-settings')}
+        <div class="route-loading"><div class="loading-spinner"></div><p>Loading settings...</p></div>
+      {:then Component}
+        <svelte:component
+          this={Component}
+          bind:visible={showAppSettings}
+          on:close={() => (showAppSettings = false)}
+        />
+      {:catch error}
+        <div class="route-error"><p>Failed to load app settings. Please try again.</p></div>
+      {/await}
+    {/if}
   <StatusManager />
   <ModAvailabilityNotifications />
     <UpdateNotification />
@@ -2094,29 +2236,6 @@
   .setup-container :global(h2) {
     color: white;
     margin-bottom: 2rem;
-  }
-
-  .setup-container :global(button) {
-    background-color: #3b82f6;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 0.75rem 2rem;
-    font-size: 1rem;
-    cursor: pointer;
-    margin: 1rem 0;
-  }
-
-  .setup-container :global(select) {
-    padding: 0.75rem;
-    margin: 0.5rem 0 1.5rem;
-    width: 100%;
-    max-width: 400px;
-    font-size: 1rem;
-    background-color: #2d3748;
-    color: white;
-    border: 1px solid #4b5563;
-    border-radius: 4px;
   }
 
   .setup-container :global(label) {

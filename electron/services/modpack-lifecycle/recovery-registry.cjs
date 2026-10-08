@@ -10,8 +10,17 @@ const {
   normalizeRecoveryTargetPath,
   verifyRecoveryTargetEnvelope
 } = require('./recovery-target-envelope.cjs');
+const {
+  assertRestoreCreationTransition,
+  normalizeRestoreCreation
+} = require('./restore-creation-intent.cjs');
+const { normalizeFailureDiagnostic } = require('./publication-failure-diagnostic.cjs');
+const { normalizeRuntimeWriterAuthority } = require('./server-runtime-writer-authority.cjs');
+const { FAILURE_CODES } = require('../modpacks/errors.cjs');
+const { normalizeRuntimeDiagnostic } = require('../runtime-diagnostic.cjs');
 
-const RECORD_SCHEMA_VERSION = 1;
+const LEGACY_RECORD_SCHEMA_VERSION = 1;
+const RECORD_SCHEMA_VERSION = 2;
 const MAX_RECORD_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -29,17 +38,18 @@ const SWAP_STEPS = new Set([
   'none', 'prepared', 'new-prepared', 'live-moved', 'candidate-published', 'failed-canonical-moved',
   'rollback-restored', 'cleanup-complete'
 ]);
-const RECORD_KEYS = Object.freeze([
+const LEGACY_RECORD_KEYS = Object.freeze([
   'schemaVersion', 'sequence', 'jobId', 'operationKind', 'target', 'candidatePath', 'rollbackPath', 'failedPath',
   'restorePoint', 'journalPath', 'priorRuntime', 'phase', 'swapStep', 'directoryIdentities', 'createdAt', 'updatedAt', 'outcome'
 ]);
+const RECORD_KEYS = Object.freeze([...LEGACY_RECORD_KEYS, 'restoreCreation']);
 const TARGET_KEYS = Object.freeze(['kind', 'stableServerId', 'path']);
 const RESTORE_KEYS = Object.freeze(['id', 'sha256']);
 const PRIOR_RUNTIME_KEYS = Object.freeze(['running', 'autoRestart']);
 const DIRECTORY_IDENTITIES_KEYS = Object.freeze(['target', 'candidate', 'rollback', 'failed']);
 const DIRECTORY_IDENTITY_KEYS = Object.freeze(['volumeSerial', 'fileId']);
 const TRANSITION_KEYS = new Set([
-  'candidatePath', 'rollbackPath', 'failedPath', 'restorePoint', 'journalPath', 'priorRuntime', 'swapStep',
+  'candidatePath', 'rollbackPath', 'failedPath', 'restorePoint', 'restoreCreation', 'journalPath', 'priorRuntime', 'swapStep',
   'directoryIdentities', 'outcome'
 ]);
 
@@ -130,12 +140,31 @@ function normalizeOutcome(value) {
     throw invalid(error);
   }
   if (!clone || typeof clone !== 'object' || Array.isArray(clone)) throw invalid();
+  if (Object.hasOwn(clone, 'runtimeWriterProtocol') && clone.runtimeWriterProtocol !== 1) throw invalid();
+  if (Object.hasOwn(clone, 'runtimeWriterFailure')) {
+    assertStrictObject(clone.runtimeWriterFailure, ['code', ...(Object.hasOwn(clone.runtimeWriterFailure, 'diagnostic') ? ['diagnostic'] : [])]);
+    if (typeof clone.runtimeWriterFailure.code !== 'string' || !FAILURE_CODES.includes(clone.runtimeWriterFailure.code)) throw invalid();
+    if (Object.hasOwn(clone.runtimeWriterFailure, 'diagnostic')) {
+      try { clone.runtimeWriterFailure.diagnostic = normalizeRuntimeDiagnostic(clone.runtimeWriterFailure.diagnostic); }
+      catch (error) { throw invalid(error); }
+    }
+  }
+  const storedFailure = Object.getOwnPropertyDescriptor(clone, 'failure');
+  if (storedFailure) {
+    const normalizedFailure = normalizeFailureDiagnostic(storedFailure.value);
+    if (normalizedFailure) clone.failure = normalizedFailure;
+    else delete clone.failure;
+  }
   return clone;
 }
 
 function normalizeRecord(value) {
-  assertStrictObject(value, RECORD_KEYS);
-  if (value.schemaVersion !== RECORD_SCHEMA_VERSION || !Number.isSafeInteger(value.sequence) || value.sequence < 0 ||
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
+  const schemaDescriptor = Object.getOwnPropertyDescriptor(value, 'schemaVersion');
+  if (!schemaDescriptor || !Object.hasOwn(schemaDescriptor, 'value')) throw invalid();
+  const legacy = schemaDescriptor.value === LEGACY_RECORD_SCHEMA_VERSION;
+  assertStrictObject(value, legacy ? LEGACY_RECORD_KEYS : RECORD_KEYS);
+  if ((!legacy && value.schemaVersion !== RECORD_SCHEMA_VERSION) || !Number.isSafeInteger(value.sequence) || value.sequence < 0 ||
       typeof value.jobId !== 'string' || !JOB_ID_PATTERN.test(value.jobId) || !OPERATION_KINDS.has(value.operationKind) ||
       !PHASES.has(value.phase) || !SWAP_STEPS.has(value.swapStep)) throw invalid();
   assertStrictObject(value.target, TARGET_KEYS);
@@ -152,7 +181,7 @@ function normalizeRecord(value) {
   const uniqueDirectoryPaths = new Set([targetPath, ...siblingPaths]);
   if (uniqueDirectoryPaths.size !== 1 + siblingPaths.length ||
       siblingPaths.some(candidate => path.win32.dirname(candidate) !== path.win32.dirname(targetPath))) throw invalid();
-  return {
+  const result = {
     schemaVersion: RECORD_SCHEMA_VERSION,
     sequence: value.sequence,
     jobId: value.jobId,
@@ -166,6 +195,7 @@ function normalizeRecord(value) {
     rollbackPath,
     failedPath,
     restorePoint: normalizeRestorePoint(value.restorePoint),
+    restoreCreation: normalizeRestoreCreation(legacy ? null : value.restoreCreation, value.jobId),
     journalPath: normalizeOptionalPath(value.journalPath),
     priorRuntime: {
       running: value.priorRuntime.running,
@@ -178,6 +208,10 @@ function normalizeRecord(value) {
     updatedAt: assertIsoTimestamp(value.updatedAt),
     outcome: normalizeOutcome(value.outcome)
   };
+  if (result.outcome && Object.hasOwn(result.outcome, 'runtimeWriterAuthority')) {
+    result.outcome.runtimeWriterAuthority = normalizeRuntimeWriterAuthority(result.outcome.runtimeWriterAuthority, result);
+  }
+  return result;
 }
 
 function digest(bytes) {
@@ -208,12 +242,24 @@ function sameRegistryDirectory(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.birthtime === right.birthtime;
 }
 
+function defaultYieldControl() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
 class RecoveryRegistry {
-  constructor({ userDataPath, fsApi = fs, durableFs, clock = () => new Date(), randomUUID = crypto.randomUUID } = {}) {
+  constructor({
+    userDataPath,
+    fsApi = fs,
+    durableFs,
+    clock = () => new Date(),
+    randomUUID = crypto.randomUUID,
+    yieldControl = defaultYieldControl
+  } = {}) {
     if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath) || !fsApi || typeof fsApi !== 'object' ||
-        !durableFs || typeof durableFs.readFileBounded !== 'function' || typeof durableFs.writeJsonAtomic !== 'function' ||
-        typeof durableFs.renameDurable !== 'function' || typeof durableFs.flushDirectory !== 'function' ||
-        typeof clock !== 'function' || typeof randomUUID !== 'function') throw invalid();
+        !durableFs || typeof durableFs.readFileBounded !== 'function' || typeof durableFs.writeJsonAtomicAsync !== 'function' ||
+        typeof durableFs.renameDurable !== 'function' || typeof durableFs.renameDurableAsync !== 'function' ||
+        typeof durableFs.flushDirectory !== 'function' ||
+        typeof clock !== 'function' || typeof randomUUID !== 'function' || typeof yieldControl !== 'function') throw invalid();
     this.userDataPath = path.resolve(userDataPath);
     if (this.userDataPath === path.parse(this.userDataPath).root) throw invalid();
     if (process.platform === 'win32') {
@@ -230,6 +276,7 @@ class RecoveryRegistry {
     this.durableFs = durableFs;
     this.clock = clock;
     this.randomUUID = randomUUID;
+    this.yieldControl = yieldControl;
     this.rootPath = path.join(this.userDataPath, 'modpack-lifecycle');
     this.activePath = path.join(this.rootPath, 'active');
     this.historyPath = path.join(this.rootPath, 'history');
@@ -240,9 +287,11 @@ class RecoveryRegistry {
       history: null
     };
     this.initialized = false;
+    this.historyPublication = Promise.resolve();
   }
 
   async initialize() {
+    await this.#awaitHistoryStable();
     if (this.initialized) this.#revalidateRegistryDirectories();
     else this.#initializeDirectories();
     this.#revalidateRegistryDirectories();
@@ -336,6 +385,7 @@ class RecoveryRegistry {
   }
 
   async create(record) {
+    await this.#awaitHistoryStable();
     this.#assertInitialized();
     let normalized;
     try {
@@ -358,9 +408,9 @@ class RecoveryRegistry {
     const envelope = createRecoveryTargetEnvelope(normalized);
     try {
       this.#revalidateRegistryDirectories();
-      this.durableFs.writeJsonAtomic(envelopePath, envelope, { expectedTargetSha256: null });
+      await this.durableFs.writeJsonAtomicAsync(envelopePath, envelope, { expectedTargetSha256: null });
       this.#revalidateRegistryDirectories();
-      this.durableFs.writeJsonAtomic(recordPath, normalized, { expectedTargetSha256: null });
+      await this.durableFs.writeJsonAtomicAsync(recordPath, normalized, { expectedTargetSha256: null });
       this.#revalidateRegistryDirectories();
       return Object.freeze(strictJsonClone(normalized));
     } catch (error) {
@@ -369,6 +419,7 @@ class RecoveryRegistry {
   }
 
   async load(jobId) {
+    await this.#awaitHistoryStable();
     this.#assertInitialized();
     assertIdentifier(jobId, JOB_ID_PATTERN);
     const loaded = this.#readRecord(this.#recordPath(jobId), { allowMissing: true, expectedJobId: jobId });
@@ -376,6 +427,7 @@ class RecoveryRegistry {
   }
 
   async loadHistory(jobId) {
+    await this.#awaitHistoryStable();
     this.#assertInitialized();
     assertIdentifier(jobId, JOB_ID_PATTERN);
     const loaded = this.#readRecord(this.#historyRecordPath(jobId), { allowMissing: true, expectedJobId: jobId });
@@ -391,6 +443,7 @@ class RecoveryRegistry {
   }
 
   async transition(jobId, request) {
+    await this.#awaitHistoryStable();
     this.#assertInitialized();
     assertIdentifier(jobId, JOB_ID_PATTERN);
     assertStrictObject(request, ['expectedPhase', 'nextPhase', 'patch']);
@@ -401,16 +454,98 @@ class RecoveryRegistry {
     const loaded = this.#readRecord(this.#recordPath(jobId), { allowMissing: false, expectedJobId: jobId });
     if (loaded.value.phase !== request.expectedPhase) throw stale();
     if (TERMINAL_PHASES.has(loaded.value.phase)) throw stale();
+    const safePatch = strictJsonClone(patch);
+    if (Object.hasOwn(safePatch, 'outcome')) safePatch.outcome = this.#preserveRuntimeAuthority(loaded.value, safePatch.outcome,
+      loaded.value.phase === 'queued' && request.nextPhase === 'preflight');
     const candidate = normalizeRecord({
       ...loaded.value,
-      ...strictJsonClone(patch),
+      ...safePatch,
       sequence: loaded.value.sequence + 1,
       phase: request.nextPhase,
       updatedAt: this.#now()
     });
+    assertRestoreCreationTransition(loaded.value.restoreCreation, candidate.restoreCreation, {
+      previousPhase: loaded.value.phase,
+      nextPhase: candidate.phase,
+      previousRestorePoint: loaded.value.restorePoint,
+      nextRestorePoint: candidate.restorePoint
+    });
     try {
       this.#revalidateRegistryDirectories();
-      this.durableFs.writeJsonAtomic(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
+      await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
+      this.#revalidateRegistryDirectories();
+      return Object.freeze(strictJsonClone(candidate));
+    } catch (error) {
+      throw commitFailure(error);
+    }
+  }
+
+  #preserveRuntimeAuthority(previous, outcome, declaringProtocol = false) {
+    const result = outcome === null ? {} : { ...outcome };
+    for (const field of ['runtimeWriterAuthority', 'runtimeWriterProtocol', 'runtimeWriterFailure']) {
+      const before = previous.outcome?.[field];
+      if (before !== undefined) {
+        if (Object.hasOwn(result, field) && !sameJson(result[field], before)) throw stale();
+        result[field] = before;
+      } else if (Object.hasOwn(result, field) && !(field === 'runtimeWriterProtocol' && declaringProtocol && result[field] === 1)) throw invalid();
+    }
+    return outcome === null && Object.keys(result).length === 0 ? null : result;
+  }
+
+  async updateRuntimeWriterAuthority(jobId, request) {
+    await this.#awaitHistoryStable(); this.#assertInitialized(); assertIdentifier(jobId, JOB_ID_PATTERN);
+    assertStrictObject(request, ['expectedSequence', 'authority', 'failureCode', ...(Object.hasOwn(request, 'diagnostic') ? ['diagnostic'] : [])]);
+    let diagnostic = null;
+    if (Object.hasOwn(request, 'diagnostic')) {
+      try { diagnostic = normalizeRuntimeDiagnostic(request.diagnostic); } catch (error) { throw invalid(error); }
+      if (request.failureCode === null) throw invalid();
+    }
+    if (!Number.isSafeInteger(request.expectedSequence) || request.expectedSequence < 0 ||
+        (request.failureCode !== null && (typeof request.failureCode !== 'string' || !FAILURE_CODES.includes(request.failureCode)))) throw invalid();
+    const loaded = this.#readRecord(this.#recordPath(jobId), { allowMissing: false, expectedJobId: jobId });
+    if (loaded.value.sequence !== request.expectedSequence) throw stale();
+    const authority = normalizeRuntimeWriterAuthority(request.authority, loaded.value);
+    const previous = loaded.value.outcome?.runtimeWriterAuthority;
+    const previousFailure = loaded.value.outcome?.runtimeWriterFailure;
+    if (previousFailure && request.failureCode !== null && previousFailure.code !== request.failureCode) throw stale();
+    if (previousFailure && diagnostic && !sameJson(previousFailure.diagnostic, diagnostic)) throw stale();
+    if (previous) {
+      if (!sameJson({ ...previous, state: authority.state }, authority) ||
+          (previous.state === 'settled' && authority.state !== 'settled')) throw stale();
+    } else if (authority.state !== 'unproven') throw invalid();
+    const candidate = normalizeRecord({ ...loaded.value, sequence: loaded.value.sequence + 1, updatedAt: this.#now(),
+      outcome: { ...(loaded.value.outcome || {}), runtimeWriterAuthority: authority,
+        ...(request.failureCode === null ? {} : { runtimeWriterFailure: previousFailure || {
+          code: request.failureCode, ...(diagnostic ? { diagnostic } : {})
+        } }) } });
+    try {
+      this.#revalidateRegistryDirectories();
+      await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
+      this.#revalidateRegistryDirectories(); return Object.freeze(strictJsonClone(candidate));
+    } catch (cause) { throw commitFailure(cause); }
+  }
+
+  async clearRestoreCreationAfterCleanup(jobId, request) {
+    await this.#awaitHistoryStable();
+    this.#assertInitialized();
+    assertIdentifier(jobId, JOB_ID_PATTERN);
+    assertStrictObject(request, ['expectedPhase', 'expectedCreation']);
+    if (!['preflight', 'snapshotting'].includes(request.expectedPhase)) throw invalid();
+    const expectedCreation = normalizeRestoreCreation(request.expectedCreation, jobId);
+    if (expectedCreation === null) throw invalid();
+    const loaded = this.#readRecord(this.#recordPath(jobId), { allowMissing: false, expectedJobId: jobId });
+    if (loaded.value.phase !== request.expectedPhase ||
+        !sameJson(loaded.value.restoreCreation, expectedCreation)) throw stale();
+    const candidate = normalizeRecord({
+      ...loaded.value,
+      restorePoint: null,
+      restoreCreation: null,
+      sequence: loaded.value.sequence + 1,
+      updatedAt: this.#now()
+    });
+    try {
+      this.#revalidateRegistryDirectories();
+      await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
       this.#revalidateRegistryDirectories();
       return Object.freeze(strictJsonClone(candidate));
     } catch (error) {
@@ -423,7 +558,9 @@ class RecoveryRegistry {
     assertIdentifier(jobId, JOB_ID_PATTERN);
     assertStrictObject(request, ['terminalPhase', 'outcome']);
     if (!TERMINAL_PHASES.has(request.terminalPhase)) throw invalid();
-    const outcome = normalizeOutcome(request.outcome);
+    const releaseHistoryPublication = await this.#acquireHistoryPublication();
+    try {
+    let outcome = normalizeOutcome(request.outcome);
     const activeRecordPath = this.#recordPath(jobId);
     const historyRecordPath = this.#historyRecordPath(jobId);
     const activeEnvelopePath = this.#envelopePath(jobId);
@@ -433,6 +570,8 @@ class RecoveryRegistry {
     let envelopeSourceSha256 = null;
     const active = this.#readRecord(activeRecordPath, { allowMissing: true, expectedJobId: jobId });
     if (active) {
+      outcome = this.#preserveRuntimeAuthority(active.value, outcome);
+      if (active.value.outcome?.runtimeWriterAuthority?.state === 'unproven') throw recoveryRequired();
       const envelopeEvidence = this.#assertEnvelopeMatches(active.value);
       envelopeSourceSha256 = envelopeEvidence.sha256;
       if (TERMINAL_PHASES.has(active.value.phase) &&
@@ -450,7 +589,7 @@ class RecoveryRegistry {
         });
         try {
           this.#revalidateRegistryDirectories();
-          this.durableFs.writeJsonAtomic(activeRecordPath, terminal, { expectedTargetSha256: active.sha256 });
+          await this.durableFs.writeJsonAtomicAsync(activeRecordPath, terminal, { expectedTargetSha256: active.sha256 });
           this.#revalidateRegistryDirectories();
           recordSourceSha256 = digest(Buffer.from(`${JSON.stringify(terminal, null, 2)}\n`, 'utf8'));
         } catch (error) {
@@ -459,6 +598,7 @@ class RecoveryRegistry {
       }
     } else {
       const historical = this.#readRecord(historyRecordPath, { allowMissing: true, expectedJobId: jobId });
+      if (historical) outcome = this.#preserveRuntimeAuthority(historical.value, outcome);
       if (!historical || historical.value.phase !== request.terminalPhase || !sameJson(historical.value.outcome, outcome)) {
         throw recoveryRequired();
       }
@@ -467,11 +607,18 @@ class RecoveryRegistry {
       envelopeSourceSha256 = envelopeEvidence.sha256;
     }
 
+    // The terminal record is already durable and retryable here. Give Electron
+    // one main-loop turn before the two authenticated history moves. The
+    // instance-local publication barrier keeps registry readers and writers from
+    // observing the recoverable record-first split while each native move runs
+    // off-thread. A restarted registry also recognizes that split as blocking.
+    await this.yieldControl();
+
     try {
       if (this.#entryExists(activeRecordPath)) {
         if (this.#entryExists(historyRecordPath)) throw targetExists();
         this.#revalidateRegistryDirectories();
-        this.durableFs.renameDurable(activeRecordPath, historyRecordPath, {
+        await this.durableFs.renameDurableAsync(activeRecordPath, historyRecordPath, {
           expectedSourceSha256: recordSourceSha256
         });
         this.#revalidateRegistryDirectories();
@@ -479,7 +626,7 @@ class RecoveryRegistry {
       if (this.#entryExists(activeEnvelopePath)) {
         if (this.#entryExists(historyEnvelopePath)) throw targetExists();
         this.#revalidateRegistryDirectories();
-        this.durableFs.renameDurable(activeEnvelopePath, historyEnvelopePath, {
+        await this.durableFs.renameDurableAsync(activeEnvelopePath, historyEnvelopePath, {
           expectedSourceSha256: envelopeSourceSha256
         });
         this.#revalidateRegistryDirectories();
@@ -492,6 +639,31 @@ class RecoveryRegistry {
     } catch (error) {
       throw commitFailure(error);
     }
+    } finally {
+      releaseHistoryPublication();
+    }
+  }
+
+  async #awaitHistoryStable() {
+    while (true) {
+      const observed = this.historyPublication;
+      await observed;
+      if (observed === this.historyPublication) return;
+    }
+  }
+
+  async #acquireHistoryPublication() {
+    const previous = this.historyPublication;
+    let releaseGate;
+    const gate = new Promise(resolve => { releaseGate = resolve; });
+    this.historyPublication = previous.then(() => gate, () => gate);
+    await previous;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseGate();
+    };
   }
 
   #initializeDirectories() {

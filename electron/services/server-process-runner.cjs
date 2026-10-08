@@ -1,19 +1,30 @@
 const { execFile } = require('node:child_process');
+const { lookup } = require('node:dns').promises;
+const net = require('node:net');
 const path = require('node:path');
 const { promisify } = require('node:util');
 const { spawn } = require('child_process');
 
 const { ModpackError } = require('./modpacks/errors.cjs');
 const { normalizeRuntimeTuple } = require('./modpacks/contracts.cjs');
-const { resolveLaunchPlan } = require('./server-launcher.cjs');
+const { MAX_SERVER_HEALTH_TIMEOUT_MS } = require('./server-health-constants.cjs');
+const { resolveLaunchPlan, resolvePrevalidatedLaunchPlan } = require('./server-launcher.cjs');
+const { isAppIssuedManagedRuntimeValidation } = require('./managed-runtime-worker-client.cjs');
+const {
+  isAppIssuedForgeCandidateHealthAuthorization
+} = require('./forge-candidate-health-authorization.cjs');
+const defaultEventBus = require('../utils/event-bus.cjs');
+const { requestServerProcessSupervision } = require('../watchdog/server-process-supervision.cjs');
+const { isServerProcessSupervisionRequired } = require('../watchdog/server-process-supervision-policy.cjs');
 
 const execFileAsync = promisify(execFile);
 const MAX_LINE_BYTES = 1024 * 1024;
 const LAUNCH_KEYS = new Set([
-  'instanceId', 'javaPath', 'maxRam', 'onLine', 'operationId', 'publishEvents', 'runtime', 'serverPath'
+  'instanceId', 'javaPath', 'maxRam', 'onLine', 'operationId', 'publishEvents', 'runtime', 'runtimeValidation',
+  'serverPath', 'forgeCandidateHealthAuthorization'
 ]);
 const WAIT_KEYS = new Set(['signal', 'timeoutMs']);
-const ENDPOINT_KEYS = new Set(['host', 'port', 'signal', 'timeoutMs']);
+const ENDPOINT_KEYS = new Set(['allowWildcard', 'host', 'port', 'signal', 'timeoutMs']);
 const STOP_KEYS = new Set(['gracefulTimeoutMs', 'killTimeoutMs']);
 
 function invalidRequest(cause) {
@@ -73,15 +84,24 @@ function normalizeLaunchRequest(value) {
     throw invalidRequest();
   }
   if (typeof value.publishEvents !== 'boolean' || typeof value.onLine !== 'function') throw invalidRequest();
+  const runtime = normalizeRuntime(value.runtime);
+  if (value.forgeCandidateHealthAuthorization !== undefined &&
+      !isAppIssuedForgeCandidateHealthAuthorization(value.forgeCandidateHealthAuthorization, {
+        candidatePath: value.serverPath,
+        healthOperationId: value.operationId,
+        instanceId: value.instanceId,
+        runtime
+      })) throw invalidRequest();
   return Object.freeze({
     ...value,
-    runtime: normalizeRuntime(value.runtime)
+    runtime
   });
 }
 
 function normalizeWaitRequest(value) {
   assertExactKeys(value, WAIT_KEYS);
-  if (!Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 || value.timeoutMs > 300000) throw invalidRequest();
+  if (!Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1 ||
+      value.timeoutMs > MAX_SERVER_HEALTH_TIMEOUT_MS) throw invalidRequest();
   if (value.signal !== undefined && !isAbortSignal(value.signal)) throw invalidRequest();
   return Object.freeze({ signal: value.signal, timeoutMs: value.timeoutMs });
 }
@@ -94,9 +114,11 @@ function normalizeEndpointRequest(value) {
   if (!host || host.length > 255 || hasControlCharacters(host) || host === '0.0.0.0' || host === '::') {
     throw invalidRequest();
   }
+  if (value.allowWildcard !== undefined && typeof value.allowWildcard !== 'boolean') throw invalidRequest();
   if (!Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) throw invalidRequest();
   const wait = normalizeWaitRequest({ timeoutMs: value.timeoutMs, ...(value.signal === undefined ? {} : { signal: value.signal }) });
   return Object.freeze({
+    allowWildcard: value.allowWildcard === true,
     host,
     port: value.port,
     signal: wait.signal,
@@ -157,15 +179,30 @@ async function defaultGetListeningEndpoints() {
   return parseNetstatListeningEndpoints(stdout);
 }
 
-function endpointMatches(listener, request, pid) {
+function normalizeListenerHost(value) {
+  const host = String(value || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
+  return mapped && net.isIP(mapped[1]) === 4 ? mapped[1] : host;
+}
+
+async function resolveEndpointHosts(host, lookupHost) {
+  const normalized = normalizeListenerHost(host);
+  if (net.isIP(normalized)) return new Set([normalized]);
+  const records = await lookupHost(normalized, { all: true, verbatim: true });
+  if (!Array.isArray(records)) throw healthFailure();
+  return new Set(records.map(record => normalizeListenerHost(record.address)).filter(Boolean));
+}
+
+function endpointMatches(listener, request, pid, resolvedHosts) {
   if (!listener || typeof listener !== 'object' || Array.isArray(listener) ||
       !Number.isSafeInteger(listener.pid) || listener.pid !== pid ||
       !Number.isSafeInteger(listener.port) || listener.port !== request.port ||
       typeof listener.host !== 'string') {
     return false;
   }
-  const host = listener.host.trim().replace(/^\[|\]$/g, '').toLowerCase();
-  return host === request.host;
+  const host = normalizeListenerHost(listener.host);
+  if (resolvedHosts.has(host)) return true;
+  return request.allowWildcard && (host === '0.0.0.0' || host === '::');
 }
 
 function waitForPromise(promise, { signal, timeoutMs }, timeoutResult = null) {
@@ -200,12 +237,46 @@ function validatePlan(plan) {
   return plan;
 }
 
+function withForgeCandidateConfirmation(plan) {
+  const args = [...plan.args];
+  const forgeArgsPath = plan.assets?.forgeArgs;
+  let launchBoundary = -1;
+  if (typeof forgeArgsPath === 'string' && isAbsolutePath(forgeArgsPath)) {
+    const forgeResponseArgument = `@${path.relative(plan.cwd, forgeArgsPath)}`;
+    launchBoundary = args.indexOf(forgeResponseArgument);
+  }
+  if (launchBoundary < 0) launchBoundary = args.findIndex(argument => argument === '-jar');
+  if (launchBoundary < 0) {
+    throw healthFailure(new Error('Protected Forge candidate launch boundary is unavailable'));
+  }
+  args.splice(launchBoundary, 0, '-Dfml.queryResult=confirm');
+  return args;
+}
+
 function createServerProcessRunner(dependencies = {}) {
-  assertExactKeys(dependencies, new Set(['getListeningEndpoints', 'resolveLaunchPlan', 'spawnProcess']));
+  assertExactKeys(dependencies, new Set([
+    'eventBus',
+    'getListeningEndpoints',
+    'isManagedRuntimeValidation',
+    'lookupHost',
+    'resolveLaunchPlan',
+    'resolvePrevalidatedLaunchPlan',
+    'spawnProcess',
+    'supervisionRequired'
+  ]));
+  const eventBus = dependencies.eventBus || defaultEventBus;
   const getListeningEndpoints = dependencies.getListeningEndpoints || defaultGetListeningEndpoints;
+  const lookupHost = dependencies.lookupHost || lookup;
+  const isRuntimeValidation = dependencies.isManagedRuntimeValidation || isAppIssuedManagedRuntimeValidation;
   const resolvePlan = dependencies.resolveLaunchPlan || resolveLaunchPlan;
+  const resolvePrevalidatedPlan = dependencies.resolvePrevalidatedLaunchPlan || resolvePrevalidatedLaunchPlan;
   const spawnProcess = dependencies.spawnProcess || spawn;
-  if (typeof getListeningEndpoints !== 'function' || typeof resolvePlan !== 'function' || typeof spawnProcess !== 'function') {
+  const supervisionRequired = dependencies.supervisionRequired || isServerProcessSupervisionRequired;
+  if (!eventBus || typeof eventBus.emit !== 'function' ||
+      typeof getListeningEndpoints !== 'function' || typeof lookupHost !== 'function' ||
+      typeof isRuntimeValidation !== 'function' ||
+      typeof resolvePlan !== 'function' || typeof resolvePrevalidatedPlan !== 'function' ||
+      typeof spawnProcess !== 'function' || typeof supervisionRequired !== 'function') {
     throw invalidRequest();
   }
 
@@ -215,16 +286,25 @@ function createServerProcessRunner(dependencies = {}) {
     let plan;
     let child;
     try {
-      plan = validatePlan(resolvePlan(request.serverPath, {
+      const planOptions = {
         javaMajor: runtime.javaMajor,
         loader: runtime.loaderFamily,
         loaderVersion: runtime.loaderVersion,
         maxRam: request.maxRam,
         minecraftVersion: runtime.minecraftVersion
-      }, { runtimeTuple: runtime }));
+      };
+      if (request.runtimeValidation !== undefined) {
+        if (!isRuntimeValidation(request.runtimeValidation, request.serverPath)) throw invalidRequest();
+        plan = validatePlan(resolvePrevalidatedPlan(request.serverPath, planOptions, request.runtimeValidation));
+      } else {
+        plan = validatePlan(resolvePlan(request.serverPath, planOptions, { runtimeTuple: runtime }));
+      }
+      const launchArguments = request.forgeCandidateHealthAuthorization
+        ? withForgeCandidateConfirmation(plan)
+        : plan.args;
       child = spawnProcess(
         request.javaPath,
-        [`-Dminecraft.core.server.id=${request.operationId}`, ...plan.args],
+        [`-Dminecraft.core.server.id=${request.operationId}`, ...launchArguments],
         {
           cwd: plan.cwd,
           detached: false,
@@ -237,7 +317,7 @@ function createServerProcessRunner(dependencies = {}) {
     }
     if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 0 ||
         !child.stdout || !child.stderr || !child.stdin || typeof child.stdin.write !== 'function' ||
-        typeof child.on !== 'function' || typeof child.kill !== 'function') {
+        typeof child.on !== 'function' || typeof child.once !== 'function' || typeof child.kill !== 'function') {
       try { child?.kill?.(); } catch {
         // The invalid child cannot be trusted to provide further cleanup evidence.
       }
@@ -245,9 +325,46 @@ function createServerProcessRunner(dependencies = {}) {
     }
 
     const pid = child.pid;
+    let stdinFailed = false;
+    const onStdinError = () => {
+      stdinFailed = true;
+    };
+    if (typeof child.stdin.on === 'function') {
+      child.stdin.on('error', onStdinError);
+    }
+    const writeStdin = value => {
+      if (stdinFailed || child.stdin.destroyed === true || child.stdin.closed === true ||
+          child.stdin.writable === false || child.stdin.writableEnded === true ||
+          child.stdin.writableFinished === true) return false;
+      try {
+        child.stdin.write(value, error => {
+          if (error) stdinFailed = true;
+        });
+        return true;
+      } catch {
+        stdinFailed = true;
+        return false;
+      }
+    };
+    const endpointHostResolutions = new Map();
+    const resolveEndpointHostsOnce = host => {
+      const normalized = normalizeListenerHost(host);
+      if (net.isIP(normalized)) return Promise.resolve(new Set([normalized]));
+      let pending = endpointHostResolutions.get(normalized);
+      if (!pending) {
+        pending = Promise.resolve().then(() => resolveEndpointHosts(normalized, lookupHost));
+        endpointHostResolutions.set(normalized, pending);
+        void pending.catch(() => {
+          if (endpointHostResolutions.get(normalized) === pending) endpointHostResolutions.delete(normalized);
+        });
+      }
+      return pending;
+    };
     let closedInfo = null;
     let fatal = false;
     let readyEvidence = null;
+    let supervisionEstablished = false;
+    let supervisionTerminationRequested = false;
     let stdoutBuffer = '';
     let stderrBuffer = '';
     const readyWaiters = new Set();
@@ -263,6 +380,11 @@ function createServerProcessRunner(dependencies = {}) {
     };
     const settleAllWaiters = (error, value) => {
       for (const waiter of [...readyWaiters]) settleWaiter(waiter, error, value);
+    };
+    const settleReadyIfComplete = () => {
+      if (readyEvidence && supervisionEstablished && !fatal && !closedInfo) {
+        settleAllWaiters(null, readyEvidence);
+      }
     };
     const emitLine = (line, stream) => {
       if (!line) return;
@@ -280,7 +402,7 @@ function createServerProcessRunner(dependencies = {}) {
         const marker = plan.readyMarkers.find(value => line.includes(value));
         if (marker) {
           readyEvidence = Object.freeze({ marker, pid });
-          settleAllWaiters(null, readyEvidence);
+          settleReadyIfComplete();
         }
       }
     };
@@ -345,6 +467,50 @@ function createServerProcessRunner(dependencies = {}) {
     child.on('error', onChildError);
     child.on('close', onChildClose);
 
+    const ownership = Object.freeze({ instanceId: request.instanceId, operationId: request.operationId, pid });
+    child.once('close', () => {
+      try { eventBus.emit('server-process-released', ownership); } catch {
+        // Internal observers cannot interfere with exact process-close handling.
+      }
+    });
+    const supervisionFailure = () => {
+      if (closedInfo) return;
+      fatal = true;
+      settleAllWaiters(healthFailure());
+      if (supervisionTerminationRequested) return;
+      supervisionTerminationRequested = true;
+      try { child.kill('SIGKILL'); } catch {
+        // The failed launch remains rejected when exact-child termination cannot be confirmed.
+      }
+    };
+    let supervision;
+    try {
+      supervision = requestServerProcessSupervision({
+        eventBus,
+        identity: ownership,
+        onFailure: supervisionFailure,
+        required: supervisionRequired() === true
+      });
+    } catch (error) {
+      // The child already exists. Return its exact handle so the caller can
+      // prove termination; throwing here would discard the only safe cleanup
+      // authority while the operating system may still have a live process.
+      supervisionFailure();
+      supervision = Object.freeze({
+        ready: Promise.resolve().then(() => { throw error; })
+      });
+    }
+    const supervisionReady = Promise.resolve(supervision.ready).then(() => {
+      if (fatal || closedInfo) throw healthFailure();
+      supervisionEstablished = true;
+      settleReadyIfComplete();
+      return ownership;
+    }, error => {
+      supervisionFailure();
+      throw healthFailure(error);
+    });
+    void supervisionReady.catch(() => {});
+
     const handle = {
       child,
       closed,
@@ -353,6 +519,7 @@ function createServerProcessRunner(dependencies = {}) {
       operationId: request.operationId,
       pid,
       publishEvents: request.publishEvents,
+      supervisionReady,
       readyMarkers: Object.freeze([...plan.readyMarkers]),
       isLive() {
         return !fatal && closedInfo === null && child.exitCode === null && child.signalCode === null && !child.killed;
@@ -361,7 +528,7 @@ function createServerProcessRunner(dependencies = {}) {
         const wait = normalizeWaitRequest(inputValue);
         if (wait.signal?.aborted) return Promise.reject(cancelled());
         if (fatal || closedInfo) return Promise.reject(healthFailure());
-        if (readyEvidence) return Promise.resolve(readyEvidence);
+        if (readyEvidence && supervisionEstablished) return Promise.resolve(readyEvidence);
         return new Promise((resolve, reject) => {
           const waiter = { resolve, reject, signal: wait.signal, timer: null, onAbort: null };
           waiter.onAbort = () => settleWaiter(waiter, cancelled());
@@ -374,13 +541,16 @@ function createServerProcessRunner(dependencies = {}) {
         const endpoint = normalizeEndpointRequest(inputValue);
         if (!handle.isLive()) return false;
         try {
-          const endpoints = await waitForPromise(
-            getListeningEndpoints(endpoint),
+          const ownership = await waitForPromise(
+            Promise.all([
+              getListeningEndpoints(endpoint),
+              resolveEndpointHostsOnce(endpoint.host)
+            ]).then(([endpoints, resolvedHosts]) => ({ endpoints, resolvedHosts })),
             { signal: endpoint.signal, timeoutMs: endpoint.timeoutMs },
-            []
+            { endpoints: [], resolvedHosts: new Set() }
           );
-          return handle.isLive() && Array.isArray(endpoints) &&
-            endpoints.some(listener => endpointMatches(listener, endpoint, pid));
+          return handle.isLive() && Array.isArray(ownership.endpoints) &&
+            ownership.endpoints.some(listener => endpointMatches(listener, endpoint, pid, ownership.resolvedHosts));
         } catch (error) {
           if (error instanceof ModpackError && error.code === 'CANCELLED') throw error;
           return false;
@@ -390,12 +560,10 @@ function createServerProcessRunner(dependencies = {}) {
         const stop = normalizeStopRequest(inputValue);
         let forced = false;
         if (!closedInfo) {
-          try {
-            child.stdin.write('stop\n');
-          } catch {
-            // Forced termination below remains available when stdin is closed.
+          const gracefulRequested = writeStdin('stop\n');
+          if (gracefulRequested) {
+            await waitForPromise(closed, { timeoutMs: stop.gracefulTimeoutMs }, null).catch(() => null);
           }
-          await waitForPromise(closed, { timeoutMs: stop.gracefulTimeoutMs }, null).catch(() => null);
         }
         if (!closedInfo) {
           forced = true;

@@ -1,9 +1,12 @@
 <script>
   import { createEventDispatcher } from 'svelte';
+  import ModpackInspectionProgress from '../modpacks/ModpackInspectionProgress.svelte';
 
   const dispatch = createEventDispatcher();
   export let release;
   export let assetResult = { assets: [], choices: [], status: 'ready' };
+  export let busy = false;
+  export let inspectionProgress = null;
   let selectedAssetIds = [];
   let rememberPattern = false;
   let initializedAssetResult = null;
@@ -86,7 +89,7 @@
 </script>
 
 <div class="modpack-surface mp-stack">
-  <div class="mp-toolbar"><div class="grow"><p class="mp-kicker">Uploaded asset review</p><h2 class="mp-title">{release?.name || release?.tagName}</h2><p class="mp-subtitle">Labels are provisional until the selected bytes pass magic, integrity, archive, and runtime inspection.</p></div><button class="mp-button" type="button" on:click={() => dispatch('back')}>Choose another release</button></div>
+  <div class="mp-toolbar"><div class="grow"><p class="mp-kicker">Uploaded asset review</p><h2 class="mp-title">{release?.name || release?.tagName}</h2><p class="mp-subtitle">Labels are provisional until the selected bytes pass format, archive-safety, and runtime inspection. Compressed file data will be verified once during protected setup.</p></div><button class="mp-button" type="button" on:click={() => dispatch('back')}>Choose another release</button></div>
 
   {#if assetResult?.status === 'NO_INSTALLABLE_ASSET'}
     <section class="mp-state warning" tabindex="-1"><strong>NO_INSTALLABLE_ASSET</strong><p>This release has no uploaded ZIP, RAR, or MRPACK candidate. Generated GitHub source archives are not server packs.</p><div class="mp-actions"><button class="mp-button" type="button" on:click={() => dispatch('local')}>Import local archive</button><button class="mp-button" type="button" on:click={() => dispatch('custom')}>Empty/Custom Server</button></div></section>
@@ -97,9 +100,12 @@
         {#each choices as choice (choice.primaryPartId || choice.id || choice.assetId || choice.fileName)}
           {@const ids = choiceIds(choice)}
           {@const unavailable = choice.complete === false || (choice.missingVolumes?.length || 0) > 0}
-          <button type="button" class="mp-row" class:selected={selectedChoice === choice} role="radio" aria-checked={selectedChoice === choice} disabled={unavailable} on:click={() => selectChoice(choice)}>
+          <button type="button" class="mp-row" class:selected={selectedChoice === choice} role="radio" aria-checked={selectedChoice === choice} disabled={unavailable || busy} on:click={() => selectChoice(choice)}>
             <span><strong>{choiceName(choice)}</strong><br /><span class="mp-muted">{ids.length > 1 ? `${ids.length} uploaded parts · ` : ''}{formatBytes(choice.combinedSize || choice.size)} · provisional role: {choice.role || 'Unknown'}</span>{#if unavailable}<br /><span class="mp-danger">Incomplete or ambiguous: {choice.missingVolumes?.join(', ') || 'selection gap requires review'}</span>{/if}</span>
-            <span class="mp-badge {unavailable ? 'danger' : 'warn'}">{unavailable ? 'Unavailable' : 'Provisional'}</span>
+            <span class="choice-badges">
+              {#if selectedChoice === choice}<span class="mp-badge selected-badge"><span aria-hidden="true">✓</span><span>Selected</span></span>{/if}
+              <span class="mp-badge {unavailable ? 'danger' : 'warn'}">{unavailable ? 'Unavailable' : 'Provisional'}</span>
+            </span>
           </button>
         {/each}
       </div>
@@ -112,7 +118,8 @@
         </ul>
       </details>
       <label class="remember"><input type="checkbox" bind:checked={rememberPattern} disabled={selectionBlocked} /><span><strong>Use this asset pattern for future releases</strong><br /><small>This is opt-in. Zero or multiple future matches will still require asset selection.</small></span></label>
-      <div class="mp-actions"><button type="button" class="mp-button primary" disabled={selectionBlocked} on:click={continueWithAsset}>Download and inspect selected asset</button></div>
+      {#if busy}<ModpackInspectionProgress progress={inspectionProgress || { phase: 'resolving' }} />{/if}
+      <div class="mp-actions"><button type="button" class="mp-button primary" disabled={selectionBlocked || busy} on:click={continueWithAsset}>{busy ? 'Inspection in progress…' : 'Download and inspect selected asset'}</button></div>
     </section>
   {/if}
 </div>
@@ -123,4 +130,6 @@
   .remember { display: flex; gap: 0.6rem; align-items: flex-start; }
   .remember input { margin-top: 0.25rem; }
   summary { cursor: pointer; color: #c4c7ff; }
+  .choice-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 0.4rem; }
+  .selected-badge { color: rgba(255, 255, 255, 0.88); border-color: rgba(255, 255, 255, 0.38); background: rgba(255, 255, 255, 0.09); }
 </style>

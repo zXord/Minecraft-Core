@@ -2,10 +2,21 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { createVerifiedZip, enumerateArchiveScope, verifyZipScopeStreaming } = require('../../utils/backup-util.cjs');
-const { strictJsonClone } = require('../../utils/durable-fs.cjs');
+const {
+  createVerifiedZip,
+  enumerateArchiveScopeCooperatively,
+  verifyZipScopeStreaming
+} = require('../../utils/backup-util.cjs');
+const { MAX_FLUSH_DIRECTORIES, strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { withBackupMutationLock } = require('../backup-mutation-lock.cjs');
 const { ModpackError } = require('../modpacks/errors.cjs');
+const {
+  RESTORE_CREATION_KIND,
+  RESTORE_CREATION_SCHEMA_VERSION,
+  identityFromStat,
+  normalizeRestoreCreation,
+  sameIdentity
+} = require('./restore-creation-intent.cjs');
 
 const METADATA_SCHEMA_VERSION = 1;
 const METADATA_KIND = 'minecraft-core-lifecycle-restore-point';
@@ -22,8 +33,41 @@ const REFERENCE_KEYS = new Set([
 ]);
 
 function backupFailure(cause) {
-  if (cause instanceof ModpackError && ['BACKUP_FAILED', 'TARGET_EXISTS'].includes(cause.code)) return cause;
+  if (cause instanceof ModpackError && ['BACKUP_FAILED', 'TARGET_EXISTS', 'CANCELLED'].includes(cause.code)) return cause;
   return new ModpackError('BACKUP_FAILED', 'The lifecycle restore point operation failed', { cause });
+}
+
+function cancelled() {
+  return new ModpackError('CANCELLED', 'The modpack operation was cancelled');
+}
+
+function normalizeSignal(signal) {
+  if (signal === null || signal === undefined) return null;
+  if (!signal || typeof signal !== 'object' || typeof signal.aborted !== 'boolean' ||
+      typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function') {
+    throw backupFailure();
+  }
+  return signal;
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw cancelled();
+}
+
+function createBoundedProgressReporter(onProgress) {
+  if (onProgress === null || onProgress === undefined) return () => {};
+  if (typeof onProgress !== 'function') throw backupFailure();
+  let lastPublishedAt = 0;
+  return (value, { force = false } = {}) => {
+    const now = Date.now();
+    if (!force && now - lastPublishedAt < 250) return;
+    lastPublishedAt = now;
+    try {
+      Promise.resolve(onProgress(Object.freeze(strictJsonClone(value, {
+        maxDepth: 8, maxCollection: 128, maxStringBytes: 4096
+      })))).catch(() => {});
+    } catch { /* progress observers never decide restore-point correctness */ }
+  };
 }
 
 function targetExists() {
@@ -151,6 +195,33 @@ function metadataDigest(metadata) {
   return crypto.createHash('sha256').update(metadataBytes(metadata)).digest('hex');
 }
 
+async function flushDirectoryBatch(durableFs, directoryPaths, signal = null) {
+  throwIfCancelled(signal);
+  const seen = new Set();
+  const unique = [];
+  for (const directoryPath of directoryPaths) {
+    const resolved = path.resolve(directoryPath);
+    const key = process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(resolved);
+  }
+  if (typeof durableFs.flushDirectoriesAsync === 'function') {
+    for (let offset = 0; offset < unique.length; offset += MAX_FLUSH_DIRECTORIES) {
+      throwIfCancelled(signal);
+      await durableFs.flushDirectoriesAsync(unique.slice(offset, offset + MAX_FLUSH_DIRECTORIES));
+      throwIfCancelled(signal);
+    }
+    return;
+  }
+  if (typeof durableFs.flushDirectoryAsync !== 'function') throw backupFailure();
+  for (const directoryPath of unique) {
+    throwIfCancelled(signal);
+    await durableFs.flushDirectoryAsync(directoryPath);
+    throwIfCancelled(signal);
+  }
+}
+
 class RestorePointService {
   constructor({
     fsApi = fs,
@@ -163,8 +234,8 @@ class RestorePointService {
     faultInjector = () => {}
   } = {}) {
     if (!fsApi || typeof fsApi !== 'object' || !durableFs ||
-        typeof durableFs.readFileBounded !== 'function' || typeof durableFs.writeJsonAtomic !== 'function' ||
-        typeof durableFs.renameDurable !== 'function' || typeof durableFs.flushDirectory !== 'function' ||
+        typeof durableFs.readFileBounded !== 'function' || typeof durableFs.writeJsonAtomicAsync !== 'function' ||
+        typeof durableFs.renameDurableAsync !== 'function' || typeof durableFs.flushDirectoryAsync !== 'function' ||
         typeof durableFs.sha256File !== 'function' || typeof clock !== 'function' || typeof randomUUID !== 'function' ||
         typeof createVerifiedZipFn !== 'function' || typeof extractVerifiedArchiveFn !== 'function' ||
         typeof zipStreamVerifier !== 'function' || typeof faultInjector !== 'function') {
@@ -180,42 +251,134 @@ class RestorePointService {
     this.faultInjector = faultInjector;
   }
 
-  async createVerifiedRestorePoint(request) {
-    let normalized;
+  async prepareVerifiedRestorePointCreation(request, options = null) {
+    const normalized = this.#normalizeCreationRequest(request);
+    const operation = this.#normalizeOperationOptions(options, { creation: false });
+    throwIfCancelled(operation.signal);
+    return withBackupMutationLock(normalized.serverPath, () =>
+      this.#prepareVerifiedRestorePointCreationLocked(normalized, operation));
+  }
+
+  async createVerifiedRestorePoint(request, options = null) {
+    const normalized = this.#normalizeCreationRequest(request);
+    let creationIntent = null;
+    let onCreationState = null;
+    let signal = null;
+    let onProgress = null;
     try {
-      assertPlainDataObject(request, new Set(['serverPath', 'operationId', 'sourceRevision', 'sourceRuntime']));
-      if (Object.keys(request).length !== 4) throw backupFailure();
-      const serverPath = this.#assertServer(request.serverPath);
-      const operationId = assertId(request.operationId);
-      if (!Number.isSafeInteger(request.sourceRevision) || request.sourceRevision < 0) throw backupFailure();
-      const sourceRuntime = request.sourceRuntime === null
-        ? null
-        : strictJsonClone(request.sourceRuntime, { maxDepth: 16, maxCollection: 4096, maxStringBytes: 64 * 1024 });
-      if (sourceRuntime !== null) assertPlainDataObject(sourceRuntime);
-      normalized = { serverPath, operationId, sourceRevision: request.sourceRevision, sourceRuntime };
+      if (options !== null) {
+        assertPlainDataObject(options, new Set(['creationIntent', 'onCreationState', 'signal', 'onProgress']));
+        if (!Object.hasOwn(options, 'creationIntent') || !Object.hasOwn(options, 'onCreationState') ||
+            typeof options.onCreationState !== 'function' ||
+            (options.onProgress !== undefined && typeof options.onProgress !== 'function')) throw backupFailure();
+        creationIntent = normalizeRestoreCreation(options.creationIntent, normalized.operationId);
+        if (creationIntent === null || creationIntent.state !== 'prepared' ||
+            creationIntent.sourceRevision !== normalized.sourceRevision) throw backupFailure();
+        onCreationState = options.onCreationState;
+        signal = normalizeSignal(options.signal);
+        onProgress = options.onProgress || null;
+      }
     } catch (error) {
       throw backupFailure(error);
     }
-    return withBackupMutationLock(normalized.serverPath, () => this.#createVerifiedRestorePointLocked(normalized));
+    throwIfCancelled(signal);
+    const operation = { signal, reportProgress: createBoundedProgressReporter(onProgress) };
+    return withBackupMutationLock(normalized.serverPath, async () => {
+      const intent = creationIntent || await this.#prepareVerifiedRestorePointCreationLocked(normalized, operation);
+      return this.#createVerifiedRestorePointLocked(normalized, intent, onCreationState, operation);
+    });
   }
 
-  async #createVerifiedRestorePointLocked(request) {
-    let paths = null;
-    let finalPublished = false;
-    let intendedMetadata = null;
+  async #prepareVerifiedRestorePointCreationLocked(request, operation = { signal: null, reportProgress() {} }) {
     try {
-      const { serverPath, operationId, sourceRuntime } = request;
-      const backupDir = this.#ensureBackupDirectory(serverPath);
-      await this.#recoverPendingRestorePointsLocked(serverPath);
+      const { serverPath, operationId } = request;
+      throwIfCancelled(operation.signal);
       const items = this.#serverItems(serverPath);
-      const expectedScope = enumerateArchiveScope(items, { fsApi: this.fs });
+      operation.reportProgress({ phase: 'scope', processedBytes: 0, totalBytes: null }, { force: true });
+      const expectedScope = await enumerateArchiveScopeCooperatively(items, {
+        fsApi: this.fs,
+        signal: operation.signal
+      });
+      throwIfCancelled(operation.signal);
       const createdAt = this.#now();
       const token = assertId(this.randomUUID());
       const timestamp = createdAt.replaceAll(':', '-');
       const name = `restore-point-${timestamp}-${token}.zip`;
       if (!RESTORE_NAME_PATTERN.test(name)) throw backupFailure();
+      const backupDir = path.join(serverPath, 'backups');
+      let backupDirectory;
+      if (this.#exists(backupDir)) {
+        const stat = this.#assertBackupDirectory(backupDir);
+        backupDirectory = { existed: true, identity: identityFromStat(stat) };
+        for (const candidate of this.#restoreCreationPaths(backupDir, name)) {
+          if (this.#exists(candidate)) throw targetExists();
+        }
+      } else {
+        backupDirectory = { existed: false, identity: null };
+      }
+      return Object.freeze(normalizeRestoreCreation({
+        schemaVersion: RESTORE_CREATION_SCHEMA_VERSION,
+        kind: RESTORE_CREATION_KIND,
+        operationId,
+        name,
+        partName: `${name}.part`,
+        createdAt,
+        sourceRevision: request.sourceRevision,
+        scopeSha256: expectedScope.scopeSha256,
+        backupDirectory,
+        partIdentity: null,
+        archiveSha256: null,
+        archiveSize: null,
+        metadataSha256: null,
+        metadataIdentity: null,
+        state: 'prepared'
+      }, operationId));
+    } catch (error) {
+      throw backupFailure(error);
+    }
+  }
+
+  async #createVerifiedRestorePointLocked(request, creationIntent, onCreationState, operation) {
+    let paths = null;
+    let finalPublished = false;
+    let intendedMetadata = null;
+    let currentIntent = creationIntent;
+    try {
+      const { serverPath, operationId, sourceRuntime } = request;
+      throwIfCancelled(operation.signal);
+      let backupDir = path.join(serverPath, 'backups');
+      if (currentIntent.backupDirectory.existed) {
+        const backupStat = this.#assertBackupDirectory(backupDir);
+        if (!sameIdentity(identityFromStat(backupStat), currentIntent.backupDirectory.identity)) throw backupFailure();
+      } else if (currentIntent.backupDirectory.identity === null) {
+        if (this.#exists(backupDir)) throw backupFailure();
+        this.fs.mkdirSync(backupDir, { recursive: false, mode: 0o700 });
+        await this.durableFs.flushDirectoryAsync(serverPath);
+        const backupStat = this.#assertBackupDirectory(backupDir);
+        const next = normalizeRestoreCreation({
+          ...currentIntent,
+          backupDirectory: { existed: false, identity: identityFromStat(backupStat) }
+        }, operationId);
+        if (onCreationState) await onCreationState(next);
+        currentIntent = next;
+      } else {
+        const backupStat = this.#assertBackupDirectory(backupDir);
+        if (!sameIdentity(identityFromStat(backupStat), currentIntent.backupDirectory.identity)) throw backupFailure();
+      }
+      const items = this.#serverItems(serverPath);
+      const expectedScope = await enumerateArchiveScopeCooperatively(items, {
+        fsApi: this.fs,
+        signal: operation.signal
+      });
+      if (expectedScope.scopeSha256 !== currentIntent.scopeSha256) throw backupFailure();
+      const createdAt = currentIntent.createdAt;
+      const name = currentIntent.name;
+      const namePrefix = `restore-point-${createdAt.replaceAll(':', '-')}-`;
+      if (!name.startsWith(namePrefix)) throw backupFailure();
+      const token = name.slice(namePrefix.length, -4);
+      assertId(token);
       const archivePath = path.join(backupDir, name);
-      const partPath = `${archivePath}.part`;
+      const partPath = path.join(backupDir, currentIntent.partName);
       const metadataPath = archivePath.replace(/\.zip$/, '.json');
       const pendingPath = archivePath.replace(/\.zip$/, '.pending.json');
       paths = { archivePath, metadataPath, partPath, pendingPath };
@@ -227,9 +390,20 @@ class RestorePointService {
         partPath,
         expectedScope,
         fsApi: this.fs,
+        signal: operation.signal,
+        onProgress: progress => operation.reportProgress(progress),
+        onPartCreated: async partIdentity => {
+          const next = normalizeRestoreCreation({ ...currentIntent, partIdentity, state: 'writing' }, operationId);
+          if (onCreationState) await onCreationState(next);
+          currentIntent = next;
+        },
         faultInjector: this.faultInjector
       });
-      const postArchiveScope = enumerateArchiveScope(this.#serverItems(serverPath), { fsApi: this.fs });
+      throwIfCancelled(operation.signal);
+      const postArchiveScope = await enumerateArchiveScopeCooperatively(this.#serverItems(serverPath), {
+        fsApi: this.fs,
+        signal: operation.signal
+      });
       if (JSON.stringify(postArchiveScope) !== JSON.stringify(expectedScope)) throw backupFailure();
       const metadata = normalizeMetadata({
         schemaVersion: METADATA_SCHEMA_VERSION,
@@ -247,15 +421,42 @@ class RestorePointService {
         pins: [operationId]
       });
       intendedMetadata = metadata;
-      this.durableFs.writeJsonAtomic(pendingPath, metadata, { expectedTargetSha256: null });
+      const verifiedIntent = normalizeRestoreCreation({
+        ...currentIntent,
+        archiveSha256: verified.sha256,
+        archiveSize: verified.size,
+        metadataSha256: metadataDigest(metadata),
+        state: 'verified'
+      }, operationId);
+      if (onCreationState) await onCreationState(verifiedIntent);
+      currentIntent = verifiedIntent;
+      await this.#writeIdentityGatedFile(pendingPath, metadataBytes(metadata), async metadataIdentity => {
+        const next = normalizeRestoreCreation({
+          ...currentIntent,
+          metadataIdentity,
+          state: 'metadata-writing'
+        }, operationId);
+        if (onCreationState) await onCreationState(next);
+        currentIntent = next;
+      }, operation.signal);
+      const metadataStaged = normalizeRestoreCreation({ ...currentIntent, state: 'metadata-staged' }, operationId);
+      if (onCreationState) await onCreationState(metadataStaged);
+      currentIntent = metadataStaged;
       await this.faultInjector('before-final-rename');
-      this.durableFs.renameDurable(partPath, archivePath, { expectedSourceSha256: verified.sha256 });
+      throwIfCancelled(operation.signal);
+      await this.durableFs.renameDurableAsync(partPath, archivePath, { expectedSourceSha256: verified.sha256 });
       finalPublished = true;
+      const archivePublished = normalizeRestoreCreation({ ...currentIntent, state: 'archive-published' }, operationId);
+      if (onCreationState) await onCreationState(archivePublished);
+      currentIntent = archivePublished;
       await this.faultInjector('after-final-rename');
       await this.faultInjector('before-pin-persistence');
-      this.durableFs.renameDurable(pendingPath, metadataPath, { expectedSourceSha256: metadataDigest(metadata) });
+      await this.durableFs.renameDurableAsync(pendingPath, metadataPath, { expectedSourceSha256: metadataDigest(metadata) });
+      const published = normalizeRestoreCreation({ ...currentIntent, state: 'published' }, operationId);
+      if (onCreationState) await onCreationState(published);
+      currentIntent = published;
       const reference = this.#reference(serverPath, metadata);
-      await this.#verifyRestorePointLocked(reference);
+      await this.#verifyRestorePointLocked(reference, { recoverPending: false, operation });
       return reference;
     } catch (error) {
       if (paths && finalPublished && intendedMetadata && this.#exists(paths.metadataPath) && !this.#exists(paths.pendingPath)) {
@@ -265,14 +466,149 @@ class RestorePointService {
               JSON.stringify(loaded.metadata) !== JSON.stringify(intendedMetadata)) throw backupFailure();
           await this.#verifyArchive(paths.archivePath, loaded.metadata);
           const reference = this.#reference(request.serverPath, loaded.metadata);
-          await this.#verifyRestorePointLocked(reference);
+          await this.#verifyRestorePointLocked(reference, { recoverPending: false });
           return reference;
         } catch { /* retain the publication uncertainty as a diagnostic failure */ }
       }
       if (paths && !finalPublished && !this.#exists(paths.archivePath)) {
-        for (const candidate of [paths.partPath, paths.pendingPath]) this.#removeOwnedFile(candidate);
+        const removedPart = this.#removeOwnedFile(paths.partPath, currentIntent.partIdentity);
+        const removedMetadata = this.#removeOwnedFile(paths.pendingPath, currentIntent.metadataIdentity);
+        if (removedPart || removedMetadata) {
+          try { await this.durableFs.flushDirectoryAsync(path.dirname(paths.partPath)); }
+          catch { /* retain the primary creation failure */ }
+        }
       }
       throw backupFailure(error);
+    }
+  }
+
+  async cleanupInterruptedRestorePointCreation(request) {
+    let normalized;
+    try {
+      assertPlainDataObject(request, new Set(['serverPath', 'operationId', 'creationIntent']));
+      if (Object.keys(request).length !== 3) throw backupFailure();
+      const serverPath = this.#assertServer(request.serverPath);
+      const operationId = assertId(request.operationId);
+      const creationIntent = normalizeRestoreCreation(request.creationIntent, operationId);
+      normalized = { serverPath, operationId, creationIntent };
+    } catch (error) {
+      throw backupFailure(error);
+    }
+    if (normalized.creationIntent === null) return { cleaned: 0, diagnostics: [] };
+    return withBackupMutationLock(normalized.serverPath, () => this.#cleanupInterruptedRestorePointCreationLocked(normalized));
+  }
+
+  async #cleanupInterruptedRestorePointCreationLocked({ serverPath, creationIntent }) {
+    const backupDir = path.join(serverPath, 'backups');
+    const diagnostics = [];
+    const removals = [];
+    const expectedDirectoryIdentity = creationIntent.backupDirectory.identity;
+    if (!this.#exists(backupDir)) return { cleaned: 0, diagnostics: [] };
+
+    let backupStat;
+    try {
+      backupStat = this.#assertBackupDirectory(backupDir);
+      if (expectedDirectoryIdentity !== null &&
+          !sameIdentity(identityFromStat(backupStat), expectedDirectoryIdentity)) throw backupFailure();
+    } catch {
+      return { cleaned: 0, diagnostics: [{ name: 'backups', reason: 'identity-mismatch' }] };
+    }
+
+    const archivePath = path.join(backupDir, creationIntent.name);
+    const partPath = path.join(backupDir, creationIntent.partName);
+    const metadataPath = archivePath.replace(/\.zip$/u, '.json');
+    const pendingPath = archivePath.replace(/\.zip$/u, '.pending.json');
+    const fileStat = candidate => {
+      if (!this.#exists(candidate)) return null;
+      const stat = this.fs.lstatSync(candidate, { bigint: true });
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n) throw backupFailure();
+      return stat;
+    };
+    const validateStableFile = (candidate, expectedIdentity, expectedSha256 = null) => {
+      const stat = fileStat(candidate);
+      if (!stat || !sameIdentity(identityFromStat(stat), expectedIdentity)) throw backupFailure();
+      if (expectedSha256 !== null && this.durableFs.sha256File(candidate) !== expectedSha256) throw backupFailure();
+      return stat;
+    };
+    const schedule = (candidate, kind, expectedIdentity = null, expectedSha256 = null) => {
+      removals.push({ candidate, kind, expectedIdentity, expectedSha256 });
+    };
+
+    try {
+      const partStat = fileStat(partPath);
+      const archiveStat = fileStat(archivePath);
+      if (partStat && archiveStat) throw backupFailure();
+      if (creationIntent.state === 'prepared') {
+        if (archiveStat || (partStat && partStat.size !== 0n)) throw backupFailure();
+        if (partStat) schedule(partPath, 'empty-part');
+      } else {
+        const ownedPath = partStat ? partPath : (archiveStat ? archivePath : null);
+        if (ownedPath) {
+          validateStableFile(ownedPath, creationIntent.partIdentity,
+            creationIntent.state === 'writing' ? null : creationIntent.archiveSha256);
+          schedule(ownedPath, 'archive', creationIntent.partIdentity,
+            creationIntent.state === 'writing' ? null : creationIntent.archiveSha256);
+        }
+      }
+
+      const pendingStat = fileStat(pendingPath);
+      const metadataStat = fileStat(metadataPath);
+      if (pendingStat && metadataStat) throw backupFailure();
+      const metadataClaimed = [
+        'metadata-writing', 'metadata-staged', 'archive-published', 'published'
+      ].includes(creationIntent.state);
+      if (!metadataClaimed) {
+        if (creationIntent.state === 'verified' && pendingStat && !metadataStat && pendingStat.size === 0n) {
+          schedule(pendingPath, 'empty-metadata');
+        } else if (pendingStat || metadataStat) {
+          throw backupFailure();
+        }
+      } else {
+        const ownedMetadata = pendingStat ? pendingPath : (metadataStat ? metadataPath : null);
+        if (ownedMetadata) {
+          const requireCompleteHash = creationIntent.state !== 'metadata-writing';
+          validateStableFile(ownedMetadata, creationIntent.metadataIdentity,
+            requireCompleteHash ? creationIntent.metadataSha256 : null);
+          schedule(ownedMetadata, 'metadata', creationIntent.metadataIdentity,
+            requireCompleteHash ? creationIntent.metadataSha256 : null);
+        }
+      }
+    } catch {
+      diagnostics.push({ name: creationIntent.name, reason: 'owned-artifact-mismatch' });
+    }
+    if (diagnostics.length > 0) return { cleaned: 0, diagnostics };
+
+    const metadataRemoval = value => ['metadata', 'empty-metadata'].includes(value.kind);
+    removals.sort((left, right) => (metadataRemoval(left) ? -1 : 1) - (metadataRemoval(right) ? -1 : 1));
+    let cleaned = 0;
+    try {
+      for (const removal of removals) {
+        if (['empty-part', 'empty-metadata'].includes(removal.kind)) {
+          const stat = fileStat(removal.candidate);
+          if (!stat || stat.size !== 0n) throw backupFailure();
+        } else if (removal.kind === 'metadata') {
+          validateStableFile(removal.candidate, removal.expectedIdentity, removal.expectedSha256);
+        } else {
+          validateStableFile(removal.candidate, removal.expectedIdentity, removal.expectedSha256);
+        }
+        this.fs.rmSync(removal.candidate, { force: false });
+        await this.durableFs.flushDirectoryAsync(backupDir);
+        cleaned += 1;
+      }
+      const pinnedAfter = this.#assertBackupDirectory(backupDir);
+      if (expectedDirectoryIdentity !== null &&
+          !sameIdentity(identityFromStat(pinnedAfter), expectedDirectoryIdentity)) throw backupFailure();
+      if (!creationIntent.backupDirectory.existed && this.fs.readdirSync(backupDir).length === 0) {
+        if ((expectedDirectoryIdentity === null && creationIntent.state !== 'prepared') ||
+            (expectedDirectoryIdentity !== null && !sameIdentity(identityFromStat(pinnedAfter), expectedDirectoryIdentity))) {
+          throw backupFailure();
+        }
+        this.fs.rmdirSync(backupDir);
+        await this.durableFs.flushDirectoryAsync(serverPath);
+      }
+      return { cleaned, diagnostics: [] };
+    } catch {
+      return { cleaned, diagnostics: [{ name: creationIntent.name, reason: 'cleanup-failed' }] };
     }
   }
 
@@ -282,7 +618,7 @@ class RestorePointService {
   }
 
   async #recoverPendingRestorePointsLocked(serverPath, { discoverFinal = false } = {}) {
-    const backupDir = this.#ensureBackupDirectory(serverPath);
+    const backupDir = await this.#ensureBackupDirectory(serverPath);
     const recovered = [];
     const diagnostics = [];
     for (const name of this.fs.readdirSync(backupDir).filter(candidate => candidate.endsWith('.pending.json')).sort()) {
@@ -296,7 +632,7 @@ class RestorePointService {
           throw backupFailure();
         }
         await this.#verifyArchive(archivePath, pending.metadata);
-        this.durableFs.renameDurable(pendingPath, metadataPath, { expectedSourceSha256: pending.sha256 });
+        await this.durableFs.renameDurableAsync(pendingPath, metadataPath, { expectedSourceSha256: pending.sha256 });
         recovered.push(Object.freeze({ id: pending.metadata.id, name: pending.metadata.name }));
       } catch {
         let reconciled = false;
@@ -341,13 +677,17 @@ class RestorePointService {
     });
   }
 
-  async verifyRestorePoint(reference) {
+  async verifyRestorePoint(reference, options = null) {
     const normalized = this.#normalizeReference(reference);
-    return withBackupMutationLock(normalized.serverPath, () => this.#verifyRestorePointLocked(normalized));
+    const operation = this.#normalizeOperationOptions(options, { creation: false });
+    throwIfCancelled(operation.signal);
+    return withBackupMutationLock(normalized.serverPath, () =>
+      this.#verifyRestorePointLocked(normalized, { operation }));
   }
 
-  async resolveRestorePoint(request) {
+  async resolveRestorePoint(request, options = null) {
     let normalized;
+    let operation;
     try {
       assertPlainDataObject(request, new Set(['serverPath', 'id', 'sha256']));
       if (Object.keys(request).length !== 3) throw backupFailure();
@@ -356,12 +696,13 @@ class RestorePointService {
         id: assertId(request.id),
         sha256: assertHash(request.sha256)
       };
+      operation = this.#normalizeOperationOptions(options, { creation: false });
     } catch (error) {
       throw backupFailure(error);
     }
     return withBackupMutationLock(normalized.serverPath, async () => {
       await this.#recoverPendingRestorePointsLocked(normalized.serverPath);
-      const backupDir = this.#ensureBackupDirectory(normalized.serverPath);
+      const backupDir = await this.#ensureBackupDirectory(normalized.serverPath);
       const matches = [];
       for (const name of this.fs.readdirSync(backupDir)
         .filter(candidate => candidate.endsWith('.json') && !candidate.endsWith('.pending.json'))
@@ -377,16 +718,90 @@ class RestorePointService {
         }
       }
       if (matches.length !== 1) throw backupFailure();
-      await this.#verifyRestorePointLocked(matches[0]);
+      await this.#verifyRestorePointLocked(matches[0], { recoverPending: false, operation });
       return matches[0];
     });
   }
 
-  async #verifyRestorePointLocked(normalized) {
-    await this.#recoverPendingRestorePointsLocked(normalized.serverPath);
+  async listAvailableRestorePoints(request) {
+    let normalized;
+    try {
+      assertPlainDataObject(request, new Set(['serverPath', 'history']));
+      if (Object.keys(request).length !== 2 || !Array.isArray(request.history) || request.history.length > 200) {
+        throw backupFailure();
+      }
+      const history = strictJsonClone(request.history, {
+        maxDepth: 16,
+        maxCollection: 20_000,
+        maxStringBytes: 64 * 1024
+      });
+      normalized = { serverPath: this.#assertServer(request.serverPath), history };
+    } catch (error) {
+      throw backupFailure(error);
+    }
+    return withBackupMutationLock(normalized.serverPath, () => {
+      const backupDir = path.join(normalized.serverPath, 'backups');
+      if (!this.#exists(backupDir)) return Object.freeze([]);
+      this.#assertBackupDirectory(backupDir);
+      const published = [];
+      for (const name of this.fs.readdirSync(backupDir)
+        .filter(candidate => candidate.endsWith('.json') && !candidate.endsWith('.pending.json'))
+        .sort((left, right) => left.localeCompare(right, 'en-US'))) {
+        try {
+          const metadataPath = path.join(backupDir, name);
+          const metadataStat = this.fs.lstatSync(metadataPath, { bigint: true });
+          if (!metadataStat.isFile() || metadataStat.isSymbolicLink() || BigInt(metadataStat.nlink) !== 1n ||
+              !sameLocalPath(this.fs.realpathSync.native(metadataPath), metadataPath)) continue;
+          const loaded = this.#readMetadata(metadataPath).metadata;
+          if (name !== loaded.name.replace(/\.zip$/u, '.json')) continue;
+          const archivePath = path.join(backupDir, loaded.name);
+          const archiveStat = this.fs.lstatSync(archivePath, { bigint: true });
+          if (!archiveStat.isFile() || archiveStat.isSymbolicLink() || BigInt(archiveStat.nlink) !== 1n ||
+              archiveStat.size !== BigInt(loaded.size) ||
+              !sameLocalPath(this.fs.realpathSync.native(archivePath), archivePath)) continue;
+          published.push(loaded);
+        } catch {
+          // Corrupt or unrelated backup metadata cannot authorize a rollback option.
+        }
+      }
+
+      const options = [];
+      const seen = new Set();
+      for (const entry of normalized.history) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+            entry.outcome !== 'completed' || typeof entry.restorePointId !== 'string' ||
+            typeof entry.restorePointSha256 !== 'string' || !entry.sourceRuntime) continue;
+        const matches = published.filter(metadata => metadata.id === entry.restorePointId &&
+          metadata.sha256 === entry.restorePointSha256 && metadata.operationId === entry.operationId &&
+          metadata.sourceRevision === entry.sourceRevision &&
+          JSON.stringify(metadata.sourceRuntime) === JSON.stringify(entry.sourceRuntime) &&
+          (entry.restorePointTotalBytes === undefined ||
+            String(metadata.scope.totalBytes) === entry.restorePointTotalBytes));
+        if (matches.length !== 1 || seen.has(entry.restorePointId)) continue;
+        seen.add(entry.restorePointId);
+        const metadata = matches[0];
+        options.push(Object.freeze({
+          restorePointId: metadata.id,
+          operationKind: assertId(entry.kind),
+          createdAt: metadata.createdAt,
+          sourceRevision: metadata.sourceRevision,
+          runtime: Object.freeze(strictJsonClone(metadata.sourceRuntime)),
+          totalBytes: String(metadata.scope.totalBytes)
+        }));
+      }
+      return Object.freeze(options);
+    });
+  }
+
+  async #verifyRestorePointLocked(normalized, {
+    recoverPending = true,
+    operation = { signal: null, reportProgress() {} }
+  } = {}) {
+    throwIfCancelled(operation.signal);
+    if (recoverPending) await this.#recoverPendingRestorePointsLocked(normalized.serverPath);
     const loaded = this.#readMetadata(normalized.metadataPath);
     this.#assertReferenceMatches(normalized, loaded.metadata);
-    const evidence = await this.#verifyArchive(normalized.archivePath, loaded.metadata);
+    const evidence = await this.#verifyArchive(normalized.archivePath, loaded.metadata, operation);
     return Object.freeze({
       ok: true,
       id: loaded.metadata.id,
@@ -420,8 +835,10 @@ class RestorePointService {
     }
   }
 
-  async restoreToFreshCandidate(reference, destinationValue) {
+  async restoreToFreshCandidate(reference, destinationValue, options = null) {
     const normalized = this.#normalizeReference(reference);
+    const operation = this.#normalizeOperationOptions(options, { creation: false });
+    throwIfCancelled(operation.signal);
     if (typeof destinationValue !== 'string' || !path.isAbsolute(destinationValue) || hasRawTraversal(destinationValue)) {
       throw backupFailure();
     }
@@ -430,11 +847,13 @@ class RestorePointService {
     if (!sameLocalPath(path.dirname(destination), expectedParent) ||
         sameLocalPath(destination, normalized.serverPath)) throw backupFailure();
     return withBackupMutationLock(normalized.serverPath, () =>
-      this.#restoreToFreshCandidateLocked(normalized, destination, expectedParent));
+      this.#restoreToFreshCandidateLocked(normalized, destination, expectedParent, operation));
   }
 
-  async restoreToOwnedCandidate(reference, destinationValue, candidateRootValue) {
+  async restoreToOwnedCandidate(reference, destinationValue, candidateRootValue, options = null) {
     const normalized = this.#normalizeReference(reference);
+    const operation = this.#normalizeOperationOptions(options, { creation: false });
+    throwIfCancelled(operation.signal);
     if (typeof destinationValue !== 'string' || !path.isAbsolute(destinationValue) || hasRawTraversal(destinationValue) ||
         typeof candidateRootValue !== 'string' || !path.isAbsolute(candidateRootValue) || hasRawTraversal(candidateRootValue)) {
       throw backupFailure();
@@ -444,9 +863,12 @@ class RestorePointService {
     const serverParent = path.dirname(normalized.serverPath);
     const candidateName = path.basename(candidateRoot);
     const prefix = `.${path.basename(normalized.serverPath)}.minecraft-core.`;
-    const operationId = candidateName.startsWith(prefix) && candidateName.endsWith('.candidate')
-      ? candidateName.slice(prefix.length, -'.candidate'.length)
-      : '';
+    const compactMatch = /^\.(op2-[0-9a-f]{32})\.c$/u.exec(candidateName);
+    const operationId = compactMatch
+      ? compactMatch[1]
+      : candidateName.startsWith(prefix) && candidateName.endsWith('.candidate')
+        ? candidateName.slice(prefix.length, -'.candidate'.length)
+        : '';
     const operationWorkspace = path.join(candidateRoot, '.minecraft-core-state', 'operations', operationId);
     if (!sameLocalPath(path.dirname(candidateRoot), serverParent) || sameLocalPath(candidateRoot, normalized.serverPath) ||
         !ID_PATTERN.test(operationId) || !sameLocalPath(path.dirname(destination), operationWorkspace) ||
@@ -464,14 +886,47 @@ class RestorePointService {
         !workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() ||
         !sameLocalPath(this.fs.realpathSync.native(operationWorkspace), operationWorkspace)) throw backupFailure();
     return withBackupMutationLock(normalized.serverPath, () =>
-      this.#restoreToFreshCandidateLocked(normalized, destination, operationWorkspace));
+      this.#restoreToFreshCandidateLocked(normalized, destination, operationWorkspace, operation));
   }
 
-  async #restoreToFreshCandidateLocked(normalized, destination, expectedParent) {
+  async #restoreToFreshCandidateLocked(normalized, destination, expectedParent, operation) {
+    let lastProgressPhase = null;
+    const reportProgress = (phase, value = {}, { force = false } = {}) => {
+      const phaseChanged = phase !== lastProgressPhase;
+      const bytesComplete = Number.isSafeInteger(value.totalBytes) && value.totalBytes > 0 &&
+        value.processedBytes === value.totalBytes;
+      const itemsComplete = !Number.isSafeInteger(value.totalItems) || value.totalItems === 0 ||
+        value.processedItems === value.totalItems;
+      lastProgressPhase = phase;
+      operation.reportProgress({
+        phase,
+        processedBytes: Number.isSafeInteger(value.processedBytes) ? value.processedBytes : 0,
+        totalBytes: Number.isSafeInteger(value.totalBytes) ? value.totalBytes : 0,
+        processedItems: Number.isSafeInteger(value.processedItems) ? value.processedItems : 0,
+        totalItems: Number.isSafeInteger(value.totalItems) ? value.totalItems : 0
+      }, { force: force || phaseChanged || (bytesComplete && itemsComplete) });
+    };
+    const verificationOperation = prefix => ({
+      signal: operation.signal,
+      reportProgress(value) {
+        const suffix = value.phase === 'archive-hash' ? 'archive-hash' : 'entry-verification';
+        reportProgress(`${prefix}-${suffix}`, value);
+      }
+    });
+    throwIfCancelled(operation.signal);
     await this.#recoverPendingRestorePointsLocked(normalized.serverPath);
     const initialMetadata = this.#readMetadata(normalized.metadataPath);
     this.#assertReferenceMatches(normalized, initialMetadata.metadata);
-    const initialArchive = await this.#verifyArchive(normalized.archivePath, initialMetadata.metadata);
+    reportProgress('source-verification', {
+      totalBytes: initialMetadata.metadata.scope.totalBytes,
+      totalItems: initialMetadata.metadata.scope.fileCount
+    }, { force: true });
+    const initialArchive = await this.#verifyArchive(
+      normalized.archivePath,
+      initialMetadata.metadata,
+      verificationOperation('source')
+    );
+    throwIfCancelled(operation.signal);
     if (this.#exists(destination)) throw targetExists();
     const parentStat = this.fs.lstatSync(expectedParent, { bigint: true });
     if (!parentStat.isDirectory() || parentStat.isSymbolicLink() ||
@@ -485,7 +940,11 @@ class RestorePointService {
       const currentMetadata = this.#readMetadata(normalized.metadataPath);
       if (currentMetadata.sha256 !== initialMetadata.sha256) throw backupFailure();
       this.#assertReferenceMatches(normalized, currentMetadata.metadata);
-      const currentArchive = await this.#verifyArchive(normalized.archivePath, currentMetadata.metadata);
+      const currentArchive = await this.#verifyArchive(
+        normalized.archivePath,
+        currentMetadata.metadata,
+        verificationOperation('source')
+      );
       if (currentArchive.sha256 !== initialArchive.sha256 || currentArchive.size !== initialArchive.size) throw backupFailure();
       await this.extractVerifiedArchive(Object.freeze({
         archivePath: normalized.archivePath,
@@ -494,26 +953,47 @@ class RestorePointService {
         expectedArchiveSize: currentArchive.size,
         expectedArchiveIdentity: currentArchive.identity,
         expectedScope: Object.freeze(strictJsonClone(currentMetadata.metadata.scope)),
-        operationId: currentMetadata.metadata.operationId
+        operationId: currentMetadata.metadata.operationId,
+        signal: operation.signal,
+        onProgress: value => {
+          if (value.phase !== 'complete') reportProgress(value.phase, value);
+        }
       }));
+      throwIfCancelled(operation.signal);
       const created = this.fs.lstatSync(stagingPath, { bigint: true });
       if (!created.isDirectory() || created.isSymbolicLink() ||
           !sameLocalPath(this.fs.realpathSync.native(stagingPath), stagingPath)) throw backupFailure();
       stagingIdentity = { dev: created.dev, ino: created.ino, birthtimeNs: created.birthtimeNs };
-      const reconstructed = enumerateArchiveScope(this.#serverItems(stagingPath, { excludeBackups: false }), { fsApi: this.fs });
+      const reconstructed = await enumerateArchiveScopeCooperatively(
+        this.#serverItems(stagingPath, { excludeBackups: false }),
+        { fsApi: this.fs, signal: operation.signal }
+      );
       if (JSON.stringify(reconstructed) !== JSON.stringify(currentMetadata.metadata.scope)) throw backupFailure();
       const directories = [stagingPath, ...currentMetadata.metadata.scope.entries
         .filter(entry => entry.type === 'directory')
         .map(entry => path.resolve(stagingPath, ...entry.path.slice(0, -1).split('/')))]
         .sort((left, right) => right.length - left.length);
-      for (const directory of directories) this.durableFs.flushDirectory(directory);
-      this.durableFs.flushDirectory(expectedParent);
+      await flushDirectoryBatch(this.durableFs, [...directories, expectedParent], operation.signal);
       const finalMetadata = this.#readMetadata(normalized.metadataPath);
       if (finalMetadata.sha256 !== initialMetadata.sha256) throw backupFailure();
-      const finalArchive = await this.#verifyArchive(normalized.archivePath, finalMetadata.metadata);
+      reportProgress('output-verification', {
+        totalBytes: currentMetadata.metadata.scope.totalBytes,
+        totalItems: currentMetadata.metadata.scope.fileCount
+      }, { force: true });
+      const finalArchive = await this.#verifyArchive(
+        normalized.archivePath,
+        finalMetadata.metadata,
+        verificationOperation('final')
+      );
       if (finalArchive.sha256 !== initialArchive.sha256 || finalArchive.size !== initialArchive.size) throw backupFailure();
       try {
-        this.durableFs.renameDurable(stagingPath, destination);
+        reportProgress('publication', {
+          processedBytes: currentMetadata.metadata.scope.totalBytes,
+          totalBytes: currentMetadata.metadata.scope.totalBytes,
+          processedItems: currentMetadata.metadata.scope.fileCount,
+          totalItems: currentMetadata.metadata.scope.fileCount
+        }, { force: true });
+        await this.durableFs.renameDurableAsync(stagingPath, destination);
       } catch (renameError) {
         if (!this.#exists(destination) || this.#exists(stagingPath) ||
             !this.#sameDirectoryIdentity(destination, stagingIdentity)) throw renameError;
@@ -524,21 +1004,30 @@ class RestorePointService {
           published.dev !== stagingIdentity.dev || published.ino !== stagingIdentity.ino ||
           published.birthtimeNs !== stagingIdentity.birthtimeNs) throw backupFailure();
       destinationIdentity = { dev: published.dev, ino: published.ino, birthtimeNs: published.birthtimeNs };
-      this.durableFs.flushDirectory(expectedParent);
-      const publishedScope = enumerateArchiveScope(this.#serverItems(destination, { excludeBackups: false }), { fsApi: this.fs });
+      await this.durableFs.flushDirectoryAsync(expectedParent);
+      const publishedScope = await enumerateArchiveScopeCooperatively(
+        this.#serverItems(destination, { excludeBackups: false }),
+        { fsApi: this.fs, signal: operation.signal }
+      );
       if (JSON.stringify(publishedScope) !== JSON.stringify(currentMetadata.metadata.scope)) throw backupFailure();
+      reportProgress('complete', {
+        processedBytes: publishedScope.totalBytes,
+        totalBytes: publishedScope.totalBytes,
+        processedItems: publishedScope.fileCount,
+        totalItems: publishedScope.fileCount
+      }, { force: true });
       return Object.freeze({ ok: true, destination, scopeSha256: publishedScope.scopeSha256 });
     } catch (error) {
       if (stagingIdentity && this.#sameDirectoryIdentity(stagingPath, stagingIdentity)) {
         try {
           this.fs.rmSync(stagingPath, { recursive: true, force: true });
-          this.durableFs.flushDirectory(expectedParent);
+          await this.durableFs.flushDirectoryAsync(expectedParent);
         } catch { /* retain original failure */ }
       }
       if (destinationIdentity && this.#sameDirectoryIdentity(destination, destinationIdentity)) {
         try {
           this.fs.rmSync(destination, { recursive: true, force: true });
-          this.durableFs.flushDirectory(expectedParent);
+          await this.durableFs.flushDirectoryAsync(expectedParent);
         } catch { /* retain original failure */ }
       }
       throw backupFailure(error);
@@ -557,9 +1046,87 @@ class RestorePointService {
     const next = normalizeMetadata({ ...loaded.metadata, pins: [...pins].sort() });
     if (JSON.stringify(next) !== JSON.stringify(loaded.metadata)) {
       await this.faultInjector('before-pin-cas-write');
-      this.durableFs.writeJsonAtomic(normalized.metadataPath, next, { expectedTargetSha256: loaded.sha256 });
+      await this.durableFs.writeJsonAtomicAsync(normalized.metadataPath, next, { expectedTargetSha256: loaded.sha256 });
     }
     return Object.freeze({ pinned: next.pins.length > 0, pins: Object.freeze([...next.pins]) });
+  }
+
+  #normalizeCreationRequest(request) {
+    try {
+      assertPlainDataObject(request, new Set(['serverPath', 'operationId', 'sourceRevision', 'sourceRuntime']));
+      if (Object.keys(request).length !== 4) throw backupFailure();
+      const serverPath = this.#assertServer(request.serverPath);
+      const operationId = assertId(request.operationId);
+      if (!Number.isSafeInteger(request.sourceRevision) || request.sourceRevision < 0) throw backupFailure();
+      const sourceRuntime = request.sourceRuntime === null
+        ? null
+        : strictJsonClone(request.sourceRuntime, { maxDepth: 16, maxCollection: 4096, maxStringBytes: 64 * 1024 });
+      if (sourceRuntime !== null) assertPlainDataObject(sourceRuntime);
+      return { serverPath, operationId, sourceRevision: request.sourceRevision, sourceRuntime };
+    } catch (error) {
+      throw backupFailure(error);
+    }
+  }
+
+  #normalizeOperationOptions(options, { creation }) {
+    try {
+      if (options === null || options === undefined) {
+        return { signal: null, reportProgress: createBoundedProgressReporter(null) };
+      }
+      assertPlainDataObject(options, new Set(['signal', 'onProgress']));
+      if (creation === true) throw backupFailure();
+      return {
+        signal: normalizeSignal(options.signal),
+        reportProgress: createBoundedProgressReporter(options.onProgress || null)
+      };
+    } catch (error) {
+      throw backupFailure(error);
+    }
+  }
+
+  async #writeIdentityGatedFile(filePath, bytes, onCreated, signal = null) {
+    let handle = null;
+    try {
+      if (!Buffer.isBuffer(bytes) || bytes.length < 1 || typeof onCreated !== 'function') throw backupFailure();
+      signal = normalizeSignal(signal);
+      throwIfCancelled(signal);
+      const asyncFsApi = this.fs.promises || fs.promises;
+      if (!asyncFsApi || typeof asyncFsApi.open !== 'function') throw backupFailure();
+      handle = await asyncFsApi.open(filePath, 'wx', 0o600);
+      if (!handle || typeof handle.stat !== 'function' || typeof handle.write !== 'function' ||
+          typeof handle.sync !== 'function' || typeof handle.close !== 'function') throw backupFailure();
+      const created = await handle.stat({ bigint: true });
+      if (!created.isFile() || created.isSymbolicLink() || created.nlink !== 1n || created.size !== 0n) throw backupFailure();
+      const identity = identityFromStat(created);
+      await onCreated(identity);
+      throwIfCancelled(signal);
+      const pinned = await handle.stat({ bigint: true });
+      const linked = this.fs.lstatSync(filePath, { bigint: true });
+      if (!pinned.isFile() || pinned.isSymbolicLink() || pinned.nlink !== 1n || pinned.size !== 0n ||
+          !linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1n || linked.size !== 0n ||
+          !sameIdentity(identityFromStat(pinned), identity) || !sameIdentity(identityFromStat(linked), identity)) throw backupFailure();
+      let offset = 0;
+      while (offset < bytes.length) {
+        throwIfCancelled(signal);
+        const result = await handle.write(bytes, offset, bytes.length - offset, offset);
+        const written = result?.bytesWritten;
+        if (!Number.isSafeInteger(written) || written < 1) throw backupFailure();
+        offset += written;
+      }
+      await handle.sync();
+      const completed = await handle.stat({ bigint: true });
+      if (!sameIdentity(identityFromStat(completed), identity) || completed.size !== BigInt(bytes.length)) throw backupFailure();
+      await handle.close();
+      handle = null;
+      await this.durableFs.flushDirectoryAsync(path.dirname(filePath));
+      if (this.durableFs.sha256File(filePath) !== crypto.createHash('sha256').update(bytes).digest('hex')) throw backupFailure();
+      return identity;
+    } catch (error) {
+      if (handle !== null) {
+        try { await handle.close(); } catch { /* preserve primary failure */ }
+      }
+      throw backupFailure(error);
+    }
   }
 
   #assertServer(value) {
@@ -575,12 +1142,12 @@ class RestorePointService {
     }
   }
 
-  #ensureBackupDirectory(serverPath) {
+  async #ensureBackupDirectory(serverPath) {
     const backupDir = path.join(serverPath, 'backups');
     try {
       if (!this.#exists(backupDir)) {
         this.fs.mkdirSync(backupDir, { recursive: false, mode: 0o700 });
-        this.durableFs.flushDirectory(serverPath);
+        await this.durableFs.flushDirectoryAsync(serverPath);
       }
       const stat = this.fs.lstatSync(backupDir, { bigint: true });
       if (!stat.isDirectory() || stat.isSymbolicLink() || !sameLocalPath(this.fs.realpathSync.native(backupDir), backupDir)) throw backupFailure();
@@ -622,6 +1189,24 @@ class RestorePointService {
     } catch (error) {
       throw backupFailure(error);
     }
+  }
+
+  #assertBackupDirectory(backupDir) {
+    const stat = this.fs.lstatSync(backupDir, { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !sameLocalPath(this.fs.realpathSync.native(backupDir), backupDir)) {
+      throw backupFailure();
+    }
+    return stat;
+  }
+
+  #restoreCreationPaths(backupDir, name) {
+    const archivePath = path.join(backupDir, name);
+    return [
+      archivePath,
+      `${archivePath}.part`,
+      archivePath.replace(/\.zip$/u, '.json'),
+      archivePath.replace(/\.zip$/u, '.pending.json')
+    ];
   }
 
   #reference(serverPath, metadata) {
@@ -680,12 +1265,16 @@ class RestorePointService {
     if (JSON.stringify(reference.sourceRuntime) !== JSON.stringify(expected.sourceRuntime)) throw backupFailure();
   }
 
-  async #verifyArchive(archivePath, metadata) {
+  async #verifyArchive(archivePath, metadata, operation = { signal: null, reportProgress() {} }) {
     try {
+      throwIfCancelled(operation.signal);
       const stat = this.fs.lstatSync(archivePath, { bigint: true });
       if (!stat.isFile() || stat.isSymbolicLink() || Number(stat.size) !== metadata.size ||
           !sameLocalPath(this.fs.realpathSync.native(archivePath), archivePath)) throw backupFailure();
-      const evidence = await this.zipStreamVerifier(archivePath, metadata.scope);
+      const evidence = await this.zipStreamVerifier(archivePath, metadata.scope, {
+        signal: operation.signal,
+        onProgress: progress => operation.reportProgress(progress)
+      });
       if (evidence.archiveSha256 !== metadata.sha256 || evidence.archiveSize !== metadata.size) throw backupFailure();
       return {
         sha256: evidence.archiveSha256,
@@ -707,12 +1296,19 @@ class RestorePointService {
     }
   }
 
-  #removeOwnedFile(candidate) {
+  #removeOwnedFile(candidate, expectedIdentity) {
+    if (expectedIdentity === null || expectedIdentity === undefined) return false;
     try {
       const stat = this.fs.lstatSync(candidate, { bigint: true });
-      if (stat.isFile() && !stat.isSymbolicLink()) this.fs.unlinkSync(candidate);
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n &&
+          sameIdentity(identityFromStat(stat), expectedIdentity)) {
+        this.fs.unlinkSync(candidate);
+        return true;
+      }
     } catch { /* best-effort cleanup before visible publication */ }
+    return false;
   }
+
 }
 
 module.exports = {

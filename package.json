@@ -4,16 +4,27 @@
   "version": "26.6.1",
   "description": "Minecraft Core",
   "author": "zXord",
-  "main": "electron/main.cjs",
+  "main": "electron/startup-entry.cjs",
   "type": "module",
+  "packageManager": "npm@12.0.2",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26"
+  },
   "scripts": {
     "dev": "concurrently -k --success=first \"npm run dev:vite\" \"npm run dev:electron\"",
     "dev:vite": "vite dev",
-    "dev:electron": "wait-on --timeout 30000 http-get://localhost:5173 && electron . || wait-on --timeout 30000 http-get://localhost:5174 && electron .",
-    "test": "node --test",
-    "test:modpacks": "node --test tests/modpacks/*.test.cjs",
+    "dev:electron": "node scripts/start-dev-electron.cjs",
+    "test": "node --test --test-concurrency=4",
+    "test:modpacks": "node --test --test-concurrency=4 tests/modpacks/*.test.cjs",
     "test:failure-matrix": "node --test tests/modpacks/lifecycle-failure-matrix.test.cjs",
-    "test:e2e:modpacks": "playwright test tests/e2e/modpack-setup.spec.js tests/e2e/modpack-lifecycle.spec.js tests/e2e/modpack-recovery-accessibility.spec.js --workers=1",
+    "test:e2e:modpacks": "playwright test tests/e2e/modpack-setup.spec.js tests/e2e/modpack-lifecycle.spec.js tests/e2e/modpack-recovery-accessibility.spec.js tests/e2e/startup-auto-start.spec.js --workers=1",
+    "test:e2e:dev-startup": "playwright test tests/e2e/dev-startup-render.spec.js --workers=1",
+    "test:e2e:ipc-handoff": "playwright test tests/e2e/main-process-ipc-handoff.spec.js --workers=1",
+    "test:e2e:disposable-client-join": "playwright test tests/e2e/disposable-client-join.spec.js --workers=1",
+    "test:e2e:disposable-client-join-continuation": "playwright test tests/e2e/disposable-client-join-continuation.spec.js --workers=1",
+    "test:e2e:real-github-releases": "playwright test tests/e2e/real-github-releases.spec.js --workers=1",
+    "test:e2e:real-tfg": "playwright test tests/e2e/real-terrafirmagreg-inspection.spec.js --workers=1",
+    "test:e2e:real-github-release-monitor": "playwright test tests/e2e/real-github-release-monitor.spec.js --workers=1",
     "smoke:packaged:modpacks": "node scripts/run-modpack-packaged-smoke.mjs",
     "build": "vite build && node scripts/post-build.mjs",
     "build:icons": "node scripts/generate-icon.cjs",
@@ -32,7 +43,7 @@
     "@typescript-eslint/eslint-plugin": "^8.34.0",
     "@typescript-eslint/parser": "^8.34.0",
     "concurrently": "^9.1.2",
-    "electron": "^42.4.1",
+    "electron": "42.10.1",
     "electron-builder": "^26.0.12",
     "eslint": "^9.31.0",
     "eslint-plugin-svelte": "^3.9.2",
@@ -41,8 +52,7 @@
     "rcedit": "^4.0.1",
     "sharp": "^0.33.5",
     "typescript": "^5.8.3",
-    "vite": "^6.0.0",
-    "wait-on": "^7.2.0"
+    "vite": "^6.0.0"
   },
   "dependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.1.0",
@@ -70,12 +80,14 @@
     "selfsigned": "^5.2.0",
     "svelte": "^5.36.8",
     "svelte-sonner": "^1.0.1",
+    "undici": "7.28.0",
     "uuid": "^11.1.1",
-    "yauzl": "2.10.0"
+    "yauzl": "3.4.0"
   },
   "overrides": {
     "undici": "7.28.0",
-    "uuid": "$uuid"
+    "uuid": "$uuid",
+    "yauzl": "3.4.0"
   },
   "build": {
     "appId": "com.minecraft-core.app",

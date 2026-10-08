@@ -47,6 +47,84 @@ function spawnHarness({ stdout = '{"version":1,"isReparsePoint":false}', stderr 
   return { calls, spawnProcess };
 }
 
+function persistentSpawnHarness({
+  isReparsePoint = () => false,
+  responseDelayMsFor = () => 0,
+  exitFor = () => null,
+  responseFor = request => ({
+    id: request.id,
+    version: 1,
+    isReparsePoint: isReparsePoint(request.path)
+  })
+} = {}) {
+  const calls = [];
+  const requests = [];
+  const spawnProcess = (executable, args, options) => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.killed = false;
+    child.closed = false;
+    child.unref = () => {};
+    child.stdin.unref = () => {};
+    child.stdout.unref = () => {};
+    child.stderr.unref = () => {};
+    let buffered = '';
+    const close = (code, signal) => {
+      if (child.closed) return;
+      child.closed = true;
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', code, signal);
+    };
+    const respondPersistent = line => {
+      const request = JSON.parse(line);
+      requests.push(request);
+      const requestedExit = exitFor(request, calls.length);
+      if (requestedExit) {
+        setImmediate(() => close(requestedExit.code, requestedExit.signal ?? null));
+        return;
+      }
+      const response = responseFor(request);
+      if (response === null) return;
+      const respond = () => {
+        if (!child.closed) child.stdout.write(`${typeof response === 'string' ? response : JSON.stringify(response)}\n`);
+      };
+      const delayMs = responseDelayMsFor(request);
+      if (delayMs > 0) setTimeout(respond, delayMs);
+      else respond();
+    };
+    child.kill = () => {
+      child.killed = true;
+      setImmediate(() => close(null, 'SIGTERM'));
+      return true;
+    };
+    child.stdin.on('data', chunk => {
+      buffered += chunk.toString('utf8');
+      for (;;) {
+        const newline = buffered.indexOf('\n');
+        if (newline === -1) break;
+        const line = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        if (line) respondPersistent(line);
+      }
+    });
+    child.stdin.on('finish', () => {
+      if (buffered) {
+        const request = JSON.parse(buffered);
+        requests.push(request);
+        child.stdout.write(JSON.stringify({ version: 1, isReparsePoint: isReparsePoint(request.path) }));
+        buffered = '';
+      }
+      setImmediate(() => close(0, null));
+    });
+    calls.push({ executable, args, options, child });
+    return child;
+  };
+  return { calls, requests, spawnProcess };
+}
+
 class TrackingSignal {
   constructor() {
     this.aborted = false;
@@ -90,6 +168,225 @@ test('inspector sends the absolute path only as bounded UTF-8 JSON stdin to pinn
     stdio: ['pipe', 'pipe', 'pipe']
   });
   assert.deepEqual(JSON.parse(Buffer.concat(call.input).toString('utf8')), { path: selectedPath });
+});
+
+test('persistent inspector compiles one pinned probe and reuses it for sequential file checks', async () => {
+  const harness = persistentSpawnHarness({
+    isReparsePoint: selectedPath => selectedPath.endsWith('junction')
+  });
+  const inspector = new WindowsReparseInspector({
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnProcess: harness.spawnProcess,
+    persistent: true
+  });
+
+  assert.equal(await inspector.isReparsePoint('C:\\private\\regular-one.jar'), false);
+  assert.equal(await inspector.isReparsePoint('C:\\private\\regular-two.jar'), false);
+  assert.equal(await inspector.isReparsePoint('C:\\private\\junction'), true);
+
+  assert.equal(harness.calls.length, 1);
+  assert.deepEqual(harness.requests.map(request => request.path), [
+    'C:\\private\\regular-one.jar',
+    'C:\\private\\regular-two.jar',
+    'C:\\private\\junction'
+  ]);
+  assert.equal(new Set(harness.requests.map(request => request.id)).size, 3);
+  inspector.close();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(harness.calls[0].child.closed, true);
+});
+
+test('persistent inspector gives a cold PowerShell compile a separate bounded startup budget', async () => {
+  const harness = persistentSpawnHarness({ responseDelayMsFor: request => request.id === 1 ? 25 : 0 });
+  const inspector = new WindowsReparseInspector({
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnProcess: harness.spawnProcess,
+    persistent: true,
+    timeoutMs: 5,
+    startupTimeoutMs: 50,
+    idleTimeoutMs: 1_000
+  });
+
+  assert.equal(await inspector.isReparsePoint('C:\\private\\cold-start.jar'), false);
+  assert.equal(await inspector.isReparsePoint('C:\\private\\warm-check.jar'), false);
+  assert.equal(harness.calls.length, 1);
+  inspector.close();
+});
+
+test('persistent inspector retries the exact read-only request once after an unexpected worker exit', async () => {
+  const selectedPath = 'C:\\private\\intermittently-locked.jar';
+  const harness = persistentSpawnHarness({
+    exitFor(_request, spawnCount) {
+      return spawnCount === 1 ? { code: 66 } : null;
+    }
+  });
+  const inspector = new WindowsReparseInspector({
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnProcess: harness.spawnProcess,
+    persistent: true
+  });
+
+  assert.equal(await inspector.isReparsePoint(selectedPath), false);
+  assert.equal(harness.calls.length, 2);
+  assert.deepEqual(harness.requests.map(request => request.path), [selectedPath, selectedPath]);
+  inspector.close();
+});
+
+test('persistent inspector remains fail closed when the replacement worker also exits', async () => {
+  const selectedPath = 'C:\\private\\consistently-uninspectable.jar';
+  const harness = persistentSpawnHarness({ exitFor: () => ({ code: 66 }) });
+  const inspector = new WindowsReparseInspector({
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnProcess: harness.spawnProcess,
+    persistent: true
+  });
+
+  await assert.rejects(
+    inspector.isReparsePoint(selectedPath),
+    error => error.code === 'REPARSE_INSPECTION_FAILED' && !String(error.message).includes(selectedPath)
+  );
+  assert.equal(harness.calls.length, 2);
+  assert.deepEqual(harness.requests.map(request => request.path), [selectedPath, selectedPath]);
+  inspector.close();
+});
+
+test('persistent inspector never retries an unsafe native validation result', async () => {
+  const selectedPath = 'C:\\private\\redirected.jar';
+  const harness = persistentSpawnHarness({ exitFor: () => ({ code: 67 }) });
+  const inspector = new WindowsReparseInspector({
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnProcess: harness.spawnProcess,
+    persistent: true
+  });
+
+  await assert.rejects(
+    inspector.isReparsePoint(selectedPath),
+    error => error.code === 'REPARSE_INSPECTION_FAILED' && !String(error.message).includes(selectedPath)
+  );
+  assert.equal(harness.calls.length, 1);
+  assert.deepEqual(harness.requests.map(request => request.path), [selectedPath]);
+  inspector.close();
+});
+
+test('persistent inspector recovers once during a pack-sized sequence without skipping a path', async () => {
+  const harness = persistentSpawnHarness({
+    exitFor(request) {
+      return request.id === 4097 ? { code: 66 } : null;
+    }
+  });
+  const inspector = new WindowsReparseInspector({
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnProcess: harness.spawnProcess,
+    persistent: true
+  });
+
+  for (let index = 0; index < 5000; index += 1) {
+    assert.equal(await inspector.isReparsePoint(`C:\\private\\pack\\file-${index}.jar`), false);
+  }
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.requests.length, 5001);
+  assert.equal(harness.requests[4096].path, 'C:\\private\\pack\\file-4096.jar');
+  assert.equal(harness.requests[4097].path, 'C:\\private\\pack\\file-4096.jar');
+  inspector.close();
+});
+
+test('persistent inspector fails closed on a mismatched response and restarts for a later request', async () => {
+  const harness = persistentSpawnHarness({
+    responseFor(request) {
+      return {
+        id: request.id === 1 ? request.id + 10 : request.id,
+        version: 1,
+        isReparsePoint: false
+      };
+    }
+  });
+  const inspector = new WindowsReparseInspector({
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnProcess: harness.spawnProcess,
+    persistent: true
+  });
+
+  await assert.rejects(
+    inspector.isReparsePoint('C:\\private\\first.jar'),
+    error => error.code === 'REPARSE_INSPECTION_FAILED'
+  );
+  assert.equal(await inspector.isReparsePoint('C:\\private\\second.jar'), false);
+  assert.equal(harness.calls.length, 2);
+  inspector.close();
+});
+
+test('persistent inspector bounds a stalled worker and cleans cancellation listeners', async (t) => {
+  await t.test('timeout', async () => {
+    const harness = persistentSpawnHarness({ responseFor: () => null });
+    const inspector = new WindowsReparseInspector({
+      platform: 'win32',
+      powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      spawnProcess: harness.spawnProcess,
+      persistent: true,
+      timeoutMs: 10,
+      startupTimeoutMs: 10
+    });
+    await assert.rejects(
+      inspector.isReparsePoint('C:\\private\\stalled.jar'),
+      error => error.code === 'REPARSE_INSPECTION_FAILED'
+    );
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(harness.calls[0].child.closed, true);
+  });
+
+  await t.test('cancellation', async () => {
+    const harness = persistentSpawnHarness({ responseFor: () => null });
+    const signal = new TrackingSignal();
+    const inspector = new WindowsReparseInspector({
+      platform: 'win32',
+      powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      spawnProcess: harness.spawnProcess,
+      persistent: true
+    });
+    const pending = inspector.isReparsePoint('C:\\private\\cancelled.jar', { signal });
+    await new Promise(resolve => setImmediate(resolve));
+    signal.abort();
+    await assert.rejects(pending, error => error.code === 'ABORT_ERR');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(signal.listeners.size, 0);
+    assert.equal(harness.calls[0].child.closed, true);
+  });
+});
+
+test('persistent inspector retains the warm timeout and restarts cold after a stalled request', async () => {
+  const harness = persistentSpawnHarness({
+    responseFor(request) {
+      if (request.id === 2) return null;
+      return { id: request.id, version: 1, isReparsePoint: false };
+    }
+  });
+  const inspector = new WindowsReparseInspector({
+    platform: 'win32',
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnProcess: harness.spawnProcess,
+    persistent: true,
+    timeoutMs: 10,
+    startupTimeoutMs: 50,
+    idleTimeoutMs: 1_000
+  });
+
+  assert.equal(await inspector.isReparsePoint('C:\\private\\first.jar'), false);
+  await assert.rejects(
+    inspector.isReparsePoint('C:\\private\\stalled-warm.jar'),
+    error => error.code === 'REPARSE_INSPECTION_FAILED'
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(harness.calls[0].child.closed, true);
+  assert.equal(await inspector.isReparsePoint('C:\\private\\restarted.jar'), false);
+  assert.equal(harness.calls.length, 2);
+  inspector.close();
 });
 
 test('inspector requires absolute closed inputs and one exact fatal-UTF8 JSON response', async () => {
@@ -182,11 +479,29 @@ test('production Windows inspector detects a real directory junction and permits
   assert.equal(await inspector.isReparsePoint(junction), true);
 });
 
+test('production Windows inspector permits a regular local file beyond legacy MAX_PATH', { skip: process.platform !== 'win32' }, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-reparse-long-path-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const segment = `segment-${'x'.repeat(52)}`;
+  let directory = root;
+  while (path.join(directory, 'regular.jar').length < 320) directory = path.join(directory, segment);
+  await fs.mkdir(directory, { recursive: true });
+  const regular = path.join(directory, 'regular.jar');
+  await fs.writeFile(regular, Buffer.from('regular'));
+  assert.ok(regular.length > 260, 'the regression must exercise a path beyond legacy MAX_PATH');
+
+  const inspector = new WindowsReparseInspector();
+  t.after(() => inspector.close());
+  assert.equal(await inspector.isReparsePoint(regular), false);
+});
+
 test('production probe classifies only name-surrogate tags as redirecting reparses', () => {
   const source = require('node:fs').readFileSync(path.join(__dirname, '..', '..', 'electron', 'services', 'modpacks', 'local', 'windows-reparse-inspector.cjs'), 'utf8');
   assert.match(source, /FileAttributeTagInfo\s*=\s*9/);
   assert.match(source, /0x20000000/);
   assert.match(source, /GetFileInformationByHandle/);
   assert.match(source, /GetFinalPathNameByHandle/);
+  assert.match(source, /afterTag\.FileAttributes\s*&\s*FileAttributeReparsePoint/);
+  assert.doesNotMatch(source, /beforeTag\.FileAttributes\s*!=\s*afterTag\.FileAttributes/);
   assert.doesNotMatch(source, /FileAttributes\.ReparsePoint\)\s*!=\s*0\s*\}\s*$/m);
 });

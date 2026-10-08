@@ -156,6 +156,7 @@ $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
 $startInfo.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
 $startInfo.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+$startInfo.Environment['DOTNET_BUNDLE_EXTRACT_BASE_DIR'] = $published.FullName
 $selfTestProcess = [Diagnostics.Process]::new()
 $selfTestProcess.StartInfo = $startInfo
 $selfTestTimedOut = $false
@@ -210,11 +211,12 @@ $manifestDirectory = Resolve-ExactDirectory -Path $manifestDirectory -Label 'man
 $manifestTarget = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $manifestDirectory 'archive-worker-x64.json') -Label 'manifest target'
 $manifestStage = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $manifestDirectory (".archive-worker-x64.stage-{0}.json" -f [Guid]::NewGuid().ToString('N'))) -Label 'manifest stage'
 $manifest = [ordered]@{
-  schemaVersion = 1
+  schemaVersion = 2
   architecture = 'x64'
   runtimeIdentifier = 'win-x64'
   targetFramework = 'net8.0-windows'
   sdkVersion = '10.0.204'
+  runtimeMode = 'in-memory-single-file'
   files = [ordered]@{
     'ArchiveWorker.exe' = [ordered]@{ size = $publishedSize; sha256 = $publishedHash }
   }

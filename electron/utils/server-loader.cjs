@@ -94,22 +94,16 @@ function readServerConfig(serverPath) {
 }
 
 function detectExactPreparedRuntime(serverPath) {
-  const metadataPath = path.join(serverPath, '.minecraft-core-state', 'runtime.json');
   try {
-    const stat = fs.lstatSync(metadataPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 2 * 1024 * 1024) throw runtimeIncomplete();
-    const parsed = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-    const runtime = parsed?.runtime;
-    if (!runtime || !['neoforge', 'quilt'].includes(runtime.loaderFamily)) throw runtimeIncomplete();
-    const { validatePreparedRuntime } = require('../services/loader-install-service.cjs');
-    const validation = validatePreparedRuntime(serverPath, runtime);
+    const { inspectPreparedRuntime } = require('../services/loader-install-service.cjs');
+    const validation = inspectPreparedRuntime(serverPath);
+    if (!validation) return null;
     return {
       loader: validation.runtime.loaderFamily,
       loaderVersion: validation.runtime.loaderVersion,
       detectedFrom: 'runtime-metadata'
     };
   } catch (error) {
-    if (error?.code === 'ENOENT') return null;
     if (error?.code === 'RUNTIME_INCOMPLETE') throw error;
     throw runtimeIncomplete();
   }

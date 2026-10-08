@@ -39,7 +39,12 @@ function harness(routes, dnsAnswers = {}) {
   return { client: new PinnedHttpsClient({ lookup, request }), calls, lookupCalls };
 }
 
-function invalid(error) { return error?.code === 'INVALID_RELEASE_URL'; }
+function invalid(error) { return error?.code === 'INVALID_RELEASE_URL' && error.retryable === false; }
+function timedOut(error) {
+  return error?.code === 'INVALID_RELEASE_URL' && error.retryable === true &&
+    error.safeMessage === 'Remote release request timed out' &&
+    JSON.stringify(error.toPublicResult().error.details) === '{}';
+}
 
 test('a redirect to a private address is rejected before a body is read', async () => {
   const publicUrl = 'https://public.example/start';
@@ -134,6 +139,35 @@ test('pinned redirects remain inside the exact allowed origin set and reject exp
   assert.equal(alternate.calls.length, 0);
 });
 
+test('one same-origin redirect succeeds but a cross-origin or second redirect is rejected at the configured cap', async () => {
+  const sameOrigin = harness({
+    'https://api.github.com/repos/owner/repo': { statusCode: 301, headers: { location: '/repositories/123' } },
+    'https://api.github.com/repositories/123': { body: 'ok' }
+  });
+  const response = await sameOrigin.client.request('https://api.github.com/repos/owner/repo', {
+    allowedHosts: ['api.github.com'], allowedOrigins: ['https://api.github.com'], maxRedirects: 1
+  });
+  response.destroy();
+  assert.equal(sameOrigin.calls.length, 2);
+
+  const crossOrigin = harness({
+    'https://api.github.com/repos/owner/repo': { statusCode: 301, headers: { location: 'https://evil.example/repositories/123' } }
+  });
+  await assert.rejects(crossOrigin.client.request('https://api.github.com/repos/owner/repo', {
+    allowedHosts: ['api.github.com'], allowedOrigins: ['https://api.github.com'], maxRedirects: 1
+  }), invalid);
+  assert.equal(crossOrigin.calls.length, 1);
+
+  const secondHop = harness({
+    'https://api.github.com/repos/owner/repo': { statusCode: 301, headers: { location: '/repositories/123' } },
+    'https://api.github.com/repositories/123': { statusCode: 301, headers: { location: '/repositories/123/releases' } }
+  });
+  await assert.rejects(secondHop.client.request('https://api.github.com/repos/owner/repo', {
+    allowedHosts: ['api.github.com'], allowedOrigins: ['https://api.github.com'], maxRedirects: 1
+  }), invalid);
+  assert.equal(secondHop.calls.length, 2);
+});
+
 test('request and redirect failures expose no query, token, provider body, or URL in ModpackError', async () => {
   const secretUrl = 'https://cdn.example/file?token=top-secret';
   const h = harness({ [secretUrl]: { error: new Error(`provider failed for ${secretUrl}: private-body`) } });
@@ -183,6 +217,73 @@ test('abort before connect returns CANCELLED without DNS or request activity', a
   const client = new PinnedHttpsClient({ lookup: async () => { lookups += 1; return [{ address: '8.8.8.8', family: 4 }]; }, request: () => { requests += 1; } });
   await assert.rejects(client.request('https://cdn.example/file', { allowedHosts: ['cdn.example'], signal: controller.signal }), error => error.code === 'CANCELLED');
   assert.equal(lookups, 0); assert.equal(requests, 0); assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('an internal request deadline bounds a DNS lookup that never resolves', { timeout: 500 }, async () => {
+  let requests = 0;
+  const client = new PinnedHttpsClient({
+    lookup: async () => new Promise(() => {}),
+    requestTimeoutMs: 25,
+    request: () => { requests += 1; assert.fail('a DNS timeout must not open an HTTPS request'); }
+  });
+  await assert.rejects(
+    client.request('https://cdn.example/file', { allowedHosts: ['cdn.example'] }),
+    timedOut
+  );
+  assert.equal(requests, 0);
+});
+
+test('an internal request deadline destroys a pending HTTPS request before response headers', { timeout: 500 }, async () => {
+  let destroyed = false;
+  const request = () => {
+    const pending = new EventEmitter();
+    pending.end = () => {};
+    pending.destroy = error => {
+      destroyed = true;
+      queueMicrotask(() => pending.emit('error', error));
+    };
+    return pending;
+  };
+  const client = new PinnedHttpsClient({
+    lookup: async () => [{ address: '8.8.8.8', family: 4 }],
+    request,
+    requestTimeoutMs: 25
+  });
+  await assert.rejects(
+    client.request('https://cdn.example/file', { allowedHosts: ['cdn.example'] }),
+    timedOut
+  );
+  assert.equal(destroyed, true);
+});
+
+test('the pinned header deadline does not interrupt a readable artifact response', async () => {
+  let scheduled = false;
+  const delayed = new Readable({
+    read() {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(() => this.push('artifact-body'), 50);
+      setTimeout(() => this.push(null), 55);
+    }
+  });
+  delayed.statusCode = 200;
+  delayed.headers = {};
+  delayed.socket = { remoteAddress: '8.8.8.8' };
+  const request = (_url, _options, callback) => {
+    const pending = new EventEmitter();
+    pending.end = () => callback(delayed);
+    pending.destroy = error => error && queueMicrotask(() => pending.emit('error', error));
+    return pending;
+  };
+  const client = new PinnedHttpsClient({
+    lookup: async () => [{ address: '8.8.8.8', family: 4 }],
+    request,
+    requestTimeoutMs: 25
+  });
+  const response = await client.request('https://cdn.example/file', { allowedHosts: ['cdn.example'] });
+  let body = '';
+  for await (const chunk of response) body += chunk;
+  assert.equal(body, 'artifact-body');
 });
 
 test('abort during a pending request destroys it, returns CANCELLED, and removes listeners', async () => {

@@ -185,7 +185,23 @@ function createArtifactSetPlan(input) {
   });
 }
 
-function finalizeVerifiedArtifactSet(plan, verifiedParts) {
+function normalizeVerifiedWarnings(value) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 256) invalidRequest('Verified artifact warnings are invalid', 'warnings');
+  const seen = new Set();
+  return value.map((warning, index) => {
+    assertPlainObject(warning, `warnings.${index}`);
+    assertKnownKeys(warning, ['code', 'partId'], `warnings.${index}`);
+    if (warning.code !== 'MISSING_PROVIDER_DIGEST') invalidRequest('Verified artifact warning is invalid', `warnings.${index}.code`);
+    const partId = assertIdentifier(warning.partId, `warnings.${index}.partId`);
+    const key = `${warning.code}:${partId}`;
+    if (seen.has(key)) invalidRequest('Verified artifact warnings are duplicated', 'warnings');
+    seen.add(key);
+    return { code: warning.code, partId };
+  });
+}
+
+function finalizeVerifiedArtifactSet(plan, verifiedParts, warningsValue) {
   const reviewedPlan = revalidateArtifactSetPlan(plan);
   if (!Array.isArray(verifiedParts) || verifiedParts.length !== reviewedPlan.artifactSet.parts.length) invalidRequest('Verified artifact parts are invalid', 'verifiedParts');
   const verifiedById = new Map();
@@ -210,12 +226,14 @@ function finalizeVerifiedArtifactSet(plan, verifiedParts) {
     return { ...plannedPart, measuredSize: measured.measuredSize, calculatedDigests: measured.calculatedDigests };
   });
   const artifactSet = { ...reviewedPlan.artifactSet, parts, setDigest: computeArtifactSetDigest(parts) };
+  const warnings = normalizeVerifiedWarnings(warningsValue);
   const verifiedArtifactSet = deepFreeze({
     type: 'verified-artifact-set',
     provider: reviewedPlan.provider,
     ...(reviewedPlan.project ? { project: reviewedPlan.project } : {}),
     ...(reviewedPlan.release ? { release: reviewedPlan.release } : {}),
-    artifactSet
+    artifactSet,
+    ...(warnings === undefined ? {} : { warnings })
   });
   APP_ISSUED_VERIFIED_ARTIFACT_SETS.add(verifiedArtifactSet);
   return verifiedArtifactSet;

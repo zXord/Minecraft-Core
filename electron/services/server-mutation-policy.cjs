@@ -3,6 +3,10 @@ const path = require('node:path');
 
 const { ModpackError } = require('./modpacks/errors.cjs');
 const { getServerMutationCoordinator } = require('./server-mutation-context.cjs');
+const CLIENT_SAFE_SETTINGS_CHANNELS = new Set([
+  'minecraft-auth', 'minecraft-save-auth', 'minecraft-import-auth-from-instance', 'minecraft-check-refresh-auth',
+  'minecraft-clear-auth', 'set-download-preferences', 'save-client-config'
+]);
 
 const CORE_SERVER_WRITER_POLICIES = Object.freeze({
   'write-config': policy('write-config', 'payload:serverPath'),
@@ -46,11 +50,7 @@ const CORE_SERVER_WRITER_POLICIES = Object.freeze({
 
 const CONTENT_SERVER_WRITER_POLICIES = Object.freeze({
   'start-management-server': serverContentPolicy('start-management-server', 'payload:serverPath|instanceId'),
-  'update-management-server-path': serverContentPolicy('update-management-server-path', 'payload:serverPath|instanceId'),
   'set-management-server-external-host': serverContentPolicy('set-management-server-external-host', 'payload:serverPath|instanceId'),
-  'get-management-invite-info': serverContentPolicy('ensure-management-invite', 'payload:serverPath|instanceId', {
-    markOnSuccess: false
-  }),
   'set-management-invite-host': serverContentPolicy('set-management-invite-host', 'payload:serverPath|instanceId'),
   'regenerate-management-invite-secret': serverContentPolicy('regenerate-management-invite-secret', 'payload:serverPath|instanceId'),
 
@@ -309,6 +309,18 @@ function selectorKey(selector) {
   return normalizePathKey(selector.serverPath) || `id:${selector.instanceId}`;
 }
 
+function assertSecondaryWriteDestination(channel, payload, selector) {
+  let destination;
+  if (channel === 'disable-client-mod') destination = payload?.modFilePath;
+  else if (channel === 'update-client-mod') destination = payload?.modInfo?.currentFilePath;
+  else if (channel === 'auto-redownload-corrupted-file') destination = payload?.filePath;
+  if (destination !== undefined && destination !== null && destination !== '') {
+    const modsRoot = path.join(selector.serverPath, 'mods');
+    if (!normalizePathKey(destination) || !pathIsInside(destination, modsRoot) ||
+        normalizePathKey(destination) === normalizePathKey(modsRoot)) throw invalidRequest();
+  }
+}
+
 function resolveManySelectors(args, getInstances) {
   const current = registeredInstances(getInstances, ['server']);
   const incoming = normalizeInstances(args[0]).filter(instance => instance.type === 'server');
@@ -349,6 +361,7 @@ function defaultOperationId() {
 function createServerMutationPolicy({
   coordinator = getServerMutationCoordinator(),
   getInstances = () => [],
+  getClientPackIntegration = null,
   createOperationId = defaultOperationId
 } = {}) {
   if (!coordinator || typeof coordinator.runMutation !== 'function' ||
@@ -361,6 +374,10 @@ function createServerMutationPolicy({
     if (!descriptor || descriptor.kind === 'manual' || descriptor.kind === 'internal') return handler;
 
     return async function coordinatedServerWriter(event, ...args) {
+      if (channel === 'save-client-config') {
+        // Saving a connection is never authority to seed or replace personal game files.
+        args = [{ ...args[0], initializeMultiplayer: false }, ...args.slice(1)];
+      }
       const operationId = createOperationId(channel);
       const options = {
         operation: descriptor.operation,
@@ -372,6 +389,15 @@ function createServerMutationPolicy({
         const selectors = resolveManySelectors(args, getInstances);
         if (selectors.length === 0) return handler(event, ...args);
         return coordinator.runManyMutations(selectors, options, async leases => {
+          const clients = registeredInstances(getInstances, ['client']);
+          for (const selector of selectors) {
+            if (clients.some(client => pathIsInside(selector.serverPath, client.path) || pathIsInside(client.path, selector.serverPath))) throw invalidRequest();
+            if (getClientPackIntegration) {
+              const integration = getClientPackIntegration();
+              if (!integration?.assertServerDestination) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client ownership services are not ready');
+              await integration.assertServerDestination(selector.serverPath);
+            }
+          }
           const result = await handler(event, ...args);
           if (descriptor.markOnSuccess && mutationSucceeded(result)) {
             for (const lease of leases) lease.markDirty();
@@ -382,8 +408,32 @@ function createServerMutationPolicy({
 
       const selector = resolveSingleSelector(descriptor, args, getInstances);
       if (!selector) return handler(event, ...args);
+      assertSecondaryWriteDestination(channel, args[0], selector);
       return coordinator.runMutation(selector, options, async lease => {
-        const result = await handler(event, ...args);
+        const perform = () => handler(event, ...args);
+        let result;
+        const clients = registeredInstances(getInstances, ['client']).filter(instance =>
+          pathIsInside(selector.serverPath, instance.path) || pathIsInside(instance.path, selector.serverPath));
+        if (getClientPackIntegration && clients.length) {
+          if (clients.length !== 1 || !descriptor.instanceTypes?.includes('client') ||
+              !pathIsInside(selector.serverPath, clients[0].path)) throw invalidRequest();
+          const client = clients[0];
+          if (channel === 'minecraft-launch' || CLIENT_SAFE_SETTINGS_CHANNELS.has(channel)) result = await perform();
+          else {
+            const integration = getClientPackIntegration();
+            if (!integration || typeof integration.runLegacyMutation !== 'function') {
+              throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client services are not ready');
+            }
+            result = await integration.runLegacyMutation({ clientId: client.id, clientPath: client.path }, perform);
+          }
+        } else {
+          if (getClientPackIntegration && !CLIENT_SAFE_SETTINGS_CHANNELS.has(channel)) {
+            const integration = getClientPackIntegration();
+            if (!integration?.assertServerDestination) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client ownership services are not ready');
+            await integration.assertServerDestination(selector.serverPath);
+          }
+          result = await perform();
+        }
         if (descriptor.markOnSuccess && mutationSucceeded(result)) lease.markDirty();
         return result;
       });

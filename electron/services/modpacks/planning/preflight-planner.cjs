@@ -7,7 +7,7 @@ const { computePreflightReserve, parseNonNegativeBytes } = require('../limits.cj
 const { matchAssetPattern } = require('../providers/github-asset-pattern.cjs');
 const { normalizeAcceptedMapping } = require('../state/modpack-state-repository.cjs');
 const { canonicalPath, getAppIssuedOwnershipDecisions, isAppIssuedOwnershipPlan } = require('./ownership-planner.cjs');
-const { computePreflightPlanFingerprint } = require('./plan-fingerprint.cjs');
+const { PREFLIGHT_PLAN_JSON_LIMITS, computePreflightPlanFingerprint } = require('./plan-fingerprint.cjs');
 
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -32,7 +32,7 @@ function fail(code = 'INVALID_REQUEST', field, details) {
 }
 
 function clone(value, field) {
-  try { return strictJsonClone(value); }
+  try { return strictJsonClone(value, PREFLIGHT_PLAN_JSON_LIMITS); }
   catch { fail('INVALID_REQUEST', field); }
 }
 
@@ -71,6 +71,30 @@ function githubRepo(value, field) {
     fail('INVALID_REQUEST', field);
   }
   return value;
+}
+
+function githubReleaseMetadata(value) {
+  const supplied = [value.channel, value.prerelease, value.publishedAt].filter(item => item !== undefined).length;
+  if (supplied === 0) return null;
+  if (supplied !== 3 || !['release', 'prerelease'].includes(value.channel) || typeof value.prerelease !== 'boolean' ||
+      value.channel !== (value.prerelease ? 'prerelease' : 'release') ||
+      typeof value.publishedAt !== 'string' || value.publishedAt.length > 64) fail('INVALID_REQUEST', 'source');
+  let publishedAt;
+  try { publishedAt = new Date(value.publishedAt).toISOString(); } catch { fail('INVALID_REQUEST', 'source.publishedAt'); }
+  if (publishedAt !== value.publishedAt) fail('INVALID_REQUEST', 'source.publishedAt');
+  return { channel: value.channel, prerelease: value.prerelease, publishedAt };
+}
+
+function modrinthReleaseMetadata(value) {
+  const supplied = [value.channel, value.prerelease, value.publishedAt].filter(item => item !== undefined).length;
+  if (supplied === 0) return null;
+  if (supplied !== 3 || !['release', 'beta', 'alpha'].includes(value.channel) ||
+      typeof value.prerelease !== 'boolean' || value.prerelease !== (value.channel !== 'release') ||
+      typeof value.publishedAt !== 'string' || value.publishedAt.length > 64) fail('INVALID_REQUEST', 'source');
+  let publishedAt;
+  try { publishedAt = new Date(value.publishedAt).toISOString(); } catch { fail('INVALID_REQUEST', 'source.publishedAt'); }
+  if (publishedAt !== value.publishedAt) fail('INVALID_REQUEST', 'source.publishedAt');
+  return { channel: value.channel, prerelease: value.prerelease, publishedAt };
 }
 
 function digest(value, field) {
@@ -122,6 +146,30 @@ function runtimeChoice(value) {
   };
 }
 
+function maxRamChoice(value) {
+  if (value === null || value === undefined) return null;
+  if (!Number.isSafeInteger(value) || value < 1 || value > 64) {
+    fail('INVALID_REQUEST', 'selections.maxRam');
+  }
+  return value;
+}
+
+function serverPortChoice(value) {
+  if (value === null || value === undefined) return null;
+  if (!Number.isSafeInteger(value) || value < 1025 || value > 65535) {
+    fail('INVALID_REQUEST', 'selections.serverPort');
+  }
+  return value;
+}
+
+function networkAccessChoice(value) {
+  if (value === null || value === undefined) return null;
+  if (!['pack-default', 'loopback'].includes(value)) {
+    fail('INVALID_REQUEST', 'selections.networkAccess');
+  }
+  return value;
+}
+
 function normalizeOperation(value) {
   exact(value, ['kind', 'serverKind', 'instanceId', 'expectedContentRevision', 'downgrade'], 'operation');
   if (!OPERATIONS.has(value.kind) || !['new', 'existing'].includes(value.serverKind) || typeof value.downgrade !== 'boolean') fail('INVALID_REQUEST', 'operation');
@@ -139,7 +187,7 @@ function normalizeOperation(value) {
 function normalizeSource(value) {
   exact(value, [
     'provider', 'projectId', 'versionId', 'repositoryId', 'releaseId', 'importId', 'artifactSha256', 'version',
-    'githubOwner', 'githubRepo', 'assetPattern', 'acceptedMapping'
+    'githubOwner', 'githubRepo', 'channel', 'prerelease', 'publishedAt', 'assetPattern', 'acceptedMapping'
   ], 'source', ['provider', 'version']);
   const common = { provider: value.provider, version: version(value.version, 'source.version') };
   if (value.provider === 'github') {
@@ -154,12 +202,14 @@ function normalizeSource(value) {
     }
     const acceptedMapping = value.acceptedMapping === undefined ? undefined : normalizeAcceptedMapping(value.acceptedMapping, 'source.acceptedMapping');
     if (acceptedMapping && acceptedMapping.githubRepositoryId !== repositoryId) fail('INVALID_REQUEST', 'source.acceptedMapping');
+    const releaseMetadata = githubReleaseMetadata(value);
     return {
       ...common,
       repositoryId,
       releaseId,
       githubOwner: githubOwner(value.githubOwner, 'source.githubOwner'),
       githubRepo: githubRepo(value.githubRepo, 'source.githubRepo'),
+      ...(releaseMetadata || {}),
       ...(assetPattern === undefined ? {} : { assetPattern }),
       ...(acceptedMapping === undefined ? {} : { acceptedMapping })
     };
@@ -171,16 +221,19 @@ function normalizeSource(value) {
     const projectId = id(value.projectId, 'source.projectId');
     const acceptedMapping = value.acceptedMapping === undefined ? undefined : normalizeAcceptedMapping(value.acceptedMapping, 'source.acceptedMapping');
     if (acceptedMapping && acceptedMapping.modrinthProjectId !== projectId) fail('INVALID_REQUEST', 'source.acceptedMapping');
+    const releaseMetadata = modrinthReleaseMetadata(value);
     return {
       ...common,
       projectId,
       versionId: id(value.versionId, 'source.versionId'),
+      ...(releaseMetadata || {}),
       ...(acceptedMapping === undefined ? {} : { acceptedMapping })
     };
   }
   if (value.provider === 'local') {
     if (value.projectId !== undefined || value.versionId !== undefined || value.repositoryId !== undefined || value.releaseId !== undefined ||
         value.githubOwner !== undefined || value.githubRepo !== undefined ||
+        value.channel !== undefined || value.prerelease !== undefined || value.publishedAt !== undefined ||
         value.assetPattern !== undefined || value.acceptedMapping !== undefined) fail('INVALID_REQUEST', 'source');
     return { ...common, importId: id(value.importId, 'source.importId'), artifactSha256: digest(value.artifactSha256, 'source.artifactSha256') };
   }
@@ -288,14 +341,20 @@ function normalizeRestorePoints(value) {
   if (!Array.isArray(value) || value.length > 1024) fail('INVALID_REQUEST', 'restorePoints');
   const result = value.map((entry, index) => {
     const field = `restorePoints.${index}`;
-    exact(entry, ['id', 'sha256', 'sourceRevision', 'runtime', 'worldIncluded'], field);
+    exact(
+      entry,
+      ['id', 'sha256', 'sourceRevision', 'runtime', 'worldIncluded', 'totalBytes'],
+      field,
+      ['id', 'sha256', 'sourceRevision', 'runtime', 'worldIncluded']
+    );
     if (typeof entry.worldIncluded !== 'boolean') fail('INVALID_REQUEST', `${field}.worldIncluded`);
     return {
       id: id(entry.id, `${field}.id`),
       sha256: digest(entry.sha256, `${field}.sha256`),
       sourceRevision: revision(entry.sourceRevision, `${field}.sourceRevision`),
       runtime: runtime(entry.runtime, `${field}.runtime`),
-      worldIncluded: entry.worldIncluded
+      worldIncluded: entry.worldIncluded,
+      ...(entry.totalBytes === undefined ? {} : { totalBytes: bytes(entry.totalBytes, `${field}.totalBytes`).toString() })
     };
   }).sort((left, right) => left.id.localeCompare(right.id, 'en-US'));
   if (new Set(result.map(entry => entry.id)).size !== result.length) fail('INVALID_REQUEST', 'restorePoints');
@@ -305,7 +364,7 @@ function normalizeRestorePoints(value) {
 function normalizeSelections(value) {
   exact(value, [
     'optionalFileIds', 'conflictChoices', 'acknowledgeMissingProviderDigest', 'acknowledgeDowngradeWorldRisk',
-    'selectedRoot', 'runtimeChoice'
+    'selectedRoot', 'runtimeChoice', 'maxRam', 'serverPort', 'networkAccess'
   ], 'selections', ['optionalFileIds', 'conflictChoices', 'acknowledgeMissingProviderDigest', 'acknowledgeDowngradeWorldRisk']);
   if (!Array.isArray(value.optionalFileIds) || typeof value.acknowledgeMissingProviderDigest !== 'boolean' ||
       typeof value.acknowledgeDowngradeWorldRisk !== 'boolean') fail('INVALID_REQUEST', 'selections');
@@ -324,7 +383,10 @@ function normalizeSelections(value) {
     acknowledgeMissingProviderDigest: value.acknowledgeMissingProviderDigest,
     acknowledgeDowngradeWorldRisk: value.acknowledgeDowngradeWorldRisk,
     selectedRoot,
-    runtimeChoice: runtimeChoice(value.runtimeChoice)
+    runtimeChoice: runtimeChoice(value.runtimeChoice),
+    maxRam: maxRamChoice(value.maxRam),
+    serverPort: serverPortChoice(value.serverPort),
+    networkAccess: networkAccessChoice(value.networkAccess)
   };
 }
 
@@ -398,7 +460,8 @@ function buildPreflightPlan(inputValue) {
     : runtime(input.runtime, 'runtime');
   const inspection = normalizeInspection(input.inspection);
   const snapshot = normalizeServerSnapshot(input.serverSnapshot, {
-    allowNullRuntime: operation.kind === 'files-only' && operation.serverKind === 'new'
+    allowNullRuntime: (operation.kind === 'files-only' && operation.serverKind === 'new') ||
+      (operation.kind === 'install' && operation.serverKind === 'existing')
   });
   const ownershipEvidence = normalizeOwnershipPlan(input.ownershipPlan, inputValue.ownershipPlan);
   const ownership = ownershipEvidence.plan;
@@ -411,12 +474,27 @@ function buildPreflightPlan(inputValue) {
   if ((operation.kind === 'files-only') !== (inspection.kind === 'files-only')) fail('INVALID_REQUEST', 'inspection.kind');
   if (operation.kind === 'files-only') {
     if (selections.runtimeChoice !== null || snapshot.sourceRuntime !== null) fail('INVALID_REQUEST', 'selections.runtimeChoice');
+    if (selections.maxRam !== null) fail('INVALID_REQUEST', 'selections.maxRam');
+    if (selections.serverPort !== null) fail('INVALID_REQUEST', 'selections.serverPort');
+    if (selections.networkAccess !== null) fail('INVALID_REQUEST', 'selections.networkAccess');
   } else if (selections.runtimeChoice !== null && (
     selections.runtimeChoice.minecraftVersion !== targetRuntime.minecraftVersion ||
     selections.runtimeChoice.loaderFamily !== targetRuntime.loaderFamily ||
     selections.runtimeChoice.loaderVersion !== targetRuntime.loaderVersion
   )) {
     fail('INVALID_REQUEST', 'selections.runtimeChoice');
+  }
+  if (operation.kind !== 'files-only') {
+    if (operation.serverKind === 'new') {
+      if (selections.maxRam === null) fail('INVALID_REQUEST', 'selections.maxRam');
+      if (selections.serverPort === null) fail('INVALID_REQUEST', 'selections.serverPort');
+      if (selections.networkAccess === null) fail('INVALID_REQUEST', 'selections.networkAccess');
+    }
+    if (operation.serverKind === 'existing') {
+      if (selections.maxRam !== null) fail('INVALID_REQUEST', 'selections.maxRam');
+      if (selections.serverPort !== null) fail('INVALID_REQUEST', 'selections.serverPort');
+      if (selections.networkAccess !== null) fail('INVALID_REQUEST', 'selections.networkAccess');
+    }
   }
 
   const missingProviderDigest = source.provider === 'github' && artifact.parts.some(part => part.providerDigest === null);
@@ -427,9 +505,7 @@ function buildPreflightPlan(inputValue) {
     fail('INVALID_REQUEST', 'selections.acknowledgeMissingProviderDigest');
   }
   if (operation.downgrade) {
-    const compatibleRestore = restorePoints.some(point => point.sourceRevision === snapshot.contentRevision && point.worldIncluded &&
-      JSON.stringify(point.runtime) === JSON.stringify(snapshot.sourceRuntime));
-    if (!selections.acknowledgeDowngradeWorldRisk || !compatibleRestore) fail('INVALID_REQUEST', 'restorePoints');
+    if (!selections.acknowledgeDowngradeWorldRisk) fail('INVALID_REQUEST', 'restorePoints');
   } else if (selections.acknowledgeDowngradeWorldRisk) {
     fail('INVALID_REQUEST', 'selections.acknowledgeDowngradeWorldRisk');
   }
@@ -446,10 +522,22 @@ function buildPreflightPlan(inputValue) {
   const sourceIdentity = source.provider === 'github'
     ? {
         provider: 'github', repositoryId: source.repositoryId, releaseId: source.releaseId,
-        githubOwner: source.githubOwner, githubRepo: source.githubRepo, version: source.version
+        githubOwner: source.githubOwner, githubRepo: source.githubRepo, version: source.version,
+        ...(source.channel === undefined ? {} : {
+          channel: source.channel,
+          prerelease: source.prerelease,
+          publishedAt: source.publishedAt
+        })
       }
     : source.provider === 'modrinth'
-      ? { provider: 'modrinth', projectId: source.projectId, versionId: source.versionId, version: source.version }
+      ? {
+          provider: 'modrinth', projectId: source.projectId, versionId: source.versionId, version: source.version,
+          ...(source.channel === undefined ? {} : {
+            channel: source.channel,
+            prerelease: source.prerelease,
+            publishedAt: source.publishedAt
+          })
+        }
       : { provider: 'local', importId: source.importId, artifactSha256: source.artifactSha256, version: source.version };
   const verifiedRestorePointRequired = operation.serverKind === 'existing' && operation.kind !== 'detach';
   const preconditions = {
@@ -503,12 +591,20 @@ function buildPreflightPlan(inputValue) {
   return plan;
 }
 
-function assertPlanStillValid(planValue, snapshotValue) {
-  if (!planValue || typeof planValue !== 'object' || !APP_ISSUED_PREFLIGHT_PLANS.has(planValue)) fail('PLAN_STALE');
+function assertPlanStillValid(planValue, snapshotValue, options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options) ||
+      Object.getPrototypeOf(options) !== Object.prototype ||
+      Object.keys(options).some(key => key !== 'skipAvailableCapacity') ||
+      (options.skipAvailableCapacity !== undefined && typeof options.skipAvailableCapacity !== 'boolean')) {
+    fail('INVALID_REQUEST', 'options');
+  }
+  if (!planValue || typeof planValue !== 'object' || !APP_ISSUED_PREFLIGHT_PLANS.has(planValue)) {
+    fail('PLAN_STALE', 'plan');
+  }
   const plan = clone(planValue, 'plan');
   const snapshot = clone(snapshotValue, 'currentSnapshot');
   if (!plan || plan.type !== 'modpack-preflight-plan' || plan.schemaVersion !== 1 ||
-      computePreflightPlanFingerprint(plan) !== plan.fingerprint) fail('PLAN_STALE');
+      computePreflightPlanFingerprint(plan) !== plan.fingerprint) fail('PLAN_STALE', 'plan');
   exact(snapshot, [
     'contentRevision', 'pathPreconditions', 'sourceIdentity', 'artifactSetDigest', 'artifactPartsFingerprint', 'runtime',
     'inspectionFingerprint', 'ownershipFingerprint', 'selectionsFingerprint', 'restorePointsFingerprint',
@@ -532,9 +628,12 @@ function assertPlanStillValid(planValue, snapshotValue) {
     operationFingerprint: snapshot.operationFingerprint
   };
   for (const [key, value] of Object.entries(checks)) {
-    if (JSON.stringify(value) !== JSON.stringify(plan.preconditions[key])) fail('PLAN_STALE');
+    if (JSON.stringify(value) !== JSON.stringify(plan.preconditions[key])) fail('PLAN_STALE', key);
   }
-  if (bytes(snapshot.availableBytes, 'currentSnapshot.availableBytes') < BigInt(plan.preconditions.minimumAvailableBytes)) fail('PLAN_STALE');
+  if (options.skipAvailableCapacity !== true &&
+      bytes(snapshot.availableBytes, 'currentSnapshot.availableBytes') < BigInt(plan.preconditions.minimumAvailableBytes)) {
+    fail('PLAN_STALE', 'availableBytes');
+  }
   return planValue;
 }
 

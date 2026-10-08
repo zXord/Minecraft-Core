@@ -9,8 +9,10 @@
   import { validateServerPath } from '../../utils/folderUtils.js';
   import { errorMessage } from '../../stores/modStore.js';
   import { settingsStore, loadSettings } from '../../stores/settingsStore.js';
-  import { latestVersions, refreshLatestVersions } from '../../stores/versionUpdates.js';
+  import { refreshLatestVersions } from '../../stores/versionUpdates.js';
+  import { navigate } from '../../router.js';
   import logger from '../../utils/logger.js';
+  import { getInviteDisplayState } from '../../utils/server/inviteDisplayState.js';
   
   // Import compareVersions function for semantic version comparison
   function compareVersions(versionA, versionB) {
@@ -65,9 +67,13 @@
   
   export let serverPath = '';
   export let currentInstance = null;
+  export let modpackManaged = null;
+  export let modpackStateGeneration = 0;
   let activeServerConfig = null;
+  let serverConfigLoading = false;
   let serverConfigRequestId = 0;
   let lastLoadedServerPath = '';
+  let lastLoadedModpackStateGeneration = 0;
   let minecraftPortConflict = null;
   let managementPortConflict = null;
   
@@ -202,10 +208,12 @@
     managementPortConflict = nextManagementConflict;
   }
 
-  // Reactive config loading when server path changes
+  // Refresh installed runtime after lifecycle changes, even when the path stays the same.
   $: {
-    if (serverPath && serverPath !== lastLoadedServerPath) {
+    if (serverPath && (serverPath !== lastLoadedServerPath || modpackStateGeneration !== lastLoadedModpackStateGeneration)) {
       lastLoadedServerPath = serverPath;
+      lastLoadedModpackStateGeneration = modpackStateGeneration;
+      activeServerConfig = null;
       updateChecked = false;
       clearAllPortConflicts();
       void loadServerConfig(serverPath);
@@ -219,6 +227,7 @@
 
   async function loadServerConfig(path) {
     const requestId = ++serverConfigRequestId;
+    serverConfigLoading = true;
     try {
       const configResult = await window.electron.invoke('read-config', path);
 
@@ -238,6 +247,8 @@
         activeServerConfig = null;
       }
       return null;
+    } finally {
+      if (requestId === serverConfigRequestId && path === serverPath) serverConfigLoading = false;
     }
   }
   // Server status tracking - use reactive statements only for display, not for overriding loaded values
@@ -248,12 +259,18 @@
   let managementSettingsLoaded = false;
   let connectedClients = 0;
   let inviteLink = '';
+  let inviteConfigured;
   let inviteHostInput = '';
   let inviteWarning = '';
   let inviteError = '';
   let inviteCopied = false;
   let inviteStatus = 'idle';
   let lastInviteKey = '';
+  $: inviteDisplayState = getInviteDisplayState({
+    configured: inviteConfigured,
+    inviteLink,
+    status: inviteStatus
+  });
   const MANAGEMENT_STATUS_VALUES = new Set(['running', 'stopped', 'starting', 'stopping', 'unknown', 'error']);
   let managementStatusSyncLock = false;
 
@@ -297,8 +314,9 @@
       lastInviteKey = inviteKey;
       loadInviteInfo();
     }
-  } else if (!serverPath && (inviteLink || inviteHostInput)) {
+  } else if (!serverPath && (inviteLink || inviteHostInput || inviteConfigured !== undefined)) {
     inviteLink = '';
+    inviteConfigured = undefined;
     inviteHostInput = '';
     inviteWarning = '';
     inviteError = '';
@@ -579,16 +597,28 @@
   }
   
   // Version update tracking
+  let latestVersionInfo = null;
+  let versionCheckRequestId = 0;
+  let versionCheckScope = '';
+  let updateChecked = false;
+  $: nextVersionCheckScope = JSON.stringify([serverPath, currentInstanceId, modpackManaged, modpackStateGeneration]);
+  $: if (versionCheckScope !== nextVersionCheckScope) {
+    versionCheckScope = nextVersionCheckScope;
+    versionCheckRequestId += 1;
+    latestVersionInfo = null;
+    updateChecked = false;
+    if (modpackManaged === false && serverPath) void checkVersionUpdates();
+  }
   $: currentVersionContext = getVersionContext(activeServerConfig);
   $: currentMcVersion = currentVersionContext.mcVersion;
   $: currentLoaderType = currentVersionContext.loader;
   $: currentLoaderVersion = currentVersionContext.loaderVersion;
-  $: latestMcVersion = $latestVersions.mc;
-  $: latestLoaderVersionForCurrentMc = $latestVersions.loaderVersion || $latestVersions.fabric;
-  $: latestLoaderTargetMc = $latestVersions.targetMc || latestMcVersion || currentMcVersion;
+  $: latestMcVersion = latestVersionInfo?.mc;
+  $: latestLoaderVersionForCurrentMc = latestVersionInfo?.loaderVersion || latestVersionInfo?.fabric;
+  $: latestLoaderTargetMc = latestVersionInfo?.targetMc || latestMcVersion || currentMcVersion;
   $: mcUpdateAvailable = currentMcVersion && latestMcVersion && compareVersions(latestMcVersion, currentMcVersion) > 0;
   $: latestLoaderVersion = mcUpdateAvailable
-    ? ($latestVersions.targetLoaderVersion || $latestVersions.targetFabric || latestLoaderVersionForCurrentMc)
+    ? (latestVersionInfo?.targetLoaderVersion || latestVersionInfo?.targetFabric || latestLoaderVersionForCurrentMc)
     : latestLoaderVersionForCurrentMc;
   $: loaderUpdateLabel = formatLoaderName(currentLoaderType);
   $: loaderUpdateAvailable = currentLoaderType !== 'vanilla' && currentLoaderVersion && latestLoaderVersion && compareVersions(latestLoaderVersion, currentLoaderVersion) > 0;
@@ -597,16 +627,25 @@
     && !!currentMcVersion
     && latestLoaderTargetMc !== currentMcVersion;
 
-  let updateChecked = false;
   $: upToDate = updateChecked && !mcUpdateAvailable && !loaderUpdateAvailable && latestMcVersion && (currentLoaderType === 'vanilla' || latestLoaderVersion);
 
   async function getActiveVersionContext() {
     const config = serverPath ? await loadServerConfig(serverPath) : activeServerConfig;
-    return getVersionContext(config || activeServerConfig);
+    return config ? getVersionContext(config) : null;
   }
 
   async function checkVersionUpdates() {
+    if (modpackManaged !== false || !serverPath) return;
+    const requestId = ++versionCheckRequestId;
+    const requestedServerPath = serverPath;
+    const requestedInstanceId = currentInstanceId;
+    const isCurrent = () => requestId === versionCheckRequestId
+      && modpackManaged === false && serverPath === requestedServerPath
+      && currentInstanceId === requestedInstanceId;
+    updateChecked = false;
+    latestVersionInfo = null;
     const versionContext = await getActiveVersionContext();
+    if (!isCurrent() || !versionContext?.mcVersion) return;
 
     logger.info('Checking for version updates', {
       category: 'ui',
@@ -620,7 +659,10 @@
       });
     
     try {
-      await refreshLatestVersions(versionContext.mcVersion, versionContext.loader);
+      const latest = await refreshLatestVersions(versionContext.mcVersion, versionContext.loader);
+      if (!isCurrent()) return;
+      latestVersionInfo = latest;
+      updateChecked = latest !== null;
       
       logger.info('Version update check completed', {
         category: 'ui',
@@ -629,10 +671,10 @@
           function: 'checkVersionUpdates',
           mcUpdateAvailable,
           loaderUpdateAvailable,
-          latestMcVersion: $latestVersions.mc,
-          latestLoaderVersion: $latestVersions.targetLoaderVersion || $latestVersions.targetFabric || $latestVersions.loaderVersion || $latestVersions.fabric,
-          latestLoaderTargetMc: $latestVersions.targetMc || $latestVersions.mc,
-          latestLoaderType: $latestVersions.loader
+          latestMcVersion: latest?.mc,
+          latestLoaderVersion: latest?.targetLoaderVersion || latest?.targetFabric || latest?.loaderVersion || latest?.fabric,
+          latestLoaderTargetMc: latest?.targetMc || latest?.mc,
+          latestLoaderType: latest?.loader
         }
       });
     } catch (error) {
@@ -645,8 +687,6 @@
         }
       });
     }
-    
-    updateChecked = true;
   }
   
   // Helper function to enable input fields
@@ -745,10 +785,13 @@
     inviteCopied = false;
     if (!serverPath) {
       inviteLink = '';
+      inviteConfigured = undefined;
       inviteHostInput = '';
       return;
     }
     inviteStatus = 'loading';
+    inviteLink = '';
+    inviteConfigured = undefined;
     try {
       const result = await window.electron.invoke('get-management-invite-info', {
         instanceId: currentInstanceId,
@@ -757,6 +800,11 @@
       });
       if (result && result.success) {
         inviteLink = result.inviteLink || '';
+        inviteConfigured = getInviteDisplayState({
+          configured: result.configured,
+          requiresSetup: result.requiresSetup,
+          inviteLink
+        }).configured;
         inviteHostInput = result.configuredHost || '';
         inviteWarning = result.usesPublicHost
           ? 'Public IPs can change. Use a static domain for a stable invite link.'
@@ -908,11 +956,25 @@
     
     try {
       applyServerStatus('Stopping', { clearPlayers: false });
-      await window.electron.invoke('stop-server', {
+      const stopResult = await window.electron.invoke('stop-server', {
         instanceId: currentInstanceId,
         targetPath: serverPath
       });
       await checkServerStatus();
+      if (stopResult?.success !== true) {
+        const message = stopResult?.error || 'The server did not finish stopping. Try again or use Kill.';
+        logger.error('Failed to stop server', {
+          category: 'ui',
+          data: {
+            component: 'ServerControls',
+            function: 'stopServer',
+            errorMessage: message
+          }
+        });
+        errorMessage.set(message);
+        setTimeout(() => errorMessage.set(''), 7000);
+        return;
+      }
       logger.debug('Server stop command sent successfully', {
         category: 'ui',
         data: {
@@ -921,7 +983,7 @@
         }
       });
     } catch (error) {
-      applyServerStatus('Running', { clearPlayers: false });
+      await checkServerStatus();
       logger.error('Failed to stop server', {
         category: 'ui',
         data: {
@@ -1052,14 +1114,6 @@
         // Initial status check
         await checkServerStatus();
 
-        // Fetch latest version info for update notification
-        const versionContext = await getActiveVersionContext();
-        await refreshLatestVersions(
-          versionContext.mcVersion,
-          versionContext.loader
-        );
-        updateChecked = true;
-        
         // Load management server status on mount (but don't override saved port setting)
         try {
           const result = await window.electron.invoke('get-management-server-status', {
@@ -1146,6 +1200,7 @@
   });
 
   onDestroy(() => {
+    versionCheckRequestId += 1;
     // Clean up event listeners and intervals
     document.removeEventListener('visibilitychange', handleVisibilityChange);
     if (statusCheckInterval) {
@@ -1429,22 +1484,39 @@
   <div class="compact-header">
     <h3>Minecraft Server Control Panel</h3>
     <div class="header-actions">
-      <button class="check-updates-button" on:click={checkVersionUpdates}>Check Updates</button>
-      {#if mcUpdateAvailable || loaderUpdateAvailable}
+      {#if modpackManaged === true}
         <span class="update-notice">
-          {#if mcUpdateAvailable}
-            MC {currentMcVersion} → {latestMcVersion}
+          {#if serverConfigLoading}
+            Loading installed runtime…
+          {:else if activeServerConfig?.version}
+            MC {activeServerConfig.version} • {formatLoaderName(resolveConfigLoader(activeServerConfig))}
+            {activeServerConfig.loaderVersion || activeServerConfig.fabric || ''}
+          {:else}
+            Installed runtime unavailable
           {/if}
-          {#if loaderUpdateAvailable}
-            {#if mcUpdateAvailable}<span class="update-separator"> • </span>{/if}
-            {loaderUpdateLabel} {currentLoaderVersion} → {latestLoaderVersion}
-            {#if loaderTargetsDifferentMc}
-              <span class="update-context">(for MC {latestLoaderTargetMc})</span>
-            {/if}
-          {/if}
+          <span class="update-context">Managed by modpack</span>
         </span>
-      {:else if upToDate}
-        <span class="update-notice up-to-date">All versions are up to date</span>
+        <button class="check-updates-button" on:click={() => navigate('/modpack')}>Modpack versions</button>
+      {:else if modpackManaged === false}
+        <button class="check-updates-button" on:click={checkVersionUpdates}>Check Updates</button>
+        {#if mcUpdateAvailable || loaderUpdateAvailable}
+          <span class="update-notice">
+            {#if mcUpdateAvailable}
+              MC {currentMcVersion} → {latestMcVersion}
+            {/if}
+            {#if loaderUpdateAvailable}
+              {#if mcUpdateAvailable}<span class="update-separator"> • </span>{/if}
+              {loaderUpdateLabel} {currentLoaderVersion} → {latestLoaderVersion}
+              {#if loaderTargetsDifferentMc}
+                <span class="update-context">(for MC {latestLoaderTargetMc})</span>
+              {/if}
+            {/if}
+          </span>
+        {:else if upToDate}
+          <span class="update-notice up-to-date">All versions are up to date</span>
+        {/if}
+      {:else}
+        <span class="update-notice">Version status unavailable</span>
       {/if}
     </div>
   </div>
@@ -1693,13 +1765,13 @@
               type="text"
               readonly
               value={inviteLink}
-              placeholder="Loading invite link..."
+              placeholder={inviteDisplayState.placeholder}
             />
             <button class="btn-compact" type="button" on:click={copyInviteLink} disabled={!inviteLink}>
               {inviteCopied ? 'Copied' : 'Copy'}
             </button>
             <button class="btn-compact" type="button" on:click={regenerateInviteSecret} disabled={inviteStatus === 'saving'}>
-              Regenerate
+              {inviteDisplayState.actionLabel}
             </button>
           </div>
           {#if inviteWarning}

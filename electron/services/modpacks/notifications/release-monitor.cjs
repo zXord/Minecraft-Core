@@ -6,6 +6,7 @@ const { matchAssetPatternProvisional } = require('../providers/github-asset-patt
 const BASE_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const MIN_BACKOFF_MS = 15 * 60 * 1000;
 const MAX_BACKOFF_MS = BASE_INTERVAL_MS;
+const MAX_PROVIDER_RETRY_MS = 24 * 60 * 60 * 1000;
 const SOURCE_CHANGED = 'source-changed';
 
 function invalid(cause) {
@@ -87,15 +88,41 @@ function isDue(record, now) {
   return now >= next;
 }
 
-function retryAfterFrom(error) {
-  const candidate = error?.details?.retryAfterAt || error?.details?.rateLimitResetAt || null;
-  if (typeof candidate !== 'string') return null;
-  const milliseconds = Date.parse(candidate);
-  return Number.isFinite(milliseconds) ? milliseconds : null;
+function retryAfterFrom(error, now) {
+  if (error?.code !== 'RATE_LIMITED') return null;
+  const value = error.retryMetadata;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype ||
+      Object.getOwnPropertySymbols(value).length !== 0) throw invalid();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Object.keys(descriptors);
+  const required = ['retryAfterMs', 'backoffMs', 'nextAttemptAfterMs'];
+  if (keys.some(key => ![...required, 'rateLimitResetAt'].includes(key)) || required.some(key => !Object.hasOwn(descriptors, key)) ||
+      Object.values(descriptors).some(descriptor => !descriptor.enumerable || !Object.hasOwn(descriptor, 'value'))) throw invalid();
+  const retryAfterMs = descriptors.retryAfterMs.value;
+  const backoffMs = descriptors.backoffMs.value;
+  const nextAttemptAfterMs = descriptors.nextAttemptAfterMs.value;
+  if (!Number.isSafeInteger(retryAfterMs) || retryAfterMs < 0 || retryAfterMs > MAX_PROVIDER_RETRY_MS ||
+      !Number.isSafeInteger(backoffMs) || backoffMs < 1 || backoffMs > MAX_PROVIDER_RETRY_MS ||
+      !Number.isSafeInteger(nextAttemptAfterMs) || nextAttemptAfterMs < Math.max(retryAfterMs, backoffMs) ||
+      nextAttemptAfterMs > MAX_PROVIDER_RETRY_MS) throw invalid();
+  if (descriptors.rateLimitResetAt) {
+    const rateLimitResetAt = descriptors.rateLimitResetAt.value;
+    if (typeof rateLimitResetAt !== 'string' || rateLimitResetAt.length > 64) throw invalid();
+    let canonical;
+    try { canonical = new Date(rateLimitResetAt).toISOString(); } catch { throw invalid(); }
+    if (canonical !== rateLimitResetAt) throw invalid();
+  }
+  return now + nextAttemptAfterMs;
 }
 
 function sourceId(record) {
   return record.provider === 'github' ? record.repositoryId : record.projectId;
+}
+
+function repositoryNotFound(repositoryId) {
+  return new ModpackError('REPOSITORY_NOT_FOUND', 'GitHub repository was not found', {
+    details: { provider: 'github', repositoryId }
+  });
 }
 
 function provisionalAssetChoices(value) {
@@ -192,24 +219,38 @@ class ReleaseMonitor {
         ? await provider.checkLatest(record)
         : await this.#checkProvider(provider, record);
       const result = normalizeCheckResult(raw, record);
-      if (!result.notModified && result.snapshot) await this.#notifyChange(record, result.snapshot);
+      const orderingBaselineKnown = record.provider === 'github' || record.lastSuccessfulCheck !== null ||
+        record.lastSnapshot?.orderingKnown === true;
+      const olderDifferentRelease = orderingBaselineKnown && result.snapshot !== null && record.lastSnapshot !== null &&
+        result.snapshot.releaseId !== record.lastSnapshot.releaseId &&
+        result.snapshot.publishedAt <= record.lastSnapshot.publishedAt;
+      const snapshotToPersist = olderDifferentRelease ? record.lastSnapshot : result.snapshot;
+      const normalizingInstalledGitHubBaseline = record.provider === 'github' && record.lastSuccessfulCheck === null &&
+        record.lastSnapshot?.releaseId === result.snapshot?.releaseId;
+      if (!result.notModified && result.snapshot && !normalizingInstalledGitHubBaseline && !olderDifferentRelease) {
+        await this.#notifyChange(record, result.snapshot);
+      }
       const nextDueAt = iso(now + deterministicInterval(record.trackingId));
       await this.trackingStore.recordSuccess(record.trackingId, {
         checkedAt: iso(now),
         etag: result.etag,
         nextDueAt,
-        snapshot: result.snapshot
+        snapshot: snapshotToPersist
       });
-      return deepFreeze({ checked: true, changed: !result.notModified, nextDueAt, trackingId: record.trackingId });
+      return deepFreeze({ checked: true, changed: !result.notModified && !olderDifferentRelease, nextDueAt, trackingId: record.trackingId });
     } catch (error) {
       const priorAttempts = record.lastFailure?.attempt || 0;
       const attempt = Math.min(64, priorAttempts + 1);
       const exponential = Math.min(MAX_BACKOFF_MS, MIN_BACKOFF_MS * (2 ** Math.min(10, attempt - 1)));
-      const retryAfter = retryAfterFrom(error);
-      const next = Math.max(now + exponential, retryAfter || 0);
-      const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code)
+      let code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code)
         ? error.code
         : 'PROVIDER_UNAVAILABLE';
+      let retryAfter = null;
+      if (code === 'RATE_LIMITED') {
+        try { retryAfter = retryAfterFrom(error, now); }
+        catch { code = 'PROVIDER_UNAVAILABLE'; }
+      }
+      const next = Math.max(now + exponential, retryAfter || 0);
       await this.trackingStore.recordFailure(record.trackingId, {
         code,
         at: iso(now),
@@ -240,10 +281,21 @@ class ReleaseMonitor {
   async #checkProvider(provider, record) {
     if (record.provider === 'github') {
       if (typeof provider.listReleases !== 'function' || typeof provider.loadUploadedAssets !== 'function') throw invalid();
+      let owner = record.githubOwner;
+      let repo = record.githubRepo;
+      if (typeof provider.getRepositoryIdentity === 'function') {
+        const repository = await provider.getRepositoryIdentity(`https://github.com/${owner}/${repo}`);
+        if (!repository || repository.repositoryId !== record.repositoryId || repository.visibility !== 'public' ||
+            typeof repository.owner !== 'string' || typeof repository.repo !== 'string') {
+          throw repositoryNotFound(record.repositoryId);
+        }
+        owner = repository.owner;
+        repo = repository.repo;
+      }
       const releases = await provider.listReleases({
         repositoryId: record.repositoryId,
-        owner: record.githubOwner,
-        repo: record.githubRepo,
+        owner,
+        repo,
         includePrereleases: record.includePrereleases,
         etag: record.etag
       });
@@ -287,6 +339,7 @@ class ReleaseMonitor {
   async #notifyChange(record, next) {
     const prior = record.lastSnapshot;
     if (!prior) return;
+    if (record.provider === 'modrinth' && record.lastSuccessfulCheck === null && next.releaseId === prior.releaseId) return;
     let type = null;
     if (next.releaseId === prior.releaseId) {
       if (next.version !== prior.version || next.prerelease !== prior.prerelease ||

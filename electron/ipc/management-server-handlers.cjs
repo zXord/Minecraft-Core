@@ -70,15 +70,13 @@ function persistInviteMetadata(serverPath, { host, secret }) {
   }, getServerConfigDefaults());
 }
 
-function getConfiguredInviteHost(serverPath, instance = null) {
-  const config = readPortableServerConfig(serverPath);
+function getConfiguredInviteHost(serverPath, instance = null, configValue = undefined) {
+  const config = configValue === undefined ? readPortableServerConfig(serverPath) : configValue;
   if (config && typeof config.managementInviteHost === 'string' && config.managementInviteHost.trim()) {
     return config.managementInviteHost.trim();
   }
   if (instance && typeof instance.managementInviteHost === 'string' && instance.managementInviteHost.trim()) {
-    const trimmed = instance.managementInviteHost.trim();
-    persistInviteMetadata(serverPath, { host: trimmed });
-    return trimmed;
+    return instance.managementInviteHost.trim();
   }
   return '';
 }
@@ -103,8 +101,7 @@ function getManagementPortForServer(serverPath) {
   return 8080;
 }
 
-function ensureInviteSecret(serverPath) {
-  ensureEncryptionAvailable();
+function inspectInviteState(serverPath) {
   const instance = findServerInstanceByPath(serverPath);
   const config = readPortableServerConfig(serverPath);
   if (!instance && !config) return { instance: null, secret: '' };
@@ -121,10 +118,26 @@ function ensureInviteSecret(serverPath) {
     }
   }
   if (!secret) secret = instanceSecret;
+  return {
+    configuredHost: getConfiguredInviteHost(serverPath, instance, config),
+    config,
+    instance,
+    instanceSecret,
+    secret
+  };
+}
+
+function ensureInviteSecret(serverPath) {
+  ensureEncryptionAvailable();
+  const inspected = inspectInviteState(serverPath);
+  const instance = inspected.instance;
+  if (!instance && !inspected.config) return { instance: null, secret: '' };
+  const instanceSecret = inspected.instanceSecret;
+  let secret = inspected.secret;
   if (!secret) {
     secret = generateInviteSecret();
   }
-  const configuredHost = getConfiguredInviteHost(serverPath, instance);
+  const configuredHost = inspected.configuredHost;
   if (serverPath) {
     persistInviteMetadata(serverPath, {
       host: configuredHost,
@@ -261,13 +274,13 @@ function createManagementServerHandlers(win) {
         const targetPath = typeof payload === 'string' ? payload : (payload.serverPath || matchedInstance?.path || null);
         const instanceId = typeof payload === 'object' && payload ? (payload.instanceId || matchedInstance?.id || null) : (matchedInstance?.id || null);
         const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
-        const inviteState = ensureInviteSecret(targetPath);
+        const inviteState = inspectInviteState(targetPath);
         const inviteInstance = inviteState.instance || matchedInstance || null;
         const secret = inviteState.secret;
         if (secret) {
           managementServer.setInviteSecret(secret);
         }
-        const configuredHost = getConfiguredInviteHost(targetPath, inviteInstance);
+        const configuredHost = inviteState.configuredHost || '';
         managementServer.setExternalHost(configuredHost || null);
         managementServer.updateServerPath(targetPath);
         
@@ -344,7 +357,7 @@ function createManagementServerHandlers(win) {
         if (!targetPath) {
           return { success: false, error: 'No server path available' };
         }
-        const inviteState = ensureInviteSecret(targetPath);
+        const inviteState = inspectInviteState(targetPath);
         const inviteInstance = inviteState.instance || matchedInstance || null;
         const secret = inviteState.secret;
         if (!inviteInstance) {
@@ -359,7 +372,7 @@ function createManagementServerHandlers(win) {
         } catch {
           fingerprint = '';
         }
-        const configuredHost = getConfiguredInviteHost(targetPath, inviteInstance);
+        const configuredHost = inviteState.configuredHost || '';
         const publicHost = managementServer.publicHost;
         const fallbackHost = managementServer.detectExternalIP() || 'localhost';
         const host = configuredHost || publicHost || fallbackHost;
@@ -369,11 +382,15 @@ function createManagementServerHandlers(win) {
         const configuredPort = getManagementPortForServer(targetPath);
         const portValue = Number.isFinite(requestedPort) ? Number(requestedPort) : configuredPort;
         const fpParam = fingerprint ? `&fp=${encodeURIComponent(fingerprint)}` : '';
-        const inviteLink = `${protocol}://${host}:${portValue}/#secret=${encodeURIComponent(secret)}${fpParam}`;
-        const usesPublicHost = hostSource === 'public' && !isPrivateIp(host);
+        const inviteLink = secret
+          ? `${protocol}://${host}:${portValue}/#secret=${encodeURIComponent(secret)}${fpParam}`
+          : '';
+        const usesPublicHost = Boolean(secret) && hostSource === 'public' && !isPrivateIp(host);
 
         return {
           success: true,
+          configured: Boolean(secret),
+          requiresSetup: !secret,
           inviteLink,
           host,
           port: portValue,

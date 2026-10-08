@@ -10,8 +10,9 @@ const {
   createDurableFs,
   renameDurable: renameWithConfiguredDurableFs
 } = require('../electron/utils/durable-fs.cjs');
+const { ModpackError } = require('../electron/services/modpacks/errors.cjs');
 
-function fixture(t, { failAt = null, shortWrites = false } = {}) {
+function fixture(t, { capabilities, failAt = null, shortWrites = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-fs-'));
   const calls = [];
   let tempSequence = 0;
@@ -47,6 +48,7 @@ function fixture(t, { failAt = null, shortWrites = false } = {}) {
     }
   };
   const durableClient = {
+    ...(capabilities === undefined ? {} : { capabilities }),
     moveWriteThrough(sourcePath, destinationPath) {
       calls.push({ kind: 'move-write-through' });
       if (failAt === 'move-write-through') throw new Error('injected move failure');
@@ -74,6 +76,70 @@ function fixture(t, { failAt = null, shortWrites = false } = {}) {
 
 function tempEntries(root) {
   return fs.readdirSync(root).filter(name => name.includes('.minecraft-core-tmp-'));
+}
+
+function uncertainMoveFixture(t, {
+  sourceType = 'directory',
+  moveMode = 'rename',
+  sameParent = false,
+  includeBatchFlush = true,
+  includeNativeReconcile = false,
+  afterMove = () => {},
+  onReconcile = () => {},
+  onFlush = () => {}
+} = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-uncertain-move-'));
+  const sourceParent = path.join(root, 'source-parent');
+  const destinationParent = sameParent ? sourceParent : path.join(root, 'destination-parent');
+  const source = path.join(sourceParent, 'candidate');
+  const destination = path.join(destinationParent, 'published');
+  const sourceBytes = 'validated file bytes';
+  fs.mkdirSync(sourceParent);
+  if (!sameParent) fs.mkdirSync(destinationParent);
+  if (sourceType === 'file') {
+    fs.writeFileSync(source, sourceBytes);
+  } else {
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, 'identity.txt'), 'validated directory');
+  }
+  const calls = [];
+  const durableClient = {
+    capabilities: Object.freeze({
+      moveWriteThroughFlushesParents: true,
+      ...(includeNativeReconcile ? { reconcileMoveWriteThrough: true } : {})
+    }),
+    moveWriteThrough(from, to) {
+      calls.push({ kind: 'move', from, to });
+      if (moveMode === 'copy') fs.cpSync(from, to, { recursive: sourceType === 'directory' });
+      else fs.renameSync(from, to);
+      afterMove({ root, sourceParent, destinationParent, source, destination, sourceBytes });
+      throw new Error('injected uncertain native move');
+    },
+    replaceFileWriteThrough() {
+      throw new Error('replacement is not expected');
+    },
+    flushDirectory(directoryPath, expectations) {
+      calls.push({ kind: 'flush', directoryPath, expectations });
+      return onFlush(directoryPath, expectations);
+    }
+  };
+  if (includeBatchFlush) {
+    durableClient.flushDirectories = (directoryPaths, expectations) => {
+      calls.push({ kind: 'flush-batch', directoryPaths, expectations });
+      for (let index = 0; index < directoryPaths.length; index += 1) {
+        onFlush(directoryPaths[index], { directoryIdentity: expectations.directoryIdentities[index] });
+      }
+    };
+  }
+  if (includeNativeReconcile) {
+    durableClient.reconcileMoveWriteThrough = (from, to, expectations) => {
+      calls.push({ kind: 'reconcile', from, to, expectations });
+      return onReconcile(from, to, expectations);
+    };
+  }
+  const durableFs = createDurableFs({ fsApi: fs, durableClient, allowedRoots: [root] });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return { root, sourceParent, destinationParent, source, destination, sourceBytes, calls, durableFs };
 }
 
 test('atomic JSON publication flushes data before write-through rename', (t) => {
@@ -110,6 +176,294 @@ test('existing files use atomic write-through replacement', (t) => {
     'flush-directory'
   ]);
   assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { old: false });
+});
+
+test('existing atomic replacement accepts ctime-only destination drift and sends its digest', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-atomic-ctime-'));
+  const target = path.join(root, 'state.bin');
+  fs.writeFileSync(target, 'old bytes');
+  const targetKey = path.resolve(target).toLocaleLowerCase('en-US');
+  const expectedSha256 = crypto.createHash('sha256').update('old bytes').digest('hex');
+  let ctimeOffset = 0n;
+  const targetDescriptors = new Set();
+
+  function withCtimeDrift(stat) {
+    ctimeOffset += 1n;
+    const ctimeKey = stat.ctimeNs === undefined ? 'ctimeMs' : 'ctimeNs';
+    const value = stat[ctimeKey];
+    return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+      [ctimeKey]: typeof value === 'bigint' ? value + ctimeOffset : value + Number(ctimeOffset)
+    });
+  }
+
+  const fsApi = {
+    ...fs,
+    openSync(candidate, flags, mode) {
+      const descriptor = fs.openSync(candidate, flags, mode);
+      if (path.resolve(candidate).toLocaleLowerCase('en-US') === targetKey) targetDescriptors.add(descriptor);
+      return descriptor;
+    },
+    closeSync(descriptor) {
+      targetDescriptors.delete(descriptor);
+      return fs.closeSync(descriptor);
+    },
+    lstatSync(candidate, options) {
+      const stat = fs.lstatSync(candidate, options);
+      return path.resolve(candidate).toLocaleLowerCase('en-US') === targetKey && options?.bigint === true
+        ? withCtimeDrift(stat)
+        : stat;
+    },
+    fstatSync(descriptor, options) {
+      const stat = fs.fstatSync(descriptor, options);
+      return options?.bigint === true && targetDescriptors.has(descriptor)
+        ? withCtimeDrift(stat)
+        : stat;
+    }
+  };
+  const durableFs = createDurableFs({
+    fsApi,
+    durableClient: {
+      moveWriteThrough() { throw new Error('move is not expected'); },
+      replaceFileWriteThrough(source, destination, expectations) {
+        assert.equal(expectations.destinationIdentity.sha256, expectedSha256);
+        assert.equal(typeof expectations.destinationIdentity.ctime, 'string');
+        fs.renameSync(source, destination);
+      },
+      flushDirectory() {}
+    },
+    allowedRoots: [root],
+    tempNameFactory: () => 'ctime-drift'
+  });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  durableFs.writeFileAtomic(target, 'new bytes');
+
+  assert.equal(fs.readFileSync(target, 'utf8'), 'new bytes');
+});
+
+test('existing atomic replacement rejects same-size destination substitution after digest capture', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-atomic-target-race-'));
+  const target = path.join(root, 'state.bin');
+  fs.writeFileSync(target, 'safe');
+  const targetKey = path.resolve(target).toLocaleLowerCase('en-US');
+  const original = fs.lstatSync(target, { bigint: true });
+  const targetDescriptors = new Set();
+  const tempDescriptors = new Set();
+  let substituted = false;
+  let replaceCalls = 0;
+
+  function withStableTargetMetadata(stat) {
+    return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+      dev: original.dev,
+      ino: original.ino,
+      size: original.size,
+      birthtimeNs: original.birthtimeNs,
+      mtimeNs: original.mtimeNs,
+      ctimeNs: original.ctimeNs + 1n
+    });
+  }
+
+  const fsApi = {
+    ...fs,
+    openSync(candidate, flags, mode) {
+      const descriptor = fs.openSync(candidate, flags, mode);
+      if (path.resolve(candidate).toLocaleLowerCase('en-US') === targetKey) targetDescriptors.add(descriptor);
+      if (flags === 'wx') tempDescriptors.add(descriptor);
+      return descriptor;
+    },
+    closeSync(descriptor) {
+      const isTarget = targetDescriptors.delete(descriptor);
+      const isTemp = tempDescriptors.delete(descriptor);
+      const result = fs.closeSync(descriptor);
+      if (!isTarget && isTemp && !substituted) {
+        substituted = true;
+        fs.writeFileSync(target, 'evil');
+      }
+      return result;
+    },
+    lstatSync(candidate, options) {
+      const stat = fs.lstatSync(candidate, options);
+      return path.resolve(candidate).toLocaleLowerCase('en-US') === targetKey && options?.bigint === true
+        ? withStableTargetMetadata(stat)
+        : stat;
+    },
+    fstatSync(descriptor, options) {
+      const stat = fs.fstatSync(descriptor, options);
+      return targetDescriptors.has(descriptor) && options?.bigint === true
+        ? withStableTargetMetadata(stat)
+        : stat;
+    }
+  };
+  const durableFs = createDurableFs({
+    fsApi,
+    durableClient: {
+      moveWriteThrough() { throw new Error('move is not expected'); },
+      replaceFileWriteThrough(source, destination) {
+        replaceCalls += 1;
+        fs.renameSync(source, destination);
+      },
+      flushDirectory() {}
+    },
+    allowedRoots: [root],
+    tempNameFactory: () => 'target-race'
+  });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  assert.throws(
+    () => durableFs.writeFileAtomic(target, 'next'),
+    error => error.code === 'PLAN_STALE' && error.commitPhase === 'pre-publication'
+  );
+  assert.equal(replaceCalls, 0);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'evil');
+});
+
+test('atomic replacement trusts only a frozen native parent-flush capability', (t) => {
+  for (const [name, capabilities, expectedFlushes] of [
+    ['native-capability', Object.freeze({ moveWriteThroughFlushesParents: true }), 0],
+    ['mutable-claim', { moveWriteThroughFlushesParents: true }, 1],
+    ['no-claim', undefined, 1]
+  ]) {
+    const { root, calls, durableFs } = fixture(t, { capabilities });
+    const target = path.join(root, `${name}.json`);
+    fs.writeFileSync(target, '{"old":true}\n');
+
+    durableFs.writeJsonAtomic(target, { old: false });
+
+    assert.equal(fs.readFileSync(target, 'utf8'), '{\n  "old": false\n}\n', name);
+    assert.equal(calls.filter(call => call.kind === 'flush-directory').length, expectedFlushes, name);
+  }
+});
+
+test('an exact atomic replacement is reconciled when native completion reports failure after publication', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-atomic-reconcile-'));
+  const target = path.join(root, 'state.json');
+  fs.writeFileSync(target, '{"old":true}\n');
+  const calls = [];
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient: {
+      capabilities: Object.freeze({
+        moveWriteThroughFlushesParents: true,
+        reconcileMoveWriteThrough: true
+      }),
+      moveWriteThrough() { throw new Error('new-file move is not expected'); },
+      replaceFileWriteThrough(source, destination) {
+        calls.push('replace');
+        fs.renameSync(source, destination);
+        throw new Error('injected post-publication completion failure');
+      },
+      reconcileMoveWriteThrough(source, destination) {
+        calls.push('reconcile');
+        assert.equal(fs.existsSync(source), false);
+        assert.equal(fs.existsSync(destination), true);
+      },
+      flushDirectory() { calls.push('flush-directory'); }
+    },
+    allowedRoots: [root],
+    tempNameFactory: () => 'atomic-reconcile'
+  });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  durableFs.writeJsonAtomic(target, { old: false });
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { old: false });
+  assert.deepEqual(tempEntries(root), []);
+  assert.deepEqual(calls, ['replace', 'reconcile']);
+});
+
+test('atomic replacement reconciliation rejects changed published bytes', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-atomic-reconcile-race-'));
+  const target = path.join(root, 'state.json');
+  fs.writeFileSync(target, '{"old":true}\n');
+  let reconcileCalls = 0;
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient: {
+      capabilities: Object.freeze({
+        moveWriteThroughFlushesParents: true,
+        reconcileMoveWriteThrough: true
+      }),
+      moveWriteThrough() { throw new Error('new-file move is not expected'); },
+      replaceFileWriteThrough(source, destination) {
+        fs.renameSync(source, destination);
+        fs.writeFileSync(destination, '{"evil":true}');
+        throw new Error('injected substituted publication');
+      },
+      reconcileMoveWriteThrough() { reconcileCalls += 1; },
+      flushDirectory() {}
+    },
+    allowedRoots: [root],
+    tempNameFactory: () => 'atomic-reconcile-race'
+  });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  assert.throws(
+    () => durableFs.writeJsonAtomic(target, { old: false }),
+    error => error.code === 'PLAN_STALE' && error.commitPhase === 'post-publication-uncertain'
+  );
+  assert.equal(reconcileCalls, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { evil: true });
+});
+
+test('existing replacement accepts the destination birthtime retained by native publication', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-name-tunneling-'));
+  const target = path.join(root, 'state.bin');
+  fs.writeFileSync(target, 'old bytes');
+  const targetKey = path.resolve(target).toLocaleLowerCase('en-US');
+  const originalTarget = fs.lstatSync(target, { bigint: true });
+  const retainedBirthtimeNs = originalTarget.birthtimeNs - 86_400_000_000_000n;
+  const targetDescriptors = new Set();
+  let published = false;
+
+  function withRetainedBirthtime(stat) {
+    return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+      birthtimeNs: retainedBirthtimeNs
+    });
+  }
+
+  const fsApi = {
+    ...fs,
+    openSync(candidate, flags, mode) {
+      const descriptor = fs.openSync(candidate, flags, mode);
+      if (path.resolve(candidate).toLocaleLowerCase('en-US') === targetKey) targetDescriptors.add(descriptor);
+      return descriptor;
+    },
+    closeSync(descriptor) {
+      targetDescriptors.delete(descriptor);
+      return fs.closeSync(descriptor);
+    },
+    lstatSync(candidate, options) {
+      const stat = fs.lstatSync(candidate, options);
+      return path.resolve(candidate).toLocaleLowerCase('en-US') === targetKey && options?.bigint === true
+        ? withRetainedBirthtime(stat)
+        : stat;
+    },
+    fstatSync(descriptor, options) {
+      const stat = fs.fstatSync(descriptor, options);
+      return (published || targetDescriptors.has(descriptor)) && options?.bigint === true
+        ? withRetainedBirthtime(stat)
+        : stat;
+    }
+  };
+  const durableFs = createDurableFs({
+    fsApi,
+    durableClient: {
+      moveWriteThrough() { throw new Error('move is not expected'); },
+      replaceFileWriteThrough(source, destination) {
+        fs.renameSync(source, destination);
+        published = true;
+      },
+      flushDirectory() {}
+    },
+    allowedRoots: [root],
+    tempNameFactory: () => 'name-tunneling'
+  });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  durableFs.writeFileAtomic(target, 'complete bytes');
+
+  assert.equal(fs.readFileSync(target, 'utf8'), 'complete bytes');
+  assert.deepEqual(tempEntries(root), []);
 });
 
 test('short writes are completed before the file is flushed', (t) => {
@@ -175,6 +529,34 @@ test('an unacknowledged move failure is classified uncertain and preserves its r
 
   assert.equal(fs.existsSync(target), false);
   assert.equal(tempEntries(root).length, 1);
+});
+
+test('a native failure before handle publication stays pre-publication and removes its temp', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-native-prepublish-'));
+  const target = path.join(root, 'state.json');
+  fs.writeFileSync(target, '{"stable":true}');
+  const failure = new ModpackError('COMMIT_FAILED', 'Durable filesystem operation failed');
+  Object.defineProperties(failure, {
+    durableFailureKind: { value: 'integrity-failure', enumerable: true },
+    durableFailureStage: { value: 'destination-parent-open', enumerable: true }
+  });
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    allowedRoots: [root],
+    durableClient: {
+      moveWriteThrough: fs.renameSync,
+      replaceFileWriteThrough() { throw failure; },
+      flushDirectory() {}
+    }
+  });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  assert.throws(
+    () => durableFs.writeJsonAtomic(target, { stable: false }),
+    error => error === failure && error.commitPhase === 'pre-publication'
+  );
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"stable":true}');
+  assert.deepEqual(tempEntries(root), []);
 });
 
 test('atomic publication rejects a same-size temp replacement after flush and close', (t) => {
@@ -284,6 +666,293 @@ test('durable rename flushes both changed parents exactly once', (t) => {
     'flush-directory'
   ]);
   assert.deepEqual(calls.slice(1).map(call => call.directoryPath), [sourceParent, destinationParent]);
+});
+
+test('durable rename reconciles a completed uncertain directory move and explicitly flushes both current parents', (t) => {
+  const { sourceParent, destinationParent, source, destination, calls, durableFs } = uncertainMoveFixture(t);
+
+  const published = durableFs.renameDurable(source, destination);
+
+  assert.equal(published, destination);
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.readFileSync(path.join(destination, 'identity.txt'), 'utf8'), 'validated directory');
+  assert.deepEqual(calls.map(call => call.kind), ['move', 'flush-batch']);
+  assert.deepEqual(calls[1].directoryPaths, [sourceParent, destinationParent]);
+  for (const [index, directoryPath] of calls[1].directoryPaths.entries()) {
+    const current = fs.lstatSync(directoryPath, { bigint: true });
+    assert.equal(calls[1].expectations.directoryIdentities[index].dev, String(current.dev));
+    assert.equal(calls[1].expectations.directoryIdentities[index].ino, String(current.ino));
+    assert.equal(calls[1].expectations.directoryIdentities[index].birthtime, String(current.birthtimeNs));
+  }
+});
+
+test('durable rename prefers native handle-pinned uncertain-move reconciliation when available', (t) => {
+  const { sourceParent, destinationParent, source, destination, calls, durableFs } = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    includeNativeReconcile: true
+  });
+
+  const published = durableFs.renameDurable(source, destination);
+
+  assert.equal(published, destination);
+  assert.deepEqual(calls.map(call => call.kind), ['move', 'reconcile']);
+  assert.equal(calls[1].from, source);
+  assert.equal(calls[1].to, destination);
+  assert.equal(calls[1].expectations.sourceIdentity.sha256.length, 64);
+  assert.equal(calls[1].expectations.sourceParentIdentity.dev, String(fs.lstatSync(sourceParent, { bigint: true }).dev));
+  assert.equal(calls[1].expectations.destinationParentIdentity.dev, String(fs.lstatSync(destinationParent, { bigint: true }).dev));
+});
+
+test('durable rename precomputes the digest needed to reconcile an uncertain file move when the caller omitted it', (t) => {
+  const { sourceParent, destinationParent, source, destination, sourceBytes, calls, durableFs } = uncertainMoveFixture(t, {
+    sourceType: 'file'
+  });
+
+  const published = durableFs.renameDurable(source, destination);
+
+  assert.equal(published, destination);
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.readFileSync(destination, 'utf8'), sourceBytes);
+  assert.deepEqual(calls.map(call => call.kind), ['move', 'flush-batch']);
+  assert.deepEqual(calls[1].directoryPaths, [sourceParent, destinationParent]);
+});
+
+test('durable rename rejects an uncertain file move whose destination bytes changed in place', (t) => {
+  const { source, destination, calls, durableFs } = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    afterMove({ destination: published }) {
+      fs.writeFileSync(published, 'substituted bytes');
+    }
+  });
+
+  assert.throws(
+    () => durableFs.renameDurable(source, destination),
+    error => error.code === 'PLAN_STALE' && error.commitPhase === 'post-publication-uncertain'
+  );
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'substituted bytes');
+  assert.deepEqual(calls.map(call => call.kind), ['move']);
+});
+
+test('durable rename rejects an uncertain move when source and destination both exist', (t) => {
+  const { source, destination, calls, durableFs } = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    moveMode: 'copy'
+  });
+
+  assert.throws(
+    () => durableFs.renameDurable(source, destination),
+    error => error.code === 'COMMIT_FAILED' && error.commitPhase === 'post-publication-uncertain'
+  );
+  assert.equal(fs.existsSync(source), true);
+  assert.equal(fs.existsSync(destination), true);
+  assert.deepEqual(calls.map(call => call.kind), ['move']);
+});
+
+test('durable rename rejects an uncertain move to a substituted destination object', (t) => {
+  const { root, source, destination, sourceBytes, calls, durableFs } = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    afterMove({ destination: published, sourceBytes: originalBytes }) {
+      fs.renameSync(published, path.join(root, 'displaced-original'));
+      fs.writeFileSync(published, originalBytes);
+    }
+  });
+
+  assert.throws(
+    () => durableFs.renameDurable(source, destination),
+    error => error.code === 'PLAN_STALE' && error.commitPhase === 'post-publication-uncertain'
+  );
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.readFileSync(destination, 'utf8'), sourceBytes);
+  assert.deepEqual(calls.map(call => call.kind), ['move']);
+});
+
+test('durable rename rejects an uncertain completed move when a parent was substituted', (t) => {
+  const { root, sourceParent, source, destination, calls, durableFs } = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    afterMove({ sourceParent: publishedSourceParent }) {
+      fs.renameSync(publishedSourceParent, path.join(root, 'displaced-source-parent'));
+      fs.mkdirSync(publishedSourceParent);
+    }
+  });
+
+  assert.throws(
+    () => durableFs.renameDurable(source, destination),
+    error => error.code === 'PLAN_STALE' && error.commitPhase === 'post-publication-uncertain'
+  );
+  assert.equal(fs.existsSync(sourceParent), true);
+  assert.equal(fs.existsSync(destination), true);
+  assert.deepEqual(calls.map(call => call.kind), ['move']);
+});
+
+test('durable rename flushes a shared source and destination parent once during uncertain reconciliation', (t) => {
+  const { sourceParent, source, destination, calls, durableFs } = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    sameParent: true
+  });
+
+  const published = durableFs.renameDurable(source, destination);
+
+  assert.equal(published, destination);
+  assert.deepEqual(calls.map(call => call.kind), ['move', 'flush-batch']);
+  assert.deepEqual(calls[1].directoryPaths, [sourceParent]);
+  assert.equal(calls[1].expectations.directoryIdentities.length, 1);
+});
+
+test('durable rename rejects destination substitution during the reconciliation flush', (t) => {
+  let substituted = false;
+  let fixtureState;
+  fixtureState = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    onFlush() {
+      if (substituted) return;
+      substituted = true;
+      fs.renameSync(fixtureState.destination, path.join(fixtureState.root, 'displaced-after-flush'));
+      fs.writeFileSync(fixtureState.destination, fixtureState.sourceBytes);
+    }
+  });
+
+  assert.throws(
+    () => fixtureState.durableFs.renameDurable(fixtureState.source, fixtureState.destination),
+    error => error.code === 'PLAN_STALE' && error.commitPhase === 'post-publication-uncertain'
+  );
+  assert.equal(fs.existsSync(fixtureState.source), false);
+  assert.equal(fs.readFileSync(fixtureState.destination, 'utf8'), fixtureState.sourceBytes);
+  assert.deepEqual(fixtureState.calls.map(call => call.kind), ['move', 'flush-batch']);
+});
+
+test('durable rename fails closed when reconciliation cannot flush a changed parent', (t) => {
+  const { source, destination, calls, durableFs } = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    onFlush() {
+      throw new Error('injected parent flush failure');
+    }
+  });
+
+  assert.throws(
+    () => durableFs.renameDurable(source, destination),
+    error => error.code === 'COMMIT_FAILED' && error.commitPhase === 'post-publication-uncertain'
+  );
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.existsSync(destination), true);
+  assert.deepEqual(calls.map(call => call.kind), ['move', 'flush-batch']);
+});
+
+test('durable rename keeps a legacy second-parent flush failure uncertain', (t) => {
+  let destinationParent;
+  const fixtureState = uncertainMoveFixture(t, {
+    sourceType: 'file',
+    includeBatchFlush: false,
+    onFlush(directoryPath) {
+      if (directoryPath === destinationParent) throw new Error('injected second parent flush failure');
+    }
+  });
+  destinationParent = fixtureState.destinationParent;
+
+  assert.throws(
+    () => fixtureState.durableFs.renameDurable(fixtureState.source, fixtureState.destination),
+    error => error.code === 'COMMIT_FAILED' && error.commitPhase === 'post-publication-uncertain'
+  );
+  assert.equal(fs.existsSync(fixtureState.source), false);
+  assert.equal(fs.existsSync(fixtureState.destination), true);
+  assert.deepEqual(fixtureState.calls.map(call => call.kind), ['move', 'flush', 'flush']);
+  assert.deepEqual(fixtureState.calls.slice(1).map(call => call.directoryPath), [
+    fixtureState.sourceParent,
+    fixtureState.destinationParent
+  ]);
+});
+
+test('durable rename trusts only a frozen native parent-flush capability', (t) => {
+  for (const [name, capabilities, expectedFlushes] of [
+    ['native-capability', Object.freeze({ moveWriteThroughFlushesParents: true }), 0],
+    ['mutable-claim', { moveWriteThroughFlushesParents: true }, 2],
+    ['no-claim', undefined, 2]
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `minecraft-core-durable-${name}-`));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const sourceParent = path.join(root, 'source');
+    const destinationParent = path.join(root, 'destination');
+    const source = path.join(sourceParent, 'candidate');
+    const destination = path.join(destinationParent, 'published');
+    fs.mkdirSync(source, { recursive: true });
+    fs.mkdirSync(destinationParent);
+    const calls = [];
+    const durableClient = {
+      ...(capabilities === undefined ? {} : { capabilities }),
+      moveWriteThrough(from, to) { calls.push('move'); fs.renameSync(from, to); },
+      replaceFileWriteThrough() { throw new Error('replacement is not expected'); },
+      flushDirectory() { calls.push('flush'); }
+    };
+    const durableFs = createDurableFs({ fsApi: fs, durableClient, allowedRoots: [root] });
+
+    durableFs.renameDurable(source, destination);
+
+    assert.equal(fs.existsSync(destination), true, name);
+    assert.equal(calls.filter(call => call === 'flush').length, expectedFlushes, name);
+  }
+});
+
+test('multiple directory flushes use one identity-bound batch client call', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-batch-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const first = path.join(root, 'first');
+  const second = path.join(first, 'second');
+  fs.mkdirSync(second, { recursive: true });
+  const batchCalls = [];
+  const singleCalls = [];
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient: {
+      moveWriteThrough() { throw new Error('move is not expected'); },
+      replaceFileWriteThrough() { throw new Error('replacement is not expected'); },
+      flushDirectory(directoryPath) { singleCalls.push(directoryPath); },
+      flushDirectories(directoryPaths, expectations) {
+        batchCalls.push({ directoryPaths, expectations });
+      }
+    },
+    allowedRoots: [root]
+  });
+
+  const flushed = durableFs.flushDirectories([second, first]);
+
+  assert.deepEqual(flushed, [second, first]);
+  assert.equal(Object.isFrozen(flushed), true);
+  assert.equal(singleCalls.length, 0);
+  assert.equal(batchCalls.length, 1);
+  assert.deepEqual(batchCalls[0].directoryPaths, [second, first]);
+  assert.deepEqual(Object.keys(batchCalls[0].expectations), ['directoryIdentities']);
+  assert.equal(batchCalls[0].expectations.directoryIdentities.length, 2);
+  assert.deepEqual(
+    batchCalls[0].expectations.directoryIdentities.map(identity => [identity.dev, identity.ino, identity.birthtime]),
+    [second, first].map(directoryPath => {
+      const stat = fs.lstatSync(directoryPath, { bigint: true });
+      return [String(stat.dev), String(stat.ino), String(stat.birthtimeNs)];
+    })
+  );
+});
+
+test('multiple directory flushes retain the legacy single-call fallback', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-batch-fallback-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const first = path.join(root, 'first');
+  const second = path.join(root, 'second');
+  fs.mkdirSync(first);
+  fs.mkdirSync(second);
+  const calls = [];
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient: {
+      moveWriteThrough() { throw new Error('move is not expected'); },
+      replaceFileWriteThrough() { throw new Error('replacement is not expected'); },
+      flushDirectory(directoryPath, expectations) { calls.push({ directoryPath, expectations }); }
+    },
+    allowedRoots: [root]
+  });
+
+  durableFs.flushDirectories([first, second]);
+
+  assert.deepEqual(calls.map(call => call.directoryPath), [first, second]);
+  assert.equal(calls.every(call => Object.keys(call.expectations).join(',') === 'directoryIdentity'), true);
 });
 
 test('durable rename binds a file publication to the caller-validated source digest', (t) => {
@@ -703,6 +1372,43 @@ test('sha256File rejects same-size timestamp mutation while the handle is read',
   assert.throws(() => durableFs.sha256File(target), error => error.code === 'PLAN_STALE');
 });
 
+test('sha256File accepts ctime-only drift while retaining size, mtime, path, and bytes', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-hash-ctime-'));
+  const target = path.join(root, 'artifact.bin');
+  fs.writeFileSync(target, 'stable');
+  let fstatCalls = 0;
+  const fsApi = {
+    ...fs,
+    fstatSync(fd, options) {
+      const stat = fs.fstatSync(fd, options);
+      fstatCalls += 1;
+      if (fstatCalls === 2) {
+        const ctimeKey = stat.ctimeNs === undefined ? 'ctimeMs' : 'ctimeNs';
+        const value = stat[ctimeKey];
+        return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+          [ctimeKey]: typeof value === 'bigint' ? value + 1n : value + 1
+        });
+      }
+      return stat;
+    }
+  };
+  const durableFs = createDurableFs({
+    fsApi,
+    durableClient: {
+      moveWriteThrough: fs.renameSync,
+      replaceFileWriteThrough: fs.renameSync,
+      flushDirectory() {}
+    },
+    allowedRoots: [root]
+  });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  assert.equal(
+    durableFs.sha256File(target),
+    crypto.createHash('sha256').update('stable').digest('hex')
+  );
+});
+
 test('an allowed root identity replacement is rejected before any file opens', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-root-race-'));
   let rootStats = 0;
@@ -772,4 +1478,262 @@ test('filesystem identity reads request bigint stats', (t) => {
   durableFs.sha256File(target);
   assert.ok(bigintLstatCalls > 0);
   assert.ok(bigintFstatCalls > 0);
+});
+
+test('flushDirectoryAsync revalidates the exact directory before and after the awaited native flush', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-async-identity-'));
+  const directory = path.join(root, 'directory');
+  fs.mkdirSync(directory);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let calls = 0;
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient: {
+      moveWriteThrough: fs.renameSync,
+      replaceFileWriteThrough: fs.renameSync,
+      flushDirectory() {},
+      async flushDirectoryAsync(target, expectations) {
+        calls += 1;
+        assert.equal(target, path.resolve(directory));
+        assert.equal(typeof expectations.directoryIdentity.ino, 'string');
+        await new Promise(resolve => setImmediate(resolve));
+      }
+    },
+    allowedRoots: [root]
+  });
+
+  assert.equal(await durableFs.flushDirectoryAsync(directory), path.resolve(directory));
+  assert.equal(calls, 1);
+
+  const replacingClient = {
+    moveWriteThrough: fs.renameSync,
+    replaceFileWriteThrough: fs.renameSync,
+    flushDirectory() {},
+    async flushDirectoryAsync() {
+      fs.renameSync(directory, `${directory}-old`);
+      fs.mkdirSync(directory);
+    }
+  };
+  const guarded = createDurableFs({ fsApi: fs, durableClient: replacingClient, allowedRoots: [root] });
+  await assert.rejects(
+    guarded.flushDirectoryAsync(directory),
+    error => error.code === 'PLAN_STALE' || error.code === 'COMMIT_FAILED'
+  );
+});
+
+test('flushDirectoriesAsync revalidates every exact directory around one awaited native batch', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-async-batch-identity-'));
+  const first = path.join(root, 'first');
+  const second = path.join(root, 'second');
+  fs.mkdirSync(first);
+  fs.mkdirSync(second);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const calls = [];
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient: {
+      moveWriteThrough: fs.renameSync,
+      replaceFileWriteThrough: fs.renameSync,
+      flushDirectory() {},
+      flushDirectories() { throw new Error('synchronous batch must not run'); },
+      async flushDirectoriesAsync(targets, expectations) {
+        calls.push({ targets: [...targets], expectations });
+        await new Promise(resolve => setImmediate(resolve));
+      }
+    },
+    allowedRoots: [root]
+  });
+
+  assert.deepEqual(
+    await durableFs.flushDirectoriesAsync([first, second]),
+    [path.resolve(first), path.resolve(second)]
+  );
+  assert.deepEqual(calls[0].targets, [path.resolve(first), path.resolve(second)]);
+  assert.equal(calls[0].expectations.directoryIdentities.length, 2);
+  assert.equal(calls[0].expectations.directoryIdentities.every(identity => typeof identity.ino === 'string'), true);
+
+  const replacingClient = {
+    moveWriteThrough: fs.renameSync,
+    replaceFileWriteThrough: fs.renameSync,
+    flushDirectory() {},
+    async flushDirectoriesAsync() {
+      fs.renameSync(first, `${first}-old`);
+      fs.mkdirSync(first);
+    }
+  };
+  const guarded = createDurableFs({ fsApi: fs, durableClient: replacingClient, allowedRoots: [root] });
+  await assert.rejects(
+    guarded.flushDirectoriesAsync([first, second]),
+    error => error.code === 'PLAN_STALE' || error.code === 'COMMIT_FAILED'
+  );
+});
+
+test('renameDurableAsync authenticates the source and revalidates the exact published file', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-async-move-'));
+  const source = path.join(root, 'active.json');
+  const destination = path.join(root, 'history.json');
+  const contents = '{"phase":"completed"}\n';
+  fs.writeFileSync(source, contents);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let asyncMoves = 0;
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient: {
+      moveWriteThrough() { throw new Error('synchronous move must not run'); },
+      async moveWriteThroughAsync(from, to, expectations) {
+        asyncMoves += 1;
+        assert.equal(typeof expectations.sourceIdentity.sha256, 'string');
+        await new Promise(resolve => setImmediate(resolve));
+        fs.renameSync(from, to);
+      },
+      replaceFileWriteThrough: fs.renameSync,
+      flushDirectory() {},
+      async flushDirectoryAsync() {}
+    },
+    allowedRoots: [root]
+  });
+  const expectedSourceSha256 = crypto.createHash('sha256').update(contents).digest('hex');
+
+  assert.equal(
+    await durableFs.renameDurableAsync(source, destination, { expectedSourceSha256 }),
+    path.resolve(destination)
+  );
+  assert.equal(asyncMoves, 1);
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.readFileSync(destination, 'utf8'), contents);
+});
+
+test('writeJsonAtomicAsync keeps the event loop responsive through file sync and native replacement', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-async-atomic-'));
+  const target = path.join(root, 'job.json');
+  fs.writeFileSync(target, '{"sequence":1}\n');
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const asyncFsApi = {
+    async open(...args) {
+      const handle = await fs.promises.open(...args);
+      return {
+        stat: options => handle.stat(options),
+        write: (...writeArgs) => handle.write(...writeArgs),
+        async sync() {
+          await new Promise(resolve => setTimeout(resolve, 120));
+          return handle.sync();
+        },
+        close: () => handle.close()
+      };
+    },
+    unlink: targetPath => fs.promises.unlink(targetPath)
+  };
+  let asyncReplacements = 0;
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    asyncFsApi,
+    durableClient: {
+      moveWriteThrough() { throw new Error('synchronous move must not run'); },
+      replaceFileWriteThrough() { throw new Error('synchronous replacement must not run'); },
+      flushDirectory() {},
+      async moveWriteThroughAsync(source, destination) { fs.renameSync(source, destination); },
+      async replaceFileWriteThroughAsync(source, destination, expectations) {
+        asyncReplacements += 1;
+        assert.equal(expectations.destinationIdentity.sha256, priorSha256);
+        await new Promise(resolve => setImmediate(resolve));
+        fs.renameSync(source, destination);
+      },
+      async flushDirectoryAsync() {}
+    },
+    allowedRoots: [root],
+    tempNameFactory: () => 'async-atomic'
+  });
+  const priorSha256 = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+  let settled = false;
+  const pending = durableFs.writeJsonAtomicAsync(target, { sequence: 2 }, {
+    expectedTargetSha256: priorSha256
+  }).finally(() => { settled = true; });
+  const winner = await Promise.race([
+    pending.then(() => 'write'),
+    new Promise(resolve => setTimeout(() => resolve('timer'), 30))
+  ]);
+  assert.equal(winner, 'timer');
+  assert.equal(settled, false);
+  await pending;
+  assert.equal(asyncReplacements, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { sequence: 2 });
+});
+
+test('readFileBoundedAsync yields while the authenticated file handle is pending', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-async-read-'));
+  const target = path.join(root, 'journal.json');
+  const expected = Buffer.from('{"sequence":1}\n', 'utf8');
+  fs.writeFileSync(target, expected);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let announceOpen;
+  const openStarted = new Promise(resolve => { announceOpen = resolve; });
+  let releaseOpen;
+  const openGate = new Promise(resolve => { releaseOpen = resolve; });
+  const asyncFsApi = {
+    async open(...args) {
+      announceOpen();
+      await openGate;
+      const handle = await fs.promises.open(...args);
+      return {
+        stat: options => handle.stat(options),
+        read: (...readArgs) => handle.read(...readArgs),
+        close: () => handle.close()
+      };
+    },
+    unlink: targetPath => fs.promises.unlink(targetPath)
+  };
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    asyncFsApi,
+    durableClient: {
+      moveWriteThrough: fs.renameSync,
+      replaceFileWriteThrough: fs.renameSync,
+      flushDirectory() {}
+    },
+    allowedRoots: [root]
+  });
+
+  assert.equal(typeof durableFs.readFileBoundedAsync, 'function');
+  const pending = durableFs.readFileBoundedAsync(target, { allowMissing: false, maxBytes: 1024 });
+  await openStarted;
+  const winner = await Promise.race([
+    pending.then(() => 'read'),
+    new Promise(resolve => setImmediate(() => resolve('event-loop')))
+  ]);
+  assert.equal(winner, 'event-loop');
+  releaseOpen();
+  assert.deepEqual(await pending, expected);
+});
+
+test('writeJsonAtomicAsync cleans its temp after a native pre-publication failure', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-async-prepublish-'));
+  const target = path.join(root, 'job.json');
+  fs.writeFileSync(target, '{"sequence":1}\n');
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const failure = new ModpackError('COMMIT_FAILED', 'Durable filesystem operation failed');
+  Object.defineProperties(failure, {
+    durableFailureKind: { value: 'integrity-failure', enumerable: true },
+    durableFailureStage: { value: 'destination-parent-open', enumerable: true }
+  });
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    asyncFsApi: fs.promises,
+    allowedRoots: [root],
+    durableClient: {
+      moveWriteThrough() { throw new Error('synchronous move must not run'); },
+      replaceFileWriteThrough() { throw new Error('synchronous replacement must not run'); },
+      flushDirectory() {},
+      async moveWriteThroughAsync(source, destination) { fs.renameSync(source, destination); },
+      async replaceFileWriteThroughAsync() { throw failure; },
+      async flushDirectoryAsync() {}
+    }
+  });
+  const priorSha256 = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+
+  await assert.rejects(
+    durableFs.writeJsonAtomicAsync(target, { sequence: 2 }, { expectedTargetSha256: priorSha256 }),
+    error => error === failure && error.commitPhase === 'pre-publication'
+  );
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"sequence":1}\n');
+  assert.deepEqual(tempEntries(root), []);
 });

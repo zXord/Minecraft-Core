@@ -42,6 +42,76 @@ function githubSource() {
   };
 }
 
+test('GitHub tracking seeds the exact installed release as a durable first-check baseline', () => {
+  const intent = createReleaseTrackingIntent({
+    serverId: 'server-one', operationKind: 'install',
+    source: {
+      ...githubSource(),
+      releaseId: '765432',
+      version: '1.7.6',
+      channel: 'release',
+      prerelease: false,
+      publishedAt: '2026-07-30T12:00:00.000Z',
+      artifactSetDigest: 'a'.repeat(64)
+    },
+    clock: () => NOW
+  });
+  assert.deepEqual(intent.record.lastSnapshot, {
+    releaseId: '765432', version: '1.7.6', prerelease: false,
+    publishedAt: '2026-07-30T12:00:00.000Z', assetFingerprint: 'a'.repeat(64), installable: true
+  });
+  assert.equal(intent.record.includePrereleases, false);
+});
+
+test('GitHub tracking retains an installed prerelease channel and checks later prereleases', () => {
+  const intent = createReleaseTrackingIntent({
+    serverId: 'server-one', operationKind: 'install',
+    source: {
+      ...githubSource(),
+      releaseId: '765433',
+      version: '1.8.0-beta.1',
+      channel: 'prerelease',
+      prerelease: true,
+      publishedAt: '2026-08-01T12:00:00.000Z',
+      artifactSetDigest: 'b'.repeat(64)
+    },
+    clock: () => NOW
+  });
+  assert.equal(intent.record.includePrereleases, true);
+  assert.deepEqual(intent.record.lastSnapshot, {
+    releaseId: '765433', version: '1.8.0-beta.1', prerelease: true,
+    publishedAt: '2026-08-01T12:00:00.000Z', assetFingerprint: 'b'.repeat(64), installable: true
+  });
+});
+
+test('Modrinth tracking retains the exact installed channel and ordering timestamp', () => {
+  const intent = createReleaseTrackingIntent({
+    serverId: 'server-one',
+    operationKind: 'install-new',
+    source: {
+      provider: 'modrinth',
+      projectId: 'project-one',
+      versionId: 'version-beta-2',
+      version: '2.0.0-beta.2',
+      channel: 'beta',
+      prerelease: true,
+      publishedAt: '2026-08-01T12:00:00.000Z'
+    },
+    clock: () => NOW
+  });
+
+  assert.equal(intent.record.includePrereleases, true);
+  assert.deepEqual(intent.record.lastSnapshot, {
+    releaseId: 'version-beta-2',
+    version: '2.0.0-beta.2',
+    prerelease: true,
+    publishedAt: '2026-08-01T12:00:00.000Z',
+    assetFingerprint: null,
+    installable: true,
+    orderingKnown: true
+  });
+});
+
 test('tracking intent is closed, authority-free recovery state and retries a failed list on restart', async () => {
   const registry = new MemoryRecoveryRegistry(recoveryRecord());
   let failList = true;

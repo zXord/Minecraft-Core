@@ -22,14 +22,16 @@ export function deriveModpackNotificationPresentation({
     ? notifications.filter(item => item?.serverId === serverId)
     : [];
   const globalUnreadActionableCount = globalItems.filter(item => !item?.read && item?.action).length;
-  const currentServerUnreadCount = currentServerItems.filter(item => !item?.read).length;
+  const currentServerUnreadCount = managed
+    ? currentServerItems.filter(item => !item?.read).length
+    : 0;
   return {
     globalItems,
     globalUnreadActionableCount,
     showGlobalBell: globalUnreadActionableCount > 0,
     currentServerItems,
     currentServerUnreadCount,
-    showContextualControl: Boolean(managed) || currentServerItems.length > 0 || recoveryCount > 0
+    showContextualControl: Boolean(managed)
   };
 }
 

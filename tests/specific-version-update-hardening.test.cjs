@@ -123,7 +123,7 @@ async function withUpdateHandlers(updateService, shell, fn, options = {}) {
         send() {}
       }
     };
-    return await fn(createUpdateHandlers(win));
+    return await fn(createUpdateHandlers(win, options.updatePolicy));
   } finally {
     delete require.cache[modulePath];
     Module._load = originalLoad;
@@ -639,4 +639,27 @@ test('install-update refuses to install while a Minecraft server is running', as
     },
     { serverStates: [{ instanceId: 'server-1', isRunning: true }] }
   );
+});
+
+test('updater IPC cannot start periodic checks when the startup policy disables the updater', async () => {
+  const updateService = new EventEmitter();
+  let starts = 0;
+  updateService.startPeriodicChecks = () => { starts += 1; return { success: true }; };
+
+  await withUpdateHandlers(updateService, {}, async handlers => {
+    const result = await handlers['start-periodic-checks']();
+    assert.deepEqual(result, { success: false, disabled: true, error: 'Automatic update checks are disabled' });
+    assert.equal(starts, 0);
+  }, { updatePolicy: { updaterEnabled: false } });
+});
+
+test('updater IPC preserves periodic checks in normal production policy', async () => {
+  const updateService = new EventEmitter();
+  let starts = 0;
+  updateService.startPeriodicChecks = () => { starts += 1; return { success: true }; };
+
+  await withUpdateHandlers(updateService, {}, async handlers => {
+    assert.deepEqual(await handlers['start-periodic-checks'](), { success: true });
+    assert.equal(starts, 1);
+  }, { updatePolicy: { updaterEnabled: true } });
 });

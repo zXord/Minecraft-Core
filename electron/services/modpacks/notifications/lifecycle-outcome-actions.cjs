@@ -285,7 +285,8 @@ class CompositeOutcomeActionExecutor {
   async execute(value) {
     const request = strictObject(value, ['actionId', 'targetKind', 'targetId']);
     if (request.actionId === 'restart-and-recover' ||
-        (request.actionId === 'retry' && typeof request.targetId === 'string' && request.targetId.startsWith('job-'))) {
+        (request.actionId === 'retry' && typeof request.targetId === 'string' &&
+          (request.targetId.startsWith('job-') || /^op2-[0-9a-f]{32}$/u.test(request.targetId)))) {
       return this.lifecycleExecutor.execute(request);
     }
     return this.releaseExecutor.execute(request);

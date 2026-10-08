@@ -4,6 +4,7 @@ const path = require('node:path');
 
 const { strictJsonClone } = require('../../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
+const { ARCHIVE_LIMITS } = require('../limits.cjs');
 const { normalizeRuntimeTuple } = require('../contracts.cjs');
 const { matchAssetPattern } = require('../providers/github-asset-pattern.cjs');
 const { normalizeOwnershipManifest } = require('../planning/ownership-planner.cjs');
@@ -15,11 +16,19 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const VERSION = /^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const HISTORY_INDEX = /^\.history-index-v1-([0-9]{16})-([a-f0-9]{64})\.idx$/u;
 const HISTORY_KINDS = new Set([
   'install', 'upgrade', 'downgrade', 'switch', 'repair', 'detach', 'uninstall', 'rollback', 'import-files-only'
 ]);
 const HISTORY_OUTCOMES = new Set(['completed', 'rolled-back', 'failed', 'recovery-required']);
 const INACTIVE_MODES = new Set(['files-only', 'uninstalled']);
+const MAX_STATE_JSON_BYTES = 8 * 1024 * 1024;
+const MAX_STATE_MANIFEST_ENTRIES = Math.min(10_000, ARCHIVE_LIMITS.maxArchiveEntries);
+const MAX_STATE_MANIFEST_VALUES_PER_ENTRY = 11;
+const MAX_STATE_NON_MANIFEST_VALUES = 25_000;
+const MAX_STATE_JSON_VALUES = MAX_STATE_NON_MANIFEST_VALUES +
+  (MAX_STATE_MANIFEST_ENTRIES * MAX_STATE_MANIFEST_VALUES_PER_ENTRY);
+const VERIFICATION_READ_BYTES = 64 * 1024;
 
 function invalid(field) {
   throw new ModpackError('INVALID_REQUEST', 'Managed modpack state is invalid', {
@@ -27,9 +36,29 @@ function invalid(field) {
   });
 }
 
-function clone(value, field) {
-  try { return strictJsonClone(value); }
+function clone(value, field, options) {
+  try { return strictJsonClone(value, options); }
   catch { invalid(field); }
+}
+
+function stateClone(value, field) {
+  return clone(value, field, { maxCollection: MAX_STATE_JSON_VALUES });
+}
+
+function normalizeStateManifest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      !Array.isArray(value.entries) || value.entries.length > MAX_STATE_MANIFEST_ENTRIES) {
+    invalid('state.manifest');
+  }
+  return normalizeOwnershipManifest(value);
+}
+
+function serializeStateManifest(value) {
+  let serialized;
+  try { serialized = `${JSON.stringify(value, null, 2)}\n`; }
+  catch { invalid('state.manifest'); }
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_STATE_JSON_BYTES) invalid('state.manifest');
+  return serialized;
 }
 
 function exactObject(value, keys, field, required = keys) {
@@ -120,10 +149,36 @@ function normalizeAssetPattern(value, field) {
   return pattern;
 }
 
+function normalizeGitHubReleaseMetadata(value) {
+  const supplied = [value.channel, value.prerelease, value.publishedAt].filter(item => item !== undefined).length;
+  if (supplied === 0) return null;
+  if (supplied !== 3 || !['release', 'prerelease'].includes(value.channel) || typeof value.prerelease !== 'boolean' ||
+      value.channel !== (value.prerelease ? 'prerelease' : 'release')) invalid('state.source');
+  return {
+    channel: value.channel,
+    prerelease: value.prerelease,
+    publishedAt: timestamp(value.publishedAt, 'state.source.publishedAt')
+  };
+}
+
+function normalizeModrinthReleaseMetadata(value) {
+  const supplied = [value.channel, value.prerelease, value.publishedAt].filter(item => item !== undefined).length;
+  if (supplied === 0) return null;
+  if (supplied !== 3 || !['release', 'beta', 'alpha'].includes(value.channel) ||
+      typeof value.prerelease !== 'boolean' || value.prerelease !== (value.channel !== 'release')) {
+    invalid('state.source');
+  }
+  return {
+    channel: value.channel,
+    prerelease: value.prerelease,
+    publishedAt: timestamp(value.publishedAt, 'state.source.publishedAt')
+  };
+}
+
 function normalizeSource(value) {
   exactObject(value, [
     'provider', 'projectId', 'versionId', 'repositoryId', 'releaseId', 'importId', 'artifactSha256',
-    'githubOwner', 'githubRepo', 'version', 'title', 'assetPattern', 'acceptedMapping',
+    'githubOwner', 'githubRepo', 'version', 'title', 'channel', 'prerelease', 'publishedAt', 'assetPattern', 'acceptedMapping',
     'selectedAssetIds', 'artifactSetDigest'
   ], 'state.source', ['provider', 'version', 'title']);
   const common = {
@@ -136,6 +191,7 @@ function normalizeSource(value) {
     if (value.projectId !== undefined || value.versionId !== undefined || value.importId !== undefined || value.artifactSha256 !== undefined) invalid('state.source');
     const repositoryId = decimalId(value.repositoryId, 'state.source.repositoryId');
     if (acceptedMapping && acceptedMapping.githubRepositoryId !== repositoryId) invalid('state.source.acceptedMapping');
+    const releaseMetadata = normalizeGitHubReleaseMetadata(value);
     return {
       ...common,
       repositoryId,
@@ -148,6 +204,7 @@ function normalizeSource(value) {
         pattern: /^(?!\.)(?!.*\.git$)[A-Za-z0-9_.-]{1,100}$/iu,
         maximum: 100
       }),
+      ...(releaseMetadata || {}),
       ...(value.selectedAssetIds === undefined ? {} : {
         selectedAssetIds: normalizeDecimalArray(value.selectedAssetIds, 'state.source.selectedAssetIds')
       }),
@@ -164,10 +221,12 @@ function normalizeSource(value) {
         value.artifactSha256 !== undefined || value.assetPattern !== undefined || value.selectedAssetIds !== undefined) invalid('state.source');
     const projectId = identifier(value.projectId, 'state.source.projectId');
     if (acceptedMapping && acceptedMapping.modrinthProjectId !== projectId) invalid('state.source.acceptedMapping');
+    const releaseMetadata = normalizeModrinthReleaseMetadata(value);
     return {
       ...common,
       projectId,
       versionId: identifier(value.versionId, 'state.source.versionId'),
+      ...(releaseMetadata || {}),
       ...(value.artifactSetDigest === undefined ? {} : {
         artifactSetDigest: hash(value.artifactSetDigest, 'state.source.artifactSetDigest')
       }),
@@ -177,6 +236,7 @@ function normalizeSource(value) {
   if (value.provider === 'local') {
     if (value.projectId !== undefined || value.versionId !== undefined || value.repositoryId !== undefined || value.releaseId !== undefined ||
         value.githubOwner !== undefined || value.githubRepo !== undefined ||
+        value.channel !== undefined || value.prerelease !== undefined || value.publishedAt !== undefined ||
         value.assetPattern !== undefined || value.selectedAssetIds !== undefined || value.artifactSetDigest !== undefined || acceptedMapping) invalid('state.source');
     return {
       ...common,
@@ -188,7 +248,7 @@ function normalizeSource(value) {
 }
 
 function normalizeStateInput(value) {
-  const source = clone(value, 'state');
+  const source = stateClone(value, 'state');
   exactObject(source, [
     'schemaVersion', 'modpackManaged', 'source', 'runtime', 'selectedOptionalFiles', 'installedAt', 'contentRevision', 'manifest'
   ], 'state');
@@ -197,7 +257,7 @@ function normalizeStateInput(value) {
   try { runtime = normalizeRuntimeTuple(source.runtime); }
   catch { invalid('state.runtime'); }
   let manifest;
-  try { manifest = normalizeOwnershipManifest(source.manifest); }
+  try { manifest = normalizeStateManifest(source.manifest); }
   catch { invalid('state.manifest'); }
   storageIdentifier(manifest.installationId, 'state.manifest.installationId');
   return deepFreeze({
@@ -225,7 +285,7 @@ function normalizePersistedState(stateValue, manifestValue) {
   try { runtime = normalizeRuntimeTuple(state.runtime); }
   catch { invalid('state.runtime'); }
   let manifest;
-  try { manifest = normalizeOwnershipManifest(manifestValue); }
+  try { manifest = normalizeStateManifest(manifestValue); }
   catch { invalid('state.manifest'); }
   const manifestId = storageIdentifier(state.manifestId, 'state.manifestId');
   if (manifest.installationId !== manifestId) invalid('state.manifestId');
@@ -316,6 +376,17 @@ function normalizeHistoryEntry(value) {
   return deepFreeze(result);
 }
 
+function historyOperationDigest(operationId) {
+  return crypto.createHash('sha256')
+    .update('minecraft-core-history-index-v1\0', 'utf8')
+    .update(operationId, 'utf8')
+    .digest('hex');
+}
+
+function historyIndexName(sequence, operationId) {
+  return `.history-index-v1-${String(sequence).padStart(16, '0')}-${historyOperationDigest(operationId)}.idx`;
+}
+
 function cursorFor(entry) {
   const payload = Buffer.from(JSON.stringify({ v: 1, sequence: entry.sequence, operationId: entry.operationId }), 'utf8').toString('base64url');
   const digest = crypto.createHash('sha256').update(`minecraft-core-history-v1\0${payload}`, 'utf8').digest('base64url');
@@ -347,16 +418,49 @@ function fileIdentity(value) {
 
 function sameFileIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.mtime === right.mtime && left.ctime === right.ctime;
+    left.mtime === right.mtime;
+}
+
+function defaultYieldControl() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+function verificationOptions(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype ||
+      Object.getOwnPropertySymbols(value).length !== 0) invalid('verification.options');
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.keys(descriptors).some(key => key !== 'signal') ||
+      Object.values(descriptors).some(descriptor => !descriptor.enumerable || !Object.hasOwn(descriptor, 'value'))) {
+    invalid('verification.options');
+  }
+  const signal = descriptors.signal?.value ?? null;
+  if (signal !== null && (!signal || typeof signal.aborted !== 'boolean' ||
+      typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function')) {
+    invalid('verification.signal');
+  }
+  return { signal };
+}
+
+function throwIfVerificationCancelled(signal) {
+  if (signal?.aborted) throw new ModpackError('CANCELLED', 'Managed file verification was cancelled');
+}
+
+function verificationChanged(cause) {
+  if (cause instanceof ModpackError) return cause;
+  return new ModpackError('PLAN_STALE', 'A managed file changed during verification', { cause });
 }
 
 class ModpackStateRepository {
-  constructor({ fsApi = fs, durableFs, clock = () => new Date() } = {}) {
+  constructor({ fsApi = fs, fsPromises = fsApi?.promises, durableFs, clock = () => new Date(), yieldControl = defaultYieldControl } = {}) {
     if (!fsApi || typeof fsApi !== 'object' || !durableFs || typeof durableFs.writeJsonAtomic !== 'function' ||
-        typeof durableFs.readFileBounded !== 'function' || typeof durableFs.flushDirectory !== 'function' || typeof clock !== 'function') invalid('repository');
+        typeof durableFs.writeFileAtomic !== 'function' || typeof durableFs.readFileBounded !== 'function' ||
+        typeof durableFs.flushDirectory !== 'function' || !fsPromises || typeof fsPromises.open !== 'function' ||
+        typeof clock !== 'function' || typeof yieldControl !== 'function') invalid('repository');
     this.fs = fsApi;
+    this.fsPromises = fsPromises;
     this.durableFs = durableFs;
     this.clock = clock;
+    this.yieldControl = yieldControl;
   }
 
   read(serverPathValue) {
@@ -373,6 +477,7 @@ class ModpackStateRepository {
   writeCandidate(serverPathValue, value) {
     const serverPath = this.#server(serverPathValue);
     const normalized = normalizeStateInput(value);
+    const serializedManifest = serializeStateManifest(normalized.manifest);
     const paths = this.#ensureLayout(serverPath);
     const summary = this.#readSummary(paths.summary);
     const persistedRevision = this.#exists(paths.modpack) ? this.#readJson(paths.modpack).contentRevision : null;
@@ -385,13 +490,13 @@ class ModpackStateRepository {
     const manifestPath = path.join(paths.manifests, `${normalized.manifest.installationId}.json`);
     if (this.#exists(manifestPath)) {
       let existing;
-      try { existing = normalizeOwnershipManifest(this.#readJson(manifestPath)); }
+      try { existing = normalizeStateManifest(this.#readJson(manifestPath)); }
       catch { invalid('state.manifest'); }
       if (JSON.stringify(existing) !== JSON.stringify(normalized.manifest)) {
         throw new ModpackError('TARGET_EXISTS', 'The target already exists');
       }
     } else {
-      this.durableFs.writeJsonAtomic(manifestPath, normalized.manifest, { expectedTargetSha256: null });
+      this.durableFs.writeFileAtomic(manifestPath, serializedManifest, { expectedTargetSha256: null });
     }
     this.durableFs.writeJsonAtomic(paths.modpack, normalized.state);
     const nextSummary = { ...summary };
@@ -399,15 +504,88 @@ class ModpackStateRepository {
       'modpackProvider', 'modpackVersion', 'modpackRepositoryId', 'modpackReleaseId',
       'modpackProjectId', 'modpackVersionId', 'modpackImportId'
     ]) delete nextSummary[key];
+    for (const key of ['fabric', 'forge', 'neoforge', 'neoForge', 'quilt']) delete nextSummary[key];
+    const legacyLoaderVersionKey = {
+      fabric: 'fabric',
+      forge: 'forge',
+      neoforge: 'neoforge',
+      quilt: 'quilt'
+    }[normalized.state.runtime.loaderFamily];
     Object.assign(nextSummary, {
       contentRevision: normalized.state.contentRevision,
       modpackManaged: normalized.state.modpackManaged,
       modpackProvider: normalized.state.source.provider,
       modpackVersion: normalized.state.source.version,
+      version: normalized.state.runtime.minecraftVersion,
+      loader: normalized.state.runtime.loaderFamily,
+      loaderVersion: normalized.state.runtime.loaderVersion,
+      javaVersion: normalized.state.runtime.javaMajor,
+      ...(legacyLoaderVersionKey
+        ? { [legacyLoaderVersionKey]: normalized.state.runtime.loaderVersion }
+        : {}),
       ...this.#sourceSummary(normalized.state.source),
       runtime: normalized.state.runtime
     });
     this.durableFs.writeJsonAtomic(paths.summary, nextSummary);
+    return normalizePersistedState(normalized.state, normalized.manifest);
+  }
+
+  async writeCandidateAsync(serverPathValue, value) {
+    if (typeof this.durableFs.writeFileAtomicAsync !== 'function' ||
+        typeof this.durableFs.writeJsonAtomicAsync !== 'function' ||
+        typeof this.durableFs.flushDirectoryAsync !== 'function') invalid('repository');
+    const serverPath = this.#server(serverPathValue);
+    const normalized = normalizeStateInput(value);
+    const serializedManifest = serializeStateManifest(normalized.manifest);
+    const paths = await this.#ensureLayoutAsync(serverPath);
+    const summary = this.#readSummary(paths.summary);
+    const persistedRevision = this.#exists(paths.modpack) ? this.#readJson(paths.modpack).contentRevision : null;
+    for (const priorRevision of [summary.contentRevision, persistedRevision]) {
+      if (priorRevision !== undefined && priorRevision !== null &&
+          (!Number.isSafeInteger(priorRevision) || priorRevision < 0 || normalized.state.contentRevision < priorRevision)) {
+        throw new ModpackError('PLAN_STALE', 'The reviewed modpack plan is stale');
+      }
+    }
+    const manifestPath = path.join(paths.manifests, `${normalized.manifest.installationId}.json`);
+    if (this.#exists(manifestPath)) {
+      let existing;
+      try { existing = normalizeStateManifest(this.#readJson(manifestPath)); }
+      catch { invalid('state.manifest'); }
+      if (JSON.stringify(existing) !== JSON.stringify(normalized.manifest)) {
+        throw new ModpackError('TARGET_EXISTS', 'The target already exists');
+      }
+    } else {
+      await this.durableFs.writeFileAtomicAsync(manifestPath, serializedManifest, { expectedTargetSha256: null });
+    }
+    await this.durableFs.writeJsonAtomicAsync(paths.modpack, normalized.state);
+    const nextSummary = { ...summary };
+    for (const key of [
+      'modpackProvider', 'modpackVersion', 'modpackRepositoryId', 'modpackReleaseId',
+      'modpackProjectId', 'modpackVersionId', 'modpackImportId'
+    ]) delete nextSummary[key];
+    for (const key of ['fabric', 'forge', 'neoforge', 'neoForge', 'quilt']) delete nextSummary[key];
+    const legacyLoaderVersionKey = {
+      fabric: 'fabric',
+      forge: 'forge',
+      neoforge: 'neoforge',
+      quilt: 'quilt'
+    }[normalized.state.runtime.loaderFamily];
+    Object.assign(nextSummary, {
+      contentRevision: normalized.state.contentRevision,
+      modpackManaged: normalized.state.modpackManaged,
+      modpackProvider: normalized.state.source.provider,
+      modpackVersion: normalized.state.source.version,
+      version: normalized.state.runtime.minecraftVersion,
+      loader: normalized.state.runtime.loaderFamily,
+      loaderVersion: normalized.state.runtime.loaderVersion,
+      javaVersion: normalized.state.runtime.javaMajor,
+      ...(legacyLoaderVersionKey
+        ? { [legacyLoaderVersionKey]: normalized.state.runtime.loaderVersion }
+        : {}),
+      ...this.#sourceSummary(normalized.state.source),
+      runtime: normalized.state.runtime
+    });
+    await this.durableFs.writeJsonAtomicAsync(paths.summary, nextSummary);
     return normalizePersistedState(normalized.state, normalized.manifest);
   }
 
@@ -417,12 +595,64 @@ class ModpackStateRepository {
     const paths = this.#ensureLayout(serverPath);
     const target = path.join(paths.history, `${entry.operationId}.json`);
     if (this.#exists(target)) throw new ModpackError('TARGET_EXISTS', 'The target already exists');
-    this.#assertHistorySequence(paths, entry.sequence);
+    const indexed = this.#prepareHistoryIndex(paths);
+    if (indexed.ordered.length > 0) {
+      const latest = this.#readIndexedHistory(indexed, indexed.ordered[0]);
+      if (latest.sequence >= Number.MAX_SAFE_INTEGER) invalid('history.sequence');
+      if (entry.sequence <= latest.sequence) {
+        throw new ModpackError('PLAN_STALE', 'The reviewed modpack plan is stale');
+      }
+    }
     try {
       this.durableFs.writeJsonAtomic(target, entry, { expectedTargetSha256: null });
     } catch (error) {
       if (this.#exists(target)) throw new ModpackError('TARGET_EXISTS', 'The target already exists', { cause: error });
       throw error;
+    }
+    try {
+      this.#createHistoryIndexMarker(
+        path.join(paths.history, historyIndexName(entry.sequence, entry.operationId)),
+        { allowExisting: true }
+      );
+    } catch {
+      // The immutable JSON record is authoritative. Validate a read-only virtual
+      // index before reporting success when the optional marker cannot publish.
+      this.#prepareHistoryIndex(paths, { persistMissing: false });
+    }
+    return entry;
+  }
+
+  async appendHistoryAsync(serverPathValue, value) {
+    if (typeof this.durableFs.writeJsonAtomicAsync !== 'function' ||
+        typeof this.durableFs.flushDirectoryAsync !== 'function') invalid('repository');
+    const serverPath = this.#server(serverPathValue);
+    const entry = normalizeHistoryEntry(value);
+    const paths = await this.#ensureLayoutAsync(serverPath);
+    const target = path.join(paths.history, `${entry.operationId}.json`);
+    if (this.#exists(target)) throw new ModpackError('TARGET_EXISTS', 'The target already exists');
+    const indexed = this.#prepareHistoryIndex(paths);
+    if (indexed.ordered.length > 0) {
+      const latest = this.#readIndexedHistory(indexed, indexed.ordered[0]);
+      if (latest.sequence >= Number.MAX_SAFE_INTEGER) invalid('history.sequence');
+      if (entry.sequence <= latest.sequence) {
+        throw new ModpackError('PLAN_STALE', 'The reviewed modpack plan is stale');
+      }
+    }
+    try {
+      await this.durableFs.writeJsonAtomicAsync(target, entry, { expectedTargetSha256: null });
+    } catch (error) {
+      if (this.#exists(target)) throw new ModpackError('TARGET_EXISTS', 'The target already exists', { cause: error });
+      throw error;
+    }
+    try {
+      this.#createHistoryIndexMarker(
+        path.join(paths.history, historyIndexName(entry.sequence, entry.operationId)),
+        { allowExisting: true }
+      );
+    } catch {
+      // The immutable JSON record is authoritative. Validate a read-only virtual
+      // index before reporting success when the optional marker cannot publish.
+      this.#prepareHistoryIndex(paths, { persistMissing: false });
     }
     return entry;
   }
@@ -430,22 +660,31 @@ class ModpackStateRepository {
   listHistory(serverPathValue, { cursor = null, limit = 50 } = {}) {
     const serverPath = this.#server(serverPathValue);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) invalid('limit');
-    const paths = this.#ensureLayout(serverPath);
-    const entries = this.#historyEntries(paths)
-      .sort((left, right) => right.sequence - left.sequence || right.operationId.localeCompare(left.operationId, 'en-US'));
+    const paths = this.#readHistoryLayout(serverPath);
+    if (!paths) {
+      if (cursor !== null) invalid('cursor');
+      return deepFreeze({ items: [], nextCursor: null });
+    }
+    const indexed = this.#prepareHistoryIndex(paths, { persistMissing: false });
     let start = 0;
     if (cursor !== null) {
       const decoded = parseCursor(cursor);
-      const index = entries.findIndex(entry => entry.sequence === decoded.sequence && entry.operationId === decoded.operationId);
+      const index = indexed.ordered.findIndex(item => item.sequence === decoded.sequence &&
+        item.operationDigest === historyOperationDigest(decoded.operationId));
       if (index < 0) invalid('cursor');
+      const cursorEntry = this.#readIndexedHistory(indexed, indexed.ordered[index]);
+      if (cursorEntry.operationId !== decoded.operationId) invalid('cursor');
       start = index + 1;
     }
-    const items = entries.slice(start, start + limit);
-    const nextCursor = start + items.length < entries.length ? cursorFor(items.at(-1)) : null;
+    const items = indexed.ordered.slice(start, start + limit)
+      .map(item => this.#readIndexedHistory(indexed, item));
+    const nextCursor = start + items.length < indexed.ordered.length ? cursorFor(items.at(-1)) : null;
     return deepFreeze({ items, nextCursor });
   }
 
-  verifyManagedFiles(serverPathValue) {
+  async verifyManagedFiles(serverPathValue, optionsValue = {}) {
+    const { signal } = verificationOptions(optionsValue);
+    throwIfVerificationCancelled(signal);
     const serverPath = this.#server(serverPathValue);
     const before = this.read(serverPath);
     if (!before || before.state.modpackManaged !== true) invalid('state');
@@ -454,16 +693,22 @@ class ModpackStateRepository {
     const mismatches = [];
     const statuses = [];
     for (const entry of entries) {
-      const status = this.#verifyManifestEntry(serverPath, entry);
+      throwIfVerificationCancelled(signal);
+      const status = await this.#verifyManifestEntryAsync(serverPath, entry, signal);
       statuses.push(status);
       if (status !== 'matched') {
         mismatches.push({ entryName: entry.path, origin: entry.origin, role: entry.role, status });
       }
+      await this.yieldControl();
+      throwIfVerificationCancelled(signal);
     }
     for (let index = 0; index < entries.length; index += 1) {
-      if (this.#verifyManifestEntry(serverPath, entries[index]) !== statuses[index]) {
+      throwIfVerificationCancelled(signal);
+      if (await this.#verifyManifestEntryAsync(serverPath, entries[index], signal) !== statuses[index]) {
         throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
       }
+      await this.yieldControl();
+      throwIfVerificationCancelled(signal);
     }
     const after = this.read(serverPath);
     if (!after || after.state.modpackManaged !== true || after.state.contentRevision !== before.state.contentRevision ||
@@ -723,28 +968,155 @@ class ModpackStateRepository {
       !pathKey.startsWith('.minecraft-core-state/');
   }
 
-  #historyEntries(paths) {
-    const entries = this.fs.readdirSync(paths.history, { withFileTypes: true }).map(item => {
-      if (!item.isFile() || item.isSymbolicLink() || !item.name.endsWith('.json')) invalid('history');
-      const operationId = storageIdentifier(item.name.slice(0, -5), 'history.operationId');
-      const entry = normalizeHistoryEntry(this.#readJson(path.join(paths.history, item.name)));
-      if (entry.operationId !== operationId || `${entry.operationId}.json` !== item.name) invalid('history');
+  #nextHistorySequence(paths) {
+    const indexed = this.#prepareHistoryIndex(paths);
+    if (indexed.ordered.length === 0) return 1;
+    const latest = this.#readIndexedHistory(indexed, indexed.ordered[0]);
+    if (latest.sequence >= Number.MAX_SAFE_INTEGER) invalid('history.sequence');
+    return latest.sequence + 1;
+  }
+
+  #prepareHistoryIndex(paths, { persistMissing = true } = {}) {
+    let inventory = this.#historyInventory(paths);
+    if (inventory.indexes.size > inventory.records.size) invalid('history.index');
+    for (const item of inventory.indexes.values()) {
+      if (!inventory.recordsByDigest.has(item.operationDigest)) invalid('history.index');
+    }
+    if (inventory.indexes.size < inventory.records.size) {
+      if (persistMissing) {
+        try {
+          this.#rebuildHistoryIndex(paths, inventory);
+          inventory = this.#historyInventory(paths);
+        } catch {
+          // Index markers are an optimization. Re-inventory after a partial
+          // publication and validate the authoritative immutable records.
+          inventory = this.#virtualHistoryIndex(this.#historyInventory(paths));
+        }
+      } else {
+        inventory = this.#virtualHistoryIndex(inventory);
+      }
+    }
+    if (inventory.indexes.size !== inventory.records.size) invalid('history.index');
+    for (const record of inventory.records.values()) {
+      if (!inventory.indexesByDigest.has(record.operationDigest)) invalid('history.index');
+    }
+    const ordered = [...inventory.indexes.values()].sort((left, right) => right.sequence - left.sequence);
+    return { ...inventory, ordered };
+  }
+
+  #historyInventory(paths) {
+    const records = new Map();
+    const recordsByDigest = new Map();
+    const indexes = new Map();
+    const indexesByDigest = new Map();
+    for (const item of this.fs.readdirSync(paths.history, { withFileTypes: true })) {
+      if (!item.isFile() || item.isSymbolicLink()) invalid('history');
+      if (item.name.endsWith('.json')) {
+        const operationId = storageIdentifier(item.name.slice(0, -5), 'history.operationId');
+        if (`${operationId}.json` !== item.name || records.has(operationId)) invalid('history');
+        const operationDigest = historyOperationDigest(operationId);
+        if (recordsByDigest.has(operationDigest)) invalid('history.operationId');
+        const record = {
+          operationId,
+          operationDigest,
+          filePath: path.join(paths.history, item.name)
+        };
+        records.set(operationId, record);
+        recordsByDigest.set(operationDigest, record);
+        continue;
+      }
+      const match = HISTORY_INDEX.exec(item.name);
+      if (!match) invalid('history');
+      const sequence = Number(match[1]);
+      const operationDigest = match[2];
+      if (!Number.isSafeInteger(sequence) || sequence < 1 || String(sequence).padStart(16, '0') !== match[1] ||
+          indexes.has(sequence) || indexesByDigest.has(operationDigest)) invalid('history.index');
+      const index = { sequence, operationDigest, filePath: path.join(paths.history, item.name) };
+      indexes.set(sequence, index);
+      indexesByDigest.set(operationDigest, index);
+    }
+    return { indexes, indexesByDigest, records, recordsByDigest };
+  }
+
+  #rebuildHistoryIndex(paths, inventory) {
+    const entries = [...inventory.records.values()].map(record => {
+      const entry = normalizeHistoryEntry(this.#readJson(record.filePath));
+      if (entry.operationId !== record.operationId || `${entry.operationId}.json` !== path.basename(record.filePath)) {
+        invalid('history');
+      }
       return entry;
     });
     if (new Set(entries.map(entry => entry.sequence)).size !== entries.length) invalid('history.sequence');
-    return entries;
+    for (const entry of entries) {
+      const operationDigest = historyOperationDigest(entry.operationId);
+      const existing = inventory.indexesByDigest.get(operationDigest);
+      if (existing && existing.sequence !== entry.sequence) invalid('history.index');
+      if (!existing) {
+        this.#createHistoryIndexMarker(
+          path.join(paths.history, historyIndexName(entry.sequence, entry.operationId)),
+          { allowExisting: true }
+        );
+      }
+    }
   }
 
-  #nextHistorySequence(paths) {
-    const entries = this.#historyEntries(paths);
-    const maximum = entries.reduce((result, entry) => Math.max(result, entry.sequence), 0);
-    if (maximum >= Number.MAX_SAFE_INTEGER) invalid('history.sequence');
-    return maximum + 1;
+  #virtualHistoryIndex(inventory) {
+    const indexes = new Map(inventory.indexes);
+    const indexesByDigest = new Map(inventory.indexesByDigest);
+    const entries = [...inventory.records.values()].map(record => {
+      const entry = normalizeHistoryEntry(this.#readJson(record.filePath));
+      if (entry.operationId !== record.operationId || `${entry.operationId}.json` !== path.basename(record.filePath)) {
+        invalid('history');
+      }
+      return entry;
+    });
+    if (new Set(entries.map(entry => entry.sequence)).size !== entries.length) invalid('history.sequence');
+    for (const entry of entries) {
+      const operationDigest = historyOperationDigest(entry.operationId);
+      const existing = indexesByDigest.get(operationDigest);
+      if (existing && existing.sequence !== entry.sequence) invalid('history.index');
+      if (!existing) {
+        if (indexes.has(entry.sequence)) invalid('history.index');
+        const index = { sequence: entry.sequence, operationDigest, filePath: null };
+        indexes.set(entry.sequence, index);
+        indexesByDigest.set(operationDigest, index);
+      }
+    }
+    return { ...inventory, indexes, indexesByDigest };
   }
 
-  #assertHistorySequence(paths, sequence) {
-    const next = this.#nextHistorySequence(paths);
-    if (sequence < next) throw new ModpackError('PLAN_STALE', 'The reviewed modpack plan is stale');
+  #readIndexedHistory(indexed, index) {
+    const record = indexed.recordsByDigest.get(index.operationDigest);
+    if (!record) invalid('history.index');
+    const entry = normalizeHistoryEntry(this.#readJson(record.filePath));
+    if (entry.operationId !== record.operationId || entry.sequence !== index.sequence ||
+        historyOperationDigest(entry.operationId) !== index.operationDigest ||
+        `${entry.operationId}.json` !== path.basename(record.filePath)) invalid('history.index');
+    return entry;
+  }
+
+  #createHistoryIndexMarker(markerPath, { allowExisting }) {
+    let descriptor = null;
+    try {
+      descriptor = this.fs.openSync(markerPath, 'wx', 0o600);
+      this.fs.closeSync(descriptor);
+      descriptor = null;
+    } catch (error) {
+      if (descriptor !== null) {
+        try { this.fs.closeSync(descriptor); } catch { /* retain the primary failure */ }
+      }
+      if (allowExisting && error?.code === 'EEXIST') {
+        const stat = this.fs.lstatSync(markerPath, { bigint: true });
+        if (!stat.isFile() || stat.isSymbolicLink() || !this.#samePath(this.fs.realpathSync.native(markerPath), markerPath)) {
+          invalid('history.index');
+        }
+        return;
+      }
+      if (error?.code === 'EEXIST') {
+        throw new ModpackError('TARGET_EXISTS', 'The target already exists', { cause: error });
+      }
+      throw error;
+    }
   }
 
   #writeInactiveState(paths, summary, state) {
@@ -760,6 +1132,105 @@ class ModpackStateRepository {
       modpackLifecycleMode: state.lifecycleMode
     });
     this.durableFs.writeJsonAtomic(paths.summary, nextSummary);
+  }
+
+  async #verifyManifestEntryAsync(serverPath, entry, signal) {
+    throwIfVerificationCancelled(signal);
+    const segments = entry.path.split('/');
+    const candidate = path.resolve(serverPath, ...segments);
+    const relative = path.relative(serverPath, candidate);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) invalid('state.manifest.path');
+    let current = serverPath;
+    let stat;
+    for (let index = 0; index < segments.length; index += 1) {
+      throwIfVerificationCancelled(signal);
+      current = path.join(current, segments[index]);
+      try { stat = this.fs.lstatSync(current, { bigint: true }); }
+      catch (error) {
+        if (error?.code === 'ENOENT') return 'missing';
+        throw verificationChanged(error);
+      }
+      const last = index === segments.length - 1;
+      if (stat.isSymbolicLink() || (!last && !stat.isDirectory()) || (last && (!stat.isFile() || BigInt(stat.nlink) !== 1n))) {
+        return 'unsafe';
+      }
+    }
+    if (!this.#samePath(this.fs.realpathSync.native(candidate), candidate)) return 'unsafe';
+    const beforeIdentity = fileIdentity(stat);
+    if (String(stat.size) !== entry.size) return 'modified';
+    const expectedBytes = BigInt(entry.size);
+    const digest = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(VERIFICATION_READ_BYTES);
+    let handle;
+    try {
+      handle = await this.fsPromises.open(candidate, 'r');
+    } catch (error) {
+      throwIfVerificationCancelled(signal);
+      throw verificationChanged(error);
+    }
+
+    let failure = null;
+    let handleAfterIdentity = null;
+    try {
+      throwIfVerificationCancelled(signal);
+      const openedStat = await handle.stat({ bigint: true });
+      if (!openedStat.isFile() || BigInt(openedStat.nlink) !== 1n ||
+          !sameFileIdentity(beforeIdentity, fileIdentity(openedStat))) {
+        throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
+      }
+      let measuredBytes = 0n;
+      for (;;) {
+        throwIfVerificationCancelled(signal);
+        const remaining = expectedBytes - measuredBytes;
+        const readLength = remaining >= BigInt(buffer.length)
+          ? buffer.length
+          : Number(remaining) + 1;
+        let result;
+        try { result = await handle.read(buffer, 0, readLength, null); }
+        catch (error) {
+          throwIfVerificationCancelled(signal);
+          throw verificationChanged(error);
+        }
+        throwIfVerificationCancelled(signal);
+        const bytesRead = result?.bytesRead;
+        if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > readLength) {
+          throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
+        }
+        if (bytesRead === 0) break;
+        measuredBytes += BigInt(bytesRead);
+        if (measuredBytes > expectedBytes) {
+          throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
+        }
+        digest.update(buffer.subarray(0, bytesRead));
+        await this.yieldControl();
+        throwIfVerificationCancelled(signal);
+      }
+      if (measuredBytes !== expectedBytes) {
+        throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
+      }
+      handleAfterIdentity = fileIdentity(await handle.stat({ bigint: true }));
+      throwIfVerificationCancelled(signal);
+    } catch (error) {
+      failure = error;
+      throw verificationChanged(error);
+    } finally {
+      try { await handle.close(); }
+      catch (error) {
+        if (failure === null) throw verificationChanged(error);
+      }
+    }
+
+    let afterStat;
+    try { afterStat = this.fs.lstatSync(candidate, { bigint: true }); }
+    catch (error) { throw verificationChanged(error); }
+    const afterIdentity = fileIdentity(afterStat);
+    if (!afterStat.isFile() || BigInt(afterStat.nlink) !== 1n ||
+        !sameFileIdentity(beforeIdentity, handleAfterIdentity) ||
+        !sameFileIdentity(beforeIdentity, afterIdentity) ||
+        !this.#samePath(this.fs.realpathSync.native(candidate), candidate)) {
+      throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
+    }
+    return digest.digest('hex') === entry.installedHash ? 'matched' : 'modified';
   }
 
   #verifyManifestEntry(serverPath, entry) {
@@ -819,6 +1290,22 @@ class ModpackStateRepository {
     };
   }
 
+  #readHistoryLayout(serverPath) {
+    const paths = this.#paths(serverPath);
+    if (!this.#exists(paths.stateRoot)) return null;
+    this.#assertDirectory(paths.stateRoot);
+    if (!this.#exists(paths.history)) return null;
+    this.#assertDirectory(paths.history);
+    return paths;
+  }
+
+  #assertDirectory(directory) {
+    const stat = this.fs.lstatSync(directory, { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !this.#samePath(this.fs.realpathSync.native(directory), directory)) {
+      invalid('state');
+    }
+  }
+
   #ensureLayout(serverPath) {
     const paths = this.#paths(serverPath);
     let parent = serverPath;
@@ -827,8 +1314,21 @@ class ModpackStateRepository {
         this.fs.mkdirSync(directory, { recursive: false, mode: 0o700 });
         this.durableFs.flushDirectory(parent);
       }
-      const stat = this.fs.lstatSync(directory, { bigint: true });
-      if (!stat.isDirectory() || stat.isSymbolicLink() || !this.#samePath(this.fs.realpathSync.native(directory), directory)) invalid('state');
+      this.#assertDirectory(directory);
+      parent = directory === paths.stateRoot ? paths.stateRoot : parent;
+    }
+    return paths;
+  }
+
+  async #ensureLayoutAsync(serverPath) {
+    const paths = this.#paths(serverPath);
+    let parent = serverPath;
+    for (const directory of [paths.stateRoot, paths.manifests, paths.operations, paths.history]) {
+      if (!this.#exists(directory)) {
+        this.fs.mkdirSync(directory, { recursive: false, mode: 0o700 });
+        await this.durableFs.flushDirectoryAsync(parent);
+      }
+      this.#assertDirectory(directory);
       parent = directory === paths.stateRoot ? paths.stateRoot : parent;
     }
     return paths;
@@ -843,8 +1343,8 @@ class ModpackStateRepository {
 
   #readJson(filePath) {
     try {
-      const bytes = this.durableFs.readFileBounded(filePath, { allowMissing: false, maxBytes: 8 * 1024 * 1024 });
-      return clone(JSON.parse(bytes.toString('utf8')), 'state');
+      const bytes = this.durableFs.readFileBounded(filePath, { allowMissing: false, maxBytes: MAX_STATE_JSON_BYTES });
+      return stateClone(JSON.parse(bytes.toString('utf8')), 'state');
     } catch (error) {
       if (error instanceof ModpackError && error.code === 'INVALID_REQUEST') throw error;
       invalid('state');

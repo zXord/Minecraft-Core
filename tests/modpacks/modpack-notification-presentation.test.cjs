@@ -74,17 +74,21 @@ test('global notification affordance appears only for unread actionable notifica
   assert.equal(attention.globalUnreadActionableCount, 1);
 });
 
-test('contextual notification control appears for managed state retained server history or recovery', () => {
+test('notification affordances are scoped to an actively managed modpack server', () => {
   const derive = notificationModule.deriveModpackNotificationPresentation;
   const base = { items: [], serverId: 'server-a', managed: false, recoveryCount: 0 };
 
   assert.equal(derive(base).showContextualControl, false);
   assert.equal(derive({ ...base, managed: true }).showContextualControl, true);
-  assert.equal(derive({ ...base, recoveryCount: 1 }).showContextualControl, true);
-  assert.equal(derive({
+  assert.equal(derive({ ...base, recoveryCount: 1 }).showContextualControl, false);
+
+  const retainedUnmanaged = derive({
     ...base,
-    items: [{ notificationId: 'retained', serverId: 'server-a', read: true, action: null }]
-  }).showContextualControl, true);
+    items: [{ notificationId: 'retained', serverId: 'server-a', read: false, action: null }]
+  });
+  assert.equal(retainedUnmanaged.showContextualControl, false);
+  assert.equal(retainedUnmanaged.currentServerUnreadCount, 0);
+
   assert.equal(derive({
     ...base,
     items: [{ notificationId: 'other-server', serverId: 'server-b', read: false, action: { actionId: 'open-details' } }]
@@ -94,6 +98,7 @@ test('contextual notification control appears for managed state retained server 
 test('current server badge and history exclude notifications owned by other servers', () => {
   const result = notificationModule.deriveModpackNotificationPresentation({
     serverId: 'server-a',
+    managed: true,
     items: [
       { notificationId: 'a-unread', serverId: 'server-a', read: false, action: null },
       { notificationId: 'a-read', serverId: 'server-a', read: true, action: { actionId: 'open-details' } },

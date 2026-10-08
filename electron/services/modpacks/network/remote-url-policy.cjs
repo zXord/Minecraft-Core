@@ -3,6 +3,11 @@ const dns = require('node:dns');
 const ipaddr = require('ipaddr.js');
 const { ModpackError } = require('../errors.cjs');
 
+const IPV6_GENERAL_GLOBAL_UNICAST = Object.freeze([ipaddr.parse('2000::'), 3]);
+const ADDITIONAL_NON_PUBLIC_RANGES = Object.freeze([
+  Object.freeze([ipaddr.parse('198.18.0.0'), 15])
+]);
+
 function rejectUrl(reasonCode = 'host-not-allowed') {
   throw new ModpackError('INVALID_RELEASE_URL', 'Remote release address is not allowed', { details: { reasonCode } });
 }
@@ -50,7 +55,10 @@ function parsedPublicAddress(address) {
   if (typeof address !== 'string' || address.includes('%') || !ipaddr.isValid(address)) return null;
   let parsed = ipaddr.parse(address);
   if (parsed.kind() === 'ipv6' && parsed.isIPv4MappedAddress()) parsed = parsed.toIPv4Address();
-  return parsed.range() === 'unicast' ? parsed : null;
+  const explicitlyNonPublic = ADDITIONAL_NON_PUBLIC_RANGES.some(([network, prefix]) =>
+    parsed.kind() === network.kind() && parsed.match(network, prefix));
+  const generallyAllocated = parsed.kind() !== 'ipv6' || parsed.match(IPV6_GENERAL_GLOBAL_UNICAST);
+  return parsed.range() === 'unicast' && generallyAllocated && !explicitlyNonPublic ? parsed : null;
 }
 
 function addressFamilyMatches(address, family) {

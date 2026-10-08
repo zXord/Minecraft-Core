@@ -48,29 +48,28 @@ const FIXTURE_HASHES = Object.freeze({
   'traversal.zip': 'b610f140c37669a753051fc166f8bf71e3f7049267a30df61484e6878e69ca7f'
 });
 const GENERATED_MRPACK_SHA256 = '8e492d0f14f22a84b66ab9e3b949ecc60fc7af88b011c5ce00b8afe03b7abfcb';
-const MAX_WINDOWS_LEGACY_PATH_CHARS = 259;
-const DOTNET_BUNDLE_EXTRACTION_SUFFIX = Object.freeze([
-  'broker-bundles',
-  'bundle-XXXXXX',
-  'ArchiveWorker',
-  'fffff',
-  'System.Runtime.InteropServices.RuntimeInformation.dll'
-]);
-
 function smokeFailure(cause) {
   const error = new Error('Packaged modpack smoke evidence is incomplete', { cause });
   error.code = 'PACKAGED_SMOKE_FAILED';
   return error;
 }
 
+function mustPreservePackagedSmokeRoot(error) {
+  const visited = new Set();
+  let current = error;
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    if (current.preservePackagedSmokeRoot === true) return true;
+    visited.add(current);
+    current = current.cause;
+  }
+  return false;
+}
+
 export function resolveArchiveWorkerProbeRoot(probeRoot) {
   if (typeof probeRoot !== 'string' || !path.isAbsolute(probeRoot)) throw smokeFailure();
   const resolvedProbeRoot = path.resolve(probeRoot);
   const workerRoot = path.join(resolvedProbeRoot, 'w');
-  if (path.dirname(workerRoot) !== resolvedProbeRoot ||
-      path.join(workerRoot, ...DOTNET_BUNDLE_EXTRACTION_SUFFIX).length > MAX_WINDOWS_LEGACY_PATH_CHARS) {
-    throw smokeFailure();
-  }
+  if (path.dirname(workerRoot) !== resolvedProbeRoot) throw smokeFailure();
   return workerRoot;
 }
 
@@ -223,20 +222,24 @@ function validateSmokeEvidenceInner(value) {
   if (!/^\d+\.\d+\.\d+$/u.test(value.application.version) || !Number.isSafeInteger(value.application.executableSize) ||
       value.application.executableSize < 1 || value.application.rendererLoaded !== true) throw smokeFailure();
   assertDigest(value.application.executableSha256);
-  exactObject(value.archiveWorker, ['containment', 'runtimeVersion', 'handlers', 'workerSize', 'workerSha256']);
+  exactObject(value.archiveWorker, ['containment', 'runtimeVersion', 'runtimeMode', 'handlers', 'workerSize', 'workerSha256']);
   exactObject(value.archiveWorker.handlers, ['zip', 'rar']);
   if (value.archiveWorker.containment !== 'passed' || value.archiveWorker.runtimeVersion !== '26.02' ||
+      value.archiveWorker.runtimeMode !== 'in-memory-single-file' ||
       value.archiveWorker.handlers.zip !== true || value.archiveWorker.handlers.rar !== true ||
       !Number.isSafeInteger(value.archiveWorker.workerSize) || value.archiveWorker.workerSize < 1) throw smokeFailure();
   assertDigest(value.archiveWorker.workerSha256);
   exactObject(value.environment, [
     'appIsPackaged', 'productionComposition', 'fixtureFactoryEnabled', 'isolatedUserData', 'pathSanitized',
-    'fixtureRootUnchanged', 'publicNetworkRequests'
+    'fixtureRootUnchanged', 'updaterEnabled', 'automaticReleaseChecksEnabled',
+    'publicManagementListenersEnabled', 'rendererPublicNetworkRequests'
   ]);
   if (value.environment.appIsPackaged !== true || value.environment.productionComposition !== true ||
       value.environment.fixtureFactoryEnabled !== false || value.environment.isolatedUserData !== true ||
       value.environment.pathSanitized !== true || value.environment.fixtureRootUnchanged !== true ||
-      value.environment.publicNetworkRequests !== 0) throw smokeFailure();
+      value.environment.updaterEnabled !== false || value.environment.automaticReleaseChecksEnabled !== false ||
+      value.environment.publicManagementListenersEnabled !== false ||
+      value.environment.rendererPublicNetworkRequests !== 0) throw smokeFailure();
   exactObject(value.archives, ['extracted', 'schemes', 'rejected']);
   validateExtractedArchives(value.archives.extracted);
   validateSchemes(value.archives.schemes);
@@ -435,7 +438,7 @@ async function runAcceptedArchive({ probeRoot, resourcesRoot, fixtureRoot, archi
   const destinationId = current.registry.createStagingOutput({ ownerId: inspected.inspectionId });
   const extracted = await current.extractor.extractArchive({ inspectionId: inspected.inspectionId, destinationId });
   if (extracted.type !== 'verified-extraction' || extracted.measured.entryCount < 1) throw smokeFailure();
-  current.registry.releaseOwner(inspected.inspectionId);
+  await current.registry.releaseOwner(inspected.inspectionId);
   return {
     archiveId,
     archiveFamily,
@@ -550,11 +553,15 @@ function validatePackagedDriverEvidence(value) {
   exactObject(value, ['rendererLoaded', 'environment', 'fallbacksUsed']);
   if (value.rendererLoaded !== true || !Array.isArray(value.fallbacksUsed) || value.fallbacksUsed.length !== 0) throw smokeFailure();
   exactObject(value.environment, [
-    'appIsPackaged', 'productionComposition', 'fixtureFactoryEnabled', 'isolatedUserData', 'pathSanitized', 'publicNetworkRequests'
+    'appIsPackaged', 'productionComposition', 'fixtureFactoryEnabled', 'isolatedUserData', 'pathSanitized',
+    'updaterEnabled', 'automaticReleaseChecksEnabled', 'publicManagementListenersEnabled', 'rendererPublicNetworkRequests'
   ]);
   if (value.environment.appIsPackaged !== true || value.environment.productionComposition !== true ||
       value.environment.fixtureFactoryEnabled !== false || value.environment.isolatedUserData !== true ||
-      value.environment.pathSanitized !== true || value.environment.publicNetworkRequests !== 0) throw smokeFailure();
+      value.environment.pathSanitized !== true || value.environment.updaterEnabled !== false ||
+      value.environment.automaticReleaseChecksEnabled !== false ||
+      value.environment.publicManagementListenersEnabled !== false ||
+      value.environment.rendererPublicNetworkRequests !== 0) throw smokeFailure();
 }
 
 function validateArchiveProbeEvidence(value) {
@@ -601,6 +608,7 @@ export async function runPackagedSmoke({
 } = {}) {
   let smokeRoot = null;
   let primaryFailure = null;
+  let preserveSmokeRoot = false;
   try {
     if (platform !== 'win32' || architecture !== 'x64' || typeof verifyPackage !== 'function' || typeof archiveProbe !== 'function' ||
         typeof deterministicProbe !== 'function' || typeof driver !== 'function') throw smokeFailure();
@@ -620,13 +628,19 @@ export async function runPackagedSmoke({
     const userDataPath = path.join(smokeRoot, 'user-data');
     await fs.mkdir(userDataPath);
     const env = createSanitizedEnvironment({ source: process.env, userDataPath });
-    const probeResults = await Promise.allSettled([
-      archiveProbe({ resourcesPath: path.join(appOutput, 'resources'), fixtureRoot, temporaryBase: smokeRoot }),
-      deterministicProbe({ repositoryRoot: repository, fixtureRoot, temporaryBase: smokeRoot })
-    ]);
-    const failedProbe = probeResults.find(result => result.status === 'rejected');
-    if (failedProbe) throw failedProbe.reason;
-    const [archiveRaw, deterministicRaw] = probeResults.map(result => result.value);
+    // Native archive extraction and the multi-launch Electron lifecycle probe are
+    // intentionally serialized. Running both at once makes the release gate fight
+    // itself for memory and can stall Electron shutdown on constrained builders.
+    const archiveRaw = await archiveProbe({
+      resourcesPath: path.join(appOutput, 'resources'),
+      fixtureRoot,
+      temporaryBase: smokeRoot
+    });
+    const deterministicRaw = await deterministicProbe({
+      repositoryRoot: repository,
+      fixtureRoot,
+      temporaryBase: smokeRoot
+    });
     const driverRaw = await driver({
       repositoryRoot: repository,
       executablePath: executable.resolved,
@@ -657,6 +671,7 @@ export async function runPackagedSmoke({
       archiveWorker: {
         containment: packaged.containment,
         runtimeVersion: packaged.runtime?.version,
+        runtimeMode: packaged.worker?.runtimeMode,
         handlers: packaged.runtime?.handlers,
         workerSize: packaged.worker?.size,
         workerSha256: packaged.worker?.sha256
@@ -675,9 +690,10 @@ export async function runPackagedSmoke({
       }
     });
   } catch (error) {
+    preserveSmokeRoot = mustPreservePackagedSmokeRoot(error);
     primaryFailure = error?.code === 'PACKAGED_SMOKE_FAILED' ? error : smokeFailure(error);
   } finally {
-    if (smokeRoot) {
+    if (smokeRoot && !preserveSmokeRoot) {
       try { await removeControlledRoot(smokeRoot, path.resolve(temporaryBase)); }
       catch (cleanupError) { primaryFailure = smokeFailure(cleanupError); }
     }

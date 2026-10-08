@@ -17,6 +17,8 @@
   export let checkClientSynchronization;
   export let redownloadClient;
   export let redownloadClientFull;
+  export let packState = null;
+  $: legacyContentAllowed = packState?.status === 'unmanaged';
 
   // Create event dispatcher for communicating state changes to parent
   const dispatch = createEventDispatcher();
@@ -504,6 +506,7 @@
 
   // Retry the automatic loader detection after a short delay when a sync check is skipped
   function scheduleFabricAutoRetry() {
+    if (!legacyContentAllowed) return;
     if (fabricAutoCheckCooldown) return;
     fabricAutoCheckCooldown = true;
     setTimeout(() => {
@@ -512,6 +515,7 @@
   }
 
   $: if (
+    legacyContentAllowed &&
     !fabricAutoChecked &&
     !fabricAutoCheckInProgress &&
     !fabricAutoCheckCooldown &&
@@ -712,7 +716,7 @@
           </div>
           
           <!-- Client Management Section (60%) -->
-          <div class="section management-section">
+          {#if legacyContentAllowed}<div class="section management-section">
             <div class="section-header">
               <h4>🎮 Client Management</h4>
               {#if serverInfo?.minecraftVersion}
@@ -782,6 +786,7 @@
             {/if}
             </div>
           </div>
+          {:else}<div class="section management-section"><h4>Matching client pack</h4><p>Content and the exact runtime are checked through Matching client pack. Legacy repair and version cleanup are disabled while this client is managed or its requirement is unavailable.</p></div>{/if}
         </div>
       </div>
           </div>

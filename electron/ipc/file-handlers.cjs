@@ -13,6 +13,7 @@ const {
 const { createZip } = require('../utils/backup-util.cjs');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
 const { isPathInside } = require('../utils/security-boundaries.cjs');
+const { ModpackError } = require('../services/modpacks/errors.cjs');
 const {
   getServerMutationCoordinator,
   markCurrentServerMutationDirty
@@ -197,7 +198,7 @@ async function calculateFileChecksum(filePath, algorithm = 'sha1') {
   }
 }
 
-function createFileHandlers(win) {
+function createFileHandlers(win, { assertServerDestination = null } = {}) {
   logger.info('File handlers initialized', {
     category: 'storage',
     data: { handler: 'createFileHandlers', hasWindow: !!win }
@@ -604,6 +605,13 @@ function createFileHandlers(win) {
             quiesce: null
           },
           async lease => {
+            const instances = appStore.get('instances');
+            if (Array.isArray(instances) && instances.some(instance => instance?.type === 'client' &&
+                typeof instance.path === 'string' && instance.path.trim() &&
+                (isPathInside(folder, instance.path) || isPathInside(instance.path, folder)))) {
+              throw new ModpackError('INVALID_REQUEST', 'A client folder cannot be initialized as a server');
+            }
+            if (assertServerDestination) await assertServerDestination(folder);
             lease.markDirty();
 
         // Create needed directories

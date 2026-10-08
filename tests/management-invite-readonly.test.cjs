@@ -5,7 +5,7 @@ const path = require('node:path');
 const Module = require('node:module');
 const test = require('node:test');
 
-test('reading an existing management invite preserves config and app-store bytes', async (t) => {
+test('management invite inspection preserves existing metadata and leaves missing setup uncreated', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-invite-readonly-'));
   const serverPath = path.join(root, 'server');
   fs.mkdirSync(serverPath);
@@ -32,7 +32,10 @@ test('reading an existing management invite preserves config and app-store bytes
     useHttps: false,
     async refreshPublicHostIfStale() {},
     detectExternalIP: () => '127.0.0.1',
-    getStatus: () => ({ port: 8080 })
+    getStatus: () => ({ port: 8080 }),
+    setExternalHost() {},
+    setInviteSecret() {},
+    updateServerPath() {}
   };
 
   Module._load = function mockLoad(request, parent, isMain) {
@@ -101,6 +104,42 @@ test('reading an existing management invite preserves config and app-store bytes
     assert.equal(fs.readFileSync(configPath, 'utf8'), originalConfig);
     assert.equal(fs.statSync(configPath).mtimeMs, oldTime.getTime());
     assert.equal(JSON.stringify(appState.instances), originalInstances);
+    assert.equal(appStoreSetCalls, 0);
+
+    const missingConfig = {
+      ...config,
+      managementInviteSecret: ''
+    };
+    const missingConfigBytes = `${JSON.stringify(missingConfig, null, 2)}\n`;
+    fs.writeFileSync(configPath, missingConfigBytes);
+    fs.utimesSync(configPath, oldTime, oldTime);
+    delete instance.managementInviteSecret;
+    const missingInstances = JSON.stringify(appState.instances);
+    appStoreSetCalls = 0;
+
+    const missingResult = await createManagementServerHandlers(null)['get-management-invite-info'](null, {
+      instanceId: 'server-one',
+      serverPath
+    });
+
+    assert.equal(missingResult.success, true);
+    assert.equal(missingResult.configured, false);
+    assert.equal(missingResult.secret, '');
+    assert.equal(missingResult.inviteLink, '');
+    assert.equal(fs.readFileSync(configPath, 'utf8'), missingConfigBytes);
+    assert.equal(fs.statSync(configPath).mtimeMs, oldTime.getTime());
+    assert.equal(JSON.stringify(appState.instances), missingInstances);
+    assert.equal(appStoreSetCalls, 0);
+
+    const pathUpdateResult = await createManagementServerHandlers(null)['update-management-server-path'](null, {
+      instanceId: 'server-one',
+      serverPath
+    });
+
+    assert.equal(pathUpdateResult.success, true);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), missingConfigBytes);
+    assert.equal(fs.statSync(configPath).mtimeMs, oldTime.getTime());
+    assert.equal(JSON.stringify(appState.instances), missingInstances);
     assert.equal(appStoreSetCalls, 0);
   } finally {
     delete require.cache[handlerPath];

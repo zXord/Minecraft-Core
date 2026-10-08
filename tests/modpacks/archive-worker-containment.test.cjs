@@ -4,13 +4,18 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
 const {
   ArchiveWorkerClient,
   verifyArchiveWorkerExecutable
 } = require('../../electron/services/modpacks/archive/archive-worker-client.cjs');
-const { WindowsDurableFsClient } = require('../../electron/utils/windows-durable-fs-client.cjs');
+const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
+const {
+  MAX_FLUSH_DIRECTORIES,
+  WindowsDurableFsClient
+} = require('../../electron/utils/windows-durable-fs-client.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..', '..');
 const workerPath = path.join(repositoryRoot, 'vendor', 'archive-worker', 'x64', 'ArchiveWorker.exe');
@@ -29,12 +34,49 @@ function copyPackagedArchiveResources(targetRoot) {
   return archiveRoot;
 }
 
+function createRetryObservedSpawn(onRetry) {
+  return (executable, args, options) => {
+    assert.deepEqual(args, ['--durable-fs']);
+    const child = childProcess.spawn(executable, ['--durable-fs-test-observe-retries'], options);
+    const nativeStderr = child.stderr;
+    const publicStderr = new PassThrough();
+    child.stderr = publicStderr;
+    let pending = '';
+
+    const consumeLine = line => {
+      const match = /^DURABILITY_RETRY attempt=([1-4]) delayMs=(50|150|400|800)$/.exec(line);
+      if (match) {
+        onRetry(Object.freeze({ attempt: Number(match[1]), delayMs: Number(match[2]) }));
+        return;
+      }
+      publicStderr.write(Buffer.from(`${line}\n`, 'utf8'));
+    };
+    nativeStderr.on('data', chunk => {
+      pending += chunk.toString('utf8');
+      for (;;) {
+        const newline = pending.indexOf('\n');
+        if (newline < 0) break;
+        const line = pending.slice(0, newline).replace(/\r$/u, '');
+        pending = pending.slice(newline + 1);
+        consumeLine(line);
+      }
+    });
+    nativeStderr.once('error', error => publicStderr.destroy(error));
+    nativeStderr.once('end', () => {
+      if (pending.length > 0) publicStderr.write(Buffer.from(pending, 'utf8'));
+      publicStderr.end();
+    });
+    return child;
+  };
+}
+
 test('worker manifest is closed and matches the exact AMD64 executable', async () => {
   const verified = await verifyArchiveWorkerExecutable({ workerPath, workerManifestPath });
   const bytes = fs.readFileSync(workerPath);
   assert.equal(verified.architecture, 'x64');
   assert.equal(verified.runtimeIdentifier, 'win-x64');
   assert.equal(verified.targetFramework, 'net8.0-windows');
+  assert.equal(verified.runtimeMode, 'in-memory-single-file');
   assert.equal(verified.file.size, bytes.length);
   assert.equal(verified.file.sha256, crypto.createHash('sha256').update(bytes).digest('hex'));
   assert.equal(bytes.readUInt16LE(0), 0x5a4d);
@@ -55,11 +97,39 @@ test('worker build script pins the SDK, publishes one self-contained AMD64 execu
   assert.match(source, /RedirectStandardOutput\s*=\s*\$true/);
   assert.match(source, /RedirectStandardError\s*=\s*\$true/);
   assert.match(source, /CreateNoWindow\s*=\s*\$true/);
+  assert.match(source, /Environment\['DOTNET_BUNDLE_EXTRACT_BASE_DIR'\]\s*=\s*\$published\.FullName/);
   assert.match(source, /Assert-Within/);
   assert.match(source, /\.ArchiveWorker\.stage-/);
   assert.match(source, /\.archive-worker-x64\.stage-/);
   assert.doesNotMatch(source, /Remove-Item[^\r\n]*(?:-Recurse|-r\b)/i);
   assert.doesNotMatch(source, /& \$published\.FullName '--build-self-test'/);
+});
+
+test('the verified single-file worker loads in memory without writing a private runtime copy', (t) => {
+  const project = fs.readFileSync(path.join(repositoryRoot, 'native', 'ArchiveWorker', 'ArchiveWorker.csproj'), 'utf8');
+  assert.match(project, /<IncludeNativeLibrariesForSelfExtract>false<\/IncludeNativeLibrariesForSelfExtract>/);
+  assert.match(project, /<IncludeAllContentForSelfExtract>false<\/IncludeAllContentForSelfExtract>/);
+
+  const executionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-worker-no-extraction-'));
+  t.after(() => fs.rmSync(executionRoot, { recursive: true, force: true }));
+  const copiedWorker = path.join(executionRoot, 'ArchiveWorker.exe');
+  fs.copyFileSync(workerPath, copiedWorker);
+  const expectedHash = crypto.createHash('sha256').update(fs.readFileSync(copiedWorker)).digest('hex');
+  const result = childProcess.spawnSync(copiedWorker, ['--probe-descendant'], {
+    shell: false,
+    windowsHide: true,
+    encoding: null,
+    timeout: 30_000,
+    env: {
+      DOTNET_BUNDLE_EXTRACT_BASE_DIR: copiedWorker,
+      SystemRoot: process.env.SystemRoot || process.env.WINDIR,
+      windir: process.env.WINDIR || process.env.SystemRoot
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr?.toString('utf8'));
+  assert.deepEqual(fs.readdirSync(executionRoot), ['ArchiveWorker.exe'], 'the exact worker must not materialize a runtime tree');
+  assert.equal(crypto.createHash('sha256').update(fs.readFileSync(copiedWorker)).digest('hex'), expectedHash);
 });
 
 test('worker verification fails closed for tampered executable or manifest and has no PATH fallback', async (t) => {
@@ -108,7 +178,7 @@ test('live AppContainer self-test proves every required containment property', {
     descendantsDenied: true,
     unrelatedEnvironmentAbsent: true,
     unrelatedHandlesAbsent: true,
-    bundleExtractionIsolated: true,
+    bundleRuntimeInMemory: true,
     standardInputClosed: true,
     cleanupKilledSurvivors: true,
     temporaryAclRemoved: true,
@@ -371,6 +441,43 @@ test('durable filesystem performs absent-target move, existing-file replacement,
   }
 });
 
+test('native atomic JSON publication supports a reviewed local path beyond legacy MAX_PATH', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-long-path-'));
+  try {
+    let targetParent = root;
+    let index = 0;
+    while (path.join(targetParent, 'directory-marker.json').length <= 300) {
+      targetParent = path.join(targetParent, `reviewed-${String(index).padStart(2, '0')}-abcdefghij`);
+      fs.mkdirSync(targetParent);
+      index += 1;
+    }
+    const target = path.join(targetParent, 'directory-marker.json');
+    assert.ok(target.length > 260, `fixture must cross legacy MAX_PATH, received ${target.length}`);
+
+    const client = new WindowsDurableFsClient({
+      workerPath,
+      workerManifestPath,
+      allowedRoots: [root],
+      appOwnedRoot: path.join(root, 'broker')
+    });
+    const durableFs = createDurableFs({
+      fsApi: fs,
+      durableClient: client,
+      allowedRoots: [root],
+      tempNameFactory: () => 'long-path-regression'
+    });
+
+    durableFs.writeJsonAtomic(target, { fixture: 'long-path' }, { expectedTargetSha256: null });
+    const initialSha256 = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+    durableFs.writeJsonAtomic(target, { fixture: 'long-path-replaced' }, { expectedTargetSha256: initialSha256 });
+
+    assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { fixture: 'long-path-replaced' });
+    assert.deepEqual(fs.readdirSync(targetParent).sort(), ['directory-marker.json']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('durable directory flush tolerates concurrent child metadata changes without weakening stable identity', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-live-directory-race-'));
   try {
@@ -395,6 +502,219 @@ test('durable directory flush tolerates concurrent child metadata changes withou
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('durable directory batch flushes nested identity-bound directories in one verified worker process', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-live-batch-'));
+  try {
+    const first = path.join(root, 'first');
+    const second = path.join(first, 'second');
+    const third = path.join(root, 'third');
+    fs.mkdirSync(second, { recursive: true });
+    fs.mkdirSync(third);
+    let workerInvocations = 0;
+    const client = new WindowsDurableFsClient({
+      workerPath,
+      workerManifestPath,
+      allowedRoots: [root],
+      spawnSync(executable, args, options) {
+        workerInvocations += 1;
+        return childProcess.spawnSync(executable, args, options);
+      }
+    });
+
+    client.flushDirectories([second, first, third, root]);
+
+    assert.equal(workerInvocations, 1);
+    assert.equal(Object.isFrozen(client.capabilities), true);
+    assert.equal(client.capabilities.moveWriteThroughFlushesParents, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('durable native worker accepts the exact token-safe maximum directory batch', { timeout: 60_000 }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-live-max-batch-'));
+  try {
+    const directories = Array.from({ length: MAX_FLUSH_DIRECTORIES }, (_, index) => {
+      const directory = path.join(root, `directory-${String(index).padStart(4, '0')}`);
+      fs.mkdirSync(directory);
+      return directory;
+    });
+    let workerInvocations = 0;
+    const client = new WindowsDurableFsClient({
+      workerPath,
+      workerManifestPath,
+      allowedRoots: [root],
+      appOwnedRoot: path.join(root, 'app-owned'),
+      spawnSync(executable, args, options) {
+        workerInvocations += 1;
+        return childProcess.spawnSync(executable, args, options);
+      }
+    });
+
+    client.flushDirectories(directories);
+
+    assert.equal(MAX_FLUSH_DIRECTORIES, 512);
+    assert.equal(workerInvocations, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('durable directory promotion uses the native parent-flush capability in one worker process', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-live-promotion-'));
+  try {
+    const sourceParent = path.join(root, 'selected-restore');
+    const destinationParent = path.join(root, 'candidate');
+    const source = path.join(sourceParent, '.fabric');
+    const destination = path.join(destinationParent, '.fabric');
+    fs.mkdirSync(source, { recursive: true });
+    fs.mkdirSync(destinationParent);
+    fs.writeFileSync(path.join(source, 'server-launch.jar'), 'fixture');
+    let workerInvocations = 0;
+    const client = new WindowsDurableFsClient({
+      workerPath,
+      workerManifestPath,
+      allowedRoots: [root],
+      spawnSync(executable, args, options) {
+        workerInvocations += 1;
+        return childProcess.spawnSync(executable, args, options);
+      }
+    });
+    const durableFs = createDurableFs({ fsApi: fs, durableClient: client, allowedRoots: [root] });
+
+    durableFs.renameDurable(source, destination);
+
+    assert.equal(workerInvocations, 1);
+    assert.equal(fs.existsSync(source), false);
+    assert.equal(fs.readFileSync(path.join(destination, 'server-launch.jar'), 'utf8'), 'fixture');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('native uncertain move reconciliation pins the published file and both original parents through durable completion', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-live-reconcile-'));
+  try {
+    const sourceParent = path.join(root, 'source-parent');
+    const destinationParent = path.join(root, 'destination-parent');
+    const source = path.join(sourceParent, 'candidate.bin');
+    const destination = path.join(destinationParent, 'published.bin');
+    fs.mkdirSync(sourceParent);
+    fs.mkdirSync(destinationParent);
+    fs.writeFileSync(source, 'exact candidate bytes');
+    const stat = fs.lstatSync(source, { bigint: true });
+    const identity = value => ({
+      dev: String(value.dev), ino: String(value.ino), size: Number(value.size),
+      birthtime: String(value.birthtimeNs ?? value.birthtimeMs),
+      mtime: String(value.mtimeNs ?? value.mtimeMs), ctime: String(value.ctimeNs ?? value.ctimeMs)
+    });
+    const sourceIdentity = {
+      ...identity(stat),
+      sha256: crypto.createHash('sha256').update('exact candidate bytes').digest('hex')
+    };
+    const sourceParentIdentity = identity(fs.lstatSync(sourceParent, { bigint: true }));
+    const destinationParentIdentity = identity(fs.lstatSync(destinationParent, { bigint: true }));
+    fs.renameSync(source, destination);
+    let workerInvocations = 0;
+    const client = new WindowsDurableFsClient({
+      workerPath,
+      workerManifestPath,
+      allowedRoots: [root],
+      spawnSync(executable, args, options) {
+        workerInvocations += 1;
+        return childProcess.spawnSync(executable, args, options);
+      }
+    });
+
+    client.reconcileMoveWriteThrough(source, destination, {
+      sourceIdentity,
+      sourceParentIdentity,
+      destinationParentIdentity
+    });
+
+    assert.equal(workerInvocations, 1);
+    assert.equal(fs.existsSync(source), false);
+    assert.equal(fs.readFileSync(destination, 'utf8'), 'exact candidate bytes');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('native atomic replacement reconciliation accepts exact committed bytes after a reported completion failure', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-live-atomic-reconcile-'));
+  try {
+    const target = path.join(root, 'notifications.json');
+    fs.writeFileSync(target, '{"sequence":1}\n');
+    const nativeClient = new WindowsDurableFsClient({
+      workerPath,
+      workerManifestPath,
+      allowedRoots: [root]
+    });
+    let reconciliations = 0;
+    const durableClient = {
+      capabilities: nativeClient.capabilities,
+      moveWriteThrough: (...args) => nativeClient.moveWriteThrough(...args),
+      replaceFileWriteThrough(...args) {
+        nativeClient.replaceFileWriteThrough(...args);
+        throw new Error('injected failure after the exact native replacement committed');
+      },
+      reconcileMoveWriteThrough(...args) {
+        reconciliations += 1;
+        return nativeClient.reconcileMoveWriteThrough(...args);
+      },
+      flushDirectory: (...args) => nativeClient.flushDirectory(...args)
+    };
+    const durableFs = createDurableFs({
+      fsApi: fs,
+      durableClient,
+      allowedRoots: [root],
+      tempNameFactory: () => 'live-atomic-reconcile'
+    });
+
+    durableFs.writeJsonAtomic(target, { sequence: 2 });
+
+    assert.equal(reconciliations, 1);
+    assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { sequence: 2 });
+    assert.deepEqual(fs.readdirSync(root).filter(name => name.includes('minecraft-core-tmp')), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('durable directory batch fails closed when one captured directory identity is substituted', (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-live-batch-race-'));
+  const root = path.join(parent, 'owned');
+  const original = path.join(parent, 'original');
+  const stable = path.join(root, 'stable');
+  const substituted = path.join(root, 'substituted');
+  fs.mkdirSync(stable, { recursive: true });
+  fs.mkdirSync(substituted);
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  let injected = false;
+  const client = new WindowsDurableFsClient({
+    workerPath,
+    workerManifestPath,
+    allowedRoots: [root],
+    spawnSync(executable, args, options) {
+      if (!injected) {
+        injected = true;
+        fs.renameSync(substituted, original);
+        fs.mkdirSync(substituted);
+      }
+      return childProcess.spawnSync(executable, args, options);
+    }
+  });
+
+  assert.throws(
+    () => client.flushDirectories([stable, substituted]),
+    error => error.code === 'COMMIT_FAILED'
+  );
+  assert.equal(injected, true);
+  assert.equal(fs.statSync(stable).isDirectory(), true);
+  assert.equal(fs.statSync(substituted).isDirectory(), true);
+  assert.equal(fs.statSync(original).isDirectory(), true);
 });
 
 test('durable primitives reject each other\'s target contract, unsafe paths, and links', (t) => {
@@ -432,7 +752,11 @@ test('durable publication refuses held source or destination writers before muta
   fs.writeFileSync(moveSource, 'move-source');
   const moveWriter = fs.openSync(moveSource, 'r+');
   try {
-    assert.throws(() => client.moveWriteThrough(moveSource, moveDestination), error => error.code === 'COMMIT_FAILED');
+    assert.throws(
+      () => client.moveWriteThrough(moveSource, moveDestination),
+      error => error.code === 'COMMIT_FAILED' && error.durableFailureKind === 'sharing-violation' &&
+        error.durableFailureStage === 'source-open'
+    );
   } finally {
     fs.closeSync(moveWriter);
   }
@@ -462,13 +786,105 @@ test('durable publication refuses held source or destination writers before muta
   assert.equal(fs.readFileSync(target, 'utf8'), 'old-target');
 });
 
-test('durable client is synchronous, bounded, hidden, and has no Node rename fallback', () => {
+test('native durable replacement waits for a brief destination writer and publishes with one worker', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-transient-writer-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const replacement = path.join(root, 'replacement.txt');
+  const target = path.join(root, 'target.txt');
+  fs.writeFileSync(replacement, 'replacement');
+  fs.writeFileSync(target, 'old-target');
+  let workerSpawns = 0;
+  const retries = [];
+  let writer = fs.openSync(target, 'r+');
+  let released = false;
+  const releaseWriter = () => {
+    if (released) return;
+    released = true;
+    fs.closeSync(writer);
+    writer = null;
+  };
+  const observedSpawn = createRetryObservedSpawn(retry => {
+    retries.push(retry);
+    releaseWriter();
+  });
+  const client = new WindowsDurableFsClient({
+    workerPath,
+    workerManifestPath,
+    allowedRoots: [root],
+    verifyWorker: () => {},
+    verifyWorkerAsync: async () => {},
+    spawn(executable, args, options) {
+      workerSpawns += 1;
+      return observedSpawn(executable, args, options);
+    }
+  });
+
+  try {
+    await client.replaceFileWriteThroughAsync(replacement, target);
+  } finally {
+    releaseWriter();
+  }
+
+  assert.deepEqual(retries, [{ attempt: 1, delayMs: 50 }]);
+  assert.equal(released, true, 'the first native retry decision released the transient writer');
+  assert.equal(workerSpawns, 1, 'retry remains inside one identity-bound native request');
+  assert.equal(fs.existsSync(replacement), false);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'replacement');
+});
+
+test('native sharing retry rejects a source substituted while the destination is busy', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-durable-transient-substitution-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const replacement = path.join(root, 'replacement.txt');
+  const target = path.join(root, 'target.txt');
+  fs.writeFileSync(replacement, 'reviewed-replacement');
+  fs.writeFileSync(target, 'old-target');
+  const retries = [];
+  let writer = fs.openSync(target, 'r+');
+  let released = false;
+  const substituteAndRelease = () => {
+    if (released) return;
+    fs.writeFileSync(replacement, 'substituted-replacement');
+    fs.closeSync(writer);
+    writer = null;
+    released = true;
+  };
+  const client = new WindowsDurableFsClient({
+    workerPath,
+    workerManifestPath,
+    allowedRoots: [root],
+    verifyWorker: () => {},
+    verifyWorkerAsync: async () => {},
+    spawn: createRetryObservedSpawn(retry => {
+      retries.push(retry);
+      substituteAndRelease();
+    })
+  });
+
+  try {
+    await assert.rejects(
+      client.replaceFileWriteThroughAsync(replacement, target),
+      error => error.code === 'COMMIT_FAILED' && error.durableFailureKind === 'integrity-failure' &&
+        error.durableFailureStage === 'source-open'
+    );
+  } finally {
+    substituteAndRelease();
+  }
+
+  assert.deepEqual(retries, [{ attempt: 1, delayMs: 50 }]);
+  assert.equal(fs.readFileSync(replacement, 'utf8'), 'substituted-replacement');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'old-target');
+});
+
+test('durable client keeps bounded sync mutations and terminates only its retained async worker handle', () => {
   const source = fs.readFileSync(path.join(repositoryRoot, 'electron', 'utils', 'windows-durable-fs-client.cjs'), 'utf8');
   assert.match(source, /spawnSync/);
+  assert.match(source, /flushDirectoryAsync/);
+  assert.match(source, /target\?\.kill\?\.\('SIGKILL'\)/);
   assert.match(source, /shell:\s*false/);
   assert.match(source, /windowsHide:\s*true/);
   assert.match(source, /timeout:/);
-  assert.doesNotMatch(source, /renameSync|copyFileSync|COPY_ALLOWED|cmd\.exe|powershell/i);
+  assert.doesNotMatch(source, /renameSync|copyFileSync|COPY_ALLOWED|cmd\.exe|powershell|taskkill|wmic|process\.kill/i);
 });
 
 test('native durable operations pin no-follow identities immediately before and after publication', () => {
@@ -484,7 +900,7 @@ test('native durable operations pin no-follow identities immediately before and 
   assert.match(durability, /pinWrite:\s*true/);
   assert.match(durability, /pinRename:\s*true/);
   assert.match(durability, /FileRenameReplaceIfExists\s*\|\s*NativeMethods\.FileRenamePosixSemantics/);
-  assert.match(durability, /Encoding\.Unicode\.GetBytes\(destinationPath\)/);
+  assert.match(durability, /Encoding\.Unicode\.GetBytes\(NativeFilePath\.ForApi\(destinationPath\)\)/);
   assert.match(durability, /Marshal\.WriteIntPtr\(buffer,\s*8,\s*nint\.Zero\)/);
   assert.match(durability, /existingDestination[\s\S]*?pinWrite:\s*true,\s*pinRename:\s*false/);
   assert.match(durability, /committedSource\s*=\s*source\.CaptureCurrent\(\)/);
@@ -495,6 +911,19 @@ test('native durable operations pin no-follow identities immediately before and 
   assert.match(methods, /SetFileInformationByHandle/);
   assert.match(methods, /FileRenameInfoEx/);
   assert.doesNotMatch(methods, /ReplaceFileW|MoveFileExW/);
+});
+
+test('native batch durability validates every bounded directory before flushing and then revalidates all pins', () => {
+  const nativeRoot = path.join(repositoryRoot, 'native', 'ArchiveWorker');
+  const durability = fs.readFileSync(path.join(nativeRoot, 'Durability', 'DurableFilesystem.cs'), 'utf8');
+  const dtos = fs.readFileSync(path.join(nativeRoot, 'Protocol', 'WorkerDtos.cs'), 'utf8');
+  assert.match(dtos, /DurableDirectoryRequest\[\]\?\s+Directories/);
+  assert.match(durability, /case\s+"flush-directories"/);
+  assert.match(durability, /MaxFlushDirectories/);
+  assert.match(durability, /DurableAncestorPins\.Open\(roots/);
+  assert.match(durability, /foreach\s*\([^)]*directory[^)]*\)\s*directory\.Revalidate\(requirePath:\s*true\)/);
+  assert.match(durability, /foreach\s*\([^)]*directory[^)]*\)\s*directory\.Flush\(\)/);
+  assert.match(durability, /foreach\s*\([^)]*directory[^)]*\)\s*directory\.Revalidate\(requirePath:\s*true,\s*allowMetadataChange:\s*true\)/);
 });
 
 test('handle-bound publication has preventive substitution pins and one crash-atomic namespace mutation', () => {

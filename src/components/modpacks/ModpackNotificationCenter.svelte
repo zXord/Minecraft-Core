@@ -70,7 +70,7 @@
       'choose-another-asset': 'Choose asset',
       'return-to-server': 'Return to server',
       'review-restore-point': 'Review restore point',
-      'restart-and-recover': 'Restart and recover',
+      'restart-and-recover': 'Recover now',
       'review-recovery': 'Review recovery',
       'restore-from-restore-point': 'Restore from restore point'
     })[actionId] || 'Review';
@@ -81,8 +81,9 @@
     try {
       const outcome = await modpackNotificationStore.performNotificationAction(item);
       if (!outcome.ok || !item.action) return;
+      const boundServerId = outcome.result?.destination?.releaseTarget?.serverId || item.serverId;
       dispatch('navigate', {
-        serverId: item.serverId,
+        serverId: boundServerId,
         notificationId: item.notificationId,
         notificationType: item.type,
         result: outcome.result

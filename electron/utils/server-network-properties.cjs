@@ -1,0 +1,226 @@
+const NETWORK_ACCESS_VALUES = Object.freeze(['pack-default', 'loopback']);
+const NETWORK_ACCESS_SET = new Set(NETWORK_ACCESS_VALUES);
+const LOOPBACK_SERVER_IP = '127.0.0.1';
+const MAX_SERVER_PROPERTIES_BYTES = 1024 * 1024;
+
+function isNetworkAccess(value) {
+  return NETWORK_ACCESS_SET.has(value);
+}
+
+function serverNetworkProperties({ port, networkAccess }) {
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535 || !isNetworkAccess(networkAccess)) {
+    throw new TypeError('Server network policy is invalid');
+  }
+  return {
+    'server-port': String(port),
+    ...(networkAccess === 'loopback' ? { 'server-ip': LOOPBACK_SERVER_IP } : {})
+  };
+}
+
+function invalidProperties() {
+  return new TypeError('Server properties are invalid');
+}
+
+function propertiesText(bytes) {
+  if (bytes === null || bytes === undefined) return '';
+  if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) throw invalidProperties();
+  const buffer = Buffer.from(bytes);
+  if (buffer.length > MAX_SERVER_PROPERTIES_BYTES) throw invalidProperties();
+  const text = buffer.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(buffer)) throw invalidProperties();
+  return text;
+}
+
+function isPropertyWhitespace(value) {
+  return value === ' ' || value === '\t' || value === '\f';
+}
+
+function hasContinuation(value) {
+  let backslashes = 0;
+  for (let index = value.length - 1; index >= 0 && value[index] === '\\'; index -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function decodePropertyEscapes(value) {
+  let decoded = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value[index];
+    if (current !== '\\') {
+      decoded += current;
+      continue;
+    }
+    index += 1;
+    if (index >= value.length) throw invalidProperties();
+    const escaped = value[index];
+    if (escaped === 'u') {
+      if (index + 4 >= value.length) throw invalidProperties();
+      const hex = value.slice(index + 1, index + 5);
+      if (!/^[0-9A-Fa-f]{4}$/u.test(hex)) throw invalidProperties();
+      decoded += String.fromCharCode(Number.parseInt(hex, 16));
+      index += 4;
+      continue;
+    }
+    decoded += {
+      f: '\f',
+      n: '\n',
+      r: '\r',
+      t: '\t'
+    }[escaped] ?? escaped;
+  }
+  return decoded;
+}
+
+function splitNaturalLines(text) {
+  if (text.length === 0) return [];
+  const lines = [];
+  const endings = /\r\n|\n|\r/gu;
+  let cursor = 0;
+  let match;
+  while ((match = endings.exec(text)) !== null) {
+    lines.push({
+      terminator: match[0],
+      text: text.slice(cursor, match.index)
+    });
+    cursor = endings.lastIndex;
+  }
+  if (cursor < text.length) {
+    lines.push({ terminator: '', text: text.slice(cursor) });
+  }
+  return lines;
+}
+
+function parseLogicalProperty(value, startLine, endLine) {
+  let start = 0;
+  while (start < value.length && isPropertyWhitespace(value[start])) start += 1;
+  if (start >= value.length || value[start] === '#' || value[start] === '!') return null;
+
+  let keyEnd = value.length;
+  let valueStart = value.length;
+  let hasSeparator = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const current = value[index];
+    if (!escaped && (current === '=' || current === ':')) {
+      keyEnd = index;
+      valueStart = index + 1;
+      hasSeparator = true;
+      break;
+    }
+    if (!escaped && isPropertyWhitespace(current)) {
+      keyEnd = index;
+      valueStart = index + 1;
+      break;
+    }
+    escaped = current === '\\' ? !escaped : false;
+  }
+
+  while (valueStart < value.length) {
+    const current = value[valueStart];
+    if (isPropertyWhitespace(current)) {
+      valueStart += 1;
+      continue;
+    }
+    if (!hasSeparator && (current === '=' || current === ':')) {
+      hasSeparator = true;
+      valueStart += 1;
+      continue;
+    }
+    break;
+  }
+
+  return {
+    endLine,
+    key: decodePropertyEscapes(value.slice(start, keyEnd)),
+    startLine,
+    value: decodePropertyEscapes(value.slice(valueStart))
+  };
+}
+
+function parseServerProperties(bytes) {
+  const text = propertiesText(bytes);
+  const lines = splitNaturalLines(text);
+  const newline = lines.find(line => line.terminator)?.terminator || '\n';
+  const entries = [];
+  let terminalContinuationLine = null;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const startLine = index;
+    let logical = lines[index].text;
+    const firstContent = logical.search(/[^ \t\f]/u);
+    const comment = firstContent >= 0 && (logical[firstContent] === '#' || logical[firstContent] === '!');
+    if (!comment) {
+      while (hasContinuation(logical)) {
+        logical = logical.slice(0, -1);
+        if (index + 1 >= lines.length) {
+          terminalContinuationLine = index;
+          break;
+        }
+        index += 1;
+        logical += lines[index].text.replace(/^[ \t\f]+/u, '');
+      }
+    }
+    const entry = parseLogicalProperty(logical, startLine, index);
+    if (entry) entries.push(entry);
+  }
+
+  return { entries, lines, newline, terminalContinuationLine };
+}
+
+function readEffectiveServerProperty(bytes, propertyName) {
+  if (typeof propertyName !== 'string' || propertyName.length === 0 || propertyName.length > 256 ||
+      /[\r\n\u0000]/u.test(propertyName)) throw invalidProperties();
+  let effective = null;
+  for (const entry of parseServerProperties(bytes).entries) {
+    if (entry.key === propertyName) effective = entry.value;
+  }
+  return effective;
+}
+
+function overlayServerProperties(bytes, properties) {
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
+    throw new TypeError('Server properties overlay is invalid');
+  }
+  const additions = [];
+  for (const [key, value] of Object.entries(properties)) {
+    if (typeof key !== 'string' || key.length === 0 || !/^[A-Za-z0-9._-]+$/u.test(key) ||
+        (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean')) {
+      throw new TypeError('Server properties overlay is invalid');
+    }
+    additions.push([key, value]);
+  }
+  const keys = new Set(additions.map(([key]) => key));
+  const parsed = parseServerProperties(bytes);
+  const removedLines = new Set();
+  for (const entry of parsed.entries) {
+    if (!keys.has(entry.key)) continue;
+    for (let index = entry.startLine; index <= entry.endLine; index += 1) removedLines.add(index);
+  }
+  const retained = parsed.lines
+    .map((line, index) => ({ index, line }))
+    .filter(({ index }) => !removedLines.has(index));
+  let output = retained.map(({ line }) => `${line.text}${line.terminator}`).join('');
+  if (additions.length > 0 && output.length > 0) {
+    const last = retained.at(-1);
+    if (last.line.terminator === '') output += parsed.newline;
+    if (last.index === parsed.terminalContinuationLine) output += parsed.newline;
+  }
+  for (const [key, value] of additions) output += `${key}=${value}${parsed.newline}`;
+  return Buffer.from(output, 'utf8');
+}
+
+function applyServerNetworkProperties(bytes, network) {
+  return overlayServerProperties(bytes, serverNetworkProperties(network));
+}
+
+module.exports = {
+  LOOPBACK_SERVER_IP,
+  MAX_SERVER_PROPERTIES_BYTES,
+  NETWORK_ACCESS_VALUES,
+  applyServerNetworkProperties,
+  isNetworkAccess,
+  overlayServerProperties,
+  readEffectiveServerProperty,
+  serverNetworkProperties
+};
