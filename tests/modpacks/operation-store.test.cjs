@@ -84,6 +84,50 @@ function job(overrides = {}) {
   };
 }
 
+test('durable swap role tuples stay associated with one operation through reload and recovery reconciliation', async t => {
+  // Catches event loss when recovery rebuilds a terminal outcome and cross-job association.
+  const { dependencies, store } = fixture(t);
+  await store.initialize();
+  await store.create(job());
+  await store.create(job({ jobId: 'job-other' }));
+  for (const [from, to] of [['queued', 'preflight'], ['preflight', 'staging'], ['staging', 'committing']]) {
+    await store.transition('job-0001', { expectedPhase: from, nextPhase: to, patch: {} });
+  }
+  const entries = [
+    { channel: 'log', message: 'Existing swap primary failure (candidate-promotion; durable-move; sharing-violation; handle-rename).', details: {
+      errorCode: 'COMMIT_FAILED', failureRole: 'primary', swapCallsite: 'candidate-promotion',
+      failure: { stage: 'durable-move', category: 'sharing-violation', boundary: 'handle-rename' }
+    } },
+    { channel: 'log', message: 'Existing swap fallback failure (rollback-settlement; native diagnostic unavailable).', details: {
+      errorCode: 'RECOVERY_REQUIRED', failureRole: 'fallback', swapCallsite: 'rollback-settlement'
+    } }
+  ];
+  await store.appendEvent('job-0001', entries[0]);
+  await store.transition('job-0001', { expectedPhase: 'committing', nextPhase: 'rolling-back', patch: {} });
+  await store.appendEvent('job-0001', entries[1]);
+  const settled = await store.transition('job-0001', { expectedPhase: 'rolling-back', nextPhase: 'recovery-required', patch: {
+    outcome: { status: 'recovery-required', message: 'Reviewed recovery is required', errorCode: 'RECOVERY_REQUIRED' }
+  } });
+  const reloaded = new OperationStore(dependencies);
+  await reloaded.initialize();
+  assert.deepEqual((await reloaded.get('job-0001')).events, settled.events);
+  assert.deepEqual(settled.events.map(event => ({ channel: event.channel, message: event.message, details: event.details })), entries);
+  assert.deepEqual(settled.events.map(event => [event.jobId, event.sequence, event.phase]), [
+    ['job-0001', 4, 'committing'], ['job-0001', 6, 'rolling-back']
+  ]);
+  const reconciled = await reloaded.reconcileRecovery('job-0001', { nextPhase: 'rolled-back', patch: {
+    progress: { percent: 100, message: 'Recovery completed safely', currentItem: null },
+    outcome: { status: 'rolled-back', message: 'The interrupted operation was recovered' }
+  } });
+  assert.deepEqual(reconciled.events, settled.events);
+  assert.equal((await reloaded.get('job-other')).events.length, 0);
+  assert.equal(Object.hasOwn(reconciled.outcome, 'failureRole'), false);
+  assert.equal(Object.hasOwn(reconciled, 'existingSwapCallsite'), false);
+  const finalReload = new OperationStore(dependencies);
+  await finalReload.initialize();
+  assert.deepEqual((await finalReload.get('job-0001')).events, settled.events);
+});
+
 test('the complete top-level phase graph rejects every unapproved mutation transition', () => {
   assert.deepEqual(JOB_PHASES, PHASES);
   for (const from of PHASES) {

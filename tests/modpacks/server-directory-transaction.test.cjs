@@ -24,6 +24,127 @@ const runtime = Object.freeze({
   architecture: 'x64'
 });
 
+test('existing swap identifies the rejected await without changing retained directory evidence', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
+  const { existingSwapCallsiteFromError, publicationFailureDiagnosticFromError,
+    filesystemFailureDiagnosticFromError } = require('../../electron/services/modpack-lifecycle/publication-failure-diagnostic.cjs');
+  for (const callsite of ['live-moved-journal', 'live-moved-boundary', 'candidate-promotion']) {
+    await t.test(callsite, async subtest => {
+      // Catches journal/boundary failures being mislabeled as directory promotion, including frozen errors.
+      const fixture = await existingFixture(subtest);
+      await transaction.buildExistingCandidate(fixture.context);
+      const nativeKind = callsite === 'live-moved-journal' ? 'io-failure' : 'sharing-violation';
+      const nativeStage = callsite === 'live-moved-journal' ? 'completion-flush' : 'handle-rename';
+      const original = Object.freeze(Object.assign(new ModpackError('RECOVERY_REQUIRED', 'Reviewed recovery is required', {
+        retryable: true, details: { privatePath: 'C:\\private\\server' },
+        cause: Object.assign(new Error('raw private native text'), {
+          durableFailureKind: nativeKind, durableFailureStage: nativeStage
+        })
+      }), { preserveWorkspace: true, runtimeWritersUnproven: true, runtimeFailureCode: 'RUNTIME_INCOMPLETE' }));
+      const base = fixture.context.durableFs;
+      const journalPath = path.join(fixture.paths.candidatePath, '.minecraft-core-state', 'operations', fixture.context.jobId, 'journal.json');
+      fixture.context.durableFs = {
+        ...base,
+        async writeJsonAtomicAsync(filePath, value, options) {
+          const result = await base.writeJsonAtomicAsync(filePath, value, options);
+          if (callsite === 'live-moved-journal' && filePath === journalPath && value.swapStep === 'live-moved') throw original;
+          return result;
+        },
+        async renameDurableAsync(source, destination) {
+          if (callsite === 'candidate-promotion' && source === fixture.paths.candidatePath) throw original;
+          return base.renameDurableAsync(source, destination);
+        }
+      };
+      fixture.context.afterBoundary = async name => {
+        if (callsite === 'live-moved-boundary' && name === 'live-moved') throw original;
+      };
+      await assert.rejects(transaction.swapExistingCandidate(fixture.context), error => {
+        assert.equal(existingSwapCallsiteFromError(error), callsite);
+        assert.equal(error.cause, original);
+        assert.equal(error.code, 'RECOVERY_REQUIRED');
+        assert.equal(error.safeMessage, 'Reviewed recovery is required');
+        assert.equal(error.retryable, true);
+        assert.equal(error.details, original.details);
+        for (const flag of ['preserveWorkspace', 'runtimeWritersUnproven', 'runtimeFailureCode']) assert.equal(error[flag], original[flag]);
+        assert.deepEqual((callsite === 'candidate-promotion' ? publicationFailureDiagnosticFromError : filesystemFailureDiagnosticFromError)(error), {
+          stage: callsite === 'candidate-promotion' ? 'durable-move' : 'filesystem-operation',
+          category: nativeKind, boundary: nativeStage
+        });
+        assert.doesNotMatch(JSON.stringify(error.toPublicResult()), /private|raw native|existingSwapCallsite/);
+        return true;
+      });
+      assert.equal(JSON.parse(fs.readFileSync(journalPath, 'utf8')).swapStep, 'live-moved');
+      assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).swapStep, 'live-moved');
+      assert.equal(fs.existsSync(fixture.targetPath), false);
+      assert.equal(fs.existsSync(fixture.paths.candidatePath), true);
+      assert.equal(fs.existsSync(fixture.paths.rollbackPath), true);
+    });
+  }
+});
+
+test('existing swap does not tag failures after candidate promotion has returned', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const { existingSwapCallsiteFromError } = require('../../electron/services/modpack-lifecycle/publication-failure-diagnostic.cjs');
+  for (const boundary of ['candidate-renamed', 'published-verification', 'published-registry', 'published-journal']) {
+    await t.test(boundary, async subtest => {
+      // Catches a broad swap catch retaining a stale candidate-promotion label.
+      const fixture = await existingFixture(subtest);
+      await transaction.buildExistingCandidate(fixture.context);
+      const base = fixture.context.durableFs;
+      fixture.context.afterBoundary = async name => {
+        if (name === 'candidate-renamed' && boundary === 'candidate-renamed') throw new Error('later failure');
+        if (name === 'candidate-renamed' && boundary === 'published-verification') {
+          fs.appendFileSync(path.join(fixture.targetPath, 'server.jar'), 'tampered');
+        }
+      };
+      fixture.context.durableFs = { ...base, async writeJsonAtomicAsync(filePath, value, options) {
+        if (boundary === 'published-journal' && path.basename(filePath) === 'journal.json' && value.swapStep === 'candidate-published') throw new Error('later failure');
+        return base.writeJsonAtomicAsync(filePath, value, options);
+      } };
+      const transition = fixture.recoveryRegistry.transition.bind(fixture.recoveryRegistry);
+      fixture.recoveryRegistry.transition = async (jobId, request) => {
+        if (boundary === 'published-registry' && request.patch.swapStep === 'candidate-published') throw new Error('later failure');
+        return transition(jobId, request);
+      };
+      await assert.rejects(transaction.swapExistingCandidate(fixture.context), error => {
+        assert.equal(existingSwapCallsiteFromError(error), null); return true;
+      });
+    });
+  }
+});
+
+test('existing candidate promotion keeps uncertain reconciliation and phase-only evidence closed', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const { publicationFailureDiagnosticFromError, existingSwapCallsiteFromError } = require('../../electron/services/modpack-lifecycle/publication-failure-diagnostic.cjs');
+  for (const uncertainMove of [false, true]) {
+    await t.test(String(uncertainMove), async subtest => {
+      // Catches lost commit-phase evidence when promotion reconciliation rejects a moved but changed identity.
+      const fixture = await existingFixture(subtest);
+      await transaction.buildExistingCandidate(fixture.context);
+      const original = Object.seal(Object.assign(new Error('raw native private path'), { commitPhase: 'post-publication-uncertain' }));
+      const base = fixture.context.durableFs;
+      fixture.context.durableFs = { ...base, async renameDurableAsync(source, destination) {
+        if (source === fixture.paths.candidatePath) {
+          if (uncertainMove) {
+            await base.renameDurableAsync(source, destination);
+            fs.renameSync(destination, `${destination}-different-identity`);
+            fs.mkdirSync(destination);
+          }
+          throw original;
+        }
+        return base.renameDurableAsync(source, destination);
+      } };
+      await assert.rejects(transaction.swapExistingCandidate(fixture.context), error => {
+        assert.equal(existingSwapCallsiteFromError(error), 'candidate-promotion');
+        assert.deepEqual(publicationFailureDiagnosticFromError(error), { stage: 'durable-move', category: 'post-publication-uncertain' });
+        return true;
+      });
+      assert.equal(fs.existsSync(fixture.paths.rollbackPath), true);
+    });
+  }
+});
+
 const forgeRuntime = Object.freeze({
   minecraftVersion: '1.12.2',
   loaderFamily: 'forge',
@@ -819,7 +940,8 @@ test('failure between renames retains enough identity to restore one canonical s
   fixture.fault.boundary = 'live-moved';
   await assert.rejects(
     transaction.swapExistingCandidate(fixture.context),
-    /fault after live-moved/
+    error => error.code === 'COMMIT_FAILED' && error.existingSwapCallsite === 'live-moved-boundary' &&
+      error.cause?.message === 'fault after live-moved'
   );
 
   const record = await fixture.recoveryRegistry.load(fixture.context.jobId);
@@ -1073,6 +1195,196 @@ test('existing candidate reports monotonic lifecycle progress around copy, recon
   ]);
   assert.equal(progress.every((event, index) => index === 0 || event.percent >= progress[index - 1].percent), true);
   assert.equal(fixture.calls.includes('health:candidate'), true);
+});
+
+function setCopyCheckpointFiles(fixture, contents) {
+  // Only replace the three known files in this test's disposable live tree.
+  const properties = fs.readFileSync(path.join(fixture.targetPath, 'server.properties'));
+  const applyIncoming = fixture.context.applyIncoming;
+  fixture.context.applyIncoming = async request => {
+    await applyIncoming(request);
+    // Restore the health fixture's required properties after the measured copy.
+    fs.writeFileSync(path.join(request.candidatePath, 'server.properties'), properties);
+  };
+  fs.unlinkSync(path.join(fixture.targetPath, 'server.jar'));
+  fs.unlinkSync(path.join(fixture.targetPath, 'server.properties'));
+  fs.unlinkSync(path.join(fixture.targetPath, 'world', 'level.dat'));
+  fs.rmdirSync(path.join(fixture.targetPath, 'world'));
+  contents.forEach((content, index) => {
+    fs.writeFileSync(path.join(fixture.targetPath, `${String.fromCharCode(97 + index)}.txt`), content);
+  });
+}
+
+async function attachCopyCheckpointStore(fixture) {
+  const { OperationStore } = require('../../electron/services/modpack-lifecycle/operation-store.cjs');
+  const userDataPath = path.join(path.dirname(path.dirname(fixture.targetPath)), 'progress-store');
+  fs.mkdirSync(userDataPath);
+  let replacements = 0;
+  let temporary = 0;
+  const durableClient = nativeDurability();
+  const replace = durableClient.replaceFileWriteThroughAsync;
+  durableClient.replaceFileWriteThroughAsync = async (...args) => {
+    await replace(...args);
+    replacements += 1;
+  };
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    durableClient,
+    allowedRoots: [userDataPath],
+    tempNameFactory: () => `copy-checkpoint-${++temporary}`
+  });
+  const store = new OperationStore({ userDataPath, fsApi: fs, durableFs, clock: fixture.context.clock });
+  await store.initialize();
+  await store.create({
+    jobId: fixture.context.jobId, operationKind: 'repair',
+    serverId: fixture.context.stableInstanceId, planFingerprint: 'a'.repeat(64)
+  });
+  await store.transition(fixture.context.jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+  await store.transition(fixture.context.jobId, { expectedPhase: 'preflight', nextPhase: 'staging', patch: {} });
+  replacements = 0;
+  fixture.context.onProgress = async event => {
+    const { phase, ...progress } = event;
+    const current = await store.get(fixture.context.jobId);
+    if (current.phase === phase) {
+      await store.updateProgress(fixture.context.jobId, { expectedPhase: phase, progress });
+    } else {
+      await store.transition(fixture.context.jobId, {
+        expectedPhase: current.phase, nextPhase: phase, patch: { progress }
+      });
+    }
+  };
+  return { store, replacementCount: () => replacements };
+}
+
+test('copy checkpoints publish first, latest ten-second samples, and completion through the real transaction and store', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await existingFixture(t);
+  setCopyCheckpointFiles(fixture, ['a', 'bb', 'ccc', 'dddd', 'eeeee', 'ffffff']);
+  const times = [0, 1, 9999, 10000, 10001, 20000, 20001];
+  let sample = 0;
+  let measuredAt = null;
+  fixture.context.copyProgressClock = () => (measuredAt = times[sample++]);
+  const publication = await attachCopyCheckpointStore(fixture);
+  const publish = fixture.context.onProgress;
+  const progress = [];
+  fixture.context.onProgress = async event => {
+    await publish(event);
+    progress.push({ ...event, measuredAt });
+  };
+
+  await transaction.buildExistingCandidate(fixture.context);
+
+  assert.deepEqual(progress.filter(event => event.message.startsWith('Copying server files ('))
+    .map(({ measuredAt, message }) => ({ measuredAt, message })), [
+    { measuredAt: 0, message: 'Copying server files (0 of 6 files, 0 of 21 bytes)' },
+    { measuredAt: 10000, message: 'Copying server files (3 of 6 files, 6 of 21 bytes)' },
+    { measuredAt: 20000, message: 'Copying server files (5 of 6 files, 15 of 21 bytes)' },
+    { measuredAt: 20001, message: 'Copying server files (6 of 6 files, 21 of 21 bytes)' }
+  ]);
+  assert.equal(sample, 7);
+  assert.equal(publication.replacementCount(), 16);
+  assert.equal(progress.length, 16);
+  assert.equal((await publication.store.get(fixture.context.jobId)).phase, 'validating-candidate');
+  assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'committing');
+  assert.equal(fs.readFileSync(path.join(fixture.paths.candidatePath, 'f.txt'), 'utf8'), 'ffffff');
+});
+
+test('copy checkpoints retain quick and empty completion before immediate flush and verification milestones', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  for (const { name, contents, counters } of [
+    { name: 'quick', contents: ['abc', 'defgh'], counters: [
+      'Copying server files (0 of 2 files, 0 of 8 bytes)',
+      'Copying server files (2 of 2 files, 8 of 8 bytes)'
+    ] },
+    { name: 'empty', contents: [], counters: ['Copying server files (0 of 0 files, 0 of 0 bytes)'] }
+  ]) {
+    await t.test(name, async subtest => {
+      const fixture = await existingFixture(subtest);
+      setCopyCheckpointFiles(fixture, contents);
+      fixture.context.copyProgressClock = () => 0;
+      const progress = [];
+      fixture.context.onProgress = async event => { progress.push(event); };
+
+      await transaction.buildExistingCandidate(fixture.context);
+
+      assert.deepEqual(progress.filter(event => event.percent === 38 || event.percent === 40)
+        .map(event => event.message), [
+        'Copying the live server into a protected candidate', ...counters,
+        'Flushing copied server directories', 'Verifying the copied server files', 'Live server copy verified'
+      ]);
+      assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'committing');
+    });
+  }
+});
+
+test('copy checkpoints cancel during suppressed real-copy samples without waiting or reaching commit', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await existingFixture(t);
+  setCopyCheckpointFiles(fixture, ['a', 'bb', 'ccc', 'dddd', 'eeeee', 'ffffff']);
+  const abort = new AbortController();
+  fixture.context.signal = abort.signal;
+  const times = [0, 1, 9999];
+  let sample = 0;
+  fixture.context.copyProgressClock = () => {
+    const now = times[sample++];
+    if (sample === 3) abort.abort();
+    return now;
+  };
+  const progress = [];
+  fixture.context.onProgress = async event => { progress.push(event); };
+
+  await assert.rejects(transaction.buildExistingCandidate(fixture.context), error => error.code === 'CANCELLED');
+
+  assert.equal(sample, 3);
+  assert.deepEqual(progress.filter(event => event.message.startsWith('Copying server files ('))
+    .map(event => event.message), ['Copying server files (0 of 6 files, 0 of 21 bytes)']);
+  assert.equal(fs.existsSync(path.join(fixture.paths.candidatePath, 'b.txt')), true);
+  assert.equal(fs.existsSync(path.join(fixture.paths.candidatePath, 'c.txt')), false);
+  assert.equal(fixture.calls.includes('incoming:apply'), false);
+  assert.equal(fixture.calls.includes('boundary:live-copied'), false);
+  assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
+  const record = await fixture.recoveryRegistry.load(fixture.context.jobId);
+  assert.equal(record.phase, 'staging');
+  assert.equal(record.swapStep, 'none');
+  assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'f.txt'), 'utf8'), 'ffffff');
+});
+
+test('copy checkpoints treat observer errors as failed attempts without replay or lost completion', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await existingFixture(t);
+  setCopyCheckpointFiles(fixture, ['a', 'bb', 'ccc', 'dddd', 'eeeee', 'ffffff']);
+  const times = [0, 1, 9999, 10000, 10001, 20000, 20001];
+  let sample = 0;
+  fixture.context.copyProgressClock = () => times[sample++];
+  const attemptedCounters = [];
+  fixture.context.onProgress = async event => {
+    if (event.message.startsWith('Copying server files (')) {
+      attemptedCounters.push(event.message);
+      throw new Error('observational publication failed');
+    }
+  };
+
+  await transaction.buildExistingCandidate(fixture.context);
+
+  assert.deepEqual(attemptedCounters, [
+    'Copying server files (0 of 6 files, 0 of 21 bytes)',
+    'Copying server files (3 of 6 files, 6 of 21 bytes)',
+    'Copying server files (5 of 6 files, 15 of 21 bytes)',
+    'Copying server files (6 of 6 files, 21 of 21 bytes)'
+  ]);
+  assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'committing');
+});
+
+test('copy checkpoints reject a non-function optional monotonic clock before transaction mutation', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await existingFixture(t);
+  fixture.context.copyProgressClock = 0;
+
+  await assert.rejects(transaction.buildExistingCandidate(fixture.context), error => error.code === 'INVALID_REQUEST');
+
+  assert.deepEqual(fixture.calls, []);
+  assert.equal(fs.existsSync(fixture.paths.candidatePath), false);
+  assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'snapshotting');
 });
 
 test('existing candidate tree work cooperatively yields throughout copy, hash, and durability passes', async (t) => {
@@ -1723,7 +2035,7 @@ const snapshotGuardCases = [
   ['read-count', 'protocol', { read: async () => undefined }],
   ['accumulated-size', 'limit', { read: async (_h, args) => ({ bytesRead: args[2] }) }],
   ['post-path-missing', 'identity-changed', { pathStat: (s, n) => { if (n === 2) throw Object.assign(new Error('private'), { code: 'ENOENT' }); return s; } }],
-  ['post-handle-identity', 'identity-changed', { handleStat: (s, n) => n === 2 ? snapshotStatDouble(s, { ctimeNs: s.ctimeNs + 1n }) : s }, 64],
+  ['post-handle-identity', 'identity-changed', { handleStat: (s, n) => n === 2 ? snapshotStatDouble(s, { mtimeNs: s.mtimeNs + 1n }) : s }, 32],
   ['post-path-identity', 'identity-changed', { pathStat: (s, n) => n === 2 ? snapshotStatDouble(s, { birthtimeNs: s.birthtimeNs + 1n }) : s }, 128],
   ['byte-count', 'protocol', { read: async () => ({ bytesRead: 0 }) }],
   ['final-reparse', 'protocol', { probe: n => n === 2 ? true : false }],
@@ -1741,6 +2053,132 @@ for (const [index, [stage, reason, fault, mask]] of snapshotGuardCases.entries()
     return true;
   });
   assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.jar'), 'utf8'), 'old-server');
+  assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
+});
+
+// Reinstating ctime as an identity guard must reject these real transactions.
+// One-nanosecond offsets deliberately disappear under Number conversion.
+for (const [boundary, pathCall, handleCall] of [
+  ['opened handle', null, 1],
+  ['post-read handle', null, 2],
+  ['post-read path', 2, null],
+  ['final path', 3, null]
+]) test(`exact properties snapshot accepts ctime-only drift at ${boundary}`, async t => {
+  const ctime = 1800000000000000000n;
+  assert.equal(Number(ctime), Number(ctime + 1n));
+  let changed = 0;
+  const statAt = (stat, call, target) => {
+    const drift = call === target ? 1n : 0n;
+    if (drift) changed++;
+    return snapshotStatDouble(stat, { ctimeNs: ctime + drift });
+  };
+  const fixture = await snapshotDiagnosticFixture(t, {
+    pathStat: (stat, call) => statAt(stat, call, pathCall),
+    handleStat: (stat, call) => statAt(stat, call, handleCall)
+  });
+
+  const built = await require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs')
+    .buildExistingCandidate(fixture.context);
+
+  assert.equal(built.phase, 'committing');
+  assert.equal(changed, 1);
+  for (const directory of [fixture.targetPath, fixture.paths.candidatePath]) {
+    assert.equal(fs.readFileSync(path.join(directory, 'server.properties'), 'utf8'),
+      'motd=Canonical\nserver-port=25565\n');
+    assert.equal(fs.readFileSync(path.join(directory, 'world', 'level.dat'), 'utf8'), 'world-state');
+  }
+  assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.jar'), 'utf8'), 'old-server');
+  assert.equal(fs.readFileSync(path.join(fixture.paths.candidatePath, 'server.jar'), 'utf8'), 'new-server');
+  assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
+});
+
+test('exact properties snapshot accepts a real metadata-only readonly change after health', async t => {
+  let properties, originalMode, metadataChanged = false, restoredAtProgress = false;
+  const fixture = await snapshotDiagnosticFixture(t, {
+    probe: call => {
+      if (call !== 1) return false;
+      properties = path.join(fixture.paths.candidatePath, 'server.properties');
+      const before = fs.lstatSync(properties, { bigint: true });
+      originalMode = Number(before.mode);
+      const bytes = fs.readFileSync(properties);
+      fs.chmodSync(properties, 0o444);
+      const after = fs.lstatSync(properties, { bigint: true });
+      assert.notEqual(after.mode, before.mode);
+      for (const field of ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs', 'nlink']) {
+        assert.equal(after[field], before[field], field);
+      }
+      assert.deepEqual(fs.readFileSync(properties), bytes);
+      metadataChanged = true;
+      t.diagnostic(`readonly change observed ctimeNs delta: ${after.ctimeNs - before.ctimeNs}ns (not required)`);
+      return false;
+    }
+  });
+  fixture.context.onProgress = async progress => {
+    if (progress.percent !== 60) return;
+    assert.equal(metadataChanged, true);
+    fs.chmodSync(properties, originalMode);
+    assert.equal(Number(fs.lstatSync(properties, { bigint: true }).mode), originalMode);
+    restoredAtProgress = true;
+  };
+
+  try {
+    const built = await require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs')
+      .buildExistingCandidate(fixture.context);
+    assert.equal(built.phase, 'committing');
+    assert.equal(metadataChanged, true);
+    assert.equal(restoredAtProgress, true);
+    for (const directory of [fixture.targetPath, fixture.paths.candidatePath]) {
+      assert.equal(fs.readFileSync(path.join(directory, 'server.properties'), 'utf8'),
+        'motd=Canonical\nserver-port=25565\n');
+    }
+    assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.jar'), 'utf8'), 'old-server');
+    assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
+  } finally {
+    if (originalMode !== undefined) fs.chmodSync(properties, originalMode);
+  }
+});
+
+test('exact properties snapshot rejects same-size changed bytes with restored mtime and ctime drift', async t => {
+  let changedProperties;
+  const fixture = await snapshotDiagnosticFixture(t, {
+    health: async ({ candidatePath }) => {
+      const properties = path.join(candidatePath, 'server.properties');
+      const before = fs.lstatSync(properties, { bigint: true });
+      const canonical = fs.readFileSync(properties);
+      changedProperties = Buffer.from('motd=Different\nserver-port=25565\n');
+      assert.equal(changedProperties.length, canonical.length);
+      fs.writeFileSync(properties, changedProperties);
+      assert.equal(before.mtimeNs, 1800000000000000000n);
+      fs.utimesSync(properties, Number(before.atimeNs) / 1e9, 1800000000);
+      const after = fs.lstatSync(properties, { bigint: true });
+      for (const field of ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs', 'nlink']) {
+        assert.equal(after[field], before[field], field);
+      }
+    },
+    pathStat: (stat, call) => snapshotStatDouble(stat, {
+      ctimeNs: 1800000000000000000n + BigInt(call)
+    }),
+    handleStat: stat => snapshotStatDouble(stat, {
+      ctimeNs: 1800000000000000001n
+    })
+  });
+  const applyIncoming = fixture.context.applyIncoming;
+  fixture.context.applyIncoming = async request => {
+    await applyIncoming(request);
+    // An integral-second timestamp can be restored exactly by real utimes.
+    fs.utimesSync(path.join(request.candidatePath, 'server.properties'), 1800000000, 1800000000);
+  };
+  await assert.rejects(require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs')
+    .buildExistingCandidate(fixture.context), error => {
+    assert.equal(error.code, 'HEALTH_CHECK_FAILED');
+    assert.deepEqual(error.runtimeDiagnostic, { stage: 'exact-snapshot-bytes', reason: 'digest-mismatch' });
+    return true;
+  });
+  assert.deepEqual(fs.readFileSync(path.join(fixture.paths.candidatePath, 'server.properties')), changedProperties);
+  assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.properties'), 'utf8'),
+    'motd=Canonical\nserver-port=25565\n');
+  assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.jar'), 'utf8'), 'old-server');
+  assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'world', 'level.dat'), 'utf8'), 'world-state');
   assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
 });
 
@@ -1796,6 +2234,11 @@ test('exact snapshot diagnostic distinguishes health await, stable bytes mismatc
       assert.deepEqual(error.runtimeDiagnostic, { stage: 'exact-snapshot-bytes', reason: 'digest-mismatch' });
       return true;
     });
+    assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.properties'), 'utf8'),
+      'motd=Canonical\nserver-port=25565\n');
+    assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.jar'), 'utf8'), 'old-server');
+    assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'world', 'level.dat'), 'utf8'), 'world-state');
+    assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
   });
   await t.test('progress 60', async subtest => {
     const failure = new Error('private progress failure');

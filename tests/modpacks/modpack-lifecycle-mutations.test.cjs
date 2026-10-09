@@ -8,6 +8,126 @@ const { createModpackHandlers } = require('../../electron/ipc/modpack-handlers.c
 
 const FINGERPRINT = 'a'.repeat(64);
 
+function taggedSwapFailure(callsite = 'candidate-promotion', native = true, code = 'COMMIT_FAILED') {
+  return Object.freeze(Object.assign(new ModpackError(code, 'The existing swap could not continue', {
+    cause: native ? Object.assign(new Error('C:\\private\\server raw native output'), {
+      durableFailureKind: 'sharing-violation', durableFailureStage: 'handle-rename'
+    }) : new Error('C:\\private\\server')
+  }), { existingSwapCallsite: callsite }));
+}
+
+test('existing swap logs primary before fallback and retains distinct same-code evidence visibly', async () => {
+  // Catches equal-code dedup hiding the original failure or attributing it to the fallback.
+  const primary = taggedSwapFailure();
+  const fallback = Object.assign(new ModpackError('COMMIT_FAILED', 'Fallback could not settle'), {
+    existingSwapCallsite: 'candidate-promotion', durableFailureKind: 'access-denied', durableFailureStage: 'source-open'
+  });
+  const fixture = mutationFixture('update', { failureAt: 'commitCandidate', failureErrors: { commitCandidate: primary } });
+  fixture.service.mutationRuntime.rollback = async ({ jobId, error }) => {
+    assert.equal(error, primary);
+    const current = await fixture.operationStore.get(jobId);
+    assert.equal(current.phase, 'rolling-back');
+    assert.equal(current.events.filter(event => event.details?.failureRole === 'primary').length, 1);
+    assert.equal(current.events.find(event => event.details?.failureRole === 'primary').phase, 'committing');
+    throw fallback;
+  };
+  const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  const settled = await waitForPhase(fixture.operationStore, queued.jobId, 'recovery-required');
+  const events = settled.events.filter(event => event.details?.failureRole);
+  assert.deepEqual(events.map(event => [event.message, event.details]), [
+    ['Existing swap primary failure (candidate-promotion; durable-move; sharing-violation; handle-rename).', {
+      errorCode: 'COMMIT_FAILED', failureRole: 'primary', swapCallsite: 'candidate-promotion',
+      failure: { stage: 'durable-move', category: 'sharing-violation', boundary: 'handle-rename' }
+    }],
+    ['Existing swap fallback failure (rollback-settlement; filesystem-operation; access-denied; source-open).', {
+      errorCode: 'COMMIT_FAILED', failureRole: 'fallback', swapCallsite: 'rollback-settlement',
+      failure: { stage: 'filesystem-operation', category: 'access-denied', boundary: 'source-open' }
+    }]
+  ]);
+  assert.equal(settled.outcome.errorCode, 'COMMIT_FAILED');
+  assert.equal(settled.outcome.status, 'recovery-required');
+  assert.equal(Object.hasOwn(settled.outcome, 'failureRole'), false);
+  assert.doesNotMatch(JSON.stringify(events), /private|native output|errno|stack/);
+});
+
+test('existing swap logs unavailable journal and boundary evidence without claiming a fallback rename', async () => {
+  // Catches hidden-details-only diagnostics and accidental native guesses for journal/boundary failures.
+  for (const callsite of ['live-moved-journal', 'live-moved-boundary']) {
+    const fixture = mutationFixture('update', { failureAt: 'commitCandidate', failureErrors: { commitCandidate: taggedSwapFailure(callsite, false) } });
+    fixture.service.mutationRuntime.rollback = async () => { throw new ModpackError('RECOVERY_REQUIRED', 'Reviewed recovery is required'); };
+    const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+    const settled = await waitForPhase(fixture.operationStore, queued.jobId, 'recovery-required');
+    const events = settled.events.filter(event => event.details?.failureRole);
+    assert.deepEqual(events.map(event => event.message), [
+      `Existing swap primary failure (${callsite}; native diagnostic unavailable).`,
+      'Existing swap fallback failure (rollback-settlement; native diagnostic unavailable).'
+    ]);
+    assert.equal(events.length, 2);
+    assert.equal(events[1].details.errorCode, 'RECOVERY_REQUIRED');
+    assert.equal(Object.hasOwn(events[0].details, 'failure'), false);
+    assert.equal(Object.hasOwn(events[1].details, 'failure'), false);
+    assert.equal(settled.outcome.errorCode, 'RECOVERY_REQUIRED');
+  }
+});
+
+test('successful existing fallback preserves one primary even beside a legacy generic same-code event', async () => {
+  // Catches generic dedup suppressing a tagged primary and duplicate late terminal publication.
+  const fixture = mutationFixture('update');
+  fixture.service.mutationRuntime.commitCandidate = async ({ jobId }) => {
+    await fixture.operationStore.appendEvent(jobId, { channel: 'log', message: 'Legacy generic failure', details: { errorCode: 'COMMIT_FAILED' } });
+    throw taggedSwapFailure();
+  };
+  const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  const settled = await waitForPhase(fixture.operationStore, queued.jobId, 'rolled-back');
+  const events = settled.events.filter(event => event.details?.failureRole);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].details.failureRole, 'primary');
+  assert.equal(settled.events.filter(event => event.message === 'Legacy generic failure').length, 1);
+  assert.equal(settled.outcome.errorCode, 'COMMIT_FAILED');
+  assert.equal(settled.outcome.status, 'rolled-back');
+});
+
+test('existing swap best-effort append failures never block fallback or fabricate durable evidence', async () => {
+  // Catches diagnostics replacing primary failure, blocking settlement, or dropping successfully persisted primary evidence.
+  for (const failingRole of ['early-primary', 'fallback', 'all']) {
+    const fixture = mutationFixture('update', { failureAt: 'commitCandidate', failureErrors: { commitCandidate: taggedSwapFailure() } });
+    const append = fixture.operationStore.appendEvent.bind(fixture.operationStore);
+    let primaryAttempts = 0;
+    let fallbackEntered = false;
+    fixture.operationStore.appendEvent = async (jobId, event) => {
+      const role = event.details?.failureRole;
+      if (role === 'primary') primaryAttempts++;
+      if (role && (failingRole === 'all' || failingRole === role ||
+          (failingRole === 'early-primary' && role === 'primary' && primaryAttempts === 1))) throw new Error('disk unavailable');
+      return append(jobId, event);
+    };
+    fixture.service.mutationRuntime.rollback = async () => {
+      fallbackEntered = true;
+      throw new ModpackError('RECOVERY_REQUIRED', 'Reviewed recovery is required');
+    };
+    const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+    const settled = await waitForPhase(fixture.operationStore, queued.jobId, 'recovery-required');
+    assert.equal(fallbackEntered, true);
+    assert.equal(settled.outcome.errorCode, 'RECOVERY_REQUIRED');
+    const primary = settled.events.filter(event => event.details?.failureRole === 'primary');
+    assert.equal(primary.length, failingRole === 'all' ? 0 : 1);
+    assert.equal(primaryAttempts, failingRole === 'fallback' ? 1 : 2);
+    const fallback = settled.events.filter(event => event.details?.failureRole === 'fallback');
+    assert.equal(fallback.length, failingRole === 'early-primary' ? 1 : 0);
+  }
+});
+
+test('swap diagnostic event codes reject unreviewed error codes without changing terminal selection', async () => {
+  // Catches raw/unreviewed codes escaping the closed tagged event projection.
+  const fixture = mutationFixture('update', { failureAt: 'commitCandidate', failureErrors: {
+    commitCandidate: { code: 'UNREVIEWED_CODE', existingSwapCallsite: 'live-moved-boundary', message: 'C:\\private\\server' }
+  } });
+  const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  const settled = await waitForPhase(fixture.operationStore, queued.jobId, 'rolled-back');
+  assert.equal(settled.events.find(event => event.details?.failureRole === 'primary')?.details.errorCode, 'COMMIT_FAILED');
+  assert.equal(settled.outcome.errorCode, 'UNREVIEWED_CODE');
+});
+
 function serviceFor(plan) {
   const mutationRuntime = Object.fromEntries([
     'resolveInstance', 'suspendAutoRestart', 'quiesce', 'revalidate', 'createRestorePoint', 'buildCandidate',

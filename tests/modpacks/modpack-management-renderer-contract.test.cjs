@@ -114,7 +114,7 @@ test('progress names every durable phase and only permits pre-commit cancellatio
 test('outcome actions are opaque and render all required durable outcomes', () => {
   const progress = source('src/components/modpacks/ModpackJobProgress.svelte');
   for (const copy of [
-    'Nothing changed', 'Downloaded file retained for manual use',
+    'Failed', 'Cancelled', 'Downloaded file retained for manual use',
     'Update failed; server restored successfully', 'Verified recovery is ready',
     'Manual recovery required', 'Retry', 'Change selection', 'Open details', 'Open folder',
     'Remove download', 'Choose another asset', 'Return to server', 'Review restore point',

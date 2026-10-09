@@ -1845,13 +1845,13 @@ class ProductionMutationRuntime {
       if (DURABLE_COMMIT_PHASES.has(record.phase)) throw this.#pendingRecovery();
       this.#context(jobId, plan, resolved);
       if (isUnprovenHealthProcessError(error)) throw this.#pendingRecovery(error);
-      const beforeExistingSwap = plan.operation.serverKind === 'existing' && (
+      const recoverExistingInterruption = plan.operation.serverKind === 'existing' && (
         ['queued', 'preflight', 'snapshotting', 'staging', 'validating-candidate', 'failed'].includes(record.phase) ||
-        (record.phase === 'committing' && ['none', 'prepared'].includes(record.swapStep))
+        (record.phase === 'committing' && ['none', 'prepared', 'live-moved'].includes(record.swapStep))
       );
       const recovered = await (plan.operation.serverKind === 'new'
         ? this.recoveryService.failNewWithLease(record, lease, error)
-        : beforeExistingSwap
+        : recoverExistingInterruption
           ? this.recoveryService.recoverWithLease(record, lease)
           : this.recoveryService.rollbackWithLease(record, lease, error?.code || 'lifecycle-rollback'));
       await this.#resolvedRecovery(recovered, request, close, true);

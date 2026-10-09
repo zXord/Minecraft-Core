@@ -1,6 +1,7 @@
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
-const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
+const { ModpackError, FAILURE_CODES, deepFreeze } = require('../modpacks/errors.cjs');
 const {
+  existingSwapCallsiteFromError,
   failureDiagnosticFromError,
   filesystemFailureDiagnosticFromError,
   normalizeFailureDiagnostic,
@@ -1622,11 +1623,36 @@ class ModpackLifecycleService {
     return completedOutcome;
   }
 
-  async #appendFailureEvent(jobId, error, state) {
+  async #appendFailureEvent(jobId, error, state, swapFallback = false) {
     if (typeof this.operationStore.appendEvent !== 'function') return null;
     try {
       const current = await this.operationStore.get(jobId);
       if (!current || TERMINAL_JOB_PHASES.has(current.phase)) return current;
+      const swapCallsite = swapFallback ? 'rollback-settlement' : existingSwapCallsiteFromError(error);
+      if (swapCallsite) {
+        const failureRole = swapFallback ? 'fallback' : 'primary';
+        const code = error && Object.getOwnPropertyDescriptor(error, 'code')?.value;
+        const errorCode = FAILURE_CODES.includes(code) ? code : 'COMMIT_FAILED';
+        const failure = normalizeFailureDiagnostic(swapCallsite === 'candidate-promotion'
+          ? publicationFailureDiagnosticFromError(error) : filesystemFailureDiagnosticFromError(error));
+        const duplicate = Array.isArray(current.events) && current.events.some(event => {
+          const details = event?.details;
+          const priorFailure = normalizeFailureDiagnostic(details?.failure);
+          return event?.channel === 'log' && details?.failureRole === failureRole &&
+            details?.swapCallsite === swapCallsite && details?.errorCode === errorCode &&
+            priorFailure?.stage === failure?.stage && priorFailure?.category === failure?.category &&
+            priorFailure?.boundary === failure?.boundary;
+        });
+        if (duplicate) return current;
+        const evidence = failure
+          ? `${failure.stage}; ${failure.category}${failure.boundary ? `; ${failure.boundary}` : ''}`
+          : 'native diagnostic unavailable';
+        return await this.operationStore.appendEvent(jobId, {
+          channel: 'log',
+          message: `Existing swap ${failureRole} failure (${swapCallsite}; ${evidence}).`,
+          details: { errorCode, failureRole, swapCallsite, ...(failure ? { failure } : {}) }
+        });
+      }
       const errorCode = error?.runtimeWritersUnproven === true && typeof error?.runtimeFailureCode === 'string'
         ? safeErrorCode({ code: error.runtimeFailureCode }) : safeErrorCode(error);
       const runtimeDiagnostic = runtimeDiagnosticFromError(error);
@@ -1634,6 +1660,7 @@ class ModpackLifecycleService {
       const field = safeFailureField(error);
       const duplicate = Array.isArray(current.events) && current.events.some(event =>
         event?.channel === 'log' && event?.details?.errorCode === errorCode &&
+        !event?.details?.failureRole && !event?.details?.swapCallsite &&
         (step === null || event?.details?.step === step) &&
         (field === null || event?.details?.field === field)
       );
@@ -1823,6 +1850,9 @@ class ModpackLifecycleService {
     }
 
     const failedPhase = job.phase;
+    const existingSwapFailed = plan.operation.serverKind === 'existing' &&
+      existingSwapCallsiteFromError(error) !== null;
+    if (existingSwapFailed) await this.#appendFailureEvent(claimed.jobId, error, state);
     try {
       if (job.phase !== 'rolling-back') {
         job = await this.operationStore.transition(claimed.jobId, {
@@ -1889,6 +1919,7 @@ class ModpackLifecycleService {
         ? terminalResolution(claimed.jobId, request)
         : this.operationStore.transition(claimed.jobId, request);
     } catch (rollbackError) {
+      if (existingSwapFailed) await this.#appendFailureEvent(claimed.jobId, rollbackError, state, true);
       const latest = await this.operationStore.get(claimed.jobId);
       if (!latest || TERMINAL_JOB_PHASES.has(latest.phase)) return latest;
       const phase = latest.phase === 'rolling-back' ? latest.phase : job.phase;

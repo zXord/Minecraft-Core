@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
 const {
+  existingSwapCallsiteFromError,
   candidateBootFailureDiagnosticFromError,
   failureDiagnosticFromError,
   filesystemFailureDiagnosticFromError,
@@ -10,6 +11,32 @@ const {
   normalizePublicationFailureDiagnostic,
   publicationFailureDiagnosticFromError
 } = require('../../electron/services/modpack-lifecycle/publication-failure-diagnostic.cjs');
+
+test('existing swap callsite extraction rejects raw, inherited, accessor and over-depth tags', () => {
+  // Catches accidental propagation of unreviewed callsites or execution of error getters.
+  for (const callsite of ['live-moved-journal', 'live-moved-boundary', 'candidate-promotion']) {
+    const inner = Object.freeze(Object.assign(new Error('private path'), { existingSwapCallsite: callsite }));
+    assert.equal(existingSwapCallsiteFromError(new Error('outer', { cause: inner })), callsite);
+  }
+  let reads = 0;
+  const accessor = Object.defineProperties({}, {
+    existingSwapCallsite: { get() { reads++; return 'candidate-promotion'; } },
+    cause: { get() { reads++; return { existingSwapCallsite: 'candidate-promotion' }; } }
+  });
+  const cycle = {}; cycle.cause = cycle;
+  for (const value of [accessor, cycle, Object.create({ existingSwapCallsite: 'candidate-promotion' }),
+    { existingSwapCallsite: 'rollback-settlement' }, { existingSwapCallsite: 42 },
+    { existingSwapCallsite: 'C:\\private\\server' }]) {
+    assert.equal(existingSwapCallsiteFromError(value), null);
+  }
+  const leaf = { existingSwapCallsite: 'candidate-promotion' };
+  let nested = leaf;
+  for (let depth = 0; depth < 7; depth++) nested = { cause: nested };
+  assert.equal(existingSwapCallsiteFromError(nested), 'candidate-promotion');
+  assert.equal(existingSwapCallsiteFromError({ cause: nested }), null);
+  assert.equal(reads, 0);
+  assert.equal(filesystemFailureDiagnosticFromError({ durableFailureKind: 'unknown', durableFailureStage: 'private' }), null);
+});
 
 const DURABLE_FAILURE_KINDS = [
   'sharing-violation',

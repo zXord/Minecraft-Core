@@ -18,6 +18,7 @@ const transaction = require('./server-directory-transaction.cjs');
 const {
   assertServerDirectoryIdentity,
   identifyServerDirectory,
+  inspectServerDirectoryStructure,
   inspectServerDirectoryTree
 } = require('./server-directory-identity.cjs');
 
@@ -1267,7 +1268,16 @@ class ModpackRecoveryService {
         normalizePaths(current);
         await assertServerDirectoryIdentity(parentPath, parentIdentity, identityOptions);
         const rollbackOnly = beforeRestoration && !this.#exists(paths.targetPath, context);
-        await this.#verifyIdentity(context, rollbackOnly ? paths.rollbackPath : paths.targetPath, originalIdentity);
+        // Retain-only authority needs the same safe subtree and exact root, not
+        // payload readability or a fresh content digest that would be discarded.
+        let retained;
+        try {
+          retained = await inspectServerDirectoryStructure(
+            rollbackOnly ? paths.rollbackPath : paths.targetPath, identityOptions);
+        } catch (error) {
+          throw recoveryRequired(error);
+        }
+        if (!sameIdentity(retained.directoryIdentity, originalIdentity)) throw recoveryRequired();
         await assertServerDirectoryIdentity(parentPath, parentIdentity, identityOptions);
         this.#assertAbsent(rollbackOnly ? paths.targetPath : paths.rollbackPath, context);
         this.#assertAbsent(paths.failedPath, context);

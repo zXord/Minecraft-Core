@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 
 const { MAX_FLUSH_DIRECTORIES } = require('../../utils/durable-fs.cjs');
 const { isNetworkAccess } = require('../../utils/server-network-properties.cjs');
@@ -53,6 +54,7 @@ const CLEANUP_YIELD_BATCH = 64;
 const CLEANUP_YIELD_INTERVAL_MS = 16;
 const EXACT_SNAPSHOT_CHUNK_BYTES = 1024 * 1024;
 const EXACT_SNAPSHOT_YIELD_BYTES = 8 * 1024 * 1024;
+const COPY_PROGRESS_CHECKPOINT_INTERVAL_MS = 10000;
 
 function defaultYieldControl() {
   return new Promise(resolve => setImmediate(resolve));
@@ -346,6 +348,23 @@ function treeOptions(context, serverPath) {
     yieldControl: context.yieldControl,
     mutableRelativePaths: [operationPaths(serverPath, context.jobId).mutableJournalRelativePath]
   };
+}
+
+function existingSwapFailure(error, callsite) {
+  const failure = commitFailure(error);
+  const tagged = new ModpackError(failure.code, failure.safeMessage, {
+    cause: error, details: failure.details, retryable: failure.retryable
+  });
+  Object.defineProperty(tagged, 'existingSwapCallsite', { value: callsite });
+  // These existing direct flags are consumed without cause traversal. Preserve
+  // only their own data values; tagging does not establish any new authority.
+  for (const key of ['preserveWorkspace', 'runtimeWritersUnproven', 'runtimeFailureCode']) {
+    const descriptor = error && Object.getOwnPropertyDescriptor(error, key);
+    if (descriptor && Object.hasOwn(descriptor, 'value')) {
+      Object.defineProperty(tagged, key, { value: descriptor.value });
+    }
+  }
+  return tagged;
 }
 
 function handoffAdoptionFailure(cause) {
@@ -1306,6 +1325,7 @@ function assertExistingDependencies(context, purpose) {
       pathAliasKey(mutationLease.serverPath) !== pathAliasKey(targetPath) || typeof mutationLease.markDirty !== 'function' ||
       !context.reparseInspector || typeof context.reparseInspector.isReparsePoint !== 'function') throw invalid();
   if (context.onProgress !== undefined && typeof context.onProgress !== 'function') throw invalid();
+  if (context.copyProgressClock !== undefined && typeof context.copyProgressClock !== 'function') throw invalid();
   const validatesCandidate = context.validateCandidate !== false;
   const validatesLive = context.validateLive !== false;
   if ((validatesCandidate && (!context.healthValidator || typeof context.healthValidator.validateCandidate !== 'function')) ||
@@ -1483,9 +1503,13 @@ async function exactFileSnapshot(context, serverPath, relativePath) {
 }
 
 function sameExactFileStat(left, right) {
+  // Metadata-only ctime changes do not prove content change or object replacement.
+  // Keep dev/ino/birthtime, size, mtime and link stability; the reader also checks
+  // type/reparse evidence and bounded reads; verification compares expected
+  // SHA-256 and exact bytes.
   return Boolean(left && right && left.dev === right.dev && left.ino === right.ino &&
     left.birthtimeNs === right.birthtimeNs && left.size === right.size &&
-    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.nlink === right.nlink);
+    left.mtimeNs === right.mtimeNs && left.nlink === right.nlink);
 }
 
 async function assertExactFileSnapshot(context, serverPath, relativePath, expected) {
@@ -1639,12 +1663,16 @@ async function buildExistingCandidate(contextValue) {
   });
   await operationBoundary(context, 'candidate-created');
   await candidateProgress(context, 'staging', 38, 'Copying the live server into a protected candidate');
-  let lastCopyProgress = 0;
+  // This observational clock is separate from durable wall-clock timestamps.
+  // Injected clocks return finite, nonnegative, nondecreasing milliseconds.
+  const copyProgressClock = context.copyProgressClock || (() => performance.now());
+  let lastCopyProgressAt = null;
   const onCopyProgress = async event => {
     if (event.activity === 'copying-live-files') {
-      const now = Date.now();
-      if (now - lastCopyProgress < 1000 && event.completedItems !== event.totalItems) return;
-      lastCopyProgress = now;
+      const now = copyProgressClock();
+      if (lastCopyProgressAt !== null && now - lastCopyProgressAt < COPY_PROGRESS_CHECKPOINT_INTERVAL_MS &&
+          event.completedItems !== event.totalItems) return;
+      lastCopyProgressAt = now;
       await candidateProgress(context, 'staging', 38,
         `Copying server files (${event.completedItems} of ${event.totalItems} files, ${event.completedBytes} of ${event.totalBytes} bytes)`);
     } else if (event.activity === 'flushing-candidate-directories') {
@@ -1912,23 +1940,30 @@ async function swapExistingCandidate(contextValue) {
       })
     }
   });
-  await candidate.journal.transition(candidate.locations.journalPath, {
-    expectedPhase: 'committing',
-    nextPhase: 'committing',
-    patch: {
-      swapStep: 'live-moved',
-      rollbackIdentity,
-      rollbackFingerprint: rollbackInspection.fingerprint
-    }
-  });
-  await operationBoundary(context, 'live-moved');
+  try {
+    await candidate.journal.transition(candidate.locations.journalPath, {
+      expectedPhase: 'committing',
+      nextPhase: 'committing',
+      patch: {
+        swapStep: 'live-moved',
+        rollbackIdentity,
+        rollbackFingerprint: rollbackInspection.fingerprint
+      }
+    });
+  } catch (error) { throw existingSwapFailure(error, 'live-moved-journal'); }
+  try {
+    await operationBoundary(context, 'live-moved');
+  } catch (error) { throw existingSwapFailure(error, 'live-moved-boundary'); }
 
-  const publishedIdentity = await durableRenameWithIdentity(
-    context,
-    context.expectedPaths.candidatePath,
-    context.targetPath,
-    record.directoryIdentities.candidate
-  );
+  let publishedIdentity;
+  try {
+    publishedIdentity = await durableRenameWithIdentity(
+      context,
+      context.expectedPaths.candidatePath,
+      context.targetPath,
+      record.directoryIdentities.candidate
+    );
+  } catch (error) { throw existingSwapFailure(error, 'candidate-promotion'); }
   await operationBoundary(context, 'candidate-renamed');
   const published = await verifyOwnedDirectory(
     context,

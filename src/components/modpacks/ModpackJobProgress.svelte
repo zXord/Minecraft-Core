@@ -29,14 +29,21 @@
     'cleanup-pending': 'Cleaning rollback staging',
     completed: 'Completed',
     cancelling: 'Cancelling',
-    cancelled: 'Nothing changed',
+    cancelled: 'Cancelled',
     'rolling-back': 'Rolling back',
     'rolled-back': 'Update failed; server restored successfully',
-    failed: 'Nothing changed',
+    failed: 'Failed',
     'recovery-required': 'Manual recovery required'
   });
   const cancellable = new Set(['queued', 'resolving', 'downloading', 'verifying', 'inspecting', 'planning', 'awaiting-user', 'preflight', 'snapshotting', 'staging', 'validating-candidate']);
   const terminal = new Set(['completed', 'cancelled', 'rolled-back', 'failed', 'recovery-required']);
+  const terminalSummaries = Object.freeze({
+    completed: 'Operation completed. Review the result below.',
+    cancelled: 'Operation cancelled. Review the result below.',
+    failed: 'Operation failed. Review the result below.',
+    'rolled-back': 'The operation was rolled back. Review the result below.',
+    'recovery-required': 'Recovery is required. Review the recovery options below.'
+  });
   const failureStepLabels = Object.freeze({
     'acquire-mutation': 'acquire mutation',
     'suspend-auto-restart': 'suspend auto restart',
@@ -126,7 +133,12 @@
   $: verificationMismatches = Array.isArray(verificationResult?.mismatches) ? verificationResult.mismatches : [];
   $: stage = cleanupPending ? 'Recovery needs review' : completedVerify ? 'Verification complete' : stageLabels[phase] || phase;
   $: badgeLabel = cleanupPending ? 'Recovery needs review' : completedVerify ? verificationTitle : phase;
-  $: activityText = `${stage}: ${job?.progress?.message || 'Minecraft Core is preserving the reviewed operation state.'}`;
+  $: summaryText = cleanupPending
+    ? 'This operation stopped before cleanup could finish. Open the Modpack page to check its current recovery status before retrying.'
+    : completedVerify ? 'Verification complete. Review the result below.'
+    : terminal.has(phase) ? terminalSummaries[phase]
+    : job?.progress?.message || 'Minecraft Core is preserving the reviewed operation state.';
+  $: activityText = `${stage}: ${summaryText}`;
   $: canCancel = cancellable.has(phase) && !job?.cancellationRequested;
   $: outcomeKind = cleanupPending ? 'cleanup-pending' : job?.outcome?.kind || job?.outcome?.resultKind || (phase === 'rolled-back' ? 'restored' : phase === 'recovery-required' ? (job?.outcome?.automatic ? 'automatic-recovery' : 'manual-recovery') : job?.outcome?.retainedDownload ? 'retained-download' : phase === 'cancelled' || phase === 'failed' ? 'nothing-changed' : 'completed');
   $: outcomeBadgeClass = cleanupPending || phase === 'failed' || phase === 'recovery-required'
@@ -376,7 +388,7 @@
 
 <div class="modpack-surface mp-stack">
   <section class="mp-panel mp-stack" aria-label="Modpack operation progress">
-    <div class="mp-toolbar"><div class="grow"><p class="mp-kicker">Durable job {job?.jobId || 'starting'}</p><h2 class="mp-title">{stage}</h2><p class="mp-subtitle" aria-live="polite">{job?.progress?.message || 'Minecraft Core is preserving the reviewed operation state.'}</p></div><span class="mp-badge {outcomeBadgeClass}">{badgeLabel}</span></div>
+    <div class="mp-toolbar"><div class="grow"><p class="mp-kicker">Durable job {job?.jobId || 'starting'}</p><h2 class="mp-title">{stage}</h2><p class="mp-subtitle" aria-live="polite">{summaryText}</p></div><span class="mp-badge {outcomeBadgeClass}">{badgeLabel}</span></div>
     {#if !terminal.has(phase)}
       <div class="mp-progress-track" role="progressbar" aria-label={stage} aria-valuetext={activityText}><span class="mp-progress-activity"></span></div>
       <p class="progress-note">This stage stays active until the current operation finishes.</p>

@@ -90,13 +90,103 @@ test.beforeEach(async ({ page }) => {
   await page.addScriptTag({ content: bundle });
 });
 
-async function showJob(page, phase, outcome, operationKind = 'repair') {
-  await page.evaluate(({ phase, outcome, operationKind }) => {
-    const job = { jobId: 'recovery-job', phase, operationKind, outcome };
+async function showJob(page, phase, outcome, operationKind = 'repair', progress) {
+  await page.evaluate(({ phase, outcome, operationKind, progress }) => {
+    const job = { jobId: 'recovery-job', phase, operationKind, outcome, progress };
     window.jobTest.job = job;
     window.progressFixture.show('job', { job });
-  }, { phase, outcome, operationKind });
+  }, { phase, outcome, operationKind, progress });
 }
+
+async function expectJobSummary(page, summary) {
+  const subtitle = page.getByRole('region', { name: 'Modpack operation progress' }).locator('.mp-subtitle');
+  await expect(subtitle).toHaveText(summary);
+  await expect(subtitle).toHaveAttribute('aria-live', 'polite');
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+}
+
+test('terminal summary replaces active cancellation on prop update', async ({ page }) => {
+  const message = 'Cancelling; verifying safe cleanup of the candidate.';
+  await showJob(page, 'cancelling', null, 'repair', { message });
+  await expect(page.locator('.mp-subtitle')).toHaveText(message);
+  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuetext', `Cancelling: ${message}`);
+
+  await page.evaluate(() => {
+    const job = { ...window.jobTest.job, phase: 'cancelled', outcome: { kind: 'nothing-changed', cleanupPending: false } };
+    window.jobTest.job = job;
+    window.progressFixture.update({ job });
+  });
+  await expectJobSummary(page, 'Operation cancelled. Review the result below.');
+  await expect(page.getByRole('region', { name: 'Modpack operation progress' })).not.toContainText('Nothing changed');
+  await expect(page.locator('section.outcome')).toContainText('No server files were changed.');
+});
+
+for (const [failure, diagnostic] of [
+  [{ stage: 'filesystem-operation', category: 'access-denied', boundary: 'destination-parent-open' }, 'Minecraft Core could not access a required folder.'],
+  [{ stage: 'candidate-boot', category: 'mod-loading-failure', boundary: 'readiness' }, 'One or more mods failed during the isolated startup test.']
+]) {
+  test(`terminal summary replaces stale preparation without hiding ${failure.stage} detail`, async ({ page }) => {
+    await showJob(page, 'failed', { failure, actions: [{ actionId: 'open-details', opaqueRef: 'details-ref' }], message: 'UNTRUSTED OUTCOME MESSAGE' }, 'repair', {
+      message: 'Preparing the candidate files.'
+    });
+    await expectJobSummary(page, 'Operation failed. Review the result below.');
+    const progress = page.getByRole('region', { name: 'Modpack operation progress' });
+    await expect(progress.getByRole('heading')).toHaveText('Failed');
+    await expect(progress).not.toContainText(/No server files were changed|Nothing changed|UNTRUSTED/u);
+    await expect(page.locator('section.outcome')).toContainText(diagnostic);
+    await page.locator('section.outcome').getByRole('button', { name: 'Open details' }).click();
+    expect(await page.evaluate(() => window.jobTest.actions)).toEqual([{ actionId: 'open-details', opaqueRef: 'details-ref' }]);
+  });
+}
+
+for (const [operationKind, summary] of [
+  ['repair', 'Operation completed. Review the result below.'],
+  ['verify', 'Verification complete. Review the result below.']
+]) {
+  test(`terminal summary replaces completed ${operationKind} stale progress`, async ({ page }) => {
+    await showJob(page, 'completed', { result: { healthy: true, checkedFiles: 5, mismatchCount: 0 } }, operationKind, {
+      message: 'Checking the reviewed files.'
+    });
+    await expectJobSummary(page, summary);
+    if (operationKind === 'verify') {
+      await expect(page.locator('section.outcome')).toContainText('Checked files: 5 · Mismatches: 0');
+    } else {
+      await expect(page.locator('section.outcome').getByRole('heading', { name: 'Completed' })).toBeVisible();
+    }
+  });
+}
+
+for (const [phase, summary] of [
+  ['rolled-back', 'The operation was rolled back. Review the result below.'],
+  ['recovery-required', 'Recovery is required. Review the recovery options below.']
+]) {
+  test(`terminal summary replaces stale ${phase} activity`, async ({ page }) => {
+    await showJob(page, phase, {}, 'repair', { message: 'Preparing the candidate files.' });
+    await expectJobSummary(page, summary);
+  });
+}
+
+test('terminal summary gives genuine cleanup pending precedence over cancellation', async ({ page }) => {
+  await showJob(page, 'cancelled', { kind: 'nothing-changed', cleanupPending: true }, 'repair', {
+    message: 'Cancelling; verifying safe cleanup of the candidate.'
+  });
+  await expectJobSummary(page, 'This operation stopped before cleanup could finish. Open the Modpack page to check its current recovery status before retrying.');
+  await expect(page.getByRole('region', { name: 'Modpack operation progress' }).getByRole('heading')).toHaveText('Recovery needs review');
+  await expect(page.locator('.mp-subtitle')).not.toContainText(/No server files were changed|Nothing changed|safe cleanup/u);
+});
+
+test('terminal summary updates its live announcement after terminal hydration', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-09T00:00:00Z') });
+  await page.clock.pauseAt(new Date('2026-10-09T00:00:01Z'));
+  await showJob(page, 'failed', null, 'repair', { message: 'Preparing the candidate files.' });
+  await expectJobSummary(page, 'Operation failed. Review the result below.');
+  await page.evaluate(() => {
+    window.jobTest.job = { ...window.jobTest.job, outcome: { cleanupPending: true } };
+  });
+  await page.clock.runFor(1);
+  await expectJobSummary(page, 'This operation stopped before cleanup could finish. Open the Modpack page to check its current recovery status before retrying.');
+  expect(await page.evaluate(() => window.jobTest.requests)).toEqual([{ channel: 'modpacks:get-job', request: { jobId: 'recovery-job' } }]);
+});
 
 for (const [phase, outcome] of [
   ['failed', { retainedDownload: { verified: true } }],
@@ -186,6 +276,49 @@ async function update(page, kind, progress) {
 for (const kind of ['archive', 'planning']) {
   const suffix = kind === 'planning' ? ' checked' : '';
   const status = page => page.locator('.preflight-status');
+
+  test(`${kind} keeps a truthful review header as scanning transitions to candidate preparation`, async ({ page }, testInfo) => {
+    // Catches insertion-order ordinals implying that Repair moves backwards,
+    // or a header fix suppressing legitimate activities or measured progress.
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => {
+      if (['error', 'warning'].includes(message.type())) errors.push(message.text());
+    });
+    const display = status(page);
+    const transitions = [
+      [{ phase: 'scanning-server' }, 'Scanning current server files'],
+      [{ phase: 'preparing-candidate', activity: 'extracting' }, 'Extracting archive'],
+      [{
+        phase: 'preparing-candidate', activity: 'assembling-files',
+        completedItems: 2, totalItems: 4, processedBytes: 1024, totalBytes: 4096
+      }, 'Assembling files']
+    ];
+
+    for (const [index, [progress, activity]] of transitions.entries()) {
+      if (index === 0) await show(page, kind, progress);
+      else await update(page, kind, progress);
+      await expect(display.locator('strong')).toHaveText(activity);
+      await expect.soft(display.locator('.preflight-heading > div > span')).toHaveText('Preparing review', { timeout: 100 });
+      await expect.soft(display).not.toContainText(/Stage \d+ of \d+/u, { timeout: 100 });
+      if (index < 2) {
+        await expect(display.locator('.indeterminate')).toHaveCount(1);
+        await expect(display.locator('.indeterminate')).toHaveAttribute('aria-hidden', 'true');
+        await expect(display.getByRole('progressbar')).toHaveCount(0);
+        await expect(display).not.toContainText(/\d+%/u);
+      } else {
+        await expect(display.locator('.indeterminate')).toHaveCount(0);
+        await expect(display.getByRole('progressbar', { name: 'Assembling files' })).toHaveAttribute('value', '25');
+        await expect(display.locator('.preflight-heading > span')).toHaveText('25%');
+        await expect(display.locator('p')).toHaveText('2 of 4 files · 1.0 KB of 4.0 KB');
+      }
+    }
+    await expect(page).toHaveTitle('Modpack progress reactivity');
+    expect(page.url()).toBe('about:blank');
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+    expect(errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`${kind}-planning-header.png`) });
+  });
 
   test(`${kind} replaces its unmeasured detail when byte totals arrive`, async ({ page }) => {
     await show(page, kind, { phase: 'preparing-candidate' });

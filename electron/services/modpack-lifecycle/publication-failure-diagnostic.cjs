@@ -57,6 +57,20 @@ function ownDataValue(value, key) {
   }
 }
 
+function existingSwapCallsiteFromError(error) {
+  let current = error;
+  const visited = new Set();
+  for (let depth = 0; depth < 8 && current &&
+      (typeof current === 'object' || typeof current === 'function') && !visited.has(current); depth += 1) {
+    visited.add(current);
+    const callsite = ownDataValue(current, 'existingSwapCallsite');
+    if (typeof callsite === 'string' &&
+        ['live-moved-journal', 'live-moved-boundary', 'candidate-promotion'].includes(callsite)) return callsite;
+    current = ownDataValue(current, 'cause');
+  }
+  return null;
+}
+
 function normalizeFailureDiagnostic(value) {
   try {
     if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -162,6 +176,7 @@ function failureDiagnosticFromError(error) {
 }
 
 module.exports = {
+  existingSwapCallsiteFromError,
   candidateBootFailureDiagnosticFromError,
   failureDiagnosticFromError,
   filesystemFailureDiagnosticFromError,

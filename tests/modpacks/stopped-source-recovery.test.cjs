@@ -11,6 +11,32 @@ const { ServerMutationCoordinator } = require('../../electron/services/server-mu
 const { createExistingSiblingPaths } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
 const { inspectServerDirectoryTree } = require('../../electron/services/modpack-lifecycle/server-directory-identity.cjs');
 
+// Observe only original payload I/O; journal and candidate access stay real and
+// outside the counters. The adapter is installed after fixture fingerprinting.
+function sourceReadProbe() {
+  const opens = [];
+  const reads = [];
+  const probe = { opens, reads, stage: 'before-work', denyOpen: false,
+    fsApi(serverPath) {
+      return { ...fs, promises: { ...fs.promises, async open(candidate, ...args) {
+        const relative = path.relative(serverPath, candidate).replaceAll(path.sep, '/');
+        if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return fs.promises.open(candidate, ...args);
+        opens.push({ relative, stage: probe.stage });
+        if (probe.denyOpen) throw Object.assign(new Error('controlled source read denial'), { code: 'EACCES' });
+        const handle = await fs.promises.open(candidate, ...args);
+        return { stat: handle.stat.bind(handle), close: handle.close.bind(handle),
+          async read(...readArgs) {
+            const result = await handle.read(...readArgs);
+            reads.push({ relative, stage: probe.stage, bytes: result.bytesRead });
+            return result;
+          }
+        };
+      } } };
+    }
+  };
+  return probe;
+}
+
 // Real directory inspection, journal, writer admission and coordinator; only external
 // runtime launch/shutdown and the native durability transport are replaced.
 async function fixture(t, options = {}) {
@@ -24,6 +50,7 @@ async function fixture(t, options = {}) {
   const reparseInspector = { async isReparsePoint() { return false; } };
   const paths = createExistingSiblingPaths(serverPath, 'job-stopped');
   const original = await inspectServerDirectoryTree(serverPath, { fsApi: fs, reparseInspector });
+  const fsApi = options.fsApi ? options.fsApi(serverPath) : fs;
   let candidate = null;
   if (options.candidate) {
     fs.mkdirSync(paths.candidatePath);
@@ -97,7 +124,7 @@ async function fixture(t, options = {}) {
     runtimeWriterAuthority: new ServerRuntimeWriterAuthority({ registry, coordinator, getBootSequence: () => 1 }),
     directoryAuthority: options.authority ? options.authority(authority, calls) : authority,
     restorePointService: options.restorePointService || null,
-    contextFactory: async ({ record, mutationLease }) => ({ fsApi: fs, reparseInspector, durableFs,
+    contextFactory: async ({ record, mutationLease }) => ({ fsApi, reparseInspector, durableFs,
       jobId: record.jobId, mutationLease, targetPath: serverPath, operationKind: record.operationKind,
       recoveryRegistry: registry, stableInstanceId: 'alpha', runtimePolicy,
       async resolveRecoveryRuntimeConfig() {
@@ -121,12 +148,24 @@ async function fixture(t, options = {}) {
 
 test('stopped original initial cleanup proves full source and finishes failed without config or boot', async t => {
   let originalProofs = 0;
-  const value = await fixture(t, { authority: base => ({ ...base, async verifyOriginal(request) {
-    originalProofs++;
-    assert.equal((await value.registry.load('job-stopped')).phase, 'snapshotting');
-    return base.verifyOriginal(request);
-  } }) });
+  const probe = sourceReadProbe();
+  const inspected = [];
+  const value = await fixture(t, { candidate: true, fsApi: probe.fsApi,
+    onAuto: async () => { probe.stage = 'after-policy'; },
+    authority: base => ({ ...base, async verifyOriginal(request) {
+      originalProofs++;
+      assert.equal((await value.registry.load('job-stopped')).phase, 'snapshotting');
+      assert.equal((await value.registry.load('job-stopped')).outcome.recovery, undefined);
+      probe.stage = 'full-proof';
+      const proof = await base.verifyOriginal(request);
+      probe.stage = 'after-work';
+      return proof;
+    } }) });
   const before = await inspectServerDirectoryTree(value.serverPath, { reparseInspector: value.reparseInspector });
+  value.reparseInspector.isReparsePoint = async candidate => {
+    inspected.push({ relative: path.relative(value.serverPath, candidate).replaceAll(path.sep, '/'), stage: probe.stage });
+    return false;
+  };
   const result = await value.recover();
   assert.deepEqual(result, { jobId: 'job-stopped', resolved: true, action: 'pre-swap-restored' });
   const historical = await value.registry.loadHistory('job-stopped');
@@ -135,6 +174,17 @@ test('stopped original initial cleanup proves full source and finishes failed wi
   assert.equal((await inspectServerDirectoryTree(value.serverPath, { reparseInspector: value.reparseInspector })).fingerprint, before.fingerprint);
   assert.deepEqual(value.calls, ['suspend', 'stop', 'auto']);
   assert.equal(originalProofs, 1);
+  assert.deepEqual(probe.opens, [
+    { relative: 'config/broken.toml', stage: 'full-proof' },
+    { relative: 'logs/latest.log', stage: 'full-proof' }
+  ]);
+  assert.equal(probe.reads.reduce((total, read) => total + read.bytes, 0), 20);
+  for (const stage of ['before-work', 'after-work', 'after-policy']) {
+    assert.ok(inspected.some(entry => entry.stage === stage && entry.relative === 'config/broken.toml'), stage);
+    assert.ok(inspected.some(entry => entry.stage === stage && entry.relative === 'logs/latest.log'), stage);
+  }
+  assert.equal(fs.existsSync(value.paths.candidatePath), false);
+  assert.equal(historical.outcome.candidateCleanup.deletionAuthorized, true);
   assert.equal(await value.registry.load('job-stopped'), null);
   assert.deepEqual(fs.readdirSync(value.registry.activePath), []);
   assert.deepEqual(fs.readdirSync(value.registry.historyPath).sort(), ['job-stopped.json', 'job-stopped.target.json']);
@@ -144,7 +194,8 @@ test('stopped original initial cleanup proves full source and finishes failed wi
 
 for (const relative of ['logs/latest.log', 'config/broken.toml']) {
   test(`stopped native-shaped terminal retry retains safe current ${relative} bytes and exact outcome`, async t => {
-    const value = await fixture(t, { terminal: true });
+    const probe = sourceReadProbe();
+    const value = await fixture(t, { terminal: true, fsApi: probe.fsApi });
     const before = value.initial;
     fs.writeFileSync(path.join(value.serverPath, relative), 'current user bytes');
     assert.notEqual((await inspectServerDirectoryTree(value.serverPath, { reparseInspector: value.reparseInspector })).fingerprint, value.original.fingerprint);
@@ -157,8 +208,52 @@ for (const relative of ['logs/latest.log', 'config/broken.toml']) {
     assert.deepEqual(historical.outcome, before.outcome);
     assert.equal(historical.sequence, before.sequence);
     assert.deepEqual(value.calls, ['suspend', 'stop', 'auto']);
+    assert.deepEqual(probe.opens.map(open => open.relative), ['config/broken.toml', 'logs/latest.log']);
+    assert.equal(probe.reads.reduce((total, read) => total + read.bytes, 0), relative === 'logs/latest.log' ? 31 : 25);
   });
 }
+
+test('stopped retain structural checkpoints do not require payload read access after the full proof', async t => {
+  const probe = sourceReadProbe();
+  const value = await fixture(t, { candidate: true, fsApi: probe.fsApi,
+    authority: base => ({ ...base, async verifyOriginal(request) {
+      assert.equal((await value.registry.load('job-stopped')).phase, 'snapshotting');
+      const proof = await base.verifyOriginal(request);
+      probe.denyOpen = true;
+      return proof;
+    } }) });
+  assert.equal((await value.recover()).resolved, true);
+  assert.equal(probe.denyOpen, true);
+  assert.equal(probe.opens.length, 2);
+  assert.equal(probe.reads.reduce((total, read) => total + read.bytes, 0), 20);
+  assert.equal(fs.readFileSync(path.join(value.serverPath, 'config', 'broken.toml'), 'utf8'), 'malformed = [');
+  assert.equal(fs.readFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'utf8'), 'old log');
+  assert.equal(fs.existsSync(value.paths.candidatePath), false);
+  const historical = await value.registry.loadHistory(value.initial.jobId);
+  assert.equal(historical.phase, 'failed');
+  assert.deepEqual(historical.outcome.recovery, { action: 'pre-swap-restored', operationId: 'job-stopped' });
+});
+
+test('stopped initial full proof still rejects payload read-open failure before settlement', async t => {
+  const probe = sourceReadProbe();
+  let fullProofs = 0;
+  const value = await fixture(t, { fsApi: probe.fsApi,
+    authority: base => ({ ...base, async verifyOriginal(request) {
+      fullProofs++;
+      probe.denyOpen = true;
+      return base.verifyOriginal(request);
+    } }) });
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(fullProofs, 1);
+  assert.equal(probe.opens.length, 1);
+  assert.deepEqual(probe.reads, []);
+  const active = await value.registry.load(value.initial.jobId);
+  assert.equal(active.phase, 'snapshotting');
+  assert.equal(active.outcome.recovery, undefined);
+  assert.equal(await value.registry.loadHistory(value.initial.jobId), null);
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(fs.readFileSync(path.join(value.serverPath, 'config', 'broken.toml'), 'utf8'), 'malformed = [');
+});
 
 test('stopped retain reservation holds through policy and finish and releases on durable failure for exact retry', async t => {
   const value = await fixture(t, { terminal: true, onAuto: async c => {
@@ -305,6 +400,67 @@ for (const change of ['target', 'parent', 'rollback', 'failed', 'candidate']) {
     await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
     assert.ok(await value.registry.load(value.initial.jobId));
     assert.equal(await value.registry.loadHistory(value.initial.jobId), null);
+  });
+}
+
+for (const change of ['hardlink', 'reparse', 'membership', 'replacement', 'metadata']) {
+  test(`stopped retain rejects after-policy descendant ${change} and keeps active recovery`, async t => {
+    let afterPolicy = false;
+    let mutated = false;
+    let policyConfigReads = 0;
+    const value = await fixture(t, { terminal: true,
+      fsApi: serverPath => ({ ...fs, promises: { ...fs.promises,
+        async readdir(candidate, ...args) {
+          const names = await fs.promises.readdir(candidate, ...args);
+          if (afterPolicy && candidate.toLowerCase() === path.join(serverPath, 'config').toLowerCase()) {
+            policyConfigReads++;
+            if (!mutated && change === 'membership') {
+              mutated = true;
+              fs.writeFileSync(path.join(candidate, 'appeared.toml'), 'external new member');
+            } else if (!mutated && change === 'metadata' && policyConfigReads === 2) {
+              mutated = true;
+              fs.utimesSync(path.join(candidate, 'broken.toml'), new Date('2000-01-01'), new Date('2000-01-01'));
+            }
+          }
+          return names;
+        },
+        async lstat(candidate, ...args) {
+          const stat = await fs.promises.lstat(candidate, ...args);
+          if (afterPolicy && !mutated && change === 'replacement' &&
+              candidate.toLowerCase() === path.join(serverPath, 'config', 'broken.toml').toLowerCase()) {
+            mutated = true;
+            fs.renameSync(candidate, path.join(value.root, 'saved-broken.toml'));
+            fs.writeFileSync(candidate, 'malformed = [');
+          }
+          return stat;
+        }
+      } }),
+      onAuto: async c => {
+        await new Promise(resolve => setImmediate(resolve));
+        afterPolicy = true;
+        if (change === 'hardlink') {
+          mutated = true;
+          fs.linkSync(path.join(c.serverPath, 'config', 'broken.toml'), path.join(c.serverPath, 'config', 'linked.toml'));
+        } else if (change === 'reparse') {
+          mutated = true;
+          c.reparseInspector.isReparsePoint = async candidate => candidate.toLowerCase() === path.join(c.serverPath, 'config').toLowerCase();
+        }
+      }
+    });
+    await value.withLease(async lease => {
+      await assert.rejects(value.service.recoverWithLease(value.initial, lease), { code: 'RECOVERY_REQUIRED' });
+      const start = await value.coordinator.acquireStart(value.selector, { operation: 'prove-release',
+        operationId: 'release', parentMutationLease: lease });
+      start.release();
+    });
+    assert.equal(mutated, true);
+    assert.equal(value.calls.includes('auto'), true);
+    assert.equal(value.calls.includes('config'), false);
+    assert.equal(value.calls.includes('health'), false);
+    assert.deepEqual((await value.registry.load(value.initial.jobId)).outcome, value.initial.outcome);
+    assert.equal(await value.registry.loadHistory(value.initial.jobId), null);
+    assert.equal(fs.readFileSync(path.join(value.serverPath, 'config', 'broken.toml'), 'utf8'), 'malformed = [');
+    assert.equal(fs.readFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'utf8'), 'old log');
   });
 }
 

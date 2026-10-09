@@ -510,7 +510,7 @@ test('setup progress distinguishes completed, current, and upcoming steps and ex
   assert.match(setup, /Chosen destination/u);
 });
 
-test('busy plan review renders stage and activity with determinate progress only for measured bytes', async () => {
+test('busy plan review renders a truthful header and activity with determinate progress only for measured bytes', async () => {
   const { render } = await import('svelte/server');
   const Component = await loadServerComponent('src/components/setup/ArchiveGuidedReview.svelte');
   const html = render(Component, {
@@ -524,7 +524,7 @@ test('busy plan review renders stage and activity with determinate progress only
     }
   }).body;
 
-  assert.match(html, /Stage 2 of 7/u);
+  assert.match(html, /Preparing review/u);
   assert.match(html, /Downloading pack files/u);
   assert.match(html, /value="25"/u);
   assert.match(html, />25%/u);
@@ -541,7 +541,7 @@ test('busy plan review uses an accessible reduced-motion indeterminate indicator
     }
   }).body;
 
-  assert.match(html, /Stage 2 of 7/u);
+  assert.match(html, /Preparing review/u);
   assert.match(html, /Hashing candidate files/u);
   assert.match(html, /class="indeterminate/u);
   assert.doesNotMatch(html, /<progress/u);

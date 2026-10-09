@@ -32,7 +32,6 @@
     'sealing-plan': 'Sealing the one-use reviewed plan',
     complete: 'Opening the reviewed plan'
   });
-  const preflightPhases = Object.freeze(Object.keys(preflightPhaseLabels));
   const preflightActivityLabels = Object.freeze({
     extracting: 'Extracting archive',
     'verifying-archive': 'Verifying archive',
@@ -114,7 +113,6 @@
   $: preflightPhase = Object.hasOwn(preflightPhaseLabels, preflightProgress?.phase)
     ? preflightProgress.phase
     : 'validating-destination';
-  $: preflightStage = preflightPhases.indexOf(preflightPhase) + 1;
   $: preflightActivity = Object.hasOwn(preflightActivityLabels, preflightProgress?.activity)
     ? preflightProgress.activity
     : null;
@@ -393,7 +391,7 @@
         <div class="preflight-status mp-state" role="status" aria-live="polite" aria-atomic="true"><strong>Choose the server destination</strong><p>The native folder picker is open. After you choose a folder, Minecraft Core will run the protected safety checks.</p></div>
       {:else if busy && preflightProgress}
         <div class="preflight-status mp-state" role="status" aria-live="polite" aria-atomic="true">
-          <div class="preflight-heading"><div><span>Stage {preflightStage} of {preflightPhases.length}</span><strong>{preflightStatusLabel}</strong></div>{#if preflightPercent !== null}<span>{preflightPercent}%</span>{/if}</div>
+          <div class="preflight-heading"><div><span>Preparing review</span><strong>{preflightStatusLabel}</strong></div>{#if preflightPercent !== null}<span>{preflightPercent}%</span>{/if}</div>
           {#if determinateProgress}
             <progress class="mp-progress-meter" aria-label={preflightStatusLabel} max="100" value={preflightPercent}>{preflightPercent}%</progress>
           {:else}

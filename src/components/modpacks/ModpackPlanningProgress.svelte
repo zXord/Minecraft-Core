@@ -11,7 +11,6 @@
     'sealing-plan': 'Sealing the one-use reviewed plan',
     complete: 'Opening the reviewed plan'
   });
-  const phaseOrder = Object.freeze(Object.keys(phaseLabels));
   const activityLabels = Object.freeze({
     extracting: 'Extracting archive',
     'verifying-archive': 'Verifying archive contents',
@@ -23,7 +22,6 @@
   $: phase = Object.hasOwn(phaseLabels, progress?.phase) ? progress.phase : 'scanning-server';
   $: activity = Object.hasOwn(activityLabels, progress?.activity) ? progress.activity : null;
   $: label = activity ? activityLabels[activity] : phaseLabels[phase];
-  $: stage = phaseOrder.indexOf(phase) + 1;
   $: byteProgress = validPair(progress?.processedBytes, progress?.totalBytes);
   $: itemProgress = validPair(progress?.completedItems, progress?.totalItems);
   $: measured = byteProgress?.total > 0 ? { ...byteProgress, kind: 'bytes' }
@@ -73,7 +71,7 @@
 
 <section class="preflight-status mp-state" role="status" aria-label="Modpack preflight progress" aria-live="polite" aria-atomic="true">
   <div class="preflight-heading">
-    <div><span>Stage {stage} of {phaseOrder.length}</span><strong>{label}</strong></div>
+    <div><span>Preparing review</span><strong>{label}</strong></div>
     {#if percent !== null}<span>{percent}%</span>{/if}
   </div>
   {#if measured}
