@@ -402,7 +402,12 @@ async function launchElectron(prepared, { executablePath = null, env = {} } = {}
     }
   });
   const page = await waitForFirstElectronWindow(electronApp);
-  await page.route(/^https?:\/\//u, route => route.abort('blockedbyclient'));
+  const devServerUrl = explicitEnv.MINECRAFT_CORE_DEV_SERVER_URL || process.env.MINECRAFT_CORE_DEV_SERVER_URL;
+  const fixtureDevOrigin = devServerUrl === 'http://127.0.0.1:5173' ? devServerUrl : null;
+  await page.route(/^https?:\/\//u, route =>
+    fixtureDevOrigin && new URL(route.request().url()).origin === fixtureDevOrigin
+      ? route.continue()
+      : route.abort('blockedbyclient'));
   await electronApp.evaluate(async ({ BrowserWindow, dialog }, target) => {
     await new Promise(resolve => setImmediate(resolve));
     const window = BrowserWindow.getAllWindows()[0];
@@ -424,6 +429,9 @@ async function launchModpackApp(options = {}) {
     get electronApp() { return running.electronApp; },
     get page() { return running.page; },
     readState() { return readJson(prepared.scenarioFile); },
+    updateScenario(changes) {
+      writeJson(prepared.scenarioFile, { ...readJson(prepared.scenarioFile), ...clone(changes) });
+    },
     readEvidence() { return readJson(prepared.scenarioFile); },
     readServerFile(relativeName) { return fs.readFileSync(path.join(prepared.serverRoot, ...relativeName.split('/')), 'utf8'); },
     serverFileExists(relativeName) { return fs.existsSync(path.join(prepared.serverRoot, ...relativeName.split('/'))); },
@@ -1416,15 +1424,31 @@ function createComposition({ input, scenarioFile }) {
 
     async getState(instanceId) {
       record('lifecycleCalls', { method: 'getState', instanceId });
-      const delayMs = Number(scenario().refreshFixture?.stateDelayMsByInstanceId?.[instanceId] || 0);
-      if (Number.isFinite(delayMs) && delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
       const current = scenario();
-      return clone(current.statesByInstanceId?.[instanceId] || current.state);
+      const call = current.lifecycleCalls.filter(item => item.method === 'getState' && item.instanceId === instanceId).length;
+      const fixture = current.refreshFixture || {};
+      const response = fixture.stateResponsesByInstanceId?.[instanceId]?.[call] || {};
+      const snapshot = clone(response.value || current.statesByInstanceId?.[instanceId] || current.state);
+      const delayMs = Number(response.delayMs ?? fixture.stateDelayMsByInstanceId?.[instanceId] ?? 0);
+      if (Number.isFinite(delayMs) && delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+      if (response.fail || fixture.stateFailureIds?.includes(instanceId)) {
+        throw new ModpackError('INVALID_REQUEST', 'Managed modpack state is invalid');
+      }
+      return snapshot;
     },
 
     async listHistory(instanceId, { cursor = null } = {}) {
       record('lifecycleCalls', { method: 'listHistory', instanceId, cursor });
-      return { items: clone(scenario().history), nextCursor: null };
+      const current = scenario();
+      const call = current.lifecycleCalls.filter(item => item.method === 'listHistory' && item.instanceId === instanceId).length;
+      const fixture = current.refreshFixture || {};
+      const response = fixture.historyResponsesByInstanceId?.[instanceId]?.[call] || {};
+      const snapshot = clone(response.value || { items: current.history, nextCursor: null });
+      if (response.delayMs > 0) await new Promise(resolve => setTimeout(resolve, response.delayMs));
+      if (response.fail || fixture.historyFailureIds?.includes(instanceId)) {
+        throw new ModpackError('INVALID_REQUEST', 'Managed modpack history is unavailable');
+      }
+      return snapshot;
     },
 
     async listRollbackOptions(instanceId) {
@@ -1608,6 +1632,8 @@ function createComposition({ input, scenarioFile }) {
       return invocation.snapshot;
     },
     async recover({ recoveryId, actionId }) {
+      const actionDelayMs = Number(scenario().recoveryListFixture?.actionDelayMs || 0);
+      if (actionDelayMs > 0) await new Promise(resolve => setTimeout(resolve, actionDelayMs));
       if (recoveryId === 'recovery-directory-swap') {
         if (actionId !== 'recover-safely') {
           throw new ModpackError('INVALID_REQUEST', 'The recovery action is not available.');

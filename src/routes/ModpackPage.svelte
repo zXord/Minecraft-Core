@@ -28,7 +28,14 @@
   let history = [];
   let historyCursor = null;
   let recovery = [];
-  let loading = true;
+  let stateStatus = 'unknown';
+  let historyStatus = 'unknown';
+  let recoveryStatus = 'unknown';
+  let stateError = null;
+  let historyError = null;
+  let recoveryError = null;
+  let recoveryAction = '';
+  let recoveryActionError = null;
   let error = null;
   let activeSection = 'overview';
   let flow = 'dashboard';
@@ -79,6 +86,8 @@
   $: serverId = currentInstance?.type === 'server' ? currentInstance.id || '' : '';
   $: if (serverId !== serverRequestScope.serverId) activateServer(serverId);
   $: isManaged = Boolean(state?.modpackManaged);
+  $: loading = [stateStatus, historyStatus, recoveryStatus].some(status => ['unknown', 'loading'].includes(status));
+  $: lifecycleAvailable = stateStatus === 'ready' && historyStatus === 'ready' && recoveryStatus === 'ready' && !recoveryAction;
   $: recoveryItems = Array.isArray(recovery) ? recovery : recovery?.items || [];
   $: currentServerRecoveryItems = filterRecoveryRecordsForServer(recoveryItems, serverId);
   $: if (serverId !== rollbackOptionsServerId) {
@@ -127,7 +136,9 @@
     history = [];
     historyCursor = null;
     recovery = [];
-    loading = Boolean(nextServerId);
+    stateStatus = historyStatus = recoveryStatus = 'unknown';
+    stateError = historyError = recoveryError = recoveryActionError = null;
+    recoveryAction = '';
     error = null;
     activeSection = 'overview';
     flow = 'dashboard';
@@ -253,6 +264,10 @@
   }
 
   function applyExactReleaseTarget(target, destination) {
+    if (!lifecycleAvailable) {
+      error = navigationFailure('Lifecycle status is unavailable. Retry the status reads before reviewing a release.');
+      return;
+    }
     let releaseTarget;
     try {
       releaseTarget = exactReleaseTarget(destination.releaseTarget);
@@ -338,43 +353,83 @@
     });
   }
 
-  async function refresh(requestedServerId = serverId) {
-    if (!requestedServerId || requestedServerId !== serverRequestScope.serverId) return;
+  async function refresh(requestedServerId = serverId, afterRecovery = false) {
+    if (!requestedServerId || requestedServerId !== serverRequestScope.serverId || (recoveryAction && !afterRecovery)) return;
     const requestToken = serverRequestScope.begin();
     const requestSequence = ++refreshRequestSequence;
-    loading = true;
-    error = null;
+    stateStatus = historyStatus = recoveryStatus = 'loading';
+    const isCurrent = () => pageMounted && currentServerRequest(requestToken) && requestSequence === refreshRequestSequence;
+    const reads = [
+      modpackApi.getState(requestedServerId).then(value => {
+        if (!isCurrent()) return;
+        state = value;
+        stateStatus = 'ready';
+        stateError = null;
+      }, caught => {
+        if (!isCurrent()) return;
+        stateStatus = 'error';
+        stateError = caught;
+      }),
+      modpackApi.listHistory(requestedServerId, null, 50).then(value => {
+        if (!isCurrent()) return;
+        history = value?.items || [];
+        historyCursor = value?.nextCursor || null;
+        historyStatus = 'ready';
+        historyError = null;
+      }, caught => {
+        if (!isCurrent()) return;
+        historyStatus = 'error';
+        historyError = caught;
+      }),
+      modpackApi.listRecovery().then(value => {
+        if (!isCurrent()) return;
+        recovery = value || [];
+        recoveryStatus = 'ready';
+        recoveryError = null;
+        recoveryActionError = null;
+      }, caught => {
+        if (!isCurrent()) return;
+        recoveryStatus = 'error';
+        recoveryError = caught;
+      })
+    ];
+    // Recovery controls need only the action's fresh recovery settlement.
+    // Canonical reads keep publishing independently through their guarded handlers.
+    await (afterRecovery ? reads[2] : Promise.all(reads));
+  }
+
+  async function recoverRecord(record, actionId) {
+    if (recoveryAction || recoveryStatus !== 'ready' ||
+        !currentServerRecoveryItems.some(item => item.recoveryId === record.recoveryId && item.actions?.some(action => action.actionId === actionId))) return;
+    const requestToken = serverRequestScope.begin();
+    recoveryAction = `${record.recoveryId}:${actionId}`;
+    recoveryActionError = null;
     try {
-      const [nextState, historyPage, recoveryRecords] = await Promise.all([
-        modpackApi.getState(requestedServerId),
-        modpackApi.listHistory(requestedServerId, null, 50),
-        modpackApi.listRecovery()
-      ]);
-      if (!currentServerRequest(requestToken) || requestSequence !== refreshRequestSequence) return;
-      state = nextState;
-      history = historyPage?.items || [];
-      historyCursor = historyPage?.nextCursor || null;
-      recovery = recoveryRecords || [];
+      await modpackApi.recover(record.recoveryId, actionId);
+      if (!pageMounted || !currentServerRequest(requestToken)) return;
+      // Action success does not replace a fresh current-server recovery read.
+      await refresh(requestToken.serverId, true);
     } catch (caught) {
-      if (!currentServerRequest(requestToken) || requestSequence !== refreshRequestSequence) return;
-      error = caught;
+      if (pageMounted && currentServerRequest(requestToken)) recoveryActionError = caught;
     } finally {
-      if (currentServerRequest(requestToken) && requestSequence === refreshRequestSequence) loading = false;
+      if (pageMounted && currentServerRequest(requestToken)) recoveryAction = '';
     }
   }
 
   async function loadOlderHistory() {
-    if (!historyCursor) return;
+    if (!historyCursor || historyStatus !== 'ready') return;
     const requestToken = serverRequestScope.begin();
+    const requestSequence = refreshRequestSequence;
     const requestedCursor = historyCursor;
     busy = true;
     try {
       const page = await modpackApi.listHistory(requestToken.serverId, requestedCursor, 50);
       if (!currentServerRequest(requestToken)) return;
+      if (requestSequence !== refreshRequestSequence) return;
       history = [...history, ...(page?.items || [])];
       historyCursor = page?.nextCursor || null;
     } catch (caught) {
-      if (!currentServerRequest(requestToken)) return;
+      if (!currentServerRequest(requestToken) || requestSequence !== refreshRequestSequence) return;
       error = caught;
     } finally {
       if (currentServerRequest(requestToken)) busy = false;
@@ -382,6 +437,7 @@
   }
 
   function beginSource(kind = isManaged ? 'switch' : 'install-existing') {
+    if (!lifecycleAvailable) return;
     invalidateInspectionRequests();
     operationKind = kind;
     const abandonedInspection = inspection;
@@ -400,7 +456,7 @@
   }
 
   async function checkForModpackUpdates() {
-    if (checkingForUpdates || !isManaged || !serverId || !['github', 'modrinth'].includes(state?.source?.provider)) return;
+    if (!lifecycleAvailable || checkingForUpdates || !isManaged || !serverId || !['github', 'modrinth'].includes(state?.source?.provider)) return;
     const requestToken = serverRequestScope.begin();
     checkingForUpdates = true;
     updateCheckStatus = '';
@@ -455,6 +511,7 @@
   }
 
   function reviewManagedGithub(event) {
+    if (!lifecycleAvailable) return;
     invalidateInspectionRequests();
     suggestedRepositoryUrl = event.detail.repositoryUrl;
     linkedModrinthProjectId = '';
@@ -486,7 +543,7 @@
   }
 
   async function selectLocalArchive() {
-    if (busy) return;
+    if (busy || !lifecycleAvailable) return;
     const requestedOperationKind = operationKind;
     const inspectionRequest = beginInspectionRequest();
     const { requestSequence } = inspectionRequest;
@@ -514,6 +571,7 @@
   }
 
   async function inspectSelection(request, forcedOperation = null, classifyManagedRuntime = false, allowBusy = false) {
+    if (!lifecycleAvailable) return;
     if (busy && !allowBusy) return;
     const requestedSelection = {
       ...request,
@@ -547,6 +605,7 @@
   }
 
   async function buildPreflight(event, kind = operationKind) {
+    if (!lifecycleAvailable) return;
     const requestToken = serverRequestScope.begin();
     const requestedInspectionId = inspection?.inspectionId;
     if (!requestedInspectionId) return;
@@ -584,6 +643,7 @@
   }
 
   async function beginManagedOperation(kind) {
+    if (!lifecycleAvailable) return;
     selectedRequest = null;
     operationKind = kind;
     error = null;
@@ -598,6 +658,7 @@
   }
 
   async function buildManagementPlan(kind, selectionRef) {
+    if (!lifecycleAvailable) return;
     const requestToken = serverRequestScope.begin();
     busy = true;
     error = null;
@@ -683,6 +744,7 @@
   }
 
   async function verifyModpack() {
+    if (!lifecycleAvailable) return;
     const requestToken = serverRequestScope.begin();
     busy = true;
     error = null;
@@ -770,10 +832,10 @@
       if (event?.instanceId === serverId || event?.serverId === serverId) refresh();
     })];
     if (serverId) refresh(serverId);
-    else loading = false;
   });
   onDestroy(() => {
     pageMounted = false;
+    refreshRequestSequence += 1;
     invalidateInspectionRequests();
     const abandonedInspection = inspection;
     inspection = null;
@@ -791,7 +853,7 @@
         <button class="mp-button" type="button" on:click={returnToDashboard}>Back to Modpack overview</button>
       {/if}
       {#if isManaged && ['github', 'modrinth'].includes(state?.source?.provider)}
-        <button class="mp-button" type="button" disabled={checkingForUpdates} on:click={checkForModpackUpdates}>{checkingForUpdates ? 'Checking for updates…' : 'Check for updates'}</button>
+        <button class="mp-button" type="button" disabled={checkingForUpdates || !lifecycleAvailable} on:click={checkForModpackUpdates}>{checkingForUpdates ? 'Checking for updates…' : 'Check for updates'}</button>
         <span class="mp-sr-only" role="status" aria-label="Release check status" aria-live="polite">{updateCheckStatus}</span>
       {/if}
       <ModpackNotificationCenter
@@ -807,7 +869,7 @@
 
   {#if error}<section class="mp-state error page-error" bind:this={errorRegion} tabindex="-1" aria-live="assertive"><strong>{error.code || 'Modpack action unavailable'}</strong><p>{error.message}</p><button class="mp-button" type="button" on:click={() => (error = null)}>Dismiss</button></section>{/if}
 
-  {#if currentServerRecoveryItems.length > 0}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} on:recovered={refresh} />{/if}
+  {#if activeSection !== 'recovery' && (recoveryStatus !== 'ready' || currentServerRecoveryItems.length > 0)}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} status={recoveryStatus} loadError={recoveryError} actionError={recoveryActionError} pendingAction={recoveryAction} onRefresh={() => refresh()} onRecover={recoverRecord} />{/if}
 
   {#if busy && preflightProgress && flow !== 'inspection'}
     <ModpackPlanningProgress progress={preflightProgress} />
@@ -817,13 +879,22 @@
     <nav class="section-tabs" aria-label="Modpack sections">
       {#each ['overview', 'versions', 'actions', 'history', 'recovery'] as section (section)}<button type="button" class:active={activeSection === section} aria-current={activeSection === section ? 'page' : undefined} on:click={() => selectDashboardSection(section)}>{section === 'overview' ? 'Overview' : section === 'versions' ? 'Versions' : section === 'actions' ? 'Actions' : section === 'history' ? 'History' : 'Recovery'}</button>{/each}
     </nav>
-    {#if activeSection === 'overview'}<ModpackOverview {state} {loading} on:install={() => beginSource('install-existing')} on:filesonly={() => beginSource('import-files-only-new')} />
-      {#if isManaged}{#key `${serverId}:${JSON.stringify(state?.source)}:${JSON.stringify(state?.runtime)}:${JSON.stringify(state?.selectedOptionalFiles)}`}<ClientCompanionPanel {serverId} managed={true} localArchive={state?.source?.provider === 'local'} />{/key}{/if}
+    {#if activeSection === 'overview'}<ModpackOverview {state} status={stateStatus} loadError={stateError} actionsAvailable={lifecycleAvailable} on:retry={() => refresh()} on:install={() => beginSource('install-existing')} on:filesonly={() => beginSource('import-files-only-new')} />
+      {#if isManaged && lifecycleAvailable}{#key `${serverId}:${JSON.stringify(state?.source)}:${JSON.stringify(state?.runtime)}:${JSON.stringify(state?.selectedOptionalFiles)}`}<ClientCompanionPanel {serverId} managed={true} localArchive={state?.source?.provider === 'local'} />{/key}{/if}
+    {:else if ['versions', 'actions'].includes(activeSection) && !lifecycleAvailable}
+      <section class="mp-panel mp-state" aria-live="polite"><strong>{stateStatus === 'ready' ? 'Lifecycle actions unavailable' : stateStatus === 'error' ? 'Modpack state unavailable' : 'Loading managed modpack state…'}</strong><p>Current state, history, and recovery must be checked successfully before lifecycle actions can be reviewed.</p><button class="mp-button" type="button" on:click={() => refresh()} disabled={loading || Boolean(recoveryAction)}>Retry status reads</button></section>
     {:else if activeSection === 'versions'}<ModpackVersionPanel {state} requestedVersionId={requestedModrinthVersionId} requestedNavigationToken={requestedModrinthNavigationToken} on:select={(event) => inspectSelection(event.detail.request, event.detail.chronologicalOperation, true)} on:github={reviewManagedGithub} on:switch={() => beginSource('switch')} />
     {:else if activeSection === 'actions'}<ModpackActionPanel {state} {busy} {verification} on:verify={verifyModpack} on:repair={() => beginSource('repair')} on:rollback={() => beginManagedOperation('rollback-restore-point')} on:detach={() => beginManagedOperation('detach')} on:uninstall={() => beginManagedOperation('uninstall')} />
     {:else if activeSection === 'history'}
-      <section class="mp-panel mp-stack" aria-label="Modpack history"><div><p class="mp-kicker">Durable audit history</p><h2 class="mp-title">Lifecycle operations</h2><p class="mp-subtitle">Managed files and user additions remain distinguished in every recorded revision.</p></div>{#if history.length === 0}<div class="mp-state">No modpack history has been recorded for this server.</div>{:else}<ol class="history-list">{#each history as item (`${item.operationId}-${item.sequence}`)}<li><div><strong>{item.kind?.replaceAll('-', ' ') || 'operation'}</strong><span>{item.outcome || 'recorded'} · {new Date(item.timestamp).toLocaleString()}</span></div><span class="mp-badge">revision {item.sourceRevision ?? '—'} → {item.targetRevision ?? '—'}</span></li>{/each}</ol>{/if}{#if historyCursor}<button class="mp-button" type="button" on:click={loadOlderHistory} disabled={busy}>Load older history</button>{/if}</section>
-    {:else}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} on:recovered={refresh} />{/if}
+      <section class="mp-panel mp-stack" aria-label="Modpack history">
+        <div><p class="mp-kicker">Durable audit history</p><h2 class="mp-title">Lifecycle operations</h2><p class="mp-subtitle">Managed files and user additions remain distinguished in every recorded revision.</p></div>
+        {#if historyStatus !== 'ready'}<div class="mp-state" class:error={historyStatus === 'error'} aria-live="polite"><strong>{historyStatus === 'error' ? 'History unavailable' : 'Loading modpack history…'}</strong>{#if historyError}<p>{historyError.message}</p>{/if}{#if history.length}<p>Previously loaded history is not current.</p>{/if}<button class="mp-button" type="button" on:click={() => refresh()} disabled={historyStatus === 'loading' || Boolean(recoveryAction)}>Retry history</button></div>{/if}
+        {#if historyStatus === 'ready' && history.length === 0}<div class="mp-state">No modpack history has been recorded for this server.</div>{:else if history.length}<ol class="history-list">{#each history as item (`${item.operationId}-${item.sequence}`)}<li><div><strong>{item.kind?.replaceAll('-', ' ') || 'operation'}</strong><span>{item.outcome || 'recorded'} · {new Date(item.timestamp).toLocaleString()}</span></div><span class="mp-badge">revision {item.sourceRevision ?? '—'} → {item.targetRevision ?? '—'}</span></li>{/each}</ol>{/if}
+        {#if historyCursor}<button class="mp-button" type="button" on:click={loadOlderHistory} disabled={busy || historyStatus !== 'ready'}>Load older history</button>{/if}
+      </section>
+    {:else}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} status={recoveryStatus} loadError={recoveryError} actionError={recoveryActionError} pendingAction={recoveryAction} onRefresh={() => refresh()} onRecover={recoverRecord} />{/if}
+  {:else if !lifecycleAvailable && flow !== 'job'}
+    <section class="mp-panel mp-state" aria-live="polite"><strong>Lifecycle actions unavailable</strong><p>Current state, history, and recovery must be checked successfully before continuing this review.</p><button class="mp-button" type="button" on:click={() => refresh()} disabled={loading || Boolean(recoveryAction)}>Retry status reads</button></section>
   {:else if flow === 'source'}
     <ModpackSourceChoice {busy} on:select={(event) => event.detail.source === 'local' ? selectLocalArchive() : navigateSelectionFlow(event.detail.source)} on:back={returnToDashboard} />
   {:else if flow === 'modrinth'}
