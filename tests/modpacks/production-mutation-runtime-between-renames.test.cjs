@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { fixtureDurableFs, fixtureRegistry } = require('./runtime-authority-fixture.cjs');
 const { ProductionMutationRuntime } = require('../../electron/services/modpack-lifecycle/production-mutation-runtime.cjs');
-const { ModpackRecoveryService } = require('../../electron/services/modpack-lifecycle/modpack-recovery-service.cjs');
+const { ModpackRecoveryService, defaultDirectoryAuthority } = require('../../electron/services/modpack-lifecycle/modpack-recovery-service.cjs');
 const { ServerRuntimeWriterAuthority } = require('../../electron/services/modpack-lifecycle/server-runtime-writer-authority.cjs');
 const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
 const { createServerMutationContext } = require('../../electron/services/server-mutation-context.cjs');
@@ -17,7 +17,7 @@ const runtimeTuple = { minecraftVersion: '1.21.1', loaderFamily: 'fabric', loade
 const jobId = 'job-between-renames';
 const noReparse = { async isReparsePoint() { return false; } };
 
-async function fixture(t, fault, { unprovenWriter = false } = {}) {
+async function fixture(t, fault, { unprovenWriter = false, brokenSource = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-between-renames-'));
   assert.equal(path.dirname(root), fs.realpathSync(os.tmpdir()));
   assert.match(path.basename(root), /^minecraft-core-between-renames-/);
@@ -74,9 +74,15 @@ async function fixture(t, fault, { unprovenWriter = false } = {}) {
   coordinator.installRecoveryBlocks([{ selector, operationId: jobId }]);
   coordinator.completeStartupRecovery([{ selector, resolved: false }]);
   const writerAuthority = new ServerRuntimeWriterAuthority({ registry, coordinator, getBootSequence: () => 1 });
+  const recoveryCalls = [];
+  const directoryCalls = [];
+  const recoveryHooks = {};
   const runtimePolicy = {
-    async suspend() { return { held: true }; }, async ensureStopped() { return { alreadyStopped: true }; },
-    async restoreAutoRestart() { return { restored: true }; },
+    async suspend() { return { held: true }; }, async ensureStopped() {
+      if (recoveryHooks.stop) await recoveryHooks.stop();
+      return { alreadyStopped: true };
+    },
+    async restoreAutoRestart() { recoveryCalls.push('auto'); return { restored: true }; },
     async adoptValidatedHandoff() { assert.fail('stopped source must not be adopted'); }
   };
   const stateRepository = {
@@ -98,18 +104,31 @@ async function fixture(t, fault, { unprovenWriter = false } = {}) {
       return writerAuthority.run(jobId, async () => ({ evidence: { kind: 'candidate' } }), { lease: mutationLease });
     },
     async validateLive({ serverPath, keepRunning }) {
+      recoveryCalls.push('health');
       assert.equal(serverPath.toLowerCase(), targetPath.toLowerCase());
       assert.equal(keepRunning, false);
       assert.equal(fs.readFileSync(path.join(serverPath, 'server.jar'), 'utf8'), 'exact original server');
+      if (brokenSource) throw Object.assign(new Error('recognizable broken source config'), { code: 'HEALTH_CHECK_FAILED' });
       return { evidence: { kind: 'source' }, handoff: null };
     }
   };
+  const authority = defaultDirectoryAuthority();
   const recoveryService = new ModpackRecoveryService({ coordinator, recoveryRegistry: registry,
+    directoryAuthority: { ...authority,
+      async verifyOriginal(request) { directoryCalls.push('original-proof'); return authority.verifyOriginal(request); },
+      async verifyOperationOwned(request) { directoryCalls.push('candidate-proof'); return authority.verifyOperationOwned(request); },
+      async renameExact(request) { directoryCalls.push('rename'); return authority.renameExact(request); },
+      async removeAuthorizedIdentity(request) {
+        directoryCalls.push('remove');
+        if (recoveryHooks.remove) await recoveryHooks.remove(request);
+        return authority.removeAuthorizedIdentity(request);
+      }
+    },
     runtimeWriterAuthority: writerAuthority, runtimePolicy,
     contextFactory: async ({ record, mutationLease }) => ({ fsApi: fs, durableFs, reparseInspector: noReparse,
       jobId, targetPath, stableInstanceId: selector.instanceId, operationKind: record.operationKind,
       recoveryRegistry: registry, mutationLease, runtimePolicy, healthValidator,
-      async resolveRecoveryRuntimeConfig() { return { runtime: runtimeTuple, maxRam: 4, port: 25565, networkAccess: 'pack-default' }; }
+      async resolveRecoveryRuntimeConfig() { recoveryCalls.push('config'); return { runtime: runtimeTuple, maxRam: 4, port: 25565, networkAccess: 'pack-default' }; }
     }) });
   const plan = { fingerprint: 'fixture-plan', operation: { kind: 'repair', serverKind: 'existing', instanceId: selector.instanceId } };
   const resolved = { ...selector, priorRunning: false };
@@ -125,6 +144,7 @@ async function fixture(t, fault, { unprovenWriter = false } = {}) {
   // transaction, directory proofs, writer settlement and terminal history are real.
   runtime.contexts.set(jobId, { plan, resolved });
   const value = { root, targetPath, paths, original, unrelated, registry, coordinator, selector, runtime, plan, resolved,
+    recoveryCalls, directoryCalls, recoveryHooks, authority, recoveryService,
     async run(work) {
       return coordinator.runRecoveryMutation(selector, { operationId: jobId }, async lease => {
         const context = { targetPath, jobId, operationKind: 'repair', stableInstanceId: selector.instanceId,
@@ -165,6 +185,133 @@ async function assertReleased(value) {
     { operation: 'prove-release', operationId: 'ordinary-start', parentMutationLease: null });
   lease.release();
 }
+
+// Catches mandatory source boot after safe stopped restoration. Materialization,
+// swap fault, recovery, writer admission, exact proofs and history are real.
+test('broken stopped source between-renames recovery finishes without config or health', async t => {
+  const value = await fixture(t, 'second-rename', { brokenSource: true });
+  await value.run(async c => {
+    let result;
+    try {
+      result = await c.rollback();
+      assert.equal(result.action, 'between-renames-restored');
+    } catch (error) {
+      const active = await c.registry.load(jobId);
+      assert.fail(JSON.stringify({ error: error.code, calls: c.recoveryCalls,
+        phase: active?.phase, action: active?.outcome?.recovery?.action,
+        candidatePresent: fs.existsSync(c.paths.candidatePath),
+        originalRestored: fs.readFileSync(path.join(c.targetPath, 'server.jar'), 'utf8'),
+        finishCalls: c.registry.finishCalls, history: await c.registry.loadHistory(jobId) }));
+    }
+    await assertOriginal(c);
+    assert.deepEqual(c.recoveryCalls, ['auto']);
+    assert.equal(c.directoryCalls.filter(call => call === 'rename').length, 1);
+    assert.equal(c.directoryCalls.includes('original-proof'), true);
+    assert.equal(c.directoryCalls.includes('candidate-proof'), true);
+    assert.equal(c.directoryCalls.filter(call => call === 'remove').length, 1);
+    assert.equal(fs.existsSync(c.paths.candidatePath), false);
+    assert.equal(fs.existsSync(c.paths.rollbackPath), false);
+    assert.equal(fs.existsSync(c.paths.failedPath), false);
+    assert.equal(await c.registry.load(jobId), null);
+    const history = await c.registry.loadHistory(jobId);
+    assert.equal(history.phase, 'failed');
+    assert.equal(history.swapStep, 'live-moved');
+    assert.deepEqual(history.outcome.recovery, { action: 'between-renames-restored', operationId: jobId });
+    assert.equal(history.outcome.candidateCleanup.deletionAuthorized, true);
+    return result;
+  });
+  await assertReleased(value);
+});
+
+for (const [name, corrupt] of [
+  ['missing target', r => { r.directoryIdentities.target = null; }],
+  ['missing rollback', r => { r.directoryIdentities.rollback = null; }],
+  ['crossed candidate', r => { r.directoryIdentities.candidate = r.directoryIdentities.target; }],
+  ['missing live digest', r => { delete r.outcome.live.fingerprint; }],
+  ['missing rollback digest', r => { delete r.outcome.rollback.fingerprint; }],
+  ['malformed digest', r => { r.outcome.live.fingerprint = 'bad'; }],
+  ['missing swap', r => { delete r.outcome.swap; }],
+  ['swap extra', r => { r.outcome.swap.published = false; }],
+  ['swap mismatch', r => { r.outcome.swap.step = 'candidate-published'; }],
+  ...['publication', 'registration', 'liveValidation', 'revisionEvent'].map(key =>
+    [key, r => { r.outcome[key] = false; }]),
+  ['live mutation', r => { r.outcome.liveMutationAuthorized = true; }],
+  ['wrong cleanup action', r => { r.outcome.candidateCleanup = { action: 'pre-swap-restored' }; }]
+]) {
+  test(`stopped initial between-renames ${name} contradiction refuses before source work`, async t => {
+    const value = await fixture(t, 'second-rename', { brokenSource: true });
+    await value.run(async c => {
+      const changed = structuredClone(await c.registry.load(jobId));
+      corrupt(changed);
+      const write = c.registry.transition(jobId, { expectedPhase: 'committing', nextPhase: 'committing',
+        patch: { outcome: changed.outcome, directoryIdentities: changed.directoryIdentities } });
+      if (name === 'crossed candidate') {
+        // The real registry rejects identity crossing against its settled writer
+        // marker before a contradictory record can become durable.
+        await assert.rejects(write, { code: 'RECOVERY_REQUIRED' });
+      } else {
+        await write;
+        await assert.rejects(c.rollback(), { code: 'RECOVERY_REQUIRED' });
+      }
+      assert.deepEqual(c.directoryCalls, []);
+      assert.deepEqual(c.recoveryCalls, []);
+      assert.equal(fs.existsSync(c.targetPath), false);
+      assert.equal(fs.existsSync(c.paths.rollbackPath), true);
+      assert.equal(fs.existsSync(c.paths.candidatePath), true);
+      assert.equal(fs.readFileSync(c.unrelated, 'utf8'), 'never owned by this operation');
+      assert.equal(await c.registry.loadHistory(jobId), null);
+    });
+  });
+}
+
+test('initial between-renames already restored original requires exact durable cleanup and performs no second rename', async t => {
+  const value = await fixture(t, 'second-rename', { brokenSource: true });
+  await value.run(async c => {
+    const record = await c.registry.load(jobId);
+    await c.authority.verifyOperationOwned({ context: c.context, directoryPath: c.paths.candidatePath,
+      directoryIdentity: record.directoryIdentities.candidate, fingerprint: record.outcome.candidate.fingerprint });
+    await c.registry.transition(jobId, { expectedPhase: 'committing', nextPhase: 'committing', patch: {
+      outcome: { ...record.outcome, candidateCleanup: { deletionAuthorized: true, slot: 'candidate',
+        action: 'between-renames-restored', directoryIdentity: record.directoryIdentities.candidate,
+        fingerprint: record.outcome.candidate.fingerprint, ownershipMode: 'operation-marker' } }
+    } });
+    await c.authority.renameExact({ context: c.context, fromPath: c.paths.rollbackPath, toPath: c.targetPath,
+      directoryIdentity: record.directoryIdentities.rollback });
+    const result = await c.rollback();
+    assert.equal(result.action, 'between-renames-restored');
+    assert.equal(c.directoryCalls.includes('rename'), false);
+    assert.deepEqual(c.recoveryCalls, ['auto']);
+    assert.equal(fs.existsSync(c.paths.candidatePath), false);
+    await assertOriginal(c);
+    return result;
+  });
+  await assertReleased(value);
+});
+
+test('initial stopped between-renames partial cleanup preserves terminal authority and retries without rename or health', async t => {
+  const value = await fixture(t, 'second-rename', { brokenSource: true });
+  await value.run(async c => {
+    c.recoveryHooks.remove = async request => {
+      fs.unlinkSync(path.join(request.directoryPath, 'server.jar'));
+      throw new Error('controlled partial deletion');
+    };
+    await assert.rejects(c.rollback(), { code: 'RECOVERY_REQUIRED' });
+    const terminal = await c.registry.load(jobId);
+    assert.equal(terminal.phase, 'failed');
+    assert.equal(terminal.outcome.candidateCleanup.deletionAuthorized, true);
+    assert.equal(c.directoryCalls.filter(call => call === 'rename').length, 1);
+    delete c.recoveryHooks.remove;
+    const result = await c.recoveryService.recoverWithLease(terminal, c.lease);
+    assert.equal(result.action, 'between-renames-restored');
+    assert.equal(c.directoryCalls.filter(call => call === 'rename').length, 1);
+    assert.equal(fs.existsSync(c.paths.candidatePath), false);
+    assert.deepEqual((await c.registry.loadHistory(jobId)).outcome, terminal.outcome);
+    assert.deepEqual(c.recoveryCalls, ['auto']);
+    await assertOriginal(c);
+    return result;
+  });
+  await assertReleased(value);
+});
 
 // Regression: live-moved must not use the candidate-absent-only rollback route
 // after a journal publishes JSON but its durable completion rejects.

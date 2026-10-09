@@ -1247,7 +1247,43 @@ class ModpackRecoveryService {
       ? targetPresent && !rollbackPresent : targetPresent !== rollbackPresent);
   }
 
-  async #retainStoppedOriginal(record, context, paths, work) {
+  #classifyStoppedBetweenRenames(record, context, paths, terminal) {
+    if (record.target.kind !== 'existing' || record.priorRuntime.running !== false ||
+        record.priorRuntime.autoRestart !== false || record.swapStep !== 'live-moved' ||
+        record.phase !== (terminal ? 'failed' : 'committing')) return null;
+    const outcome = record.outcome || {};
+    const identities = record.directoryIdentities;
+    const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
+    // A stopped live-moved claim is not permission to fall back to health when
+    // its restoration/publication evidence contradicts the never-published case.
+    if (!identities.target || !identities.rollback || !identities.candidate ||
+        !sameIdentity(identities.target, identities.rollback) ||
+        sameIdentity(identities.target, identities.candidate) || identities.failed ||
+        !digest(outcome.live?.fingerprint) || !digest(outcome.rollback?.fingerprint) ||
+        outcome.live.fingerprint !== outcome.rollback.fingerprint || !digest(outcome.candidate?.fingerprint) ||
+        !outcome.swap || typeof outcome.swap !== 'object' || Array.isArray(outcome.swap) ||
+        outcome.swap.step !== 'live-moved' || Object.keys(outcome.swap).some(key => key !== 'step') ||
+        ['publication', 'registration', 'liveValidation', 'revisionEvent'].some(key => outcome[key] != null) ||
+        (outcome.liveMutationAuthorized != null && outcome.liveMutationAuthorized !== false) ||
+        record.restoreCreation != null ||
+        (terminal && (outcome.recovery?.action !== 'between-renames-restored' ||
+          outcome.recovery.operationId !== record.jobId)) ||
+        (!terminal && outcome.recovery != null && (outcome.recovery.action !== 'between-renames-restored' ||
+          outcome.recovery.operationId !== record.jobId))) throw recoveryRequired();
+    const cleanup = this.#candidateCleanupAuthorization(record, paths.candidatePath, 'between-renames-restored');
+    // Validate durable deletion evidence even when its directory/journal is gone.
+    // A remaining partial candidate uses this exact authority, not a fresh hash.
+    if ((terminal && !cleanup) || (cleanup && !digest(cleanup.fingerprint))) throw recoveryRequired();
+    const targetPresent = this.#exists(paths.targetPath, context);
+    const rollbackPresent = this.#exists(paths.rollbackPath, context);
+    if (this.#exists(paths.failedPath, context) || (terminal
+      ? !targetPresent || rollbackPresent
+      : targetPresent === rollbackPresent || !this.#exists(paths.candidatePath, context) ||
+        (targetPresent && !cleanup))) throw recoveryRequired();
+    return { kind: 'between-renames', action: 'between-renames-restored' };
+  }
+
+  async #retainStoppedOriginal(record, context, paths, classification, work) {
     const lease = context.mutationLease;
     if (!lease || lease.operationId !== record.jobId || lease.instanceId !== record.target.stableServerId ||
         !samePath(lease.serverPath, paths.targetPath)) throw recoveryRequired();
@@ -1284,7 +1320,10 @@ class ModpackRecoveryService {
       };
       await proveRetained(record, true);
       const current = await work();
-      if (current.restoreCreation != null || !this.#canRetainStoppedOriginal(current, context, paths, true)) {
+      const validTerminal = classification.kind === 'between-renames'
+        ? this.#classifyStoppedBetweenRenames(current, context, paths, true)
+        : classification.kind === 'pre-swap' && this.#canRetainStoppedOriginal(current, context, paths, true);
+      if (current.restoreCreation != null || !validTerminal) {
         throw recoveryRequired();
       }
       await proveRetained(current);
@@ -1292,15 +1331,20 @@ class ModpackRecoveryService {
       await this.#restoreAutoRestart(current, context, 'source');
       await proveRetained(current);
       this.#assertAbsent(paths.candidatePath, context);
-      return await this.#finish(current, 'failed', 'pre-swap-restored');
+      // Existing publication boundary: fresh source/topology proof above, then
+      // uninterrupted reservation through authenticated record/envelope moves.
+      return await this.#finish(current, 'failed', classification.action);
     } finally {
       reservation.release();
     }
   }
 
   async #recoverTerminalExisting(record, context, paths, retainingStopped = false) {
-    if (!retainingStopped && this.#canRetainStoppedOriginal(record, context, paths, true)) {
-      return this.#retainStoppedOriginal(record, context, paths, () =>
+    if (!retainingStopped) {
+      const classification = this.#classifyStoppedBetweenRenames(record, context, paths, true) ||
+        (this.#canRetainStoppedOriginal(record, context, paths, true)
+          ? { kind: 'pre-swap', action: 'pre-swap-restored' } : null);
+      if (classification) return this.#retainStoppedOriginal(record, context, paths, classification, () =>
         this.#recoverTerminalExisting(record, context, paths, true));
     }
     const action = record.outcome?.recovery?.action;
@@ -1352,7 +1396,7 @@ class ModpackRecoveryService {
 
   async #recoverExistingBeforeSwap(record, context, paths, retainingStopped = false) {
     if (!retainingStopped && this.#canRetainStoppedOriginal(record, context, paths, false)) {
-      return this.#retainStoppedOriginal(record, context, paths, () =>
+      return this.#retainStoppedOriginal(record, context, paths, { kind: 'pre-swap', action: 'pre-swap-restored' }, () =>
         this.#recoverExistingBeforeSwap(record, context, paths, true));
     }
     this.#assertAbsent(paths.failedPath, context);
@@ -1430,7 +1474,12 @@ class ModpackRecoveryService {
     return this.#finish(current, 'failed', 'pre-swap-restored');
   }
 
-  async #restoreBeforePublication(record, context, paths) {
+  async #restoreBeforePublication(record, context, paths, retainingStopped = false) {
+    if (!retainingStopped) {
+      const classification = this.#classifyStoppedBetweenRenames(record, context, paths, false);
+      if (classification) return this.#retainStoppedOriginal(record, context, paths, classification, () =>
+        this.#restoreBeforePublication(record, context, paths, true));
+    }
     this.#assertAbsent(paths.failedPath, context);
     const targetPresent = this.#exists(paths.targetPath, context);
     const rollbackPresent = this.#exists(paths.rollbackPath, context);
@@ -1467,6 +1516,7 @@ class ModpackRecoveryService {
       paths.candidatePath,
       'between-renames-restored'
     );
+    if (retainingStopped) return current;
     await this.#restoreCanonicalPolicy(current, context, 'source');
     return this.#finish(current, 'failed', 'between-renames-restored');
   }

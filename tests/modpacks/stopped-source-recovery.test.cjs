@@ -10,6 +10,9 @@ const { ServerRuntimeWriterAuthority } = require('../../electron/services/modpac
 const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
 const { createExistingSiblingPaths } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
 const { inspectServerDirectoryTree } = require('../../electron/services/modpack-lifecycle/server-directory-identity.cjs');
+const { ModpackRecoveryFacade } = require('../../electron/services/modpack-lifecycle/modpack-recovery-facade.cjs');
+const { OperationStore } = require('../../electron/services/modpack-lifecycle/operation-store.cjs');
+const { reconcileOperationStoreWithRecovery } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
 
 // Observe only original payload I/O; journal and candidate access stay real and
 // outside the counters. The adapter is installed after fixture fingerprinting.
@@ -52,7 +55,7 @@ async function fixture(t, options = {}) {
   const original = await inspectServerDirectoryTree(serverPath, { fsApi: fs, reparseInspector });
   const fsApi = options.fsApi ? options.fsApi(serverPath) : fs;
   let candidate = null;
-  if (options.candidate) {
+  if (options.candidate || options.between) {
     fs.mkdirSync(paths.candidatePath);
     fs.writeFileSync(path.join(paths.candidatePath, 'partial.txt'), 'candidate-only');
     candidate = await inspectServerDirectoryTree(paths.candidatePath, { reparseInspector });
@@ -70,14 +73,28 @@ async function fixture(t, options = {}) {
     }
   });
   let failHistory = false;
-  const registry = new RecoveryRegistry({ userDataPath: root, durableFs: {
+  let historyMoves = 0;
+  let historyFaultPending = Boolean(options.historyFault);
+  const registryDurableFs = {
     ...durableFs,
     async renameDurableAsync(a, b, request) {
-      if (options.onHistory && b.includes(`${path.sep}history${path.sep}`)) await options.onHistory(value);
-      if (failHistory && b.includes(`${path.sep}history${path.sep}`)) throw new Error('history transport failed');
-      return durableFs.renameDurableAsync(a, b, request);
+      const history = b.includes(`${path.sep}history${path.sep}`);
+      if (history) historyMoves++;
+      if (options.onHistory && history) await options.onHistory(value);
+      const fault = historyFaultPending && history && historyMoves === options.historyFault.move;
+      if ((failHistory && history) || (fault && !options.historyFault.after)) {
+        historyFaultPending = false;
+        throw new Error('history transport failed before effect');
+      }
+      const result = await durableFs.renameDurableAsync(a, b, request);
+      if (fault && options.historyFault.after) {
+        historyFaultPending = false;
+        throw new Error('history transport failed after effect');
+      }
+      return result;
     }
-  } });
+  };
+  let registry = new RecoveryRegistry({ userDataPath: root, durableFs: registryDurableFs });
   await registry.initialize();
   await registry.create({ schemaVersion: 2, sequence: 0, jobId: 'job-stopped', operationKind: options.operationKind || 'repair',
     target: { kind: 'existing', stableServerId: 'alpha', path: serverPath },
@@ -92,17 +109,31 @@ async function fixture(t, options = {}) {
       deletionAuthorized: true, slot: 'candidate', action: 'pre-swap-restored',
       directoryIdentity: candidate.directoryIdentity, fingerprint: candidate.fingerprint, ownershipMode: 'recorded-identity'
     } } : {}),
-    ...options.outcome };
+    ...(options.between ? {
+      rollback: { fingerprint: original.fingerprint }, candidate: { fingerprint: candidate.fingerprint },
+      swap: { step: 'live-moved' },
+      recovery: { action: 'between-renames-restored', operationId: 'job-stopped' },
+      candidateCleanup: { deletionAuthorized: true, slot: 'candidate', action: 'between-renames-restored',
+        directoryIdentity: candidate.directoryIdentity, fingerprint: candidate.fingerprint, ownershipMode: 'operation-marker' },
+      runtime: { source: { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.4.13',
+        javaMajor: 17, os: 'win32', architecture: 'x64' }, target: { minecraftVersion: '1.20.1', loaderFamily: 'forge',
+        loaderVersion: '47.4.13', javaMajor: 17, os: 'win32', architecture: 'x64' }, maxRam: 6,
+        networkAccess: 'loopback', port: 25575 },
+      runtimePolicy: { targetRunning: true, targetAutoRestart: false, targetInactive: false }
+    } : {}), ...options.outcome };
   await registry.transition('job-stopped', { expectedPhase: 'queued', nextPhase: 'preflight',
     patch: { outcome: options.legacyWriter ? {} : { runtimeWriterProtocol: 1 } } });
-  let initial = await registry.transition('job-stopped', { expectedPhase: 'preflight',
-    nextPhase: 'snapshotting', patch: {
-      ...options.patch, outcome,
+  const snapshotPatch = {
+      ...(options.between ? { swapStep: 'live-moved' } : {}), ...options.patch, outcome,
       directoryIdentities: { target: original.directoryIdentity, candidate: candidate?.directoryIdentity || null,
         rollback: options.terminal ? original.directoryIdentity : null, failed: null,
         ...(typeof options.identities === 'function' ? options.identities(original) : options.identities) }
-    } });
+    };
+  if (options.corrupt) options.corrupt(snapshotPatch);
+  let initial = await registry.transition('job-stopped', { expectedPhase: 'preflight',
+    nextPhase: 'snapshotting', patch: snapshotPatch });
   if (options.terminal) initial = await registry.transition(initial.jobId, { expectedPhase: 'snapshotting', nextPhase: 'failed', patch: {} });
+  if (options.between && !options.candidate) fs.rmSync(paths.candidatePath, { recursive: true });
   const selector = { instanceId: 'alpha', serverPath };
   const coordinator = new ServerMutationCoordinator({ readContentRevision: () => 4,
     bumpContentRevision() { assert.fail('no revision may be created'); } });
@@ -120,7 +151,7 @@ async function fixture(t, options = {}) {
     async adoptValidatedHandoff() { assert.fail('source adoption forbidden'); }
   };
   const authority = defaultDirectoryAuthority();
-  const service = new ModpackRecoveryService({ coordinator, recoveryRegistry: registry, runtimePolicy,
+  const createService = () => new ModpackRecoveryService({ coordinator, recoveryRegistry: registry, runtimePolicy,
     runtimeWriterAuthority: new ServerRuntimeWriterAuthority({ registry, coordinator, getBootSequence: () => 1 }),
     directoryAuthority: options.authority ? options.authority(authority, calls) : authority,
     restorePointService: options.restorePointService || null,
@@ -134,9 +165,17 @@ async function fixture(t, options = {}) {
       },
       healthValidator: { async validateLive() { calls.push('health'); throw new Error('source launch forbidden'); } }
     }) });
+  let service = createService();
   const value = { root, serverPath, paths, original, initial, selector, coordinator, registry, service, calls,
     authority, reparseInspector, candidate, failHistory(enabled) { failHistory = enabled; },
     recover() { return service.recover(initial); },
+    async restartRegistry() {
+      registry = new RecoveryRegistry({ userDataPath: root, durableFs: registryDurableFs });
+      await registry.initialize();
+      service = createService();
+      value.registry = registry;
+      value.service = service;
+    },
     withLease(work) { return coordinator.runRecoveryMutation(selector, { operationId: initial.jobId }, work); },
     async update(patch) {
       initial = await registry.transition(initial.jobId, { expectedPhase: initial.phase, nextPhase: initial.phase, patch });
@@ -190,6 +229,233 @@ test('stopped original initial cleanup proves full source and finishes failed wi
   assert.deepEqual(fs.readdirSync(value.registry.historyPath).sort(), ['job-stopped.json', 'job-stopped.target.json']);
   const start = await value.coordinator.acquireStart(value.selector, { operation: 'later-start', operationId: 'later', parentMutationLease: null });
   start.release();
+});
+
+// Catches treating the coherent native failed/live-moved record as a mandatory
+// health retry, or rewriting its outcome/sequence to fit the no-swap route.
+test('stopped between-renames native terminal retains changed config and log without second restore or boot', async t => {
+  let renames = 0;
+  const value = await fixture(t, { terminal: true, between: true,
+    authority: base => ({ ...base, async renameExact(request) { renames++; return base.renameExact(request); } }) });
+  fs.writeFileSync(path.join(value.serverPath, 'config', 'broken.toml'), 'still broken = [changed');
+  fs.writeFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'failed boot wrote this safe log');
+  const result = await value.recover();
+  assert.deepEqual(result, { jobId: 'job-stopped', resolved: true, action: 'between-renames-restored' });
+  assert.deepEqual(value.calls, ['suspend', 'stop', 'auto']);
+  assert.equal(renames, 0);
+  const historical = await value.registry.loadHistory('job-stopped');
+  assert.equal(historical.sequence, value.initial.sequence);
+  assert.deepEqual(historical.outcome, value.initial.outcome);
+  assert.equal(historical.outcome.candidateCleanup.ownershipMode, 'operation-marker');
+  assert.equal(fs.readFileSync(path.join(value.serverPath, 'config', 'broken.toml'), 'utf8'), 'still broken = [changed');
+  assert.equal(fs.readFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'utf8'), 'failed boot wrote this safe log');
+  assert.deepEqual(fs.readdirSync(value.registry.historyPath).sort(), ['job-stopped.json', 'job-stopped.target.json']);
+  const start = await value.coordinator.acquireStart(value.selector,
+    { operation: 'ordinary-start', operationId: 'later', parentMutationLease: null });
+  start.release();
+});
+
+const betweenContradictions = [
+  ['cleanup missing', r => { delete r.outcome.candidateCleanup; }],
+  ['cleanup null', r => { r.outcome.candidateCleanup = null; }],
+  ['cleanup action', r => { r.outcome.candidateCleanup.action = 'pre-swap-restored'; }],
+  ['cleanup deletion flag', r => { r.outcome.candidateCleanup.deletionAuthorized = false; }],
+  ['cleanup slot', r => { r.outcome.candidateCleanup.slot = 'rollback'; }],
+  ['cleanup mode', r => { r.outcome.candidateCleanup.ownershipMode = 'unknown'; }],
+  ['cleanup identity', r => { r.outcome.candidateCleanup.directoryIdentity = r.directoryIdentities.target; }],
+  ['cleanup digest', r => { r.outcome.candidateCleanup.fingerprint = 'b'.repeat(64); }],
+  ['cleanup malformed digest', r => { r.outcome.candidateCleanup.fingerprint = 'bad'; }],
+  ['recovery job', r => { r.outcome.recovery.operationId = 'different-job'; }],
+  ['recovery action', r => { r.outcome.recovery.action = 'pre-swap-restored'; }],
+  ['candidate identity missing', r => { r.directoryIdentities.candidate = null; }],
+  ['candidate digest missing', r => { delete r.outcome.candidate.fingerprint; }],
+  ['candidate digest malformed', r => { r.outcome.candidate.fingerprint = 'bad'; }],
+  ['identity crossing', r => { r.directoryIdentities.candidate = r.directoryIdentities.target; }],
+  ['target identity missing', r => { r.directoryIdentities.target = null; }],
+  ['rollback identity missing', r => { r.directoryIdentities.rollback = null; }],
+  ['rollback identity crossed', r => { r.directoryIdentities.rollback = r.directoryIdentities.candidate; }],
+  ['failed identity', r => { r.directoryIdentities.failed = r.directoryIdentities.candidate; }],
+  ['live digest missing', r => { delete r.outcome.live.fingerprint; }],
+  ['rollback digest missing', r => { delete r.outcome.rollback.fingerprint; }],
+  ['live digest malformed', r => { r.outcome.live.fingerprint = 'BAD'; }],
+  ['rollback digest mismatch', r => { r.outcome.rollback.fingerprint = 'b'.repeat(64); }],
+  ['restore creation', r => { r.restoreCreation = restoreCreation(); }],
+  ['swap missing', r => { delete r.outcome.swap; }],
+  ['swap null', r => { r.outcome.swap = null; }],
+  ['swap false', r => { r.outcome.swap = false; }],
+  ['swap unknown step', r => { r.outcome.swap.step = 'unknown'; }],
+  ['swap extra field', r => { r.outcome.swap.published = false; }],
+  ...['publication', 'registration', 'liveValidation', 'revisionEvent'].flatMap(key =>
+    [[`${key} empty`, r => { r.outcome[key] = {}; }], [`${key} false`, r => { r.outcome[key] = false; }]]),
+  ['live mutation true', r => { r.outcome.liveMutationAuthorized = true; }],
+  ['live mutation malformed', r => { r.outcome.liveMutationAuthorized = {}; }]
+];
+for (const candidate of [false, true]) for (const [name, corrupt] of betweenContradictions) {
+  test(`stopped between-renames ${name}, candidate=${candidate} refuses before cleanup policy or boot`, async t => {
+    const value = await fixture(t, { terminal: true, between: true, candidate, corrupt });
+    await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+    assert.deepEqual(value.calls, ['suspend']);
+    assert.equal(await value.registry.loadHistory('job-stopped'), null);
+    assert.equal(fs.existsSync(value.paths.candidatePath), candidate);
+    assert.equal(fs.readFileSync(path.join(value.serverPath, 'config', 'broken.toml'), 'utf8'), 'malformed = [');
+  });
+}
+
+async function recoveryStore(value) {
+  const store = new OperationStore({ userDataPath: value.root, durableFs: value.registry.durableFs });
+  await store.initialize();
+  await store.create({ jobId: 'job-stopped', operationKind: 'repair', serverId: 'alpha' });
+  await store.transition('job-stopped', { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+  await store.transition('job-stopped', { expectedPhase: 'preflight', nextPhase: 'recovery-required', patch: {
+    outcome: { status: 'recovery-required', message: 'Reviewed recovery required', errorCode: 'RECOVERY_REQUIRED' }
+  } });
+  return store;
+}
+
+test('stopped between-renames facade reconciles real OperationStore only after authenticated history', async t => {
+  const value = await fixture(t, { terminal: true, between: true });
+  const store = await recoveryStore(value);
+  await reconcileOperationStoreWithRecovery({ operationStore: store, recoveryRegistry: value.registry,
+    jobs: [await store.get('job-stopped')] });
+  assert.equal((await store.get('job-stopped')).phase, 'recovery-required');
+  const facade = new ModpackRecoveryFacade({ recoveryRegistry: value.registry, recoveryService: value.service,
+    canExposePendingNewServer: () => false,
+    onResolved: async () => {
+      assert.ok(await value.registry.loadHistory('job-stopped'));
+      await reconcileOperationStoreWithRecovery({ operationStore: store, recoveryRegistry: value.registry,
+        jobs: [await store.get('job-stopped')] });
+      return (await store.get('job-stopped')).phase === 'rolled-back';
+    } });
+  const listed = await facade.listRecovery();
+  const result = await facade.recover({ recoveryId: listed.items[0].recoveryId, actionId: 'retry-recovery' });
+  assert.equal(result.resolved, true);
+  assert.equal(result.operationStateReconciled, true);
+  assert.equal((await store.get('job-stopped')).phase, 'rolled-back');
+  assert.equal((await store.get('job-stopped')).outcome.status, 'rolled-back');
+  assert.deepEqual(value.calls, ['suspend', 'stop', 'auto']);
+});
+
+for (const move of [1, 2]) for (const after of [false, true]) {
+  test(`stopped between-renames history move ${move} ${after ? 'after' : 'before'} effect retries after registry restart`, async t => {
+    let retry = false;
+    let protectedMoves = 0;
+    const value = await fixture(t, { terminal: true, between: true, historyFault: { move, after },
+      onHistory: async c => {
+        if (!retry) {
+          protectedMoves++;
+          await assert.rejects(c.coordinator.acquireStart(c.selector, { operation: 'competing-health', operationId: 'other',
+            parentMutationLease: c.parentLease }), { code: 'OPERATION_IN_PROGRESS' });
+        }
+      } });
+    const store = await recoveryStore(value);
+    const before = value.initial;
+    await value.withLease(async lease => {
+      value.parentLease = lease;
+      await assert.rejects(value.service.recoverWithLease(value.initial, lease), { code: 'RECOVERY_REQUIRED' });
+    });
+    assert.equal(protectedMoves, move);
+    assert.equal((await store.get('job-stopped')).phase, 'recovery-required');
+    await assert.rejects(value.coordinator.acquireStart(value.selector,
+      { operation: 'ordinary-start', operationId: 'blocked', parentMutationLease: null }), { code: 'RECOVERY_REQUIRED' });
+    const activeSurvives = move === 1 && !after;
+    assert.equal(Boolean(await value.registry.load('job-stopped')), activeSurvives);
+    const callsBeforeRetry = [...value.calls];
+    retry = true;
+    await value.restartRegistry();
+    fs.writeFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'safe bytes after failed publication');
+    const result = await value.recover();
+    assert.equal(result.resolved, true);
+    assert.equal(result.action, activeSurvives ? 'between-renames-restored' : 'already-finished');
+    assert.deepEqual(value.calls, activeSurvives ? [...callsBeforeRetry, 'suspend', 'stop', 'auto'] : callsBeforeRetry);
+    const historical = await value.registry.loadHistory('job-stopped');
+    assert.deepEqual(historical.outcome, before.outcome);
+    assert.equal(historical.sequence, before.sequence);
+    assert.deepEqual(fs.readdirSync(value.registry.historyPath).sort(), ['job-stopped.json', 'job-stopped.target.json']);
+    assert.equal(fs.readFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'utf8'), 'safe bytes after failed publication');
+    await reconcileOperationStoreWithRecovery({ operationStore: store, recoveryRegistry: value.registry,
+      jobs: [await store.get('job-stopped')] });
+    assert.equal((await store.get('job-stopped')).phase, 'rolled-back');
+  });
+}
+
+test('stopped between-renames terminal partial candidate deletion retries exact durable authority', async t => {
+  let fail = true;
+  let removals = 0;
+  const value = await fixture(t, { terminal: true, between: true, candidate: true,
+    authority: base => ({ ...base, async removeAuthorizedIdentity(request) {
+      removals++;
+      if (fail) {
+        fs.unlinkSync(path.join(request.directoryPath, 'partial.txt'));
+        throw new Error('partial candidate deletion');
+      }
+      return base.removeAuthorizedIdentity(request);
+    } }) });
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual((await value.registry.load('job-stopped')).outcome, value.initial.outcome);
+  assert.equal(fs.existsSync(value.paths.candidatePath), true);
+  assert.equal(fs.existsSync(path.join(value.paths.candidatePath, 'partial.txt')), false);
+  assert.equal(value.calls.includes('auto'), false);
+  fail = false;
+  await value.restartRegistry();
+  assert.equal((await value.recover()).resolved, true);
+  assert.equal(removals, 2);
+  assert.equal(fs.existsSync(value.paths.candidatePath), false);
+  assert.deepEqual((await value.registry.loadHistory('job-stopped')).outcome, value.initial.outcome);
+  assert.equal((await value.registry.loadHistory('job-stopped')).sequence, value.initial.sequence);
+  assert.equal(value.calls.includes('config'), false);
+});
+
+for (const boundary of ['stop', 'work']) for (const replacement of ['parent', 'root']) {
+  test(`stopped between-renames ${replacement} replacement at awaited ${boundary} boundary stays quarantined`, async t => {
+    let changed = false;
+    const replace = async c => {
+      await new Promise(resolve => setImmediate(resolve));
+      changed = true;
+      if (replacement === 'parent') {
+        const parent = path.dirname(c.serverPath);
+        fs.renameSync(parent, path.join(c.root, 'saved-parent'));
+        fs.mkdirSync(parent);
+        fs.renameSync(path.join(c.root, 'saved-parent', 'Alpha'), c.serverPath);
+      } else {
+        fs.renameSync(c.serverPath, path.join(c.root, 'saved-original'));
+        fs.mkdirSync(c.serverPath);
+        fs.writeFileSync(path.join(c.serverPath, 'unrelated.txt'), 'replacement must survive');
+      }
+    };
+    const value = await fixture(t, { terminal: true, between: true,
+      ...(boundary === 'stop' ? { onStop: replace } : {
+        authority: base => ({ ...base, async inspectFresh(request) {
+          const result = await base.inspectFresh(request);
+          if (!changed && request.directoryPath.toLowerCase() === value.serverPath.toLowerCase()) await replace(value);
+          return result;
+        } })
+      }) });
+    await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+    assert.equal(changed, true);
+    assert.equal(value.calls.includes('auto'), false);
+    assert.equal(value.calls.includes('config'), false);
+    assert.equal(await value.registry.loadHistory('job-stopped'), null);
+    assert.deepEqual((await value.registry.load('job-stopped')).outcome, value.initial.outcome);
+    if (replacement === 'root') assert.equal(fs.readFileSync(path.join(value.serverPath, 'unrelated.txt'), 'utf8'), 'replacement must survive');
+  });
+}
+
+test('stopped between-renames replaced candidate is not durable deletion authority', async t => {
+  const value = await fixture(t, { terminal: true, between: true, candidate: true });
+  fs.renameSync(value.paths.candidatePath, path.join(value.root, 'saved-candidate'));
+  fs.mkdirSync(value.paths.candidatePath);
+  fs.writeFileSync(path.join(value.paths.candidatePath, 'unrelated.txt'), 'replacement candidate survives');
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(fs.readFileSync(path.join(value.paths.candidatePath, 'unrelated.txt'), 'utf8'), 'replacement candidate survives');
+  assert.equal(fs.readFileSync(path.join(value.root, 'saved-candidate', 'partial.txt'), 'utf8'), 'candidate-only');
+  assert.equal(value.calls.includes('auto'), false);
+});
+
+test('stopped between-renames explicit live-mutation false remains eligible', async t => {
+  const value = await fixture(t, { terminal: true, between: true, outcome: { liveMutationAuthorized: false } });
+  assert.equal((await value.recover()).resolved, true);
+  assert.equal(value.calls.includes('config'), false);
+  assert.equal((await value.registry.loadHistory('job-stopped')).outcome.liveMutationAuthorized, false);
 });
 
 for (const relative of ['logs/latest.log', 'config/broken.toml']) {
@@ -278,9 +544,9 @@ test('stopped retain reservation holds through policy and finish and releases on
   assert.deepEqual((await value.registry.loadHistory('job-stopped')).outcome, outcome);
 });
 
-for (const slot of ['source', 'candidate']) {
-  test(`stopped retain WithLease and top-level recovery reject retained ${slot} health start authority`, async t => {
-    const value = await fixture(t, { terminal: true });
+for (const between of [false, true]) for (const slot of ['source', 'candidate']) {
+  test(`stopped ${between ? 'between-renames ' : ''}retain WithLease and top-level recovery reject retained ${slot} health start authority`, async t => {
+    const value = await fixture(t, { terminal: true, between });
     let retained;
     await value.withLease(async lease => {
       retained = await value.coordinator.acquireStart({ instanceId: 'alpha',
@@ -296,8 +562,8 @@ for (const slot of ['source', 'candidate']) {
   });
 }
 
-test('stopped retain rejects forged, expired and nonambient mutation parents with actual coordinator', async t => {
-  const value = await fixture(t, { terminal: true });
+for (const between of [false, true]) test(`stopped ${between ? 'between-renames ' : ''}retain rejects forged, expired and nonambient mutation parents with actual coordinator`, async t => {
+  const value = await fixture(t, { terminal: true, between });
   let expired;
   await value.withLease(async lease => { expired = lease; });
   const fake = { kind: 'mutation', operationId: 'job-stopped', instanceId: 'alpha', serverPath: value.serverPath, markDirty() {} };
@@ -364,9 +630,9 @@ for (const mismatch of ['rollback', 'candidate', 'failed']) {
   });
 }
 
-for (const topology of ['missing', 'replacement', 'rollback', 'failed', 'symlink', 'hardlink']) {
-  test(`stopped terminal retain rejects ${topology} canonical topology`, async t => {
-    const value = await fixture(t, { terminal: true });
+for (const between of [false, true]) for (const topology of ['missing', 'replacement', 'rollback', 'failed', 'symlink', 'hardlink']) {
+  test(`stopped ${between ? 'between-renames ' : ''}terminal retain rejects ${topology} canonical topology`, async t => {
+    const value = await fixture(t, { terminal: true, between });
     if (topology === 'missing' || topology === 'replacement') {
       fs.renameSync(value.serverPath, path.join(value.root, 'retained-original'));
       if (topology === 'replacement') fs.mkdirSync(value.serverPath);
@@ -384,9 +650,9 @@ for (const topology of ['missing', 'replacement', 'rollback', 'failed', 'symlink
   });
 }
 
-for (const change of ['target', 'parent', 'rollback', 'failed', 'candidate']) {
-  test(`stopped retain rechecks ${change} after awaited policy restoration`, async t => {
-    const value = await fixture(t, { terminal: true, onAuto: async c => {
+for (const between of [false, true]) for (const change of ['target', 'parent', 'rollback', 'failed', 'candidate']) {
+  test(`stopped ${between ? 'between-renames ' : ''}retain rechecks ${change} after awaited policy restoration`, async t => {
+    const value = await fixture(t, { terminal: true, between, onAuto: async c => {
       await new Promise(resolve => setImmediate(resolve));
       if (change === 'target') {
         fs.renameSync(c.serverPath, path.join(c.root, 'saved-target')); fs.mkdirSync(c.serverPath);
@@ -403,12 +669,12 @@ for (const change of ['target', 'parent', 'rollback', 'failed', 'candidate']) {
   });
 }
 
-for (const change of ['hardlink', 'reparse', 'membership', 'replacement', 'metadata']) {
-  test(`stopped retain rejects after-policy descendant ${change} and keeps active recovery`, async t => {
+for (const between of [false, true]) for (const change of ['hardlink', 'reparse', 'membership', 'replacement', 'metadata']) {
+  test(`stopped ${between ? 'between-renames ' : ''}retain rejects after-policy descendant ${change} and keeps active recovery`, async t => {
     let afterPolicy = false;
     let mutated = false;
     let policyConfigReads = 0;
-    const value = await fixture(t, { terminal: true,
+    const value = await fixture(t, { terminal: true, between,
       fsApi: serverPath => ({ ...fs, promises: { ...fs.promises,
         async readdir(candidate, ...args) {
           const names = await fs.promises.readdir(candidate, ...args);
@@ -464,9 +730,9 @@ for (const change of ['hardlink', 'reparse', 'membership', 'replacement', 'metad
   });
 }
 
-for (const [name, policy] of [['stop', { stopResult: { stopped: false } }], ['auto-restart', { autoResult: { restored: false } }]]) {
-  test(`stopped retain ${name} proof failure retains recovery and releases reservation`, async t => {
-    const value = await fixture(t, { terminal: true, ...policy });
+for (const between of [false, true]) for (const [name, policy] of [['stop', { stopResult: { stopped: false } }], ['auto-restart', { autoResult: { restored: false } }]]) {
+  test(`stopped ${between ? 'between-renames ' : ''}retain ${name} proof failure retains recovery and releases reservation`, async t => {
+    const value = await fixture(t, { terminal: true, between, ...policy });
     await value.withLease(async lease => {
       await assert.rejects(value.service.recoverWithLease(value.initial, lease), { code: 'RECOVERY_REQUIRED' });
       const start = await value.coordinator.acquireStart(value.selector, { operation: 'prove-release', operationId: 'release', parentMutationLease: lease });
@@ -521,9 +787,9 @@ for (const operationKind of ['upgrade', 'downgrade', 'switch', 'import']) {
   });
 }
 
-for (const policy of [{ running: true, autoRestart: false }, { running: false, autoRestart: true }]) {
-  test(`prior running=${policy.running} autoRestart=${policy.autoRestart} still requires normal source health`, async t => {
-    const value = await fixture(t, { terminal: true, patch: { priorRuntime: policy }, runtimeConfig: {
+for (const between of [false, true]) for (const policy of [{ running: true, autoRestart: false }, { running: false, autoRestart: true }]) {
+  test(`${between ? 'between-renames ' : ''}prior running=${policy.running} autoRestart=${policy.autoRestart} still requires normal source health`, async t => {
+    const value = await fixture(t, { terminal: true, between, patch: { priorRuntime: policy }, runtimeConfig: {
       runtime: { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.0', javaMajor: 17 },
       maxRam: 4, port: 25565, networkAccess: 'pack-default'
     } });
@@ -536,7 +802,7 @@ for (const swapStep of ['prepared', 'live-moved', 'candidate-published', 'rollba
   test(`terminal ${swapStep} cannot use stopped retain exception`, async t => {
     const value = await fixture(t, { terminal: true, patch: { swapStep } });
     await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
-    assert.equal(value.calls.includes('config'), true);
+    assert.equal(value.calls.includes('config'), swapStep !== 'live-moved');
     assert.equal(value.calls.includes('auto'), false);
   });
 }
@@ -549,8 +815,8 @@ test('between-renames terminal action keeps ordinary source validation', async t
   assert.equal(value.calls.includes('config'), true);
 });
 
-test('unsettled same-boot writer blocks stopped retain before source context and remains quarantined', async t => {
-  const value = await fixture(t, { terminal: true, candidate: true, authorizedCandidate: true });
+for (const between of [false, true]) test(`${between ? 'between-renames ' : ''}unsettled same-boot writer blocks stopped retain before source context and remains quarantined`, async t => {
+  const value = await fixture(t, { terminal: true, between, candidate: true, authorizedCandidate: true });
   const marker = { schemaVersion: 1, jobId: value.initial.jobId, candidatePath: value.paths.candidatePath,
     candidateIdentity: value.candidate.directoryIdentity, bootSequence: 1, state: 'unproven' };
   const active = await value.registry.updateRuntimeWriterAuthority(value.initial.jobId, {
@@ -697,8 +963,8 @@ test('stopped reservation stays active through both authenticated registry histo
   assert.equal(historyMoves, 2);
 });
 
-test('unknown legacy terminal candidate worker is first durably refused without candidate cleanup', async t => {
-  const value = await fixture(t, { terminal: true, candidate: true, authorizedCandidate: true, legacyWriter: true });
+for (const between of [false, true]) test(`${between ? 'between-renames ' : ''}unknown legacy terminal candidate worker is first durably refused without candidate cleanup`, async t => {
+  const value = await fixture(t, { terminal: true, between, candidate: true, authorizedCandidate: true, legacyWriter: true });
   await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
   assert.deepEqual(value.calls, []);
   assert.equal(fs.readFileSync(path.join(value.paths.candidatePath, 'partial.txt'), 'utf8'), 'candidate-only');
@@ -713,8 +979,8 @@ test('stopped terminal reparse observation blocks the complete safe-tree proof',
   assert.equal(value.calls.includes('auto'), false);
 });
 
-test('terminal candidate directory alias to canonical original is not deletion authority', async t => {
-  const value = await fixture(t, { terminal: true, candidate: true, authorizedCandidate: true });
+for (const between of [false, true]) test(`${between ? 'between-renames ' : ''}terminal candidate directory alias to canonical original is not deletion authority`, async t => {
+  const value = await fixture(t, { terminal: true, between, candidate: true, authorizedCandidate: true });
   fs.unlinkSync(path.join(value.paths.candidatePath, 'partial.txt'));
   fs.rmdirSync(value.paths.candidatePath);
   fs.symlinkSync(value.serverPath, value.paths.candidatePath, 'junction');
